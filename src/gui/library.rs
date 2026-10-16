@@ -35,18 +35,18 @@ pub(super) fn track_detail(
         None => detail.push('-'),
     }
     detail.push_str(" · ");
-    detail.push_str(if track.codec.is_empty() {
-        "-"
+    if track.codec.is_empty() {
+        detail.push('-');
     } else {
-        &track.codec
-    });
+        detail.extend(track.codec.chars().map(|ch| ch.to_ascii_lowercase()));
+    }
     detail.push_str(" · ");
     match track.bitrate_bps {
         Some(value) => {
             use std::fmt::Write;
             let _ = write!(
                 detail,
-                "{}{:.1} kbps",
+                "{}{:.0} kbps",
                 if track.bitrate_exact { "" } else { "≈" },
                 value as f64 / 1000.0
             );
@@ -95,14 +95,14 @@ fn track_columns(track: &LibraryRow, columns: LibraryColumns) -> Option<gpui::Di
                 if track.codec.is_empty() {
                     "-".into()
                 } else {
-                    track.codec.clone().into()
+                    track.codec.to_ascii_lowercase().into()
                 }
             }
             LibraryColumn::Bitrate => track.bitrate_bps.map_or_else(
                 || "-".into(),
                 |value| {
                     format!(
-                        "{}{:.1} kbps",
+                        "{}{:.0}",
                         if track.bitrate_exact { "" } else { "≈" },
                         value as f64 / 1000.0
                     )

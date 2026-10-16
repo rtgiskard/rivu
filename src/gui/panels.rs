@@ -2792,7 +2792,7 @@ impl GuiApp {
                             if track.codec.is_empty() {
                                 "—".into()
                             } else {
-                                track.codec.clone().into()
+                                track.codec.to_ascii_lowercase().into()
                             }
                         },
                     ),
@@ -2845,7 +2845,7 @@ impl GuiApp {
                         |track| {
                             track.bitrate_bps.map_or("—".into(), |value| {
                                 format!(
-                                    "{}{:.1} kbps",
+                                    "{}{:.0} kbps",
                                     if track.bitrate_exact { "" } else { "≈" },
                                     value as f64 / 1000.0
                                 )
