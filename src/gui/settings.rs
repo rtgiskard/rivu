@@ -1642,44 +1642,41 @@ impl Settings {
 
     fn artwork_cache_settings(&self, cx: &mut Context<Self>) -> Div {
         let busy = self.artwork_cache_busy.is_some();
-        let mut content = column()
-            .gap_2()
-            .child(caption(self.tr("settings-cache-immediate-help")))
-            .child(
-                row()
-                    .items_end()
-                    .gap_2()
-                    .child(
-                        form_field(
-                            self.tr("settings-expire-files-older-than-days"),
-                            div()
-                                .id("settings-artwork-cache-age")
-                                .child(self.artwork_cache_age.clone()),
-                        )
-                        .min_w_0()
-                        .flex_1(),
+        let mut content = column().gap_2().child(
+            row()
+                .items_end()
+                .gap_2()
+                .child(
+                    form_field(
+                        self.tr("settings-expire-files-older-than-days"),
+                        div()
+                            .id("settings-artwork-cache-age")
+                            .child(self.artwork_cache_age.clone()),
                     )
-                    .child(disabled_control(
-                        icon_button(
-                            "settings-artwork-cache-calculate",
-                            "󰃬",
-                            self.tr("settings-calculate-usage"),
-                            cx,
-                            |this, _, cx| this.maintain_artwork_cache(false, cx),
-                        ),
-                        busy,
-                    ))
-                    .child(disabled_control(
-                        icon_button(
-                            "settings-artwork-cache-clean",
-                            "󰆴",
-                            self.tr("settings-clean-expired"),
-                            cx,
-                            |this, _, cx| this.maintain_artwork_cache(true, cx),
-                        ),
-                        busy,
-                    )),
-            );
+                    .min_w_0()
+                    .flex_1(),
+                )
+                .child(disabled_control(
+                    icon_button(
+                        "settings-artwork-cache-calculate",
+                        "󰃬",
+                        self.tr("settings-calculate-usage"),
+                        cx,
+                        |this, _, cx| this.maintain_artwork_cache(false, cx),
+                    ),
+                    busy,
+                ))
+                .child(disabled_control(
+                    icon_button(
+                        "settings-artwork-cache-clean",
+                        "󰆴",
+                        self.tr("settings-clean-expired"),
+                        cx,
+                        |this, _, cx| this.maintain_artwork_cache(true, cx),
+                    ),
+                    busy,
+                )),
+        );
         if let Some((days, clean)) = self.artwork_cache_busy {
             content = content.child(status_message(
                 self.i18n.format(

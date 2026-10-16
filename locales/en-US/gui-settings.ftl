@@ -106,7 +106,6 @@ settings-spectrum-style-recovery = In Visualizations → Spectrum, choose a non-
 settings-spectrum-peaks-recovery = In Visualizations → Spectrum, enable Peak markers to edit marker hold or gravity.
 settings-artwork-recovery = In Interface → Album artwork, choose Rotating to edit the period.
 settings-save-error = Could not save settings
-settings-cache-immediate-help = Cleaning takes effect immediately; no Apply needed.
 settings-expire-files-older-than-days = Expire files older than (days)
 settings-calculate-usage = Calculate usage
 settings-clean-expired = Clean expired

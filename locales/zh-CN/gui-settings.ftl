@@ -106,7 +106,6 @@ settings-spectrum-style-recovery = 在“可视化 → 频谱”中选择非实�
 settings-spectrum-peaks-recovery = 在“可视化 → 频谱”中启用峰值标记，以修改保持时间或重力。
 settings-artwork-recovery = 在“界面 → 专辑封面”中选择旋转，以修改周期。
 settings-save-error = 无法保存设置
-settings-cache-immediate-help = 清理立即生效，无需应用设置。
 settings-expire-files-older-than-days = 过期天数
 settings-calculate-usage = 计算用量
 settings-clean-expired = 清理过期文件
