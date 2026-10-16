@@ -103,6 +103,16 @@ impl ViewRequests {
 }
 
 impl GuiApp {
+    fn playlist_view_demand(&self, kind: ViewRequestKind) -> bool {
+        self.panel_demand("playlists")
+            || (kind == ViewRequestKind::Summaries
+                && self.window_visible
+                && !self.state.system.shutting_down
+                && self
+                    .panel_menu
+                    .is_some_and(|menu| matches!(menu.page, shell::PanelMenuPage::Playlists)))
+    }
+
     pub(super) fn request_root_counts(&mut self, cx: &mut Context<Self>) {
         if !self.panel_demand("library") {
             return;
@@ -273,7 +283,7 @@ impl GuiApp {
 
     fn dispatch_queued_view(&mut self, kind: ViewRequestKind, cx: &mut Context<Self>) {
         if let Some((query, generation)) = self.browser.requests.queued.remove(&kind) {
-            if !self.panel_demand("playlists") {
+            if !self.playlist_view_demand(kind) {
                 self.browser.requests.cancel(kind);
                 match kind {
                     ViewRequestKind::Summaries => self.browser.playlists.cancel_page(false),
@@ -564,7 +574,7 @@ impl GuiApp {
         range: std::ops::Range<usize>,
         cx: &mut Context<Self>,
     ) {
-        if !self.panel_demand("playlists") {
+        if !self.playlist_view_demand(ViewRequestKind::Summaries) {
             return;
         }
         if let Some(offset) =

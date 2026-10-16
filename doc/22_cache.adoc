@@ -49,7 +49,8 @@ Duplicate source/target choices retain track identity across reference-only
 refreshes; command eligibility is checked against current targeted member facts.
 
 Owners reconcile keys while hidden, but tree and Details reads require actual
-panel demand. An unchanged key retains bounded album pages and page failures
+panel demand. An open Add to playlist chooser also demands playlist summaries,
+independently of the Playlists panel. An unchanged key retains bounded album pages and page failures
 across hiding; covers are released independently. Page-size changes affect demand geometry,
 not query identity. Failed pages stay failed until explicit retry. Cancelling a
 generation cannot release a physical worker gate: completion owns that release,
