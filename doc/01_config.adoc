@@ -6,6 +6,9 @@ A missing file, group, or field uses the existing defaults. Unreadable files,
 malformed TOML, unknown keys at the root or in any group or nested view table,
 misplaced fields, and invalid values are errors, not a reason to fall back to defaults.
 Paths are literal: `~` and environment variables are not expanded.
+Configuration symlinks are followed when saving, including relative chains and
+missing targets; saving atomically replaces the target file, not the links.
+Link loops and inaccessible targets are reported as errors without replacing the links.
 The file has five stable top-level domains: `[library]`, `[playback]`,
 `[interface]`, `[logging]`, and `[visualizations]`. Audio visualization settings
 live in `[visualizations.spectrum]`, `[visualizations.spectrogram]`,

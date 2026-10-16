@@ -11,6 +11,7 @@ use crate::model::RepeatMode;
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::{
+    borrow::Cow,
     fs,
     io::{ErrorKind, Write},
     path::{Path, PathBuf},
@@ -806,8 +807,10 @@ impl Config {
     }
 
     /// Validate, serialize, and atomically replace the destination using a
-    /// private same-directory temporary file. Failures before replacement
-    /// leave the previous file untouched and clean up the temporary file.
+    /// private same-directory temporary file. Symbolic links are followed to
+    /// their destination, including missing targets; the links stay untouched.
+    /// Failures before replacement leave the previous file untouched and clean
+    /// up the temporary file.
     ///
     /// This deliberately does not fsync the file or directory: configuration
     /// writes must not block on storage flushes. Existing directory
@@ -817,6 +820,9 @@ impl Config {
             .with_context(|| format!("cannot save invalid configuration {}", path.display()))?;
         let contents = toml::to_string_pretty(&file::FileConfigView::from(self))
             .with_context(|| format!("cannot serialize configuration {}", path.display()))?;
+        let destination = configuration_destination(path)
+            .with_context(|| format!("cannot resolve configuration {}", path.display()))?;
+        let path = destination.as_ref();
         ensure!(
             path.file_name().is_some(),
             "configuration path must name a file: {}",
@@ -862,6 +868,35 @@ impl Config {
                 format!("cannot atomically replace configuration {}", path.display())
             })?;
         Ok(())
+    }
+}
+
+fn configuration_destination(path: &Path) -> Result<Cow<'_, Path>> {
+    let mut destination = Cow::Borrowed(path);
+    let mut followed = 0;
+    loop {
+        match fs::symlink_metadata(destination.as_ref()) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {}
+            Ok(_) => return Ok(destination),
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(destination),
+            Err(error) => return Err(error.into()),
+        }
+        // Match Linux's bounded link traversal, including cycles and dangling
+        // chains, without requiring the final file to already exist.
+        ensure!(
+            followed < 40,
+            "configuration symbolic link traversal exceeds 40 links"
+        );
+        let target = fs::read_link(destination.as_ref())?;
+        destination = Cow::Owned(if target.is_absolute() {
+            target
+        } else {
+            destination
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join(target)
+        });
+        followed += 1;
     }
 }
 
@@ -1702,6 +1737,101 @@ mod tests {
             config.save(&path).unwrap();
             assert_eq!(Config::load(&path).unwrap(), config);
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saving_configuration_follows_links_and_resolves_each_save() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let links = directory.path().join("links");
+        fs::create_dir(&links).unwrap();
+        let first = directory.path().join("managed.toml");
+        let second = directory.path().join("other.toml");
+        let link = directory.path().join("config.toml");
+        let intermediate = links.join("active.toml");
+        Config::default().save(&first).unwrap();
+        symlink(&first, &intermediate).unwrap();
+        symlink("links/active.toml", &link).unwrap();
+
+        let config = Config {
+            volume: 0.2,
+            ..Config::default()
+        };
+        config.save(&link).unwrap();
+        assert_eq!(Config::load(&first).unwrap(), config);
+        assert_eq!(
+            fs::read_link(&link).unwrap(),
+            Path::new("links/active.toml")
+        );
+        assert_eq!(fs::read_link(&intermediate).unwrap(), first);
+
+        fs::remove_file(&intermediate).unwrap();
+        symlink(&second, &intermediate).unwrap();
+        let changed = Config {
+            volume: 0.8,
+            ..config.clone()
+        };
+        changed.save(&link).unwrap();
+        assert_eq!(Config::load(&first).unwrap(), config);
+        assert_eq!(Config::load(&second).unwrap(), changed);
+        assert_eq!(fs::read_link(&intermediate).unwrap(), second);
+        assert_eq!(entries(&links), vec![intermediate]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saving_configuration_creates_a_dangling_link_target() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let link = directory.path().join("config.toml");
+        let target = Path::new("managed/nested/config.toml");
+        symlink(target, &link).unwrap();
+        let config = Config {
+            volume: 0.3,
+            ..Config::default()
+        };
+        config.save(&link).unwrap();
+        assert_eq!(fs::read_link(&link).unwrap(), target);
+        assert_eq!(
+            Config::load(&directory.path().join(target)).unwrap(),
+            config
+        );
+        assert_eq!(
+            entries(&directory.path().join("managed/nested")),
+            vec![directory.path().join(target)]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saving_configuration_preserves_cyclic_links_and_failed_targets() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let first = directory.path().join("first.toml");
+        let second = directory.path().join("second.toml");
+        symlink("second.toml", &first).unwrap();
+        symlink("first.toml", &second).unwrap();
+        assert!(Config::default().save(&first).is_err());
+        assert_eq!(fs::read_link(&first).unwrap(), Path::new("second.toml"));
+        assert_eq!(fs::read_link(&second).unwrap(), Path::new("first.toml"));
+
+        fs::remove_file(&second).unwrap();
+        let target = directory.path().join("target");
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("keep"), "unchanged").unwrap();
+        symlink(&target, &second).unwrap();
+        assert!(Config::default().save(&first).is_err());
+        assert_eq!(fs::read_link(&first).unwrap(), Path::new("second.toml"));
+        assert_eq!(fs::read_link(&second).unwrap(), target);
+        assert_eq!(
+            fs::read_to_string(target.join("keep")).unwrap(),
+            "unchanged"
+        );
+        assert_eq!(entries(directory.path()), vec![first, second, target]);
     }
 
     #[test]
