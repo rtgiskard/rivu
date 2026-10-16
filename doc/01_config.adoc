@@ -169,6 +169,8 @@ The sidebar has four groups: Library, Playback & Audio, Interface, and
 Visualizations. Library includes scan settings and maintenance; Playback & Audio
 contains playback, output, decoding, and read buffering. Interface contains basic
 preferences, layout, album artwork, desktop integration, and diagnostic logging.
+Interface presents these sections together on one scrollable page, without
+separate sidebar subpages. Panel-specific artwork settings remain a focused editor.
 Logging is application-wide, including headless operation, and remains in `[logging]`.
 Visualizations contains shared settings and the four audio-data views.
 In an open dropdown, Up/Down moves the highlight with wraparound;

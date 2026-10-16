@@ -377,14 +377,6 @@ enum SettingsPage {
     Visualizations,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum InterfacePage {
-    Basic,
-    Layout,
-    AlbumArtwork,
-    Desktop,
-    Logging,
-}
-#[derive(Clone, Copy, PartialEq, Eq)]
 enum VisualPage {
     Common,
     Spectrum,
@@ -470,7 +462,6 @@ pub(super) struct Settings {
     feedback: Option<std::result::Result<(), String>>,
     page: SettingsPage,
     visual_page: VisualPage,
-    interface_page: InterfacePage,
     visualizer_panel: Option<u64>,
     artwork_panel: Option<u64>,
 }
@@ -544,7 +535,6 @@ impl Settings {
             feedback: None,
             page: SettingsPage::Library,
             visual_page: VisualPage::Common,
-            interface_page: InterfacePage::Basic,
             visualizer_panel: None,
             artwork_panel: None,
         }
@@ -1345,7 +1335,6 @@ impl Settings {
         self.open(window, cx);
         self.artwork_panel = Some(panel_id);
         self.page = SettingsPage::Interface;
-        self.interface_page = InterfacePage::AlbumArtwork;
         self.draft.album_artwork_style = options.style;
         self.draft.album_artwork_mode = options.mode;
         self.draft.album_artwork_direction = options.direction;
@@ -2158,45 +2147,6 @@ impl Settings {
             cx,
             |settings| settings.page = SettingsPage::Interface,
         ));
-        if self.page == SettingsPage::Interface {
-            let mut children = column().pl_3().gap_1();
-            children = children.child(self.tab_button(
-                "nav-basic",
-                self.tr("settings-basic"),
-                self.interface_page == InterfacePage::Basic,
-                cx,
-                |settings| settings.interface_page = InterfacePage::Basic,
-            ));
-            children = children.child(self.tab_button(
-                "nav-layout",
-                self.tr("settings-layout"),
-                self.interface_page == InterfacePage::Layout,
-                cx,
-                |settings| settings.interface_page = InterfacePage::Layout,
-            ));
-            children = children.child(self.tab_button(
-                "nav-album-artwork",
-                self.tr("settings-album-artwork"),
-                self.interface_page == InterfacePage::AlbumArtwork,
-                cx,
-                |settings| settings.interface_page = InterfacePage::AlbumArtwork,
-            ));
-            children = children.child(self.tab_button(
-                "nav-desktop-integration",
-                self.tr("settings-desktop-integration"),
-                self.interface_page == InterfacePage::Desktop,
-                cx,
-                |settings| settings.interface_page = InterfacePage::Desktop,
-            ));
-            children = children.child(self.tab_button(
-                "nav-diagnostic-logging",
-                self.tr("settings-diagnostic-logging"),
-                self.interface_page == InterfacePage::Logging,
-                cx,
-                |settings| settings.interface_page = InterfacePage::Logging,
-            ));
-            sidebar = sidebar.child(children);
-        }
         sidebar = sidebar.child(self.tab_button(
             "nav-visualizations",
             self.tr("settings-visualizations"),
@@ -2864,15 +2814,25 @@ impl Settings {
         let (page_id, content) = match self.page {
             SettingsPage::Library => ("settings-library-scroll", self.library_settings(cx)),
             SettingsPage::Playback => ("settings-playback-scroll", self.playback_settings(cx)),
-            SettingsPage::Interface => match self.interface_page {
-                InterfacePage::Basic => ("settings-basic-scroll", self.basic_settings(cx)),
-                InterfacePage::Layout => ("settings-layout-scroll", self.layout_settings(cx)),
-                InterfacePage::AlbumArtwork => {
-                    ("settings-artwork-scroll", self.artwork_settings(cx))
-                }
-                InterfacePage::Desktop => ("settings-desktop-scroll", self.desktop_settings(cx)),
-                InterfacePage::Logging => ("settings-logging-scroll", self.logging_settings(cx)),
-            },
+            SettingsPage::Interface if self.artwork_panel.is_some() => {
+                ("settings-artwork-scroll", self.artwork_settings(cx))
+            }
+            SettingsPage::Interface => (
+                "settings-interface-scroll",
+                column()
+                    .gap_3()
+                    .child(self.basic_settings(cx))
+                    .child(settings_group(
+                        self.tr("settings-layout"),
+                        self.layout_settings(cx),
+                    ))
+                    .child(self.artwork_settings(cx))
+                    .child(settings_group(
+                        self.tr("settings-desktop-integration"),
+                        self.desktop_settings(cx),
+                    ))
+                    .child(self.logging_settings(cx)),
+            ),
             SettingsPage::Visualizations => {
                 let id = match self.visual_page {
                     VisualPage::Common => "settings-common-scroll",
