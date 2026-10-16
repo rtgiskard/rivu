@@ -119,6 +119,7 @@ struct RootCounts {
     totals: std::collections::HashMap<std::path::PathBuf, usize>,
     pending: HashSet<usize>,
     failed: HashSet<usize>,
+    settled: bool,
 }
 
 impl RootCounts {
@@ -127,6 +128,7 @@ impl RootCounts {
         self.totals.clear();
         self.pending.clear();
         self.failed.clear();
+        self.settled = false;
     }
 }
 
@@ -229,12 +231,18 @@ impl LibraryBrowser {
             self.counts.totals.clear();
             self.counts.pending.clear();
             self.counts.failed.clear();
+            self.counts.settled = false;
             self.counts.roots = roots.to_vec();
         }
     }
 
     pub(super) fn retry_root_counts(&mut self) {
         self.counts.failed.clear();
+        self.counts.settled = false;
+    }
+
+    pub(super) fn root_counts_settled(&self) -> bool {
+        self.counts.settled
     }
     pub(super) fn begin_root_counts(
         &mut self,
@@ -257,6 +265,7 @@ impl LibraryBrowser {
             .take(1)
             .collect::<Vec<_>>();
         self.counts.pending.extend(batches.iter().copied());
+        self.counts.settled = batches.is_empty();
         (self.counts.owner.generation(), batches)
     }
 
@@ -1465,8 +1474,10 @@ mod tests {
         assert!(!library.root_count_failed(std::path::Path::new("/other")));
         assert_eq!(library.root_count(roots.last().unwrap()), None);
         assert!(library.begin_root_counts(&roots, 7).1.is_empty());
+        assert!(library.root_counts_settled());
         assert!(library.root_count_failed(roots.last().unwrap()));
         library.retry_root_counts();
+        assert!(!library.root_counts_settled());
         assert_eq!(
             library.begin_root_counts(&roots, 7).1,
             vec![crate::model::MAX_QUERY_ROWS]
@@ -1483,6 +1494,7 @@ mod tests {
         );
         assert_eq!(library.root_count(roots.last().unwrap()), Some(2));
         assert!(library.begin_root_counts(&roots, 7).1.is_empty());
+        assert!(library.root_counts_settled());
         library.refresh_search("needle".into());
         assert_eq!(library.root_count(&roots[0]), Some(0));
         let (scanned, _) = library.begin_root_counts(&roots, 8);
@@ -1507,10 +1519,12 @@ mod tests {
         );
         assert_eq!(library.root_count(&roots[0]), Some(3));
         library.roots_changed();
+        assert!(!library.root_counts_settled());
         assert!(!library.counts_current(scanned, &roots, 8));
         assert_eq!(library.root_count(&roots[0]), None);
         let empty = library.begin_root_counts(&[], 8);
         assert!(empty.1.is_empty());
+        assert!(library.root_counts_settled());
     }
 
     #[test]

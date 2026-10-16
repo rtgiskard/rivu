@@ -117,15 +117,17 @@ impl GuiApp {
         if !self.panel_demand("library") {
             return;
         }
-        if !self.browser.requests.root_count_workers.is_empty() {
+        if !self.browser.requests.root_count_workers.is_empty()
+            || self.browser.library.root_counts_settled()
+        {
             return;
         }
-        let roots = self.state.system.config.library_roots.clone();
+        let roots = &self.state.system.config.library_roots;
         let structure_revision = self.state.library.structure_revision;
         let (generation, batches) = self
             .browser
             .library
-            .begin_root_counts(&roots, structure_revision);
+            .begin_root_counts(roots, structure_revision);
         self.browser
             .requests
             .root_count_workers
