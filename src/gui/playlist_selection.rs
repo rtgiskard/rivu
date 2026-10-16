@@ -1,5 +1,6 @@
 //! Playlist occurrence selection is independent of bounded metadata pages.
 //! Jobs retain compact identities and publish atomically for their original token.
+//! Metadata-only changes retry pending navigation without invalidating occurrence identities.
 use super::metadata::{ManualAction, ManualIntentId};
 use super::*;
 use crate::{
@@ -55,6 +56,26 @@ struct EntryNavigationScope {
     revision: u64,
     library: u64,
 }
+impl EntryNavigationScope {
+    fn revisions(self) -> QueryRevisions {
+        QueryRevisions {
+            library: self.library,
+            playlist_entries: Some(PlaylistEntryRevision {
+                playlist_id: self.playlist_id,
+                revision: self.revision,
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn same_occurrences(self, other: Self) -> bool {
+        let query = Query::PlaylistEntryLocations {
+            playlist_id: self.playlist_id,
+            entry_ids: Vec::new(),
+        };
+        query.stamp(self.revisions()) == query.stamp(other.revisions())
+    }
+}
 
 impl PartialEq for EntryNavigationScope {
     fn eq(&self, other: &Self) -> bool {
@@ -63,15 +84,7 @@ impl PartialEq for EntryNavigationScope {
             offset: 0,
             limit: 1,
         };
-        let revisions = |scope: &Self| QueryRevisions {
-            library: scope.library,
-            playlist_entries: Some(PlaylistEntryRevision {
-                playlist_id: scope.playlist_id,
-                revision: scope.revision,
-            }),
-            ..Default::default()
-        };
-        query.stamp(revisions(self)) == query.stamp(revisions(other))
+        query.stamp(self.revisions()) == query.stamp(other.revisions())
     }
 }
 
@@ -265,7 +278,7 @@ impl EntrySelection {
         }
         let current = self
             .navigation
-            .filter(|job| job.scope == scope)
+            .filter(|job| job.scope.same_occurrences(scope))
             .map(|job| job.offset)
             .or(self.active.map(|row| row.position));
         let offset = match current {
@@ -343,7 +356,12 @@ impl EntrySelection {
         if let Some(intent) = self.navigation
             && scope != Some(intent.scope)
         {
-            self.invalidate();
+            if let Some(scope) = scope.filter(|scope| intent.scope.same_occurrences(*scope)) {
+                // Occurrences remain valid; retry the latest intent with current metadata.
+                self.navigation = Some(EntryNavigationJob { scope, ..intent });
+            } else {
+                self.invalidate();
+            }
         }
         if scope != Some(job.scope) || !self.current(job.generation) || self.navigation != Some(job)
         {
@@ -1095,6 +1113,149 @@ mod tests {
             revisions: QueryRevisions::default(),
             result: Err(QueryError::Message(message.into())),
         }
+    }
+
+    #[test]
+    fn metadata_only_navigation_change_retries_without_losing_selection_or_readiness() {
+        use crate::gui::metadata::ManualIntents;
+        let scope = navigation_scope();
+        let changed = EntryNavigationScope {
+            library: scope.library + 1,
+            ..scope
+        };
+        for (shift, multi) in [(false, false), (false, true), (true, false), (true, true)] {
+            let mut selection = EntrySelection::default();
+            let mut intents = ManualIntents::default();
+            selection.select(identity(9, 9), false);
+            selection.select(identity(0, 0), true);
+            assert!(selection.navigate(scope, 20, true, shift, multi));
+            let intent = intents.begin();
+            selection.intent = Some(intent);
+            let stale = selection.take_navigation().unwrap();
+            assert_eq!(
+                selection.finish_navigation(
+                    "Unexpected playlist navigation response",
+                    stale,
+                    Some(changed),
+                    navigation_response(stale, 20)
+                ),
+                EntryNavigationEffect::None
+            );
+            assert_eq!(selection.intent, Some(intent));
+            assert!(intents.current(intent));
+            assert!(selection.current(stale.generation));
+            assert_eq!(selection.active, Some(identity(0, 0)));
+            assert_eq!(selection.anchor, Some(identity(0, 0)));
+            assert!(selection.contains(0) && selection.contains(9));
+            assert!(selection.busy);
+            assert!(selection.error.is_none());
+            let retry = selection.take_navigation().unwrap();
+            assert_eq!(
+                retry,
+                EntryNavigationJob {
+                    scope: changed,
+                    ..stale
+                }
+            );
+            assert!(selection.take_navigation().is_none());
+            let target = identity(1, 1);
+            assert_eq!(
+                selection.finish_navigation(
+                    "Unexpected playlist navigation response",
+                    retry,
+                    Some(changed),
+                    navigation_response(retry, 20)
+                ),
+                EntryNavigationEffect::Selected {
+                    target,
+                    range: shift.then_some(EntryNavigationRange {
+                        start: 0,
+                        end: 2,
+                        anchor: identity(0, 0),
+                        additive: multi,
+                    }),
+                }
+            );
+            if shift {
+                assert!(selection.complete_range(
+                    retry.generation,
+                    Some(identity(0, 0)),
+                    target,
+                    vec![identity(0, 0), target],
+                    multi,
+                ));
+            } else {
+                selection.select(target, multi);
+            }
+            assert_eq!(
+                selection.ordered_ids(),
+                match (shift, multi) {
+                    (false, false) => vec![1],
+                    (true, false) => vec![0, 1],
+                    (_, true) => vec![0, 1, 9],
+                }
+            );
+            assert_eq!(selection.active, Some(target));
+            assert!(selection.ready());
+            assert!(selection.navigate(changed, 20, true, false, false));
+            assert_eq!(selection.take_navigation().unwrap().offset, 2);
+        }
+    }
+
+    #[test]
+    fn metadata_only_change_preserves_newer_navigation_target_intent_and_worker_gate() {
+        use crate::gui::metadata::ManualIntents;
+        let scope = navigation_scope();
+        let changed = EntryNavigationScope {
+            library: scope.library + 1,
+            ..scope
+        };
+        let mut selection = EntrySelection::default();
+        let mut intents = ManualIntents::default();
+        selection.select(identity(0, 0), false);
+        assert!(selection.navigate(scope, 20, true, false, false));
+        selection.intent = Some(intents.begin());
+        let stale = selection.take_navigation().unwrap();
+        assert!(selection.navigate(changed, 20, true, true, true));
+        let intent = intents.begin();
+        selection.intent = Some(intent);
+        let generation = selection.generation;
+        assert_eq!(selection.navigation_in_flight, Some(stale));
+        assert!(selection.take_navigation().is_none());
+        assert_eq!(
+            selection.finish_navigation(
+                "Unexpected playlist navigation response",
+                stale,
+                Some(changed),
+                navigation_error("obsolete worker")
+            ),
+            EntryNavigationEffect::None
+        );
+        assert_eq!(selection.intent, Some(intent));
+        assert!(intents.current(intent));
+        assert!(selection.current(generation));
+        assert!(selection.error.is_none());
+        let latest = selection.take_navigation().unwrap();
+        assert_eq!(latest.scope, changed);
+        assert_eq!(latest.offset, 2);
+        assert!(latest.shift && latest.multi);
+        assert_eq!(
+            selection.finish_navigation(
+                "Unexpected playlist navigation response",
+                latest,
+                Some(changed),
+                navigation_response(latest, 20)
+            ),
+            EntryNavigationEffect::Selected {
+                target: identity(2, 2),
+                range: Some(EntryNavigationRange {
+                    start: 0,
+                    end: 3,
+                    anchor: identity(0, 0),
+                    additive: true,
+                }),
+            }
+        );
     }
 
     #[test]

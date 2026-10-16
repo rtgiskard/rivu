@@ -42,6 +42,8 @@ depend only on the playlist catalog. Full playlist rows depend on metadata and
 that playlist's content token; compact occurrence/location queries depend only
 on its content token. Every extant playlist has a token, and absence means
 deletion: rename never invalidates content or compact occurrence selection.
+Metadata-only changes preserve the latest navigation target and modifiers;
+an in-flight full-row read drains before retrying against current metadata.
 Queue queries depend only on the queue token. Duplicate groups use their group
 token; duplicate members use metadata, member facts (including playlist reference
 counts), and queue. A catalog rename does not change member facts.
