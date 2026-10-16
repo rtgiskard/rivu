@@ -1062,20 +1062,22 @@ impl GuiApp {
                     .into()
             }
         });
-        let tools = panel_toolbar().min_h(px(32.)).child(disabled_control(
-            icon_button(
-                ("queue-locate-playing", panel_id),
-                "",
-                self.tr("gl-locate-playing-entry"),
-                cx,
-                |this, window, cx| this.locate_playing_queue(window, cx),
-            ),
-            self.state.queue.current_id.is_none(),
-        ))
+        let tools = panel_toolbar()
+            .min_h(px(32.))
+            .child(self.queue_search.clone())
+            .child(disabled_control(
+                icon_button(
+                    ("queue-locate-playing", panel_id),
+                    "",
+                    self.tr("gl-locate-playing-entry"),
+                    cx,
+                    |this, window, cx| this.locate_playing_queue(window, cx),
+                ),
+                self.state.queue.current_id.is_none(),
+            ))
             .min_w_0()
             .max_w(gpui::rems(20.5))
-            .flex_shrink(1.)
-            .child(self.queue_search.clone());
+            .flex_shrink(1.);
         let (selection_message, selection_kind): (SharedString, _) =
             if let Some(error) = &self.browser.queue.selection_error {
                 (error.clone().into(), StatusKind::Error)

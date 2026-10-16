@@ -154,9 +154,21 @@ impl Render for ListSearch {
         let visible =
             self.expanded || !self.input.read(cx).text().is_empty() || self.query.is_some();
         let focused = self.input_focused(window, cx);
+        if !visible {
+            return row()
+                .track_focus(&self.focus_handle)
+                .child(icon_button(
+                    "search-toggle",
+                    "󰍉",
+                    self.i18n.text("search-toggle").to_owned(),
+                    cx,
+                    |this, window, cx| this.toggle(window, cx),
+                ))
+                .into_any_element();
+        }
         let mut field = row()
             .gap_0()
-            .h(gpui::rems(2.25))
+            .h(gpui::rems(2.))
             .min_w_0()
             .max_w_full()
             .overflow_hidden()
@@ -176,58 +188,51 @@ impl Render for ListSearch {
                 .bg(gpui::transparent_black())
                 .rounded_none(),
             );
-        if visible {
-            let count = match self.counts {
-                Some((matched, total)) => self.i18n.format(
-                    "search-count",
-                    &[("matched", matched.into()), ("total", total.into())],
-                ),
-                None => "—".to_owned(),
-            };
-            self.input.update(cx, |input, cx| {
-                input.set_trailing_text(count.into(), cx);
-            });
-            field = field
-                .child(div().flex_1().min_w_0().child(self.input.clone()))
-                .when(!self.input.read(cx).text().is_empty(), |field| {
-                    field.child(
-                        icon_button(
-                            "search-clear",
-                            "",
-                            self.i18n.text("search-clear").to_owned(),
-                            cx,
-                            |this, window, cx| {
-                                this.clear(cx);
-                                this.input.update(cx, |input, cx| {
-                                    input.focus_handle(cx).focus(window, cx)
-                                });
-                            },
-                        )
-                        .border_0()
-                        .bg(gpui::transparent_black())
-                        .rounded_none(),
+        let count = match self.counts {
+            Some((matched, total)) => self.i18n.format(
+                "search-count",
+                &[("matched", matched.into()), ("total", total.into())],
+            ),
+            None => "—".to_owned(),
+        };
+        self.input.update(cx, |input, cx| {
+            input.set_trailing_text(count.into(), cx);
+        });
+        field = field
+            .child(div().flex_1().min_w_0().child(self.input.clone()))
+            .when(!self.input.read(cx).text().is_empty(), |field| {
+                field.child(
+                    icon_button(
+                        "search-clear",
+                        "",
+                        self.i18n.text("search-clear").to_owned(),
+                        cx,
+                        |this, window, cx| {
+                            this.clear(cx);
+                            this.input
+                                .update(cx, |input, cx| input.focus_handle(cx).focus(window, cx));
+                        },
                     )
-                });
-        }
-        let field = field.w(gpui::rems(if visible { 16. } else { 2. }));
+                    .border_0()
+                    .bg(gpui::transparent_black())
+                    .rounded_none(),
+                )
+            });
+        let field = field.w(gpui::rems(16.));
         let control = row()
             .track_focus(&self.focus_handle)
             .min_w_0()
             .flex_basis(gpui::rems(2.))
             .flex_shrink(1.)
             .child(field);
-        if visible {
-            control
-                .flex_grow(1.)
-                .with_animation(
-                    ("search-expand", self.expansion),
-                    Animation::new(std::time::Duration::from_millis(150))
-                        .with_easing(|t| 1. - (1. - t).powi(3)),
-                    |control, progress| control.max_w(gpui::rems(2. + 14. * progress)),
-                )
-                .into_any_element()
-        } else {
-            control.max_w(gpui::rems(2.)).into_any_element()
-        }
+        control
+            .flex_grow(1.)
+            .with_animation(
+                ("search-expand", self.expansion),
+                Animation::new(std::time::Duration::from_millis(150))
+                    .with_easing(|t| 1. - (1. - t).powi(3)),
+                |control, progress| control.max_w(gpui::rems(2. + 14. * progress)),
+            )
+            .into_any_element()
     }
 }
