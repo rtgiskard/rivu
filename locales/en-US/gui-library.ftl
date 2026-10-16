@@ -78,9 +78,9 @@ gl-force-on = Force rescans: on
 
 gl-force-off = Force rescans: off
 
-gl-enqueue-selected = Append selected tracks to queue
+gl-enqueue-selected = Append to queue
 
-gl-remove-library-selected = Remove selected tracks from library
+gl-remove-library-selected = Remove from library
 
 gl-queue = Queue
 

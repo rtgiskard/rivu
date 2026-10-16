@@ -78,9 +78,9 @@ gl-force-on = 强制扫描：开
 
 gl-force-off = 强制扫描：关
 
-gl-enqueue-selected = 将所选曲目加入队列
+gl-enqueue-selected = 加入队列
 
-gl-remove-library-selected = 从音乐库移除所选曲目
+gl-remove-library-selected = 从音乐库移除
 
 gl-queue = 播放队列
 

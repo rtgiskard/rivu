@@ -190,7 +190,7 @@ settings-colors-hint = #RRGGBB. Shared by all instances, independent of the shar
 settings-waterline-hint = #RRGGBB. The waterline stays still while paused.
 settings-language = Interface language
 settings-language-auto = Automatic
-settings-language-restart = Restart Rivu to apply.
+settings-language-restart = Restart to apply
 settings-use-font = Use “{ $font }”
 settings-inherited-range = 1–160 dB; empty = Shared settings ({ $range } dB).
 settings-invalid = Invalid settings: { $error } { $recovery }
