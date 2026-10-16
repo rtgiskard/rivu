@@ -16,12 +16,30 @@ panels. Renaming and deleting an inactive layout do not rebuild the root.
 
 New default layouts allocate 42% of the vertical content to Playback and 58%
 to the lower panes. The lower panes divide their width equally between Library
-and the right-hand stack; that stack assigns 66% of its vertical content to
-Queue and 17% each to Spectrum and Spectrogram. These proportions exclude
-separator gutters and balance visible playback controls with usable list space
-at larger interface scales.
+and the right-hand area; that area assigns 60% of its vertical content to
+Queue and 40% to a row containing Spectrum and Spectrogram at equal widths.
+These proportions exclude separator gutters. Sharing a row gives both plots
+enough height at 1280 by 800 with interface scale 1 without reducing Playback's
+space; Queue retains most of the right-hand height.
 They apply only when creating a default layout: loading a saved tree retains
 its boundaries, including omitted or empty arrays that mean equal division.
+
+Visualization sizing uses the actual content canvas, after the 1.75rem tab row,
+panel borders, and 8px content insets. A canvas at most 64px wide or 40px high
+shows an `Enlarge panel` hint instead of an unreadable plot or unexplained blank
+background. The hint has a tooltip and can scroll when its text does not fit.
+Spectrum omits its axis labels below 78px canvas height, preserving a readable
+compact plot instead of overlapping its four dB labels. This does not change
+the saved label preference.
+
+At the supported minimum window size (760 by 480), particularly at interface
+scale 2 (the supported scale range is 0.75 through 2), not every list and plot
+can be useful simultaneously. Playback keeps its vertical scrolling and the
+controls row's horizontal scrolling, so transport, seek, and volume remain
+reachable without assigning its space to plots. To give Queue or a plot more
+space, unlock layout editing and drag its separator, or dock panels into tabs;
+enlarging the window or reducing interface scale also restores plot space.
+No window-size or scale change rewrites saved proportions.
 
 Each Album artwork panel owns its style, rotation mode, period, and direction,
 saved with the layout and retained by docking and layout duplication. New panels

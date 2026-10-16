@@ -212,6 +212,7 @@ settings-mpris-status = 媒体控制 (MPRIS)：{ $state }
 visual-wait = 等待播放后分析
 visual-no-spectrum = 无可听频谱数据
 visual-no-spectrogram = 16 Hz 至奈奎斯特频率内无声谱数据
+visual-too-small = 请扩大面板
 visual-error = 可视化错误：{ $error }
 visual-level-zero = 条形电平 0%
 visual-level-half = 条形电平 50%

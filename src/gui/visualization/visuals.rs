@@ -160,6 +160,15 @@ fn spectrogram_source_height(
         .min(usize::try_from(max_rows.max(1)).unwrap_or(usize::MAX))
 }
 
+fn visual_canvas_has_room(size: gpui::Size<Pixels>) -> bool {
+    size.width > px(64.0) && size.height > px(40.0)
+}
+
+fn spectrum_labels_visible(configured: bool, height: Pixels) -> bool {
+    // Four 10px dB labels need separation as well as the bottom note labels.
+    configured && height >= px(78.0)
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum VisualMode {
     Spectrum,
@@ -724,76 +733,106 @@ impl Visuals {
             VisualMode::Spectrum => "spectrum",
             VisualMode::Spectrogram => "spectrogram",
         };
-        div()
-            .id((kind, panel_id))
-            .relative()
-            .size_full()
-            .min_w_0()
-            .min_h_0()
-            .overflow_hidden()
-            .bg(rgb(self.data.borrow().visual_background))
-            .child(
-                canvas(
-                    move |bounds, _, _| {
-                        if mode == VisualMode::Spectrogram {
-                            let mut data = prepaint_data.borrow_mut();
-                            let margin = axis_label_margin(
-                                data.spectrogram_show_labels,
-                                &data.frequency_labels,
-                            );
-                            let width = ((bounds.size.width - px(margin + 8.0)) / px(1.0))
-                                .ceil()
-                                .max(2.0) as usize;
-                            let height = ((bounds.size.height - px(12.0)) / px(1.0)).ceil().max(1.0)
-                                as usize;
-                            data.spectrogram_panel_sizes
-                                .insert(panel_id, (width, height));
-                        }
-                    },
-                    move |bounds, _, window, cx| {
-                        let mut data = data.borrow_mut();
-                        window.paint_quad(fill(bounds, rgb(data.visual_background)));
-                        if bounds.size.width <= px(64.0) || bounds.size.height <= px(40.0) {
-                            return;
-                        }
-                        if !showing_status {
-                            let result = match mode {
-                                VisualMode::Spectrum => {
-                                    data.paint_spectrum(panel_id, bounds, window, cx)
-                                }
-                                VisualMode::Spectrogram => {
-                                    data.paint_spectrogram(bounds, window, cx)
-                                }
-                            };
-                            if let Err(error) = result {
-                                data.report_error(error);
+        let visual_background = self.data.borrow().visual_background;
+        gpui::container_query(move |available, _, _| {
+            if !visual_canvas_has_room(available) {
+                let message: SharedString = i18n.text("visual-too-small").to_owned().into();
+                let tooltip = message.clone();
+                return div()
+                    .id((kind, panel_id))
+                    .size_full()
+                    .min_w_0()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .bg(rgb(super::super::PANEL))
+                    .text_color(rgb(super::super::SECONDARY))
+                    .text_size(px(10.0))
+                    .line_height(px(12.0))
+                    .tooltip(move |_, cx| {
+                        cx.new(|_| super::super::ButtonTooltip {
+                            text: tooltip.clone(),
+                        })
+                        .into()
+                    })
+                    .child(message)
+                    .into_any_element();
+            }
+            div()
+                .id((kind, panel_id))
+                .relative()
+                .size_full()
+                .min_w_0()
+                .min_h_0()
+                .overflow_hidden()
+                .bg(rgb(visual_background))
+                .child(
+                    canvas(
+                        move |bounds, _, _| {
+                            if mode == VisualMode::Spectrogram {
+                                let mut data = prepaint_data.borrow_mut();
+                                let margin = axis_label_margin(
+                                    data.spectrogram_show_labels,
+                                    &data.frequency_labels,
+                                );
+                                let width = ((bounds.size.width - px(margin + 8.0)) / px(1.0))
+                                    .ceil()
+                                    .max(2.0) as usize;
+                                let height = ((bounds.size.height - px(12.0)) / px(1.0))
+                                    .ceil()
+                                    .max(1.0) as usize;
+                                data.spectrogram_panel_sizes
+                                    .insert(panel_id, (width, height));
                             }
-                        }
-                        if let Some(error) = &data.error {
-                            window.paint_quad(fill(
-                                Bounds::new(bounds.origin, size(bounds.size.width, px(22.0))),
-                                rgb(ERROR_BG),
-                            ));
-                            paint_label(
-                                i18n.format("visual-error", &[("error", error.as_str().into())])
+                        },
+                        move |bounds, _, window, cx| {
+                            let mut data = data.borrow_mut();
+                            window.paint_quad(fill(bounds, rgb(data.visual_background)));
+                            if !visual_canvas_has_room(bounds.size) {
+                                return;
+                            }
+                            if !showing_status {
+                                let result = match mode {
+                                    VisualMode::Spectrum => {
+                                        data.paint_spectrum(panel_id, bounds, window, cx)
+                                    }
+                                    VisualMode::Spectrogram => {
+                                        data.paint_spectrogram(bounds, window, cx)
+                                    }
+                                };
+                                if let Err(error) = result {
+                                    data.report_error(error);
+                                }
+                            }
+                            if let Some(error) = &data.error {
+                                window.paint_quad(fill(
+                                    Bounds::new(bounds.origin, size(bounds.size.width, px(22.0))),
+                                    rgb(ERROR_BG),
+                                ));
+                                paint_label(
+                                    i18n.format(
+                                        "visual-error",
+                                        &[("error", error.as_str().into())],
+                                    )
                                     .into(),
-                                point(bounds.left() + px(6.0), bounds.top() + px(3.0)),
-                                ERROR,
-                                window,
-                                cx,
-                            );
-                        }
-                    },
+                                    point(bounds.left() + px(6.0), bounds.top() + px(3.0)),
+                                    ERROR,
+                                    window,
+                                    cx,
+                                );
+                            }
+                        },
+                    )
+                    .size_full(),
                 )
-                .size_full(),
-            )
-            .children(message.map(|message| {
-                super::super::components::visualization_status(message)
-                    .absolute()
-                    .top_0()
-                    .left_0()
-            }))
-            .into_any_element()
+                .children(message.map(|message| {
+                    super::super::components::visualization_status(message)
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                }))
+                .into_any_element()
+        })
+        .into_any_element()
     }
 }
 
@@ -1126,8 +1165,9 @@ impl VisualData {
         window: &mut Window,
         cx: &mut App,
     ) -> Result<(), String> {
-        let left_margin = axis_label_margin(self.spectrum_show_labels, &self.spectrum_labels);
-        let bottom_margin = if self.spectrum_show_labels { 22.0 } else { 8.0 };
+        let show_labels = spectrum_labels_visible(self.spectrum_show_labels, bounds.size.height);
+        let left_margin = axis_label_margin(show_labels, &self.spectrum_labels);
+        let bottom_margin = if show_labels { 22.0 } else { 8.0 };
         let plot = Bounds::new(
             point(bounds.left() + px(left_margin), bounds.top() + px(8.0)),
             size(
@@ -1161,7 +1201,7 @@ impl VisualData {
                 grid_path.line_to(point(plot.right(), y));
                 has_grid = true;
             }
-            if self.spectrum_show_labels {
+            if show_labels {
                 paint_aligned_label(
                     self.db_labels[step].clone(),
                     point(plot.left() - px(5.0), y - px(5.0)),
@@ -1405,7 +1445,7 @@ impl VisualData {
         if !self.visualization_cache {
             self.spectrum_bins.clear();
         }
-        if self.spectrum_show_labels {
+        if show_labels {
             let labels_y = plot.bottom() + px(3.0);
             paint_label(
                 self.spectrum_labels[0].clone(),
@@ -1971,6 +2011,18 @@ fn paint_aligned_label(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn small_canvases_explain_missing_space_instead_of_painting_unreadable_plots() {
+        for (width, height) in [(64.0, 100.0), (100.0, 40.0), (300.0, 25.0)] {
+            assert!(!visual_canvas_has_room(size(px(width), px(height))));
+        }
+        assert!(visual_canvas_has_room(size(px(65.0), px(41.0))));
+        assert!(!spectrum_labels_visible(true, px(41.0)));
+        assert!(!spectrum_labels_visible(true, px(77.0)));
+        assert!(spectrum_labels_visible(true, px(78.0)));
+        assert!(!spectrum_labels_visible(false, px(100.0)));
+    }
 
     #[test]
     fn smooth_gradient_preserves_palette_stops() {

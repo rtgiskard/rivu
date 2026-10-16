@@ -821,18 +821,25 @@ impl Default for Layout {
                             Node::Split {
                                 id: 7,
                                 axis: Axis::Vertical,
-                                boundaries: vec![0.66, 0.83],
+                                boundaries: vec![0.60],
                                 children: vec![
                                     tabs(8, 9, "queue"),
-                                    tabs(10, 11, "spectrum"),
-                                    tabs(12, 13, "spectrogram"),
+                                    Node::Split {
+                                        id: 14,
+                                        axis: Axis::Horizontal,
+                                        boundaries: Vec::new(),
+                                        children: vec![
+                                            tabs(10, 11, "spectrum"),
+                                            tabs(12, 13, "spectrogram"),
+                                        ],
+                                    },
                                 ],
                             },
                         ],
                     },
                 ],
             }),
-            next_id: 14,
+            next_id: 15,
             locked: true,
         }
     }
@@ -2124,6 +2131,30 @@ mod tests {
         let mut set = LayoutSet::default();
         *set.current_mut() = layout;
         assert_eq!(encoded(&decoded(encoded(&set)).unwrap()), encoded(&set));
+    }
+
+    #[test]
+    fn saved_visualizer_stack_retains_its_geometry() {
+        for boundaries in [json!([0.66, 0.83]), json!([])] {
+            let saved = one_layout(json!({
+                "type": "split",
+                "axis": "vertical",
+                "boundaries": boundaries,
+                "children": [wire_tabs("queue"), wire_tabs("spectrum"), wire_tabs("spectrogram")]
+            }));
+            let reopened = decoded(saved.clone()).unwrap();
+            let written = encoded(&reopened);
+            let expected = &saved["layouts"]["Work"]["root"];
+            let actual = &written["layouts"]["Work"]["root"];
+            assert_eq!(actual["children"], expected["children"]);
+            assert_eq!(
+                actual["boundaries"]
+                    .as_array()
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]),
+                expected["boundaries"].as_array().unwrap()
+            );
+        }
     }
 
     #[test]

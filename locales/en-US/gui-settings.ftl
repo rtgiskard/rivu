@@ -212,6 +212,7 @@ settings-mpris-status = Media controls (MPRIS): { $state }
 visual-wait = Analysis waiting for playback
 visual-no-spectrum = No audible spectrum data
 visual-no-spectrogram = No spectrogram data in 16 Hz–Nyquist
+visual-too-small = Enlarge panel
 visual-error = Visualization error: { $error }
 visual-level-zero = Bar level 0%
 visual-level-half = Bar level 50%
