@@ -339,6 +339,15 @@ but cannot restore that hidden owner. Window hide, close, or reload releases
 current and retired display owners without waiting for another frame. Another
 window owns an independent decode.
 
+Album-artwork decorations load lazily for visible styles, with one shared decode
+per style and window. Losing the last visible style consumer retires its image
+and cancels pending decoding through the same window-frame boundary; window
+hide or close flushes it immediately. A synchronous rasterization already running
+may finish, but cannot publish after cancellation. An old scene cannot restart a
+released decoration load. Reopening before retirement reuses the live owner;
+reopening after retirement decodes anew. Decoration resolution and GPU rotation
+are unchanged.
+
 Generated default covers share a separate window-local cache across square
 previews, cards, and circular artwork panels. GPUI background assets rasterize
 the embedded SVG at twice the displayed physical square size, then Lanczos-filter

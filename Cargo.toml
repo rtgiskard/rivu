@@ -56,6 +56,7 @@ pipewire = { version = "0.10.1", features = ["v1_2_0"] }
 fontconfig-sys = { package = "yeslogic-fontconfig-sys", version = "6" }
 
 [dev-dependencies]
+gpui = { git = "https://github.com/zed-industries/zed", rev = "df48a139ce9c292738b523252c12f044697e673f", default-features = false, features = ["test-support"] }
 tokio = { version = "1", features = ["test-util"] }
 
 [build-dependencies]

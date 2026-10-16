@@ -5,8 +5,8 @@ use std::{
 };
 
 use gpui::{
-    App, Bounds, BoxShadow, Context, Entity, Image, ImageFormat, ObjectFit, Pixels, Render, Task,
-    Transformation, Window, canvas, div, img, point, prelude::*, px, radians, rgb, size,
+    App, Bounds, BoxShadow, Context, Entity, ObjectFit, Pixels, Render, Task, Transformation,
+    Window, canvas, div, point, prelude::*, px, radians, rgb, size,
 };
 
 use crate::{
@@ -17,7 +17,7 @@ use crate::{
     model::{PlaybackStatus, Track},
 };
 
-use super::artwork::{Artwork, ArtworkImages, ArtworkLoader, ArtworkView};
+use super::artwork::{Artwork, ArtworkDecoration, ArtworkImages, ArtworkLoader, ArtworkView};
 
 /// Pacing is measured between native frame requests, not after frame delivery.
 /// A late wake schedules only one frame and establishes a fresh deadline.
@@ -155,6 +155,27 @@ struct Instance {
     visible: bool,
 }
 
+const DECORATIONS: [&[u8]; 6] = [
+    include_bytes!("../../assets/album_vinyl.svg"),
+    include_bytes!("../../assets/album_glass.svg"),
+    include_bytes!("../../assets/album_halo.svg"),
+    include_bytes!("../../assets/album_metal.svg"),
+    include_bytes!("../../assets/album_card.svg"),
+    include_bytes!("../../assets/album_duotone.svg"),
+];
+
+fn decoration_index(style: AlbumArtworkStyle) -> Option<usize> {
+    match style {
+        AlbumArtworkStyle::Plain => None,
+        AlbumArtworkStyle::Vinyl => Some(0),
+        AlbumArtworkStyle::Glass => Some(1),
+        AlbumArtworkStyle::Halo => Some(2),
+        AlbumArtworkStyle::Metal => Some(3),
+        AlbumArtworkStyle::Card => Some(4),
+        AlbumArtworkStyle::Duotone => Some(5),
+    }
+}
+
 /// Instances share one source owner, frame callback and cancellable deadline.
 /// Only rotation state and presentation options belong to individual panels.
 pub(super) struct AlbumArtwork {
@@ -166,7 +187,8 @@ pub(super) struct AlbumArtwork {
     status: PlaybackStatus,
     visible: bool,
     instances: HashMap<u64, Instance>,
-    decorations: [Arc<Image>; 6],
+    images: ArtworkImages,
+    decorations: [Option<ArtworkDecoration>; 6],
     pacing: FramePacing,
     frame_pending: bool,
     frame_generation: u64,
@@ -182,21 +204,14 @@ impl AlbumArtwork {
         Self {
             manager,
             loader: ArtworkLoader::default(),
-            view: ArtworkView::new(images),
+            view: ArtworkView::new(images.clone()),
             default_album,
             track: None,
             status: PlaybackStatus::Stopped,
             visible: false,
             instances: HashMap::new(),
-            decorations: [
-                include_bytes!("../../assets/album_vinyl.svg").as_slice(),
-                include_bytes!("../../assets/album_glass.svg").as_slice(),
-                include_bytes!("../../assets/album_halo.svg").as_slice(),
-                include_bytes!("../../assets/album_metal.svg").as_slice(),
-                include_bytes!("../../assets/album_card.svg").as_slice(),
-                include_bytes!("../../assets/album_duotone.svg").as_slice(),
-            ]
-            .map(|bytes| Arc::new(Image::from_bytes(ImageFormat::Svg, bytes.to_vec()))),
+            images,
+            decorations: std::array::from_fn(|_| None),
             pacing: FramePacing::new(),
             frame_pending: false,
             frame_generation: 0,
@@ -281,6 +296,23 @@ impl AlbumArtwork {
             );
         }
         self.instances.retain(|_, instance| instance.retained);
+        let mut visible_styles = [false; 6];
+        for instance in self.instances.values().filter(|instance| instance.visible) {
+            if let Some(index) = decoration_index(instance.options.style) {
+                visible_styles[index] = true;
+            }
+        }
+        for (index, decoration) in self.decorations.iter_mut().enumerate() {
+            if visible_styles[index] {
+                if decoration.is_none() {
+                    *decoration = Some(self.images.decoration(index, DECORATIONS[index], cx));
+                    changed = true;
+                }
+            } else if let Some(previous) = decoration.take() {
+                previous.retire();
+                changed = true;
+            }
+        }
         let visible = self.instances.values().any(|instance| instance.visible);
         changed |= self.visible != visible || self.pacing.fps != config.album_artwork_fps;
         if switched {
@@ -418,6 +450,11 @@ impl AlbumArtwork {
         self.instances.clear();
         self.cancel_frame();
         self.view.release_all_images(window, cx);
+        for decoration in &mut self.decorations {
+            if let Some(decoration) = decoration.take() {
+                decoration.release(window, cx);
+            }
+        }
     }
 
     fn running(&self) -> bool {
@@ -482,15 +519,9 @@ impl AlbumArtwork {
             .get(&id)
             .expect("artwork panel initialized before render");
         let style = instance.options.style;
-        let decoration = match style {
-            AlbumArtworkStyle::Plain => None,
-            AlbumArtworkStyle::Vinyl => Some(self.decorations[0].clone()),
-            AlbumArtworkStyle::Glass => Some(self.decorations[1].clone()),
-            AlbumArtworkStyle::Halo => Some(self.decorations[2].clone()),
-            AlbumArtworkStyle::Metal => Some(self.decorations[3].clone()),
-            AlbumArtworkStyle::Card => Some(self.decorations[4].clone()),
-            AlbumArtworkStyle::Duotone => Some(self.decorations[5].clone()),
-        };
+        let mut decoration = decoration_index(style)
+            .and_then(|index| self.decorations[index].as_ref())
+            .map(ArtworkDecoration::image);
         let angle = instance.rotation.angle as f32;
         canvas(
             move |bounds, window, cx| {
@@ -550,26 +581,18 @@ impl AlbumArtwork {
                 };
                 let mut element = div().relative().size(side);
                 let behind = matches!(style, AlbumArtworkStyle::Halo | AlbumArtworkStyle::Duotone);
-                if behind {
-                    element =
-                        element.child(img(decoration.clone().unwrap()).absolute().size_full());
+                if behind && let Some(decoration) = decoration.take() {
+                    element = element.child(decoration.absolute().size_full());
                 }
                 element = element.child(surface);
-                if let Some(decoration) = decoration.filter(|_| !behind) {
-                    element = element.child(
-                        img(decoration)
-                            .absolute()
-                            .top_0()
-                            .left_0()
-                            .size_full()
-                            .when(
-                                matches!(style, AlbumArtworkStyle::Vinyl | AlbumArtworkStyle::Card),
-                                |image| {
-                                    image
-                                        .with_transformation(Transformation::rotate(radians(angle)))
-                                },
-                            ),
-                    );
+                if let Some(decoration) = decoration {
+                    element =
+                        element.child(decoration.absolute().top_0().left_0().size_full().when(
+                            matches!(style, AlbumArtworkStyle::Vinyl | AlbumArtworkStyle::Card),
+                            |image| {
+                                image.with_transformation(Transformation::rotate(radians(angle)))
+                            },
+                        ));
                 }
                 let mut element = element.into_any_element();
                 let _ = element.prepaint_as_root(
