@@ -280,6 +280,7 @@ gl-queue-count = 队列 { $total } 项 · 已选 { $selected } 项
 gl-queue-drag-hint = 拖动队列项以调整顺序
 
 gl-confirm-delete-playlist = 删除“{ $name }”？
+gl-confirm-remove-library = 确认从音乐库移除选中的 { $count } 首曲目？不会删除音频文件。
 
 gl-confirm-play-playlist = 播放“{ $name }”？
 

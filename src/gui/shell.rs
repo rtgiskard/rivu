@@ -9,6 +9,7 @@ pub(super) enum PanelMenuPage {
     AudioVisualizerStyle,
     AlbumArtworkStyle,
     ConfirmClearQueue,
+    ConfirmRemoveLibrary,
     Playlists,
     LibraryColumns,
 }
@@ -630,6 +631,9 @@ impl Render for GuiApp {
             );
         }
 
+        if self.panel_menu.is_none() {
+            self.library_remove_pending = None;
+        }
         if let Some(state) = self.panel_menu {
             let panel_kind = self
                 .layouts
@@ -656,6 +660,54 @@ impl Render for GuiApp {
             match state.page {
                 PanelMenuPage::Main => {
                     if is_library {
+                        let can_edit = !self.library_range_pending()
+                            && !self.browser.library.selected().is_empty();
+                        menu = menu
+                            .child(components::disabled_control(
+                                menu_item(
+                                    "library-enqueue",
+                                    self.tr("gl-enqueue-selected"),
+                                    cx,
+                                    |this, _, cx| {
+                                        if this.library_range_pending()
+                                            || this.browser.library.selected().is_empty()
+                                        {
+                                            return;
+                                        }
+                                        this.panel_menu = None;
+                                        this.send(
+                                            Command::Enqueue {
+                                                track_ids: this.panel_selected_tracks(),
+                                            },
+                                            cx,
+                                        );
+                                    },
+                                ),
+                                !can_edit,
+                            ))
+                            .child(components::disabled_control(
+                                components::danger_control(menu_item(
+                                    "library-remove",
+                                    self.tr("gl-remove-library-selected"),
+                                    cx,
+                                    move |this, _, cx| {
+                                        if this.library_range_pending()
+                                            || this.browser.library.selected().is_empty()
+                                        {
+                                            return;
+                                        }
+                                        this.library_remove_pending =
+                                            Some(this.panel_selected_tracks());
+                                        this.panel_menu = Some(PanelMenu {
+                                            page: PanelMenuPage::ConfirmRemoveLibrary,
+                                            ..state
+                                        });
+                                        cx.notify();
+                                    },
+                                )),
+                                !can_edit,
+                            ))
+                            .child(components::menu_separator());
                         menu = menu.child(menu_item(
                             "library-columns-menu",
                             self.tr("shell-track-information-menu"),
@@ -1144,6 +1196,42 @@ impl Render for GuiApp {
                                 cx.notify();
                             },
                         ));
+                }
+                PanelMenuPage::ConfirmRemoveLibrary => {
+                    let count = self.library_remove_pending.as_ref().map_or(0, Vec::len);
+                    menu = menu
+                        .child(
+                            div().px(gpui::px(UI_INSET)).py_2().text_sm().child(
+                                self.i18n.format(
+                                    "gl-confirm-remove-library",
+                                    &[("count", count.into())],
+                                ),
+                            ),
+                        )
+                        .child(menu_item(
+                            "cancel-remove-library",
+                            self.tr("gl-cancel"),
+                            cx,
+                            |this, _, cx| {
+                                this.library_remove_pending = None;
+                                this.panel_menu = None;
+                                cx.notify();
+                            },
+                        ))
+                        .child(components::danger_control(menu_item(
+                            "confirm-remove-library",
+                            self.tr("gl-remove-library-selected"),
+                            cx,
+                            |this, _, cx| {
+                                this.panel_menu = None;
+                                if let Some(track_ids) = this.library_remove_pending.take()
+                                    && !track_ids.is_empty()
+                                {
+                                    this.send(Command::RemoveTracks { track_ids }, cx);
+                                }
+                                cx.notify();
+                            },
+                        )));
                 }
                 PanelMenuPage::ConfirmClearQueue => {
                     menu = menu

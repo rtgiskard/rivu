@@ -414,7 +414,7 @@ impl GuiApp {
         form_field(label, self.input(field))
     }
 
-    fn panel_selected_tracks(&self) -> Vec<i64> {
+    pub(super) fn panel_selected_tracks(&self) -> Vec<i64> {
         if self.library_range_pending() {
             return Vec::new();
         }
@@ -638,7 +638,6 @@ impl GuiApp {
             self.i18n
                 .format("gl-entry-count", &[("count", (total).into())])
         };
-        let can_edit_tracks = !range_pending && !self.browser.library.selected().is_empty();
         let mut tools = panel_toolbar();
         tools = tools
             .when(!tab_bar_visible, |tools| {
@@ -736,51 +735,6 @@ impl GuiApp {
                     },
                 ),
                 self.browser.library.force_scan(),
-            ));
-        tools = tools
-            .child(disabled_control(
-                icon_button(
-                    ("library-enqueue", panel_id),
-                    "󰐕",
-                    self.tr("gl-enqueue-selected"),
-                    cx,
-                    |this, _, cx| {
-                        if this.library_range_pending()
-                            || this.browser.library.selected().is_empty()
-                        {
-                            return;
-                        }
-                        this.send(
-                            Command::Enqueue {
-                                track_ids: this.panel_selected_tracks(),
-                            },
-                            cx,
-                        )
-                    },
-                ),
-                !can_edit_tracks,
-            ))
-            .child(disabled_control(
-                danger_control(icon_button(
-                    ("library-remove", panel_id),
-                    "󰆴",
-                    self.tr("gl-remove-library-selected"),
-                    cx,
-                    |this, _, cx| {
-                        if this.library_range_pending()
-                            || this.browser.library.selected().is_empty()
-                        {
-                            return;
-                        }
-                        this.send(
-                            Command::RemoveTracks {
-                                track_ids: this.panel_selected_tracks(),
-                            },
-                            cx,
-                        )
-                    },
-                )),
-                !can_edit_tracks,
             ));
         let mut panel = panel_surface(("library-panel", panel_id))
             .child(tools)

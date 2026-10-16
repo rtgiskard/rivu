@@ -313,6 +313,7 @@ gl-queue-count = { $total } queued · { $selected } selected
 gl-queue-drag-hint = Drag an entry onto its new position
 
 gl-confirm-delete-playlist = Delete “{ $name }”?
+gl-confirm-remove-library = Remove the selected { $count } tracks from the library? Audio files are not deleted.
 
 gl-confirm-play-playlist = Play “{ $name }”?
 
