@@ -25,6 +25,10 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Gauge, List, ListItem, ListState, Paragraph, Wrap},
 };
+use signal_hook::{
+    SigId,
+    consts::{SIGINT, SIGTERM},
+};
 use std::{
     collections::HashMap,
     io::{self, Stdout},
@@ -40,6 +44,7 @@ use std::{
 /// Connect to an existing core over IPC. This never creates an audio engine and
 /// quitting the screen only restores the terminal; the server keeps playing.
 pub fn run(data_dir: &Path, language: &str) -> Result<()> {
+    let termination = TerminalTermination::new().context("register terminal shutdown signals")?;
     let i18n = Arc::new(Localizer::new(language));
     enable_raw_mode().context("enable terminal raw mode")?;
     let mut stdout = io::stdout();
@@ -56,7 +61,7 @@ pub fn run(data_dir: &Path, language: &str) -> Result<()> {
             return Err(error.into());
         }
     };
-    let result = run_loop(data_dir, &mut terminal, i18n);
+    let result = run_loop(data_dir, &mut terminal, i18n, &termination.requested);
     let cleanup = restore_terminal(&mut terminal);
     match result {
         Err(error) => Err(error),
@@ -85,6 +90,38 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result
         first = Some(error);
     }
     first.map_or(Ok(()), Err)
+}
+
+/// Signal handlers only request exit; terminal and IPC cleanup stays on the owner.
+struct TerminalTermination {
+    requested: Arc<AtomicBool>,
+    registrations: [SigId; 2],
+}
+
+impl TerminalTermination {
+    fn new() -> io::Result<Self> {
+        let requested = Arc::new(AtomicBool::new(false));
+        let interrupt = signal_hook::flag::register(SIGINT, Arc::clone(&requested))?;
+        let terminate = match signal_hook::flag::register(SIGTERM, Arc::clone(&requested)) {
+            Ok(registration) => registration,
+            Err(error) => {
+                signal_hook::low_level::unregister(interrupt);
+                return Err(error);
+            }
+        };
+        Ok(Self {
+            requested,
+            registrations: [interrupt, terminate],
+        })
+    }
+}
+
+impl Drop for TerminalTermination {
+    fn drop(&mut self) {
+        for registration in self.registrations {
+            signal_hook::low_level::unregister(registration);
+        }
+    }
 }
 
 type WatchedSnapshot = Result<(u32, ClientSnapshot), String>;
@@ -510,6 +547,7 @@ fn run_loop(
     data_dir: &Path,
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     i18n: Arc<Localizer>,
+    terminating: &AtomicBool,
 ) -> Result<()> {
     let updates = spawn_watcher(data_dir);
     let mut workers = None;
@@ -517,7 +555,9 @@ fn run_loop(
     let mut redraw = true;
     let mut immediate_redraw = true;
     let mut last_draw = Instant::now() - Duration::from_millis(100);
-    loop {
+    // Reuse the input loop's existing bounded wait; signals need no extra worker
+    // or periodic wakeup and are observed even before the IPC handshake finishes.
+    while !terminating.load(Ordering::Relaxed) {
         while updates.receiver.try_recv().is_ok() {}
         if let Some(update) = updates.latest.lock().take() {
             let (instance_id, state) = update.map_err(anyhow::Error::msg)?;

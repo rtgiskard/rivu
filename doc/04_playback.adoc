@@ -228,8 +228,10 @@ Queue rows show the track title before the artist.
 Left/Backspace goes to the parent directory; Left/Esc leaves playlist details.
 Esc returns from search, the tree, or the playlist catalog to Queue. `q` exits
 outside Search without stopping the core.
-While initially connecting, `q` also exits the loading screen. Connection errors
-and normal exits restore the terminal's input mode, screen, and cursor.
+While initially connecting, `q` also exits the loading screen. `SIGINT` and
+`SIGTERM` close only the terminal client, including during connection setup.
+Connection errors, normal exits, and these signals restore the terminal's input
+mode, screen, and cursor; the core keeps running.
 
 == Desktop tray and window lifecycle
 
