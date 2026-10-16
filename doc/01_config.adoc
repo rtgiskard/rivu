@@ -309,6 +309,49 @@ saved to `config.toml`. Ownership and retention rationale are documented in
 link:22_cache.adoc#_artwork_lookup_retention[Artwork lookup retention].
 
 
+=== Album artwork
+
+The optional `Album artwork` panel (`album_artwork` in layout files) follows
+the current playback track independently of Metadata. Its configuration is:
+
+[source,toml]
+----
+[interface.album_artwork]
+style = "plain"
+mode = "static"
+period_seconds = 20.0
+direction = "clockwise"
+fps = 0
+----
+
+`style` accepts `plain` (default), `vinyl`, `glass`, `halo`, `metal`, `card`, or
+`duotone`. Style and motion are independent: all seven styles support static and
+rotating modes. Changing style preserves the current rotation angle. Metal adds
+a fixed brushed radial sheen over a circular cover. Card preserves the full
+square image inside a rounded frame and shadow that rotate together, with room
+for the corners at every angle. Duotone adds a fixed blue/purple edge glow behind
+a circular cover, without extracted colors or audio-driven effects.
+`mode` accepts `static` (default) or `rotating`. `period_seconds` is the time
+for one full circle and must be finite and greater than zero; there is no
+additional upper limit. `direction` accepts `clockwise` (default) or
+`counterclockwise`. `fps` is an integer from 0 through 240 (default 0): zero
+follows display callbacks without timer throttling; a positive value caps
+animation requests per second. Lower caps reduce rendering work and resource
+use at the cost of less smooth motion; zero can render more frequently on
+high-refresh displays. Changing the cap preserves the angle. All Album artwork
+panels share these settings; the analysis rate is independent.
+Rotation follows playback rather than audio energy. Pausing or hiding the panel
+preserves its angle; resuming does not catch up on suspended time.
+Stopping, changing the current track, or selecting static mode resets the cover
+upright. A track without artwork uses Playback's generated default cover with
+the same animation, interaction, and lifecycle rules as a real cover. Pending
+animation work is cancelled while paused, hidden, or static, and resuming never
+produces a catch-up burst. Still Mode does not affect artwork acquisition,
+display, track changes, or rotation. Rendering uses GPU transforms, without
+rotating geometry on the CPU every frame or introducing an application image
+cache. Metadata's full preview is unchanged.
+
+
 == Layout
 
 The desktop stores named layouts and the current selection in `layout.json` in
@@ -448,10 +491,10 @@ are errors.
 `visualizations.db_range` defaults to `70` dB. The optional `visualizations.spectrum.db_range`,
 `visualizations.spectrogram.db_range`, and `visualizations.audio_visualizer.db_range` override it only for their
 named view. Every supplied range must be finite and between `1` and `160` dB,
-inclusive. An explicit override remains an override even if it equals Common's
-current value; changing Common later affects only views without overrides.
+inclusive. An explicit override remains an override even if it equals the shared
+default; changing Shared settings later affects only views without overrides.
 
-In TOML, omit a view's override key to inherit Common. Do not write an empty
+In TOML, omit a view's override key to inherit the shared default. Do not write an empty
 string or a blank assignment: overrides are numeric when present. Saving an
 inherited range omits that override key.
 
@@ -470,7 +513,7 @@ db_range = 100.0
 
 These ranges affect display mapping only, not FFT analysis, decoded audio,
 playback volume, or Waveform's RMS/Peak gains. Spectrogram recolors retained
-history without discarding it. Changing an unused Common default or setting an
+history without discarding it. Changing an unused shared default or setting an
 override equal to the current resolved value leaves the display unchanged.
 
 == Visualizations
@@ -486,49 +529,6 @@ link:../src/config.rs[`Config`] for the full setting ranges and defaults.
 results but rebuilds derived graphics on repaint. It does not affect Radial
 Spectrum. See link:22_cache.adoc[Visualization Cache] for scope and trade-offs,
 and link:23_visuals.adoc[Visualization Rendering Design] for rendering choices.
-
-=== Album artwork
-
-The optional `Album artwork` panel (`album_artwork` in layout files) follows
-the current playback track independently of Metadata. Its configuration is:
-
-[source,toml]
-----
-[interface.album_artwork]
-style = "plain"
-mode = "static"
-period_seconds = 20.0
-direction = "clockwise"
-fps = 0
-----
-
-`style` accepts `plain` (default), `vinyl`, `glass`, `halo`, `metal`, `card`, or
-`duotone`. Style and motion are independent: all seven styles support static and
-rotating modes. Changing style preserves the current rotation angle. Metal adds
-a fixed brushed radial sheen over a circular cover. Card preserves the full
-square image inside a rounded frame and shadow that rotate together, with room
-for the corners at every angle. Duotone adds a fixed blue/purple edge glow behind
-a circular cover, without extracted colors or audio-driven effects.
-`mode` accepts `static` (default) or `rotating`. `period_seconds` is the time
-for one full circle and must be finite and greater than zero; there is no
-additional upper limit. `direction` accepts `clockwise` (default) or
-`counterclockwise`. `fps` is an integer from 0 through 240 (default 0): zero
-follows display callbacks without timer throttling; a positive value caps
-animation requests per second. Lower caps reduce rendering work and resource
-use at the cost of less smooth motion; zero can render more frequently on
-high-refresh displays. Changing the cap preserves the angle. All Album artwork
-panels share these settings; the analysis rate is independent.
-Rotation follows playback rather than audio energy. Pausing or hiding the panel
-preserves its angle; resuming does not catch up on suspended time.
-Stopping, changing the current track, or selecting static mode resets the cover
-upright. A track without artwork uses Playback's generated default cover with
-the same animation, interaction, and lifecycle rules as a real cover. Pending
-animation work is cancelled while paused, hidden, or static, and resuming never
-produces a catch-up burst. Still Mode does not affect artwork acquisition,
-display, track changes, or rotation. Rendering uses GPU transforms, without
-rotating geometry on the CPU every frame or introducing an application image
-cache. Metadata's full preview is unchanged.
-
 
 === Still Mode
 

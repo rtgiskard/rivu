@@ -220,10 +220,11 @@ playback track. It is optional and is not added to the default layout. Unlike
 Track details, browsing or selecting a different library track does not change it.
 
 Choose Static or Rotating in link:01_config.adoc#_album_artwork[Settings artwork
-controls]. Rotation runs only during playback with a decoded cover. Pause retains
+controls]. Rotation runs during playback while the panel is visible. Pause retains
 the angle, and resume continues; stopping or changing tracks resets it. Static
 mode immediately returns the cover upright. Changing the period or direction
-preserves the current angle. Missing artwork uses a static placeholder.
+preserves the current angle. Missing artwork uses the generated default cover,
+with the same animation behavior as a real cover.
 
 Hiding the panel or window suspends animation without advancing hidden time.
 Still Mode does not affect cover loading or rotation. Multiple panels share
