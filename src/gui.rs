@@ -439,6 +439,10 @@ pub(super) struct GuiApp {
     inputs: HashMap<Field, Entity<Input>>,
     browser: BrowserState,
     metadata: MetadataSession,
+    metadata_projection: crate::projection::QueryProjection,
+    metadata_worker: bool,
+    metadata_queued: Option<i64>,
+    metadata_needs_refresh: bool,
     manual_intents: metadata::ManualIntents,
     duplicate_review: duplicates::DuplicateReview,
     duplicate_focus: FocusHandle,
@@ -485,6 +489,16 @@ pub(super) struct GuiApp {
     _subscriptions: Vec<Subscription>,
 }
 impl GuiApp {
+    fn panel_demand(&self, kind: &str) -> bool {
+        self.window_visible
+            && !self.state.system.shutting_down
+            && self
+                .layouts
+                .current()
+                .active_panels()
+                .iter()
+                .any(|panel| panel.kind == kind)
+    }
     pub(super) fn tr(&self, id: &str) -> SharedString {
         self.localized_text
             .get(id)
@@ -938,6 +952,10 @@ impl GuiApp {
             inputs,
             browser: BrowserState::default(),
             metadata: MetadataSession::default(),
+            metadata_projection: Default::default(),
+            metadata_worker: false,
+            metadata_queued: None,
+            metadata_needs_refresh: false,
             manual_intents: metadata::ManualIntents::default(),
             duplicate_review: duplicates::DuplicateReview::default(),
             duplicate_focus: cx.focus_handle(),
@@ -991,9 +1009,6 @@ impl GuiApp {
         app.interaction
             .retain_layout(app.layouts.current().root.as_ref());
         app.sync_metadata_default(cx);
-        app.request_root_counts(cx);
-        app.request_directory_page(library::TreeBranch::default(), 0, cx);
-        app.request_playlist_summaries(0, cx);
         app.browser
             .history
             .sync(&app.state.library.history, app.history_playback());
@@ -1274,7 +1289,9 @@ impl GuiApp {
     fn refresh(&mut self, cx: &mut Context<Self>) {
         let state = (self.handle.revision() != self.state.system.revision)
             .then(|| self.handle.gui_snapshot());
-        let changed = state.is_some();
+        let changed = state
+            .as_ref()
+            .is_some_and(|state| state.revisions != self.state.revisions);
         let mut config_changed = false;
         if let Some(state) = state {
             config_changed = !Arc::ptr_eq(&self.state.system.config, &state.system.config);
@@ -1293,23 +1310,14 @@ impl GuiApp {
                     );
                 });
             }
-            let library_changed = self.state.library.revision != state.library.revision;
-            let library_structure_changed =
-                self.state.library.structure_revision != state.library.structure_revision;
-            let playlist_changed =
-                self.state.library.playlist_revision != state.library.playlist_revision;
             let playlist_refresh = self
                 .browser
                 .playlists
                 .refresh_changes(&self.state.library, &state.library);
-            let queue_changed = self.state.queue.revision != state.queue.revision;
             let roots_changed =
                 self.state.system.config.library_roots != state.system.config.library_roots;
             let page_size_changed =
                 self.state.system.config.page_size != state.system.config.page_size;
-            if library_changed || library_structure_changed || roots_changed || page_size_changed {
-                self.browser.library.invalidate_projection();
-            }
             let waveform_seek_disabled = self.state.system.config.waveform_seek_enabled
                 && !state.system.config.waveform_seek_enabled;
             let still_mode_changed =
@@ -1318,17 +1326,37 @@ impl GuiApp {
                 self.ui_font = fonts::resolve(&state.system.config.ui_font, cx);
             }
             self.state = state;
-            self.sync_duplicate_review(
-                library_changed || library_structure_changed || playlist_changed || queue_changed,
-                cx,
+            self.sync_duplicate_review(cx);
+            if self
+                .browser
+                .library
+                .sync_projection(self.state.query_revisions(None))
+            {
+                self.browser.requests.cancel_directory_demand();
+            }
+            self.browser.library.sync_root_counts(
+                &self.state.system.config.library_roots,
+                self.state.library.structure_revision,
             );
+            self.sync_queue(cx);
+            self.sync_metadata_query();
             self.browser
                 .history
                 .sync(&self.state.library.history, self.history_playback());
             self.sync_metadata_default(cx);
             self.sync_full_waveform_request();
             self.browser.playlists.reconcile_selection();
-            if playlist_changed || page_size_changed {
+            if self.browser.playlists.selected().is_some_and(|id| {
+                !self
+                    .state
+                    .library
+                    .playlist_entry_revisions
+                    .contains_key(&id)
+            }) {
+                self.browser.remove_playlist_selection();
+            }
+            self.sync_entry_projection(cx);
+            if playlist_refresh.summaries && self.panel_demand("playlists") {
                 self.request_playlist_selection(cx);
             }
             if still_mode_changed {
@@ -1347,43 +1375,23 @@ impl GuiApp {
             }
             if roots_changed {
                 self.browser.library.roots_changed();
-                self.request_root_counts(cx);
-                if !page_size_changed {
-                    self.request_directory_page(library::TreeBranch::default(), 0, cx);
-                }
             }
             if page_size_changed {
-                self.refresh_page_size(cx);
+                self.refresh_page_size();
             }
-            if queue_changed || page_size_changed {
-                self.refresh_queue(cx);
+            if playlist_refresh.summaries {
+                self.browser.playlists.invalidate_summaries();
+                self.browser
+                    .requests
+                    .cancel(queries::ViewRequestKind::Summaries);
             }
-            if library_changed || library_structure_changed {
-                self.request_root_counts(cx);
-                if !page_size_changed {
-                    self.browser.library.refresh_tree(self.view_page_size());
-                    self.request_directory_page(library::TreeBranch::default(), 0, cx);
+            if playlist_refresh.entries {
+                if let Some(id) = self.browser.playlists.entries().playlist_id {
+                    self.browser.playlists.prepare_entries(id);
                 }
-                if let Some(id) = self.metadata.selected() {
-                    self.request_track(id, cx);
-                }
-            }
-            if !page_size_changed {
-                if playlist_refresh.summaries {
-                    self.request_playlist_summaries(
-                        self.browser.playlists.summaries().rows.visible().start,
-                        cx,
-                    );
-                }
-                if playlist_refresh.entries
-                    && let Some(id) = self.browser.playlists.entries().playlist_id
-                {
-                    self.request_playlist_entries(
-                        id,
-                        self.browser.playlists.entries().rows.visible().start,
-                        cx,
-                    );
-                }
+                self.browser
+                    .requests
+                    .cancel(queries::ViewRequestKind::Entries);
             }
         }
         self.sync_album_artwork(cx);
@@ -1522,7 +1530,7 @@ impl GuiApp {
         albums.update(cx, |albums, cx| {
             albums.sync(
                 visible,
-                self.state.library.revision,
+                self.state.query_revisions(None),
                 page_size,
                 self.state.current_track().map(|track| track.id),
                 self.state.playback.status,
@@ -1536,7 +1544,7 @@ impl GuiApp {
         let panels = self.layouts.current().panels();
         let active = self.layouts.current().active_panels();
         let visible = self.window_visible && !self.state.system.shutting_down;
-        let revision = self.state.library.revision;
+        let revisions = self.state.query_revisions(None);
         let page_size = self.view_page_size();
         let current_track = self.state.current_track().map(|track| track.id);
         let playback_status = self.state.playback.status;
@@ -1548,7 +1556,7 @@ impl GuiApp {
             albums.update(cx, |albums, cx| {
                 albums.sync(
                     shown,
-                    revision,
+                    revisions,
                     page_size,
                     current_track,
                     playback_status,
@@ -1702,6 +1710,8 @@ impl GuiApp {
             waveform.cancel_full_request(cx);
         });
         let handle = self.handle.clone();
+        let query = Query::Track { track_id };
+        let stamp = query.stamp(self.state.query_revisions(None));
         cx.spawn(async move |this, cx| {
             let response = cx
                 .background_executor()
@@ -1711,6 +1721,11 @@ impl GuiApp {
                 // Core changes also arrive while hidden, without a rendered frame.
                 this.refresh(cx);
                 this.sync_full_waveform_request();
+                if query.stamp(response.revisions) != stamp
+                    || query.stamp(this.state.query_revisions(None)) != stamp
+                {
+                    return;
+                }
                 if !this.full_waveform_request.accepts(
                     generation,
                     this.state.current_track().or(this.metadata.track()),

@@ -1,9 +1,10 @@
-//! Bounded ordinary-file review. Query epochs belong to the dialog; task IDs belong to Core.
+//! Bounded ordinary-file review. Projections own data validity; Core owns task IDs.
 
 use super::*;
 use crate::{
     model::{Page, RelocationPhase, RelocationTaskStatus},
-    response::{QueryRevisions, ViewResponse},
+    projection::QueryProjection,
+    response::{QueryResponse, QueryRevisions, ViewResponse},
     store::{DuplicateGroup, DuplicateMember},
 };
 
@@ -28,8 +29,13 @@ enum Busy {
 pub(super) struct DuplicateReview {
     pub(super) open: bool,
     epoch: u64,
-    groups_request: u64,
-    members_request: u64,
+    groups_projection: QueryProjection,
+    members_projection: QueryProjection,
+    groups_dirty: bool,
+    members_dirty: bool,
+    members_current: bool,
+    groups_failed: bool,
+    members_failed: bool,
     groups: Option<Page<DuplicateGroup>>,
     members: Vec<Member>,
     members_total: usize,
@@ -47,12 +53,68 @@ pub(super) struct DuplicateReview {
 }
 
 impl DuplicateReview {
-    fn accepts_groups(&self, epoch: u64, request: u64) -> bool {
-        self.open && self.epoch == epoch && self.groups_request == request
+    fn groups_query(&self) -> Query {
+        Query::DuplicateGroups {
+            offset: self.groups_offset,
+            limit: GROUP_PAGE,
+        }
     }
 
-    fn accepts_members(&self, epoch: u64, request: u64) -> bool {
-        self.open && self.epoch == epoch && self.members_request == request
+    fn members_query(&self) -> Option<Query> {
+        Some(Query::DuplicateMembers {
+            fingerprint: self.fingerprint.clone()?,
+            offset: self.members_offset,
+            limit: MEMBER_PAGE,
+        })
+    }
+
+    fn sync_queries(&mut self, revisions: QueryRevisions) -> bool {
+        let groups_query = self.groups_query();
+        let groups_changed = self.groups_projection.sync(&groups_query, revisions);
+        if groups_changed {
+            self.groups = None;
+            self.groups_dirty = true;
+            self.groups_failed = false;
+        }
+        let members_changed = self
+            .members_query()
+            .is_some_and(|query| self.members_projection.sync(&query, revisions));
+        if members_changed {
+            self.members.clear();
+            self.members_current = false;
+            self.members_dirty = true;
+            self.members_failed = false;
+            self.confirming = false;
+        }
+        groups_changed || members_changed
+    }
+
+    fn accepts_groups(
+        &self,
+        epoch: u64,
+        query: &Query,
+        generation: u64,
+        revisions: QueryRevisions,
+    ) -> bool {
+        self.open
+            && self.epoch == epoch
+            && self.groups_projection.accepts(query, generation, revisions)
+            && matches!(query, Query::DuplicateGroups { offset, .. } if *offset == self.groups_offset)
+    }
+
+    fn accepts_members(
+        &self,
+        epoch: u64,
+        query: &Query,
+        generation: u64,
+        revisions: QueryRevisions,
+    ) -> bool {
+        self.open
+            && self.epoch == epoch
+            && self
+                .members_projection
+                .accepts(query, generation, revisions)
+            && matches!(query, Query::DuplicateMembers { offset, .. } if *offset == self.members_offset)
     }
 
     fn clear_selection(&mut self) {
@@ -62,29 +124,69 @@ impl DuplicateReview {
     }
 
     fn invalidate(&mut self) {
-        self.groups_request = self.groups_request.wrapping_add(1);
-        self.members_request = self.members_request.wrapping_add(1);
-        self.groups_loading = false;
-        self.members_loading = false;
+        self.groups_projection.cancel();
+        self.members_projection.cancel();
+        self.groups_dirty = true;
+        self.members_dirty = self.fingerprint.is_some();
+        self.members_current = false;
+        self.groups_failed = false;
+        self.members_failed = false;
         self.groups = None;
         self.members.clear();
         self.members_total = 0;
         self.clear_selection();
+        // Logical cancellation must not release either physical worker gate.
+    }
+
+    fn reconcile_selection(&mut self, selected: &[Member]) {
+        let source = self.source.as_ref().and_then(|source| {
+            self.members
+                .iter()
+                .chain(selected)
+                .find(|member| member.value.track.id == source.track.id)
+                .filter(|member| selectable_source(member))
+                .map(|member| member.value.clone())
+        });
+        let target = self.target.as_ref().and_then(|target| {
+            self.members
+                .iter()
+                .chain(selected)
+                .find(|member| member.value.track.id == target.track.id)
+                .filter(|member| selectable_target(member))
+                .map(|member| member.value.clone())
+        });
+        self.source = source;
+        self.target = target;
+        if self.source.is_none() || self.target.as_ref().is_none_or(has_target_state) {
+            self.confirming = false;
+        }
+        self.members_current = true;
+    }
+
+    fn can_relocate(&self) -> bool {
+        self.members_current
+            && self.source.is_some()
+            && self
+                .target
+                .as_ref()
+                .is_some_and(|target| !has_target_state(target))
     }
 }
 
 impl GuiApp {
     pub(super) fn open_duplicate_review(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.cancel_interaction(window, cx);
+        self.cancel_duplicate_task();
+        self.duplicate_review.busy = None;
         self.panel_menu = None;
         self.app_menu_open = false;
         self.catalog_open = false;
-        let epoch = self.duplicate_review.epoch.wrapping_add(1);
-        self.duplicate_review = DuplicateReview {
-            open: true,
-            epoch,
-            ..Default::default()
-        };
+        self.duplicate_review.epoch = self.duplicate_review.epoch.wrapping_add(1);
+        self.duplicate_review.invalidate();
+        self.duplicate_review.open = true;
+        self.duplicate_review.fingerprint = None;
+        self.duplicate_review.members_dirty = false;
+        self.duplicate_review.feedback = None;
         self.duplicate_focus.focus(window, cx);
         self.request_duplicate_groups(0, cx);
         cx.notify();
@@ -110,68 +212,93 @@ impl GuiApp {
         }
     }
 
-    fn review_revisions_match(&self, revisions: QueryRevisions) -> bool {
-        revisions.library == self.state.library.revision
-            && revisions.structure == self.state.library.structure_revision
-            && revisions.playlist == self.state.library.playlist_revision
-            && revisions.queue == self.state.queue.revision
+    fn request_duplicate_groups(&mut self, offset: usize, cx: &mut Context<Self>) {
+        let revisions = self.state.query_revisions(None);
+        let review = &mut self.duplicate_review;
+        if review.groups_offset != offset {
+            review.groups = None;
+        }
+        review.groups_offset = offset;
+        review.sync_queries(revisions);
+        review.groups_projection.cancel();
+        review.groups_dirty = true;
+        review.groups_failed = false;
+        self.start_duplicate_groups(cx);
     }
 
-    fn request_duplicate_groups(&mut self, offset: usize, cx: &mut Context<Self>) {
+    fn start_duplicate_groups(&mut self, cx: &mut Context<Self>) {
         let review = &mut self.duplicate_review;
-        review.groups_offset = offset;
+        if !review.open || review.busy.is_some() || review.groups_loading || !review.groups_dirty {
+            return;
+        }
+        review.groups_dirty = false;
         review.groups_loading = true;
-        review.groups_request = review.groups_request.wrapping_add(1);
-        let (epoch, request) = (review.epoch, review.groups_request);
+        let query = review.groups_query();
+        let (epoch, generation) = (review.epoch, review.groups_projection.generation());
         let handle = self.handle.clone();
         cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(Duration::from_millis(80))
                 .await;
             if !this
-                .update(cx, |this, _| {
-                    this.duplicate_review.accepts_groups(epoch, request)
+                .update(cx, |this, cx| {
+                    let current = this.duplicate_review.accepts_groups(
+                        epoch,
+                        &query,
+                        generation,
+                        this.state.query_revisions(None),
+                    );
+                    if !current {
+                        this.duplicate_review.groups_loading = false;
+                        this.start_duplicate_groups(cx);
+                    }
+                    current
                 })
                 .unwrap_or(false)
             {
                 return;
             }
+            let worker_query = query.clone();
             let response = cx
                 .background_executor()
-                .spawn(async move {
-                    handle.query(Query::DuplicateGroups {
-                        offset,
-                        limit: GROUP_PAGE,
-                    })
-                })
+                .spawn(async move { handle.query(worker_query) })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.refresh(cx);
-                if !this.duplicate_review.accepts_groups(epoch, request) {
-                    return;
-                }
-                if !this.review_revisions_match(response.revisions) {
-                    this.request_duplicate_groups(offset, cx);
-                    return;
-                }
                 this.duplicate_review.groups_loading = false;
+                this.refresh(cx);
+                if !this.duplicate_review.accepts_groups(
+                    epoch,
+                    &query,
+                    generation,
+                    response.revisions,
+                ) {
+                    if this.duplicate_review.groups_projection.generation() == generation {
+                        this.duplicate_review.groups_dirty = true;
+                    }
+                    this.start_duplicate_groups(cx);
+                    return;
+                }
                 match response.result {
                     Ok(ViewResponse::DuplicateGroups(page)) => {
-                        if offset > 0 && offset >= page.total {
+                        if this.duplicate_review.groups_offset > 0
+                            && this.duplicate_review.groups_offset >= page.total
+                        {
                             this.request_duplicate_groups(0, cx);
                             return;
                         }
                         this.duplicate_review.groups = Some(page);
                     }
                     Err(error) => {
+                        this.duplicate_review.groups_failed = true;
                         this.duplicate_review.feedback =
-                            Some((error.to_string(), StatusKind::Error))
+                            Some((error.to_string(), StatusKind::Error));
                     }
                     _ => {
+                        this.duplicate_review.groups_failed = true;
                         this.duplicate_review.feedback = Some((
                             this.i18n.text("gl-duplicate-response").into(),
                             StatusKind::Error,
-                        ))
+                        ));
                     }
                 }
                 cx.notify();
@@ -186,70 +313,152 @@ impl GuiApp {
         offset: usize,
         cx: &mut Context<Self>,
     ) {
+        let revisions = self.state.query_revisions(None);
         let review = &mut self.duplicate_review;
         if review.fingerprint.as_ref() != Some(&fingerprint) {
             review.clear_selection();
+            review.members_total = 0;
         }
-        review.fingerprint = Some(fingerprint.clone());
+        review.fingerprint = Some(fingerprint);
         review.members_offset = offset;
+        review.sync_queries(revisions);
+        review.members_projection.cancel();
         review.members.clear();
+        review.members_current = false;
+        review.members_dirty = true;
+        review.members_failed = false;
+        review.confirming = false;
+        self.start_duplicate_members(cx);
+    }
+
+    fn start_duplicate_members(&mut self, cx: &mut Context<Self>) {
+        let review = &mut self.duplicate_review;
+        if !review.open || review.busy.is_some() || review.members_loading || !review.members_dirty
+        {
+            return;
+        }
+        let Some(query) = review.members_query() else {
+            return;
+        };
+        review.members_dirty = false;
         review.members_loading = true;
-        review.members_request = review.members_request.wrapping_add(1);
-        let (epoch, request) = (review.epoch, review.members_request);
+        let selected_ids = review
+            .source
+            .iter()
+            .chain(review.target.iter())
+            .map(|member| member.track.id)
+            .collect::<Vec<_>>();
+        let (epoch, generation) = (review.epoch, review.members_projection.generation());
         let handle = self.handle.clone();
         cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(Duration::from_millis(80))
                 .await;
             if !this
-                .update(cx, |this, _| {
-                    this.duplicate_review.accepts_members(epoch, request)
+                .update(cx, |this, cx| {
+                    let current = this.duplicate_review.accepts_members(
+                        epoch,
+                        &query,
+                        generation,
+                        this.state.query_revisions(None),
+                    );
+                    if !current {
+                        this.duplicate_review.members_loading = false;
+                        this.start_duplicate_members(cx);
+                    }
+                    current
                 })
                 .unwrap_or(false)
             {
                 return;
             }
-            let (response, existence) = cx
+            let worker_query = query.clone();
+            let (response, existence, selected) = cx
                 .background_executor()
                 .spawn(async move {
-                    let response = handle.query(Query::DuplicateMembers {
-                        fingerprint,
-                        offset,
-                        limit: MEMBER_PAGE,
-                    });
-                    let existence = match &response.result {
-                        Ok(ViewResponse::DuplicateMembers(page)) => page
-                            .rows
-                            .iter()
-                            .map(|member| match std::fs::metadata(&member.track.path) {
-                                Ok(metadata) if metadata.is_file() => Some(true),
-                                Ok(_) => None,
-                                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                                    Some(false)
-                                }
-                                Err(_) => None,
-                            })
-                            .collect::<Vec<_>>(),
-                        _ => Vec::new(),
+                    let response = handle.query(worker_query.clone());
+                    let existence = member_existence(&response);
+                    let selected = match (&worker_query, &response.result) {
+                        (
+                            Query::DuplicateMembers { fingerprint, .. },
+                            Ok(ViewResponse::DuplicateMembers(page)),
+                        ) => {
+                            let track_ids = selected_ids
+                                .into_iter()
+                                .filter(|id| !page.rows.iter().any(|member| member.track.id == *id))
+                                .collect::<Vec<_>>();
+                            if track_ids.is_empty() {
+                                None
+                            } else {
+                                let selected = handle.query(Query::DuplicateMemberSelection {
+                                    fingerprint: fingerprint.clone(),
+                                    track_ids,
+                                });
+                                let exists = member_existence(&selected);
+                                Some((selected, exists))
+                            }
+                        }
+                        _ => None,
                     };
-                    (response, existence)
+                    (response, existence, selected)
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.refresh(cx);
-                if !this.duplicate_review.accepts_members(epoch, request) {
-                    return;
-                }
-                if !this.review_revisions_match(response.revisions) {
-                    if let Some(hash) = this.duplicate_review.fingerprint.clone() {
-                        this.request_duplicate_members(hash, offset, cx);
-                    }
-                    return;
-                }
                 this.duplicate_review.members_loading = false;
+                this.refresh(cx);
+                let selected_current = selected.as_ref().is_none_or(|(selected, _)| {
+                    query.stamp(selected.revisions) == query.stamp(response.revisions)
+                });
+                if !selected_current
+                    || !this.duplicate_review.accepts_members(
+                        epoch,
+                        &query,
+                        generation,
+                        response.revisions,
+                    )
+                {
+                    if this.duplicate_review.members_projection.generation() == generation {
+                        this.duplicate_review.members_dirty = true;
+                    }
+                    this.start_duplicate_members(cx);
+                    return;
+                }
+                let selected = match selected {
+                    Some((
+                        QueryResponse {
+                            result: Ok(ViewResponse::DuplicateMembers(page)),
+                            ..
+                        },
+                        exists,
+                    )) => page
+                        .rows
+                        .into_iter()
+                        .zip(exists)
+                        .map(|(value, exists)| Member { value, exists })
+                        .collect(),
+                    Some((
+                        QueryResponse {
+                            result: Err(error), ..
+                        },
+                        _,
+                    )) => {
+                        this.fail_duplicate_members(error.to_string(), cx);
+                        return;
+                    }
+                    Some(_) => {
+                        this.fail_duplicate_members(
+                            this.i18n.text("gl-member-response").into(),
+                            cx,
+                        );
+                        return;
+                    }
+                    None => Vec::new(),
+                };
                 match response.result {
                     Ok(ViewResponse::DuplicateMembers(page)) => {
-                        if offset > 0 && offset >= page.total {
+                        if this.duplicate_review.members_offset > 0
+                            && this.duplicate_review.members_offset >= page.total
+                        {
                             if let Some(hash) = this.duplicate_review.fingerprint.clone() {
                                 this.request_duplicate_members(hash, 0, cx);
                             }
@@ -262,16 +471,11 @@ impl GuiApp {
                             .zip(existence)
                             .map(|(value, exists)| Member { value, exists })
                             .collect();
+                        this.duplicate_review.reconcile_selection(&selected);
                     }
-                    Err(error) => {
-                        this.duplicate_review.feedback =
-                            Some((error.to_string(), StatusKind::Error))
-                    }
+                    Err(error) => this.fail_duplicate_members(error.to_string(), cx),
                     _ => {
-                        this.duplicate_review.feedback = Some((
-                            this.i18n.text("gl-member-response").into(),
-                            StatusKind::Error,
-                        ))
+                        this.fail_duplicate_members(this.i18n.text("gl-member-response").into(), cx)
                     }
                 }
                 cx.notify();
@@ -280,7 +484,17 @@ impl GuiApp {
         .detach();
     }
 
-    pub(super) fn sync_duplicate_review(&mut self, changed: bool, cx: &mut Context<Self>) {
+    fn fail_duplicate_members(&mut self, message: String, cx: &mut Context<Self>) {
+        self.duplicate_review.members_failed = true;
+        self.duplicate_review.members_current = false;
+        self.duplicate_review.feedback = Some((message, StatusKind::Error));
+        cx.notify();
+    }
+
+    pub(super) fn sync_duplicate_review(&mut self, cx: &mut Context<Self>) {
+        let data_changed = self
+            .duplicate_review
+            .sync_queries(self.state.query_revisions(None));
         if !self.duplicate_review.open {
             return;
         }
@@ -305,8 +519,10 @@ impl GuiApp {
         {
             self.request_retained_relocation(id, cx);
         }
-        if (changed || finished) && self.duplicate_review.busy.is_none() {
-            self.reload_duplicate_review(cx);
+        self.start_duplicate_groups(cx);
+        self.start_duplicate_members(cx);
+        if data_changed || finished {
+            cx.notify();
         }
     }
 
@@ -335,16 +551,6 @@ impl GuiApp {
         true
     }
 
-    fn reload_duplicate_review(&mut self, cx: &mut Context<Self>) {
-        let offset = self.duplicate_review.groups_offset;
-        let fingerprint = self.duplicate_review.fingerprint.clone();
-        self.duplicate_review.invalidate();
-        self.request_duplicate_groups(offset, cx);
-        if let Some(hash) = fingerprint {
-            self.request_duplicate_members(hash, 0, cx);
-        }
-    }
-
     fn request_retained_relocation(&mut self, id: u64, cx: &mut Context<Self>) {
         if self.duplicate_review.task_query_pending {
             return;
@@ -357,25 +563,25 @@ impl GuiApp {
                 handle.query(Query::RelocationTask { id })
             }).await;
             let _ = this.update(cx, |this, cx| {
-                if !this.duplicate_review.open || this.duplicate_review.epoch != epoch { return; }
                 this.duplicate_review.task_query_pending = false;
+                if !this.duplicate_review.open || this.duplicate_review.epoch != epoch { return; }
                 if !matches!(this.duplicate_review.busy, Some(Busy::Relocating(current) | Busy::Cancelling(current)) if current == id) { return; }
                 match response.result {
                     Ok(ViewResponse::RelocationTask(task)) if task.id == id => {
                         if this.accept_duplicate_task(&task) {
                             this.refresh(cx);
-                            this.reload_duplicate_review(cx);
+                            this.sync_duplicate_review(cx);
                         }
                     }
                     Err(error) => {
                         this.duplicate_review.busy = None;
                         this.duplicate_review.feedback = Some((this.i18n.format("gl-verification-read-failed", &[("error", (error.to_string()).into())]), StatusKind::Error));
-                        this.reload_duplicate_review(cx);
+                        this.sync_duplicate_review(cx);
                     }
                     _ => {
                         this.duplicate_review.busy = None;
                         this.duplicate_review.feedback = Some((this.i18n.text("gl-verification-response").into(), StatusKind::Error));
-                        this.reload_duplicate_review(cx);
+                        this.sync_duplicate_review(cx);
                     }
                 }
                 cx.notify();
@@ -384,7 +590,8 @@ impl GuiApp {
     }
 
     fn submit_duplicate_action(&mut self, independent: bool, cx: &mut Context<Self>) {
-        if self.duplicate_review.busy.is_some() {
+        self.refresh(cx);
+        if self.duplicate_review.busy.is_some() || !self.duplicate_review.members_current {
             return;
         }
         let Some(target) = self.duplicate_review.target.as_ref() else {
@@ -395,7 +602,7 @@ impl GuiApp {
                 track_id: target.track.id,
             }
         } else {
-            if !self.duplicate_review.confirming {
+            if !self.duplicate_review.confirming || !self.duplicate_review.can_relocate() {
                 return;
             }
             let Some(source) = self.duplicate_review.source.as_ref() else {
@@ -452,10 +659,8 @@ impl GuiApp {
                     this.refresh(cx);
                     if independent && ack.ok {
                         this.duplicate_review.busy = None;
-                        this.reload_duplicate_review(cx);
-                    } else {
-                        this.sync_duplicate_review(false, cx);
                     }
+                    this.sync_duplicate_review(cx);
                     cx.notify();
                     true
                 })
@@ -550,6 +755,21 @@ impl GuiApp {
                 ));
             }
         }
+        if review.groups_failed && !review.groups_loading {
+            groups = groups.child(icon_button(
+                "review-groups-retry",
+                "󰑐",
+                self.tr("gl-retry-loading"),
+                cx,
+                |this, _, cx| {
+                    if this.duplicate_review.busy.is_none() {
+                        let offset = this.duplicate_review.groups_offset;
+                        this.request_duplicate_groups(offset, cx);
+                        cx.notify();
+                    }
+                },
+            ));
+        }
         let group_total = review.groups.as_ref().map_or(0, |page| page.total);
         let group_offset = review.groups_offset;
         let group_pager = self.review_pager(
@@ -587,8 +807,25 @@ impl GuiApp {
             members = members.child(caption(self.tr("gl-members-loading")));
         } else if review.fingerprint.is_none() {
             members = members.child(caption(self.tr("gl-select-relocation")));
-        } else if review.members.is_empty() {
+        } else if !review.members_failed && review.members.is_empty() {
             members = members.child(caption(self.tr("gl-members-empty")));
+        }
+        if review.members_failed && !review.members_loading {
+            members = members.child(icon_button(
+                "review-members-retry",
+                "󰑐",
+                self.tr("gl-retry-loading"),
+                cx,
+                |this, _, cx| {
+                    if this.duplicate_review.busy.is_none()
+                        && let Some(hash) = this.duplicate_review.fingerprint.clone()
+                    {
+                        let offset = this.duplicate_review.members_offset;
+                        this.request_duplicate_members(hash, offset, cx);
+                        cx.notify();
+                    }
+                },
+            ));
         }
         for member in &review.members {
             let value = &member.value;
@@ -601,10 +838,8 @@ impl GuiApp {
                 .target
                 .as_ref()
                 .is_some_and(|row| row.track.id == track.id);
-            let selectable_source =
-                track.missing && member.exists == Some(false) && !value.independent;
-            let selectable_target =
-                !track.missing && member.exists == Some(true) && !value.independent;
+            let selectable_source = selectable_source(member);
+            let selectable_target = selectable_target(member);
             let id = track.id;
             let existence = match member.exists {
                 Some(true) => self.i18n.text("gl-exists-now"),
@@ -763,6 +998,7 @@ impl GuiApp {
                             cx,
                             move |this, _, cx| {
                                 if this.duplicate_review.busy.is_none()
+                                    && this.duplicate_review.members_current
                                     && !this.duplicate_review.confirming
                                 {
                                     this.duplicate_review.source = this
@@ -789,6 +1025,7 @@ impl GuiApp {
                             cx,
                             move |this, _, cx| {
                                 if this.duplicate_review.busy.is_none()
+                                    && this.duplicate_review.members_current
                                     && !this.duplicate_review.confirming
                                 {
                                     this.duplicate_review.target = this
@@ -863,11 +1100,7 @@ impl GuiApp {
                         )),
                 );
         } else if !busy {
-            let can_relocate = review.source.is_some()
-                && review
-                    .target
-                    .as_ref()
-                    .is_some_and(|target| !has_target_state(target));
+            let can_relocate = review.can_relocate();
             decisions = decisions.child(
                 panel_toolbar()
                     .flex_wrap()
@@ -878,12 +1111,14 @@ impl GuiApp {
                             self.tr("gl-review-relocation"),
                             cx,
                             |this, _, cx| {
-                                this.duplicate_review.confirming = true;
-                                cx.notify();
+                                if this.duplicate_review.can_relocate() {
+                                    this.duplicate_review.confirming = true;
+                                    cx.notify();
+                                }
                             },
                         ))
                     })
-                    .when(review.target.is_some(), |view| {
+                    .when(review.members_current && review.target.is_some(), |view| {
                         view.child(button(
                             "review-independent",
                             self.tr("gl-keep-independent"),
@@ -970,6 +1205,7 @@ impl GuiApp {
                                         if this.duplicate_review.busy.is_none() {
                                             this.duplicate_review.invalidate();
                                             this.duplicate_review.fingerprint = None;
+                                            this.duplicate_review.members_dirty = false;
                                             this.duplicate_review.feedback = None;
                                             this.request_duplicate_groups(0, cx);
                                             cx.notify();
@@ -1122,6 +1358,30 @@ impl Drop for GuiApp {
     }
 }
 
+fn selectable_source(member: &Member) -> bool {
+    member.value.track.missing && member.exists == Some(false) && !member.value.independent
+}
+
+fn selectable_target(member: &Member) -> bool {
+    !member.value.track.missing && member.exists == Some(true) && !member.value.independent
+}
+
+fn member_existence(response: &QueryResponse) -> Vec<Option<bool>> {
+    match &response.result {
+        Ok(ViewResponse::DuplicateMembers(page)) => page
+            .rows
+            .iter()
+            .map(|member| match std::fs::metadata(&member.track.path) {
+                Ok(metadata) if metadata.is_file() => Some(true),
+                Ok(_) => None,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(false),
+                Err(_) => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 fn has_target_state(member: &DuplicateMember) -> bool {
     member.has_overrides
         || member.track.favorite
@@ -1133,46 +1393,237 @@ fn has_target_state(member: &DuplicateMember) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::DuplicateReview;
+    use super::{DuplicateReview, Member};
+    use crate::{
+        model::{Page, Track},
+        response::QueryRevisions,
+        store::DuplicateMember,
+    };
 
-    #[test]
-    fn refresh_rejects_outstanding_group_and_member_results() {
+    fn review() -> DuplicateReview {
         let mut review = DuplicateReview {
             open: true,
             epoch: 4,
-            groups_request: 2,
-            members_request: 3,
+            fingerprint: Some("fingerprint".into()),
             ..Default::default()
         };
-        assert!(review.accepts_groups(4, 2));
-        assert!(review.accepts_members(4, 3));
-        review.invalidate();
-        assert!(!review.accepts_groups(4, 2));
-        assert!(!review.accepts_members(4, 3));
+        review.sync_queries(QueryRevisions::default());
+        review.groups_dirty = false;
+        review.members_dirty = false;
+        review
+    }
+
+    fn member(id: i64, missing: bool) -> Member {
+        Member {
+            value: DuplicateMember {
+                track: Track {
+                    id,
+                    path: format!("/music/{id}.wav").into(),
+                    fingerprint: Some("fingerprint".into()),
+                    cue: None,
+                    title: String::new(),
+                    artist: String::new(),
+                    album: String::new(),
+                    duration: None,
+                    codec: String::new(),
+                    channels: 0,
+                    sample_rate: 0,
+                    bitrate_bps: None,
+                    bitrate_exact: false,
+                    track_number: None,
+                    disc_number: None,
+                    bits_per_sample: None,
+                    release_date: None,
+                    favorite: false,
+                    decoder_hint: Default::default(),
+                    missing,
+                    play_count: 0,
+                    last_played: None,
+                },
+                file_size: 100,
+                modified_ns: 1,
+                has_overrides: false,
+                playlist_references: 0,
+                queue_references: 0,
+                independent: false,
+            },
+            exists: Some(!missing),
+        }
     }
 
     #[test]
-    fn close_reopen_never_accepts_previous_dialog_results() {
-        let mut review = DuplicateReview {
-            open: true,
-            epoch: 4,
-            groups_request: 1,
-            members_request: 1,
-            ..Default::default()
-        };
+    fn refresh_and_close_reopen_reject_old_results_without_releasing_workers() {
+        let mut review = review();
+        let revisions = QueryRevisions::default();
+        let groups = review.groups_query();
+        let members = review.members_query().unwrap();
+        let groups_generation = review.groups_projection.generation();
+        let members_generation = review.members_projection.generation();
+        review.groups_loading = true;
+        review.members_loading = true;
+        assert!(review.accepts_groups(4, &groups, groups_generation, revisions));
+        assert!(review.accepts_members(4, &members, members_generation, revisions));
+        review.invalidate();
+        assert!(review.groups_loading);
+        assert!(review.members_loading);
+        assert!(!review.accepts_groups(4, &groups, groups_generation, revisions));
+        assert!(!review.accepts_members(4, &members, members_generation, revisions));
         review.open = false;
-        assert!(!review.accepts_groups(4, 1));
-        assert!(!review.accepts_members(4, 1));
-        review = DuplicateReview {
-            open: true,
-            epoch: 5,
-            groups_request: 1,
-            members_request: 1,
+        review.epoch += 1;
+        review.open = true;
+        assert!(!review.accepts_groups(
+            4,
+            &groups,
+            review.groups_projection.generation(),
+            revisions
+        ));
+        assert!(!review.accepts_members(
+            4,
+            &members,
+            review.members_projection.generation(),
+            revisions
+        ));
+    }
+
+    #[test]
+    fn group_validity_is_independent_of_metadata_and_member_reference_refreshes() {
+        for revisions in [
+            QueryRevisions {
+                library: 1,
+                ..Default::default()
+            },
+            QueryRevisions {
+                duplicate_members: 1,
+                ..Default::default()
+            },
+            QueryRevisions {
+                queue: 1,
+                ..Default::default()
+            },
+        ] {
+            let mut review = review();
+            review.groups = Some(Page {
+                total: 1,
+                rows: Vec::new(),
+            });
+            let groups_generation = review.groups_projection.generation();
+            let groups_query = review.groups_query();
+            assert!(review.sync_queries(revisions));
+            assert!(review.groups.is_some());
+            assert!(!review.groups_dirty);
+            assert!(review.members_dirty);
+            assert!(review.accepts_groups(4, &groups_query, groups_generation, revisions));
+        }
+    }
+
+    #[test]
+    fn catalog_rename_and_structure_changes_do_not_schedule_either_query() {
+        let mut review = review();
+        assert!(!review.sync_queries(QueryRevisions {
+            playlist: 1,
+            structure: 1,
             ..Default::default()
-        };
-        assert!(!review.accepts_groups(4, 1));
-        assert!(!review.accepts_members(4, 1));
-        assert!(review.accepts_groups(5, 1));
-        assert!(review.accepts_members(5, 1));
+        }));
+        assert!(!review.groups_dirty);
+        assert!(!review.members_dirty);
+    }
+
+    #[test]
+    fn hidden_sync_invalidates_only_the_changed_projection() {
+        let mut review = review();
+        review.open = false;
+        assert!(review.sync_queries(QueryRevisions {
+            duplicate_groups: 1,
+            ..Default::default()
+        }));
+        assert!(review.groups_dirty);
+        assert!(!review.members_dirty);
+        assert!(!review.groups_loading);
+        assert!(!review.members_loading);
+    }
+
+    #[test]
+    fn reference_refresh_preserves_choices_but_rechecks_target_state() {
+        let mut review = review();
+        let source = member(1, true);
+        let mut target = member(2, false);
+        review.source = Some(source.value.clone());
+        review.target = Some(target.value.clone());
+        review.confirming = true;
+        review.members_current = true;
+        assert!(review.can_relocate());
+        assert!(review.sync_queries(QueryRevisions {
+            duplicate_members: 1,
+            queue: 1,
+            ..Default::default()
+        }));
+        assert_eq!(review.source.as_ref().unwrap().track.id, 1);
+        assert_eq!(review.target.as_ref().unwrap().track.id, 2);
+        assert!(!review.can_relocate());
+        review.members = vec![source];
+        target.value.playlist_references = 1;
+        target.value.queue_references = 2;
+        review.reconcile_selection(&[target]);
+        assert_eq!(review.source.as_ref().unwrap().track.id, 1);
+        let target = review.target.as_ref().unwrap();
+        assert_eq!(target.track.id, 2);
+        assert_eq!(target.playlist_references, 1);
+        assert_eq!(target.queue_references, 2);
+        assert!(!review.can_relocate());
+        assert!(!review.confirming);
+        let target = member(2, false);
+        review.reconcile_selection(&[target]);
+        assert_eq!(review.target.as_ref().unwrap().track.id, 2);
+        assert!(review.can_relocate());
+    }
+
+    #[test]
+    fn accepted_facts_clear_ineligible_absent_or_unknown_selections() {
+        for invalid in [
+            None,
+            Some(Member {
+                exists: None,
+                ..member(1, true)
+            }),
+            Some(Member {
+                exists: Some(true),
+                ..member(1, true)
+            }),
+            Some(member(1, false)),
+            Some({
+                let mut member = member(1, true);
+                member.value.independent = true;
+                member
+            }),
+        ] {
+            let mut review = review();
+            review.source = Some(member(1, true).value);
+            review.target = Some(member(2, false).value);
+            review.members = vec![member(2, false)];
+            review.reconcile_selection(&invalid.into_iter().collect::<Vec<_>>());
+            assert!(review.source.is_none());
+            assert_eq!(review.target.as_ref().unwrap().track.id, 2);
+        }
+        let mut review = review();
+        review.source = Some(member(1, true).value);
+        review.target = Some(member(2, false).value);
+        let mut target = member(2, false);
+        target.value.independent = true;
+        review.members = vec![member(1, true), target];
+        review.reconcile_selection(&[]);
+        assert!(review.source.is_some());
+        assert!(review.target.is_none());
+    }
+
+    #[test]
+    fn unchanged_reconciliation_does_not_retry_failed_pages() {
+        let mut review = review();
+        review.groups_failed = true;
+        review.members_failed = true;
+        assert!(!review.sync_queries(QueryRevisions::default()));
+        assert!(review.groups_failed);
+        assert!(review.members_failed);
+        assert!(!review.groups_dirty);
+        assert!(!review.members_dirty);
     }
 }

@@ -332,7 +332,9 @@ impl GuiApp {
         if self.metadata.select(id) {
             self.set_metadata_values(MetadataValues::default(), cx);
         }
-        self.load_metadata_track(id, cx);
+        self.sync_metadata_query();
+        self.metadata_needs_refresh = true;
+        self.demand_metadata(cx);
     }
 
     pub(super) fn retry_metadata(&mut self, cx: &mut Context<Self>) {
@@ -346,9 +348,45 @@ impl GuiApp {
         self.ready_manual_action(id, ManualAction::ReloadPlayback, cx);
     }
 
+    pub(super) fn sync_metadata_query(&mut self) {
+        if let Some(track_id) = self.metadata.selected() {
+            let query = Query::Track { track_id };
+            if self
+                .metadata_projection
+                .sync(&query, self.state.query_revisions(None))
+            {
+                self.metadata_needs_refresh = true;
+            }
+        } else {
+            self.metadata_projection.cancel();
+            self.metadata_needs_refresh = false;
+            self.metadata_queued = None;
+        }
+    }
+
+    pub(super) fn demand_metadata(&mut self, cx: &mut Context<Self>) {
+        if self.panel_demand("metadata")
+            && self.metadata_needs_refresh
+            && let Some(id) = self.metadata.selected()
+        {
+            self.metadata_needs_refresh = false;
+            self.load_metadata_track(id, cx);
+        }
+    }
+
     fn load_metadata_track(&mut self, id: i64, cx: &mut Context<Self>) {
+        self.metadata_needs_refresh = false;
         self.sync_full_waveform_request();
         let token = self.metadata.begin_load(id);
+        let query = Query::Track { track_id: id };
+        self.metadata_projection
+            .sync(&query, self.state.query_revisions(None));
+        let generation = self.metadata_projection.generation();
+        if self.metadata_worker {
+            self.metadata_queued = Some(id);
+            return;
+        }
+        self.metadata_worker = true;
         self.sync_metadata_inputs(cx);
         let handle = self.handle.clone();
         cx.spawn(async move |this, cx| {
@@ -356,18 +394,22 @@ impl GuiApp {
             cx.background_executor()
                 .timer(std::time::Duration::from_millis(80))
                 .await;
-            if !this
-                .update(cx, |this, _| this.metadata.accepts_load(token))
-                .unwrap_or(false)
-            {
-                return;
-            }
+            // Logical cancellation never releases the physical worker gate.
             let response = cx
                 .background_executor()
                 .spawn(async move { handle.query(Query::Track { track_id: id }) })
                 .await;
             let _ = this.update(cx, |this, cx| {
+                this.metadata_worker = false;
                 this.refresh(cx);
+                if let Some(id) = this.metadata_queued.take() {
+                    if !this.panel_demand("metadata") {
+                        this.metadata_needs_refresh = true;
+                        return;
+                    }
+                    this.load_metadata_track(id, cx);
+                    return;
+                }
                 if !this.metadata.accepts_load(token) {
                     return;
                 }
@@ -380,8 +422,12 @@ impl GuiApp {
                         return;
                     }
                 };
-                if response.revisions.library != this.state.library.revision {
-                    this.load_metadata_track(id, cx);
+                this.sync_metadata_query();
+                if !this
+                    .metadata_projection
+                    .accepts(&query, generation, response.revisions)
+                {
+                    this.demand_metadata(cx);
                     return;
                 }
                 if let ViewResponse::Track(track) = result {
@@ -411,6 +457,7 @@ impl GuiApp {
         self.metadata.clear_selection();
         self.set_metadata_values(MetadataValues::default(), cx);
         self.sync_metadata_default(cx);
+        self.sync_metadata_query();
         self.sync_waveform(cx);
     }
 

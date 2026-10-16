@@ -140,7 +140,7 @@ pub(in crate::gui) struct DirectoryTree {
 
 impl Default for DirectoryTree {
     fn default() -> Self {
-        Self {
+        let mut tree = Self {
             branches: HashMap::new(),
             pages: HashMap::new(),
             segments: Vec::new(),
@@ -156,7 +156,10 @@ impl Default for DirectoryTree {
             grouped: false,
             saved_expansions: Default::default(),
             grouped_roots: HashSet::new(),
-        }
+        };
+        // Measurement needs an actual placeholder to demand the first forest page.
+        tree.refresh_visible();
+        tree
     }
 }
 
@@ -210,11 +213,6 @@ impl DirectoryTree {
         }
         let branch = self.branches.entry(key).or_default();
         branch.pending = Some((offset, generation));
-        // Default reserves one row before its placeholder segment exists.
-        // Later requests only change status, including for a known empty forest.
-        if self.segments.is_empty() && self.row_count != 0 {
-            self.refresh_visible();
-        }
     }
 
     pub(in crate::gui) fn retry(&mut self, key: &TreeBranch) {
@@ -226,6 +224,14 @@ impl DirectoryTree {
         self.branches
             .get(key)
             .is_some_and(|branch| branch.pending.is_some_and(|(_, token)| token == generation))
+    }
+
+    pub(in crate::gui) fn cancel_request(&mut self, key: &TreeBranch, generation: u64) {
+        if let Some(branch) = self.branches.get_mut(key)
+            && branch.pending.is_some_and(|(_, token)| token == generation)
+        {
+            branch.pending = None;
+        }
     }
 
     pub(in crate::gui) fn accept(
@@ -1030,6 +1036,42 @@ mod tests {
         tree.begin(key.clone(), offset, generation);
         assert!(tree.accept(key, generation, page(paths, total)));
     }
+
+    #[test]
+    fn cancelled_directory_read_preserves_rows_and_can_be_demanded_again() {
+        let mut tree = DirectoryTree::default();
+        tree.configure_page_size(2);
+        let forest = branch("");
+        accept(&mut tree, &forest, 0, 1, &["/a", "/b"], 4);
+        tree.begin(forest.clone(), 2, 2);
+        tree.cancel_request(&forest, 2);
+        assert_eq!(tree.row_count(), 4);
+        assert_eq!(tree.requests_for_range(0..2), Vec::new());
+        assert_eq!(tree.requests_for_range(2..4), vec![(forest.clone(), 2)]);
+        assert!(!tree.accept(&forest, 2, page(&["/old", "/stale"], 4)));
+
+        tree.begin(forest.clone(), 2, 3);
+        tree.cancel_request(&forest, 2);
+        assert!(tree.accept(&forest, 3, page(&["/c", "/d"], 4)));
+        assert!(tree.requests_for_range(0..4).is_empty());
+    }
+    #[test]
+    fn initial_forest_exposes_viewport_demand_before_any_explicit_request() {
+        let mut tree = DirectoryTree::default();
+        assert!(matches!(
+            tree.item(0),
+            Some(TreeItem::Placeholder {
+                offset: 0,
+                status: BranchStatus::Unloaded,
+                ..
+            })
+        ));
+        assert_eq!(tree.requests_for_range(0..1), vec![(branch(""), 0)]);
+        accept(&mut tree, &branch(""), 0, 1, &["/a"], 1);
+        assert!(matches!(tree.item(0), Some(TreeItem::Entry(_))));
+        assert!(tree.requests_for_range(0..1).is_empty());
+    }
+
     #[test]
     fn grouped_projection_preserves_independent_choices_and_never_reuses_tree_children() {
         let mut tree = DirectoryTree::default();

@@ -1,20 +1,21 @@
-//! Queue metadata lives in bounded viewport pages. Revision changes discard positional
-//! payloads and relocate selected occurrence IDs through bounded worker lookups;
-//! current-only playback updates do not invalidate pages. Range selection streams
-//! pages into compact identities and commits only for its original selection token.
-//! Explicit now-playing locate has its own bounded worker and never enters selection
+//! Queue pages and compact selections use Query-owned Q-only stamps. Page demand,
+//! logical generations and physical worker gates have separate lifetimes: retiring
+//! work never releases its gate, and only authoritative identity lookups delete a
+//! selected occurrence. Hidden state sync does not demand metadata pages; failures
+//! remain parked until explicit retry. Now-playing locate never enters selection
 //! or metadata intent handling.
 
 use super::metadata::{ManualAction, ManualIntentId};
 use super::*;
 use crate::{
-    model::{Page, Query, QueueRow},
-    response::ViewResponse,
+    model::{Page, Query, QueryStamp, QueueRow},
+    projection::QueryProjection,
+    response::{QueryRevisions, ViewResponse},
 };
 use std::{ops::Range, time::Duration};
 
 pub(in crate::gui) struct QueueCommit {
-    revision: u64,
+    stamp: QueryStamp,
     generation: u64,
     pub(in crate::gui) target: QueueIdentity,
     anchor: QueueIdentity,
@@ -32,7 +33,7 @@ enum QueueTarget {
 struct QueueJob {
     intent: ManualIntentId,
     generation: u64,
-    revision: u64,
+    stamp: QueryStamp,
     target: QueueTarget,
     anchor: Option<QueueIdentity>,
     shift: bool,
@@ -61,7 +62,7 @@ impl From<&QueueRow> for QueueIdentity {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct QueueLocateRequest {
     generation: u64,
-    revision: u64,
+    stamp: QueryStamp,
     id: u64,
 }
 
@@ -74,7 +75,8 @@ struct QueueLocateReveal {
 
 #[derive(Default)]
 struct QueueLocate {
-    generation: u64,
+    projection: QueryProjection,
+    query: Option<Query>,
     pending: Option<QueueLocateRequest>,
     worker: Option<QueueLocateRequest>,
     reveal: Option<QueueLocateReveal>,
@@ -84,7 +86,8 @@ struct QueueLocate {
 
 impl QueueLocate {
     fn invalidate(&mut self) {
-        self.generation = self.generation.wrapping_add(1);
+        self.projection.cancel();
+        self.query = None;
         self.pending = None;
         self.reveal = None;
         self.emphasized = None;
@@ -92,21 +95,38 @@ impl QueueLocate {
         // A cancelled lookup still owns the worker gate until its response arrives.
     }
 
-    fn begin(&mut self, id: u64, revision: u64) -> QueueLocateRequest {
+    fn query(id: u64) -> Query {
+        Query::QueueEntries {
+            queue_ids: vec![id],
+        }
+    }
+
+    fn begin(&mut self, id: u64, revisions: QueryRevisions) -> QueueLocateRequest {
         self.invalidate();
+        let query = Self::query(id);
+        self.projection.sync(&query, revisions);
         let request = QueueLocateRequest {
-            generation: self.generation,
-            revision,
+            generation: self.projection.generation(),
+            stamp: query.stamp(revisions),
             id,
         };
+        self.query = Some(query);
         self.pending = Some(request);
         request
     }
 
-    fn current(&self, request: QueueLocateRequest, revision: u64, current_id: Option<u64>) -> bool {
-        request.generation == self.generation
-            && request.revision == revision
-            && current_id == Some(request.id)
+    fn current(
+        &self,
+        request: QueueLocateRequest,
+        revisions: QueryRevisions,
+        current_id: Option<u64>,
+    ) -> bool {
+        current_id == Some(request.id)
+            && self.query.as_ref().is_some_and(|query| {
+                self.projection
+                    .accepts(query, request.generation, revisions)
+                    && query.stamp(revisions) == request.stamp
+            })
     }
 
     fn take_job(&mut self) -> Option<QueueLocateRequest> {
@@ -125,7 +145,7 @@ impl QueueLocate {
     }
 
     fn resolve(&mut self, request: QueueLocateRequest, position: usize) {
-        if request.generation != self.generation {
+        if !self.current(request, request.stamp.revisions(), Some(request.id)) {
             return;
         }
         self.pending = None;
@@ -137,20 +157,35 @@ impl QueueLocate {
     }
 }
 
+struct QueueReconcileJob {
+    ids: Vec<u64>,
+    generation: u64,
+    stamp: QueryStamp,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum QueueWorker {
+    Selection(u64),
+    Reconcile(u64),
+}
+
 #[derive(Default)]
 pub(super) struct QueueSelection {
     pub(super) rows: paged::PagedRows<QueueRow>,
     selected: HashMap<u64, QueueIdentity>,
     anchor: Option<QueueIdentity>,
-    revision: u64,
-    page_generation: u64,
-    generation: u64,
+    page_projection: QueryProjection,
+    page_worker: bool,
+    page_size: usize,
+    projection: QueryProjection,
+    reconcile_projection: QueryProjection,
+    reconcile_pending: Option<QueueReconcileJob>,
     pub(super) busy: bool,
     pub(super) selection_error: Option<String>,
     navigation: Option<usize>,
     active: Option<QueueIdentity>,
     pending: Option<QueueJob>,
-    worker: Option<u64>,
+    worker: Option<QueueWorker>,
     manual: Option<ManualIntentId>,
     locate: QueueLocate,
 }
@@ -201,7 +236,9 @@ impl QueueSelection {
             })
     }
     pub(in crate::gui) fn cancel(&mut self) {
-        self.generation = self.generation.wrapping_add(1);
+        self.projection.cancel();
+        self.reconcile_projection.cancel();
+        self.reconcile_pending = None;
         self.busy = false;
         self.navigation = None;
         self.pending = None;
@@ -233,8 +270,87 @@ impl QueueSelection {
         self.active = Some(row);
         self.rows.pin(Some(row.position));
     }
-    fn current(&self, generation: u64, revision: u64) -> bool {
-        self.generation == generation && self.revision == revision
+    fn query() -> Query {
+        Query::QueuePage {
+            offset: 0,
+            limit: 1,
+        }
+    }
+    fn current(&self, generation: u64, stamp: QueryStamp) -> bool {
+        self.projection
+            .accepts(&Self::query(), generation, stamp.revisions())
+    }
+    fn sync(&mut self, revisions: QueryRevisions, total: usize) -> bool {
+        let query = Self::query();
+        let changed = self.page_projection.sync(&query, revisions);
+        self.projection.sync(&query, revisions);
+        self.rows.set_total(total);
+        if changed {
+            self.locate.invalidate();
+            self.rows.invalidate();
+            self.cancel();
+        }
+        changed
+    }
+    fn reconcile_query() -> Query {
+        // Chunk boundaries are demand; selection cancellation owns the chosen ID set.
+        Query::QueueEntries {
+            queue_ids: Vec::new(),
+        }
+    }
+    fn schedule_reconcile(&mut self, revisions: QueryRevisions) {
+        let mut ids: Vec<_> = self.selected.keys().copied().collect();
+        if let Some(anchor) = self.anchor
+            && !self.selected.contains_key(&anchor.id)
+        {
+            ids.push(anchor.id);
+        }
+        if ids.is_empty() {
+            return;
+        }
+        let query = Self::reconcile_query();
+        self.reconcile_projection.sync(&query, revisions);
+        self.busy = true;
+        self.reconcile_pending = Some(QueueReconcileJob {
+            ids,
+            generation: self.reconcile_projection.generation(),
+            stamp: query.stamp(revisions),
+        });
+    }
+    fn reconcile_current(&self, job: &QueueReconcileJob, revisions: QueryRevisions) -> bool {
+        let query = Self::reconcile_query();
+        self.reconcile_projection
+            .accepts(&query, job.generation, revisions)
+            && query.stamp(revisions) == job.stamp
+    }
+    fn take_reconcile_job(&mut self) -> Option<QueueReconcileJob> {
+        if self.worker.is_some() {
+            return None;
+        }
+        let job = self.reconcile_pending.take()?;
+        self.worker = Some(QueueWorker::Reconcile(job.generation));
+        Some(job)
+    }
+    fn release_reconcile_worker(&mut self, generation: u64) {
+        if self.worker == Some(QueueWorker::Reconcile(generation)) {
+            self.worker = None;
+        }
+    }
+    fn demand_page(&mut self, range: Range<usize>, limit: usize) -> Option<(Query, u64)> {
+        if self.page_size != limit {
+            self.page_size = limit;
+            self.page_projection.cancel();
+        }
+        let offset = self.rows.demand(range, limit)?;
+        if self.page_worker {
+            return None;
+        }
+        self.rows.begin(offset, limit);
+        self.page_worker = true;
+        Some((
+            Query::QueuePage { offset, limit },
+            self.page_projection.generation(),
+        ))
     }
     fn reconcile(&mut self, rows: Vec<QueueIdentity>) {
         self.active = self
@@ -256,12 +372,12 @@ impl QueueSelection {
             return None;
         }
         let job = self.pending.take()?;
-        self.worker = Some(job.generation);
+        self.worker = Some(QueueWorker::Selection(job.generation));
         Some(job)
     }
 
     fn release_worker(&mut self, generation: u64) {
-        if self.worker == Some(generation) {
+        if self.worker == Some(QueueWorker::Selection(generation)) {
             self.worker = None;
         }
     }
@@ -269,13 +385,13 @@ impl QueueSelection {
     fn complete_range(
         &mut self,
         generation: u64,
-        revision: u64,
+        stamp: QueryStamp,
         anchor: QueueIdentity,
         target: QueueIdentity,
         rows: Vec<QueueIdentity>,
         additive: bool,
     ) -> bool {
-        if !self.current(generation, revision) {
+        if !self.current(generation, stamp) {
             return false;
         }
         if !additive {
@@ -301,7 +417,7 @@ impl GuiApp {
             .browser
             .queue
             .locate
-            .begin(id, self.state.queue.revision);
+            .begin(id, self.state.query_revisions(None));
         let position = self.state.queue.current_position.or_else(|| {
             self.browser
                 .queue
@@ -322,7 +438,7 @@ impl GuiApp {
     fn queue_locate_current(&self, request: QueueLocateRequest) -> bool {
         self.browser.queue.locate.current(
             request,
-            self.state.queue.revision,
+            self.state.query_revisions(None),
             self.state.queue.current_id,
         )
     }
@@ -349,7 +465,11 @@ impl GuiApp {
                 this.browser.queue.locate.release_worker(request);
                 this.refresh(cx);
                 if this.queue_locate_current(request)
-                    && response.revisions.queue == request.revision
+                    && this.browser.queue.locate.current(
+                        request,
+                        response.revisions,
+                        this.state.queue.current_id,
+                    )
                 {
                     match response.result {
                         Ok(ViewResponse::QueueEntries(rows)) => {
@@ -424,82 +544,89 @@ impl GuiApp {
             .is_some_and(|request| request.id == id && self.queue_locate_current(request))
     }
 
-    pub(super) fn refresh_queue(&mut self, cx: &mut Context<Self>) {
-        let queue = &mut self.browser.queue;
-        queue.locate.invalidate();
-        queue.rows.invalidate();
-        queue.rows.set_total(self.state.queue.total);
-        queue.page_generation = queue.page_generation.wrapping_add(1);
-        queue.cancel();
-        queue.revision = self.state.queue.revision;
-        let mut ids: Vec<_> = queue.selected.keys().copied().collect();
-        if let Some(anchor) = queue.anchor
-            && !queue.selected.contains_key(&anchor.id)
-        {
-            ids.push(anchor.id);
+    /// Reconcile authoritative queue state even while its pane is hidden. No page demand.
+    pub(super) fn sync_queue(&mut self, cx: &mut Context<Self>) -> bool {
+        let revisions = self.state.query_revisions(None);
+        if !self.browser.queue.sync(revisions, self.state.queue.total) {
+            return false;
         }
-        if ids.is_empty() {
+        self.browser.queue.schedule_reconcile(revisions);
+        self.dispatch_queue_selection(cx);
+        true
+    }
+
+    /// Explicit retry of failed identity relocation; unchanged pages and locate survive.
+    pub(super) fn refresh_queue(&mut self, cx: &mut Context<Self>) {
+        if self.sync_queue(cx) {
             return;
         }
-        queue.busy = true;
-        let generation = queue.generation;
-        let revision = queue.revision;
+        if self.browser.queue.selection_error.is_some() {
+            self.browser.queue.cancel();
+            self.browser
+                .queue
+                .schedule_reconcile(self.state.query_revisions(None));
+            self.dispatch_queue_selection(cx);
+        }
+    }
+
+    fn dispatch_queue_reconcile(&mut self, job: QueueReconcileJob, cx: &mut Context<Self>) {
         let handle = self.handle.clone();
         let i18n = std::sync::Arc::clone(&self.i18n);
         cx.spawn(async move |this, cx| {
-            let mut selected = Vec::with_capacity(ids.len());
-            for chunk in ids.chunks(crate::model::MAX_QUERY_ROWS) {
-                if !this
-                    .update(cx, |this, _| {
-                        this.browser.queue.current(generation, revision)
-                    })
-                    .unwrap_or(false)
-                {
-                    return;
-                }
-                let handle = handle.clone();
-                let queue_ids = chunk.to_vec();
-                let response = cx
-                    .background_executor()
-                    .spawn(async move { handle.query(Query::QueueEntries { queue_ids }) })
-                    .await;
-                if response.revisions.queue != revision {
-                    let _ = this.update(cx, |this, cx| {
-                        if this.browser.queue.current(generation, revision) {
+            let result: Result<Option<Vec<QueueIdentity>>, String> = async {
+                let mut selected = Vec::with_capacity(job.ids.len());
+                for chunk in job.ids.chunks(crate::model::MAX_QUERY_ROWS) {
+                    if !this
+                        .update(cx, |this, cx| {
                             this.refresh(cx);
-                            this.refresh_queue(cx);
-                            cx.notify();
+                            this.browser
+                                .queue
+                                .reconcile_current(&job, this.state.query_revisions(None))
+                        })
+                        .unwrap_or(false)
+                    {
+                        return Ok(None);
+                    }
+                    let handle = handle.clone();
+                    let queue_ids = chunk.to_vec();
+                    let response = cx
+                        .background_executor()
+                        .spawn(async move { handle.query(Query::QueueEntries { queue_ids }) })
+                        .await;
+                    if QueueSelection::reconcile_query().stamp(response.revisions) != job.stamp {
+                        return Ok(None);
+                    }
+                    match response.result {
+                        Ok(ViewResponse::QueueEntries(rows)) => {
+                            selected.extend(rows.iter().map(QueueIdentity::from));
                         }
-                    });
-                    return;
-                }
-                match response.result {
-                    Ok(ViewResponse::QueueEntries(rows)) => {
-                        selected.extend(rows.iter().map(QueueIdentity::from))
-                    }
-                    result => {
-                        let error = match result {
-                            Err(error) => error.to_string(),
-                            _ => i18n.text("gl-queue-selection-response").to_owned(),
-                        };
-                        let _ = this.update(cx, |this, cx| {
-                            if this.browser.queue.current(generation, revision) {
-                                this.error = Some(error.clone());
-                                this.browser.queue.selection_error = Some(error);
-                                cx.notify();
-                            }
-                        });
-                        return;
+                        Err(error) => return Err(error.to_string()),
+                        _ => return Err(i18n.text("gl-queue-selection-response").to_owned()),
                     }
                 }
+                Ok(Some(selected))
             }
+            .await;
             let _ = this.update(cx, |this, cx| {
-                if !this.browser.queue.current(generation, revision)
-                    || this.state.queue.revision != revision
+                this.browser.queue.release_reconcile_worker(job.generation);
+                this.refresh(cx);
+                if this
+                    .browser
+                    .queue
+                    .reconcile_current(&job, this.state.query_revisions(None))
                 {
-                    return;
+                    match result {
+                        Ok(Some(selected)) => this.browser.queue.reconcile(selected),
+                        Err(error) => {
+                            this.error = Some(error.clone());
+                            this.browser.queue.selection_error = Some(error);
+                        }
+                        Ok(None) => {
+                            // A newer snapshot will schedule fresh reconciliation.
+                        }
+                    }
                 }
-                this.browser.queue.reconcile(selected);
+                this.dispatch_queue_selection(cx);
                 cx.notify();
             });
         })
@@ -507,28 +634,31 @@ impl GuiApp {
     }
 
     pub(super) fn ensure_queue_range(&mut self, range: Range<usize>, cx: &mut Context<Self>) {
+        self.sync_queue(cx);
+        if !self.panel_demand("queue") {
+            return;
+        }
         let limit = self.view_page_size();
-        let Some(offset) = self.browser.queue.rows.demand(range, limit) else {
+        let Some((query, generation)) = self.browser.queue.demand_page(range, limit) else {
             return;
         };
-        self.browser.queue.rows.begin(offset, limit);
-        self.browser.queue.page_generation = self.browser.queue.page_generation.wrapping_add(1);
-        let generation = self.browser.queue.page_generation;
-        let revision = self.state.queue.revision;
+        let request = query.clone();
         let handle = self.handle.clone();
         cx.spawn(async move |this, cx| {
             let response = cx
                 .background_executor()
-                .spawn(async move { handle.query(Query::QueuePage { offset, limit }) })
+                .spawn(async move { handle.query(query) })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                if this.browser.queue.page_generation != generation {
-                    return;
-                }
-                if revision != this.state.queue.revision || response.revisions.queue != revision {
-                    this.refresh(cx);
-                    this.browser.queue.rows.invalidate();
-                } else {
+                // Only physical completion releases this gate, including obsolete responses.
+                this.browser.queue.page_worker = false;
+                this.refresh(cx);
+                this.sync_queue(cx);
+                if this.browser.queue.page_projection.accepts(
+                    &request,
+                    generation,
+                    response.revisions,
+                ) {
                     match response.result {
                         Ok(ViewResponse::QueuePage(page)) => this.browser.queue.rows.accept(page),
                         Err(error) => this.browser.queue.rows.fail(error.to_string()),
@@ -569,13 +699,13 @@ impl GuiApp {
         let anchor = self.browser.queue.anchor;
         let intent = self.begin_manual_intent();
         self.browser.queue.manual = Some(intent);
-        let generation = self.browser.queue.generation;
-        let revision = self.state.queue.revision;
+        let generation = self.browser.queue.projection.generation();
+        let stamp = QueueSelection::query().stamp(self.state.query_revisions(None));
         if shift && anchor.is_some() {
             self.browser.queue.pending = Some(QueueJob {
                 intent,
                 generation,
-                revision,
+                stamp,
                 target: QueueTarget::Row(row),
                 anchor,
                 shift,
@@ -589,7 +719,7 @@ impl GuiApp {
             self.ready_manual_action(
                 intent,
                 ManualAction::Queue(QueueCommit {
-                    revision,
+                    stamp,
                     generation,
                     target: row,
                     anchor: row,
@@ -603,11 +733,8 @@ impl GuiApp {
     }
 
     pub(in crate::gui) fn queue_commit_valid(&self, commit: &QueueCommit) -> bool {
-        self.state.queue.revision == commit.revision
-            && self
-                .browser
-                .queue
-                .current(commit.generation, commit.revision)
+        QueueSelection::query().stamp(self.state.query_revisions(None)) == commit.stamp
+            && self.browser.queue.current(commit.generation, commit.stamp)
     }
 
     pub(in crate::gui) fn commit_queue_selection(
@@ -615,11 +742,14 @@ impl GuiApp {
         commit: QueueCommit,
         cx: &mut Context<Self>,
     ) {
+        if !self.queue_commit_valid(&commit) {
+            return;
+        }
         let queue = &mut self.browser.queue;
         if let Some(rows) = commit.rows {
             queue.complete_range(
                 commit.generation,
-                commit.revision,
+                commit.stamp,
                 commit.anchor,
                 commit.target,
                 rows,
@@ -665,14 +795,15 @@ impl GuiApp {
     fn start_queue_navigation(&mut self, offset: usize, cx: &mut Context<Self>) {
         let anchor = self.browser.queue.anchor;
         let intent = self.begin_manual_intent();
+        let stamp = QueueSelection::query().stamp(self.state.query_revisions(None));
         let queue = &mut self.browser.queue;
         queue.manual = Some(intent);
         queue.navigation = Some(offset);
         queue.busy = true;
         queue.pending = Some(QueueJob {
             intent,
-            generation: queue.generation,
-            revision: queue.revision,
+            generation: queue.projection.generation(),
+            stamp,
             target: QueueTarget::Offset(offset),
             anchor,
             shift: false,
@@ -686,11 +817,15 @@ impl GuiApp {
 
     fn queue_job_current(&self, job: &QueueJob) -> bool {
         self.manual_intent_current(job.intent)
-            && self.state.queue.revision == job.revision
-            && self.browser.queue.current(job.generation, job.revision)
+            && QueueSelection::query().stamp(self.state.query_revisions(None)) == job.stamp
+            && self.browser.queue.current(job.generation, job.stamp)
     }
 
     fn dispatch_queue_selection(&mut self, cx: &mut Context<Self>) {
+        if let Some(job) = self.browser.queue.take_reconcile_job() {
+            self.dispatch_queue_reconcile(job, cx);
+            return;
+        }
         let Some(job) = self.browser.queue.take_job() else {
             return;
         };
@@ -717,7 +852,7 @@ impl GuiApp {
                                 async move { handle.query(Query::QueuePage { offset, limit: 1 }) },
                             )
                             .await;
-                        if response.revisions.queue != job.revision {
+                        if QueueSelection::query().stamp(response.revisions) != job.stamp {
                             return Err(i18n.text("gl-queue-changed").into());
                         }
                         let ViewResponse::QueuePage(page) =
@@ -757,7 +892,7 @@ impl GuiApp {
                             .background_executor()
                             .spawn(async move { handle.query(Query::QueuePage { offset, limit }) })
                             .await;
-                        if response.revisions.queue != job.revision {
+                        if QueueSelection::query().stamp(response.revisions) != job.stamp {
                             return Err(i18n.text("gl-queue-changed").into());
                         }
                         let ViewResponse::QueuePage(Page { rows: page, total }) =
@@ -780,7 +915,7 @@ impl GuiApp {
                     rows = Some(identities);
                 }
                 Ok(Some(QueueCommit {
-                    revision: job.revision,
+                    stamp: job.stamp,
                     generation: job.generation,
                     target,
                     anchor,
@@ -819,6 +954,42 @@ impl GuiApp {
 #[cfg(test)]
 mod tests {
     use super::{QueueIdentity, QueueSelection};
+    use crate::{
+        model::{LibraryRow, Page, QueueRow},
+        response::QueryRevisions,
+    };
+
+    fn revisions(queue: u64) -> QueryRevisions {
+        QueryRevisions {
+            queue,
+            ..QueryRevisions::default()
+        }
+    }
+    fn queue(revision: u64) -> QueueSelection {
+        let mut queue = QueueSelection::default();
+        queue.sync(revisions(revision), 200_000);
+        queue
+    }
+    fn row(id: u64, position: usize) -> QueueRow {
+        QueueRow {
+            id,
+            track_id: 1,
+            position,
+            track: LibraryRow {
+                id: 1,
+                title: String::new(),
+                artist: String::new(),
+                album: String::new(),
+                duration: None,
+                codec: String::new(),
+                bitrate_bps: None,
+                bitrate_exact: false,
+                favorite: false,
+                missing: false,
+                play_count: 0,
+            },
+        }
+    }
     fn identity(id: u64, position: usize) -> QueueIdentity {
         QueueIdentity {
             id,
@@ -828,14 +999,14 @@ mod tests {
     }
     #[test]
     fn playing_locate_reveals_exact_duplicate_occurrence_without_selecting() {
-        let mut queue = QueueSelection::default();
+        let mut queue = queue(7);
         queue.select(identity(10, 4), false);
         let selected = queue.ordered();
         let anchor = queue.anchor;
         let active = queue.active;
-        let generation = queue.generation;
-        let request = queue.locate.begin(11, 7);
-        assert!(queue.locate.current(request, 7, Some(11)));
+        let generation = queue.projection.generation();
+        let request = queue.locate.begin(11, revisions(7));
+        assert!(queue.locate.current(request, revisions(7), Some(11)));
         queue.locate.resolve(request, 199_999);
         let reveal = queue.locate.reveal.unwrap();
         assert_eq!(reveal.request.id, 11);
@@ -844,28 +1015,28 @@ mod tests {
         assert_eq!(queue.ordered(), selected);
         assert_eq!(queue.anchor, anchor);
         assert_eq!(queue.active, active);
-        assert_eq!(queue.generation, generation);
+        assert_eq!(queue.projection.generation(), generation);
         assert!(queue.ready());
     }
 
     #[test]
     fn playing_locate_rejects_replaced_targets_and_revisions_with_one_worker() {
-        let mut queue = QueueSelection::default();
-        let old = queue.locate.begin(10, 7);
+        let mut queue = queue(7);
+        let old = queue.locate.begin(10, revisions(7));
         assert_eq!(queue.locate.take_job(), Some(old));
-        let latest = queue.locate.begin(11, 7);
+        let latest = queue.locate.begin(11, revisions(7));
         assert!(queue.locate.take_job().is_none());
-        assert!(!queue.locate.current(old, 7, Some(10)));
-        assert!(!queue.locate.current(latest, 7, Some(10)));
-        assert!(!queue.locate.current(latest, 7, None));
-        assert!(!queue.locate.current(latest, 8, Some(11)));
+        assert!(!queue.locate.current(old, revisions(7), Some(10)));
+        assert!(!queue.locate.current(latest, revisions(7), Some(10)));
+        assert!(!queue.locate.current(latest, revisions(7), None));
+        assert!(!queue.locate.current(latest, revisions(8), Some(11)));
         queue.locate.resolve(old, 3);
         assert!(queue.locate.reveal.is_none());
         queue.locate.release_worker(old);
         assert_eq!(queue.locate.take_job(), Some(latest));
         assert!(queue.locate.take_job().is_none());
         queue.locate.invalidate();
-        assert!(!queue.locate.current(latest, 7, Some(11)));
+        assert!(!queue.locate.current(latest, revisions(7), Some(11)));
         assert_eq!(queue.locate.worker, Some(latest));
         queue.locate.release_worker(latest);
         assert!(queue.locate.take_job().is_none());
@@ -873,7 +1044,7 @@ mod tests {
 
     #[test]
     fn occurrence_selection_survives_eviction_and_relocates_without_track_deduplication() {
-        let mut queue = QueueSelection::default();
+        let mut queue = queue(0);
         queue.select(identity(10, 199_999), false);
         queue.select(identity(11, 3), true);
         queue.rows.invalidate();
@@ -892,14 +1063,15 @@ mod tests {
     }
     #[test]
     fn selection_changes_cancel_pending_navigation_and_range_results() {
-        let mut queue = QueueSelection {
-            revision: 7,
-            ..QueueSelection::default()
-        };
-        let generation = queue.generation;
+        let mut queue = queue(7);
+        let stamp = QueueSelection::query().stamp(revisions(7));
+        let generation = queue.projection.generation();
         queue.select(identity(1, 0), false);
-        assert!(!queue.current(generation, 7));
-        assert!(!queue.current(queue.generation, 8));
+        assert!(!queue.current(generation, stamp));
+        assert!(!queue.current(
+            queue.projection.generation(),
+            QueueSelection::query().stamp(revisions(8))
+        ));
         queue.busy = true;
         queue.navigation = Some(199_999);
         queue.clear();
@@ -909,26 +1081,34 @@ mod tests {
     }
     #[test]
     fn streamed_ranges_replace_or_extend_occurrences_and_reject_stale_completion() {
-        let mut queue = QueueSelection::default();
+        let mut queue = queue(0);
         queue.select(identity(1, 0), false);
-        let generation = queue.generation;
+        let generation = queue.projection.generation();
+        let stamp = QueueSelection::query().stamp(revisions(0));
         let anchor = identity(2, 199_997);
         let range = vec![anchor, identity(3, 199_998), identity(4, 199_999)];
         let target = identity(4, 199_999);
-        assert!(queue.complete_range(generation, 0, anchor, target, range.clone(), true));
+        assert!(queue.complete_range(generation, stamp, anchor, target, range.clone(), true));
         assert_eq!(queue.len(), 4);
         assert_eq!(queue.anchor, Some(anchor));
         assert_eq!(queue.active(), Some(target));
-        assert!(queue.complete_range(generation, 0, anchor, target, range, false));
+        assert!(queue.complete_range(generation, stamp, anchor, target, range, false));
         assert_eq!(queue.len(), 3);
         assert!(!queue.contains(&1));
         queue.select(identity(3, 199_998), true);
         assert!(!queue.contains(&3));
         assert_eq!(queue.anchor, Some(identity(3, 199_998)));
-        assert!(!queue.complete_range(generation, 0, anchor, target, vec![identity(1, 0)], false));
         assert!(!queue.complete_range(
-            queue.generation,
-            1,
+            generation,
+            stamp,
+            anchor,
+            target,
+            vec![identity(1, 0)],
+            false
+        ));
+        assert!(!queue.complete_range(
+            queue.projection.generation(),
+            QueueSelection::query().stamp(revisions(1)),
             anchor,
             target,
             vec![identity(1, 0)],
@@ -947,13 +1127,13 @@ mod tests {
         use super::{QueueJob, QueueTarget};
         use crate::gui::metadata::ManualIntents;
         let mut intents = ManualIntents::default();
-        let mut queue = QueueSelection::default();
+        let mut queue = queue(0);
         queue.select(identity(1, 0), false);
         let old = intents.begin();
         queue.pending = Some(QueueJob {
             intent: old,
-            generation: queue.generation,
-            revision: 0,
+            generation: queue.projection.generation(),
+            stamp: QueueSelection::query().stamp(revisions(0)),
             target: QueueTarget::Offset(1),
             anchor: queue.anchor,
             shift: false,
@@ -966,8 +1146,8 @@ mod tests {
         let latest = intents.begin();
         queue.pending = Some(QueueJob {
             intent: latest,
-            generation: queue.generation,
-            revision: 0,
+            generation: queue.projection.generation(),
+            stamp: QueueSelection::query().stamp(revisions(0)),
             target: QueueTarget::Offset(8),
             anchor: queue.anchor,
             shift: false,
@@ -976,7 +1156,7 @@ mod tests {
             total: 10,
         });
         assert!(queue.take_job().is_none());
-        assert!(!queue.current(running.generation, running.revision));
+        assert!(!queue.current(running.generation, running.stamp));
         assert_eq!(queue.ordered_ids(), vec![1]);
         queue.release_worker(running.generation);
         let next = queue.take_job().unwrap();
@@ -984,5 +1164,144 @@ mod tests {
         assert!(matches!(next.target, QueueTarget::Offset(8)));
         assert!(queue.take_job().is_none());
         assert_eq!(queue.active(), Some(identity(1, 0)));
+    }
+    #[test]
+    fn unrelated_publications_preserve_pages_failures_selection_and_playing_locate() {
+        let mut queue = queue(7);
+        queue.rows.begin(0, 20);
+        queue.rows.accept(Page {
+            total: 200_000,
+            rows: (0..20)
+                .map(|position| row(position as u64, position))
+                .collect(),
+        });
+        queue.select(identity(10, 10), false);
+        let selected_generation = queue.projection.generation();
+        let page_generation = queue.page_projection.generation();
+        let locate = queue.locate.begin(11, revisions(7));
+        queue.rows.begin(20, 20);
+        queue.rows.fail("offline".into());
+        let mut unrelated = revisions(7);
+        unrelated.library = 11;
+        unrelated.structure = 12;
+        unrelated.playlist = 13;
+        unrelated.duplicate_groups = 14;
+        unrelated.duplicate_members = 15;
+        assert!(!queue.sync(unrelated, 200_000));
+        assert_eq!(queue.rows.get(10).unwrap().id, 10);
+        assert_eq!(queue.rows.error(20), Some("offline"));
+        assert_eq!(queue.ordered_ids(), vec![10]);
+        assert!(queue.current(
+            selected_generation,
+            QueueSelection::query().stamp(unrelated)
+        ));
+        assert!(queue.page_projection.accepts(
+            &QueueSelection::query(),
+            page_generation,
+            unrelated
+        ));
+        assert!(queue.locate.current(locate, unrelated, Some(11)));
+        assert!(queue.reconcile_pending.is_none());
+    }
+
+    #[test]
+    fn page_cancellation_and_boundary_changes_keep_the_physical_gate() {
+        let mut queue = queue(7);
+        let (old_query, old_generation) = queue.demand_page(0..10, 20).unwrap();
+        assert!(queue.page_worker);
+        queue.cancel();
+        assert!(queue.page_worker);
+        assert!(queue.sync(revisions(8), 200_000));
+        assert!(queue.demand_page(0..10, 40).is_none());
+        assert!(queue.page_worker);
+        assert!(
+            !queue
+                .page_projection
+                .accepts(&old_query, old_generation, revisions(7))
+        );
+        queue.page_worker = false; // Physical completion, not logical cancellation.
+        let (latest, generation) = queue.demand_page(0..10, 40).unwrap();
+        assert!(
+            queue
+                .page_projection
+                .accepts(&latest, generation, revisions(8))
+        );
+        assert!(queue.demand_page(40..50, 40).is_none());
+    }
+
+    #[test]
+    fn page_failure_waits_for_explicit_retry() {
+        let mut queue = queue(7);
+        queue.rows.set_total(20);
+        let (query, generation) = queue.demand_page(0..10, 20).unwrap();
+        assert!(
+            queue
+                .page_projection
+                .accepts(&query, generation, revisions(7))
+        );
+        queue.page_worker = false;
+        queue.rows.fail("offline".into());
+        for _ in 0..3 {
+            assert!(!queue.sync(revisions(7), 20));
+            assert!(queue.demand_page(0..10, 20).is_none());
+        }
+        assert_eq!(queue.rows.error(0), Some("offline"));
+        queue.rows.retry();
+        assert!(queue.demand_page(0..10, 20).is_some());
+    }
+
+    #[test]
+    fn hidden_queue_changes_coalesce_relocation_without_releasing_its_worker() {
+        let mut queue = queue(7);
+        queue.select(identity(10, 199_999), false);
+        queue.select(identity(11, 3), true);
+        assert!(queue.sync(revisions(8), 10));
+        queue.schedule_reconcile(revisions(8));
+        assert!(!queue.page_worker);
+        assert!(queue.busy);
+        let old = queue.take_reconcile_job().unwrap();
+        assert!(queue.sync(revisions(9), 10));
+        queue.schedule_reconcile(revisions(9));
+        assert!(!queue.reconcile_current(&old, revisions(8)));
+        assert!(queue.take_reconcile_job().is_none());
+        assert!(queue.take_job().is_none());
+        assert_eq!(queue.selected.len(), 2);
+        queue.release_reconcile_worker(old.generation);
+        let latest = queue.take_reconcile_job().unwrap();
+        assert!(queue.reconcile_current(&latest, revisions(9)));
+        assert_eq!(latest.ids.len(), 2);
+        queue.release_reconcile_worker(latest.generation);
+        queue.selection_error = Some("offline".into());
+        assert!(!queue.sync(revisions(9), 10));
+        assert!(queue.take_reconcile_job().is_none());
+        assert_eq!(queue.selected.len(), 2);
+        queue.cancel(); // Explicit retry retires the failed logical operation.
+        queue.schedule_reconcile(revisions(9));
+        assert!(queue.take_reconcile_job().is_some());
+        queue.reconcile(vec![identity(10, 0), identity(11, 1)]);
+        assert_eq!(queue.ordered_ids(), vec![10, 11]);
+    }
+    #[test]
+    fn page_size_is_demand_not_selection_or_locate_identity() {
+        let mut queue = queue(7);
+        queue.select(identity(10, 199_999), false);
+        let selection_generation = queue.projection.generation();
+        let locate = queue.locate.begin(11, revisions(7));
+        let (old, generation) = queue.demand_page(0..10, 20).unwrap();
+        assert!(queue.demand_page(0..10, 40).is_none());
+        assert!(
+            !queue
+                .page_projection
+                .accepts(&old, generation, revisions(7))
+        );
+        assert!(queue.current(
+            selection_generation,
+            QueueSelection::query().stamp(revisions(7))
+        ));
+        assert_eq!(queue.ordered_ids(), vec![10]);
+        assert!(queue.locate.current(locate, revisions(7), Some(11)));
+        assert!(queue.reconcile_pending.is_none());
+        queue.page_worker = false;
+        assert!(queue.demand_page(0..10, 40).is_some());
     }
 }

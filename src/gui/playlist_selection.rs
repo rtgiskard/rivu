@@ -4,7 +4,7 @@ use super::metadata::{ManualAction, ManualIntentId};
 use super::*;
 use crate::{
     model::{Page, PlaylistEntryLocation, PlaylistEntryRow, Query},
-    response::{PlaylistEntryRevision, ViewResponse},
+    response::{PlaylistEntryRevision, QueryRevisions, ViewResponse},
 };
 
 pub(in crate::gui) struct EntryCommit {
@@ -49,12 +49,30 @@ impl From<&PlaylistEntryLocation> for EntryIdentity {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq)]
 struct EntryNavigationScope {
     playlist_id: i64,
     revision: u64,
-    catalog: u64,
     library: u64,
+}
+
+impl PartialEq for EntryNavigationScope {
+    fn eq(&self, other: &Self) -> bool {
+        let query = Query::PlaylistEntries {
+            playlist_id: self.playlist_id,
+            offset: 0,
+            limit: 1,
+        };
+        let revisions = |scope: &Self| QueryRevisions {
+            library: scope.library,
+            playlist_entries: Some(PlaylistEntryRevision {
+                playlist_id: scope.playlist_id,
+                revision: scope.revision,
+            }),
+            ..Default::default()
+        };
+        query.stamp(revisions(self)) == query.stamp(revisions(other))
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -92,6 +110,7 @@ pub(super) struct EntrySelection {
     pub(super) active: Option<EntryIdentity>,
     anchor: Option<EntryIdentity>,
     generation: u64,
+    projection: crate::projection::QueryProjection,
     pub(super) busy: bool,
     pub(super) error: Option<String>,
     navigation: Option<EntryNavigationJob>,
@@ -100,6 +119,8 @@ pub(super) struct EntrySelection {
     intent: Option<ManualIntentId>,
     range_request: Option<EntryRangeRequest>,
     range_in_flight: Option<u64>,
+    refresh_in_flight: bool,
+    refresh_pending: bool,
 }
 impl EntrySelection {
     pub(super) fn len(&self) -> usize {
@@ -333,7 +354,6 @@ impl EntrySelection {
             response,
             job.scope.playlist_id,
             job.scope.revision,
-            job.scope.catalog,
             job.scope.library,
         );
         match response {
@@ -421,43 +441,92 @@ fn entry_query_result(
     response: crate::response::QueryResponse,
     playlist_id: i64,
     revision: u64,
-    catalog: u64,
     library: u64,
 ) -> Result<Option<ViewResponse>, crate::response::QueryError> {
     let result = response.result?;
-    let expected = Some(PlaylistEntryRevision {
-        playlist_id,
-        revision,
-    });
-    Ok((response.revisions.playlist_entries == expected
-        && response.revisions.playlist == catalog
-        && response.revisions.library == library)
-        .then_some(result))
+    let query = match &result {
+        ViewResponse::PlaylistEntryLocations(_) => Query::PlaylistEntryLocations {
+            playlist_id,
+            entry_ids: Vec::new(),
+        },
+        _ => Query::PlaylistEntries {
+            playlist_id,
+            offset: 0,
+            limit: 1,
+        },
+    };
+    let expected = QueryRevisions {
+        library,
+        playlist_entries: Some(PlaylistEntryRevision {
+            playlist_id,
+            revision,
+        }),
+        ..Default::default()
+    };
+    Ok((query.stamp(response.revisions) == query.stamp(expected)).then_some(result))
 }
 
 impl GuiApp {
+    pub(super) fn playlist_occurrence_stamp(&self, playlist_id: i64) -> crate::model::QueryStamp {
+        Query::PlaylistEntryLocations {
+            playlist_id,
+            entry_ids: Vec::new(),
+        }
+        .stamp(self.state.query_revisions(Some(playlist_id)))
+    }
+
+    pub(super) fn sync_entry_projection(&mut self, cx: &mut Context<Self>) {
+        if let Some(playlist_id) = self.browser.playlists.selected() {
+            let query = Query::PlaylistEntryLocations {
+                playlist_id,
+                entry_ids: Vec::new(),
+            };
+            let revisions = self.state.query_revisions(Some(playlist_id));
+            if self
+                .browser
+                .playlists
+                .track_selection
+                .projection
+                .sync(&query, revisions)
+            {
+                self.refresh_entry_selection(cx);
+            }
+        }
+    }
+
     pub(super) fn playlist_revision(&self, id: i64) -> u64 {
         self.state
             .library
             .playlist_entry_revisions
             .get(&id)
             .copied()
-            .unwrap_or(self.state.library.playlist_revision)
+            .unwrap_or(0)
     }
     fn entry_job_current(
         &self,
         playlist_id: i64,
         generation: u64,
         revision: u64,
-        catalog: u64,
         library: u64,
     ) -> bool {
         self.browser.playlists.selected() == Some(playlist_id)
             && self.browser.playlists.entries().playlist_id == Some(playlist_id)
             && self.browser.playlists.track_selection.current(generation)
-            && self.playlist_revision(playlist_id) == revision
-            && self.state.library.playlist_revision == catalog
-            && self.state.library.revision == library
+            && {
+                let query = Query::PlaylistEntryLocations {
+                    playlist_id,
+                    entry_ids: Vec::new(),
+                };
+                let expected = QueryRevisions {
+                    library,
+                    playlist_entries: Some(PlaylistEntryRevision {
+                        playlist_id,
+                        revision,
+                    }),
+                    ..Default::default()
+                };
+                query.stamp(self.state.query_revisions(Some(playlist_id))) == query.stamp(expected)
+            }
     }
     fn entry_job_failed(
         &mut self,
@@ -482,41 +551,47 @@ impl GuiApp {
         };
         let selection = &mut self.browser.playlists.track_selection;
         selection.invalidate();
+        if selection.refresh_in_flight {
+            selection.refresh_pending = true;
+            return;
+        }
         let ids = selection.ids();
         if ids.is_empty() {
             return;
         }
+        selection.refresh_in_flight = true;
+        selection.refresh_pending = false;
         let generation = selection.generation;
         let revision = self.playlist_revision(playlist_id);
-        let catalog = self.state.library.playlist_revision;
         let library = self.state.library.revision;
         let handle = self.handle.clone();
         let i18n = std::sync::Arc::clone(&self.i18n);
         cx.spawn(async move |this, cx| {
-            let mut identities = Vec::with_capacity(ids.len());
-            for chunk in ids.chunks(crate::model::MAX_QUERY_ROWS) {
-                if !this
-                    .update(cx, |this, cx| {
-                        this.refresh(cx);
-                        this.entry_job_current(playlist_id, generation, revision, catalog, library)
-                    })
-                    .unwrap_or(false)
-                {
-                    return;
-                }
-                let handle = handle.clone();
-                let entry_ids = chunk.to_vec();
-                let response = cx
-                    .background_executor()
-                    .spawn(async move {
-                        handle.query(Query::PlaylistEntryLocations {
-                            playlist_id,
-                            entry_ids,
+            async {
+                let mut identities = Vec::with_capacity(ids.len());
+                for chunk in ids.chunks(crate::model::MAX_QUERY_ROWS) {
+                    if !this
+                        .update(cx, |this, cx| {
+                            this.refresh(cx);
+                            this.entry_job_current(playlist_id, generation, revision, library)
                         })
-                    })
-                    .await;
-                let result =
-                    match entry_query_result(response, playlist_id, revision, catalog, library) {
+                        .unwrap_or(false)
+                    {
+                        return;
+                    }
+                    let handle = handle.clone();
+                    let entry_ids = chunk.to_vec();
+                    let response = cx
+                        .background_executor()
+                        .spawn(async move {
+                            handle.query(Query::PlaylistEntryLocations {
+                                playlist_id,
+                                entry_ids,
+                            })
+                        })
+                        .await;
+                    let result = match entry_query_result(response, playlist_id, revision, library)
+                    {
                         Ok(result) => result,
                         Err(error) => {
                             let _ = this.update(cx, |this, cx| {
@@ -525,7 +600,6 @@ impl GuiApp {
                                     playlist_id,
                                     generation,
                                     revision,
-                                    catalog,
                                     library,
                                 ) {
                                     this.entry_job_failed(
@@ -539,42 +613,45 @@ impl GuiApp {
                             return;
                         }
                     };
-                let Some(result) = result else {
-                    let _ = this.update(cx, |this, cx| {
-                        this.refresh(cx);
-                        if this.entry_job_current(
-                            playlist_id,
-                            generation,
-                            revision,
-                            catalog,
-                            library,
-                        ) {
-                            this.refresh_entry_selection(cx);
-                        }
-                    });
-                    return;
-                };
-                match result {
-                    ViewResponse::PlaylistEntryLocations(rows) => identities.extend(
-                        rows.into_iter()
-                            .filter(|row| row.playlist_id == playlist_id),
-                    ),
-                    _ => {
-                        let message = i18n.text("gl-playlist-selection-response").into();
+                    let Some(result) = result else {
                         let _ = this.update(cx, |this, cx| {
-                            this.entry_job_failed(playlist_id, generation, message, cx)
+                            this.refresh(cx);
+                            if this.entry_job_current(playlist_id, generation, revision, library) {
+                                this.refresh_entry_selection(cx);
+                            }
                         });
                         return;
+                    };
+                    match result {
+                        ViewResponse::PlaylistEntryLocations(rows) => identities.extend(
+                            rows.into_iter()
+                                .filter(|row| row.playlist_id == playlist_id),
+                        ),
+                        _ => {
+                            let message = i18n.text("gl-playlist-selection-response").into();
+                            let _ = this.update(cx, |this, cx| {
+                                this.entry_job_failed(playlist_id, generation, message, cx)
+                            });
+                            return;
+                        }
                     }
                 }
+                let _ = this.update(cx, |this, cx| {
+                    this.refresh(cx);
+                    if !this.entry_job_current(playlist_id, generation, revision, library) {
+                        return;
+                    }
+                    this.browser.playlists.accept_entry_locations(identities);
+                    cx.notify();
+                });
             }
+            .await;
             let _ = this.update(cx, |this, cx| {
-                this.refresh(cx);
-                if !this.entry_job_current(playlist_id, generation, revision, catalog, library) {
-                    return;
+                let selection = &mut this.browser.playlists.track_selection;
+                selection.refresh_in_flight = false;
+                if std::mem::take(&mut selection.refresh_pending) {
+                    this.refresh_entry_selection(cx);
                 }
-                this.browser.playlists.accept_entry_locations(identities);
-                cx.notify();
             });
         })
         .detach();
@@ -589,6 +666,7 @@ impl GuiApp {
         self.begin_manual_intent();
         if self.browser.playlists.select(id, name, index) {
             self.request_playlist_entries(id, 0, cx);
+            self.sync_entry_projection(cx);
         }
     }
 
@@ -649,7 +727,6 @@ impl GuiApp {
             commit.scope.playlist_id,
             commit.generation,
             commit.scope.revision,
-            commit.scope.catalog,
             commit.scope.library,
         )
     }
@@ -739,7 +816,6 @@ impl GuiApp {
                         response,
                         scope.playlist_id,
                         scope.revision,
-                        scope.catalog,
                         scope.library,
                     )
                     .map_err(|error| error.to_string())?;
@@ -796,7 +872,6 @@ impl GuiApp {
             EntryNavigationScope {
                 playlist_id,
                 revision: self.playlist_revision(playlist_id),
-                catalog: self.state.library.playlist_revision,
                 library: self.state.library.revision,
             }
         })
@@ -999,7 +1074,6 @@ mod tests {
         EntryNavigationScope {
             playlist_id: 9,
             revision: 12,
-            catalog: 8,
             library: 6,
         }
     }
@@ -1007,7 +1081,6 @@ mod tests {
         QueryResponse {
             revisions: QueryRevisions {
                 library: job.scope.library,
-                playlist: job.scope.catalog,
                 playlist_entries: Some(PlaylistEntryRevision {
                     playlist_id: job.scope.playlist_id,
                     revision: job.scope.revision,
@@ -1337,7 +1410,7 @@ mod tests {
 
     #[test]
     fn cancel_switch_back_and_revision_changes_keep_physical_navigation_gate_until_completion() {
-        for transition in 0..6 {
+        for transition in 0..5 {
             let mut scope = navigation_scope();
             let mut selection = EntrySelection::default();
             selection.select(identity(0, 0), false);
@@ -1362,12 +1435,11 @@ mod tests {
                     selection.select(identity(4, 4), false);
                     identity(4, 4)
                 }
-                2..=4 => {
+                2..=3 => {
                     selection.invalidate();
                     assert!(selection.busy);
                     match transition {
                         2 => scope.revision += 1,
-                        3 => scope.catalog += 1,
                         _ => scope.library += 1,
                     }
                     selection.reconcile(vec![identity(0, 3)]);
@@ -1539,7 +1611,7 @@ mod tests {
     #[test]
     fn navigation_success_with_stale_revisions_never_publishes_target() {
         let scope = navigation_scope();
-        for stale_domain in 0..5 {
+        for stale_domain in 0..4 {
             let mut selection = EntrySelection::default();
             selection.select(identity(0, 0), false);
             assert!(selection.navigate(scope, 10, true, false, false));
@@ -1563,7 +1635,6 @@ mod tests {
                         .unwrap()
                         .revision += 1
                 }
-                3 => response.revisions.playlist += 1,
                 _ => response.revisions.library += 1,
             }
             assert_eq!(
@@ -1632,7 +1703,7 @@ mod tests {
             revisions: QueryRevisions::default(),
             result: Err(QueryError::Message("core unavailable".into())),
         };
-        let error = super::entry_query_result(response, 9, 12, 8, 6).unwrap_err();
+        let error = super::entry_query_result(response, 9, 12, 6).unwrap_err();
         selection.fail(error.to_string());
         assert!(!selection.busy);
         assert!(selection.error.is_some());
@@ -1646,7 +1717,7 @@ mod tests {
     }
 
     #[test]
-    fn successful_query_requires_current_playlist_and_all_data_revisions() {
+    fn full_rows_require_library_and_scoped_content_not_catalog() {
         use crate::response::{PlaylistEntryRevision, QueryResponse, QueryRevisions, ViewResponse};
         let current = QueryRevisions {
             library: 6,
@@ -1660,10 +1731,6 @@ mod tests {
         for revisions in [
             QueryRevisions {
                 library: 7,
-                ..current
-            },
-            QueryRevisions {
-                playlist: 9,
                 ..current
             },
             QueryRevisions {
@@ -1690,7 +1757,7 @@ mod tests {
                 result: Ok(ViewResponse::PlaylistEntries(page(0, 1, 1))),
             };
             assert!(
-                super::entry_query_result(response, 9, 12, 8, 6)
+                super::entry_query_result(response, 9, 12, 6)
                     .unwrap()
                     .is_none()
             );
@@ -1700,11 +1767,49 @@ mod tests {
             result: Ok(ViewResponse::PlaylistEntries(page(0, 1, 1))),
         };
         let Some(ViewResponse::PlaylistEntries(page)) =
-            super::entry_query_result(response, 9, 12, 8, 6).unwrap()
+            super::entry_query_result(response, 9, 12, 6).unwrap()
         else {
             panic!("current payload rejected");
         };
         assert_eq!(page.rows[0].id, 0);
+        let renamed = QueryRevisions {
+            playlist: 9,
+            ..current
+        };
+        assert!(
+            super::entry_query_result(
+                QueryResponse {
+                    revisions: renamed,
+                    result: Ok(ViewResponse::PlaylistEntries(super::Page {
+                        total: 0,
+                        rows: Vec::new()
+                    })),
+                },
+                9,
+                12,
+                6
+            )
+            .unwrap()
+            .is_some()
+        );
+        let metadata_only = QueryRevisions {
+            library: 7,
+            playlist: 9,
+            ..current
+        };
+        assert!(
+            super::entry_query_result(
+                QueryResponse {
+                    revisions: metadata_only,
+                    result: Ok(ViewResponse::PlaylistEntryLocations(Vec::new())),
+                },
+                9,
+                12,
+                6
+            )
+            .unwrap()
+            .is_some()
+        );
     }
 
     #[test]

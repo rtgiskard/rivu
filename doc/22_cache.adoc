@@ -26,6 +26,50 @@ analysis, waveform-coverage, and late-result invariants are authoritative in
 link:23_visuals.adoc#_still_mode[Visualization Rendering Design]. Graphics that
 have already been submitted still follow the retirement boundary below.
 
+== Query projection retention
+
+List and tree data are independent of `visualizations.cache`. A query owns its
+dependency stamp; GUI and terminal consumers use that same contract to schedule
+work and accept results. A projection key is normalized query identity plus its
+stamp, excluding page offsets, limits, batch cursors, and expected revisions.
+Request generations reject obsolete intent independently of data freshness.
+
+Library metadata rows and Details depend on library metadata; directory rows,
+album rows, and library location also depend on structure. Root counts depend
+only on structure and configured root identity. The forest page is synthesized
+locally from configured roots, not another database query. Playlist summaries
+depend only on the playlist catalog. Full playlist rows depend on metadata and
+that playlist's content token; compact occurrence/location queries depend only
+on its content token. Every extant playlist has a token, and absence means
+deletion: rename never invalidates content or compact occurrence selection.
+Queue queries depend only on the queue token. Duplicate groups use their group
+token; duplicate members use metadata, member facts (including playlist reference
+counts), and queue. A catalog rename does not change member facts.
+Duplicate source/target choices retain track identity across reference-only
+refreshes; command eligibility is checked against current targeted member facts.
+
+Owners reconcile keys while hidden, but tree and Details reads require actual
+panel demand. An unchanged key retains bounded album pages and page failures
+across hiding; covers are released independently. Page-size changes affect demand geometry,
+not query identity. Failed pages stay failed until explicit retry. Cancelling a
+generation cannot release a physical worker gate: completion owns that release,
+and only the latest queued demand may then run. Metadata drafts/save baselines,
+occurrence identities, unavailable state, and relocation operations remain
+business-owned rather than being swallowed by a generic payload cache.
+
+Root-count batches run one at a time. Tree reads share at most four physical
+workers and four coalesced latest pending branch demands; unscheduled demand
+owns no loading token. Completion re-drives current visible demand, while
+discarded offscreen demand does not accumulate as a visited-branch backlog.
+Debounced directory demand is checked again before submission; abandoned demand
+releases its reservation without becoming a failed page or discarding cached rows.
+Viewport demand is deferred past prepaint so locally accepted forest pages can
+invalidate the frame that still contains their loading placeholders.
+
+Publication revisions and four state-section tokens are distinct from query
+stamps and request generations. A publication with unchanged section tokens does
+not invalidate the GUI root; independent audio frame processing still proceeds.
+
 == Reuse and invalidation
 
 === Waveform

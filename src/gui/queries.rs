@@ -2,11 +2,7 @@
 //! GuiApp retains the entity and the single frame scheduler.
 
 use super::*;
-use crate::{
-    model::Query,
-    projection::GuiLibrarySnapshot,
-    response::{PlaylistEntryRevision, QueryRevisions, ViewResponse},
-};
+use crate::{model::Query, projection::QueryProjection, response::ViewResponse};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) enum ViewRequestKind {
@@ -25,42 +21,42 @@ impl ViewRequestKind {
             _ => return None,
         })
     }
-
-    fn revisions_match(
-        self,
-        revisions: QueryRevisions,
-        library: &GuiLibrarySnapshot,
-        playlist_id: Option<i64>,
-    ) -> bool {
-        if revisions.library != library.revision || revisions.playlist != library.playlist_revision
-        {
-            return false;
-        }
-        if self != Self::Entries {
-            return true;
-        }
-        let entries = playlist_id.map(|playlist_id| PlaylistEntryRevision {
-            playlist_id,
-            revision: library
-                .playlist_entry_revisions
-                .get(&playlist_id)
-                .copied()
-                .unwrap_or(library.playlist_revision),
-        });
-        match self {
-            Self::Entries => entries.is_some() && revisions.playlist_entries == entries,
-            _ => true,
-        }
-    }
 }
+const DIRECTORY_WORKERS: usize = 4;
 
 #[derive(Default)]
 pub(super) struct ViewRequests {
     generation: u64,
     generations: HashMap<ViewRequestKind, u64>,
+    projections: HashMap<ViewRequestKind, QueryProjection>,
+    workers: HashSet<ViewRequestKind>,
+    queued: HashMap<ViewRequestKind, (Query, u64)>,
+    directory_workers: HashSet<library::TreeBranch>,
+    directory_queued: std::collections::VecDeque<(library::TreeBranch, usize)>,
+    root_count_workers: HashSet<usize>,
+    selection_baseline: Option<(u64, crate::model::QueryStamp)>,
 }
 
 impl ViewRequests {
+    pub(super) fn cancel_directory_demand(&mut self) {
+        self.directory_queued.clear();
+    }
+
+    fn queue_directory(&mut self, branch: library::TreeBranch, offset: usize) {
+        if let Some(index) = self
+            .directory_queued
+            .iter()
+            .position(|(key, _)| key == &branch)
+        {
+            self.directory_queued.remove(index);
+        } else if self.directory_queued.len() == DIRECTORY_WORKERS {
+            self.directory_queued.pop_front();
+        }
+        // Unsubmitted demand owns no pending token; a still-visible dropped row
+        // can demand again after any completion, without retaining a visited-tree log.
+        self.directory_queued.push_back((branch, offset));
+    }
+
     fn next_generation(&mut self) -> u64 {
         self.generation = self.generation.wrapping_add(1);
         self.generation
@@ -78,7 +74,7 @@ impl ViewRequests {
         if !self.is_current(kind, generation) {
             return false;
         }
-        self.cancel(kind);
+        self.generations.remove(&kind);
         true
     }
 
@@ -88,23 +84,42 @@ impl ViewRequests {
 
     pub(super) fn cancel(&mut self, kind: ViewRequestKind) {
         self.generations.remove(&kind);
+        self.queued.remove(&kind);
+        if let Some(projection) = self.projections.get_mut(&kind) {
+            projection.cancel();
+        }
     }
 
     fn invalidate_pages(&mut self) {
         // Existence lookups are not pages; changing page size cannot supersede them.
-        self.generations
-            .retain(|kind, _| matches!(kind, ViewRequestKind::Selection));
+        for kind in [
+            ViewRequestKind::Summaries,
+            ViewRequestKind::Entries,
+            ViewRequestKind::Queue,
+        ] {
+            self.cancel(kind);
+        }
     }
 }
 
 impl GuiApp {
     pub(super) fn request_root_counts(&mut self, cx: &mut Context<Self>) {
+        if !self.panel_demand("library") {
+            return;
+        }
+        if !self.browser.requests.root_count_workers.is_empty() {
+            return;
+        }
         let roots = self.state.system.config.library_roots.clone();
         let structure_revision = self.state.library.structure_revision;
         let (generation, batches) = self
             .browser
             .library
             .begin_root_counts(&roots, structure_revision);
+        self.browser
+            .requests
+            .root_count_workers
+            .extend(batches.iter().copied());
         for offset in batches {
             let batch =
                 roots[offset..(offset + crate::model::MAX_QUERY_ROWS).min(roots.len())].to_vec();
@@ -115,15 +130,20 @@ impl GuiApp {
                     .spawn(async move { handle.query(Query::LibraryRootCounts { roots: batch }) })
                     .await;
                 let _ = this.update(cx, |this, cx| {
+                    this.browser.requests.root_count_workers.remove(&offset);
                     this.refresh(cx);
                     if !this.browser.library.counts_current(
                         generation,
                         &this.state.system.config.library_roots,
                         this.state.library.structure_revision,
                     ) {
+                        this.request_root_counts(cx);
                         return;
                     }
-                    if response.revisions.structure != structure_revision {
+                    let query = Query::LibraryRootCounts { roots: Vec::new() };
+                    if query.stamp(response.revisions)
+                        != query.stamp(this.state.query_revisions(None))
+                    {
                         this.browser.library.fail_root_counts(generation, offset);
                         this.request_root_counts(cx);
                         return;
@@ -139,6 +159,7 @@ impl GuiApp {
                         }
                         _ => this.browser.library.fail_root_counts(generation, offset),
                     }
+                    this.request_root_counts(cx);
                     cx.notify();
                 });
             })
@@ -155,21 +176,29 @@ impl GuiApp {
             return;
         };
         self.browser.requests.begin(kind, generation);
+        let revisions = self
+            .state
+            .query_revisions(self.browser.playlists.entries().playlist_id);
+        let owner = self.browser.requests.projections.entry(kind).or_default();
+        owner.sync(&query, revisions);
+        let owner_generation = owner.generation();
+        if !self.browser.requests.workers.insert(kind) {
+            self.browser
+                .requests
+                .queued
+                .insert(kind, (query, generation));
+            return;
+        }
         let selected_playlist = self.browser.playlists.selected();
+        let selection_generation = self.browser.playlists.selection_generation();
+        let request_query = query.clone();
         let handle = self.handle.clone();
         cx.spawn(async move |this, cx| {
             // Coalesce quick changes; generations reject superseded queries.
             cx.background_executor()
                 .timer(Duration::from_millis(80))
                 .await;
-            if !this
-                .update(cx, |this, _| {
-                    this.browser.requests.is_current(kind, generation)
-                })
-                .unwrap_or(false)
-            {
-                return;
-            }
+            // The physical gate remains held through cancellation and core completion.
             let response = cx
                 .background_executor()
                 .spawn(async move { handle.query(query) })
@@ -177,8 +206,27 @@ impl GuiApp {
             let revisions = response.revisions;
             let result = response.result;
             let _ = this.update(cx, |this, cx| {
+                this.browser.requests.workers.remove(&kind);
                 this.refresh(cx);
-                if !this.browser.requests.finish(kind, generation) {
+                if !this.browser.requests.is_current(kind, generation) {
+                    this.dispatch_queued_view(kind, cx);
+                    return;
+                }
+                let current = this
+                    .state
+                    .query_revisions(this.browser.playlists.entries().playlist_id);
+                let owner = this.browser.requests.projections.entry(kind).or_default();
+                owner.sync(&request_query, current);
+                let accepted = owner.accepts(&request_query, owner_generation, revisions);
+                this.browser.requests.finish(kind, generation);
+                if kind == ViewRequestKind::Selection
+                    && this.browser.playlists.selection_generation() != selection_generation
+                {
+                    this.dispatch_queued_view(kind, cx);
+                    return;
+                }
+                if !accepted {
+                    this.dispatch_queued_view(kind, cx);
                     return;
                 }
                 let result = match result {
@@ -199,30 +247,7 @@ impl GuiApp {
                         return;
                     }
                 };
-                if !kind.revisions_match(
-                    revisions,
-                    &this.state.library,
-                    this.browser.playlists.entries().playlist_id,
-                ) {
-                    match kind {
-                        ViewRequestKind::Summaries => this.request_playlist_summaries(
-                            this.browser.playlists.summaries().offset,
-                            cx,
-                        ),
-                        ViewRequestKind::Entries => {
-                            if let Some(id) = this.browser.playlists.entries().playlist_id {
-                                this.request_playlist_entries(
-                                    id,
-                                    this.browser.playlists.entries().offset,
-                                    cx,
-                                );
-                            }
-                        }
-                        ViewRequestKind::Selection => this.request_playlist_selection(cx),
-                        ViewRequestKind::Queue => unreachable!("queue pages use their own worker"),
-                    }
-                    return;
-                }
+                this.dispatch_queued_view(kind, cx);
                 match result {
                     ViewResponse::PlaylistSummaries(page) if kind == ViewRequestKind::Summaries => {
                         this.browser.accept_playlist_summaries(page);
@@ -246,13 +271,47 @@ impl GuiApp {
         .detach();
     }
 
+    fn dispatch_queued_view(&mut self, kind: ViewRequestKind, cx: &mut Context<Self>) {
+        if let Some((query, generation)) = self.browser.requests.queued.remove(&kind) {
+            if !self.panel_demand("playlists") {
+                self.browser.requests.cancel(kind);
+                match kind {
+                    ViewRequestKind::Summaries => self.browser.playlists.cancel_page(false),
+                    ViewRequestKind::Entries => self.browser.playlists.cancel_page(true),
+                    _ => {}
+                }
+                return;
+            }
+            self.request_view(query, generation, cx);
+        }
+    }
+
     pub(super) fn request_directory_page(
         &mut self,
         branch: library::TreeBranch,
         offset: usize,
         cx: &mut Context<Self>,
     ) {
+        if !self.panel_demand("library") {
+            return;
+        }
         let page_size = self.view_page_size();
+        if self
+            .browser
+            .library
+            .sync_projection(self.state.query_revisions(None))
+        {
+            self.browser.requests.cancel_directory_demand();
+        }
+        let owner_query = self.browser.library.projection_query();
+        let owner_generation = self.browser.library.projection.generation();
+        if !branch.is_forest()
+            && (self.browser.requests.directory_workers.contains(&branch)
+                || self.browser.requests.directory_workers.len() >= DIRECTORY_WORKERS)
+        {
+            self.browser.requests.queue_directory(branch, offset);
+            return;
+        }
         let generation = self.browser.requests.next_generation();
         let offset =
             self.browser
@@ -275,6 +334,10 @@ impl GuiApp {
             cx.notify();
             return;
         }
+        self.browser
+            .requests
+            .directory_workers
+            .insert(branch.clone());
         let handle = self.handle.clone();
         let favorite = self.browser.library.favorites_only().then_some(true);
         let query = self.browser.library.buffer().query.clone();
@@ -289,15 +352,30 @@ impl GuiApp {
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(delay).await;
             if !this
-                .update(cx, |this, _| {
-                    this.browser.library.directory_request_pending(
-                        &branch,
-                        generation,
-                        query.as_deref(),
-                        favorite,
-                        tree_active,
-                        missing,
-                    )
+                .update(cx, |this, cx| {
+                    this.refresh(cx);
+                    if this.panel_demand("library")
+                        && this.browser.library.projection.accepts(
+                            &owner_query,
+                            owner_generation,
+                            this.state.query_revisions(None),
+                        )
+                        && this.browser.library.directory_request_pending(
+                            &branch,
+                            generation,
+                            query.as_deref(),
+                            favorite,
+                            tree_active,
+                            missing,
+                        )
+                    {
+                        return true;
+                    }
+                    this.browser.library.cancel_directory(&branch, generation);
+                    this.browser.requests.directory_workers.remove(&branch);
+                    this.dispatch_directory_demand(cx);
+                    cx.notify();
+                    false
                 })
                 .unwrap_or(false)
             {
@@ -331,60 +409,108 @@ impl GuiApp {
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
+                this.browser.requests.directory_workers.remove(&branch);
                 this.refresh(cx);
-                if !this.browser.library.directory_request_pending(
-                    &branch,
-                    generation,
-                    query.as_deref(),
-                    favorite,
-                    tree_active,
-                    missing,
-                ) {
-                    return;
-                }
-                let result = match response.result {
-                    Ok(result) => result,
-                    Err(error) => {
-                        this.browser.library.fail_directory(&branch, generation);
-                        this.error = Some(error.to_string());
-                        cx.notify();
+                (|| {
+                    if !this.browser.library.directory_request_pending(
+                        &branch,
+                        generation,
+                        query.as_deref(),
+                        favorite,
+                        tree_active,
+                        missing,
+                    ) {
                         return;
                     }
-                };
-                if response.revisions.structure != this.state.library.structure_revision
-                    || response.revisions.library != this.state.library.revision
-                {
-                    this.request_directory_page(branch, offset, cx);
-                    return;
-                }
-                let page = match result {
-                    ViewResponse::DirectoryPage(page) if tree_active => Some(page),
-                    ViewResponse::LibraryPage(page) if !tree_active => Some(crate::model::Page {
-                        total: page.total,
-                        rows: page
-                            .rows
-                            .into_iter()
-                            .map(crate::model::DirectoryRow::Track)
-                            .collect(),
-                    }),
-                    _ => None,
-                };
-                if let Some(page) = page {
-                    this.browser
-                        .library
-                        .accept_directory(&branch, generation, page);
-                }
-                cx.notify();
+                    let result = match response.result {
+                        Ok(result) => result,
+                        Err(error) => {
+                            this.browser.library.fail_directory(&branch, generation);
+                            this.error = Some(error.to_string());
+                            cx.notify();
+                            return;
+                        }
+                    };
+                    if !this.browser.library.projection.accepts(
+                        &owner_query,
+                        owner_generation,
+                        response.revisions,
+                    ) {
+                        return;
+                    }
+                    let page = match result {
+                        ViewResponse::DirectoryPage(page) if tree_active => Some(page),
+                        ViewResponse::LibraryPage(page) if !tree_active => {
+                            Some(crate::model::Page {
+                                total: page.total,
+                                rows: page
+                                    .rows
+                                    .into_iter()
+                                    .map(crate::model::DirectoryRow::Track)
+                                    .collect(),
+                            })
+                        }
+                        _ => None,
+                    };
+                    if let Some(page) = page {
+                        this.browser
+                            .library
+                            .accept_directory(&branch, generation, page);
+                    }
+                    cx.notify();
+                })();
+                this.dispatch_directory_demand(cx);
             });
         })
         .detach();
         cx.notify();
     }
 
+    fn dispatch_directory_demand(&mut self, cx: &mut Context<Self>) {
+        if !self.panel_demand("library") {
+            self.browser.requests.directory_queued.clear();
+            return;
+        }
+        while self.browser.requests.directory_workers.len() < DIRECTORY_WORKERS {
+            let next = self
+                .browser
+                .requests
+                .directory_queued
+                .iter()
+                .position(|(branch, _)| !self.browser.requests.directory_workers.contains(branch));
+            let Some(index) = next else {
+                break;
+            };
+            let (branch, offset) = self
+                .browser
+                .requests
+                .directory_queued
+                .remove(index)
+                .expect("queued directory demand");
+            self.request_directory_page(branch, offset, cx);
+        }
+    }
+
     pub(super) fn request_playlist_selection(&mut self, cx: &mut Context<Self>) {
+        if !self.panel_demand("playlists") {
+            return;
+        }
         let Some(id) = self.browser.playlists.selected() else {
             return;
         };
+        let query = Query::PlaylistSummaryBatch {
+            after: id.checked_sub(1),
+            limit: 1,
+            expected: None,
+        };
+        let baseline = (
+            self.browser.playlists.selection_generation(),
+            query.stamp(self.state.query_revisions(None)),
+        );
+        if self.browser.requests.selection_baseline == Some(baseline) {
+            return;
+        }
+        self.browser.requests.selection_baseline = Some(baseline);
         let generation = self.browser.requests.next_generation();
         self.request_view(
             Query::PlaylistSummaryBatch {
@@ -420,7 +546,6 @@ impl GuiApp {
     ) {
         self.browser.playlists.prepare_entries(playlist_id);
         self.load_playlist_entries(playlist_id, offset, cx);
-        self.refresh_entry_selection(cx);
     }
 
     fn load_playlist_entries(&mut self, playlist_id: i64, offset: usize, cx: &mut Context<Self>) {
@@ -439,6 +564,9 @@ impl GuiApp {
         range: std::ops::Range<usize>,
         cx: &mut Context<Self>,
     ) {
+        if !self.panel_demand("playlists") {
+            return;
+        }
         if let Some(offset) =
             self.browser
                 .playlists
@@ -452,6 +580,9 @@ impl GuiApp {
         range: std::ops::Range<usize>,
         cx: &mut Context<Self>,
     ) {
+        if !self.panel_demand("playlists") {
+            return;
+        }
         if let Some(id) = self.browser.playlists.entries().playlist_id
             && let Some(offset) =
                 self.browser
@@ -513,21 +644,13 @@ impl GuiApp {
         self.request_directory_page(library::TreeBranch::default(), 0, cx);
     }
 
-    pub(super) fn refresh_page_size(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn refresh_page_size(&mut self) {
         // Invalidate query tokens and payload, not identity, metadata drafts, or scroll position.
         self.browser.requests.invalidate_pages();
         self.browser.library.refresh_tree(self.view_page_size());
-        self.request_directory_page(library::TreeBranch::default(), 0, cx);
-        self.request_playlist_summaries(
-            self.browser.playlists.summaries().rows.visible().start,
-            cx,
-        );
+        self.browser.playlists.invalidate_summaries();
         if let Some(id) = self.browser.playlists.entries().playlist_id {
-            self.request_playlist_entries(
-                id,
-                self.browser.playlists.entries().rows.visible().start,
-                cx,
-            );
+            self.browser.playlists.prepare_entries(id);
         }
     }
 }
@@ -535,48 +658,71 @@ impl GuiApp {
 #[cfg(test)]
 mod tests {
     use super::{ViewRequestKind, ViewRequests};
-    use crate::{
-        projection::GuiLibrarySnapshot,
-        response::{PlaylistEntryRevision, QueryRevisions},
-    };
+    use crate::projection::GuiLibrarySnapshot;
     use std::sync::Arc;
 
     #[test]
-    fn playlist_queries_reject_relevant_reorders_not_other_playlists() {
+    fn playlist_query_owners_separate_metadata_catalog_and_occurrences() {
+        use crate::model::Query;
         let mut library = GuiLibrarySnapshot::default();
-        let catalog = QueryRevisions::default();
-        let old = QueryRevisions {
-            playlist_entries: Some(PlaylistEntryRevision {
-                playlist_id: 1,
-                revision: 0,
-            }),
-            ..catalog
+        Arc::make_mut(&mut library.playlist_entry_revisions).insert(1, 0);
+        let summaries = Query::PlaylistSummaries {
+            offset: 0,
+            limit: 20,
         };
-        Arc::make_mut(&mut library.playlist_entry_revisions).insert(2, 1);
-        assert!(ViewRequestKind::Summaries.revisions_match(catalog, &library, Some(1)));
-        assert!(ViewRequestKind::Selection.revisions_match(catalog, &library, Some(1)));
-        assert!(ViewRequestKind::Entries.revisions_match(old, &library, Some(1)));
-        Arc::make_mut(&mut library.playlist_entry_revisions).insert(1, 1);
-        assert!(ViewRequestKind::Summaries.revisions_match(catalog, &library, Some(1)));
-        assert!(!ViewRequestKind::Entries.revisions_match(old, &library, Some(1)));
-        let current = QueryRevisions {
-            playlist_entries: Some(PlaylistEntryRevision {
-                playlist_id: 1,
-                revision: 1,
-            }),
-            ..catalog
+        let entries = Query::PlaylistEntries {
+            playlist_id: 1,
+            offset: 0,
+            limit: 20,
         };
-        assert!(ViewRequestKind::Entries.revisions_match(current, &library, Some(1)));
-        assert!(!ViewRequestKind::Entries.revisions_match(current, &library, Some(2)));
-        let before_metadata = library.clone();
+        let compact = Query::PlaylistEntryLocations {
+            playlist_id: 1,
+            entry_ids: vec![3],
+        };
+        let before = library.query_revisions(Some(1));
         library.revision += 1;
-        assert!(!ViewRequestKind::Entries.revisions_match(current, &library, Some(1)));
-        assert!(!ViewRequestKind::Summaries.revisions_match(catalog, &library, Some(1)));
-        library = before_metadata;
+        let metadata = library.query_revisions(Some(1));
+        assert_eq!(summaries.stamp(before), summaries.stamp(metadata));
+        assert_ne!(entries.stamp(before), entries.stamp(metadata));
+        assert_eq!(compact.stamp(before), compact.stamp(metadata));
         library.playlist_revision += 1;
-        library.playlist_entry_revisions = Arc::default();
-        // Epoch change rejects the old zero token even after the scoped map resets.
-        assert!(!ViewRequestKind::Entries.revisions_match(old, &library, Some(1)));
+        let renamed = library.query_revisions(Some(1));
+        assert_ne!(summaries.stamp(metadata), summaries.stamp(renamed));
+        assert_eq!(entries.stamp(metadata), entries.stamp(renamed));
+        assert_eq!(compact.stamp(metadata), compact.stamp(renamed));
+        Arc::make_mut(&mut library.playlist_entry_revisions).remove(&1);
+        let deleted = library.query_revisions(Some(1));
+        assert_ne!(compact.stamp(renamed), compact.stamp(deleted));
+    }
+
+    #[test]
+    fn cancelling_a_view_retains_its_physical_worker_gate() {
+        let mut requests = ViewRequests::default();
+        requests.begin(ViewRequestKind::Entries, 1);
+        requests.workers.insert(ViewRequestKind::Entries);
+        requests.cancel(ViewRequestKind::Entries);
+        assert!(!requests.pending(ViewRequestKind::Entries));
+        assert!(requests.workers.contains(&ViewRequestKind::Entries));
+        assert!(!requests.workers.insert(ViewRequestKind::Entries));
+        assert!(requests.workers.remove(&ViewRequestKind::Entries));
+        assert!(requests.workers.insert(ViewRequestKind::Entries));
+    }
+
+    #[test]
+    fn queued_directory_demand_coalesces_without_releasing_a_worker() {
+        let mut requests = ViewRequests::default();
+        let branch = super::library::TreeBranch::default();
+        requests.directory_workers.insert(branch.clone());
+        requests.queue_directory(branch.clone(), 0);
+        requests.queue_directory(branch.clone(), 40);
+        assert_eq!(requests.directory_queued.len(), 1);
+        assert_eq!(
+            requests.directory_queued.front(),
+            Some(&(branch.clone(), 40))
+        );
+        requests.cancel_directory_demand();
+        assert!(requests.directory_queued.is_empty());
+        assert!(requests.directory_workers.contains(&branch));
     }
 
     #[test]

@@ -23,11 +23,17 @@ at larger interface scales.
 They apply only when creating a default layout: loading a saved tree retains
 its boundaries, including omitted or empty arrays that mean equal division.
 
-Hidden windows still reconcile core state. A query completion synchronizes the
-GUI snapshot before comparing query revisions, so rows from a current query are
-not rejected against a stale hidden-window snapshot. Visibility gates rendering
-and analysis demand, not state validity. Keyboard list actions target only a
-visible active panel; see link:02_library.adoc#_paged_views[Paged views].
+Hidden windows and inactive tabs still reconcile core state and query-owner keys.
+A query completion synchronizes the GUI snapshot before checking identity,
+generation, and the query-owned dependency stamp. Visibility gates rendering,
+analysis, and new tree/Details reads, not state validity; revealing a panel
+demands only missing current data. Metadata refresh retains dirty input, save
+baseline, unavailable state, and follow intent. Playlist row metadata refresh
+does not relocate compact occurrence selection. Shared projection ownership and
+physical-worker cancellation rules are authoritative in
+link:22_cache.adoc#_query_projection_retention[Query projection retention].
+Keyboard list actions target only a visible active panel; see
+link:02_library.adoc#_paged_views[Paged views].
 
 == Normalized trees and resource boundaries
 

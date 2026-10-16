@@ -200,12 +200,12 @@ overrides, favorites, decoder hints, counts, and last-played timestamps. `librar
 they never delete media files. Missing rows remain visible in playlist views
 until removed or cleaned.
 
-Committed edits, deletions, scans, and playlist changes invalidate their affected
-library, structure, and playlist query domains before refreshing counts, history,
-or current-track projections. A playlist catalog change also resets scoped entry
-tokens above the previous epoch's entry tokens. Queue-content revisions are saved
-in the same database transaction as the change; queue refresh is attempted even
-if refreshing the catalog fails.
+Committed edits, deletions, scans, and playlist changes announce their actual
+affected query facts before refreshing counts, history, or current-track
+projections. Playlist names/catalog summaries and each playlist's content/lifetime
+are independent: changing one collection does not invalidate another. Queue
+content revisions are committed with the underlying transaction; refreshing the
+queue is attempted even if another projection read fails.
 
 A refresh error explicitly reports that the change was committed, not rolled
 back. Some previous projections may remain visible until a later successful
@@ -373,10 +373,12 @@ including ranges that cross groups or unloaded pages. Selected root headers
 support directory rescanning and dragging with the same recursive semantics
 as tree directories; actions deduplicate overlapping track identities.
 
-After a scan changes stored library data, both views and root counts refresh
-automatically, including previously empty expanded folders, even if some files
-failed to import. Unchanged scans preserve existing view revisions. Collapsed
-folders load updated contents when reopened.
+After a scan changes effective library rows or directory identities, affected
+views refresh on demand, including previously empty expanded folders, even if
+some files failed to import. Root counts change only for identity/path changes;
+size/mtime-only changes refresh duplicate verification facts without reloading
+library rows, playlist summaries, or unrelated collections. Unchanged scans
+preserve query validity. Collapsed folders load current contents when reopened.
 The scan status row offers a close button after completion or failure. Closing
 it hides the result and progress bar without changing imported tracks or the
 separate error message. A new scan shows progress again.

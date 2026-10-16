@@ -14,27 +14,7 @@ use std::{path::Path, sync::Arc};
 use tree::TreeItem;
 pub(super) use tree::{BranchStatus, DirectoryTree, TreeBranch};
 
-#[derive(Default)]
-pub(super) struct LibraryLocateState {
-    pub(super) generation: u64,
-    pub(super) pending: bool,
-    pub(super) notice: Option<(i64, crate::model::LibraryLocateResult)>,
-    pub(super) reveal: Option<(i64, TreeBranch, usize)>,
-    pub(super) reveal_scrolled: bool,
-    pub(super) highlight: Option<(i64, std::time::Instant)>,
-    pub(super) highlight_task: Option<gpui::Task<()>>,
-}
-
-impl LibraryLocateState {
-    pub(super) fn invalidate(&mut self) {
-        self.generation = self.generation.wrapping_add(1);
-        self.notice = None;
-        self.reveal = None;
-        self.reveal_scrolled = false;
-        self.highlight = None;
-        self.highlight_task = None;
-    }
-}
+pub(super) use locate::LibraryLocateState;
 
 pub(super) fn track_detail(
     i18n: &crate::i18n::Localizer,
@@ -466,6 +446,8 @@ impl GuiApp {
     ) -> AnyElement {
         let row_count = self.browser.library.tree().row_count();
         let scroll = &self.browser.library.tree().scroll;
+        // Local forest acceptance must notify after prepaint to redraw the loaded rows.
+        let demand_owner = cx.entity().downgrade();
         let view = list_viewport(
             super::components::scrollable_list(
                 ("library-directory-scrollbar", panel_id),
@@ -581,6 +563,7 @@ impl GuiApp {
                                     cx,
                                     move |this, _, cx| {
                                         if this.browser.library.root_count_failed(&scan_path) {
+                                            this.browser.library.retry_root_counts();
                                             this.request_root_counts(cx);
                                         } else {
                                             this.send(
@@ -813,16 +796,23 @@ impl GuiApp {
                         .collect::<Vec<_>>()
                 }),
             )
-            .with_decoration(super::paged::viewport_demand(cx.processor(
-                |this, range: std::ops::Range<usize>, _, cx| {
-                    for (path, offset) in this.browser.library.demand_directories(range) {
-                        this.request_directory_page(path, offset, cx);
-                    }
-                    if let Some((id, index)) = this.browser.library.take_ready_manual_navigation() {
-                        this.prepare_tree_row(id, index, cx);
-                    }
-                },
-            )))
+            .with_decoration(super::paged::viewport_demand(move |range, _, cx| {
+                let owner = demand_owner.clone();
+                cx.defer(move |cx| {
+                    let _ = owner.update(cx, |this, cx| {
+                        if !this.panel_demand("library") {
+                            return;
+                        }
+                        this.request_root_counts(cx);
+                        for (path, offset) in this.browser.library.demand_directories(range) {
+                            this.request_directory_page(path, offset, cx);
+                        }
+                        if let Some((id, index)) = this.browser.library.take_ready_manual_navigation() {
+                            this.prepare_tree_row(id, index, cx);
+                        }
+                    });
+                });
+            }))
             .h_full()
             .min_h_0()
             .w_full()

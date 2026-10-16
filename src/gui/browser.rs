@@ -21,6 +21,7 @@ use crate::model::{
     DirectoryRow, HistoryEntry, LibrarySort, Page, PlaylistEntryLocation, PlaylistEntryRow,
     PlaylistSummary, Query,
 };
+use crate::{projection::QueryProjection, response::QueryRevisions};
 use gpui::ScrollStrategy;
 use selection::LibrarySelection;
 use std::{collections::HashSet, ops::Range, sync::Arc};
@@ -113,8 +114,7 @@ impl BrowserState {
 
 #[derive(Default)]
 struct RootCounts {
-    generation: u64,
-    structure_revision: u64,
+    owner: QueryProjection,
     roots: Vec<std::path::PathBuf>,
     totals: std::collections::HashMap<std::path::PathBuf, usize>,
     pending: HashSet<usize>,
@@ -123,7 +123,7 @@ struct RootCounts {
 
 impl RootCounts {
     fn invalidate(&mut self) {
-        self.generation = self.generation.wrapping_add(1);
+        self.owner.cancel();
         self.totals.clear();
         self.pending.clear();
         self.failed.clear();
@@ -139,6 +139,7 @@ pub(super) struct LibraryViewBuffer {
 }
 
 pub(super) struct LibraryBrowser {
+    pub(super) projection: QueryProjection,
     buffer: LibraryViewBuffer,
     tree: DirectoryTree,
     range_selection: LibrarySelection,
@@ -156,6 +157,7 @@ pub(super) struct LibraryBrowser {
 impl Default for LibraryBrowser {
     fn default() -> Self {
         Self {
+            projection: Default::default(),
             buffer: LibraryViewBuffer {
                 sort: LibrarySort::Album,
                 ..Default::default()
@@ -176,28 +178,86 @@ impl Default for LibraryBrowser {
 }
 
 impl LibraryBrowser {
+    pub(super) fn projection_query(&self) -> Query {
+        if self.tree_active {
+            Query::DirectoryPage {
+                path: Default::default(),
+                query: self.buffer.query.clone(),
+                favorite: self.buffer.favorite,
+                missing: self.buffer.missing,
+                offset: 0,
+                limit: 1,
+            }
+        } else {
+            Query::LibraryRootPage {
+                path: Default::default(),
+                query: self.buffer.query.clone(),
+                favorite: self.buffer.favorite,
+                missing: self.buffer.missing,
+                sort: self.buffer.sort,
+                offset: 0,
+                limit: 1,
+            }
+        }
+    }
+
+    pub(super) fn sync_projection(&mut self, revisions: QueryRevisions) -> bool {
+        if !self.projection.sync(&self.projection_query(), revisions) {
+            return false;
+        }
+        self.invalidate_projection();
+        self.tree.invalidate();
+        true
+    }
+    pub(super) fn sync_root_counts(
+        &mut self,
+        roots: &[std::path::PathBuf],
+        structure_revision: u64,
+    ) {
+        let revisions = QueryRevisions {
+            structure: structure_revision,
+            ..Default::default()
+        };
+        let stamp = Query::LibraryRootCounts { roots: Vec::new() }.stamp(revisions);
+        if self.counts.roots == roots && self.counts.owner.stamp() == Some(stamp) {
+            return;
+        }
+        let query = Query::LibraryRootCounts {
+            roots: roots.to_vec(),
+        };
+        if self.counts.owner.sync(&query, revisions) {
+            self.counts.totals.clear();
+            self.counts.pending.clear();
+            self.counts.failed.clear();
+            self.counts.roots = roots.to_vec();
+        }
+    }
+
+    pub(super) fn retry_root_counts(&mut self) {
+        self.counts.failed.clear();
+    }
     pub(super) fn begin_root_counts(
         &mut self,
         roots: &[std::path::PathBuf],
         structure_revision: u64,
     ) -> (u64, Vec<usize>) {
-        if self.counts.roots != roots || self.counts.structure_revision != structure_revision {
-            self.counts.invalidate();
-            self.counts.roots = roots.to_vec();
-            self.counts.structure_revision = structure_revision;
+        self.sync_root_counts(roots, structure_revision);
+        if !self.counts.pending.is_empty() {
+            return (self.counts.owner.generation(), Vec::new());
         }
         let batches = (0..roots.len())
             .step_by(crate::model::MAX_QUERY_ROWS)
             .filter(|offset| {
                 !self.counts.pending.contains(offset)
+                    && !self.counts.failed.contains(offset)
                     && roots[*offset..(*offset + crate::model::MAX_QUERY_ROWS).min(roots.len())]
                         .iter()
                         .any(|root| !self.counts.totals.contains_key(root))
             })
+            .take(1)
             .collect::<Vec<_>>();
         self.counts.pending.extend(batches.iter().copied());
-        self.counts.failed.clear();
-        (self.counts.generation, batches)
+        (self.counts.owner.generation(), batches)
     }
 
     pub(super) fn counts_current(
@@ -206,9 +266,14 @@ impl LibraryBrowser {
         roots: &[std::path::PathBuf],
         structure_revision: u64,
     ) -> bool {
-        self.counts.generation == generation
-            && self.counts.roots == roots
-            && self.counts.structure_revision == structure_revision
+        let query = Query::LibraryRootCounts { roots: Vec::new() };
+        self.counts.roots == roots
+            && self.counts.owner.generation() == generation
+            && self.counts.owner.stamp()
+                == Some(query.stamp(QueryRevisions {
+                    structure: structure_revision,
+                    ..Default::default()
+                }))
     }
 
     pub(super) fn accept_root_counts(
@@ -217,7 +282,7 @@ impl LibraryBrowser {
         offset: usize,
         counts: Vec<crate::model::LibraryRootCount>,
     ) {
-        if self.counts.generation == generation && self.counts.pending.remove(&offset) {
+        if self.counts.owner.generation() == generation && self.counts.pending.remove(&offset) {
             self.counts
                 .totals
                 .extend(counts.into_iter().map(|count| (count.path, count.total)));
@@ -225,7 +290,7 @@ impl LibraryBrowser {
     }
 
     pub(super) fn fail_root_counts(&mut self, generation: u64, offset: usize) {
-        if self.counts.generation == generation && self.counts.pending.remove(&offset) {
+        if self.counts.owner.generation() == generation && self.counts.pending.remove(&offset) {
             self.counts.failed.insert(offset);
         }
     }
@@ -325,6 +390,10 @@ impl LibraryBrowser {
 
     pub(super) fn fail_directory(&mut self, branch: &TreeBranch, generation: u64) {
         self.tree.fail(branch, generation);
+    }
+
+    pub(super) fn cancel_directory(&mut self, branch: &TreeBranch, generation: u64) {
+        self.tree.cancel_request(branch, generation);
     }
 
     pub(super) fn retry_directory(&mut self, branch: &TreeBranch) {
@@ -586,13 +655,20 @@ impl PlaylistBrowser {
         previous: &crate::projection::GuiLibrarySnapshot,
         next: &crate::projection::GuiLibrarySnapshot,
     ) -> PlaylistRefresh {
-        let summaries = previous.revision != next.revision
-            || previous.structure_revision != next.structure_revision
-            || previous.playlist_revision != next.playlist_revision;
-        let entries = self.entries.playlist_id.is_some_and(|id| {
-            summaries
-                || previous.playlist_entry_revisions.get(&id)
-                    != next.playlist_entry_revisions.get(&id)
+        let summaries_query = Query::PlaylistSummaries {
+            offset: 0,
+            limit: 1,
+        };
+        let summaries = summaries_query.stamp(previous.query_revisions(None))
+            != summaries_query.stamp(next.query_revisions(None));
+        let entries = self.entries.playlist_id.is_some_and(|playlist_id| {
+            let query = Query::PlaylistEntries {
+                playlist_id,
+                offset: 0,
+                limit: 1,
+            };
+            query.stamp(previous.query_revisions(Some(playlist_id)))
+                != query.stamp(next.query_revisions(Some(playlist_id)))
         });
         PlaylistRefresh { summaries, entries }
     }
@@ -607,6 +683,14 @@ impl PlaylistBrowser {
 
     pub(super) fn invalidate_summaries(&mut self) {
         self.summaries.rows.invalidate();
+    }
+
+    pub(super) fn cancel_page(&mut self, entries: bool) {
+        if entries {
+            self.entries.rows.cancel_pending();
+        } else {
+            self.summaries.rows.cancel_pending();
+        }
     }
 
     pub(super) fn prepare_page(&mut self, entries: bool, offset: usize, page_size: usize) -> Query {
@@ -734,7 +818,6 @@ impl PlaylistBrowser {
         } else {
             self.entries.rows.invalidate();
         }
-        self.track_selection.invalidate();
         self.entries.playlist_id = Some(id);
     }
 
@@ -1358,7 +1441,7 @@ mod tests {
             .map(|index| std::path::PathBuf::from(format!("/root/{index}")))
             .collect();
         let (generation, batches) = library.begin_root_counts(&roots, 7);
-        assert_eq!(batches, vec![0, crate::model::MAX_QUERY_ROWS]);
+        assert_eq!(batches, vec![0]);
         assert_eq!(library.root_count(&roots[0]), None);
         library.accept_root_counts(
             generation,
@@ -1372,11 +1455,18 @@ mod tests {
                 .collect(),
         );
         assert_eq!(library.root_count(&roots[0]), Some(0));
+        assert_eq!(
+            library.begin_root_counts(&roots, 7).1,
+            vec![crate::model::MAX_QUERY_ROWS]
+        );
         library.fail_root_counts(generation, crate::model::MAX_QUERY_ROWS);
         assert!(!library.root_count_failed(&roots[0]));
         assert!(library.root_count_failed(roots.last().unwrap()));
         assert!(!library.root_count_failed(std::path::Path::new("/other")));
         assert_eq!(library.root_count(roots.last().unwrap()), None);
+        assert!(library.begin_root_counts(&roots, 7).1.is_empty());
+        assert!(library.root_count_failed(roots.last().unwrap()));
+        library.retry_root_counts();
         assert_eq!(
             library.begin_root_counts(&roots, 7).1,
             vec![crate::model::MAX_QUERY_ROWS]
@@ -1591,6 +1681,17 @@ mod tests {
         assert!(playlists.entries().rows.is_empty());
     }
     #[test]
+    fn metadata_row_refresh_does_not_invalidate_occurrence_identity() {
+        let mut playlists = PlaylistBrowser::default();
+        playlists.select(1, "one".into(), 0);
+        playlists.prepare_entries(1);
+        playlists.select_entry(41, 3);
+        playlists.prepare_entries(1);
+        assert_eq!(playlists.selected_entry(), Some(41));
+        assert!(playlists.entry_ready());
+    }
+
+    #[test]
     fn playlist_reorder_refresh_is_scoped_and_preserves_catalog_payload() {
         use crate::projection::GuiLibrarySnapshot;
         let mut playlists = PlaylistBrowser::default();
@@ -1627,6 +1728,7 @@ mod tests {
         );
         if refresh.entries {
             playlists.prepare_entries(1);
+            playlists.track_selection.invalidate();
         }
         assert_eq!(playlists.summaries.rows.get(0).unwrap().name, "one");
         assert_eq!(playlists.selected_entry(), Some(41));
@@ -1654,7 +1756,7 @@ mod tests {
         assert_eq!(
             playlists.refresh_changes(&before_metadata, &next),
             PlaylistRefresh {
-                summaries: true,
+                summaries: false,
                 entries: true,
             }
         );
@@ -1699,6 +1801,7 @@ mod tests {
         });
         playlists.demand_page(true, 8_000..8_010, 20);
         playlists.prepare_entries(1);
+        playlists.track_selection.invalidate();
         assert_eq!(playlists.selected_entry(), Some(41));
         assert!(!playlists.entry_ready());
         // The one identity result restores actions without restoring offscreen payload.
@@ -1721,6 +1824,7 @@ mod tests {
             Some(7_000)
         );
         playlists.prepare_entries(1);
+        playlists.track_selection.invalidate();
         assert!(!playlists.entry_ready());
         playlists.accept_entry_locations(vec![PlaylistEntryLocation {
             id: 41,
@@ -1744,6 +1848,7 @@ mod tests {
         playlists.prepare_entries(1);
         playlists.select_entry(41, 3);
         playlists.prepare_entries(1);
+        playlists.track_selection.invalidate();
         assert!(!playlists.entry_ready());
         assert_eq!(playlists.selected_entry(), Some(41));
         playlists.accept_entry_locations(Vec::new());
@@ -1767,6 +1872,7 @@ mod tests {
         }]);
         assert!(playlists.entry_ready());
         playlists.prepare_entries(1);
+        playlists.track_selection.invalidate();
         assert!(!playlists.entry_ready());
         playlists.accept_entry_locations(vec![PlaylistEntryLocation {
             id: 41,

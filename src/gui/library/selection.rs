@@ -5,7 +5,8 @@ use crate::gui::library::{
 };
 use crate::{
     gui::{GuiApp, ListFocus},
-    model::{DirectoryRow, LibrarySort, Query},
+    model::{DirectoryRow, LibrarySort, Query, QueryStamp},
+    projection::QueryProjection,
     response::{QueryResponse, QueryRevisions, ViewResponse},
 };
 use gpui::Context;
@@ -79,17 +80,15 @@ enum Projection {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Scope {
-    library: u64,
-    structure: u64,
+    stamp: QueryStamp,
     projection: Projection,
 }
 
 impl Scope {
-    fn capture(browser: &LibraryBrowser, revisions: (u64, u64)) -> Self {
+    fn capture(browser: &LibraryBrowser, revisions: QueryRevisions) -> Self {
         let view = browser.buffer();
         Self {
-            library: revisions.0,
-            structure: revisions.1,
+            stamp: browser.projection_query().stamp(revisions),
             projection: if browser.tree_active() {
                 Projection::Tree {
                     query: view.query.clone(),
@@ -111,46 +110,8 @@ impl Scope {
         }
     }
 
-    fn matches(&self, browser: &LibraryBrowser, revisions: (u64, u64)) -> bool {
-        let view = browser.buffer();
-        self.library == revisions.0
-            && self.structure == revisions.1
-            && match &self.projection {
-                Projection::Tree {
-                    query,
-                    favorite,
-                    missing,
-                    revision,
-                    total,
-                } => {
-                    browser.tree_active()
-                        && query == &view.query
-                        && *favorite == browser.favorites_only().then_some(true)
-                        && *missing == view.missing
-                        && *revision == browser.tree().projection_revision()
-                        && *total == browser.tree().row_count()
-                }
-                Projection::Flat {
-                    query,
-                    favorite,
-                    missing,
-                    sort,
-                    revision,
-                    total,
-                } => {
-                    !browser.tree_active()
-                        && query == &view.query
-                        && *favorite == view.favorite
-                        && *missing == view.missing
-                        && *sort == view.sort
-                        && *revision == browser.tree().projection_revision()
-                        && *total == browser.tree().row_count()
-                }
-            }
-    }
-
-    fn accepts(&self, revisions: QueryRevisions) -> bool {
-        self.library == revisions.library && self.structure == revisions.structure
+    fn matches(&self, browser: &LibraryBrowser, revisions: QueryRevisions) -> bool {
+        *self == Self::capture(browser, revisions)
     }
 
     fn total(&self) -> usize {
@@ -259,7 +220,7 @@ impl RangeJob {
     }
 
     fn accept(&mut self, slice: &Slice, response: QueryResponse) -> Result<(), SelectionError> {
-        if !self.scope.accepts(response.revisions) {
+        if self.query(slice).stamp(response.revisions) != self.scope.stamp {
             return Err(SelectionError::Message("gl-library-changed"));
         }
         let result = response.result.map_err(|error| error.to_string())?;
@@ -338,7 +299,7 @@ impl RangeJob {
 #[derive(Default)]
 pub(super) struct LibrarySelection {
     anchor: Option<Anchor>,
-    token: u64,
+    projection: QueryProjection,
     pending: Option<RangeJob>,
     // Cancellation keeps this slot occupied until the outstanding query returns.
     active: Option<u64>,
@@ -347,7 +308,7 @@ pub(super) struct LibrarySelection {
 
 impl LibrarySelection {
     pub(super) fn cancel(&mut self, clear_anchor: bool) {
-        self.token = self.token.wrapping_add(1);
+        self.projection.cancel();
         self.intent = None;
         self.pending = None;
         if clear_anchor {
@@ -366,7 +327,8 @@ impl LibrarySelection {
     }
 
     fn accepts_completion(&self, token: u64) -> bool {
-        self.token == token && self.pending.as_ref().is_some_and(|job| job.token == token)
+        self.projection.generation() == token
+            && self.pending.as_ref().is_some_and(|job| job.token == token)
     }
 }
 
@@ -426,7 +388,7 @@ impl LibraryBrowser {
         node: &LibraryNode,
         index: usize,
         multi: bool,
-        revisions: (u64, u64),
+        revisions: QueryRevisions,
         page_size: usize,
     ) -> Result<bool, SelectionError> {
         let scope = Scope::capture(self, revisions);
@@ -436,6 +398,8 @@ impl LibraryBrowser {
         self.cancel_navigation();
         let range = self.range_selection.interval(&scope, index);
         self.range_selection.cancel(false);
+        let query = self.projection_query();
+        self.range_selection.projection.sync(&query, revisions);
         let spans = self
             .tree
             .range_spans(range.clone())
@@ -457,7 +421,7 @@ impl LibraryBrowser {
             }
         }
         self.range_selection.pending = Some(RangeJob {
-            token: self.range_selection.token,
+            token: self.range_selection.projection.generation(),
             scope,
             slices,
             selected: HashSet::new(),
@@ -479,7 +443,7 @@ impl LibraryBrowser {
 
     fn advance_range(
         &mut self,
-        revisions: (u64, u64),
+        revisions: QueryRevisions,
         roots: &[std::path::PathBuf],
     ) -> Result<RangeStep, SelectionError> {
         if self.range_selection.active.is_some() {
@@ -559,7 +523,7 @@ impl LibraryBrowser {
         token: u64,
         slice: &Slice,
         response: QueryResponse,
-        revisions: (u64, u64),
+        revisions: QueryRevisions,
     ) -> Result<(), SelectionError> {
         if self.range_selection.active == Some(token) {
             self.range_selection.active = None;
@@ -572,7 +536,12 @@ impl LibraryBrowser {
             .pending
             .take()
             .expect("current pending range");
-        if !job.scope.matches(self, revisions) {
+        if !self
+            .range_selection
+            .projection
+            .accepts(&self.projection_query(), token, revisions)
+            || !job.scope.matches(self, revisions)
+        {
             self.range_selection.cancel(true);
             return Ok(());
         }
@@ -628,10 +597,7 @@ impl GuiApp {
             multi,
             scroll,
         } = request;
-        let revisions = (
-            self.state.library.revision,
-            self.state.library.structure_revision,
-        );
+        let revisions = self.state.query_revisions(None);
         if !shift {
             let commit = LibraryCommit {
                 scope: Scope::capture(&self.browser.library, revisions),
@@ -664,13 +630,10 @@ impl GuiApp {
     }
 
     pub(in crate::gui) fn library_commit_valid(&self, commit: &LibraryCommit) -> bool {
-        commit.scope.matches(
-            &self.browser.library,
-            (
-                self.state.library.revision,
-                self.state.library.structure_revision,
-            ),
-        ) && commit.index < commit.scope.total()
+        commit
+            .scope
+            .matches(&self.browser.library, self.state.query_revisions(None))
+            && commit.index < commit.scope.total()
     }
 
     pub(in crate::gui) fn library_commit_target(&self, commit: &LibraryCommit) -> Option<i64> {
@@ -750,10 +713,7 @@ impl GuiApp {
     }
 
     fn pump_library_range_unchecked(&mut self, id: ManualIntentId, cx: &mut Context<Self>) {
-        let revisions = (
-            self.state.library.revision,
-            self.state.library.structure_revision,
-        );
+        let revisions = self.state.query_revisions(None);
         match self
             .browser
             .library
@@ -777,10 +737,7 @@ impl GuiApp {
                         .spawn(async move { handle.query(query) })
                         .await;
                     let _ = this.update(cx, |this, cx| {
-                        let revisions = (
-                            this.state.library.revision,
-                            this.state.library.structure_revision,
-                        );
+                        let revisions = this.state.query_revisions(None);
                         if let Err(error) = this
                             .browser
                             .library
@@ -806,8 +763,28 @@ mod tests {
     use crate::gui::browser::merge_selection;
     use crate::model::{LibraryRow, Page};
 
+    fn revisions(library: u64, structure: u64) -> QueryRevisions {
+        QueryRevisions {
+            library,
+            structure,
+            ..Default::default()
+        }
+    }
+
+    fn range_stamp(revisions: QueryRevisions) -> QueryStamp {
+        Query::DirectoryPage {
+            path: Default::default(),
+            query: None,
+            favorite: None,
+            missing: None,
+            offset: 0,
+            limit: 0,
+        }
+        .stamp(revisions)
+    }
+
     fn publish_row(library: &mut LibraryBrowser, endpoint: LibraryNode, index: usize) {
-        let scope = Scope::capture(library, (7, 3));
+        let scope = Scope::capture(library, revisions(7, 3));
         library.publish_selection(LibraryCommit {
             scope,
             endpoint,
@@ -820,8 +797,7 @@ mod tests {
 
     fn scope() -> Scope {
         Scope {
-            library: 7,
-            structure: 3,
+            stamp: range_stamp(revisions(7, 3)),
             projection: Projection::Flat {
                 query: Some("filtered".into()),
                 favorite: Some(true),
@@ -961,9 +937,10 @@ mod tests {
         let (mut library, branch, roots) = grouped(100, 20);
         publish_row(&mut library, LibraryNode::Track(1), 2);
         library
-            .start_range_selection(&LibraryNode::Track(30), 31, false, (7, 3), 20)
+            .start_range_selection(&LibraryNode::Track(30), 31, false, revisions(7, 3), 20)
             .unwrap();
-        let RangeStep::Query { token, slice } = library.advance_range((7, 3), &roots).unwrap()
+        let RangeStep::Query { token, slice } =
+            library.advance_range(revisions(7, 3), &roots).unwrap()
         else {
             panic!("uncached range needs a batch")
         };
@@ -981,10 +958,10 @@ mod tests {
             },
         );
         library
-            .start_range_selection(&LibraryNode::Track(50), 51, false, (7, 3), 20)
+            .start_range_selection(&LibraryNode::Track(50), 51, false, revisions(7, 3), 20)
             .unwrap();
         assert!(matches!(
-            library.advance_range((7, 3), &roots).unwrap(),
+            library.advance_range(revisions(7, 3), &roots).unwrap(),
             RangeStep::Idle
         ));
         library
@@ -992,13 +969,7 @@ mod tests {
                 token,
                 &slice,
                 QueryResponse {
-                    revisions: QueryRevisions {
-                        library: 7,
-                        structure: 3,
-                        playlist: 0,
-                        queue: 0,
-                        playlist_entries: None,
-                    },
+                    revisions: revisions(7, 3),
                     result: Ok(ViewResponse::LibraryPage(Page {
                         total: 100,
                         rows: (slice.offset..slice.offset + slice.len)
@@ -1006,11 +977,12 @@ mod tests {
                             .collect(),
                     })),
                 },
-                (7, 3),
+                revisions(7, 3),
             )
             .unwrap();
         assert_eq!(library.selected(), &HashSet::from([1]));
-        let RangeStep::Query { token, slice } = library.advance_range((7, 3), &roots).unwrap()
+        let RangeStep::Query { token, slice } =
+            library.advance_range(revisions(7, 3), &roots).unwrap()
         else {
             panic!("replacement starts after old batch")
         };
@@ -1024,22 +996,17 @@ mod tests {
                 token,
                 &slice,
                 QueryResponse {
-                    revisions: QueryRevisions {
-                        library: 7,
-                        structure: 3,
-                        playlist: 0,
-                        queue: 0,
-                        playlist_entries: None,
-                    },
+                    revisions: revisions(7, 3),
                     result: Ok(ViewResponse::LibraryPage(Page {
                         total: 100,
                         rows: vec![row(50)],
                     })),
                 },
-                (7, 3),
+                revisions(7, 3),
             )
             .unwrap();
-        let RangeStep::Selected(commit) = library.advance_range((7, 3), &roots).unwrap() else {
+        let RangeStep::Selected(commit) = library.advance_range(revisions(7, 3), &roots).unwrap()
+        else {
             panic!("range ready")
         };
         assert_eq!(commit.endpoint, LibraryNode::Track(50));
@@ -1054,9 +1021,10 @@ mod tests {
         load_group(&mut library, &branch, 20, 1000, 20, 3);
         publish_row(&mut library, LibraryNode::Track(1), 2);
         library
-            .start_range_selection(&LibraryNode::Track(21), 22, false, (7, 3), 20)
+            .start_range_selection(&LibraryNode::Track(21), 22, false, revisions(7, 3), 20)
             .unwrap();
-        let RangeStep::Selected(commit) = library.advance_range((7, 3), &roots).unwrap() else {
+        let RangeStep::Selected(commit) = library.advance_range(revisions(7, 3), &roots).unwrap()
+        else {
             panic!("range ready")
         };
         assert_eq!(commit.endpoint, LibraryNode::Track(21));
@@ -1068,10 +1036,10 @@ mod tests {
         assert!(library.tree.cached_row(&branch, 1).is_none());
         assert_eq!(library.selected(), &(1..=21).collect::<HashSet<_>>());
         library
-            .start_range_selection(&LibraryNode::Track(50), 51, false, (7, 3), 20)
+            .start_range_selection(&LibraryNode::Track(50), 51, false, revisions(7, 3), 20)
             .unwrap();
         assert!(matches!(
-            library.advance_range((8, 3), &roots).unwrap(),
+            library.advance_range(revisions(8, 3), &roots).unwrap(),
             RangeStep::Idle
         ));
         assert!(!library.range_pending());
@@ -1112,11 +1080,11 @@ mod tests {
         let header = LibraryNode::Directory(Arc::from(roots[0].as_path()));
         publish_row(&mut library, header, 0);
         library
-            .start_range_selection(&LibraryNode::Track(3), 7, false, (7, 3), 2)
+            .start_range_selection(&LibraryNode::Track(3), 7, false, revisions(7, 3), 2)
             .unwrap();
         let mut requests = Vec::new();
         loop {
-            match library.advance_range((7, 3), &roots).unwrap() {
+            match library.advance_range(revisions(7, 3), &roots).unwrap() {
                 RangeStep::Query { token, slice } => {
                     let query = library.range_query(token, &slice);
                     let Query::LibraryRootPage {
@@ -1136,19 +1104,13 @@ mod tests {
                             token,
                             &slice,
                             QueryResponse {
-                                revisions: QueryRevisions {
-                                    library: 7,
-                                    structure: 3,
-                                    playlist: 0,
-                                    queue: 0,
-                                    playlist_entries: None,
-                                },
+                                revisions: revisions(7, 3),
                                 result: Ok(ViewResponse::LibraryPage(Page {
                                     total: 3,
                                     rows: vec![row(id)],
                                 })),
                             },
-                            (7, 3),
+                            revisions(7, 3),
                         )
                         .unwrap();
                 }
@@ -1278,8 +1240,7 @@ mod tests {
             let mut job = RangeJob {
                 token: 1,
                 scope: Scope {
-                    library: 7,
-                    structure: 3,
+                    stamp: range_stamp(revisions(7, 3)),
                     projection: Projection::Tree {
                         query: query.map(str::to_owned),
                         favorite: Some(true),
@@ -1319,13 +1280,7 @@ mod tests {
                 job.accept(
                     &slice,
                     QueryResponse {
-                        revisions: QueryRevisions {
-                            library: 7,
-                            structure: 3,
-                            playlist: 0,
-                            queue: 0,
-                            playlist_entries: None,
-                        },
+                        revisions: revisions(7, 3),
                         result: Ok(ViewResponse::DirectoryPage(page)),
                     },
                 )
@@ -1375,10 +1330,11 @@ mod tests {
             );
             publish_row(&mut library, LibraryNode::Track(0), 1);
             library
-                .start_range_selection(&LibraryNode::Track(3), 4, false, (7, 3), 2)
+                .start_range_selection(&LibraryNode::Track(3), 4, false, revisions(7, 3), 2)
                 .unwrap();
-            let RangeStep::Query { token, slice } =
-                library.advance_range((7, 3), &["/music".into()]).unwrap()
+            let RangeStep::Query { token, slice } = library
+                .advance_range(revisions(7, 3), &["/music".into()])
+                .unwrap()
             else {
                 panic!("uncached filtered rows require a range query")
             };
@@ -1389,21 +1345,21 @@ mod tests {
                     query: Some(query), favorite: Some(true), missing: Some(true), offset: 2, limit: 2, ..
                 } if query == "needle"
             ));
-            let scope = Scope::capture(&library, (7, 3));
+            let scope = Scope::capture(&library, revisions(7, 3));
             let mut other_query = scope.clone();
             let Projection::Tree { query, .. } = &mut other_query.projection else {
                 unreachable!()
             };
             *query = Some("other".into());
-            assert!(!other_query.matches(&library, (7, 3)));
+            assert!(!other_query.matches(&library, revisions(7, 3)));
             let mut other_missing = scope.clone();
             let Projection::Tree { missing, .. } = &mut other_missing.projection else {
                 unreachable!()
             };
             *missing = None;
-            assert!(!other_missing.matches(&library, (7, 3)));
-            assert!(!scope.matches(&library, (8, 3)));
-            assert!(!scope.matches(&library, (7, 4)));
+            assert!(!other_missing.matches(&library, revisions(7, 3)));
+            assert!(!scope.matches(&library, revisions(8, 3)));
+            assert!(!scope.matches(&library, revisions(7, 4)));
             if change_search {
                 library.refresh_search("replacement".into());
             } else {
@@ -1415,26 +1371,20 @@ mod tests {
                 assert_eq!(library.buffer().missing, Some(true));
             }
             assert!(library.tree_active());
-            assert!(!scope.matches(&library, (7, 3)));
+            assert!(!scope.matches(&library, revisions(7, 3)));
             assert!(!library.range_pending());
             library
                 .complete_range(
                     token,
                     &slice,
                     QueryResponse {
-                        revisions: QueryRevisions {
-                            library: 7,
-                            structure: 3,
-                            playlist: 0,
-                            queue: 0,
-                            playlist_entries: None,
-                        },
+                        revisions: revisions(7, 3),
                         result: Ok(ViewResponse::DirectoryPage(Page {
                             total: 4,
                             rows: vec![DirectoryRow::Track(row(2)), DirectoryRow::Track(row(3))],
                         })),
                     },
-                    (7, 3),
+                    revisions(7, 3),
                 )
                 .unwrap();
             assert_eq!(library.selected(), &HashSet::from([0]));
@@ -1460,7 +1410,7 @@ mod tests {
         assert_eq!(selection.interval(&scope, 6), 4..7);
         assert_eq!(selection.anchor.as_ref().unwrap().index, 4);
         let mut changed = scope.clone();
-        changed.library += 1;
+        changed.stamp = range_stamp(revisions(8, 3));
         assert_eq!(selection.interval(&changed, 9), 9..10);
     }
 
@@ -1475,13 +1425,7 @@ mod tests {
             job.accept(
                 &slice,
                 QueryResponse {
-                    revisions: QueryRevisions {
-                        library: 7,
-                        structure: 3,
-                        playlist: 0,
-                        queue: 0,
-                        playlist_entries: None,
-                    },
+                    revisions: revisions(7, 3),
                     result: Ok(ViewResponse::LibraryPage(Page {
                         total: 10_000,
                         rows,
@@ -1500,13 +1444,7 @@ mod tests {
         let mut job = job(2, 8, false);
         let slice = job.next().unwrap();
         let response = |library, rows| QueryResponse {
-            revisions: QueryRevisions {
-                library,
-                structure: 3,
-                playlist: 0,
-                queue: 0,
-                playlist_entries: None,
-            },
+            revisions: revisions(library, 3),
             result: Ok(ViewResponse::LibraryPage(Page {
                 total: 10_000,
                 rows,
@@ -1525,20 +1463,20 @@ mod tests {
     #[test]
     fn newer_click_rejects_old_completion_and_keeps_active_batch_slot() {
         let mut selection = LibrarySelection {
-            token: 1,
             pending: Some(job(0, 10, false)),
             active: Some(1),
             ..Default::default()
         };
+        selection.projection.cancel();
         assert!(selection.accepts_completion(1));
         selection.cancel(false);
         assert!(!selection.accepts_completion(1));
         assert_eq!(selection.active, Some(1));
         let mut next = job(20, 30, true);
-        next.token = selection.token;
+        next.token = selection.projection.generation();
         selection.pending = Some(next);
         assert!(!selection.accepts_completion(1));
-        assert!(selection.accepts_completion(selection.token));
+        assert!(selection.accepts_completion(selection.projection.generation()));
     }
 
     #[test]
@@ -1649,8 +1587,7 @@ mod tests {
         let mut job = RangeJob {
             token: 1,
             scope: Scope {
-                library: 7,
-                structure: 3,
+                stamp: range_stamp(revisions(7, 3)),
                 projection: Projection::Tree {
                     query: None,
                     favorite: None,
@@ -1708,13 +1645,7 @@ mod tests {
             job.accept(
                 &slice,
                 QueryResponse {
-                    revisions: QueryRevisions {
-                        library: 7,
-                        structure: 3,
-                        playlist: 0,
-                        queue: 0,
-                        playlist_entries: None,
-                    },
+                    revisions: revisions(7, 3),
                     result: Ok(ViewResponse::DirectoryPage(Page {
                         total: slice.total,
                         rows,
@@ -1757,8 +1688,7 @@ mod tests {
         let mut job = RangeJob {
             token: 1,
             scope: Scope {
-                library: 7,
-                structure: 3,
+                stamp: range_stamp(revisions(7, 3)),
                 projection: Projection::Tree {
                     query: None,
                     favorite: None,
@@ -1778,13 +1708,7 @@ mod tests {
             job.accept(
                 &slice,
                 QueryResponse {
-                    revisions: QueryRevisions {
-                        library: 7,
-                        structure: 3,
-                        playlist: 0,
-                        queue: 0,
-                        playlist_entries: None,
-                    },
+                    revisions: revisions(7, 3),
                     result: Ok(ViewResponse::DirectoryPage(Page {
                         total: 1,
                         rows: vec![DirectoryRow::Directory { path: "/b".into() },]
@@ -1803,8 +1727,7 @@ mod tests {
             ..Default::default()
         };
         let changed = Scope {
-            library: 7,
-            structure: 3,
+            stamp: range_stamp(revisions(7, 3)),
             projection: Projection::Tree {
                 query: None,
                 favorite: None,
@@ -1814,5 +1737,91 @@ mod tests {
             },
         };
         assert_ne!(selection.anchor.as_ref().unwrap().scope, changed);
+    }
+
+    #[test]
+    fn range_freshness_ignores_unrelated_publications_and_page_demand() {
+        let (mut library, _, roots) = grouped(100, 20);
+        publish_row(&mut library, LibraryNode::Track(1), 2);
+        library
+            .start_range_selection(&LibraryNode::Track(30), 31, false, revisions(7, 3), 20)
+            .unwrap();
+        let RangeStep::Query { token, slice } =
+            library.advance_range(revisions(7, 3), &roots).unwrap()
+        else {
+            panic!("uncached range needs a batch")
+        };
+        let query = library.range_query(token, &slice);
+        let mut resized = query.clone();
+        let Query::LibraryRootPage { offset, limit, .. } = &mut resized else {
+            panic!("grouped library range")
+        };
+        *offset += 1;
+        *limit += 1;
+        assert_eq!(query.identity(), resized.identity());
+        let mut current = revisions(7, 3);
+        current.playlist = 17;
+        current.queue = 19;
+        current.duplicate_groups = 23;
+        current.duplicate_members = 29;
+        library
+            .complete_range(
+                token,
+                &slice,
+                QueryResponse {
+                    revisions: current,
+                    result: Ok(ViewResponse::LibraryPage(Page {
+                        total: 100,
+                        rows: (slice.offset..slice.offset + slice.len)
+                            .map(|id| row(id as i64))
+                            .collect(),
+                    })),
+                },
+                current,
+            )
+            .unwrap();
+        assert!(library.range_pending());
+        assert_eq!(library.selected(), &HashSet::from([1]));
+    }
+
+    #[test]
+    fn failed_range_waits_for_an_explicit_selection_retry() {
+        let (mut library, _, roots) = grouped(100, 20);
+        publish_row(&mut library, LibraryNode::Track(1), 2);
+        library
+            .start_range_selection(&LibraryNode::Track(30), 31, false, revisions(7, 3), 20)
+            .unwrap();
+        let RangeStep::Query { token, slice } =
+            library.advance_range(revisions(7, 3), &roots).unwrap()
+        else {
+            panic!("uncached range needs a batch")
+        };
+        assert!(
+            library
+                .complete_range(
+                    token,
+                    &slice,
+                    QueryResponse {
+                        revisions: revisions(7, 3),
+                        result: Err(crate::response::QueryError::Message("read failed".into())),
+                    },
+                    revisions(7, 3),
+                )
+                .is_err()
+        );
+        assert!(!library.range_pending());
+        assert!(library.range_selection.active.is_none());
+        assert_eq!(library.selected(), &HashSet::from([1]));
+        assert!(matches!(
+            library.advance_range(revisions(7, 3), &roots).unwrap(),
+            RangeStep::Idle
+        ));
+        library
+            .start_range_selection(&LibraryNode::Track(30), 31, false, revisions(7, 3), 20)
+            .unwrap();
+        assert!(matches!(
+            library.advance_range(revisions(7, 3), &roots).unwrap(),
+            RangeStep::Query { .. }
+        ));
     }
 }

@@ -2,30 +2,68 @@ use super::{TreeBranch, tree::TreeItem};
 use crate::{
     gui::{Field, GuiApp},
     model::{DirectoryRow, LibraryLocateResult, Query},
-    response::ViewResponse,
+    projection::QueryProjection,
+    response::{QueryRevisions, ViewResponse},
 };
 use gpui::{Context, ScrollStrategy, Window};
 use std::time::{Duration, Instant};
 
-// The worker owns only navigation intent. Selection and Details never participate.
-// Projection changes invalidate the locate generation; ordinary page arrivals do not.
-#[derive(Clone, Copy)]
+#[derive(Default)]
+pub(in crate::gui) struct LibraryLocateState {
+    projection: QueryProjection,
+    // Logical cancellation never releases the physical ancestor worker.
+    pub(in crate::gui) pending: bool,
+    pub(in crate::gui) notice: Option<(i64, LibraryLocateResult)>,
+    pub(in crate::gui) reveal: Option<(i64, TreeBranch, usize)>,
+    pub(in crate::gui) reveal_scrolled: bool,
+    pub(in crate::gui) highlight: Option<(i64, Instant)>,
+    pub(in crate::gui) highlight_task: Option<gpui::Task<()>>,
+}
+
+impl LibraryLocateState {
+    pub(in crate::gui) fn invalidate(&mut self) {
+        self.projection.cancel();
+        self.notice = None;
+        self.reveal = None;
+        self.reveal_scrolled = false;
+        self.highlight = None;
+        self.highlight_task = None;
+    }
+
+    fn sync(&mut self, query: &Query, revisions: QueryRevisions) {
+        if self.projection.sync(query, revisions) {
+            self.invalidate();
+        }
+    }
+}
+
+// Ancestor queries share the navigation request's freshness contract; their path
+// and range endpoints are validated by the locate traversal, not page demand.
 struct Request {
     generation: u64,
+    query: Query,
     track_id: i64,
-    library: u64,
-    structure: u64,
 }
 
 impl Request {
-    fn current(self, app: &GuiApp) -> bool {
-        app.browser.library.locate.generation == self.generation
-            && app
-                .state
-                .current_track()
-                .is_some_and(|track| track.id == self.track_id)
-            && app.state.library.revision == self.library
-            && app.state.library.structure_revision == self.structure
+    fn current(&self, app: &GuiApp) -> bool {
+        app.browser.library.locate.projection.accepts(
+            &self.query,
+            self.generation,
+            app.state.query_revisions(None),
+        ) && app
+            .state
+            .current_track()
+            .is_some_and(|track| track.id == self.track_id)
+    }
+
+    fn accepts(&self, app: &GuiApp, revisions: QueryRevisions) -> bool {
+        self.current(app)
+            && app.browser.library.locate.projection.accepts(
+                &self.query,
+                self.generation,
+                revisions,
+            )
     }
 }
 
@@ -66,18 +104,28 @@ impl GuiApp {
             cx.notify();
             return;
         };
-        let request = Request {
-            generation: self.browser.library.locate.generation,
-            track_id,
-            library: self.state.library.revision,
-            structure: self.state.library.structure_revision,
-        };
+        let revisions = self.state.query_revisions(None);
         let buffer = self.browser.library.buffer();
         let query = buffer.query.clone();
         let favorite = buffer.favorite;
         let missing = buffer.missing;
         let sort = buffer.sort;
         let tree = self.browser.library.tree_active();
+        let locate_query = Query::LibraryLocate {
+            track_id,
+            path: path.clone(),
+            tree,
+            query: query.clone(),
+            favorite,
+            missing,
+            sort,
+        };
+        self.browser.library.locate.sync(&locate_query, revisions);
+        let request = Request {
+            generation: self.browser.library.locate.projection.generation(),
+            query: locate_query,
+            track_id,
+        };
         let handle = self.handle.clone();
         self.browser.library.locate.pending = true;
         cx.spawn(async move |this, cx| {
@@ -101,9 +149,7 @@ impl GuiApp {
                 let current = this
                     .update(cx, |this, cx| {
                         this.refresh(cx);
-                        request.current(this)
-                            && response.revisions.library == request.library
-                            && response.revisions.structure == request.structure
+                        request.accepts(this, response.revisions)
                     })
                     .unwrap_or(false);
                 if !current {
@@ -236,11 +282,11 @@ impl GuiApp {
         if !ready && self.browser.library.locate.reveal_scrolled {
             return;
         }
-        let generation = self.browser.library.locate.generation;
+        let generation = self.browser.library.locate.projection.generation();
         let entity = cx.entity().downgrade();
         window.defer(cx, move |_, cx| {
             let _ = entity.update(cx, |this, cx| {
-                if this.browser.library.locate.generation == generation
+                if this.browser.library.locate.projection.generation() == generation
                     && this
                         .state
                         .current_track()
@@ -264,7 +310,9 @@ impl GuiApp {
                             Some(cx.spawn(async move |this, cx| {
                                 cx.background_executor().timer(Duration::from_secs(2)).await;
                                 let _ = this.update(cx, |this, cx| {
-                                    if this.browser.library.locate.generation == generation {
+                                    if this.browser.library.locate.projection.generation()
+                                        == generation
+                                    {
                                         this.browser.library.locate.highlight = None;
                                         cx.notify();
                                     }
@@ -275,5 +323,101 @@ impl GuiApp {
                 }
             });
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::LibrarySort;
+
+    fn query() -> Query {
+        Query::LibraryLocate {
+            track_id: 7,
+            path: "/music".into(),
+            tree: true,
+            query: Some("needle".into()),
+            favorite: None,
+            missing: None,
+            sort: LibrarySort::Album,
+        }
+    }
+
+    fn revisions() -> QueryRevisions {
+        QueryRevisions {
+            library: 3,
+            structure: 5,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn locate_freshness_uses_only_its_authoritative_query_stamp() {
+        let mut state = LibraryLocateState::default();
+        let query = query();
+        state.sync(&query, revisions());
+        let generation = state.projection.generation();
+        let mut current = revisions();
+        current.playlist = 11;
+        current.queue = 13;
+        current.duplicate_groups = 17;
+        current.duplicate_members = 19;
+        state.sync(&query, current);
+        assert_eq!(state.projection.generation(), generation);
+        assert!(state.projection.accepts(&query, generation, current));
+        current.library += 1;
+        assert!(!state.projection.accepts(&query, generation, current));
+        current = revisions();
+        current.structure += 1;
+        assert!(!state.projection.accepts(&query, generation, current));
+    }
+
+    #[test]
+    fn cancelled_locate_keeps_the_physical_gate_and_retires_navigation_only() {
+        let mut state = LibraryLocateState::default();
+        let query = query();
+        state.sync(&query, revisions());
+        let generation = state.projection.generation();
+        state.pending = true;
+        state.notice = Some((7, LibraryLocateResult::OutsideRoot));
+        state.reveal = Some((7, TreeBranch::default(), 2));
+        state.invalidate();
+        assert!(state.pending);
+        assert!(state.notice.is_none());
+        assert!(state.reveal.is_none());
+        assert!(!state.projection.accepts(&query, generation, revisions()));
+        // Only the worker completion releases the slot; another explicit locate
+        // can then reuse the same identity with a new submission generation.
+        state.pending = false;
+        state.sync(&query, revisions());
+        assert!(
+            state
+                .projection
+                .accepts(&query, state.projection.generation(), revisions(),)
+        );
+    }
+
+    #[test]
+    fn locate_filter_or_target_change_rejects_the_previous_traversal() {
+        let mut state = LibraryLocateState::default();
+        let original = query();
+        state.sync(&original, revisions());
+        let generation = state.projection.generation();
+        let mut changed = original.clone();
+        let Query::LibraryLocate {
+            query, track_id, ..
+        } = &mut changed
+        else {
+            unreachable!()
+        };
+        *query = None;
+        *track_id = 9;
+        state.sync(&changed, revisions());
+        assert!(!state.projection.accepts(&original, generation, revisions()));
+        assert!(
+            state
+                .projection
+                .accepts(&changed, state.projection.generation(), revisions(),)
+        );
     }
 }

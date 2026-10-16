@@ -85,7 +85,7 @@ pub(super) struct PlaylistDrag {
     // GPUI keeps the original on_drag value; the constructor creates only its preview.
     entry_ids: std::rc::Rc<std::cell::OnceCell<Vec<i64>>>,
     revision: u64,
-    catalog_revision: u64,
+    stamp: crate::model::QueryStamp,
     selection_generation: u64,
 }
 
@@ -1155,8 +1155,7 @@ impl GuiApp {
         if self.browser.playlists.selected() != Some(drag.playlist_id)
             || self.browser.playlists.entries().playlist_id != Some(drag.playlist_id)
             || self.browser.playlists.selection_generation() != drag.selection_generation
-            || self.playlist_revision(drag.playlist_id) != drag.revision
-            || self.state.library.playlist_revision != drag.catalog_revision
+            || self.playlist_occurrence_stamp(drag.playlist_id) != drag.stamp
         {
             return;
         }
@@ -1438,6 +1437,10 @@ impl GuiApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let owner = cx.weak_entity();
+        window.defer(cx, move |_, cx| {
+            let _ = owner.update(cx, |this, cx| this.request_playlist_selection(cx));
+        });
         let row_height = list_row_height(window);
         let playlist_id = self.browser.playlists.selected();
         let selection_entry = self.browser.playlists.selected_entry();
@@ -1657,7 +1660,7 @@ impl GuiApp {
                             let title = e.title.clone();
                             let favorite = e.favorite;
                             let revision = this.playlist_revision(playlist_id);
-                            let catalog_revision = this.state.library.playlist_revision;
+                            let stamp = this.playlist_occurrence_stamp(playlist_id);
                             let selection_generation =
                                 this.browser.playlists.selection_generation();
                             let drag_owner = cx.entity().downgrade();
@@ -1667,7 +1670,7 @@ impl GuiApp {
                                 source_id: id,
                                 entry_ids: Default::default(),
                                 revision,
-                                catalog_revision,
+                                stamp,
                                 selection_generation,
                             };
                             let detail = format!(
@@ -1729,10 +1732,8 @@ impl GuiApp {
                                                 this.refresh(cx);
                                                 if this.browser.playlists.selected()
                                                     != Some(playlist_id)
-                                                    || this.playlist_revision(playlist_id)
-                                                        != revision
-                                                    || this.state.library.playlist_revision
-                                                        != catalog_revision
+                                                    || this.playlist_occurrence_stamp(playlist_id)
+                                                        != stamp
                                                 {
                                                     return;
                                                 }
@@ -1959,6 +1960,13 @@ impl GuiApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let owner = cx.weak_entity();
+        window.defer(cx, move |_, cx| {
+            let _ = owner.update(cx, |this, cx| {
+                this.sync_metadata_query();
+                this.demand_metadata(cx);
+            });
+        });
         self.sync_metadata_inputs(cx);
         self.prepare_artwork(cx);
         let track = self.metadata.track();
@@ -2741,7 +2749,7 @@ mod playlist_drag_tests {
             source_id: 40,
             entry_ids: Default::default(),
             revision: 19,
-            catalog_revision: 12,
+            stamp: Default::default(),
             selection_generation: 4,
         };
         // The preview constructor fills a shared snapshot, but drop consumes the original value.

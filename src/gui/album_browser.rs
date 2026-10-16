@@ -9,7 +9,8 @@ use crate::{
         AlbumKey, AlbumSort, AlbumSummary, Command, LibraryRow, PlaybackStatus, Query,
         SEARCH_DEBOUNCE,
     },
-    response::ViewResponse,
+    projection::QueryProjection,
+    response::{QueryRevisions, ViewResponse},
 };
 
 use super::{
@@ -56,8 +57,8 @@ fn card_icon_button(
 
 const ALBUM_PAGE: usize = 24;
 
-/// Sparse absolute rows and viewport-owned covers per panel. Only the current
-/// generation and library revision may commit a data request.
+/// Sparse absolute rows and viewport-owned covers per panel. Visibility cancels
+/// submissions and cover demand, not unchanged album or track data.
 pub(super) struct AlbumBrowser {
     handle: CoreHandle,
     i18n: Arc<crate::i18n::Localizer>,
@@ -66,10 +67,11 @@ pub(super) struct AlbumBrowser {
     images: ArtworkImages,
     default_album: Entity<Artwork>,
     visible: bool,
-    revision: u64,
+    revisions: QueryRevisions,
+    albums_projection: QueryProjection,
+    tracks_projection: QueryProjection,
+    tracks_key: Option<AlbumKey>,
     page_size: usize,
-    generation: u64,
-    request: Option<Task<()>>,
     loading: bool,
     error: Option<String>,
     selected: Option<AlbumKey>,
@@ -142,10 +144,11 @@ impl AlbumBrowser {
             images,
             default_album,
             visible: false,
-            revision: 0,
+            revisions: QueryRevisions::default(),
+            albums_projection: QueryProjection::default(),
+            tracks_projection: QueryProjection::default(),
+            tracks_key: None,
             page_size: 1,
-            generation: 0,
-            request: None,
             loading: false,
             error: None,
             selected: None,
@@ -183,7 +186,7 @@ impl AlbumBrowser {
     pub(super) fn sync(
         &mut self,
         visible: bool,
-        revision: u64,
+        revisions: QueryRevisions,
         page_size: usize,
         current_track: Option<i64>,
         playback_status: PlaybackStatus,
@@ -194,20 +197,24 @@ impl AlbumBrowser {
             self.playback_status = playback_status;
             cx.notify();
         }
-        let changed =
-            self.visible != visible || self.revision != revision || self.page_size != page_size;
-        if !changed {
-            return;
-        }
-        self.visible = visible;
-        self.revision = revision;
+        let visibility_changed = self.visible != visible;
+        let demand_changed = self.page_size != page_size.max(1);
+        self.revisions = revisions;
+        let data_changed = self.sync_data(cx);
         self.page_size = page_size.max(1);
-        if visible {
-            self.load(cx);
-        } else {
+        if visibility_changed && !visible {
             self.cancel(cx);
         }
-        cx.notify();
+        self.visible = visible;
+        if visible && (visibility_changed || data_changed || demand_changed) {
+            if self.selected.is_none() {
+                self.restore_grid_anchor();
+            }
+            self.request_next(false, cx);
+        }
+        if visibility_changed || data_changed || demand_changed {
+            cx.notify();
+        }
     }
 
     fn clear_covers(&mut self, cx: &mut App) {
@@ -218,21 +225,58 @@ impl AlbumBrowser {
         }
     }
 
+    fn albums_query(&self) -> Query {
+        Query::Albums {
+            query: self.query.clone(),
+            sort: self.sort,
+            offset: 0,
+            limit: ALBUM_PAGE,
+        }
+    }
+
+    fn sync_data(&mut self, cx: &mut App) -> bool {
+        let albums_query = self.albums_query();
+        if self.albums_projection.stamp() != Some(albums_query.stamp(self.revisions)) {
+            self.capture_grid_anchor();
+        }
+        let albums_changed = sync_pages(
+            &mut self.albums_projection,
+            &mut self.albums,
+            &albums_query,
+            self.revisions,
+        );
+        let tracks_changed = self.tracks_key.as_ref().is_some_and(|key| {
+            sync_pages(
+                &mut self.tracks_projection,
+                &mut self.tracks,
+                &Query::AlbumTracks {
+                    key: key.clone(),
+                    offset: 0,
+                    limit: self.page_size,
+                },
+                self.revisions,
+            )
+        });
+        if albums_changed {
+            self.clear_covers(cx);
+        }
+        albums_changed || tracks_changed
+    }
+
+    fn active_projection(&self) -> &QueryProjection {
+        if self.selected.is_some() {
+            &self.tracks_projection
+        } else {
+            &self.albums_projection
+        }
+    }
+
     fn cancel(&mut self, cx: &mut App) {
         self.capture_grid_anchor();
-        self.generation = self.generation.wrapping_add(1);
-        self.request = None;
-        self.loading = false;
+        cancel_pages(&mut self.albums_projection, &mut self.albums);
+        cancel_pages(&mut self.tracks_projection, &mut self.tracks);
+        // The detached worker still owns the physical gate until it completes.
         self.clear_covers(cx);
-        self.albums.invalidate();
-        self.tracks.invalidate();
-        // Empty results still need a bootstrap row when the library changes.
-        if self.albums.is_empty() {
-            self.albums.clear();
-        }
-        if self.tracks.is_empty() {
-            self.tracks.clear();
-        }
     }
 
     fn load(&mut self, cx: &mut Context<Self>) {
@@ -241,6 +285,7 @@ impl AlbumBrowser {
 
     fn load_with_delay(&mut self, debounce: bool, cx: &mut Context<Self>) {
         self.cancel(cx);
+        self.sync_data(cx);
         if !self.visible {
             return;
         }
@@ -281,37 +326,48 @@ impl AlbumBrowser {
             }
         };
         self.loading = true;
-        let generation = self.generation;
-        let revision = self.revision;
+        let generation = self.active_projection().generation();
         let handle = self.handle.clone();
         let debounce = debounce && self.query.is_some();
-        self.request = Some(cx.spawn(async move |this, cx| {
+        cx.spawn(async move |this, cx| {
             if debounce {
                 cx.background_executor().timer(SEARCH_DEBOUNCE).await;
                 if !this
-                    .update(cx, |this, _| this.visible && this.generation == generation)
+                    .update(cx, |this, cx| {
+                        let current = this.visible
+                            && this
+                                .active_projection()
+                                .accepts(&query, generation, this.revisions);
+                        if !current {
+                            this.loading = false;
+                            this.request_next(false, cx);
+                        }
+                        current
+                    })
                     .unwrap_or(false)
                 {
                     return;
                 }
             }
+            let worker_query = query.clone();
             let response = cx
                 .background_executor()
-                .spawn(async move { handle.query(query) })
+                .spawn(async move { handle.query(worker_query) })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                if !this.visible || generation != this.generation || revision != this.revision {
-                    return;
-                }
-                // A newer core snapshot may be waiting in the window wakeup queue.
-                let current_revision = this.handle.gui_snapshot().library.revision;
-                if response.revisions.library != revision || current_revision != revision {
-                    this.revision = current_revision;
-                    this.load(cx);
+                // Completion, not logical cancellation, releases the physical gate.
+                this.loading = false;
+                this.revisions = this.handle.gui_snapshot().query_revisions(None);
+                this.sync_data(cx);
+                if !this.visible
+                    || !this
+                        .active_projection()
+                        .accepts(&query, generation, response.revisions)
+                {
+                    this.request_next(false, cx);
                     cx.notify();
                     return;
                 }
-                this.loading = false;
                 match response.result {
                     Ok(ViewResponse::Albums(page)) => {
                         this.albums.accept(page);
@@ -324,7 +380,8 @@ impl AlbumBrowser {
                 this.request_next(false, cx);
                 cx.notify();
             });
-        }));
+        })
+        .detach();
         cx.notify();
     }
 
@@ -377,7 +434,8 @@ impl AlbumBrowser {
 
     fn open(&mut self, key: AlbumKey, cx: &mut Context<Self>) {
         self.capture_grid_anchor();
-        if self.selected.as_ref() != Some(&key) {
+        if self.tracks_key.as_ref() != Some(&key) {
+            self.tracks_key = Some(key.clone());
             self.tracks.clear();
             self.track_scroll
                 .scroll_to_item_strict(0, ScrollStrategy::Top);
@@ -645,6 +703,25 @@ impl AlbumBrowser {
     }
 }
 
+fn sync_pages<T>(
+    projection: &mut QueryProjection,
+    pages: &mut paged::PagedRows<T>,
+    query: &Query,
+    revisions: QueryRevisions,
+) -> bool {
+    if !projection.sync(query, revisions) {
+        return false;
+    }
+    // Unknown total bootstraps a new request even after an accepted empty result.
+    pages.clear();
+    true
+}
+
+fn cancel_pages<T>(projection: &mut QueryProjection, pages: &mut paged::PagedRows<T>) {
+    projection.cancel();
+    pages.cancel_pending();
+}
+
 // Reflow can place earlier cards before the anchor in its new row. Keep the
 // identity until the user actually scrolls to a different row.
 fn anchored_index(previous: Option<usize>, row: usize, columns: usize, count: usize) -> usize {
@@ -747,7 +824,7 @@ impl Render for AlbumBrowser {
                     },
                 ));
         }
-        let generation = self.generation;
+        let generation = self.active_projection().generation();
         let track_demand_owner = cx.weak_entity();
         let content = if self.selected.is_some() {
             if self.tracks.is_empty() {
@@ -859,7 +936,7 @@ impl Render for AlbumBrowser {
                         let owner = track_demand_owner.clone();
                         cx.defer(move |cx| {
                             let _ = owner.update(cx, |this, cx| {
-                                if generation == this.generation
+                                if generation == this.active_projection().generation()
                                     && this.selected.is_some()
                                     && this.visible
                                 {
@@ -884,7 +961,7 @@ impl Render for AlbumBrowser {
                 .into_any_element()
         } else {
             let columns = self.columns;
-            let generation = self.generation;
+            let generation = self.active_projection().generation();
             let demand_owner = cx.weak_entity();
             let measure_owner = cx.weak_entity();
             scrollable_list(
@@ -944,7 +1021,9 @@ impl Render for AlbumBrowser {
                             let owner = demand_owner.clone();
                             cx.defer(move |cx| {
                                 let _ = owner.update(cx, |this, cx| {
-                                    if generation == this.generation && columns == this.columns {
+                                    if generation == this.active_projection().generation()
+                                        && columns == this.columns
+                                    {
                                         this.cover_demand(range, cx);
                                     }
                                 });
@@ -966,7 +1045,13 @@ impl Render for AlbumBrowser {
 
 #[cfg(test)]
 mod tests {
-    use super::anchored_index;
+    use super::{anchored_index, cancel_pages, sync_pages};
+    use crate::{
+        gui::paged,
+        model::{AlbumKey, AlbumSort, Page, Query},
+        projection::QueryProjection,
+        response::QueryRevisions,
+    };
 
     #[test]
     fn reflow_retains_anchor_until_user_scrolls() {
@@ -976,5 +1061,136 @@ mod tests {
         assert_eq!(anchor, 8);
         assert_eq!(anchored_index(Some(anchor), 3, 4, 24), 12);
         assert_eq!(anchored_index(Some(22), 7, 3, 10), 9);
+    }
+
+    fn queries() -> [Query; 2] {
+        [
+            Query::Albums {
+                query: None,
+                sort: AlbumSort::default(),
+                offset: 0,
+                limit: 2,
+            },
+            Query::AlbumTracks {
+                key: AlbumKey {
+                    directory: "/music".into(),
+                    title: "Album".into(),
+                },
+                offset: 0,
+                limit: 2,
+            },
+        ]
+    }
+
+    #[test]
+    fn hiding_retains_pages_and_failures_but_cancels_pending_submissions() {
+        for query in queries() {
+            let mut projection = QueryProjection::default();
+            let mut pages = paged::PagedRows::default();
+            let revisions = QueryRevisions::default();
+            assert!(sync_pages(&mut projection, &mut pages, &query, revisions));
+            pages.begin(0, 2);
+            pages.accept(Page {
+                total: 6,
+                rows: vec![10, 11],
+            });
+            pages.begin(2, 2);
+            pages.fail("Unavailable".into());
+            pages.begin(4, 2);
+            let generation = projection.generation();
+            cancel_pages(&mut projection, &mut pages);
+            assert_eq!(pages.len(), 6);
+            assert_eq!(pages.get(0), Some(&10));
+            assert_eq!(pages.error(2), Some("Unavailable"));
+            assert!(!projection.accepts(&query, generation, revisions));
+            assert!(!sync_pages(&mut projection, &mut pages, &query, revisions));
+            assert_eq!(pages.get(1), Some(&11));
+            assert_eq!(pages.demand(4..6, 2), Some(4));
+            assert_eq!(pages.demand(2..4, 2), Some(4));
+            pages.retry();
+            assert_eq!(pages.demand(2..4, 2), Some(2));
+        }
+    }
+
+    #[test]
+    fn hidden_data_changes_discard_pages_and_bootstrap_previous_empty_results() {
+        for query in queries() {
+            for revisions in [
+                QueryRevisions {
+                    library: 1,
+                    ..Default::default()
+                },
+                QueryRevisions {
+                    structure: 1,
+                    ..Default::default()
+                },
+            ] {
+                for total in [0, 2] {
+                    let mut projection = QueryProjection::default();
+                    let mut pages = paged::PagedRows::default();
+                    sync_pages(
+                        &mut projection,
+                        &mut pages,
+                        &query,
+                        QueryRevisions::default(),
+                    );
+                    pages.begin(0, 2);
+                    pages.accept(Page {
+                        total,
+                        rows: if total == 0 { vec![] } else { vec![1, 2] },
+                    });
+                    cancel_pages(&mut projection, &mut pages);
+                    assert!(sync_pages(&mut projection, &mut pages, &query, revisions));
+                    assert!(!pages.is_empty());
+                    assert!(pages.get(0).is_none());
+                    assert_eq!(pages.demand(pages.visible(), 2), Some(0));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn paging_and_unrelated_revisions_do_not_change_album_data_keys() {
+        let mut projection = QueryProjection::default();
+        let mut pages = paged::PagedRows::default();
+        let query = queries().into_iter().next().unwrap();
+        sync_pages(
+            &mut projection,
+            &mut pages,
+            &query,
+            QueryRevisions::default(),
+        );
+        pages.begin(0, 2);
+        pages.accept(Page {
+            total: 2,
+            rows: vec![1, 2],
+        });
+        let generation = projection.generation();
+        let paging = Query::Albums {
+            query: None,
+            sort: AlbumSort::default(),
+            offset: 24,
+            limit: 48,
+        };
+        let revisions = QueryRevisions {
+            playlist: 1,
+            queue: 1,
+            duplicate_members: 1,
+            duplicate_groups: 1,
+            ..Default::default()
+        };
+        assert!(!sync_pages(&mut projection, &mut pages, &paging, revisions));
+        assert_eq!(projection.generation(), generation);
+        assert_eq!(pages.get(0), Some(&1));
+        assert!(projection.accepts(&paging, generation, revisions));
+        let changed = Query::Albums {
+            query: Some("new search".into()),
+            sort: AlbumSort::default(),
+            offset: 0,
+            limit: 2,
+        };
+        assert!(sync_pages(&mut projection, &mut pages, &changed, revisions));
+        assert!(pages.get(0).is_none());
+        assert_eq!(pages.demand(pages.visible(), 2), Some(0));
     }
 }

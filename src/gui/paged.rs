@@ -108,6 +108,11 @@ impl<T> PagedRows<T> {
         self.configure_page_size(page_size);
         self.pending = Some(offset);
     }
+    /// Retire a logical page request without invalidating payload, total, or failures.
+    /// The consumer owns generation checks and retains its physical worker gate.
+    pub(super) fn cancel_pending(&mut self) {
+        self.pending = None;
+    }
     pub(super) fn accept(&mut self, page: Page<T>) {
         let Some(offset) = self.pending.take() else {
             return;
@@ -224,6 +229,26 @@ mod tests {
         assert_eq!(rows.demand(0..10, 20), Some(0));
         fill(&mut rows, 0, 10_000);
         assert_eq!(rows.position(|row| *row == 3), Some(3));
+    }
+
+    #[test]
+    fn cancelling_pending_demand_retains_payload_identity_and_explicit_failures() {
+        let mut rows = PagedRows::default();
+        fill(&mut rows, 0, 100);
+        rows.pin(Some(3));
+        rows.begin(20, 20);
+        rows.fail("offline".into());
+        rows.begin(40, 20);
+        rows.cancel_pending();
+        rows.accept(Page {
+            total: 0,
+            rows: Vec::new(),
+        });
+        assert_eq!(rows.len(), 100);
+        assert_eq!(rows.get(3), Some(&3));
+        assert_eq!(rows.pinned, Some(3));
+        assert_eq!(rows.error(20), Some("offline"));
+        assert_eq!(rows.demand(40..50, 20), Some(40));
     }
 
     #[test]
