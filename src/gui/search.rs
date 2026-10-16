@@ -1,6 +1,6 @@
 //! Shared interaction state for optional list-local search.
 
-use super::{Input, InputEvent, Localizer, caption, icon_button, row};
+use super::{Input, InputEvent, Localizer, MUTED, caption, icon_button, row};
 use gpui::{prelude::*, *};
 use std::sync::Arc;
 
@@ -155,7 +155,11 @@ impl Render for ListSearch {
             self.expanded || !self.input.read(cx).text().is_empty() || self.query.is_some();
         let mut control = row()
             .track_focus(&self.focus_handle)
-            .flex_wrap()
+            .h(gpui::rems(2.25))
+            .min_w_0()
+            .flex_basis(gpui::rems(2.))
+            .justify_end()
+            .when(visible, |control| control.flex_grow(1.))
             .flex_shrink(1.)
             .child(icon_button(
                 "search-toggle",
@@ -165,32 +169,26 @@ impl Render for ListSearch {
                 |this, window, cx| this.toggle(window, cx),
             ));
         if visible {
-            control = control
-                .child(
-                    gpui::div()
-                        .w(gpui::rems(12.))
-                        .flex_shrink(1.)
-                        .min_w_0()
-                        .child(self.input.clone()),
-                )
-                .child(icon_button(
-                    "search-clear",
-                    "",
-                    self.i18n.text("search-clear").to_owned(),
-                    cx,
-                    |this, window, cx| {
-                        this.clear(cx);
-                        this.focus(window, cx);
-                    },
-                ));
-        }
-        if let Some((matched, total)) = self.counts {
-            control = control.child(caption(self.i18n.format(
-                "search-count",
-                &[("matched", matched.into()), ("total", total.into())],
-            )));
-        } else {
-            control = control.child(caption("—"));
+            control = control.child(
+                gpui::div()
+                    .w(gpui::rems(12.))
+                    .flex_shrink(1.)
+                    .min_w_0()
+                    .child(self.input.clone()),
+            );
+            let count = match self.counts {
+                Some((matched, total)) => self.i18n.format(
+                    "search-count",
+                    &[("matched", matched.into()), ("total", total.into())],
+                ),
+                None => "—".to_owned(),
+            };
+            control = control.child(
+                caption(count)
+                    .text_color(rgb(MUTED))
+                    .flex_shrink_0()
+                    .whitespace_nowrap(),
+            );
         }
         control
     }
