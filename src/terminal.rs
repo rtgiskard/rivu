@@ -21,9 +21,9 @@ use ratatui::{
     Terminal,
     backend::CrosstermBackend,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Gauge, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, LineGauge, List, ListItem, ListState, Paragraph},
 };
 use signal_hook::{
     SigId,
@@ -1774,147 +1774,186 @@ fn help_bindings(context: KeyboardContext) -> impl Iterator<Item = &'static keyb
     ))
 }
 
+mod theme {
+    use ratatui::style::Color;
+
+    pub const BACKGROUND: Color = Color::Rgb(26, 27, 38);
+    pub const TEXT: Color = Color::Rgb(192, 202, 245);
+    pub const SECONDARY: Color = Color::Rgb(154, 165, 206);
+    pub const BORDER: Color = Color::Rgb(65, 72, 104);
+    pub const PLAYING: Color = Color::Rgb(122, 162, 247);
+    pub const FOCUS: Color = Color::Rgb(125, 207, 255);
+    pub const SELECTION: Color = Color::Rgb(36, 44, 66);
+    pub const WARNING: Color = Color::Rgb(224, 175, 104);
+}
+
+fn playback_symbol(status: PlaybackStatus) -> &'static str {
+    match status {
+        PlaybackStatus::Playing => "󰐊",
+        PlaybackStatus::Paused => "󰏤",
+        PlaybackStatus::Stopped => "󰓛",
+    }
+}
+
+fn list_selection_style() -> Style {
+    Style::default()
+        .fg(theme::FOCUS)
+        .bg(theme::SELECTION)
+        .add_modifier(Modifier::BOLD)
+}
+
 fn draw_loading(frame: &mut ratatui::Frame<'_>, i18n: &Localizer) {
     let close = keyboard::bindings(KeyboardContext::TuiQueue)
         .find(|binding| binding.action == Action::Close)
         .expect("Terminal exit binding");
     frame.render_widget(
         Paragraph::new(format!(
-            "{}\n{}  {}",
+            " RIVU  {}\n\n {}  {}",
             i18n.text("terminal-connecting"),
             close.label,
-            i18n.text(close.description)
+            i18n.text(close.description),
         ))
-        .block(Block::default().title("Rivu").borders(Borders::ALL)),
+        .style(Style::default().fg(theme::TEXT).bg(theme::BACKGROUND)),
         frame.area(),
     );
 }
 
 fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut UiState) {
+    let area = frame.area();
+    frame.render_widget(
+        Block::default().style(Style::default().fg(theme::TEXT).bg(theme::BACKGROUND)),
+        area,
+    );
     if ui.show_help {
         let context = ui.keyboard_context();
-        let items: Vec<_> = help_bindings(context)
-            .map(|binding| {
-                ListItem::new(format!(
-                    "{:<22} {}",
-                    binding.label,
-                    ui.i18n.text(binding.description)
-                ))
-            })
-            .collect();
-        ui.page_size = frame.area().height.saturating_sub(2).max(1) as usize;
-        let mut block = Block::default()
+        let items = help_bindings(context).map(|binding| {
+            ListItem::new(Line::from(vec![
+                Span::styled(format!("{:<22}", binding.label), Style::default().fg(theme::FOCUS)),
+                Span::raw(ui.i18n.text(binding.description)),
+            ]))
+        });
+        ui.page_size = area.height.saturating_sub(2).max(1) as usize;
+        let block = Block::default()
             .title(ui.i18n.text("terminal-keys"))
-            .borders(Borders::ALL);
-        if context == KeyboardContext::TuiSearchQuery {
-            block = block.title_bottom(ui.i18n.text("keyboard-query-input"));
-        }
+            .title_style(Style::default().fg(theme::PLAYING))
+            .border_style(Style::default().fg(theme::BORDER))
+            .borders(Borders::TOP | Borders::BOTTOM);
         let list = List::new(items)
             .block(block)
-            .highlight_style(Style::default().fg(Color::Yellow));
-        frame.render_stateful_widget(list, frame.area(), &mut ui.help_selection);
+            .highlight_style(list_selection_style());
+        frame.render_stateful_widget(list, area, &mut ui.help_selection);
         return;
     }
+    let outer = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Min(1),
+        Constraint::Length(3),
+        Constraint::Length(1),
+    ])
+    .split(area);
     let i18n = &ui.i18n;
-    let area = frame.area();
-    let outer = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Min(5),
-            Constraint::Length(3),
-            Constraint::Length(2),
-        ])
-        .split(area);
-    let now = state
-        .current_track()
-        .map(|t| format!("{} — {}", t.artist, t.title))
-        .unwrap_or_else(|| i18n.text("terminal-nothing-playing").into());
-    let (status, status_icon) = match state.playback.status {
-        PlaybackStatus::Playing => (i18n.text("terminal-playing"), "󰐊"),
-        PlaybackStatus::Paused => (i18n.text("terminal-paused"), "󰏤"),
-        PlaybackStatus::Stopped => (i18n.text("terminal-stopped"), "󰓛"),
+    let active = match &ui.view {
+        View::Queue => 0,
+        View::Search(_) => 1,
+        View::Tree(_) => 2,
+        View::Playlists(_) | View::PlaylistDetail { .. } => 3,
     };
+    let navigation = [
+        ("󰎆", "terminal-queue", ""),
+        ("", "terminal-search", " /"),
+        ("", "terminal-folders", " t"),
+        ("󰲋", "terminal-playlists", " P"),
+    ];
+    let mut header = vec![Span::styled(
+        " RIVU  ",
+        Style::default().fg(theme::PLAYING).add_modifier(Modifier::BOLD),
+    )];
+    for (index, (symbol, label, key)) in navigation.into_iter().enumerate() {
+        if area.width < 90 && index != active {
+            continue;
+        }
+        header.push(Span::styled(
+            format!(" {symbol} {}{key}  ", i18n.text(label)),
+            Style::default().fg(if index == active { theme::FOCUS } else { theme::SECONDARY }),
+        ));
+    }
     frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                " RIVU ",
-                Style::default()
-                    .fg(Color::Rgb(122, 162, 247))
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(format!("{status_icon} {status}  {now}")),
-        ]))
-        .block(Block::default().borders(Borders::BOTTOM)),
+        Paragraph::new(Line::from(header)).block(
+            Block::default()
+                .borders(Borders::BOTTOM)
+                .border_style(Style::default().fg(theme::BORDER)),
+        ),
         outer[0],
     );
-    let columns = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(100)])
-        .split(outer[1]);
-    if matches!(&ui.view, View::Search(_)) {
-        ui.page_size = columns[0].height.saturating_sub(5).max(1) as usize;
-    } else {
-        ui.page_size = columns[0].height.saturating_sub(2).max(1) as usize;
-    }
+    ui.page_size = outer[1].height.saturating_sub(
+        if matches!(ui.view, View::Search(_)) { 4 } else { 1 },
+    ).max(1) as usize;
     match &mut ui.view {
-        View::Search(search) => draw_search(frame, columns[0], search, i18n),
-        View::Tree(tree) => draw_tree(frame, columns[0], tree, i18n),
-        View::PlaylistDetail { detail, .. } => {
-            draw_playlist_detail(frame, columns[0], detail, i18n)
-        }
-        View::Playlists(playlists) => draw_playlists(frame, columns[0], playlists, i18n),
-        View::Queue => draw_queue(frame, columns[0], state, &mut ui.queue, i18n),
+        View::Search(search) => draw_search(frame, outer[1], search, i18n),
+        View::Tree(tree) => draw_tree(frame, outer[1], tree, i18n),
+        View::PlaylistDetail { detail, .. } => draw_playlist_detail(frame, outer[1], detail, i18n),
+        View::Playlists(playlists) => draw_playlists(frame, outer[1], playlists, i18n),
+        View::Queue => draw_queue(frame, outer[1], state, &mut ui.queue, i18n),
     }
+    let playback = Block::default()
+        .borders(Borders::TOP)
+        .border_style(Style::default().fg(theme::BORDER));
+    let playback_area = playback.inner(outer[2]);
+    frame.render_widget(playback, outer[2]);
+    let rows = Layout::vertical([Constraint::Length(1), Constraint::Length(1)])
+        .split(playback_area);
+    let status = match state.playback.status {
+        PlaybackStatus::Playing => "terminal-playing",
+        PlaybackStatus::Paused => "terminal-paused",
+        PlaybackStatus::Stopped => "terminal-stopped",
+    };
+    let mut now = vec![
+        Span::styled(format!(" {} ", playback_symbol(state.playback.status)), Style::default().fg(theme::PLAYING)),
+        Span::styled(i18n.text(status), Style::default().fg(theme::SECONDARY)),
+        Span::raw("  "),
+    ];
+    if let Some(track) = state.current_track() {
+        now.push(Span::raw(track.title.as_str()));
+        if !track.artist.is_empty() {
+            now.push(Span::styled(format!(" — {}", track.artist), Style::default().fg(theme::SECONDARY)));
+        }
+    } else {
+        now.push(Span::raw(i18n.text("terminal-nothing-playing")));
+    }
+    frame.render_widget(Paragraph::new(Line::from(now)), rows[0]);
     let position = state.playback.position.max(0.0);
-    let duration = state.playback.duration.unwrap_or(0.0).max(position + 0.001);
-    let ratio = (position / duration).clamp(0.0, 1.0);
+    let duration = state.playback.duration.filter(|duration| duration.is_finite() && *duration > 0.0);
+    let ratio = duration.map_or(0.0, |duration| (position / duration).clamp(0.0, 1.0));
+    let time = format!(" {} / {} ", fmt_time(position), duration.map_or_else(|| "–:––".into(), fmt_time));
+    let progress = Layout::horizontal([Constraint::Min(1), Constraint::Length(Line::from(time.as_str()).width() as u16)])
+        .split(rows[1]);
     frame.render_widget(
-        Gauge::default()
-            .block(
-                Block::default()
-                    .title(format!(
-                        " {} / {} ",
-                        fmt_time(position),
-                        fmt_time(state.playback.duration.unwrap_or(0.0))
-                    ))
-                    .borders(Borders::ALL),
-            )
-            .gauge_style(Style::default().fg(Color::Rgb(122, 162, 247)))
+        LineGauge::default()
+            .label("")
+            .filled_style(Style::default().fg(theme::PLAYING))
+            .unfilled_style(Style::default().fg(theme::BORDER))
             .ratio(ratio),
-        outer[2],
+        progress[0],
     );
+    frame.render_widget(Paragraph::new(time).style(Style::default().fg(theme::SECONDARY)), progress[1]);
     let status = format!(
-        "󰕾 {:>3}% 󰒝 {} 󰑖 {} 󰘦 {}",
+        " 󰕾 {}%  󰒟 {}  󰑖 {}",
         (state.playback.volume * 100.0).round() as u8,
-        i18n.text(if state.playback.shuffle {
-            "terminal-on"
-        } else {
-            "terminal-off"
-        }),
+        i18n.text(if state.playback.shuffle { "terminal-on" } else { "terminal-off" }),
         repeat_label(state.playback.repeat, i18n),
-        state.queue.total
     );
-    let status_columns = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
+    let status_columns = Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)])
         .split(outer[3]);
-    frame.render_widget(
-        Paragraph::new(status).style(Style::default().fg(Color::Rgb(86, 95, 137))),
-        status_columns[0],
-    );
+    frame.render_widget(Paragraph::new(status).style(Style::default().fg(theme::SECONDARY)), status_columns[0]);
     let help = keyboard::bindings(ui.keyboard_context())
         .find(|binding| binding.action == Action::Help)
         .expect("Every terminal context declares help");
     let help_prompt = format!("{}  {}", help.label, i18n.text(help.description));
-    let prompt = ui
-        .message
-        .as_ref()
-        .map_or(help_prompt.as_str(), |notice| notice.text.as_str());
+    let prompt = ui.message.as_ref().map_or(help_prompt.as_str(), |notice| notice.text.as_str());
     frame.render_widget(
         Paragraph::new(prompt)
             .alignment(Alignment::Right)
-            .style(Style::default().fg(Color::Yellow)),
+            .style(Style::default().fg(if ui.message.is_some() { theme::WARNING } else { theme::SECONDARY })),
         status_columns[1],
     );
 }
@@ -1926,7 +1965,7 @@ fn draw_queue(
     queue: &mut PagedList<QueueRow>,
     i18n: &Localizer,
 ) {
-    queue.set_viewport(area.height.saturating_sub(2) as usize);
+    queue.set_viewport(area.height.saturating_sub(1) as usize);
     let loading =
         (queue.selection.offset()..queue.visible_end()).any(|index| queue.get(index).is_none());
     let title = if state.queue.total == 0 {
@@ -1952,11 +1991,18 @@ fn draw_queue(
             || "…".into(),
             |row| {
                 let marker = if state.queue.current_id == Some(row.id) {
-                    "▶ "
+                    playback_symbol(state.playback.status)
                 } else {
-                    "  "
+                    " "
                 };
-                format!("{marker}{} — {}", row.track.title, row.track.artist)
+                Line::from(vec![
+                    Span::styled(format!("{marker} "), Style::default().fg(theme::PLAYING)),
+                    Span::raw(row.track.title.as_str()),
+                    Span::styled(
+                        if row.track.artist.is_empty() { String::new() } else { format!(" — {}", row.track.artist) },
+                        Style::default().fg(theme::SECONDARY),
+                    ),
+                ])
             },
         ))
     });
@@ -1968,13 +2014,9 @@ fn draw_queue(
     );
     frame.render_stateful_widget(
         List::new(items)
-            .block(Block::default().title(title).borders(Borders::ALL))
-            .highlight_style(
-                Style::default()
-                    .bg(Color::DarkGray)
-                    .add_modifier(Modifier::BOLD),
-            )
-            .highlight_symbol("> "),
+            .block(Block::default().title(title).title_style(Style::default().fg(theme::SECONDARY)))
+            .highlight_style(list_selection_style())
+            .highlight_symbol("▎ "),
         area,
         &mut selection,
     );
@@ -1987,7 +2029,7 @@ fn draw_paged_list<T>(
     row: impl Fn(&T) -> String,
     i18n: &Localizer,
 ) {
-    page.set_viewport(area.height.saturating_sub(2) as usize);
+    page.set_viewport(area.height.saturating_sub(1) as usize);
     let loading = !page.loaded
         || (page.selection.offset()..page.visible_end()).any(|index| page.get(index).is_none());
     let title = if loading {
@@ -2016,13 +2058,9 @@ fn draw_paged_list<T>(
     );
     frame.render_stateful_widget(
         List::new(items)
-            .block(Block::default().title(title).borders(Borders::ALL))
-            .highlight_style(
-                Style::default()
-                    .bg(Color::DarkGray)
-                    .add_modifier(Modifier::BOLD),
-            )
-            .highlight_symbol("> "),
+            .block(Block::default().title(title).title_style(Style::default().fg(theme::SECONDARY)))
+            .highlight_style(list_selection_style())
+            .highlight_symbol("▎ "),
         area,
         &mut selection,
     );

@@ -68,3 +68,6 @@ keyboard-add-extend-down = 向选择中追加下方范围
 keyboard-backspace = 删除搜索词的前一个字符
 keyboard-library-search = 搜索音乐库
 keyboard-query-input = 输入文本以搜索标题、艺人、专辑和路径
+terminal-queue = 队列
+terminal-search = 搜索
+terminal-folders = 目录

@@ -71,3 +71,6 @@ keyboard-add-extend-down = Add a downward range to the selection
 keyboard-backspace = Delete the previous query character
 keyboard-library-search = Search the library
 keyboard-query-input = Type text to search title, artist, album and path
+terminal-queue = Queue
+terminal-search = Search
+terminal-folders = Folders
