@@ -4,10 +4,10 @@ use gpui::{
     App, Bounds, DispatchPhase, Element, ElementId, GlobalElementId, Hitbox, HitboxBehavior,
     InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, Pixels, ScrollWheelEvent, Style, UniformListScrollHandle, Window, div, fill,
-    point, prelude::*, px, relative, rgb, size,
+    linear_color_stop, linear_gradient, point, prelude::*, px, relative, rgb, size,
 };
 
-use super::{ACCENT, MUTED};
+use super::{ACCENT, MUTED, PANEL};
 
 const SLOT_WIDTH: f32 = 12.;
 const THUMB_WIDTH: f32 = 6.;
@@ -102,6 +102,38 @@ impl Geometry {
         }
         let progress = (y - self.track.top() - grab_offset).clamp(px(0.), travel) / travel;
         -(self.max_offset * progress)
+    }
+}
+
+// Paint after the list has resolved scrolling, without a hitbox or an offscreen
+// content texture. The solid surface color deliberately matches docked panels.
+fn paint_scroll_edges(geometry: Geometry, offset: Pixels, window: &mut Window) {
+    let viewport = geometry.viewport;
+    let height = (window.rem_size() * 0.75).min(viewport.size.height / 4.);
+    if geometry.max_offset <= px(0.) || height <= px(0.) || viewport.size.width <= px(0.) {
+        return;
+    }
+    let scrolled = (-offset).clamp(px(0.), geometry.max_offset);
+    for (distance, y, angle) in [
+        (scrolled, viewport.top(), 180.),
+        (
+            geometry.max_offset - scrolled,
+            viewport.bottom() - height,
+            0.,
+        ),
+    ] {
+        let opacity = (distance / height).clamp(0., 1.);
+        if opacity > 0. {
+            let color = rgb(PANEL);
+            window.paint_quad(fill(
+                Bounds::new(point(viewport.left(), y), size(viewport.size.width, height)),
+                linear_gradient(
+                    angle,
+                    linear_color_stop(color.alpha(opacity), 0.),
+                    linear_color_stop(color.alpha(0.), 1.),
+                ),
+            ));
+        }
     }
 }
 
@@ -274,6 +306,7 @@ impl Element for Scrollbar {
             let mut state = frame.state.borrow_mut();
             state.hovered = frame.hitbox.is_hovered(window);
             let offset = self.scroll.0.borrow().base_handle.offset().y;
+            paint_scroll_edges(state.geometry, offset, window);
             if let Some(mut thumb) = state.geometry.thumb(offset) {
                 let expanded = state.gesture.is_some() || state.hovered;
                 let width = px(if expanded {

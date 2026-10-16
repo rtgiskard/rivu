@@ -83,6 +83,8 @@ lists, or click its track to jump.
 Dragging continues outside the scrollbar until you release the mouse button.
 Lists that fit in the viewport have no scrollbar thumb; mouse-wheel scrolling
 remains available when content overflows.
+The list's upper and lower edges indicate more content beyond the viewport;
+the corresponding fade clears when that end is reached.
 
 `interface.language` selects the presentation language: `auto` (default), `en-US`,
 or `zh-CN`. Translations are embedded; no language pack installation is needed.
