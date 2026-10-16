@@ -7,10 +7,10 @@ malformed TOML, unknown keys at the root or in any group or nested view table,
 misplaced fields, and invalid values are errors, not a reason to fall back to defaults.
 Paths are literal: `~` and environment variables are not expanded.
 The file has five stable top-level domains: `[library]`, `[playback]`,
-`[interface]`, `[logging]`, and `[visualizations]`. Visualization view settings
+`[interface]`, `[logging]`, and `[visualizations]`. Audio visualization settings
 live in `[visualizations.spectrum]`, `[visualizations.spectrogram]`,
-`[visualizations.audio_visualizer]`, `[visualizations.waveform]`, and
-`[visualizations.album_artwork]`.
+`[visualizations.audio_visualizer]`, and `[visualizations.waveform]`.
+Album artwork settings live in `[interface.album_artwork]`.
 Desktop integration belongs to Interface; output and decoding belong to Playback;
 shared analysis belongs to Visualizations. Dotted names below identify file paths.
 A minimal example (all omitted settings retain their defaults):
@@ -37,6 +37,10 @@ still_mode = false
 
 The old root-level format is no longer accepted. Rewrite it before starting
 Rivu; mixing old flat keys with grouped settings is also an error.
+
+Move an existing `[visualizations.album_artwork]` table to
+`[interface.album_artwork]`, keeping its fields and values. The old location is
+rejected; do not keep both tables.
 
 * Move library fields to `[library]`; rename `library_roots` to `roots`.
 * Move volume, shuffle, repeat, play-count threshold, output device,
@@ -158,6 +162,12 @@ validation remain in link:../src/config.rs[`Config`].
 == Desktop settings
 
 Open Settings from the application menu. Separate library roots with semicolons.
+The sidebar has four groups: Library, Playback & Audio, Interface, and
+Visualizations. Library includes scan settings and maintenance; Playback & Audio
+contains playback, output, decoding, and read buffering. Interface contains basic
+preferences, layout, album artwork, desktop integration, and diagnostic logging.
+Logging is application-wide, including headless operation, and remains in `[logging]`.
+Visualizations contains shared settings and the four audio-data views.
 In an open dropdown, Up/Down moves the highlight with wraparound;
 PageUp/PageDown moves by the visible row count and clamps at the first or last
 option without scrolling the settings underneath. Enter or Space accepts an
@@ -165,10 +175,11 @@ option in non-editable dropdowns, and Escape closes the dropdown.
 The system tray switch takes effect after restarting the graphical host, not
 merely reopening its window. Media read buffering applies to future source opens,
 including full waveform scans; it does not reopen the current track.
-Still mode is under Visualizations → Common → Rendering and takes effect when
-settings are applied, without restarting playback. The application menu also
-offers a Still mode toggle below Layouts; it applies and saves immediately.
-Both controls use the persisted `visualizations.still_mode` setting.
+Pause visualizations (Still Mode) is under Visualizations → Shared settings →
+Processing and cache and takes effect when settings are applied, without
+restarting playback. The application menu also offers a Still mode toggle below
+Layouts; it applies and saves immediately. Both controls use the persisted
+`visualizations.still_mode` setting. Neither affects artwork or its animation.
 
 Shuffle and Repeat are playback controls, not desktop settings. Applying settings
 preserves their values at the time the core executes the request, including
@@ -176,7 +187,7 @@ changes made while the dialog was open or waiting to save. Library track-informa
 columns are also preserved when applying Settings. Adding a library root,
 toggling a Library column, or toggling waveform seeking does not overwrite playback
 or output-device settings.
-General → Interface includes Layout snapping and Layout grid spacing. These save
+Interface → Layout includes Layout snapping and Layout grid spacing. These save
 `interface.layout_snap_enabled` (default `true`) and `interface.layout_snap_grid_px` (default `8`,
 integer `1`–`64` logical pixels before interface scaling) in `config.toml`.
 
@@ -185,7 +196,7 @@ Single-line desktop text fields scroll horizontally to keep the caret visible.
 Use Left/Right to navigate long values, Home/End to reach either end, or
 Shift+Left/Right to extend a selection beyond the visible text.
 
-Common visualization settings apply as follows:
+Shared visualization settings apply as follows:
 
 * `visualizations.background` sets the background for all views; `visualizations.palette` is
   shared by Spectrum, Spectrogram, and Waveform. Audio Visualizer has independent
@@ -204,7 +215,7 @@ Common visualization settings apply as follows:
   <<_still_mode,Still Mode>>. `visualizations.cache` controls rendering reuse,
   separately from media read buffering; see link:22_cache.adoc[Visualization Cache].
 
-Each frequency view has a range override; leave it empty to inherit Common,
+Each frequency view has a range override; leave it empty to inherit Shared settings,
 or clear an explicit value to restore inheritance. See
 <<_visualization_db_ranges,Visualization dB ranges>> for the configuration contract.
 
@@ -213,10 +224,11 @@ instances, while effect parameters are shared by all instances. See
 <<_audio_visualizer,Audio Visualizer>> for instance settings and style-specific
 effects. Inactive Spectrum style-dependent settings retain their values.
 
-Visualizations → Album artwork edits mode, seconds per circle, and direction
-for every Album artwork panel. These are shared application settings, not
-per-layout instance options; Apply and Discard follow the same draft rules
-as the other global settings.
+Interface → Album artwork edits style, mode, seconds per circle, direction,
+and animation frame rate for every Album artwork panel. These are shared
+application settings, not per-layout instance options; Apply and Discard follow
+the same draft rules as the other global settings. Static mode retains rotation
+parameters; choose Rotating to edit them.
 
 Font: type to search installed families, or use the arrow to browse them and
 `serif`, `sans-serif`, and `monospace`. Enter or a click selects a choice; Space
@@ -256,8 +268,8 @@ Omitted `playback.output_device` uses the default output; a selected device must
 Changing the output device or `playback.pipewire_auto_mix` reopens the current audio
 source and output, unlike display-only settings.
 
-Apply validates and saves all General and Visualizations pages together;
-navigation preserves the draft. Discard drops unapplied changes and closes
+Apply validates and saves all four settings groups together;
+navigation preserves the draft and each page's scroll position. Discard drops unapplied changes and closes
 settings. Invalid input, an unavailable output device, or a save failure is
 reported in settings. Settings opened for one Audio Visualizer instance instead
 apply only that instance's style, reference lines, and labels to `layout.json`;
@@ -276,7 +288,7 @@ See link:../readme.adoc[README] for application lifecycle and host behavior.
 
 === Artwork cache maintenance
 
-Settings → General → Library → Artwork cache provides manual maintenance of embedded
+Settings → Library → Artwork cache provides manual maintenance of embedded
 cover files. Enter a positive whole number in `Expire files older than (days)`
 (initially 30), then choose `Calculate usage` or `Clean expired`. Neither opening
 Settings nor starting Rivu scans this directory. These actions run immediately
@@ -481,7 +493,7 @@ the current playback track independently of Metadata. Its configuration is:
 
 [source,toml]
 ----
-[visualizations.album_artwork]
+[interface.album_artwork]
 style = "plain"
 mode = "static"
 period_seconds = 20.0
@@ -505,13 +517,14 @@ animation requests per second. Lower caps reduce rendering work and resource
 use at the cost of less smooth motion; zero can render more frequently on
 high-refresh displays. Changing the cap preserves the angle. All Album artwork
 panels share these settings; the analysis rate is independent.
-Rotation follows playback rather than audio energy. Pausing, hiding the panel,
-and Still Mode preserve its angle; resuming does not catch up on suspended time.
+Rotation follows playback rather than audio energy. Pausing or hiding the panel
+preserves its angle; resuming does not catch up on suspended time.
 Stopping, changing the current track, or selecting static mode resets the cover
 upright. A track without artwork uses Playback's generated default cover with
 the same animation, interaction, and lifecycle rules as a real cover. Pending
-animation work is cancelled while paused, hidden, static, or in Still Mode, and
-resuming never produces a catch-up burst. Rendering uses GPU transforms, without
+animation work is cancelled while paused, hidden, or static, and resuming never
+produces a catch-up burst. Still Mode does not affect artwork acquisition,
+display, track changes, or rotation. Rendering uses GPU transforms, without
 rotating geometry on the CPU every frame or introducing an application image
 cache. Metadata's full preview is unchanged.
 
@@ -524,8 +537,8 @@ all visualization results. Progressive waveform collection stops; any running
 full-waveform request is cancelled, and new requests are unavailable.
 
 Playback, seeking through the playback slider, ordinary interface effects,
-library operations, covers, IPC, MPRIS, and the tray are unchanged. Layout and
-visualization settings are preserved, including `visualizations.cache`.
+library operations, covers and their animation, IPC, MPRIS, and the tray are unchanged.
+Layout and visualization settings are preserved, including `visualizations.cache`.
 
 Disabling Still Mode starts the visible views fresh, without reopening audio
 output or the decoder. Views rebuild from new audio; leaving the mode while

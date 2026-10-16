@@ -77,7 +77,7 @@ unique new destination with matching content. Exact paths take precedence.
 Ambiguous copies retain separate IDs and the missing identity's user state;
 scan order never chooses a destination. CUE matching is unchanged.
 
-Use Settings → General → Library → `Same files / Relocation candidates` to
+Use Settings → Library → `Same files / Relocation candidates` to
 inspect paged ordinary-file groups. Closing the review returns to Settings
 without applying or discarding its unsaved edits. Historical cached BLAKE3 hashes
 identify candidates, not fresh proof. Rows show paths, current existence, scan

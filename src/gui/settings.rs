@@ -371,8 +371,18 @@ fn ffmpeg_hint(i18n: &Localizer, status: &str) -> String {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SettingsPage {
-    General,
+    Library,
+    Playback,
+    Interface,
     Visualizations,
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InterfacePage {
+    Basic,
+    Layout,
+    AlbumArtwork,
+    Desktop,
+    Logging,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum VisualPage {
@@ -381,7 +391,6 @@ enum VisualPage {
     Spectrogram,
     AudioVisualizer,
     Waveform,
-    AlbumArtwork,
 }
 
 struct FontOption {
@@ -456,6 +465,7 @@ pub(super) struct Settings {
     feedback: Option<std::result::Result<(), String>>,
     page: SettingsPage,
     visual_page: VisualPage,
+    interface_page: InterfacePage,
     visualizer_panel: Option<u64>,
 }
 
@@ -526,8 +536,9 @@ impl Settings {
             applying: false,
             session: 0,
             feedback: None,
-            page: SettingsPage::General,
+            page: SettingsPage::Library,
             visual_page: VisualPage::Common,
+            interface_page: InterfacePage::Basic,
             visualizer_panel: None,
         }
     }
@@ -1682,7 +1693,46 @@ impl Settings {
         settings_group(self.tr("settings-artwork-cache"), content)
     }
 
-    fn general_settings(&mut self, cx: &mut Context<Self>) -> Div {
+    fn library_settings(&mut self, cx: &mut Context<Self>) -> Div {
+        let library = settings_group(
+            self.tr("settings-library"),
+            column()
+                .gap_2()
+                .child(
+                    row()
+                        .items_start()
+                        .flex_wrap()
+                        .gap_3()
+                        .child(self.field(Field::Roots).flex_1().min_w(rems(260. / 16.)))
+                        .child(
+                            self.field(Field::ScanMaxDepth)
+                                .flex_1()
+                                .min_w(rems(220. / 16.)),
+                        ),
+                )
+                .child(two_column(
+                    settings_group(
+                        self.tr("settings-relocation"),
+                        column()
+                            .gap_2()
+                            .child(caption(self.tr("settings-relocation-help")))
+                            .child(button(
+                                "settings-same-files",
+                                self.tr("settings-review-candidates"),
+                                cx,
+                                |this, _, cx| {
+                                    this.dropdown.close();
+                                    cx.emit(SettingsEvent::ReviewDuplicates);
+                                },
+                            )),
+                    ),
+                    self.artwork_cache_settings(cx),
+                )),
+        );
+        column().child(library)
+    }
+
+    fn playback_settings(&mut self, cx: &mut Context<Self>) -> Div {
         let chosen_device: SharedString = self
             .draft
             .output_device
@@ -1745,112 +1795,8 @@ impl Settings {
                 })
                 .child(self.measurement(Measured::Device, cx)),
             );
-        let draft = &self.draft;
-        let (mpris, tray, ffmpeg, remix) = (
-            draft.mpris_enabled,
-            draft.tray_enabled,
-            draft.ffmpeg_enabled,
-            draft.pipewire_auto_mix,
-        );
-        let log_level_dropdown = dropdown_button(
-            "settings-log-level",
-            SettingChoice::LogLevel(draft.log_level).label(&self.i18n),
-            cx,
-            |this, _, _| {
-                let values = [
-                    LogLevel::Debug,
-                    LogLevel::Info,
-                    LogLevel::Warning,
-                    LogLevel::Error,
-                ];
-                let selected = values
-                    .iter()
-                    .position(|value| *value == this.draft.log_level)
-                    .unwrap_or(0);
-                this.open_setting_dropdown(
-                    values
-                        .into_iter()
-                        .map(|value| {
-                            DropdownItem::new(
-                                SettingChoice::LogLevel(value),
-                                SettingChoice::LogLevel(value).label(&this.i18n),
-                            )
-                        })
-                        .collect(),
-                    selected,
-                );
-            },
-        )
-        .relative()
-        .child(self.measurement(Measured::SettingsLogLevel, cx));
-        let logging = settings_group(
-            self.tr("settings-logging"),
-            column()
-                .gap_2()
-                .child(
-                    row()
-                        .items_start()
-                        .flex_wrap()
-                        .gap_3()
-                        .child(
-                            column()
-                                .flex_1()
-                                .min_w(rems(180. / 16.))
-                                .gap_1()
-                                .child(caption(self.tr("settings-log-level")))
-                                .child(log_level_dropdown),
-                        )
-                        .child(
-                            self.field(Field::LogRetentionWeeks)
-                                .flex_1()
-                                .min_w(rems(180. / 16.)),
-                        ),
-                )
-                .child(row().child(visual_switch(
-                    &self.i18n,
-                    "settings-log-file",
-                    "",
-                    self.tr("settings-write-logs-to-disk"),
-                    draft.log_to_file,
-                    cx,
-                    |draft| draft.log_to_file = !draft.log_to_file,
-                ))),
-        );
-        let library = settings_group(
-            self.tr("settings-library"),
-            column()
-                .gap_2()
-                .child(
-                    row()
-                        .items_start()
-                        .flex_wrap()
-                        .gap_3()
-                        .child(self.field(Field::Roots).flex_1().min_w(rems(260. / 16.)))
-                        .child(
-                            self.field(Field::ScanMaxDepth)
-                                .flex_1()
-                                .min_w(rems(220. / 16.)),
-                        ),
-                )
-                .child(two_column(
-                    settings_group(
-                        self.tr("settings-relocation"),
-                        column()
-                            .gap_2()
-                            .child(caption(self.tr("settings-relocation-help")))
-                            .child(button(
-                                "settings-same-files",
-                                self.tr("settings-review-candidates"),
-                                cx,
-                                |this, _, cx| {
-                                    this.dropdown.close();
-                                    cx.emit(SettingsEvent::ReviewDuplicates);
-                                },
-                            )),
-                    ),
-                    self.artwork_cache_settings(cx),
-                )),
-        );
+        let ffmpeg = self.draft.ffmpeg_enabled;
+        let remix = self.draft.pipewire_auto_mix;
         let playback = settings_group(
             self.tr("settings-playback"),
             column()
@@ -1921,6 +1867,11 @@ impl Settings {
                         )),
                 ),
         );
+        column().gap_3().child(playback).child(audio)
+    }
+
+    fn basic_settings(&mut self, cx: &mut Context<Self>) -> Div {
+        let draft = &self.draft;
         let language = dropdown_button(
             "settings-language",
             match draft.ui_language.as_str() {
@@ -1961,134 +1912,379 @@ impl Settings {
                 .child(two_column(
                     self.font_control(cx).min_w(rems(180. / 16.)),
                     self.field(Field::Scale).min_w(rems(180. / 16.)),
-                ))
-                .child(two_column(
-                    Field::LayoutSnapGrid.form(
-                        self,
-                        row()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .child(self.inputs[&Field::LayoutSnapGrid].clone()),
-                            )
-                            .child(visual_switch(
-                                &self.i18n,
-                                "settings-layout-snapping",
-                                "󰐃",
-                                self.tr("settings-layout-snapping"),
-                                self.draft.layout_snap_enabled,
-                                cx,
-                                |draft| draft.layout_snap_enabled = !draft.layout_snap_enabled,
-                            )),
-                    ),
-                    div(),
-                ))
-                .child(
-                    row()
-                        .flex_wrap()
-                        .gap_2()
-                        .child(active_control(
-                            icon_button(
-                                "settings-mpris",
-                                "󰐹",
-                                self.i18n.format(
-                                    "settings-mpris-status",
-                                    &[
-                                        (
-                                            "state",
-                                            self.i18n
-                                                .text(if mpris {
-                                                    "settings-on"
-                                                } else {
-                                                    "settings-off"
-                                                })
-                                                .into(),
-                                        ),
-                                        ("detail", self.mpris_status.to_owned().into()),
-                                    ],
+                )),
+        );
+        column().child(interface)
+    }
+
+    fn layout_settings(&mut self, cx: &mut Context<Self>) -> Div {
+        column().child(two_column(
+            Field::LayoutSnapGrid.form(
+                self,
+                row()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(self.inputs[&Field::LayoutSnapGrid].clone()),
+                    )
+                    .child(visual_switch(
+                        &self.i18n,
+                        "settings-layout-snapping",
+                        "󰐃",
+                        self.tr("settings-layout-snapping"),
+                        self.draft.layout_snap_enabled,
+                        cx,
+                        |draft| draft.layout_snap_enabled = !draft.layout_snap_enabled,
+                    )),
+            ),
+            div(),
+        ))
+    }
+
+    fn desktop_settings(&mut self, cx: &mut Context<Self>) -> Div {
+        let mpris = self.draft.mpris_enabled;
+        let tray = self.draft.tray_enabled;
+        column().child(
+            row()
+                .flex_wrap()
+                .gap_2()
+                .child(active_control(
+                    icon_button(
+                        "settings-mpris",
+                        "󰐹",
+                        self.i18n.format(
+                            "settings-mpris-status",
+                            &[
+                                (
+                                    "state",
+                                    self.i18n
+                                        .text(if mpris { "settings-on" } else { "settings-off" })
+                                        .into(),
                                 ),
-                                cx,
-                                |this, _, cx| {
-                                    this.draft.mpris_enabled = !this.draft.mpris_enabled;
-                                    cx.notify();
-                                },
-                            ),
-                            mpris,
-                        ))
-                        .child(visual_switch(
-                            &self.i18n,
-                            "settings-tray",
-                            "",
-                            self.tr("settings-system-tray"),
-                            tray,
-                            cx,
-                            |draft| draft.tray_enabled = !draft.tray_enabled,
-                        )),
-                )
+                                ("detail", self.mpris_status.to_owned().into()),
+                            ],
+                        ),
+                        cx,
+                        |this, _, cx| {
+                            this.draft.mpris_enabled = !this.draft.mpris_enabled;
+                            cx.notify();
+                        },
+                    ),
+                    mpris,
+                ))
+                .child(visual_switch(
+                    &self.i18n,
+                    "settings-tray",
+                    "",
+                    self.tr("settings-system-tray"),
+                    tray,
+                    cx,
+                    |draft| draft.tray_enabled = !draft.tray_enabled,
+                ))
                 .id("settings-interface-help")
                 .tooltip(settings_tooltip(self.tr("settings-tray-restart-help"))),
-        );
+        )
+    }
 
+    fn logging_settings(&mut self, cx: &mut Context<Self>) -> Div {
+        let draft = &self.draft;
+        let log_level_dropdown = dropdown_button(
+            "settings-log-level",
+            SettingChoice::LogLevel(draft.log_level).label(&self.i18n),
+            cx,
+            |this, _, _| {
+                let values = [
+                    LogLevel::Debug,
+                    LogLevel::Info,
+                    LogLevel::Warning,
+                    LogLevel::Error,
+                ];
+                let selected = values
+                    .iter()
+                    .position(|value| *value == this.draft.log_level)
+                    .unwrap_or(0);
+                this.open_setting_dropdown(
+                    values
+                        .into_iter()
+                        .map(|value| {
+                            DropdownItem::new(
+                                SettingChoice::LogLevel(value),
+                                SettingChoice::LogLevel(value).label(&this.i18n),
+                            )
+                        })
+                        .collect(),
+                    selected,
+                );
+            },
+        )
+        .relative()
+        .child(self.measurement(Measured::SettingsLogLevel, cx));
+        let logging = settings_group(
+            self.tr("settings-logging"),
+            column()
+                .gap_2()
+                .child(
+                    row()
+                        .items_start()
+                        .flex_wrap()
+                        .gap_3()
+                        .child(
+                            column()
+                                .flex_1()
+                                .min_w(rems(180. / 16.))
+                                .gap_1()
+                                .child(caption(self.tr("settings-log-level")))
+                                .child(log_level_dropdown),
+                        )
+                        .child(
+                            self.field(Field::LogRetentionWeeks)
+                                .flex_1()
+                                .min_w(rems(180. / 16.)),
+                        ),
+                )
+                .child(row().child(visual_switch(
+                    &self.i18n,
+                    "settings-log-file",
+                    "",
+                    self.tr("settings-write-logs-to-disk"),
+                    draft.log_to_file,
+                    cx,
+                    |draft| draft.log_to_file = !draft.log_to_file,
+                ))),
+        );
         column()
-            .gap_3()
-            .child(library)
-            .child(playback)
-            .child(audio)
-            .child(interface)
+            .child(caption(self.tr("settings-logging-scope")))
             .child(logging)
     }
 
-    fn visual_settings_tabs(&self, cx: &mut Context<Self>) -> Div {
-        let selected = self.visual_page;
-        row()
-            .flex_wrap()
-            .flex_shrink_0()
+    fn sidebar(&self, cx: &mut Context<Self>) -> Div {
+        let mut sidebar = column()
             .gap_1()
-            .px(gpui::px(UI_INSET))
-            .py_2()
-            .child(self.tab_button(
-                "visual-common",
-                self.tr("settings-common"),
-                selected == VisualPage::Common,
+            .w(rems(11.))
+            .flex_shrink_0()
+            .p(gpui::px(UI_INSET))
+            .border_r_1()
+            .border_color(rgb(BORDER));
+        sidebar = sidebar.child(self.tab_button(
+            "nav-library",
+            self.tr("settings-library"),
+            self.page == SettingsPage::Library,
+            cx,
+            |settings| settings.page = SettingsPage::Library,
+        ));
+        sidebar = sidebar.child(self.tab_button(
+            "nav-playback-audio",
+            self.tr("settings-playback-audio"),
+            self.page == SettingsPage::Playback,
+            cx,
+            |settings| settings.page = SettingsPage::Playback,
+        ));
+        sidebar = sidebar.child(self.tab_button(
+            "nav-interface",
+            self.tr("settings-interface"),
+            self.page == SettingsPage::Interface,
+            cx,
+            |settings| settings.page = SettingsPage::Interface,
+        ));
+        if self.page == SettingsPage::Interface {
+            let mut children = column().pl_3().gap_1();
+            children = children.child(self.tab_button(
+                "nav-basic",
+                self.tr("settings-basic"),
+                self.interface_page == InterfacePage::Basic,
+                cx,
+                |settings| settings.interface_page = InterfacePage::Basic,
+            ));
+            children = children.child(self.tab_button(
+                "nav-layout",
+                self.tr("settings-layout"),
+                self.interface_page == InterfacePage::Layout,
+                cx,
+                |settings| settings.interface_page = InterfacePage::Layout,
+            ));
+            children = children.child(self.tab_button(
+                "nav-album-artwork",
+                self.tr("settings-album-artwork"),
+                self.interface_page == InterfacePage::AlbumArtwork,
+                cx,
+                |settings| settings.interface_page = InterfacePage::AlbumArtwork,
+            ));
+            children = children.child(self.tab_button(
+                "nav-desktop-integration",
+                self.tr("settings-desktop-integration"),
+                self.interface_page == InterfacePage::Desktop,
+                cx,
+                |settings| settings.interface_page = InterfacePage::Desktop,
+            ));
+            children = children.child(self.tab_button(
+                "nav-diagnostic-logging",
+                self.tr("settings-diagnostic-logging"),
+                self.interface_page == InterfacePage::Logging,
+                cx,
+                |settings| settings.interface_page = InterfacePage::Logging,
+            ));
+            sidebar = sidebar.child(children);
+        }
+        sidebar = sidebar.child(self.tab_button(
+            "nav-visualizations",
+            self.tr("settings-visualizations"),
+            self.page == SettingsPage::Visualizations,
+            cx,
+            |settings| settings.page = SettingsPage::Visualizations,
+        ));
+        if self.page == SettingsPage::Visualizations {
+            let mut children = column().pl_3().gap_1();
+            children = children.child(self.tab_button(
+                "nav-shared-settings",
+                self.tr("settings-shared-settings"),
+                self.visual_page == VisualPage::Common,
                 cx,
                 |settings| settings.visual_page = VisualPage::Common,
-            ))
-            .child(self.tab_button(
-                "visual-album-artwork",
-                self.tr("settings-album-artwork"),
-                selected == VisualPage::AlbumArtwork,
-                cx,
-                |settings| settings.visual_page = VisualPage::AlbumArtwork,
-            ))
-            .child(self.tab_button(
-                "visual-spectrogram",
-                self.tr("settings-spectrogram"),
-                selected == VisualPage::Spectrogram,
-                cx,
-                |settings| settings.visual_page = VisualPage::Spectrogram,
-            ))
-            .child(self.tab_button(
-                "visual-spectrum",
+            ));
+            children = children.child(self.tab_button(
+                "nav-spectrum",
                 self.tr("settings-spectrum"),
-                selected == VisualPage::Spectrum,
+                self.visual_page == VisualPage::Spectrum,
                 cx,
                 |settings| settings.visual_page = VisualPage::Spectrum,
-            ))
-            .child(self.tab_button(
-                "visual-waveform",
+            ));
+            children = children.child(self.tab_button(
+                "nav-spectrogram",
+                self.tr("settings-spectrogram"),
+                self.visual_page == VisualPage::Spectrogram,
+                cx,
+                |settings| settings.visual_page = VisualPage::Spectrogram,
+            ));
+            children = children.child(self.tab_button(
+                "nav-waveform",
                 self.tr("settings-waveform"),
-                selected == VisualPage::Waveform,
+                self.visual_page == VisualPage::Waveform,
                 cx,
                 |settings| settings.visual_page = VisualPage::Waveform,
-            ))
-            .child(self.tab_button(
-                "visual-audio-visualizer",
+            ));
+            children = children.child(self.tab_button(
+                "nav-audio-visualizer",
                 self.tr("settings-audio-visualizer"),
-                selected == VisualPage::AudioVisualizer,
+                self.visual_page == VisualPage::AudioVisualizer,
                 cx,
                 |settings| settings.visual_page = VisualPage::AudioVisualizer,
+            ));
+            sidebar = sidebar.child(children);
+        }
+        sidebar
+    }
+
+    fn artwork_settings(&mut self, cx: &mut Context<Self>) -> Div {
+        let settings = &*self;
+        let draft = &settings.draft;
+        let style = dropdown_button(
+            "album-artwork-style",
+            SettingChoice::AlbumArtworkStyle(draft.album_artwork_style).label(&self.i18n),
+            cx,
+            |this, _, _| {
+                let values = ALBUM_ARTWORK_STYLES;
+                let selected = values
+                    .iter()
+                    .position(|value| *value == this.draft.album_artwork_style)
+                    .unwrap_or(0);
+                this.open_setting_dropdown(
+                    values
+                        .into_iter()
+                        .map(|value| {
+                            let choice = SettingChoice::AlbumArtworkStyle(value);
+                            DropdownItem::new(choice, choice.label(&this.i18n))
+                        })
+                        .collect(),
+                    selected,
+                );
+            },
+        )
+        .relative()
+        .child(self.measurement(Measured::AlbumArtworkStyle, cx));
+        let mode = dropdown_button(
+            "album-artwork-mode",
+            SettingChoice::AlbumArtworkMode(draft.album_artwork_mode).label(&self.i18n),
+            cx,
+            |this, _, _| {
+                let values = [AlbumArtworkMode::Static, AlbumArtworkMode::Rotating];
+                let selected = values
+                    .iter()
+                    .position(|value| *value == this.draft.album_artwork_mode)
+                    .unwrap_or(0);
+                this.open_setting_dropdown(
+                    values
+                        .into_iter()
+                        .map(|value| {
+                            let choice = SettingChoice::AlbumArtworkMode(value);
+                            DropdownItem::new(choice, choice.label(&this.i18n))
+                        })
+                        .collect(),
+                    selected,
+                );
+            },
+        )
+        .relative()
+        .child(self.measurement(Measured::AlbumArtworkMode, cx));
+        let direction = dropdown_button(
+            "album-artwork-direction",
+            SettingChoice::AlbumArtworkDirection(draft.album_artwork_direction).label(&self.i18n),
+            cx,
+            |this, _, _| {
+                let values = [
+                    AlbumArtworkDirection::Clockwise,
+                    AlbumArtworkDirection::Counterclockwise,
+                ];
+                let selected = values
+                    .iter()
+                    .position(|value| *value == this.draft.album_artwork_direction)
+                    .unwrap_or(0);
+                this.open_setting_dropdown(
+                    values
+                        .into_iter()
+                        .map(|value| {
+                            let choice = SettingChoice::AlbumArtworkDirection(value);
+                            DropdownItem::new(choice, choice.label(&this.i18n))
+                        })
+                        .collect(),
+                    selected,
+                );
+            },
+        )
+        .relative()
+        .child(self.measurement(Measured::AlbumArtworkDirection, cx));
+        let rotating = draft.album_artwork_mode == AlbumArtworkMode::Rotating;
+        let reason = settings.tr("settings-artwork-static-inactive-hint");
+        column()
+            .gap_3()
+            .child(caption(settings.tr("settings-artwork-motion-help")))
+            .child(settings_group(
+                settings.tr("settings-appearance"),
+                form_field(settings.tr("settings-style"), style),
+            ))
+            .child(settings_group(
+                settings.tr("settings-animation"),
+                column()
+                    .gap_2()
+                    .child(form_field(settings.tr("settings-mode"), mode))
+                    .child(two_column(
+                        div().child(
+                            disabled_control(
+                                form_field(settings.tr("settings-direction"), direction)
+                                    .id("settings-artwork-direction-field"),
+                                !rotating,
+                            )
+                            .tooltip(settings_tooltip(reason.clone())),
+                        ),
+                        settings.field_state(
+                            Field::AlbumArtworkPeriod,
+                            rotating,
+                            reason.clone(),
+                            cx,
+                        ),
+                    ))
+                    .child(settings.field_state(Field::AlbumArtworkFps, rotating, reason, cx)),
             ))
     }
 
@@ -2096,104 +2292,6 @@ impl Settings {
         let settings = &*self;
         let draft = &settings.draft;
         match settings.visual_page {
-            VisualPage::AlbumArtwork => {
-                let style = dropdown_button(
-                    "album-artwork-style",
-                    SettingChoice::AlbumArtworkStyle(draft.album_artwork_style).label(&self.i18n),
-                    cx,
-                    |this, _, _| {
-                        let values = ALBUM_ARTWORK_STYLES;
-                        let selected = values
-                            .iter()
-                            .position(|value| *value == this.draft.album_artwork_style)
-                            .unwrap_or(0);
-                        this.open_setting_dropdown(
-                            values
-                                .into_iter()
-                                .map(|value| {
-                                    let choice = SettingChoice::AlbumArtworkStyle(value);
-                                    DropdownItem::new(choice, choice.label(&this.i18n))
-                                })
-                                .collect(),
-                            selected,
-                        );
-                    },
-                )
-                .relative()
-                .child(self.measurement(Measured::AlbumArtworkStyle, cx));
-                let mode = dropdown_button(
-                    "album-artwork-mode",
-                    SettingChoice::AlbumArtworkMode(draft.album_artwork_mode).label(&self.i18n),
-                    cx,
-                    |this, _, _| {
-                        let values = [AlbumArtworkMode::Static, AlbumArtworkMode::Rotating];
-                        let selected = values
-                            .iter()
-                            .position(|value| *value == this.draft.album_artwork_mode)
-                            .unwrap_or(0);
-                        this.open_setting_dropdown(
-                            values
-                                .into_iter()
-                                .map(|value| {
-                                    let choice = SettingChoice::AlbumArtworkMode(value);
-                                    DropdownItem::new(choice, choice.label(&this.i18n))
-                                })
-                                .collect(),
-                            selected,
-                        );
-                    },
-                )
-                .relative()
-                .child(self.measurement(Measured::AlbumArtworkMode, cx));
-                let direction = dropdown_button(
-                    "album-artwork-direction",
-                    SettingChoice::AlbumArtworkDirection(draft.album_artwork_direction)
-                        .label(&self.i18n),
-                    cx,
-                    |this, _, _| {
-                        let values = [
-                            AlbumArtworkDirection::Clockwise,
-                            AlbumArtworkDirection::Counterclockwise,
-                        ];
-                        let selected = values
-                            .iter()
-                            .position(|value| *value == this.draft.album_artwork_direction)
-                            .unwrap_or(0);
-                        this.open_setting_dropdown(
-                            values
-                                .into_iter()
-                                .map(|value| {
-                                    let choice = SettingChoice::AlbumArtworkDirection(value);
-                                    DropdownItem::new(choice, choice.label(&this.i18n))
-                                })
-                                .collect(),
-                            selected,
-                        );
-                    },
-                )
-                .relative()
-                .child(self.measurement(Measured::AlbumArtworkDirection, cx));
-                column().child(settings_group(
-                    settings.tr("settings-playback-motion"),
-                    column()
-                        .gap_2()
-                        .child(two_column(
-                            form_field(settings.tr("settings-style"), style)
-                                .min_w(rems(180. / 16.)),
-                            form_field(settings.tr("settings-mode"), mode).min_w(rems(180. / 16.)),
-                        ))
-                        .child(two_column(
-                            form_field(settings.tr("settings-direction"), direction)
-                                .min_w(rems(180. / 16.)),
-                            settings.field(Field::AlbumArtworkPeriod),
-                        ))
-                        .child(settings.single(Field::AlbumArtworkFps))
-                        .id("settings-album-artwork-help")
-                        .tooltip(settings_tooltip(
-                            settings.tr("settings-artwork-motion-help"),
-                        )),
-                ))
-            }
             VisualPage::Common => {
                 let palette = dropdown_button(
                     "visual-palette",
@@ -2288,9 +2386,12 @@ impl Settings {
                                 form_field(settings.tr("settings-color-scheme"), palette)
                                     .min_w(rems(180. / 16.)),
                             ))
-                            .child(settings.single(Field::VisualizationDb))
                             .id("settings-appearance-help")
                             .tooltip(settings_tooltip(settings.tr("settings-appearance-help"))),
+                    ))
+                    .child(settings_group(
+                        settings.tr("settings-display-range"),
+                        settings.single(Field::VisualizationDb),
                     ))
                     .child(settings_group(
                         settings.tr("settings-frequency-analysis"),
@@ -2307,7 +2408,7 @@ impl Settings {
                             .tooltip(settings_tooltip(settings.tr("settings-analysis-help"))),
                     ))
                     .child(settings_group(
-                        settings.tr("settings-rendering"),
+                        settings.tr("settings-processing-cache"),
                         row()
                             .gap_2()
                             .child(visual_switch(
@@ -2730,68 +2831,61 @@ impl Settings {
 
     fn panel(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let panel_id = u64::MAX;
-        let category = row()
-            .flex_wrap()
-            .flex_shrink_0()
-            .gap_1()
-            .px(gpui::px(UI_INSET))
-            .py(gpui::px(UI_INSET))
-            .border_b_1()
-            .border_color(rgb(BORDER))
-            .child(self.tab_button(
-                "settings-general",
-                self.tr("settings-general"),
-                self.page == SettingsPage::General,
-                cx,
-                |settings| settings.page = SettingsPage::General,
-            ))
-            .child(self.tab_button(
-                "settings-visualizations",
-                self.tr("settings-visualizations"),
-                self.page == SettingsPage::Visualizations,
-                cx,
-                |settings| settings.page = SettingsPage::Visualizations,
-            ));
         let mut panel = column()
             .id(("settings-panel", panel_id))
             .relative()
             .w_full()
             .flex_1()
             .min_h_0()
-            .gap_0()
-            .when(self.visualizer_panel.is_none(), |panel| {
-                panel.child(category)
-            });
-        let page_id = match (self.page, self.visual_page) {
-            (SettingsPage::General, _) => "settings-general-scroll",
-            (_, VisualPage::Common) => "settings-common-scroll",
-            (_, VisualPage::Spectrum) => "settings-spectrum-scroll",
-            (_, VisualPage::Spectrogram) => "settings-spectrogram-scroll",
-            (_, VisualPage::Waveform) => "settings-waveform-scroll",
-            (_, VisualPage::AudioVisualizer) => "settings-audio-visualizer-scroll",
-            (_, VisualPage::AlbumArtwork) => "settings-album-artwork-scroll",
-        };
-        let content = match self.page {
-            SettingsPage::General => self.general_settings(cx),
-            SettingsPage::Visualizations => {
-                if self.visualizer_panel.is_none() {
-                    panel = panel.child(self.visual_settings_tabs(cx));
+            .gap_0();
+        let (page_id, content) = match self.page {
+            SettingsPage::Library => ("settings-library-scroll", self.library_settings(cx)),
+            SettingsPage::Playback => ("settings-playback-scroll", self.playback_settings(cx)),
+            SettingsPage::Interface => match self.interface_page {
+                InterfacePage::Basic => ("settings-basic-scroll", self.basic_settings(cx)),
+                InterfacePage::Layout => ("settings-layout-scroll", self.layout_settings(cx)),
+                InterfacePage::AlbumArtwork => {
+                    ("settings-artwork-scroll", self.artwork_settings(cx))
                 }
-                self.visual_settings(cx)
+                InterfacePage::Desktop => ("settings-desktop-scroll", self.desktop_settings(cx)),
+                InterfacePage::Logging => ("settings-logging-scroll", self.logging_settings(cx)),
+            },
+            SettingsPage::Visualizations => {
+                let id = match self.visual_page {
+                    VisualPage::Common => "settings-common-scroll",
+                    VisualPage::Spectrum => "settings-spectrum-scroll",
+                    VisualPage::Spectrogram => "settings-spectrogram-scroll",
+                    VisualPage::Waveform => "settings-waveform-scroll",
+                    VisualPage::AudioVisualizer => "settings-audio-visualizer-scroll",
+                };
+                (id, self.visual_settings(cx))
             }
         };
         let scroll = self.scrolls.entry(page_id).or_default().clone();
         self.active_scroll = Some(scroll.clone());
+        let mut body = row().flex_1().min_h_0().items_start();
+        if self.visualizer_panel.is_none() {
+            body = body.child(
+                self.sidebar(cx)
+                    .id("settings-sidebar")
+                    .h_full()
+                    .overflow_y_scroll(),
+            );
+        }
         panel = panel.child(
-            div()
-                .id(page_id)
-                .flex()
-                .flex_col()
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scroll()
-                .track_scroll(&scroll)
-                .child(content.flex_shrink_0().p(gpui::px(UI_INSET))),
+            body.child(
+                div()
+                    .id(page_id)
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h_0()
+                    .min_w_0()
+                    .h_full()
+                    .overflow_y_scroll()
+                    .track_scroll(&scroll)
+                    .child(content.flex_shrink_0().p(gpui::px(UI_INSET))),
+            ),
         );
         let feedback = if self.applying {
             status_message(self.tr("settings-applying-settings"), StatusKind::Info)
@@ -2984,7 +3078,7 @@ impl Render for Settings {
             .bg(rgb(0x000000).alpha(0.58))
             .child(
                 column()
-                    .max_w(rems(620. / 16.))
+                    .max_w(rems(860. / 16.))
                     .w(relative(0.9))
                     .h((window.viewport_size().height - px(32.))
                         .max(px(0.))

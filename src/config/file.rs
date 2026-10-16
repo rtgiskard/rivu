@@ -4,27 +4,30 @@ use super::*;
 // Each leaf declares its file key, runtime field and type once. Loading overlays
 // supplied values on one Config::default(); saving borrows the runtime fields.
 macro_rules! file_group {
-    ($owned:ident, $view:ident { $( $(#[$attr:meta])* $key:ident => $field:ident : $ty:ty, )* }) => {
+    ($owned:ident, $view:ident { $( $(#[$attr:meta])* $key:ident => $field:ident : $ty:ty, )* } $(; $nested:ident : $nested_owned:ident, $nested_view:ident)?) => {
         #[derive(Default, Deserialize)]
         #[serde(default, deny_unknown_fields)]
         struct $owned {
             $( $(#[$attr])* $key: Option<$ty>, )*
+            $( $nested: $nested_owned, )?
         }
 
         impl $owned {
             fn apply(self, config: &mut Config) {
                 $( if let Some(value) = self.$key { config.$field = value; } )*
+                $( self.$nested.apply(config); )?
             }
         }
 
         #[derive(Serialize)]
         struct $view<'a> {
             $( $(#[$attr])* $key: &'a $ty, )*
+            $( $nested: $nested_view<'a>, )?
         }
 
         impl<'a> From<&'a Config> for $view<'a> {
             fn from(config: &'a Config) -> Self {
-                Self { $( $key: &config.$field, )* }
+                Self { $( $key: &config.$field, )* $( $nested: config.into(), )? }
             }
         }
     };
@@ -77,7 +80,7 @@ file_group!(Interface, InterfaceView {
     scale => ui_scale: f32,
     layout_snap_enabled => layout_snap_enabled: bool,
     layout_snap_grid_px => layout_snap_grid_px: u32,
-});
+}; album_artwork: AlbumArtwork, AlbumArtworkView);
 
 file_group!(Logging, LoggingView {
     level => log_level: LogLevel,
@@ -164,7 +167,6 @@ struct Visualizations {
     spectrogram: Spectrogram,
     audio_visualizer: AudioVisualizer,
     waveform: Waveform,
-    album_artwork: AlbumArtwork,
 }
 
 #[derive(Serialize)]
@@ -181,7 +183,6 @@ struct VisualizationsView<'a> {
     spectrogram: SpectrogramView<'a>,
     audio_visualizer: AudioVisualizerView<'a>,
     waveform: WaveformView<'a>,
-    album_artwork: AlbumArtworkView<'a>,
 }
 
 #[derive(Default, Deserialize)]
@@ -229,7 +230,6 @@ impl FileConfig {
         self.visualizations.spectrogram.apply(&mut config);
         self.visualizations.audio_visualizer.apply(&mut config);
         self.visualizations.waveform.apply(&mut config);
-        self.visualizations.album_artwork.apply(&mut config);
         config
     }
 }
@@ -263,7 +263,6 @@ impl<'a> From<&'a Config> for FileConfigView<'a> {
                 spectrogram: config.into(),
                 audio_visualizer: config.into(),
                 waveform: config.into(),
-                album_artwork: config.into(),
             },
         }
     }

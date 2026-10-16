@@ -226,7 +226,7 @@ mode immediately returns the cover upright. Changing the period or direction
 preserves the current angle. Missing artwork uses a static placeholder.
 
 Hiding the panel or window suspends animation without advancing hidden time.
-Still Mode also freezes rotation but retains the cover. Multiple panels share
+Still Mode does not affect cover loading or rotation. Multiple panels share
 the same cover and rotation state. The full, static Track details preview is
 unchanged.
 

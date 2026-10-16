@@ -55,14 +55,15 @@ style is marked. Changes take effect immediately and are saved to the shared
 configuration used by Settings and all Album artwork panels. Motion mode,
 direction, period, and frame rate are unchanged.
 
-`visualizations.album_artwork.fps` accepts integers from 0 through 240, default 0.
+`interface.album_artwork.fps` accepts integers from 0 through 240, default 0.
 Zero follows display callbacks without a timer throttle; positive values cap
 animation requests per second independently of the analysis rate. A lower cap
 reduces rendering work and resource use at the expense of motion smoothness;
 display-following mode can do more work on high-refresh displays. Each owner has
-at most one pending frame or timer; pausing, hiding, static mode, and Still Mode
-cancel pending work, and resuming does not replay missed frames. Styles introduce
-neither per-frame CPU geometry rotation nor a new application cache system.
+at most one pending frame or timer; pausing, hiding, and static mode cancel
+pending work, and resuming does not replay missed frames. Still Mode affects
+only audio visualizations, not artwork. Styles introduce neither per-frame CPU
+geometry rotation nor a new application cache system.
 
 
 == Analysis boundary

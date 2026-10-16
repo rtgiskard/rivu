@@ -1,7 +1,7 @@
 //! User-editable TOML settings, separate from the library database and GUI layout.
 //!
 //! The file has library, playback, interface, logging, and visualizations tables;
-//! the latter contains spectrum, spectrogram, audio_visualizer, waveform, and album_artwork.
+//! interface contains album_artwork; visualizations contains the four audio-data views.
 //! Missing fields use [`Config::default`]; unknown or misplaced fields and invalid
 //! values are errors. `playback.repeat` accepts "off", "all", or "one". Omit
 //! `playback.output_device` to use the system default. Paths are literal filesystem
@@ -671,11 +671,11 @@ impl Config {
         ensure!(
             self.album_artwork_period_seconds.is_finite()
                 && self.album_artwork_period_seconds > 0.0,
-            "visualizations.album_artwork.period_seconds must be finite and greater than zero"
+            "interface.album_artwork.period_seconds must be finite and greater than zero"
         );
         ensure!(
             self.album_artwork_fps <= 240,
-            "visualizations.album_artwork.fps must be between 0 and 240"
+            "interface.album_artwork.fps must be between 0 and 240"
         );
         Ok(())
     }
@@ -833,20 +833,17 @@ mod tests {
             ("card", AlbumArtworkStyle::Card),
             ("duotone", AlbumArtworkStyle::Duotone),
         ] {
-            fs::write(
-                &path,
-                format!("visualizations.album_artwork.style = '{name}'\n"),
-            )
-            .unwrap();
+            fs::write(&path, format!("interface.album_artwork.style = '{name}'\n")).unwrap();
             let config = Config::load(&path).unwrap();
             assert_eq!(config.album_artwork_style, style);
             config.save(&path).unwrap();
             let saved = fs::read_to_string(&path).unwrap();
             let saved: toml::Value = toml::from_str(&saved).unwrap();
             assert_eq!(
-                saved["visualizations"]["album_artwork"]["style"].as_str(),
+                saved["interface"]["album_artwork"]["style"].as_str(),
                 Some(name)
             );
+            assert!(saved["visualizations"].get("album_artwork").is_none());
             assert_eq!(Config::load(&path).unwrap(), config);
         }
         for mode in [AlbumArtworkMode::Static, AlbumArtworkMode::Rotating] {
@@ -869,10 +866,11 @@ mod tests {
         for period in ["0", "-1", "nan", "inf", "-inf"] {
             fs::write(
                 &path,
-                format!("visualizations.album_artwork.period_seconds = {period}\n"),
+                format!("interface.album_artwork.period_seconds = {period}\n"),
             )
             .unwrap();
-            assert!(Config::load(&path).is_err());
+            let error = Config::load(&path).unwrap_err();
+            assert!(format!("{error:#}").contains("interface.album_artwork.period_seconds"));
         }
         Config::default().save(&path).unwrap();
         let original = fs::read(&path).unwrap();
@@ -885,7 +883,7 @@ mod tests {
             assert_eq!(fs::read(&path).unwrap(), original);
         }
         for fps in [0, 1, 60, 240] {
-            fs::write(&path, format!("visualizations.album_artwork.fps = {fps}\n")).unwrap();
+            fs::write(&path, format!("interface.album_artwork.fps = {fps}\n")).unwrap();
             let config = Config::load(&path).unwrap();
             assert_eq!(config.album_artwork_fps, fps);
             config.save(&path).unwrap();
@@ -913,14 +911,10 @@ mod tests {
             "fps = 1.5",
             "fps = '60'",
         ] {
-            fs::write(
-                &path,
-                format!("[visualizations.album_artwork]\n{invalid}\n"),
-            )
-            .unwrap();
+            fs::write(&path, format!("[interface.album_artwork]\n{invalid}\n")).unwrap();
             assert!(Config::load(&path).is_err());
         }
-        fs::write(&path, "visualizations.album_artwork.mode = 'rotating'\n").unwrap();
+        fs::write(&path, "interface.album_artwork.mode = 'rotating'\n").unwrap();
         let partial = Config::load(&path).unwrap();
         assert_eq!(partial.album_artwork_mode, AlbumArtworkMode::Rotating);
         assert_eq!(partial.album_artwork_style, AlbumArtworkStyle::Plain);
@@ -933,6 +927,20 @@ mod tests {
             partial.album_artwork_direction,
             Config::default().album_artwork_direction
         );
+    }
+
+    #[test]
+    fn album_artwork_rejects_obsolete_visualizations_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        for contents in [
+            "[visualizations.album_artwork]\n",
+            "visualizations.album_artwork.mode = 'rotating'\n",
+            "[interface.album_artwork]\nmode = 'rotating'\n[visualizations.album_artwork]\nstyle = 'vinyl'\n",
+        ] {
+            fs::write(&path, contents).unwrap();
+            assert!(Config::load(&path).is_err(), "accepted config: {contents}");
+        }
     }
 
     #[test]
@@ -1040,13 +1048,7 @@ mod tests {
             .collect();
         assert_eq!(
             nested,
-            [
-                "album_artwork",
-                "audio_visualizer",
-                "spectrogram",
-                "spectrum",
-                "waveform"
-            ]
+            ["audio_visualizer", "spectrogram", "spectrum", "waveform"]
         );
     }
 

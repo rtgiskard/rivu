@@ -155,7 +155,6 @@ pub(super) struct AlbumArtwork {
     track: Option<Track>,
     status: PlaybackStatus,
     visible: bool,
-    still: bool,
     style: AlbumArtworkStyle,
     decorations: [Arc<Image>; 6],
     rotation: Rotation,
@@ -175,7 +174,6 @@ impl AlbumArtwork {
             track: None,
             status: PlaybackStatus::Stopped,
             visible: false,
-            still: false,
             style: AlbumArtworkStyle::Plain,
             decorations: [
                 include_bytes!("../../assets/album_vinyl.svg").as_slice(),
@@ -214,7 +212,6 @@ impl AlbumArtwork {
         let changed = switched
             || self.status != status
             || self.visible != visible
-            || self.still != config.still_mode
             || self.style != config.album_artwork_style
             || self.pacing.fps != config.album_artwork_fps
             || self.rotation.settings != settings;
@@ -225,7 +222,6 @@ impl AlbumArtwork {
         }
         self.status = status;
         self.visible = visible;
-        self.still = config.still_mode;
         self.style = config.album_artwork_style;
         if self.pacing.set_fps(config.album_artwork_fps) {
             self.cancel_frame();
@@ -238,7 +234,7 @@ impl AlbumArtwork {
     }
 
     fn sync_rotation(&mut self, settings: RotationSettings, reset: bool) {
-        let eligible = self.visible && !self.still && self.status == PlaybackStatus::Playing;
+        let eligible = self.visible && self.status == PlaybackStatus::Playing;
         if self
             .rotation
             .sync(Instant::now(), settings, eligible, reset)
