@@ -1215,6 +1215,7 @@ impl GuiApp {
                                     row.border_1().border_color(rgb(ACCENT)).bg(rgb(HIGHLIGHT))
                                 })
                                 .group("queue-track-row")
+                                .line_height(gpui::rems(1.125))
                                 .relative()
                                 .child(
                                     hover_actions(
@@ -2132,6 +2133,7 @@ impl GuiApp {
                                 this.browser.playlists.track_selection.contains(id),
                             )
                             .group("playlist-track-row")
+                            .line_height(gpui::rems(1.125))
                             .relative()
                             .gap_0()
                             .child(
