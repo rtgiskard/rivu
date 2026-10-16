@@ -41,8 +41,8 @@ texel centers. This prevents neighboring images from bleeding into magnified
 edges, including Spectrogram's one-pixel-wide history columns, without adding
 atlas padding or disabling interpolation.
 
-Album artwork offers `plain` (default), `vinyl`, `glass`, `halo`, `metal`, `card`,
-and `duotone` styles, independently of static or rotating motion. Metal places a
+Album artwork offers `plain`, `vinyl`, `glass`, `halo` (default), `metal`, `card`,
+and `duotone` styles. New panels default to rotating motion. Metal places a
 fixed brushed radial sheen over the rotating circular cover. Card rotates the
 full square image, rounded frame, and shadow together, reserving enough margin
 for its diagonal; it does not crop away the original composition. Duotone uses a
@@ -51,9 +51,9 @@ or an audio dependency. Real and generated default covers share animation,
 interaction, and lifecycle rules. Changing style or frame pacing does not reset
 the rotation angle.
 Right-click an Album artwork panel and open `Style` to select a style; the current
-style is marked. Changes take effect immediately and are saved to the shared
-configuration used by Settings and all Album artwork panels. Motion mode,
-direction, period, and frame rate are unchanged.
+style is marked. Changes take effect immediately and are saved with that panel
+in the layout. Motion mode, direction, period, and the shared frame rate are
+unchanged. Global artwork settings supply defaults for new or uninitialized panels.
 
 `interface.album_artwork.fps` accepts integers from 0 through 240, default 0.
 Zero follows display callbacks without a timer throttle; positive values cap

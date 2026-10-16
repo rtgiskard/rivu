@@ -356,7 +356,7 @@ than subdirectory rows. Track text uses one level of indentation below the root,
 independent of the track's actual directory depth. Tree tracks retain their
 directory-level indentation. Both views use single-line rows. Right-click the
 Library panel and open `Track information` to choose Artist, Album, Duration,
-Codec, and Bitrate columns. Only Duration is enabled initially. Columns appear
+Codec, and Bitrate columns. Duration and Codec are enabled initially. Columns appear
 in that fixed order, with compact content-dependent widths independent of tree
 depth. Long Artist and Album values are truncated; hover the row for full details.
 Disabling every column leaves the name without reserved track-information space. The selection

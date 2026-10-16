@@ -3193,6 +3193,13 @@ mod tests {
         let config = Arc::make_mut(&mut core.state.system.config);
         config.ui_scale = 1.25;
         config.waveform_seek_enabled = false;
+        config.library_columns = crate::config::LibraryColumns {
+            artist: false,
+            album: false,
+            duration: true,
+            codec: false,
+            bitrate: false,
+        };
         let audio = recording_audio(&mut core);
         let mut expected = core.state.system.config.as_ref().clone();
         expected.volume = 0.25;

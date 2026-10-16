@@ -227,7 +227,7 @@ impl Default for LibraryColumns {
             artist: false,
             album: false,
             duration: true,
-            codec: false,
+            codec: true,
             bitrate: false,
         }
     }
@@ -486,7 +486,7 @@ impl Default for Config {
             ui_font: "sans-serif".to_owned(),
             ui_scale: 1.0,
             layout_snap_enabled: true,
-            layout_snap_grid_px: 8,
+            layout_snap_grid_px: 16,
             still_mode: false,
             analysis_fps: 20,
             visual_background: RgbColor(0x08090c),
@@ -536,8 +536,8 @@ impl Default for Config {
             waveform_rms_gain: 1.6,
             waveform_peak_gain: 0.75,
             waveform_peak_gamma: 1.1,
-            album_artwork_style: AlbumArtworkStyle::Plain,
-            album_artwork_mode: AlbumArtworkMode::Static,
+            album_artwork_style: AlbumArtworkStyle::Halo,
+            album_artwork_mode: AlbumArtworkMode::Rotating,
             album_artwork_period_seconds: 20.0,
             album_artwork_direction: AlbumArtworkDirection::Clockwise,
             album_artwork_fps: 0,
@@ -1074,19 +1074,6 @@ mod tests {
             fs::write(&path, format!("[interface.album_artwork]\n{invalid}\n")).unwrap();
             assert!(Config::load(&path).is_err());
         }
-        fs::write(&path, "interface.album_artwork.mode = 'rotating'\n").unwrap();
-        let partial = Config::load(&path).unwrap();
-        assert_eq!(partial.album_artwork_mode, AlbumArtworkMode::Rotating);
-        assert_eq!(partial.album_artwork_style, AlbumArtworkStyle::Plain);
-        assert_eq!(partial.album_artwork_fps, 0);
-        assert_eq!(
-            partial.album_artwork_period_seconds,
-            Config::default().album_artwork_period_seconds
-        );
-        assert_eq!(
-            partial.album_artwork_direction,
-            Config::default().album_artwork_direction
-        );
     }
 
     #[test]

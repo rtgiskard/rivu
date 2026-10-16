@@ -241,7 +241,7 @@ cannot replace the draft or feedback of a reopened editor.
 Adding a library root, toggling a Library column, or toggling waveform seeking
 does not overwrite playback or output-device settings.
 Interface → Layout includes Layout snapping and Layout grid spacing. These save
-`interface.layout_snap_enabled` (default `true`) and `interface.layout_snap_grid_px` (default `8`,
+`interface.layout_snap_enabled` (default `true`) and `interface.layout_snap_grid_px` (default `16`,
 integer `1`–`64` logical pixels before interface scaling) in `config.toml`.
 
 Hover settings fields for accepted ranges and input syntax.
@@ -310,8 +310,8 @@ For SSH, configure the local client terminal; installing fonts on the server
 does not supply terminal glyphs. Missing glyphs can appear as boxes or blanks.
 
 `interface.library_columns` selects desktop Library information columns. Its
-boolean keys are `artist`, `album`, `duration`, `codec`, and `bitrate`; only
-`duration` defaults to `true`. Omitted keys retain those defaults; set all five
+boolean keys are `artist`, `album`, `duration`, `codec`, and `bitrate`;
+`duration` and `codec` default to `true`. Omitted keys retain those defaults; set all five
 to `false` for names only. Change them without restarting from the Library
 right-click menu → `Track information`. Both Library views share the saved
 selection; full tooltip information is unaffected. See
@@ -366,20 +366,20 @@ link:22_cache.adoc#_artwork_lookup_retention[Artwork lookup retention].
 
 === Album artwork
 
-The optional `Album artwork` panel (`album_artwork` in layout files) follows
+The `Album artwork` panel (`album_artwork` in layout files) follows
 the current playback track independently of Metadata. Its configuration is:
 
 [source,toml]
 ----
 [interface.album_artwork]
-style = "plain"
-mode = "static"
+style = "halo"
+mode = "rotating"
 period_seconds = 20.0
 direction = "clockwise"
 fps = 0
 ----
 
-`style` accepts `plain` (default), `vinyl`, `glass`, `halo`, `metal`, `card`, or
+`style` accepts `plain`, `vinyl`, `glass`, `halo` (default), `metal`, `card`, or
 `duotone` and supplies the initial style for new panels. Each panel saves style,
 mode, period, and direction in the layout. Its right-click Style and Rotation
 actions affect only that panel; Artwork settings edits all four instance options.
@@ -390,7 +390,7 @@ a fixed brushed radial sheen over a circular cover. Card preserves the full
 square image inside a rounded frame and shadow that rotate together, with room
 for the corners at every angle. Duotone adds a fixed blue/purple edge glow behind
 a circular cover, without extracted colors or audio-driven effects.
-`mode` accepts `static` (default) or `rotating`. `period_seconds` is the time
+`mode` accepts `static` or `rotating` (default). `period_seconds` is the time
 for one full circle and must be finite and greater than zero; there is no
 additional upper limit. `direction` accepts `clockwise` (default) or
 `counterclockwise`. `fps` is an integer from 0 through 240 (default 0): zero
