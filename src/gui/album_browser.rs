@@ -19,7 +19,7 @@ use crate::{
 };
 
 use super::{
-    BORDER, TEXT,
+    HIGHLIGHT, TEXT,
     artwork::{Artwork, ArtworkImages, ArtworkLoader, ArtworkView},
     caption, column,
     components::{LIST_ROW_REMS, quiet_icon_button, scrollable_list, track_list_row},
@@ -61,6 +61,27 @@ fn card_icon_button(
 }
 
 const ALBUM_PAGE: usize = 24;
+
+#[derive(Clone, Copy, PartialEq)]
+struct AlbumGridLayout {
+    columns: usize,
+    artwork_size: Pixels,
+    row_height: Pixels,
+}
+
+impl AlbumGridLayout {
+    fn measured(width: Pixels, rem: Pixels) -> Self {
+        let columns = ((width / rem) / 12.).floor().max(1.) as usize;
+        let card_width = (width - rem * 0.5 * columns.saturating_sub(1) as f32) / columns as f32;
+        let artwork_size = (card_width - rem).max(px(0.));
+        Self {
+            columns,
+            artwork_size,
+            // Card padding, three gaps, metadata/footer, and the row's bottom gap.
+            row_height: artwork_size + rem * 7.,
+        }
+    }
+}
 
 #[derive(Default)]
 struct AlbumLoadState {
@@ -114,7 +135,7 @@ pub(super) struct AlbumBrowser {
     covers: BTreeMap<usize, ArtworkView>,
     loader: ArtworkLoader,
     demand: Range<usize>,
-    columns: usize,
+    grid_layout: AlbumGridLayout,
     grid_scroll: UniformListScrollHandle,
     track_scroll: UniformListScrollHandle,
     grid_anchor: Option<AlbumKey>,
@@ -193,7 +214,7 @@ impl AlbumBrowser {
             covers: BTreeMap::new(),
             loader: ArtworkLoader::default(),
             demand: 0..0,
-            columns: 1,
+            grid_layout: AlbumGridLayout::measured(px(192.), px(16.)),
             grid_scroll: UniformListScrollHandle::new(),
             track_scroll: UniformListScrollHandle::new(),
             grid_anchor: None,
@@ -526,8 +547,8 @@ impl AlbumBrowser {
                 // UniformList virtualizes its children; ScrollHandle's child index
                 // is not the logical row. Use measured content height instead.
                 state.last_item_size.map_or(0, |size| {
-                    let height =
-                        size.contents.height / self.albums.len().div_ceil(self.columns) as f32;
+                    let height = size.contents.height
+                        / self.albums.len().div_ceil(self.grid_layout.columns) as f32;
                     (-state.base_handle.offset().y / height).floor().max(0.) as usize
                 })
             },
@@ -538,7 +559,12 @@ impl AlbumBrowser {
             .as_ref()
             .and_then(|key| self.albums.position(|album| &album.key == key))
             .or(Some(self.grid_anchor_index));
-        let index = anchored_index(previous, grid_row, self.columns, self.albums.len());
+        let index = anchored_index(
+            previous,
+            grid_row,
+            self.grid_layout.columns,
+            self.albums.len(),
+        );
         self.grid_anchor = self.albums.get(index).map(|album| album.key.clone());
         self.grid_anchor_index = index;
     }
@@ -551,7 +577,7 @@ impl AlbumBrowser {
             .unwrap_or(self.grid_anchor_index)
             .min(self.albums.len().saturating_sub(1));
         self.grid_scroll
-            .scroll_to_item_strict(index / self.columns, ScrollStrategy::Top);
+            .scroll_to_item_strict(index / self.grid_layout.columns, ScrollStrategy::Top);
         self.grid_anchor = self.albums.get(index).map(|album| album.key.clone());
         self.grid_anchor_index = index;
         self.grid_reset = false;
@@ -563,9 +589,12 @@ impl AlbumBrowser {
         }
         let end = range
             .end
-            .saturating_mul(self.columns)
+            .saturating_mul(self.grid_layout.columns)
             .min(self.albums.len());
-        let start = range.start.saturating_mul(self.columns).min(end);
+        let start = range
+            .start
+            .saturating_mul(self.grid_layout.columns)
+            .min(end);
         self.demand = start..end;
         // Updating demand while a request is pending still records the latest viewport.
         let _ = self.albums.demand(self.demand.clone(), ALBUM_PAGE);
@@ -705,14 +734,13 @@ impl AlbumBrowser {
                 }
             }))
             .rounded_md()
-            .border_1()
-            .border_color(rgb(BORDER))
+            .hover(|style| style.bg(rgb(HIGHLIGHT)))
             .overflow_hidden()
             .child(
                 div()
                     .relative()
                     .w_full()
-                    .h(rems(7.))
+                    .h(self.grid_layout.artwork_size)
                     .flex_shrink_0()
                     .map(|view| match image {
                         Some(image) => {
@@ -729,7 +757,7 @@ impl AlbumBrowser {
                     .flex_shrink_0()
                     .text_sm()
                     .text_color(rgb(TEXT))
-                    .text_center()
+                    .text_left()
                     .truncate()
                     .child(title.clone())
                     .tooltip(move |_, cx| {
@@ -742,7 +770,7 @@ impl AlbumBrowser {
             .child(
                 caption(album.artist.clone())
                     .w_full()
-                    .text_center()
+                    .text_left()
                     .truncate()
                     .h(rems(1.25))
                     .flex_shrink_0(),
@@ -753,8 +781,12 @@ impl AlbumBrowser {
                         .format("gl-track-count", &[("count", album.track_count.into())]),
                 )
                 .w_full()
-                .text_center()
-                .h(rems(1.25))
+                .text_left()
+                .h(rems(2.))
+                .pr(rems(3.))
+                .truncate()
+                .flex()
+                .items_center()
                 .flex_shrink_0(),
             )
             .child(actions)
@@ -1019,7 +1051,8 @@ impl Render for AlbumBrowser {
                 }))
                 .into_any_element()
         } else {
-            let columns = self.columns;
+            let layout = self.grid_layout;
+            let columns = layout.columns;
             let generation = self.active_projection().generation();
             let demand_owner = cx.weak_entity();
             let measure_owner = cx.weak_entity();
@@ -1032,15 +1065,17 @@ impl Render for AlbumBrowser {
                         canvas(
                             |_, _, _| (),
                             move |bounds, _, window, cx| {
-                                let columns = ((bounds.size.width / window.rem_size()) / 12.)
-                                    .floor()
-                                    .max(1.) as usize;
+                                let measured =
+                                    AlbumGridLayout::measured(bounds.size.width, window.rem_size());
+                                if measured == layout {
+                                    return;
+                                }
                                 let owner = measure_owner.clone();
                                 cx.defer(move |cx| {
                                     let _ = owner.update(cx, |this, cx| {
-                                        if this.columns != columns {
+                                        if this.grid_layout != measured {
                                             this.capture_grid_anchor();
-                                            this.columns = columns;
+                                            this.grid_layout = measured;
                                             this.restore_grid_anchor();
                                             cx.notify();
                                         }
@@ -1065,7 +1100,7 @@ impl Render for AlbumBrowser {
                                             .grid_cols(columns as u16)
                                             .gap_2()
                                             .w_full()
-                                            .h(rems(14.))
+                                            .h(layout.row_height)
                                             .pb_2();
                                         for index in start..end {
                                             cards = cards.child(this.card(index, cx));
@@ -1081,7 +1116,7 @@ impl Render for AlbumBrowser {
                             cx.defer(move |cx| {
                                 let _ = owner.update(cx, |this, cx| {
                                     if generation == this.active_projection().generation()
-                                        && columns == this.columns
+                                        && layout == this.grid_layout
                                     {
                                         this.cover_demand(range, cx);
                                     }
