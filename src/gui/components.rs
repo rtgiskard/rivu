@@ -10,7 +10,20 @@ pub(crate) const LIST_ROW_REMS: f32 = 2.625;
 pub(crate) const MENU_WIDTH: f32 = 260.0;
 pub(crate) const POPOVER_MAX_REMS: f32 = 15.0;
 pub(crate) const DROPDOWN_ROW_REMS: f32 = 2.0;
+
+const ROW_HOVER: u32 = 0x202330;
+const ROW_SELECTED: u32 = 0x2b3752;
+const ROW_SELECTED_HOVER: u32 = 0x34415e;
 pub(crate) use dropdown::{DropdownItem, DropdownState};
+
+pub(crate) fn row_background(selected: bool, hovered: bool) -> gpui::Rgba {
+    rgb(match (selected, hovered) {
+        (true, true) => ROW_SELECTED_HOVER,
+        (true, false) => ROW_SELECTED,
+        (false, true) => ROW_HOVER,
+        (false, false) => PANEL,
+    })
+}
 
 pub(super) fn visualization_status(message: impl Into<SharedString>) -> Div {
     div()
@@ -555,8 +568,8 @@ pub(crate) fn tree_row(id: impl Into<ElementId>, depth: usize, selected: bool) -
         .gap_1()
         .rounded_sm()
         .cursor_pointer()
-        .bg(rgb(if selected { HIGHLIGHT } else { PANEL }))
-        .hover(|style| style.bg(rgb(HIGHLIGHT)))
+        .bg(row_background(selected, false))
+        .hover(move |style| style.bg(row_background(selected, true)))
 }
 
 /// Standard compact option row used by anchored dropdowns.
@@ -627,8 +640,8 @@ pub(crate) fn list_row(id: impl Into<ElementId>, selected: bool) -> Stateful<Div
         .rounded_sm()
         .overflow_hidden()
         .cursor_pointer()
-        .bg(rgb(if selected { HIGHLIGHT } else { PANEL }))
-        .hover(|style| style.bg(rgb(HIGHLIGHT)))
+        .bg(row_background(selected, false))
+        .hover(move |style| style.bg(row_background(selected, true)))
 }
 
 struct TrackTooltip {

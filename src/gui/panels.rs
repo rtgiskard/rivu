@@ -37,14 +37,14 @@ fn compact_icon_button(control: gpui::Stateful<Div>) -> gpui::Stateful<Div> {
 }
 
 // Out-of-flow actions leave the full text width available until the row is hovered.
-pub(super) fn hover_actions(group: &'static str) -> Div {
+pub(super) fn hover_actions(group: &'static str, selected: bool) -> Div {
     row()
         .absolute()
         .right_0()
         .top_0()
         .h_full()
         .gap_0()
-        .bg(rgb(HIGHLIGHT))
+        .bg(super::components::row_background(selected, true))
         .invisible()
         .group_hover(group, |style| style.visible())
 }
@@ -1021,87 +1021,90 @@ impl GuiApp {
                                 .group("queue-track-row")
                                 .relative()
                                 .child(
-                                    hover_actions("queue-track-row")
-                                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
-                                            cx.stop_propagation();
-                                        })
-                                        .child(compact_icon_button(icon_button(
-                                            ("queue-entry-play", id),
-                                            "󰐊",
-                                            this.tr("gl-play-queue-entry"),
+                                    hover_actions(
+                                        "queue-track-row",
+                                        this.browser.queue.contains(&id),
+                                    )
+                                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation();
+                                    })
+                                    .child(compact_icon_button(icon_button(
+                                        ("queue-entry-play", id),
+                                        "󰐊",
+                                        this.tr("gl-play-queue-entry"),
+                                        cx,
+                                        move |this, _, cx| {
+                                            this.send_queue_row_action(
+                                                revision,
+                                                Command::PlayQueue { queue_id: id },
+                                                cx,
+                                            )
+                                        },
+                                    )))
+                                    .child(this.track_favorite_toggle(
+                                        ("queue-entry-favorite", id),
+                                        "queue-track-row",
+                                        track_id,
+                                        favorite,
+                                        cx,
+                                    ))
+                                    .child(compact_icon_button(icon_button(
+                                        ("queue-entry-remove", id),
+                                        "",
+                                        this.tr("gl-remove-queue"),
+                                        cx,
+                                        move |this, _, cx| {
+                                            this.send_queue_row_action(
+                                                revision,
+                                                Command::RemoveQueueEntries {
+                                                    queue_ids: vec![id],
+                                                },
+                                                cx,
+                                            )
+                                        },
+                                    )))
+                                    .child(disabled_control(
+                                        compact_icon_button(icon_button(
+                                            ("queue-entry-up", id),
+                                            "",
+                                            this.tr("gl-entry-up"),
                                             cx,
                                             move |this, _, cx| {
-                                                this.send_queue_row_action(
-                                                    revision,
-                                                    Command::PlayQueue { queue_id: id },
-                                                    cx,
-                                                )
+                                                if index > 0 {
+                                                    this.send_queue_row_action(
+                                                        revision,
+                                                        Command::MoveQueue {
+                                                            queue_id: id,
+                                                            index: index - 1,
+                                                        },
+                                                        cx,
+                                                    );
+                                                }
                                             },
-                                        )))
-                                        .child(this.track_favorite_toggle(
-                                            ("queue-entry-favorite", id),
-                                            "queue-track-row",
-                                            track_id,
-                                            favorite,
-                                            cx,
-                                        ))
-                                        .child(compact_icon_button(icon_button(
-                                            ("queue-entry-remove", id),
-                                            "",
-                                            this.tr("gl-remove-queue"),
-                                            cx,
-                                            move |this, _, cx| {
-                                                this.send_queue_row_action(
-                                                    revision,
-                                                    Command::RemoveQueueEntries {
-                                                        queue_ids: vec![id],
-                                                    },
-                                                    cx,
-                                                )
-                                            },
-                                        )))
-                                        .child(disabled_control(
-                                            compact_icon_button(icon_button(
-                                                ("queue-entry-up", id),
-                                                "",
-                                                this.tr("gl-entry-up"),
-                                                cx,
-                                                move |this, _, cx| {
-                                                    if index > 0 {
-                                                        this.send_queue_row_action(
-                                                            revision,
-                                                            Command::MoveQueue {
-                                                                queue_id: id,
-                                                                index: index - 1,
-                                                            },
-                                                            cx,
-                                                        );
-                                                    }
-                                                },
-                                            )),
-                                            index == 0,
-                                        ))
-                                        .child(disabled_control(
-                                            compact_icon_button(icon_button(
-                                                ("queue-entry-down", id),
-                                                "",
-                                                this.tr("gl-entry-down"),
-                                                cx,
-                                                move |this, _, cx| {
-                                                    if can_move_down {
-                                                        this.send_queue_row_action(
-                                                            revision,
-                                                            Command::MoveQueue {
-                                                                queue_id: id,
-                                                                index: index + 1,
-                                                            },
-                                                            cx,
-                                                        );
-                                                    }
-                                                },
-                                            )),
-                                            !can_move_down,
                                         )),
+                                        index == 0,
+                                    ))
+                                    .child(disabled_control(
+                                        compact_icon_button(icon_button(
+                                            ("queue-entry-down", id),
+                                            "",
+                                            this.tr("gl-entry-down"),
+                                            cx,
+                                            move |this, _, cx| {
+                                                if can_move_down {
+                                                    this.send_queue_row_action(
+                                                        revision,
+                                                        Command::MoveQueue {
+                                                            queue_id: id,
+                                                            index: index + 1,
+                                                        },
+                                                        cx,
+                                                    );
+                                                }
+                                            },
+                                        )),
+                                        !can_move_down,
+                                    )),
                                 )
                                 .on_mouse_down(
                                     gpui::MouseButton::Right,
@@ -1799,65 +1802,64 @@ impl GuiApp {
                             .relative()
                             .gap_0()
                             .child(
-                                hover_actions("playlist-track-row")
-                                    .child(
-                                        compact_icon_button(icon_button(
-                                            ("playlist-entry-play", id as u64),
-                                            "󰐊",
-                                            this.tr("gl-play-track"),
-                                            cx,
-                                            move |this, _, cx| {
-                                                this.send(Command::Play { track_id }, cx)
-                                            },
-                                        ))
-                                        .opacity(0.)
-                                        .group_hover("playlist-track-row", |style| {
-                                            style.opacity(1.)
-                                        })
-                                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
-                                            cx.stop_propagation()
-                                        }),
-                                    )
-                                    .child(this.track_favorite_toggle(
-                                        ("playlist-entry-favorite", id as u64),
-                                        "playlist-track-row",
-                                        track_id,
-                                        favorite,
+                                hover_actions(
+                                    "playlist-track-row",
+                                    this.browser.playlists.track_selection.contains(id),
+                                )
+                                .child(
+                                    compact_icon_button(icon_button(
+                                        ("playlist-entry-play", id as u64),
+                                        "󰐊",
+                                        this.tr("gl-play-track"),
                                         cx,
+                                        move |this, _, cx| {
+                                            this.send(Command::Play { track_id }, cx)
+                                        },
                                     ))
-                                    .child(
-                                        compact_icon_button(icon_button(
-                                            ("playlist-entry-remove", id as u64),
-                                            "",
-                                            this.tr("gl-remove-playlist"),
-                                            cx,
-                                            move |this, _, cx| {
-                                                this.refresh(cx);
-                                                if this.browser.playlists.selected()
-                                                    != Some(playlist_id)
-                                                    || this.playlist_occurrence_stamp(playlist_id)
-                                                        != stamp
-                                                {
-                                                    return;
-                                                }
-                                                this.send(
-                                                    Command::RemovePlaylistEntries {
-                                                        playlist_id,
-                                                        entry_ids: vec![id],
-                                                        expected_revision: revision,
-                                                    },
-                                                    cx,
-                                                );
-                                            },
-                                        ))
-                                        .opacity(0.)
-                                        .group_hover("playlist-track-row", |style| {
-                                            style.opacity(1.)
-                                        })
-                                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
-                                            cx.stop_propagation()
-                                        }),
-                                    ),
+                                    .opacity(0.)
+                                    .group_hover("playlist-track-row", |style| style.opacity(1.))
+                                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation()
+                                    }),
+                                )
+                                .child(this.track_favorite_toggle(
+                                    ("playlist-entry-favorite", id as u64),
+                                    "playlist-track-row",
+                                    track_id,
+                                    favorite,
+                                    cx,
+                                ))
+                                .child(
+                                    compact_icon_button(icon_button(
+                                        ("playlist-entry-remove", id as u64),
+                                        "",
+                                        this.tr("gl-remove-playlist"),
+                                        cx,
+                                        move |this, _, cx| {
+                                            this.refresh(cx);
+                                            if this.browser.playlists.selected()
+                                                != Some(playlist_id)
+                                                || this.playlist_occurrence_stamp(playlist_id)
+                                                    != stamp
+                                            {
+                                                return;
+                                            }
+                                            this.send(
+                                                Command::RemovePlaylistEntries {
+                                                    playlist_id,
+                                                    entry_ids: vec![id],
+                                                    expected_revision: revision,
+                                                },
+                                                cx,
+                                            );
+                                        },
+                                    ))
+                                    .opacity(0.)
+                                    .group_hover("playlist-track-row", |style| style.opacity(1.))
+                                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation()
+                                    }),
+                                ),
                             )
                             .on_mouse_down(
                                 gpui::MouseButton::Left,
@@ -2857,15 +2859,21 @@ impl GuiApp {
                                                 .min_w_0()
                                                 .truncate(),
                                         )
-                                        .child(hover_actions("history-track-row").child(
-                                            this.track_favorite_toggle(
-                                                ("history-entry-favorite", id as u64),
+                                        .child(
+                                            hover_actions(
                                                 "history-track-row",
-                                                id,
-                                                favorite,
-                                                cx,
+                                                this.browser.library.selected().contains(&id),
+                                            )
+                                            .child(
+                                                this.track_favorite_toggle(
+                                                    ("history-entry-favorite", id as u64),
+                                                    "history-track-row",
+                                                    id,
+                                                    favorite,
+                                                    cx,
+                                                ),
                                             ),
-                                        ))
+                                        )
                                         .on_click(cx.listener(
                                             move |this, event: &gpui::ClickEvent, window, cx| {
                                                 this.focus_layout(window, cx);

@@ -653,10 +653,10 @@ impl GuiApp {
                                             .right_0()
                                             .top_0()
                                             .h_full()
-                                            .bg(gpui::rgb(super::HIGHLIGHT))
-                                            .when(!retry_counts, |view| {
-                                                view.invisible()
-                                                    .group_hover("library-track-row", |style| style.visible())
+                                            .bg(super::components::row_background(selected, false))
+                                            .when(!retry_counts, |view| view.invisible())
+                                            .group_hover("library-track-row", move |style| {
+                                                style.visible().bg(super::components::row_background(selected, true))
                                             })
                                             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                                             .on_click(|_, _, cx| cx.stop_propagation())
@@ -701,7 +701,7 @@ impl GuiApp {
                                     },
                                     |view, (track_id, favorite)| {
                                         view.child(
-                                            super::panels::hover_actions("library-track-row").child(this.track_favorite_toggle(
+                                            super::panels::hover_actions("library-track-row", selected).child(this.track_favorite_toggle(
                                                 gpui::ElementId::named_usize("library-tree-favorite", index),
                                                 "library-track-row",
                                                 track_id,
