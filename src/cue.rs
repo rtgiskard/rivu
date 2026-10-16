@@ -1,7 +1,6 @@
 use anyhow::{Context, Result, bail};
 use std::{
     borrow::Cow,
-    fs,
     path::{Path, PathBuf},
 };
 
@@ -34,15 +33,8 @@ struct PendingTrack {
     start: Option<u64>,
 }
 
-pub fn read(path: &Path) -> Result<CueSheet> {
-    let bytes = fs::read(path).with_context(|| format!("Reading CUE {}", path.display()))?;
-    let text = decode(&bytes).with_context(|| format!("Reading CUE {}", path.display()))?;
-    parse(&text, path.parent().unwrap_or_else(|| Path::new(".")))
-        .with_context(|| format!("Parsing CUE {}", path.display()))
-}
-
-/// Parse an already bounded import input without reopening its sheet.
-pub(crate) fn parse_import(
+/// Parse already bounded input without reopening its sheet.
+pub(crate) fn parse_input(
     bytes: &[u8],
     path: &Path,
     cancellation: &crate::library::ScanCancellation,
@@ -140,6 +132,7 @@ fn timestamp(value: &str) -> Result<u64> {
         .context("CUE time is too large")
 }
 
+#[cfg(test)]
 fn parse(text: &str, parent: &Path) -> Result<CueSheet> {
     parse_checked(text, parent, || Ok(()))
 }
@@ -378,21 +371,23 @@ FILE "disc two.wav" WAVE
         assert!(decode(&[0xff, 0xfe, 0x00, 0xd8]).is_err());
     }
     #[test]
-    fn parsing_stops_when_import_is_cancelled() {
-        let cancellation = crate::library::ScanCancellation::default();
-        let mut checks = 0;
-        let result = parse_checked(
-            "FILE album.wav WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\n",
-            Path::new("."),
-            || {
-                checks += 1;
-                if checks == 2 {
-                    cancellation.cancel();
-                }
-                cancellation.check()
-            },
-        );
-        assert!(result.is_err());
-        assert_eq!(checks, 2);
+    fn parsing_stops_at_line_and_segment_boundaries_when_cancelled() {
+        for cancel_at in [2, 6, 7] {
+            let cancellation = crate::library::ScanCancellation::default();
+            let mut checks = 0;
+            let result = parse_checked(
+                "FILE album.wav WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\nTRACK 02 AUDIO\nINDEX 01 00:01:00\n",
+                Path::new("."),
+                || {
+                    checks += 1;
+                    if checks == cancel_at {
+                        cancellation.cancel();
+                    }
+                    cancellation.check()
+                },
+            );
+            assert!(result.is_err());
+            assert_eq!(checks, cancel_at);
+        }
     }
 }

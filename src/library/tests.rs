@@ -253,6 +253,160 @@ fn cancellation_during_a_hash_read_stops_at_the_chunk_boundary() {
 }
 
 #[test]
+fn bounded_playlist_reads_enforce_capacity_and_cancellation_boundaries() -> Result<()> {
+    use super::playlist_io::{MAX_CUE_BYTES, read_chunks, read_input};
+
+    let directory = tempfile::tempdir()?;
+    let sheet = directory.path().join("album.cue");
+    let cancellation = ScanCancellation::default();
+    let bytes = vec![b' '; MAX_CUE_BYTES];
+    fs::write(&sheet, &bytes)?;
+    assert_eq!(read_input(&sheet, MAX_CUE_BYTES, &cancellation)?, bytes);
+    File::options()
+        .write(true)
+        .open(&sheet)?
+        .set_len(MAX_CUE_BYTES as u64 + 1)?;
+    assert!(read_input(&sheet, MAX_CUE_BYTES, &cancellation).is_err());
+    // A source that grows after metadata was checked is still bounded per chunk.
+    let mut grown = std::io::Cursor::new(vec![b' '; MAX_CUE_BYTES + 1]);
+    assert!(read_chunks(&mut grown, MAX_CUE_BYTES, &cancellation).is_err());
+
+    struct CancellingReader {
+        cancellation: ScanCancellation,
+        reads: usize,
+        at_eof: bool,
+    }
+    impl Read for CancellingReader {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            self.reads += 1;
+            self.cancellation.cancel();
+            buffer.fill(b' ');
+            Ok(if self.at_eof { 0 } else { buffer.len() })
+        }
+    }
+    for at_eof in [false, true] {
+        let cancellation = ScanCancellation::default();
+        let mut reader = CancellingReader {
+            cancellation: cancellation.clone(),
+            reads: 0,
+            at_eof,
+        };
+        assert!(read_chunks(&mut reader, MAX_CUE_BYTES, &cancellation).is_err());
+        assert_eq!(reader.reads, 1);
+        // Cancellation wins before metadata lookup or decoding malformed input.
+        assert!(
+            read_input(
+                &directory.path().join("absent.cue"),
+                MAX_CUE_BYTES,
+                &cancellation
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("cancelled")
+        );
+        assert!(
+            crate::cue::parse_input(&[0xff], &sheet, &cancellation)
+                .unwrap_err()
+                .to_string()
+                .contains("cancelled")
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn oversized_scan_cue_is_a_local_error_preserving_owned_tracks() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let root = directory.path().to_path_buf();
+    wav(&root.join("audio.wav"), 225)?;
+    let sheet = root.join("album.cue");
+    two_track_sheet(&sheet)?;
+    let store = crate::store::Store::open(Path::new(":memory:"))?;
+    store.apply_scan(&scan_paths(std::slice::from_ref(&root), &[], false)?)?;
+    let ids = [
+        store.track_id_for_source(&sheet, Some(1))?.unwrap(),
+        store.track_id_for_source(&sheet, Some(2))?.unwrap(),
+    ];
+    store.set_favorite(&ids, true)?;
+    store.edit_track(ids[0], Some("Owned title"), None, None, None)?;
+    // A sparse 32 MiB sheet must be rejected by size, before decoding/parsing.
+    File::options()
+        .write(true)
+        .open(&sheet)?
+        .set_len(32 * 1024 * 1024)?;
+    let result = scan_paths(&[root], &[], false)?;
+    assert_eq!(result.errors.len(), 1);
+    assert!(result.errors[0].contains("exceeds 1048576 bytes"));
+    assert_eq!(result.uncertainties, [ScanUncertainty::CueSheet(sheet)]);
+    assert!(result.suppressed_sources.is_empty());
+    assert_eq!(result.records.len(), 1);
+    assert!(result.records[0].cue.is_none());
+    store.apply_scan(&result)?;
+    store.remove_missing_tracks()?;
+    for id in ids {
+        let track = store.track(id)?.unwrap();
+        assert!(track.favorite && !track.missing);
+    }
+    assert_eq!(store.track(ids[0])?.unwrap().title, "Owned title");
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn scan_rejects_fifo_sheets_before_or_after_discovery_without_losing_owned_tracks() -> Result<()> {
+    for (replace_after_discovery, explicit_sheet) in [(false, false), (false, true), (true, false)]
+    {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path().to_path_buf();
+        wav(&root.join("audio.wav"), 225)?;
+        let sheet = root.join("album.cue");
+        two_track_sheet(&sheet)?;
+        let store = crate::store::Store::open(Path::new(":memory:"))?;
+        store.apply_scan(&scan_paths(std::slice::from_ref(&root), &[], false)?)?;
+        let ids = [
+            store.track_id_for_source(&sheet, Some(1))?.unwrap(),
+            store.track_id_for_source(&sheet, Some(2))?.unwrap(),
+        ];
+        let replace = |sheet: &Path| {
+            fs::remove_file(sheet).unwrap();
+            let name = std::ffi::CString::new(sheet.as_os_str().as_encoded_bytes()).unwrap();
+            // SAFETY: name is a live NUL-terminated path; mkfifo retains no pointer.
+            assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        };
+        if !replace_after_discovery {
+            replace(&sheet);
+        }
+        let requested = if explicit_sheet { sheet.clone() } else { root };
+        let worker_sheet = sheet.clone();
+        let (completed, receive) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let result =
+                scan_paths_at_depth(&[requested], &[], false, 1, |phase, processed, _, _, _| {
+                    if replace_after_discovery
+                        && phase == ScanPhase::ReadingMetadata
+                        && processed == 0
+                    {
+                        replace(&worker_sheet);
+                    }
+                });
+            completed.send(result).unwrap();
+        });
+        // Do not join on timeout: a regression must fail rather than hang the suite.
+        let result = receive.recv_timeout(Duration::from_secs(2))??;
+        worker.join().unwrap();
+        assert_eq!(result.errors.len(), 1);
+        assert!(result.errors[0].contains("not an ordinary file"));
+        assert_eq!(result.uncertainties, [ScanUncertainty::CueSheet(sheet)]);
+        store.apply_scan(&result)?;
+        store.remove_missing_tracks()?;
+        for id in ids {
+            assert!(!store.track(id)?.unwrap().missing);
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn failed_audio_probe_is_not_missing_or_cleanable_but_true_deletion_is() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let root = directory.path().to_path_buf();
@@ -1550,6 +1704,58 @@ fn unrepresentable_cue_exports_preserve_existing_destination() -> Result<()> {
     )?;
     assert!(export_m3u(&path, playlist_tracks(&stale_sequence, &tracks)).is_err());
     assert_eq!(fs::read_to_string(&path)?, "original playlist\n");
+    Ok(())
+}
+
+#[test]
+#[cfg(unix)]
+fn cue_export_rejects_fifo_and_oversized_sheets_without_replacing_destination() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    wav(&directory.path().join("audio.wav"), 225)?;
+    let sheet = directory.path().join("album.cue");
+    two_track_sheet(&sheet)?;
+    let scan = scan_paths(std::slice::from_ref(&sheet), &[], false)?;
+    let tracks: Vec<_> = scan
+        .records
+        .iter()
+        .enumerate()
+        .map(|(index, record)| track_from_record(index as i64 + 1, record))
+        .collect();
+    let destination = directory.path().join("existing.m3u8");
+    let sequence = [1, 2];
+    export_m3u(&destination, playlist_tracks(&sequence, &tracks))?;
+    assert_eq!(import_playlist(&destination)?.len(), 2);
+    let original = fs::read(&destination)?;
+
+    fs::remove_file(&sheet)?;
+    let name = std::ffi::CString::new(sheet.as_os_str().as_encoded_bytes())?;
+    // SAFETY: name is a live NUL-terminated path; mkfifo retains no pointer.
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+    let (completed, receive) = std::sync::mpsc::channel();
+    let export_path = destination.clone();
+    let worker = std::thread::spawn(move || {
+        let result = export_m3u(&export_path, playlist_tracks(&sequence, &tracks));
+        completed.send(result).unwrap();
+    });
+    // Do not join on timeout: a regression must fail rather than hang the suite.
+    let error = receive.recv_timeout(Duration::from_secs(2))?.unwrap_err();
+    worker.join().unwrap();
+    assert!(format!("{error:#}").contains("not an ordinary file"));
+    assert_eq!(fs::read(&destination)?, original);
+
+    fs::remove_file(&sheet)?;
+    two_track_sheet(&sheet)?;
+    File::options()
+        .write(true)
+        .open(&sheet)?
+        .set_len(1024 * 1024 + 1)?;
+    let tracks = scan
+        .records
+        .iter()
+        .enumerate()
+        .map(|(index, record)| Ok(track_from_record(index as i64 + 1, record)));
+    assert!(export_m3u(&destination, tracks).is_err());
+    assert_eq!(fs::read(&destination)?, original);
     Ok(())
 }
 

@@ -206,11 +206,13 @@ input is limited to 16 MiB, each CUE sheet to 1 MiB, and aggregate input to 64 M
 before first-occurrence deduplication. Expanded entry data and retained parsed CUE
 data each have a 64 MiB accounting limit, including paths, names, and record
 storage. These limits allow large collections while bounding repeated-sheet
-expansion and long-metadata costs; they are import limits, not playlist-size
-limits for other operations. Input errors identify preparation/read/decode/parse
-stages and occur before any scan or playlist commit. Parsed import CUE sheets are
-reused by metadata scanning, preserving the sheet version and track order read
-during preparation. Ordinary library directory scanning is unchanged.
+expansion and long-metadata costs; the aggregate and expansion limits apply to
+imports, not playlist sizes for other operations. Input errors identify
+preparation/read/decode/parse stages and occur before any scan or playlist commit.
+Parsed import CUE sheets are reused by metadata scanning, preserving the sheet
+version and track order read during preparation. Ordinary library scans and CUE
+exports share the ordinary-file-only, nonblocking, 1 MiB CUE reader; scans also
+check cancellation between read chunks and while parsing lines and segments.
 
 Scan saving, playlist creation, and playlist refresh are separate stages. A
 failure to save the scan does not create a playlist. Once the scan has been
@@ -256,3 +258,6 @@ A complete, contiguous, correctly ordered sheet run exports as one CUE path.
 Standard M3U cannot select individual subtracks: partial or reordered runs fail
 and leave the existing destination untouched. Such selections remain valid inside
 Rivu. Rescan externally edited sheets before exporting.
+Export rereads each CUE sheet as an ordinary file, limited to 1 MiB. FIFOs and
+other non-regular inputs are rejected without waiting for input; read or parse
+errors leave an existing destination untouched.

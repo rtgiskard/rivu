@@ -17,7 +17,7 @@ pub struct M3uItem {
 
 // Large enough for substantial music collections, while bounding hostile inputs.
 pub(crate) const MAX_IMPORT_FILE_BYTES: usize = 16 * 1024 * 1024;
-const MAX_CUE_BYTES: usize = 1024 * 1024;
+pub(super) const MAX_CUE_BYTES: usize = 1024 * 1024;
 const MAX_IMPORT_BYTES: usize = 64 * 1024 * 1024;
 pub(crate) const MAX_IMPORT_ENTRIES: usize = 100_000;
 const MAX_RETAINED_BYTES: usize = 64 * 1024 * 1024;
@@ -45,35 +45,44 @@ pub(crate) fn prepare_playlist_import(
     prepare_import(path, is_cue_path(path), cancellation, roots)
 }
 
-fn read_input(path: &Path, limit: usize, cancellation: &ScanCancellation) -> Result<Vec<u8>> {
+pub(super) fn read_input(
+    path: &Path,
+    limit: usize,
+    cancellation: &ScanCancellation,
+) -> Result<Vec<u8>> {
     cancellation.check()?;
     // O_NONBLOCK prevents a FIFO substituted between metadata and open from hanging.
     ensure!(
         fs::metadata(path)?.is_file(),
-        "import input is not an ordinary file"
+        "input is not an ordinary file"
     );
     let mut file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NONBLOCK)
         .open(path)?;
     let metadata = file.metadata()?;
-    ensure!(metadata.is_file(), "import input is not an ordinary file");
+    ensure!(metadata.is_file(), "input is not an ordinary file");
     ensure!(
         metadata.len() <= limit as u64,
-        "import input exceeds {limit} bytes"
+        "input exceeds {limit} bytes"
     );
+    read_chunks(&mut file, limit, cancellation)
+}
+
+pub(super) fn read_chunks(
+    reader: &mut impl Read,
+    limit: usize,
+    cancellation: &ScanCancellation,
+) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     let mut chunk = [0; 64 * 1024];
     loop {
         cancellation.check()?;
-        let count = file.read(&mut chunk)?;
+        let count = reader.read(&mut chunk)?;
         if count == 0 {
             break;
         }
-        ensure!(
-            bytes.len() + count <= limit,
-            "import input exceeds {limit} bytes"
-        );
+        ensure!(bytes.len() + count <= limit, "input exceeds {limit} bytes");
         bytes.extend_from_slice(&chunk[..count]);
     }
     cancellation.check()?;
@@ -120,7 +129,7 @@ fn prepare_import(
                 )
                 .with_context(|| format!("Reading import CUE {}", path.display()))?;
                 bytes_read += bytes.len();
-                let sheet = crate::cue::parse_import(&bytes, path, cancellation)?;
+                let sheet = crate::cue::parse_input(&bytes, path, cancellation)?;
                 // Account for retained parsed paths/metadata, not merely source bytes.
                 retained += path.as_os_str().len() + std::mem::size_of::<crate::cue::CueSheet>();
                 retained += sheet.title.as_ref().map_or(0, String::len)
@@ -279,7 +288,10 @@ where
                 continue;
             }
             if let Some(cue) = &track.cue {
-                let sheet = crate::cue::read(&cue.sheet)?;
+                let cancellation = ScanCancellation::default();
+                let bytes = read_input(&cue.sheet, MAX_CUE_BYTES, &cancellation)
+                    .with_context(|| format!("Reading export CUE {}", cue.sheet.display()))?;
+                let sheet = crate::cue::parse_input(&bytes, &cue.sheet, &cancellation)?;
                 let expected = sheet
                     .tracks
                     .first()

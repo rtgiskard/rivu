@@ -301,7 +301,7 @@ pub(crate) fn scan_paths_with_cues(
             }
         };
         cancellation.check()?;
-        if metadata.is_file() {
+        if metadata.is_file() || (!metadata.is_dir() && is_cue_path(&root)) {
             if is_audio_path(&root) {
                 explicit_audio.insert(root.clone());
                 if files.insert(root.clone()) {
@@ -378,8 +378,8 @@ pub(crate) fn scan_paths_with_cues(
                         );
                     }
                     Ok(entry)
-                        if entry.file_type().is_file()
-                            && (is_audio_path(entry.path()) || is_cue_path(entry.path())) =>
+                        if (entry.file_type().is_file() && is_audio_path(entry.path()))
+                            || (!entry.file_type().is_dir() && is_cue_path(entry.path())) =>
                     {
                         if files.insert(entry.path().to_path_buf()) {
                             progress(
@@ -562,7 +562,15 @@ fn scan_cue(
         Some(sheets) => sheets
             .remove(path)
             .context("Import CUE sheet was not prepared"),
-        None => crate::cue::read(path),
+        None => {
+            let bytes = super::playlist_io::read_input(
+                path,
+                super::playlist_io::MAX_CUE_BYTES,
+                cancellation,
+            )
+            .with_context(|| format!("Reading CUE {}", path.display()))?;
+            crate::cue::parse_input(&bytes, path, cancellation)
+        }
     };
     cancellation.check()?;
     let sheet = sheet?;
