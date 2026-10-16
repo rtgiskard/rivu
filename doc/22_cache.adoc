@@ -74,6 +74,8 @@ Debounced directory, playlist, and explicit Details demand is checked again
 before submission. Abandoned unsubmitted demand releases its reservation without
 becoming a failed page or discarding cached rows; submitted reads retain their
 physical gate until completion.
+Album searches retain the latest input's quiet deadline independently of a
+submitted worker; replacement, hiding, and completion do not shorten that delay.
 Viewport demand is deferred past prepaint so locally accepted forest pages can
 invalidate the frame that still contains their loading placeholders.
 

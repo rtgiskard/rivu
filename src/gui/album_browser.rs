@@ -1,4 +1,9 @@
-use std::{collections::BTreeMap, ops::Range, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    ops::Range,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use gpui::{prelude::*, *};
 
@@ -57,6 +62,33 @@ fn card_icon_button(
 
 const ALBUM_PAGE: usize = 24;
 
+#[derive(Default)]
+struct AlbumLoadState {
+    // Latest search intent survives cancellation, hiding and worker completion.
+    quiet_until: Option<Instant>,
+    // Only a submitted Core query owns this gate, until its completion callback.
+    worker_pending: bool,
+}
+
+impl AlbumLoadState {
+    fn search_changed(&mut self, nonempty: bool, now: Instant) {
+        self.quiet_until = nonempty.then(|| now + SEARCH_DEBOUNCE);
+    }
+
+    fn next_delay(&self, visible: bool, album_grid: bool, now: Instant) -> Option<Duration> {
+        if !visible || self.worker_pending {
+            return None;
+        }
+        Some(if album_grid {
+            self.quiet_until.map_or(Duration::ZERO, |deadline| {
+                deadline.saturating_duration_since(now)
+            })
+        } else {
+            Duration::ZERO
+        })
+    }
+}
+
 /// Sparse absolute rows and viewport-owned covers per panel. Visibility cancels
 /// submissions and cover demand, not unchanged album or track data.
 pub(super) struct AlbumBrowser {
@@ -72,7 +104,8 @@ pub(super) struct AlbumBrowser {
     tracks_projection: QueryProjection,
     tracks_key: Option<AlbumKey>,
     page_size: usize,
-    loading: bool,
+    load_state: AlbumLoadState,
+    search_timer: Option<Task<()>>,
     error: Option<String>,
     selected: Option<AlbumKey>,
     albums: paged::PagedRows<AlbumSummary>,
@@ -149,7 +182,8 @@ impl AlbumBrowser {
             tracks_projection: QueryProjection::default(),
             tracks_key: None,
             page_size: 1,
-            loading: false,
+            load_state: AlbumLoadState::default(),
+            search_timer: None,
             error: None,
             selected: None,
             albums: paged::PagedRows::default(),
@@ -210,7 +244,7 @@ impl AlbumBrowser {
             if self.selected.is_none() {
                 self.restore_grid_anchor();
             }
-            self.request_next(false, cx);
+            self.request_next(cx);
         }
         if visibility_changed || data_changed || demand_changed {
             cx.notify();
@@ -273,6 +307,7 @@ impl AlbumBrowser {
 
     fn cancel(&mut self, cx: &mut App) {
         self.capture_grid_anchor();
+        self.search_timer = None;
         cancel_pages(&mut self.albums_projection, &mut self.albums);
         cancel_pages(&mut self.tracks_projection, &mut self.tracks);
         // The detached worker still owns the physical gate until it completes.
@@ -284,6 +319,10 @@ impl AlbumBrowser {
     }
 
     fn load_with_delay(&mut self, debounce: bool, cx: &mut Context<Self>) {
+        if debounce {
+            self.load_state
+                .search_changed(self.query.is_some(), Instant::now());
+        }
         self.cancel(cx);
         self.sync_data(cx);
         if !self.visible {
@@ -293,11 +332,29 @@ impl AlbumBrowser {
             self.restore_grid_anchor();
         }
         self.error = None;
-        self.request_next(debounce, cx);
+        self.request_next(cx);
     }
 
-    fn request_next(&mut self, debounce: bool, cx: &mut Context<Self>) {
-        if !self.visible || self.loading {
+    fn request_next(&mut self, cx: &mut Context<Self>) {
+        if self.search_timer.is_some() {
+            return;
+        }
+        let Some(delay) =
+            self.load_state
+                .next_delay(self.visible, self.selected.is_none(), Instant::now())
+        else {
+            return;
+        };
+        if !delay.is_zero() {
+            let timer = cx.background_executor().timer(delay);
+            self.search_timer = Some(cx.spawn(async move |this, cx| {
+                timer.await;
+                let _ = this.update(cx, |this, cx| {
+                    this.search_timer = None;
+                    // A wake only rechecks current demand; it owns no query or page.
+                    this.request_next(cx);
+                });
+            }));
             return;
         }
         let query = match &self.selected {
@@ -325,30 +382,10 @@ impl AlbumBrowser {
                 }
             }
         };
-        self.loading = true;
+        self.load_state.worker_pending = true;
         let generation = self.active_projection().generation();
         let handle = self.handle.clone();
-        let debounce = debounce && self.query.is_some();
         cx.spawn(async move |this, cx| {
-            if debounce {
-                cx.background_executor().timer(SEARCH_DEBOUNCE).await;
-                if !this
-                    .update(cx, |this, cx| {
-                        let current = this.visible
-                            && this
-                                .active_projection()
-                                .accepts(&query, generation, this.revisions);
-                        if !current {
-                            this.loading = false;
-                            this.request_next(false, cx);
-                        }
-                        current
-                    })
-                    .unwrap_or(false)
-                {
-                    return;
-                }
-            }
             let worker_query = query.clone();
             let response = cx
                 .background_executor()
@@ -356,7 +393,7 @@ impl AlbumBrowser {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 // Completion, not logical cancellation, releases the physical gate.
-                this.loading = false;
+                this.load_state.worker_pending = false;
                 this.revisions = this.handle.gui_snapshot().query_revisions(None);
                 this.sync_data(cx);
                 if !this.visible
@@ -364,7 +401,7 @@ impl AlbumBrowser {
                         .active_projection()
                         .accepts(&query, generation, response.revisions)
                 {
-                    this.request_next(false, cx);
+                    this.request_next(cx);
                     cx.notify();
                     return;
                 }
@@ -377,7 +414,7 @@ impl AlbumBrowser {
                     Err(error) => this.fail_page(error.to_string()),
                     _ => this.fail_page(this.i18n.text("gl-album-response").to_owned()),
                 }
-                this.request_next(false, cx);
+                this.request_next(cx);
                 cx.notify();
             });
         })
@@ -399,7 +436,7 @@ impl AlbumBrowser {
         } else {
             self.albums.retry();
         }
-        self.request_next(false, cx);
+        self.request_next(cx);
         cx.notify();
     }
 
@@ -511,7 +548,7 @@ impl AlbumBrowser {
         // Updating demand while a request is pending still records the latest viewport.
         let _ = self.albums.demand(self.demand.clone(), ALBUM_PAGE);
         self.prepare_cover(cx);
-        self.request_next(false, cx);
+        self.request_next(cx);
     }
 
     fn prepare_cover(&mut self, cx: &mut Context<Self>) {
@@ -941,7 +978,7 @@ impl Render for AlbumBrowser {
                                     && this.visible
                                 {
                                     let _ = this.tracks.demand(range, this.page_size);
-                                    this.request_next(false, cx);
+                                    this.request_next(cx);
                                 }
                             });
                         });
@@ -1045,13 +1082,98 @@ impl Render for AlbumBrowser {
 
 #[cfg(test)]
 mod tests {
-    use super::{anchored_index, cancel_pages, sync_pages};
+    use std::time::{Duration, Instant};
+
+    use super::{AlbumLoadState, anchored_index, cancel_pages, sync_pages};
     use crate::{
         gui::paged,
-        model::{AlbumKey, AlbumSort, Page, Query},
+        model::{AlbumKey, AlbumSort, Page, Query, SEARCH_DEBOUNCE},
         projection::QueryProjection,
         response::QueryRevisions,
     };
+
+    #[test]
+    fn replacing_unsubmitted_search_waits_for_latest_quiet_deadline() {
+        let start = Instant::now();
+        let mut load = AlbumLoadState::default();
+        load.search_changed(true, start);
+        assert_eq!(load.next_delay(true, true, start), Some(SEARCH_DEBOUNCE));
+
+        let replacement = start + Duration::from_millis(100);
+        load.search_changed(true, replacement);
+        assert_eq!(
+            load.next_delay(true, true, start + SEARCH_DEBOUNCE),
+            Some(Duration::from_millis(100))
+        );
+        let deadline = replacement + SEARCH_DEBOUNCE;
+        assert_eq!(
+            load.next_delay(true, true, deadline - Duration::from_nanos(1)),
+            Some(Duration::from_nanos(1))
+        );
+        assert_eq!(load.next_delay(true, true, deadline), Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn submitted_search_completion_preserves_replacement_deadline_and_immediate_paging() {
+        let start = Instant::now();
+        let mut load = AlbumLoadState {
+            worker_pending: true,
+            ..Default::default()
+        };
+        let replacement = start + Duration::from_millis(100);
+        load.search_changed(true, replacement);
+        let completed = start + SEARCH_DEBOUNCE;
+        assert_eq!(load.next_delay(true, true, completed), None);
+
+        load.worker_pending = false;
+        assert_eq!(
+            load.next_delay(true, true, completed),
+            Some(Duration::from_millis(100))
+        );
+        let deadline = replacement + SEARCH_DEBOUNCE;
+        assert_eq!(load.next_delay(true, true, deadline), Some(Duration::ZERO));
+        load.worker_pending = true;
+        // Even an elapsed quiet deadline cannot release the physical worker.
+        let next_page = deadline + Duration::from_secs(1);
+        assert_eq!(load.next_delay(true, true, next_page), None);
+        load.worker_pending = false;
+        assert_eq!(load.next_delay(true, true, next_page), Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn clearing_search_removes_delay_without_releasing_submitted_worker() {
+        let start = Instant::now();
+        let mut load = AlbumLoadState::default();
+        load.search_changed(true, start);
+        let cleared = start + Duration::from_millis(100);
+        load.search_changed(false, cleared);
+        assert_eq!(load.next_delay(true, true, cleared), Some(Duration::ZERO));
+
+        load.worker_pending = true;
+        load.search_changed(true, cleared);
+        load.search_changed(false, cleared);
+        assert_eq!(load.next_delay(true, true, cleared), None);
+        load.worker_pending = false;
+        assert_eq!(load.next_delay(true, true, cleared), Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn hidden_and_selected_album_transitions_retain_grid_quiet_deadline() {
+        let start = Instant::now();
+        let mut load = AlbumLoadState::default();
+        load.search_changed(true, start);
+        let reopened = start + Duration::from_millis(100);
+        assert_eq!(load.next_delay(false, true, reopened), None);
+        assert_eq!(load.next_delay(true, false, reopened), Some(Duration::ZERO));
+        assert_eq!(
+            load.next_delay(true, true, reopened),
+            Some(SEARCH_DEBOUNCE - Duration::from_millis(100))
+        );
+        assert_eq!(
+            load.next_delay(true, true, start + SEARCH_DEBOUNCE),
+            Some(Duration::ZERO)
+        );
+    }
 
     #[test]
     fn reflow_retains_anchor_until_user_scrolls() {
