@@ -373,9 +373,10 @@ Press `Escape` to close the layout manager,
 including after renaming the current layout.
 
 While unlocked, panels can be added, removed, moved, resized, and reordered.
-Right-click a panel to toggle its tab bar; right-click the bottom-right layout
-button to toggle the lock, or left-click it to add a panel. Playback, tab
-selection, and layout management remain available while locked.
+Right-click a panel to toggle its tab bar, even while locked. Right-click the
+bottom-right layout button to toggle the lock, or left-click it to add a panel.
+Playback, tab selection, and layout management remain available while locked.
+Locked separators have no resize cursor or hover highlight.
 
 Rows and columns contain two or more ordered regions. New containers divide
 their content equally. Docking at an edge splits the target region while

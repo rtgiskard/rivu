@@ -1976,10 +1976,11 @@ impl GuiApp {
                             .id(("split", index))
                             .absolute()
                             .bg(rgb(BG))
-                            .hover(|style| style.bg(rgb(ACCENT)))
-                            .when(axis == Axis::Horizontal, |view| view.cursor_col_resize())
-                            .when(axis == Axis::Vertical, |view| view.cursor_row_resize())
-                            .when(self.layouts.current().locked, |view| view.cursor_default())
+                            .when(!self.layouts.current().locked, |view| {
+                                view.hover(|style| style.bg(rgb(ACCENT)))
+                                    .when(axis == Axis::Horizontal, |view| view.cursor_col_resize())
+                                    .when(axis == Axis::Vertical, |view| view.cursor_row_resize())
+                            })
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {

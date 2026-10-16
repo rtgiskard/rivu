@@ -1040,28 +1040,22 @@ impl Render for GuiApp {
                                     .child(self.tr("shell-layout-locked")),
                             )
                         })
-                        .when(!self.layouts.current().locked, |view| {
-                            view.child(menu_item(
-                                "toggle-tab-bar",
-                                if state.tab_bar_visible {
-                                    self.tr("shell-hide-tab-bar")
-                                } else {
-                                    self.tr("shell-show-tab-bar")
-                                },
-                                cx,
-                                move |this, _, cx| {
-                                    if this.layouts.current().locked {
-                                        return;
-                                    }
-                                    this.layouts.current_mut().set_tab_bar_visible(
-                                        state.panel_id,
-                                        !state.tab_bar_visible,
-                                    );
-                                    this.panel_menu = None;
-                                    this.persist_layout(cx);
-                                },
-                            ))
-                        });
+                        .child(menu_item(
+                            "toggle-tab-bar",
+                            if state.tab_bar_visible {
+                                self.tr("shell-hide-tab-bar")
+                            } else {
+                                self.tr("shell-show-tab-bar")
+                            },
+                            cx,
+                            move |this, _, cx| {
+                                this.layouts
+                                    .current_mut()
+                                    .set_tab_bar_visible(state.panel_id, !state.tab_bar_visible);
+                                this.panel_menu = None;
+                                this.persist_layout(cx);
+                            },
+                        ));
                 }
                 PanelMenuPage::LibraryColumns => {
                     menu = menu
