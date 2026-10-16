@@ -250,8 +250,8 @@ struct PanelDrag {
     title: SharedString,
 }
 impl Render for PanelDrag {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        drag_preview(self.title.clone())
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        drag_preview(self.title.clone(), window, cx)
     }
 }
 
@@ -264,8 +264,8 @@ pub(super) struct QueueDrag {
 }
 
 impl Render for QueueDrag {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        drag_preview(self.label.clone())
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        drag_preview(self.label.clone(), window, cx)
     }
 }
 

@@ -105,11 +105,15 @@ impl PlaylistDrag {
 }
 
 impl gpui::Render for PlaylistDrag {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        super::drag_preview(self.i18n.format(
-            "gl-move-playlist-entries",
-            &[("count", (self.entry_ids.get().map_or(0, Vec::len)).into())],
-        ))
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        super::drag_preview(
+            self.i18n.format(
+                "gl-move-playlist-entries",
+                &[("count", (self.entry_ids.get().map_or(0, Vec::len)).into())],
+            ),
+            window,
+            cx,
+        )
     }
 }
 

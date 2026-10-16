@@ -193,21 +193,13 @@ impl LibraryDragPreview {
 }
 
 impl Render for LibraryDragPreview {
-    fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Window coordinates avoid the source row's grab offset; GPUI fits actual bounds.
         gpui::anchored()
             .position(window.mouse_position() + gpui::point(px(10.), px(10.)))
             .child(
-                row()
-                    .px_2()
-                    .py_1()
+                super::components::drag_preview_surface(window, cx)
                     .gap_2()
-                    .max_w(px(260.))
-                    .bg(gpui::rgb(super::PANEL))
-                    .border_1()
-                    .border_color(gpui::rgb(super::ACCENT))
-                    .rounded_md()
-                    .text_color(gpui::rgb(super::TEXT))
                     .child(
                         div()
                             .flex_shrink_0()

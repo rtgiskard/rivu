@@ -483,17 +483,26 @@ pub(crate) fn dropdown_container(id: impl Into<ElementId>, width: gpui::Pixels) 
         .occlude()
 }
 
-/// Shared drag preview used by panel and queue drag sources.
-pub(crate) fn drag_preview(label: impl Into<SharedString>) -> Div {
+/// Shared compact surface for independent drag previews.
+pub(crate) fn drag_preview_surface(window: &Window, cx: &gpui::App) -> Div {
+    let available = (window.viewport_size().width - px(UI_INSET * 2.)).max(px(0.));
     div()
-        .px_4()
-        .py_2()
+        .flex()
+        .items_center()
+        .min_w_0()
+        .max_w((window.rem_size() * 22.5).min(available))
+        .overflow_hidden()
+        .px_2()
+        .py_1()
         .bg(rgb(PANEL))
-        .border_1()
-        .border_color(rgb(ACCENT))
-        .rounded_md()
+        .rounded_sm()
+        .font(overlay_font(window, cx))
+        .text_sm()
         .text_color(rgb(TEXT))
-        .child(label.into())
+}
+
+pub(crate) fn drag_preview(label: impl Into<SharedString>, window: &Window, cx: &gpui::App) -> Div {
+    drag_preview_surface(window, cx).child(div().min_w_0().truncate().child(label.into()))
 }
 
 pub(crate) fn tree_row(id: impl Into<ElementId>, depth: usize, selected: bool) -> Stateful<Div> {
