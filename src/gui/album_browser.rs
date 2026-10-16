@@ -846,7 +846,7 @@ impl AlbumBrowser {
             .get(&index)
             .and_then(|cover| cover.view.image(cx));
         let directory = key.directory.to_string_lossy().into_owned();
-        let title = album_title(&self.i18n, &key);
+        let title = key.title.clone();
         let drag_label: SharedString = title.clone().into();
         let cover_fade = |color: u32| {
             linear_gradient(
@@ -1047,14 +1047,6 @@ fn track_marker(current: Option<i64>, status: PlaybackStatus, id: i64) -> Option
     })
 }
 
-fn album_title(i18n: &crate::i18n::Localizer, key: &AlbumKey) -> String {
-    if key.title.is_empty() {
-        i18n.text("gl-unknown-album").into()
-    } else {
-        key.title.clone()
-    }
-}
-
 impl Render for AlbumBrowser {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let total = if self.selected.is_some() {
@@ -1100,7 +1092,7 @@ impl Render for AlbumBrowser {
                         .min_w_0()
                         .truncate()
                         .text_color(rgb(TEXT))
-                        .child(album_title(&self.i18n, key)),
+                        .child(key.title.clone()),
                 )
                 .child(self.tracks_search.clone())
                 .child(icon_button(

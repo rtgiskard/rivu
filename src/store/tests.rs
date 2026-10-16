@@ -557,7 +557,7 @@ fn albums_are_directory_scoped_compilations_with_ordered_whole_queue_actions() {
     }
     store.apply_scan(&scan(records)).unwrap();
     let albums = store.albums_page(None, AlbumSort::Title, 0, 24).unwrap();
-    assert_eq!(albums.total, 5);
+    assert_eq!(albums.total, 3);
     assert_eq!(
         store
             .albums_page(None, AlbumSort::Title, 1, 1)
@@ -584,13 +584,8 @@ fn albums_are_directory_scoped_compilations_with_ordered_whole_queue_actions() {
             .collect::<Vec<_>>(),
         ["A", "Z", "N"]
     );
-    let unknown = albums
-        .rows
-        .iter()
-        .find(|album| album.key.directory == Path::new("/music/c"))
-        .unwrap();
-    assert_eq!(unknown.key.title, "");
-    assert!(unknown.artist.is_empty());
+    assert!(albums.rows.iter().all(|album| !album.key.title.is_empty()));
+    assert_eq!(all_tracks(&store).len(), MAX_QUERY_ROWS + 9);
     let large = AlbumKey {
         directory: "/music/large".into(),
         title: "Large".into(),
@@ -653,15 +648,235 @@ fn albums_are_directory_scoped_compilations_with_ordered_whole_queue_actions() {
             [],
         )
         .unwrap();
-    let changed = store
-        .albums_page(None, AlbumSort::Title, 0, 24)
+    let changed = store.albums_page(None, AlbumSort::Title, 0, 24).unwrap();
+    assert_eq!(changed.total, 2);
+    assert!(
+        changed
+            .rows
+            .iter()
+            .all(|album| album.key.directory != Path::new("/music/b"))
+    );
+}
+
+#[test]
+fn album_eligibility_matches_unicode_trim_without_normalizing_identity_or_dropping_tracks() {
+    use crate::model::AlbumKey;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("album-eligibility.db");
+    let store = Store::open(&path).unwrap();
+    // No application scalar functions are registered on this connection.
+    let external = Connection::open(&path).unwrap();
+    let whitespace = "\t\n\u{000b}\u{000c}\r \u{0085}\u{00a0}\u{1680}\u{2000}\u{2001}\u{2002}\u{2003}\u{2004}\u{2005}\u{2006}\u{2007}\u{2008}\u{2009}\u{200a}\u{2028}\u{2029}\u{202f}\u{205f}\u{3000}";
+    let mut invalid = vec![String::new(), whitespace.to_owned()];
+    invalid.extend(whitespace.chars().map(|ch| ch.to_string()));
+    for (index, title) in invalid.iter().enumerate() {
+        assert!(title.trim().is_empty());
+        external
+            .execute(
+                "INSERT INTO tracks(path,raw_album,raw_artist) VALUES(?1,?2,'Excluded artist')",
+                params![format!("/music/{index}.flac"), title],
+            )
+            .unwrap();
+    }
+    for (index, title) in ["", whitespace].iter().enumerate() {
+        external.execute(
+            "INSERT INTO tracks(path,raw_album,album_override,raw_artist) VALUES(?1,'Tagged',?2,'Excluded artist')",
+            params![format!("/override/{index}.flac"), title],
+        ).unwrap();
+    }
+    // These nonblank titles stay distinct, including surrounding whitespace
+    // and Unicode characters that are not in Unicode White_Space.
+    let valid = [
+        "Album",
+        " Album ",
+        "\u{3000}Album\u{a0}",
+        "\u{200b}",
+        "\u{feff}",
+        "\u{001c}",
+        "\0",
+    ];
+    for (index, title) in valid.iter().enumerate() {
+        assert!(!title.trim().is_empty());
+        external
+            .execute(
+                "INSERT INTO tracks(path,raw_album) VALUES(?1,?2)",
+                params![format!("/valid/{index}.flac"), title],
+            )
+            .unwrap();
+    }
+    let total = invalid.len() + 2 + valid.len();
+    let tracks = all_tracks(&store);
+    assert_eq!(tracks.len(), total);
+    let playlist = store.create_playlist("All metadata survives").unwrap();
+    let ids: Vec<_> = tracks.into_iter().map(|track| track.id).collect();
+    store.add_playlist(playlist, &ids).unwrap();
+    store
+        .enqueue_tracks(&[ids[0], ids[0], *ids.last().unwrap()])
+        .unwrap();
+    store
+        .set_queue_current(Some(store.queue_ids().unwrap()[1]))
+        .unwrap();
+    let queue = store.queue_page(None, 0, 24).unwrap();
+    let state = store.queue_state().unwrap();
+    let entries = store.playlist_entries_page(playlist, None, 0, 100).unwrap();
+    assert_eq!(entries.total, total);
+    for sort in [AlbumSort::Title, AlbumSort::Artist] {
+        let page = store.albums_page(None, sort, 0, 100).unwrap();
+        assert_eq!(page.total, valid.len());
+        assert!(page.rows.iter().all(|album| album.artist.is_empty()));
+        let titles: HashSet<_> = page
+            .rows
+            .iter()
+            .map(|album| album.key.title.as_str())
+            .collect();
+        assert_eq!(titles, valid.into_iter().collect());
+        assert_eq!(
+            store
+                .albums_page(Some("Excluded artist"), sort, 0, 24)
+                .unwrap()
+                .total,
+            0
+        );
+        let past_end = store.albums_page(None, sort, valid.len(), 1).unwrap();
+        assert_eq!(past_end.total, valid.len());
+        assert!(past_end.rows.is_empty());
+        for album in page.rows {
+            assert_eq!(album.track_count, 1);
+            assert_eq!(
+                store
+                    .album_tracks_page(&album.key, None, 0, 24)
+                    .unwrap()
+                    .total,
+                1
+            );
+        }
+    }
+    for title in &invalid {
+        for directory in ["/music", "/override"] {
+            let key = AlbumKey {
+                directory: directory.into(),
+                title: title.clone(),
+            };
+            for query in [None, Some("Excluded")] {
+                let page = store.album_tracks_page(&key, query, 0, 24).unwrap();
+                assert_eq!(page.total, 0);
+                assert!(page.rows.is_empty());
+            }
+            for replace in [false, true] {
+                assert!(store.queue_album(&key, replace).is_err());
+                assert_eq!(store.queue_page(None, 0, 24).unwrap(), queue);
+                assert_eq!(store.queue_state().unwrap(), state);
+            }
+        }
+    }
+    assert_eq!(
+        store.playlist_entries_page(playlist, None, 0, 100).unwrap(),
+        entries
+    );
+    assert_eq!(all_tracks(&store).len(), total);
+}
+
+#[test]
+fn album_eligibility_transitions_follow_overrides_external_commits_and_rollback() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("album-transitions.db");
+    let store = Store::open(&path).unwrap();
+    let external = Connection::open(&path).unwrap();
+    external.execute_batch(
+        "INSERT INTO tracks(id,path,raw_album,raw_artist) VALUES(1,'/music/one.flac','','Artist');",
+    ).unwrap();
+    let check = |title: Option<&str>, artist: &str| {
+        for sort in [AlbumSort::Title, AlbumSort::Artist] {
+            let page = store.albums_page(None, sort, 0, 24).unwrap();
+            assert_eq!(page.total, usize::from(title.is_some()));
+            assert_eq!(page.rows.len(), page.total);
+            if let Some(title) = title {
+                assert_eq!(page.rows[0].key.title, title);
+                assert_eq!(page.rows[0].artist, artist);
+                assert_eq!(page.rows[0].track_count, 1);
+                assert_eq!(
+                    store
+                        .album_tracks_page(&page.rows[0].key, None, 0, 24)
+                        .unwrap()
+                        .total,
+                    1
+                );
+            }
+        }
+        assert_eq!(all_tracks(&store).len(), 1);
+    };
+    check(None, "");
+    external
+        .execute("UPDATE tracks SET raw_album=' Tagged ' WHERE id=1", [])
+        .unwrap();
+    check(Some(" Tagged "), "Artist");
+    let stale = store
+        .albums_page(None, AlbumSort::Title, 0, 1)
         .unwrap()
         .rows
-        .into_iter()
-        .find(|album| album.key.directory == Path::new("/music/b"))
+        .remove(0)
+        .key;
+    external
+        .execute("UPDATE tracks SET album_override='' WHERE id=1", [])
         .unwrap();
-    assert_eq!(changed.key.title, "");
-    assert!(changed.artist.is_empty());
+    check(None, "");
+    assert_eq!(
+        store.album_tracks_page(&stale, None, 0, 24).unwrap().total,
+        0
+    );
+    assert!(store.queue_album(&stale, true).is_err());
+    external
+        .execute("UPDATE tracks SET raw_album='Raw changed' WHERE id=1", [])
+        .unwrap();
+    check(None, "");
+    external
+        .execute("UPDATE tracks SET album_override=NULL WHERE id=1", [])
+        .unwrap();
+    check(Some("Raw changed"), "Artist");
+    external
+        .execute(
+            "UPDATE tracks SET album_override=?1 WHERE id=1",
+            ["\u{a0}\u{2003}\u{202f}\u{3000}"],
+        )
+        .unwrap();
+    check(None, "");
+    external.execute_batch("BEGIN; UPDATE tracks SET album_override='Rollback',artist_override='Rolled back' WHERE id=1;").unwrap();
+    check(None, "");
+    external.execute_batch("ROLLBACK;").unwrap();
+    check(None, "");
+    external.execute_batch("BEGIN; UPDATE tracks SET album_override=' Override ',artist_override='' WHERE id=1; COMMIT;").unwrap();
+    check(Some(" Override "), "");
+    let tx = store.conn.unchecked_transaction().unwrap();
+    tx.execute("UPDATE tracks SET album_override='' WHERE id=1", [])
+        .unwrap();
+    check(None, "");
+    tx.rollback().unwrap();
+    check(Some(" Override "), "");
+    external
+        .execute(
+            "UPDATE tracks SET raw_album='',album_override=NULL WHERE id=1",
+            [],
+        )
+        .unwrap();
+    check(None, "");
+    external
+        .execute("DELETE FROM tracks WHERE id=1", [])
+        .unwrap();
+    assert_eq!(
+        store
+            .albums_page(None, AlbumSort::Title, 0, 24)
+            .unwrap()
+            .total,
+        0
+    );
+    assert_eq!(
+        store
+            .conn
+            .query_row("SELECT COUNT(*) FROM album_artists", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
 }
 
 #[test]
@@ -674,7 +889,7 @@ fn album_search_matches_effective_metadata_without_filtering_members() {
         ("/music/a/2.flac", "Shared", "Other"),
         ("/music/b/1.flac", "Shared", "Zulu"),
         ("/music/c/1.flac", "Alpha", "Alpha"),
-        ("/music/d/1.flac", "", ""),
+        ("/music/d/1.flac", "Without artist", ""),
     ] {
         let mut record = rec(path, path, path, 10.0);
         record.media.album = album.into();
@@ -730,7 +945,7 @@ fn album_search_matches_effective_metadata_without_filtering_members() {
         assert!(absent.rows.is_empty());
         let keys: Vec<_> = all.rows.into_iter().map(|row| row.key).collect();
         let expected: Vec<PathBuf> = match sort {
-            AlbumSort::Title => ["/music/d", "/music/c", "/music/a", "/music/b"],
+            AlbumSort::Title => ["/music/c", "/music/a", "/music/b", "/music/d"],
             AlbumSort::Artist => ["/music/c", "/music/d", "/music/a", "/music/b"],
         }
         .into_iter()
@@ -954,7 +1169,7 @@ fn album_summaries_follow_artist_counts_transactions_external_commits_and_restar
             .albums_page(None, AlbumSort::Title, 0, 24)
             .unwrap()
             .total,
-        3
+        2
     );
     tx.rollback().unwrap();
     assert_eq!(snapshot(&store), before);
@@ -1000,12 +1215,12 @@ fn album_summaries_follow_artist_counts_transactions_external_commits_and_restar
         "UPDATE tracks SET path='/moved.flac',album_override='',title_override='Moved' WHERE id=1", []
     ).unwrap();
     let page = store.albums_page(None, AlbumSort::Title, 0, 24).unwrap();
-    assert_eq!(page.total, 2);
-    assert_eq!(page.rows[0].key.directory, Path::new("/"));
-    assert_eq!(page.rows[0].key.title, "");
+    assert_eq!(page.total, 1);
+    assert_eq!(page.rows[0].key.directory, Path::new("/music/a"));
+    assert_eq!(page.rows[0].key.title, "Shared");
     assert_eq!(page.rows[0].track_count, 1);
-    assert_eq!(page.rows[0].representative.path, Path::new("/moved.flac"));
-    assert_eq!(page.rows[0].representative.title, "Moved");
+    assert_eq!(page.rows[0].representative.id, 4);
+    assert_eq!(store.track(1).unwrap().unwrap().title, "Moved");
     let before_restart = snapshot(&store);
     drop(store);
     let store = Store::open(&path).unwrap();
@@ -4059,7 +4274,7 @@ fn queue_dedup_uses_first_position_not_allocation_order_and_track_deletes_remove
 fn unsupported_database_versions_are_rejected_without_migration() {
     fs::create_dir_all(".cache").unwrap();
     let directory = tempfile::tempdir_in(".cache").unwrap();
-    for version in [6, 14] {
+    for version in [6, 15] {
         let path = directory.path().join(format!("version-{version}.db"));
         let connection = rusqlite::Connection::open(&path).unwrap();
         connection

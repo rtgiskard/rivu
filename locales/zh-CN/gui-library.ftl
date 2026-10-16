@@ -255,8 +255,6 @@ gl-track-count = { $count } 首曲目
 
 gl-current = 当前
 
-gl-unknown-album = 未知专辑
-
 gl-move-playlist-entries = 移动 { $count } 个播放列表项
 
 gl-move-queue-entries = 移动 { $count } 个队列项

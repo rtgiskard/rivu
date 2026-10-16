@@ -11,11 +11,21 @@ const DIRECTORY: &str = "CASE WHEN rtrim(path,replace(path,'/',''))='/' THEN '/'
 const TITLE: &str = "COALESCE(album_override,raw_album)";
 const ORDER: &str = "disc_number IS NULL,disc_number,track_number IS NULL,track_number,COALESCE(title_override,raw_title),id";
 
+// Rust str::trim uses Unicode White_Space, not SQLite's default ASCII space.
+// Keep this predicate built-in-only so persistent triggers work on any connection;
+// trimming decides membership without changing the original album identity.
+fn eligible_title(title: &str) -> String {
+    format!(
+        "trim({title},char(9,10,11,12,13,32,133,160,5760,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,8287,12288))<>''"
+    )
+}
+
 // SQLite owns these derived tables, including writes from other connections. Only
 // effective grouping/artist changes touch them; stats and representative ordering
 // changes need no rebuild. Each changed track does indexed counter updates, not a
 // scan of its album. The covering member index also bounds representative lookup.
 pub(super) fn create_summary_schema(conn: &Connection) -> Result<()> {
+    let eligible = eligible_title(TITLE);
     conn.execute_batch(&format!(
         "CREATE TABLE albums(
             directory TEXT NOT NULL,title TEXT NOT NULL,
@@ -36,10 +46,10 @@ pub(super) fn create_summary_schema(conn: &Connection) -> Result<()> {
                     WHEN 0 THEN NULL
                     WHEN 1 THEN MAX(NULLIF(COALESCE(artist_override,raw_artist),''))
                     ELSE 'Various artists' END
-            FROM tracks GROUP BY {DIRECTORY},{TITLE};
+            FROM tracks WHERE {eligible} GROUP BY {DIRECTORY},{TITLE};
         INSERT INTO album_artists
             SELECT {DIRECTORY},{TITLE},COALESCE(artist_override,raw_artist),COUNT(*)
-            FROM tracks WHERE COALESCE(artist_override,raw_artist)<>''
+            FROM tracks WHERE {eligible} AND COALESCE(artist_override,raw_artist)<>''
             GROUP BY {DIRECTORY},{TITLE},COALESCE(artist_override,raw_artist);"
     ))?;
     let directory = |row: &str| DIRECTORY.replace("path", &format!("{row}.path"));
@@ -59,16 +69,17 @@ pub(super) fn create_summary_schema(conn: &Connection) -> Result<()> {
         )
     };
     let add = format!(
-        "INSERT INTO albums(directory,title,track_count) VALUES({d},{t},1)
+        "INSERT INTO albums(directory,title,track_count) SELECT {d},{t},1 WHERE {eligible}
             ON CONFLICT(directory,title) DO UPDATE SET track_count=track_count+1;
          INSERT INTO album_artists(directory,title,artist,track_count)
-            SELECT {d},{t},{a},1 WHERE {a}<>''
+            SELECT {d},{t},{a},1 WHERE {eligible} AND {a}<>''
             ON CONFLICT(directory,title,artist) DO UPDATE SET track_count=track_count+1;
          {refresh}",
         d = directory("new"),
         t = title("new"),
         a = artist("new"),
         refresh = refresh_artist("new"),
+        eligible = eligible_title(&title("new")),
     );
     let remove = format!(
         "UPDATE albums SET track_count=track_count-1 WHERE directory={d} AND title={t};
@@ -107,7 +118,8 @@ pub(super) fn create_summary_schema(conn: &Connection) -> Result<()> {
 // SQLite prefer tracks_album and scan every same-titled album.
 fn album_filter() -> String {
     format!(
-        "path>=(CASE WHEN ?1='/' THEN '/' ELSE ?1||'/' END) AND path<(CASE WHEN ?1='/' THEN '0' ELSE ?1||'0' END) AND {DIRECTORY}=?1 AND {TITLE}=?2"
+        "path>=(CASE WHEN ?1='/' THEN '/' ELSE ?1||'/' END) AND path<(CASE WHEN ?1='/' THEN '0' ELSE ?1||'0' END) AND {DIRECTORY}=?1 AND {TITLE}=?2 AND {}",
+        eligible_title(TITLE)
     )
 }
 

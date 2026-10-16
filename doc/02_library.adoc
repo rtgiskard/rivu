@@ -511,12 +511,17 @@ The current-track marker identifies the library track, not a particular queue
 occurrence when the same track appears more than once.
 
 Albums use the exact effective album title and immediate parent directory.
+Only titles containing a non-whitespace character form albums; empty or entirely
+Unicode-whitespace titles do not. An explicit metadata override takes precedence
+even when empty. Nonblank titles retain their exact spelling and whitespace;
+there is no directory-name or `Unknown album` fallback. These tracks remain in
+the Library, directory tree, queue, and playlists, with their normal track actions.
 Same-name albums in different directories remain separate; different artists
 within one directory form a compilation. Disc subdirectories are not inferred
-to be one album. Missing titles display as `Unknown album`; empty artist
-metadata displays as `Unknown artist`, and multiple nonempty artists display
-as `Various artists`. Members are ordered by disc number, track number (unknown
-numbers last), title, then library ID. Metadata overrides affect grouping.
+to be one album. Missing artist metadata does not prevent album membership;
+empty artist metadata displays as `Unknown artist`, and multiple nonempty artists
+display as `Various artists`. Members are ordered by disc number, track number
+(unknown numbers last), title, then library ID. Metadata overrides affect grouping.
 
 == Paged views
 
@@ -617,18 +622,17 @@ For the JSON history shape and `--limit` behavior, see <<_cli_output,CLI output>
 
 == SQLite maintenance
 
-Rivu creates version 13 library databases and automatically upgrades version 11
-or 12 databases on open. The atomic upgrade preserves library identities and user
-state and builds album summaries and their indexes once; a large library may
-take longer to open for this upgrade. Version 11 bitrates remain estimates until
-an exact value is obtained. Other versions and unversioned databases are rejected
-without an automatic reset. Back up the database and any WAL before upgrading
-or replacing it. Version 13 databases cannot be opened by older Rivu versions
-that only support version 11 or 12.
+Rivu creates and opens only version 14 library databases. Older versions,
+including versions 11 through 13, and unversioned databases are unsupported and
+rejected without migration, automatic reset, or deletion. Preserve the existing
+database and any WAL before changing versions or choosing to rebuild a library.
+Older Rivu versions that do not support version 14 cannot open these databases.
 
-Stop the core before removing `library.db` and its `-wal`/`-shm` sidecars, then scan
-the music files again. This resets playlists, saved queue, favorites, metadata
-overrides, decoder hints, and playback statistics; audio files, `config.toml`, and
+If you choose to rebuild, stop the core and retain a separate backup of
+`library.db` and any `-wal`/`-shm` sidecars before using a fresh database and
+rescanning the music files. Do not overwrite or delete the original database.
+A fresh library does not retain playlists, saved queue, favorites, metadata
+overrides, decoder hints, or playback statistics. Audio files, `config.toml`, and
 `layout.json` are independent.
 
 Graceful core shutdown (`rivu quit`, `SIGINT`, or `SIGTERM`) closes its database

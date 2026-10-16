@@ -79,7 +79,7 @@ fn create_schema(conn: &Connection) -> Result<()> {
             revision INTEGER NOT NULL DEFAULT 0
         );
         INSERT INTO queue_meta(singleton) VALUES(1);
-        INSERT INTO schema_meta(key,value) VALUES('version',13);",
+        INSERT INTO schema_meta(key,value) VALUES('version',14);",
     )?;
     tx.execute_batch(TRACK_INDEXES)?;
     tx.execute_batch(QUEUE_METADATA_TRIGGER)?;
@@ -116,21 +116,7 @@ impl Store {
                     |row| row.get(0),
                 )
                 .context("Unsupported library database; back up the database and WAL before replacing it; rescanning cannot restore user state")?;
-            if version == 11 || version == 12 {
-                // Both the legacy column change and album backfill commit together.
-                let tx = c.unchecked_transaction()?;
-                if version == 11 {
-                    tx.execute_batch(
-                        "ALTER TABLE tracks ADD COLUMN bitrate_exact INTEGER NOT NULL DEFAULT 0
-                            CHECK(bitrate_exact IN (0,1));
-                         DROP TRIGGER queue_metadata;",
-                    )?;
-                    tx.execute_batch(QUEUE_METADATA_TRIGGER)?;
-                }
-                super::albums::create_summary_schema(&tx)?;
-                tx.execute("UPDATE schema_meta SET value=13 WHERE key='version'", [])?;
-                tx.commit()?;
-            } else if version != 13 {
+            if version != 14 {
                 bail!(
                     "Unsupported database version {version}; back up the database and WAL before replacing it; rescanning cannot restore user state"
                 );
@@ -206,30 +192,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn version_eleven_bitrates_migrate_as_estimates_and_precision_survives_restart() -> Result<()> {
+    fn bitrate_precision_updates_queue_metadata_and_survives_restart() -> Result<()> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("library.db");
         let store = Store::open(&path)?;
-        store.conn.execute_batch(
-            "INSERT INTO tracks(path,bitrate_bps) VALUES('/music/legacy.flac',128000);
-             DROP TRIGGER albums_insert;
-             DROP TRIGGER albums_delete;
-             DROP TRIGGER albums_update;
-             DROP TABLE albums;
-             DROP TABLE album_artists;
-             DROP INDEX tracks_album_members;
-             DROP TRIGGER queue_metadata;
-             ALTER TABLE tracks DROP COLUMN bitrate_exact;
-             CREATE TRIGGER queue_metadata AFTER UPDATE OF bitrate_bps ON tracks BEGIN
-                UPDATE queue_meta SET revision=revision+1;
-             END;
-             UPDATE schema_meta SET value=11 WHERE key='version';",
+        store.conn.execute(
+            "INSERT INTO tracks(path,bitrate_bps) VALUES('/music/current.flac',128000)",
+            [],
         )?;
-        drop(store);
-        let store = Store::open(&path)?;
-        let track = store.track(1)?.unwrap();
-        assert_eq!(track.bitrate_bps, Some(128_000));
-        assert!(!track.bitrate_exact);
+        assert!(!store.track(1)?.unwrap().bitrate_exact);
         assert!(
             store
                 .conn
@@ -244,105 +215,54 @@ mod tests {
         assert!(store.queue_state()?.revision > revision);
         drop(store);
         let store = Store::open(&path)?;
-        assert!(store.track(1)?.unwrap().bitrate_exact);
+        let track = store.track(1)?.unwrap();
+        assert!(track.bitrate_exact);
+        assert_eq!(track.bitrate_bps, Some(128000));
         assert_eq!(
             store.conn.query_row(
                 "SELECT value FROM schema_meta WHERE key='version'",
                 [],
-                |row| row.get::<_, i64>(0),
+                |row| row.get::<_, i64>(0)
             )?,
-            13
+            14
         );
         Ok(())
     }
 
     #[test]
-    fn versions_eleven_and_twelve_backfill_albums_without_losing_user_state() -> Result<()> {
-        use crate::model::AlbumSort;
-        for version in [11, 12] {
-            let directory = tempfile::tempdir()?;
-            let path = directory.path().join("legacy.db");
-            let store = Store::open(&path)?;
-            store.conn.execute_batch(
-                "INSERT INTO tracks(id,path,raw_title,title_override,raw_album,raw_artist,
-                    disc_number,track_number,favorite,play_count,last_played) VALUES
-                    (1,'/music/é/a.flac','Z','User title','Shared','ÉTÉ%_',2,1,1,7,42),
-                    (2,'/music/é/b.flac','A',NULL,'Shared','Other',1,2,0,0,NULL),
-                    (3,'/root.flac','Root',NULL,'','',NULL,NULL,0,0,NULL);",
-            )?;
-            let playlist = store.create_playlist("Preserved")?;
-            store.add_playlist(playlist, &[3, 1])?;
-            store.enqueue_tracks(&[2, 1, 2])?;
-            let tracks = (1..=3)
-                .map(|id| store.track(id))
-                .collect::<Result<Vec<_>>>()?;
-            let queue = store.queue_page(None, 0, 24)?;
-            let entries = store.playlist_entries_page(playlist, None, 0, 24)?;
-            store.conn.execute_batch(
-                "DROP TRIGGER albums_insert;
-                 DROP TRIGGER albums_delete;
-                 DROP TRIGGER albums_update;
-                 DROP TABLE albums;
-                 DROP TABLE album_artists;
-                 DROP INDEX tracks_album_members;",
-            )?;
-            if version == 11 {
-                store.conn.execute_batch(
-                    "DROP TRIGGER queue_metadata;
-                     ALTER TABLE tracks DROP COLUMN bitrate_exact;
-                     CREATE TRIGGER queue_metadata AFTER UPDATE OF bitrate_bps ON tracks
-                     BEGIN UPDATE queue_meta SET revision=revision+1; END;",
-                )?;
-            }
-            store.conn.execute(
-                "UPDATE schema_meta SET value=?1 WHERE key='version'",
-                [version],
-            )?;
-            drop(store);
-
-            let store = Store::open(&path)?;
-            assert_eq!(
-                (1..=3)
-                    .map(|id| store.track(id))
-                    .collect::<Result<Vec<_>>>()?,
-                tracks
-            );
-            assert_eq!(store.queue_page(None, 0, 24)?, queue);
-            assert_eq!(store.playlist_entries_page(playlist, None, 0, 24)?, entries);
-            for sort in [AlbumSort::Title, AlbumSort::Artist] {
-                let page = store.albums_page(None, sort, 0, 24)?;
-                assert_eq!(page.total, 2);
-                assert_eq!(page.rows[0].key.directory, Path::new("/"));
-                assert_eq!(page.rows[0].key.title, "");
-                assert_eq!(page.rows[1].key.directory, Path::new("/music/é"));
-                assert_eq!(page.rows[1].track_count, 2);
-                assert_eq!(page.rows[1].artist, "Various artists");
-                assert_eq!(page.rows[1].representative.id, 2);
-                let matching = store.albums_page(Some("été%_"), sort, 0, 24)?;
-                assert_eq!(matching.total, 1);
-                assert_eq!(matching.rows[0].track_count, 2);
-            }
-            store.remove_tracks(&[2])?;
-            let page = store.albums_page(Some("été%_"), AlbumSort::Title, 0, 24)?;
-            assert_eq!(page.rows[0].track_count, 1);
-            assert_eq!(page.rows[0].artist, "ÉTÉ%_");
-            assert_eq!(page.rows[0].representative.title, "User title");
-            drop(store);
-            let store = Store::open(&path)?;
-            assert_eq!(store.albums_page(None, AlbumSort::Title, 0, 24)?.total, 2);
-        }
-        Ok(())
-    }
-
-    #[test]
     fn incompatible_databases_are_rejected_without_changing_schema_or_data() -> Result<()> {
-        for version in [None, Some(0), Some(7), Some(8), Some(9), Some(10), Some(14)] {
+        for version in [
+            None,
+            Some(0),
+            Some(7),
+            Some(8),
+            Some(9),
+            Some(10),
+            Some(11),
+            Some(12),
+            Some(13),
+            Some(15),
+        ] {
             let directory = tempfile::tempdir()?;
             let path = directory.path().join("library.db");
-            let connection = Store::open(&path)?.conn;
+            let store = Store::open(&path)?;
+            store.conn.execute_batch(
+                "INSERT INTO tracks(id,path,raw_title,title_override,raw_album,album_override,
+                    raw_artist,artist_override,favorite,play_count,last_played) VALUES
+                    (1,'/music/one.flac','Raw','User title','Raw album','','Raw artist','User artist',1,7,42),
+                    (2,'/music/two.flac','Two',NULL,'Real album',NULL,'',NULL,0,0,NULL);",
+            )?;
+            let playlist = store.create_playlist("Preserved playlist")?;
+            store.add_playlist(playlist, &[2, 1])?;
+            store.enqueue_tracks(&[1, 2, 1])?;
+            store.set_queue_current(Some(store.queue_ids()?[1]))?;
+            let tracks = [store.track(1)?, store.track(2)?];
+            let queue = store.queue_page(None, 0, 24)?;
+            let queue_state = store.queue_state()?;
+            let entries = store.playlist_entries_page(playlist, None, 0, 24)?;
+            let connection = &store.conn;
             connection.execute_batch(
-                "ALTER TABLE tracks DROP COLUMN relocation_independent;
-                 CREATE TABLE preserved_data(value BLOB NOT NULL);
+                "CREATE TABLE preserved_data(value BLOB NOT NULL);
                  INSERT INTO preserved_data VALUES(X'0001FEFF');",
             )?;
             if let Some(version) = version {
@@ -355,9 +275,18 @@ mod tests {
             }
             let schema_version: i64 =
                 connection.query_row("PRAGMA schema_version", [], |row| row.get(0))?;
-            drop(connection);
+            let data_version: i64 =
+                connection.query_row("PRAGMA data_version", [], |row| row.get(0))?;
 
             assert!(Store::open(&path).is_err());
+            assert_eq!(
+                connection.query_row("PRAGMA data_version", [], |row| row.get::<_, i64>(0))?,
+                data_version
+            );
+            assert_eq!([store.track(1)?, store.track(2)?], tracks);
+            assert_eq!(store.queue_page(None, 0, 24)?, queue);
+            assert_eq!(store.queue_state()?, queue_state);
+            assert_eq!(store.playlist_entries_page(playlist, None, 0, 24)?, entries);
 
             let connection = Connection::open(&path)?;
             assert_eq!(

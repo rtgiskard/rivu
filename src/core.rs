@@ -6457,17 +6457,24 @@ mod tests {
         assert_eq!(core.state.queue.current_id, Some(core.queue_ids[0]));
         let queue = core.queue_ids.clone();
         let generation = core.generation;
-        assert!(
-            core.command(Command::PlayAlbum {
-                key: crate::model::AlbumKey {
-                    directory: directory.path().into(),
-                    title: "Absent".into()
-                }
-            })
-            .is_err()
-        );
-        assert_eq!(core.queue_ids, queue);
-        assert_eq!(core.generation, generation);
+        let current_id = core.state.queue.current_id;
+        let playback_status = core.state.playback.status;
+        for title in ["Absent", "", " \t\r\n", "\u{a0}\u{2003}\u{202f}\u{3000}"] {
+            let key = crate::model::AlbumKey {
+                directory: directory.path().into(),
+                title: title.into(),
+            };
+            for command in [
+                Command::PlayAlbum { key: key.clone() },
+                Command::EnqueueAlbum { key: key.clone() },
+            ] {
+                assert!(core.command(command).is_err());
+                assert_eq!(core.queue_ids, queue);
+                assert_eq!(core.generation, generation);
+                assert_eq!(core.state.queue.current_id, current_id);
+                assert_eq!(core.state.playback.status, playback_status);
+            }
+        }
     }
 
     fn queue_entries(core: &Core) -> Vec<(u64, i64)> {

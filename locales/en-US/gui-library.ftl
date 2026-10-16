@@ -258,8 +258,6 @@ gl-track-count = { $count } { $count ->
 
 gl-current = Current
 
-gl-unknown-album = Unknown album
-
 gl-move-playlist-entries = Move { $count } { $count ->
         [one] playlist entry
        *[other] playlist entries
