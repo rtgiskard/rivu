@@ -184,13 +184,19 @@ A completed explicit full-track scan takes precedence in the GUI, without
 replacing the audio worker's progressive buffer. The GUI retains one bounded
 full result; playback continues to update its own bounded buffer. Rendering
 selects one result rather than copying or combining bins between decoders.
-Display identity is the file and optional playback range. A target change
-cancels the explicit scan; ordinary metadata and panel visibility changes do
-not start a decoder. Saving a changed decoder hint cancels the matching request
-and retires its full result, leaving playback untouched. A subsequent explicit
-load reads the latest saved hint and replaces any pending request. Request
-generation, captured decode identity and suspension generation reject stale
-results independently of the playback buffer's hint or revision.
+Explicit preview identity is the file, optional playback range and library
+content fingerprint. A changed fingerprint, including after overwriting a file
+at the same path and forcing a scan, cancels a pending preview and retires its
+completed result. Late query responses, scan completions and display selection
+must still match that content identity. A target change has the same effect;
+ordinary metadata and panel visibility changes retain pending and completed
+previews and do not start a decoder. Saving a changed decoder hint cancels the
+matching request and retires its full result, leaving playback untouched. A
+subsequent explicit load reads the latest saved hint and replaces any pending
+request. Request generation, captured content/decode identity and suspension
+generation reject stale results independently of the playback buffer's hint or
+revision. Progressive playback still follows its active decoder's path and
+range; refreshing a saved hint does not reject that decoder's existing frame.
 
 RMS fills extend above and below the centerline for the respective stereo
 channels. Each display column has its own gradient endpoint, preserving color
@@ -350,6 +356,9 @@ Views without accepted data do not invent signal history. Analysis frames with
 incompatible FFT settings are ignored; Spectrum and Spectrogram reject mismatched
 frequency and level counts. Explicit full-waveform decoding failures preserve
 an error result rather than installing an incomplete scan as complete.
+Full-waveform requests validate the selected track's metadata revision before
+starting the scan. Unchanged tracks remain eligible across unrelated library
+edits; changing the target or its metadata invalidates the pending request.
 
 Spectrum tessellation and Spectrogram image upload/paint failures are surfaced
 as visualization errors. Stereo-analysis image failures are reported separately.

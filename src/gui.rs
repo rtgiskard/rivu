@@ -363,6 +363,7 @@ struct FullWaveformRequest {
 struct FullWaveformTarget {
     track_id: i64,
     path: PathBuf,
+    fingerprint: Option<String>,
     cue_range: Option<(u64, Option<u64>)>,
 }
 
@@ -375,7 +376,9 @@ impl FullWaveformTarget {
     }
 
     fn matches_source(&self, track: &Track) -> bool {
-        self.path == track.path && self.cue_range == Self::cue_range(track)
+        self.path == track.path
+            && self.cue_range == Self::cue_range(track)
+            && self.fingerprint == track.fingerprint
     }
 
     fn matches(&self, track: &Track) -> bool {
@@ -389,6 +392,7 @@ impl FullWaveformRequest {
         self.target = Some(FullWaveformTarget {
             track_id: track.id,
             path: track.path.clone(),
+            fingerprint: track.fingerprint.clone(),
             cue_range: FullWaveformTarget::cue_range(track),
         });
         self.generation
@@ -1954,7 +1958,7 @@ impl GuiApp {
         });
         let handle = self.handle.clone();
         let query = Query::Track { track_id };
-        let stamp = query.stamp(self.state.query_revisions(None));
+        let stamp = query.stamp(self.state.query_revisions_for(&query));
         cx.spawn(async move |this, cx| {
             let response = cx
                 .background_executor()
@@ -1965,7 +1969,7 @@ impl GuiApp {
                 this.refresh(cx);
                 this.sync_full_waveform_request();
                 if query.stamp(response.revisions) != stamp
-                    || query.stamp(this.state.query_revisions(None)) != stamp
+                    || query.stamp(this.state.query_revisions_for(&query)) != stamp
                 {
                     return;
                 }

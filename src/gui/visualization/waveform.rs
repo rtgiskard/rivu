@@ -1,8 +1,8 @@
 //! Progressive whole-track amplitude previews from the playback decoder.
 //!
 //! The audio worker owns bounded progressive bins. Explicit full previews own
-//! separate bounded results, never replacing playback's frame. Saving a changed
-//! decoder hint or switching target cancels the matching preview; hiding does not.
+//! separate bounded results, never replacing playback's frame. Content changes,
+//! saved decoder hint edits or target switches cancel previews; hiding does not.
 //! Still Mode cancels scans and releases both owners' display data.
 //!
 //! Pointer captures require a live interactive panel, not just cached peaks.
@@ -39,6 +39,7 @@ use crate::{
 struct Source {
     path: PathBuf,
     range: Option<PlaybackRange>,
+    fingerprint: Option<String>,
     decoder_hint: DecoderHint,
 }
 
@@ -48,6 +49,7 @@ impl Source {
         frame.path.as_ref().map(|path| Self {
             path: path.clone(),
             range: frame.range,
+            fingerprint: None,
             decoder_hint: frame.decoder_hint,
         })
     }
@@ -57,7 +59,9 @@ impl Source {
     }
 
     fn same_target(&self, other: &Self) -> bool {
-        self.path == other.path && self.range == other.range
+        self.path == other.path
+            && self.range == other.range
+            && self.fingerprint == other.fingerprint
     }
 
     fn matches_target(&self, frame: &WaveformFrame) -> bool {
@@ -725,7 +729,7 @@ impl Waveform {
         }
     }
     /// The caller chooses the playing track, or the selected track before play.
-    /// Metadata, display settings and visibility do not change source identity.
+    /// Content fingerprints invalidate previews; metadata and visibility do not.
     pub(in crate::gui) fn sync(&mut self, track: Option<&Track>, cx: &mut Context<Self>) {
         if self.sync_state(track) {
             cx.notify();
@@ -760,7 +764,9 @@ impl Waveform {
     fn sync_source(&mut self, track: Option<&Track>) -> bool {
         let source_changed = match (&self.source, track) {
             (Some(source), Some(track)) => {
-                source.path != track.path || source.range != track_range(track)
+                source.path != track.path
+                    || source.range != track_range(track)
+                    || source.fingerprint != track.fingerprint
             }
             (None, None) => false,
             _ => true,
@@ -772,6 +778,7 @@ impl Waveform {
                 Rc::new(Source {
                     path: track.path.clone(),
                     range: track_range(track),
+                    fingerprint: track.fingerprint.clone(),
                     decoder_hint: track.decoder_hint,
                 })
             });
@@ -932,10 +939,18 @@ impl Waveform {
         true
     }
 
+    fn full_preview(&self, progressive: &WaveformFrame) -> Option<&Rc<FullPreview>> {
+        self.full.as_ref().filter(|full| {
+            full.suspension_generation == progressive.suspension_generation()
+                && self
+                    .source
+                    .as_ref()
+                    .is_some_and(|source| source.same_target(&full.source))
+        })
+    }
+
     fn display_frame<'a>(&'a self, progressive: &'a WaveformFrame) -> &'a WaveformFrame {
-        self.full
-            .as_ref()
-            .filter(|full| full.suspension_generation == progressive.suspension_generation())
+        self.full_preview(progressive)
             .map_or(progressive, |full| &full.frame)
     }
 
@@ -1050,11 +1065,7 @@ impl Waveform {
         let (message, label_duration, full) = {
             let shared = self.shared.read();
             let frame = self.display_frame(&shared);
-            let full = self
-                .full
-                .as_ref()
-                .filter(|full| full.suspension_generation == shared.suspension_generation())
-                .map(Rc::clone);
+            let full = self.full_preview(&shared).map(Rc::clone);
             (
                 preview_message(source, frame),
                 timeline(frame, duration),
@@ -1705,6 +1716,7 @@ mod tests {
         let source = Source {
             path: PathBuf::from("track.flac"),
             range: None,
+            fingerprint: None,
             decoder_hint: DecoderHint::Auto,
         };
         assert!(preview_message(&source, &frame).is_none());
@@ -2285,6 +2297,110 @@ mod tests {
             waveform.source.as_ref().unwrap().decoder_hint,
             DecoderHint::Auto
         );
+    }
+
+    #[test]
+    fn changed_content_cancels_pending_and_completed_previews_at_the_same_path() {
+        for complete in [false, true] {
+            for (before, after) in [
+                (Some("old"), Some("new")),
+                (None, Some("new")),
+                (Some("old"), None),
+            ] {
+                let mut original = track("track.flac", DecoderHint::Auto);
+                original.fingerprint = before.map(str::to_owned);
+                let mut waveform = preview(frame(vec![Some(0.25), None]));
+                waveform.sync_state(Some(&original));
+                let mut query = crate::gui::FullWaveformRequest::default();
+                let query_generation = query.begin(&original);
+                let (generation, cancelled) = waveform.start_full(DecoderHint::Auto);
+                let completed = if complete {
+                    assert!(waveform.finish_full(generation, Ok(frame(vec![Some(0.5); 2]))));
+                    Some(Rc::downgrade(waveform.full.as_ref().unwrap()))
+                } else {
+                    None
+                };
+                let mut replaced = original.clone();
+                replaced.fingerprint = after.map(str::to_owned);
+                assert!(!query.accepts(query_generation, Some(&replaced)));
+                query.retain_target(Some(&replaced), false);
+                assert!(!query.accepts(query_generation, Some(&original)));
+                assert!(waveform.sync_state(Some(&replaced)));
+                assert!(complete || cancelled.load(Ordering::Relaxed));
+                assert!(waveform.manual.is_none());
+                assert!(waveform.full.is_none());
+                assert!(waveform.manual_error.is_none());
+                assert!(completed.is_none_or(|completed| completed.upgrade().is_none()));
+                assert!(!waveform.finish_full(generation, Ok(frame(vec![Some(1.0); 2]))));
+                let shared = waveform.shared.read();
+                assert_eq!(shared.peaks, vec![Some(0.25), None]);
+                assert!(std::ptr::eq(waveform.display_frame(&shared), &*shared));
+            }
+        }
+    }
+
+    #[test]
+    fn content_identity_is_checked_at_completion_and_display() {
+        for complete in [false, true] {
+            let mut original = track("track.flac", DecoderHint::Auto);
+            original.fingerprint = Some("old".into());
+            let mut waveform = preview(frame(vec![Some(0.25), None]));
+            waveform.sync_state(Some(&original));
+            let (generation, _) = waveform.start_full(DecoderHint::Auto);
+            if complete {
+                assert!(waveform.finish_full(generation, Ok(frame(vec![Some(0.5); 2]))));
+            }
+            // Exercise the install/display guards independently of sync's cancellation.
+            Rc::make_mut(waveform.source.as_mut().unwrap()).fingerprint = Some("new".into());
+            if !complete {
+                assert!(waveform.finish_full(generation, Ok(frame(vec![Some(1.0); 2]))));
+                assert!(waveform.full.is_none());
+            }
+            let shared = waveform.shared.read();
+            assert!(std::ptr::eq(waveform.display_frame(&shared), &*shared));
+            assert!(waveform.full_preview(&shared).is_none());
+        }
+    }
+
+    #[test]
+    fn same_content_metadata_and_hidden_panels_retain_manual_preview() {
+        let mut original = track("track.flac", DecoderHint::Auto);
+        original.fingerprint = Some("same-content".into());
+        let mut waveform = preview(frame(vec![Some(0.25), None]));
+        waveform.sync_state(Some(&original));
+        let source = Rc::clone(waveform.source.as_ref().unwrap());
+        let mut query = crate::gui::FullWaveformRequest::default();
+        let query_generation = query.begin(&original);
+        let (generation, cancelled) = waveform.start_full(DecoderHint::Auto);
+        let mut edited = original.clone();
+        edited.title = "renamed".into();
+        edited.favorite = true;
+        edited.play_count += 1;
+        edited.decoder_hint = DecoderHint::Ffmpeg;
+        for complete in [false, true] {
+            query.retain_target(Some(&edited), false);
+            assert!(query.accepts(query_generation, Some(&edited)));
+            assert!(!waveform.sync_state(Some(&edited)));
+            // These are the same owners retained by sync when no panel is visible.
+            waveform.plot.borrow_mut().retain_panels(|_| false);
+            assert_eq!(waveform.retain_interaction_panels(|_| false), None);
+            assert!(!cancelled.load(Ordering::Relaxed));
+            assert!(Rc::ptr_eq(waveform.source.as_ref().unwrap(), &source));
+            if !complete {
+                assert!(waveform.manual.is_some());
+                assert!(waveform.finish_full(generation, Ok(frame(vec![Some(0.5); 2]))));
+            } else {
+                let shared = waveform.shared.read();
+                assert_eq!(waveform.display_frame(&shared).peaks, vec![Some(0.5); 2]);
+            }
+        }
+        query.saved_hint_changed(&edited);
+        assert!(!query.accepts(query_generation, Some(&original)));
+        assert!(waveform.invalidate_saved_hint(&edited));
+        let shared = waveform.shared.read();
+        assert_eq!(shared.decoder_hint, DecoderHint::Auto);
+        assert!(preview_message(waveform.source.as_deref().unwrap(), &shared).is_none());
+        assert!(std::ptr::eq(waveform.display_frame(&shared), &*shared));
     }
 
     #[test]
