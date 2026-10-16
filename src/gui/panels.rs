@@ -355,7 +355,7 @@ impl GuiApp {
                     .child(disabled_control(
                         quiet_icon_button(icon_button(
                             ("playback-locate", panel_id),
-                            "󰍉",
+                            "",
                             self.tr("gl-locate-playing-entry"),
                             cx,
                             |this, window, cx| {
@@ -665,7 +665,7 @@ impl GuiApp {
             .child(disabled_control(
                 icon_button(
                     ("library-locate-playing", panel_id),
-                    "󰍉",
+                    "",
                     self.tr("gl-locate-library"),
                     cx,
                     |this, window, cx| this.locate_playing_library(window, cx),
@@ -888,7 +888,7 @@ impl GuiApp {
         let mut tools = panel_toolbar().min_h(px(32.)).child(disabled_control(
             icon_button(
                 ("queue-locate-playing", panel_id),
-                "󰍉",
+                "",
                 self.tr("gl-locate-playing-entry"),
                 cx,
                 |this, window, cx| this.locate_playing_queue(window, cx),
