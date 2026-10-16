@@ -1850,7 +1850,7 @@ impl GuiApp {
         };
         let spectrogram_panel_ids = active_panels
             .iter()
-            .filter(|panel| panel.kind == "spectrogram")
+            .filter(|panel| self.window_visible && panel.kind == "spectrogram")
             .map(|panel| panel.id)
             .collect::<Vec<_>>();
         let spectrum_panel_ids = active_panels

@@ -6,8 +6,8 @@
 //! frames are max-pooled so narrow transients survive; Spectrum separately
 //! retains the latest frame. The available history expands until that dynamic
 //! limit; unavailable history is left blank, including long gaps in publication.
-//! Replaced images are explicitly removed from the window's atlas. Hidden
-//! spectrograms retain reusable CPU buckets but create no new GPU images.
+//! Replaced images are explicitly removed from the window's atlas. History and
+//! its derived storage are released when no Spectrogram panel is visible.
 //! Range and axis changes remap cached levels even while paused; style changes
 //! redraw Spectrum in place. Unchanged buckets reuse their GPU image.
 //! Spectrogram image rows use half the active panel height, never fewer than
@@ -202,6 +202,8 @@ struct SpectrumGeometry {
 
 struct VisualData {
     enabled: bool,
+    spectrogram_visible: bool,
+    last_analysis_sequence: Option<u64>,
     spectrogram_panel_sizes: HashMap<u64, (usize, usize)>,
     spectrogram_panel_height: usize,
     frequencies: Vec<f32>,
@@ -276,10 +278,12 @@ pub(in crate::gui) struct Visuals {
 
 impl Visuals {
     pub(in crate::gui) fn new() -> Self {
-        // History is initialized by configure when an analysis panel becomes visible.
+        // History is initialized only after visible Spectrogram demand.
         Self {
             data: Rc::new(RefCell::new(VisualData {
                 enabled: true,
+                spectrogram_visible: false,
+                last_analysis_sequence: None,
                 frequencies: Vec::new(),
                 sample_rate: 0,
                 frequency_labels: ["8 Hz".into(), "11 kHz".into()],
@@ -358,11 +362,8 @@ impl Visuals {
         if enabled {
             return;
         }
-        data.clear_history();
-        data.columns = Vec::new();
-        data.history_columns = 0;
+        data.release_history();
         data.spectrogram_panel_sizes = HashMap::new();
-        data.spectrogram_panel_height = 0;
         data.frequencies = Vec::new();
         data.sample_rate = 0;
         data.latest_levels = Vec::new();
@@ -374,7 +375,7 @@ impl Visuals {
         data.spectrum_bins = Vec::new();
         data.spectrum_points = Vec::new();
         data.spectrum_geometry = HashMap::new();
-        data.heat_samples = Vec::new();
+        data.last_analysis_sequence = None;
         data.envelope_initialized = false;
         data.last_update = None;
         data.source_generation = None;
@@ -392,7 +393,7 @@ impl Visuals {
             history_column_count(config.spectrogram_history_seconds, config.analysis_fps);
         let palette_changed = data.palette_lut.palette != config.visual_palette;
         let cache_changed = data.visualization_cache != config.visualization_cache;
-        let history_missing = data.enabled && data.history_columns == 0;
+        let history_missing = data.enabled && data.spectrogram_visible && data.history_columns == 0;
         let changed = history_missing
             || palette_changed
             || data.visual_background != config.visual_background.rgb()
@@ -471,7 +472,7 @@ impl Visuals {
         data.history_limit_seconds = config.spectrogram_history_seconds as f64;
         data.analysis_fps = config.analysis_fps;
         data.configured_history_columns = configured_history_columns;
-        if data.enabled && history_changed {
+        if data.enabled && data.spectrogram_visible && history_changed {
             data.resize_history(configured_history_columns);
         }
         if analysis_changed {
@@ -535,7 +536,10 @@ impl Visuals {
             data.envelope_initialized = false;
         }
         data.latest_levels.clone_from(&frame.spectrum_db);
-        data.push_history(frame.sample_time, &frame.spectrum_db);
+        if data.spectrogram_visible && data.last_analysis_sequence != Some(frame.sequence) {
+            data.push_history(frame.sample_time, &frame.spectrum_db);
+        }
+        data.last_analysis_sequence = Some(frame.sequence);
         data.latest_sample_time = Some(frame.sample_time);
         if !data.spectrum_visible {
             return;
@@ -613,8 +617,9 @@ impl Visuals {
         let mut data = self.data.borrow_mut();
         data.spectrogram_panel_sizes
             .retain(|panel_id, _| panel_ids.contains(panel_id));
+        data.spectrogram_visible = !panel_ids.is_empty();
         if panel_ids.is_empty() {
-            data.invalidate_images();
+            data.release_history();
         }
     }
 
@@ -794,7 +799,7 @@ impl Visuals {
 
 impl VisualData {
     fn finish_prepaint(&mut self) {
-        if !self.enabled {
+        if !self.enabled || !self.spectrogram_visible {
             return;
         }
         let Some(width) = self
@@ -803,7 +808,7 @@ impl VisualData {
             .map(|size| size.0)
             .max()
         else {
-            // Hidden history keeps its last capacity and continues accumulating.
+            // No measurement yet; keep sizing out of individual panel paints.
             return;
         };
         self.spectrogram_panel_height = self
@@ -976,6 +981,14 @@ impl VisualData {
         self.spectrogram_image_height = 0;
         self.heat_samples.clear();
         self.heat_sample_generation = 0;
+    }
+
+    fn release_history(&mut self) {
+        self.clear_history();
+        self.columns = Vec::new();
+        self.history_columns = 0;
+        self.spectrogram_panel_height = 0;
+        self.heat_samples = Vec::new();
     }
 
     fn history_window(&self, latest: Duration) -> Duration {
@@ -2043,6 +2056,7 @@ mod tests {
 
     fn frame(time: f64, level: f32) -> AnalysisFrame {
         AnalysisFrame {
+            sequence: Duration::from_secs_f64(time).as_nanos() as u64,
             sample_rate: 48_000,
             sample_time: Duration::from_secs_f64(time),
             frequencies_hz: vec![20.0, 200.0, 2000.0, 20_000.0],
@@ -2103,6 +2117,7 @@ mod tests {
     fn history_retains_requested_audio_duration_at_different_rates() {
         for fps in [5, 60] {
             let mut visuals = Visuals::new();
+            visuals.retain_spectrogram_panels(&[1]);
             visuals.configure(&Config {
                 analysis_fps: fps,
                 spectrogram_history_seconds: 120,
@@ -2131,8 +2146,54 @@ mod tests {
 
     fn configured_visuals() -> Visuals {
         let mut visuals = Visuals::new();
+        visuals.retain_spectrogram_panels(&[1]);
         visuals.configure(&Config::default());
         visuals
+    }
+
+    #[test]
+    fn spectrogram_history_requires_visible_demand_and_restarts_without_hidden_frames() {
+        let mut visuals = Visuals::new();
+        let mut config = Config::default();
+        visuals.configure(&config);
+        visuals.update(&frame(1.0, -10.0));
+        assert_eq!(visuals.data.borrow().columns.capacity(), 0);
+        assert_eq!(visuals.data.borrow().peaks, vec![-10.0; 4]);
+
+        visuals.retain_spectrogram_panels(&[1, 2]);
+        visuals.configure(&config);
+        visuals.update(&frame(1.1, -20.0));
+        visuals.retain_spectrogram_panels(&[2]);
+        assert_eq!(visuals.data.borrow().len, 1);
+        visuals.update(&frame(1.2, -30.0));
+        assert_eq!(visuals.data.borrow().len, 2);
+
+        visuals.retain_spectrogram_panels(&[]);
+        for cache in [false, true] {
+            config.visualization_cache = cache;
+            config.analysis_fps += 1;
+            visuals.configure(&config);
+            visuals.update(&frame(2.0, -40.0));
+            let data = visuals.data.borrow();
+            assert_eq!(data.columns.capacity(), 0);
+            assert_eq!(data.heat_samples.capacity(), 0);
+            assert_eq!(data.history_columns, 0);
+            assert_eq!(data.len, 0);
+            assert_eq!(data.latest_levels, vec![-40.0; 4]);
+        }
+
+        visuals.retain_spectrogram_panels(&[3]);
+        visuals.configure(&config);
+        // A settings refresh can replay the current analysis publication.
+        // It must not resurrect the last hidden frame as new history.
+        visuals.update(&frame(2.0, -40.0));
+        assert_eq!(visuals.data.borrow().len, 0);
+        visuals.update(&frame(3.0, -50.0));
+        let data = visuals.data.borrow();
+        assert_eq!(data.len, 1);
+        let newest = &data.columns[data.latest.unwrap()];
+        assert_eq!(newest.sample_time, Some(Duration::from_secs(3)));
+        assert_eq!(newest.levels, vec![-50.0; 4]);
     }
 
     #[test]
@@ -2380,6 +2441,7 @@ mod tests {
     #[test]
     fn buckets_preserve_transients_without_contaminating_latest_spectrum() {
         let mut visuals = Visuals::new();
+        visuals.retain_spectrogram_panels(&[1]);
         visuals.configure(&Config {
             spectrogram_history_seconds: 120,
             spectrum_peaks: false,
@@ -2466,6 +2528,7 @@ mod tests {
                     ..Config::default()
                 };
                 let mut visuals = Visuals::new();
+                visuals.retain_spectrogram_panels(&[1]);
                 visuals.configure(&config);
                 visuals.update(&frame(1.0, -30.0));
                 let image = visuals.data.borrow().build_spectrogram_image(&[-30.0], 1);
@@ -2599,7 +2662,7 @@ mod tests {
     }
 
     #[test]
-    fn multiple_panel_sizes_preserve_wide_history_across_frames_and_hiding() {
+    fn multiple_panel_sizes_preserve_wide_history_across_frames() {
         let mut visuals = configured_visuals();
         for time in 1..=10 {
             visuals.update(&frame(time as f64, -30.0));

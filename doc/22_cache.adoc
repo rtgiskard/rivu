@@ -141,10 +141,11 @@ wide panels therefore do not compete to resize it during painting. Capacity
 changes preserve the newest chronological columns. Recoloring compatible
 history does not discard its underlying frequency data.
 
-When no Spectrogram panel remains active, its images are retired but CPU history
-keeps its last capacity. It can continue accumulating while another view keeps
-analysis active. Hiding the whole window disables analysis demand, not all
-retained graphics. Still Mode instead releases history and derived storage.
+When no Spectrogram panel is visible, including when the window is hidden,
+its images are retired and CPU history and derived storage are released.
+Other analysis views can continue updating without accumulating Spectrogram
+history. Restoring demand starts with a new analysis publication, not the
+frames received while hidden. This lifetime is independent of the cache setting.
 
 == Resource boundaries
 
