@@ -95,6 +95,10 @@ Cached source metadata is looked up as each source is encountered, including
 sources used by new or retargeted CUE sheets within configured roots. See
 link:21_ipc.adoc#_core_and_client_boundary[Scan lookup and merge design] for
 ownership, reuse rules, and costs.
+Native probing skips oversized tags and embedded images before buffering their
+full payloads; otherwise decodable audio remains usable, but some metadata may
+be absent. See link:22_cache.adoc#_native_metadata_admission[Native metadata admission]
+for the resource limits and their scope.
 
 === Cancellation
 

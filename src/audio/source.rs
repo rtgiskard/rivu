@@ -38,6 +38,19 @@ use symphonia::{
 const PROBE_BUFFER_LEN: usize = 2 * BYTES_PER_MEBIBYTE;
 pub(super) const DECODE_WORK_BUDGET: usize = 64;
 
+/// Share one admission budget across probing and all later metadata revisions.
+/// Playback/probe retain tags only; artwork explicitly opts into visual bytes.
+pub(crate) fn metadata_budget(visuals: bool) -> symphonia_metadata::budget::MetadataBudget {
+    use symphonia::core::common::Limit;
+    symphonia_metadata::budget::MetadataBudget::new(MetadataOptions::default().limit_visual_bytes(
+        Limit::Maximum(if visuals {
+            symphonia_metadata::budget::MAX_VISUAL_BYTES
+        } else {
+            0
+        }),
+    ))
+}
+
 /// Open before inspecting metadata so a replaced path cannot block on a FIFO.
 /// Normal symlinks are followed; only the actual opened object must be regular.
 pub(crate) fn open_regular_file(path: &Path) -> Result<File> {
@@ -368,6 +381,7 @@ impl std::error::Error for UnsupportedNative {}
 pub(super) struct Source {
     identity: SourceIdentity,
     format: Option<Box<dyn FormatReader>>,
+    metadata_budget: symphonia_metadata::budget::MetadataBudget,
     track: u32,
     decode: Decode,
     time_base: TimeBase,
@@ -490,6 +504,7 @@ impl Source {
         let mut source = Self {
             identity: decode.identity(),
             format: None,
+            metadata_budget: metadata_budget(false),
             track: 0,
             decode: Decode::Ffmpeg(Box::new(decode)),
             time_base: TimeBase::try_new(1, info.sample_rate).unwrap(),
@@ -529,12 +544,15 @@ impl Source {
         let mut stream =
             MediaSourceStream::new(Box::new(file), MediaSourceStreamOptions { buffer_len });
         let compressed_summary = bitrate::probe(&mut stream, cancelled)?;
-        let mut format = match get_probe().probe(
-            &hint,
-            stream,
-            FormatOptions::default(),
-            MetadataOptions::default(),
-        ) {
+        let mut metadata_budget = metadata_budget(false);
+        let mut format = match metadata_budget.with(|| {
+            get_probe().probe(
+                &hint,
+                stream,
+                FormatOptions::default(),
+                MetadataOptions::default(),
+            )
+        }) {
             Ok(format) => format,
             Err(SymphoniaError::Unsupported(error)) => {
                 return Err(anyhow!(UnsupportedNative(error.to_string())));
@@ -677,6 +695,7 @@ impl Source {
             identity,
             time_base: track_time_base.unwrap_or_else(|| TimeBase::try_new(1, rate).unwrap()),
             format: Some(format),
+            metadata_budget,
             track,
             decode,
             frames: Vec::with_capacity(8192),
@@ -761,17 +780,20 @@ impl Source {
         } else {
             target
         };
-        let sought = self
+        let time = Time::try_from_secs_f64(preroll).context("Invalid seek time")?;
+        let format = self
             .format
             .as_mut()
-            .context("Native source has no format reader")?
-            .seek(
+            .context("Native source has no format reader")?;
+        let sought = self.metadata_budget.with(|| {
+            format.seek(
                 SeekMode::Accurate,
                 SeekTo::Time {
-                    time: Time::try_from_secs_f64(preroll).context("Invalid seek time")?,
+                    time,
                     track_id: Some(self.track),
                 },
-            )?;
+            )
+        })?;
         check_cancelled(cancelled)?;
         match &mut self.decode {
             Decode::Native(decoder) => decoder.reset(),
@@ -1042,7 +1064,7 @@ impl Source {
                 .format
                 .as_mut()
                 .context("Native source has no format reader")?;
-            let packet = read(format.as_mut());
+            let packet = self.metadata_budget.with(|| read(format.as_mut()));
             check_cancelled(cancelled)?;
             let Some(packet) = packet? else {
                 self.exhausted = true;
@@ -1221,6 +1243,111 @@ mod tests {
     use super::*;
     use std::io::Write;
     use symphonia::core::{checksum::Crc32, io::Monitor};
+
+    #[test]
+    fn native_metadata_budget_preserves_unsynchronised_audio() {
+        let directory = tempfile::tempdir().unwrap();
+        for (version, tag_wide) in [(2, true), (3, true), (4, false), (4, true)] {
+            let path = directory
+                .path()
+                .join(format!("unsync-{version}-{tag_wide}.wav"));
+            crate::artwork::tests::budget_unsynchronised_wav(&path, version, tag_wide);
+            assert_eq!(probe(&path, false).unwrap().sample_rate, 8_000);
+            let mut source =
+                Source::open(&path, PROBE_BUFFER_LEN, DecoderHint::Native, false).unwrap();
+            assert_eq!(decode_remaining(&mut source), [0.5]);
+        }
+    }
+
+    fn id3_frame_file(frame_id: &[u8; 4], payload: &[u8]) -> tempfile::NamedTempFile {
+        let mut file = tempfile::Builder::new().suffix(".wav").tempfile().unwrap();
+        file.write_all(b"ID3\x03\0\0").unwrap();
+        let size = payload.len() + 10;
+        for shift in [21, 14, 7, 0] {
+            file.write_all(&[((size >> shift) & 0x7f) as u8]).unwrap();
+        }
+        file.write_all(frame_id).unwrap();
+        file.write_all(&(payload.len() as u32).to_be_bytes())
+            .unwrap();
+        file.write_all(&[0, 0]).unwrap();
+        file.write_all(payload).unwrap();
+        file.write_all(b"RIFF\x26\0\0\0WAVEfmt \x10\0\0\0\x01\0\x01\0\x40\x1f\0\0\x80\x3e\0\0\x02\0\x10\0data\x02\0\0\0\0\x40").unwrap();
+        file
+    }
+
+    #[test]
+    fn native_metadata_budget_limits_text_fanout_without_failing_audio() {
+        let file = id3_frame_file(b"TIT2", &vec![0; 256 * 1024]);
+        assert_eq!(probe(file.path(), false).unwrap().sample_rate, 8_000);
+        let mut source =
+            Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Native, false).unwrap();
+        assert_eq!(decode_remaining(&mut source), [0.5]);
+    }
+
+    #[test]
+    fn native_metadata_budget_limits_nested_chapters_without_failing_audio() {
+        let mut payload = Vec::new();
+        for _ in 0..64 {
+            let mut chapter = b"chapter\0".to_vec();
+            chapter.extend_from_slice(&[0; 16]);
+            chapter.extend_from_slice(&payload);
+            payload = b"CHAP".to_vec();
+            payload.extend_from_slice(&(chapter.len() as u32).to_be_bytes());
+            payload.extend_from_slice(&[0, 0]);
+            payload.extend_from_slice(&chapter);
+        }
+        let file = id3_frame_file(b"CHAP", &payload[10..]);
+        assert_eq!(probe(file.path(), false).unwrap().sample_rate, 8_000);
+        let mut source =
+            Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Native, false).unwrap();
+        assert_eq!(decode_remaining(&mut source), [0.5]);
+    }
+
+    #[test]
+    fn native_metadata_budget_skips_large_pictures_without_losing_tags_or_audio() {
+        let directory = tempfile::tempdir().unwrap();
+        for version in [2, 3, 4] {
+            let path = directory.path().join(format!("budget-{version}.wav"));
+            let size = if version == 2 { 9 } else { 27 } * BYTES_PER_MEBIBYTE;
+            crate::artwork::tests::budget_tagged_wav(
+                &path,
+                version,
+                &[
+                    (crate::artwork::DEFAULT_IMAGE, size, 3),
+                    (
+                        crate::artwork::DEFAULT_IMAGE,
+                        crate::artwork::DEFAULT_IMAGE.len(),
+                        3,
+                    ),
+                ],
+            );
+            let info = probe(&path, false).unwrap();
+            assert_eq!(info.title, "Budget title");
+            assert_eq!(info.sample_rate, 8_000);
+            let mut source =
+                Source::open(&path, PROBE_BUFFER_LEN, DecoderHint::Native, false).unwrap();
+            assert!(!source.uses_ffmpeg());
+            assert_eq!(decode_remaining(&mut source), [0.5]);
+        }
+    }
+
+    #[test]
+    fn native_metadata_budget_keeps_audio_after_many_picture_frames() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("many-pictures.wav");
+        let pictures = vec![
+            (
+                crate::artwork::DEFAULT_IMAGE,
+                crate::artwork::DEFAULT_IMAGE.len(),
+                3
+            );
+            64
+        ];
+        crate::artwork::tests::budget_tagged_wav(&path, 4, &pictures);
+        let mut source = Source::open(&path, PROBE_BUFFER_LEN, DecoderHint::Native, false).unwrap();
+        assert_eq!(source.info.title, "Budget title");
+        assert_eq!(decode_remaining(&mut source), [0.5]);
+    }
 
     #[test]
     fn native_interleave_reuses_storage_and_replaces_previous_packet() {

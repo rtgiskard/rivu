@@ -42,6 +42,7 @@ serde_json = "1"
 postcard = { version = "1", default-features = false, features = ["use-std"] }
 signal-hook = "0.3.18"
 symphonia = { version = "0.6.1", features = ["all"] }
+symphonia-metadata = "0.6.1"
 tokio = { version = "1", default-features = false, features = ["rt", "net", "io-util", "sync", "time", "macros"] }
 walkdir = "2"
 toml = "1.1.8"
@@ -73,6 +74,13 @@ strip = "symbols"
 [patch.crates-io]
 # GPUI schedules nested idle callbacks; use its pinned nonblocking dispatcher.
 calloop = { git = "https://github.com/zed-industries/calloop", rev = "3759371fee14c40066d64777e2a36b6ffcc22590" }
+# Bound metadata before allocation, including embedded and nested ID3 readers.
+symphonia-metadata = { path = "vendor/symphonia-metadata" }
+symphonia-bundle-flac = { path = "vendor/symphonia-bundle-flac" }
+symphonia-format-isomp4 = { path = "vendor/symphonia-format-isomp4" }
+symphonia-format-mkv = { path = "vendor/symphonia-format-mkv" }
+symphonia-format-ogg = { path = "vendor/symphonia-format-ogg" }
+symphonia-format-riff = { path = "vendor/symphonia-format-riff" }
 
 # Pinned GPUI extensions: GPU image transforms and caller-authored path textures.
 [patch."https://github.com/zed-industries/zed"]

@@ -209,6 +209,31 @@ shared immutable geometry over a second geometry representation. A combined
 Spectrogram texture would change that boundary and should be justified by
 profiling real workloads, not assumed hit rates or submission counts alone.
 
+== Native metadata admission
+
+Native playback, probes, and full-waveform reads retain tags but skip embedded
+visuals before their payload buffers are allocated. Artwork extraction admits
+images up to 8 MiB, with a separate 16 MiB aggregate visual-frame allowance.
+Text admission is capped at 1 MiB per encoded item and a 4 MiB aggregate charge
+that includes decoding/copy allowance and per-operation overhead. At most 4096
+admission operations are allowed, including frames, decoded strings, and packet
+fragments; this is not an exact retained-tag count. Nested metadata and encoded
+image staging have finite allowances
+as well. Oversized metadata is skipped without rejecting otherwise decodable
+audio; these limits do not guarantee complete tags or chapters for such files.
+
+One opened native source owns its remaining allowance across probing, packet
+reads, and seeks. Artwork extraction owns a separate probe allowance. Synchronous
+parser scopes share that allowance with nested readers and restore the previous
+scope on return or unwind; they never span an asynchronous wait or thread hop.
+The pinned Symphonia 0.6.1 metadata and container patches under `vendor/` enforce
+admission before frame, chunk, attachment, or metadata-packet allocation rather
+than relying on a check after decoding the complete payload.
+
+These are metadata admission bounds, not total process-memory or I/O-time
+limits. Audio packets, codec state, FFmpeg reads, and decoded image pixels have
+separate costs. The encoded-image admission limit does not bound decoded pixels.
+
 == Artwork lookup retention
 
 Artwork lookup is independent of visualization caching. One application-session

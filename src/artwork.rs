@@ -24,7 +24,7 @@ use symphonia::{
 pub(crate) static DEFAULT_IMAGE: &[u8] = include_bytes!("../assets/rivu.png");
 
 const MAX_ARTWORK_ENTRIES: usize = 64;
-const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_IMAGE_BYTES: usize = symphonia_metadata::budget::MAX_VISUAL_BYTES;
 
 struct ArtworkFile {
     uri: String,
@@ -410,13 +410,16 @@ impl ArtworkManager {
         if let Some(extension) = path.extension().and_then(|value| value.to_str()) {
             hint.with_extension(extension);
         }
-        let mut format = get_probe()
-            .probe(
-                &hint,
-                MediaSourceStream::new(Box::new(file), MediaSourceStreamOptions::default()),
-                FormatOptions::default(),
-                MetadataOptions::default(),
-            )
+        let mut budget = crate::audio::metadata_budget(true);
+        let mut format = budget
+            .with(|| {
+                get_probe().probe(
+                    &hint,
+                    MediaSourceStream::new(Box::new(file), MediaSourceStreamOptions::default()),
+                    FormatOptions::default(),
+                    MetadataOptions::default(),
+                )
+            })
             .map_err(|_| ())?;
         let track_id = format
             .default_track(TrackType::Audio)
@@ -594,6 +597,241 @@ pub(crate) mod tests {
         bytes.extend_from_slice(&2_u32.to_le_bytes());
         bytes.extend_from_slice(&0_i16.to_le_bytes());
         fs::write(path, bytes).unwrap();
+    }
+
+    fn syncsafe(value: usize) -> [u8; 4] {
+        std::array::from_fn(|index| ((value >> (21 - 7 * index)) & 0x7f) as u8)
+    }
+
+    fn write_test_wave(file: &mut File) {
+        use std::io::Write;
+        file.write_all(b"RIFF\x26\0\0\0WAVEfmt \x10\0\0\0\x01\0\x01\0\x40\x1f\0\0\x80\x3e\0\0\x02\0\x10\0data\x02\0\0\0\0\x40").unwrap();
+    }
+
+    // Stream large fixture payloads without creating large test buffers.
+    pub(crate) fn budget_tagged_wav(path: &Path, version: u8, pictures: &[(&[u8], usize, u8)]) {
+        use std::io::{Read, Write};
+        let header_len = if version == 2 { 6 } else { 10 };
+        let picture_prefix = if version == 2 { 6 } else { 13 };
+        let title = b"\0Budget title";
+        let tag_len = pictures
+            .iter()
+            .map(|(_, size, _)| header_len + picture_prefix + size)
+            .sum::<usize>()
+            + header_len
+            + title.len();
+        let mut file = File::create(path).unwrap();
+        file.write_all(&[b'I', b'D', b'3', version, 0, 0]).unwrap();
+        file.write_all(&syncsafe(tag_len)).unwrap();
+        let frame_header = |file: &mut File, legacy: &[u8; 3], modern: &[u8; 4], size: usize| {
+            if version == 2 {
+                file.write_all(legacy).unwrap();
+                file.write_all(&(size as u32).to_be_bytes()[1..]).unwrap();
+            } else {
+                file.write_all(modern).unwrap();
+                file.write_all(&if version == 4 {
+                    syncsafe(size)
+                } else {
+                    (size as u32).to_be_bytes()
+                })
+                .unwrap();
+                file.write_all(&[0, 0]).unwrap();
+            }
+        };
+        for &(bytes, size, usage) in pictures {
+            assert!(size >= bytes.len());
+            frame_header(&mut file, b"PIC", b"APIC", picture_prefix + size);
+            if version == 2 {
+                file.write_all(b"\0PNG").unwrap();
+            } else {
+                file.write_all(b"\0image/png\0").unwrap();
+            }
+            file.write_all(&[usage, 0]).unwrap();
+            file.write_all(bytes).unwrap();
+            std::io::copy(
+                &mut std::io::repeat(0).take((size - bytes.len()) as u64),
+                &mut file,
+            )
+            .unwrap();
+        }
+        frame_header(&mut file, b"TT2", b"TIT2", title.len());
+        file.write_all(title).unwrap();
+        write_test_wave(&mut file);
+    }
+
+    pub(crate) fn budget_unsynchronised_wav(path: &Path, version: u8, tag_wide: bool) {
+        use std::io::Write;
+        fn unsynchronise(bytes: &[u8]) -> Vec<u8> {
+            let mut encoded = Vec::new();
+            for &byte in bytes {
+                encoded.push(byte);
+                if byte == 0xff {
+                    encoded.push(0);
+                }
+            }
+            encoded
+        }
+        let mut picture = if version == 2 {
+            b"\0PNG\x03\0".to_vec()
+        } else {
+            b"\0image/png\0\x03\0".to_vec()
+        };
+        picture.extend_from_slice(DEFAULT_IMAGE);
+        let picture = if version == 4 {
+            unsynchronise(&picture)
+        } else {
+            picture
+        };
+        let mut body = if version == 2 {
+            b"PIC".to_vec()
+        } else {
+            b"APIC".to_vec()
+        };
+        if version == 2 {
+            body.extend_from_slice(&(picture.len() as u32).to_be_bytes()[1..]);
+        } else {
+            body.extend_from_slice(&if version == 4 {
+                syncsafe(picture.len())
+            } else {
+                (picture.len() as u32).to_be_bytes()
+            });
+            body.extend_from_slice(&[0, if version == 4 && !tag_wide { 2 } else { 0 }]);
+        }
+        body.extend_from_slice(&picture);
+        let body = if version < 4 {
+            unsynchronise(&body)
+        } else {
+            body
+        };
+        let mut file = File::create(path).unwrap();
+        file.write_all(&[
+            b'I',
+            b'D',
+            b'3',
+            version,
+            0,
+            if version < 4 || tag_wide { 0x80 } else { 0 },
+        ])
+        .unwrap();
+        file.write_all(&syncsafe(body.len())).unwrap();
+        file.write_all(&body).unwrap();
+        write_test_wave(&mut file);
+    }
+
+    #[test]
+    fn metadata_budget_unsynchronised_covers_preserve_original_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        for (version, tag_wide) in [(2, true), (3, true), (4, false), (4, true)] {
+            let path = directory
+                .path()
+                .join(format!("unsync-{version}-{tag_wide}.wav"));
+            budget_unsynchronised_wav(&path, version, tag_wide);
+            let manager = ArtworkManager::new(directory.path());
+            let artwork = manager.load(&track(path)).unwrap();
+            assert!(
+                !artwork.is_placeholder(),
+                "ID3v2.{version}, tag-wide={tag_wide}"
+            );
+            assert_eq!(fs::read(file_path(artwork.uri())).unwrap(), DEFAULT_IMAGE);
+        }
+    }
+
+    #[test]
+    fn metadata_budget_many_tiny_pictures_cannot_bypass_object_quota() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("tiny-pictures.wav");
+        let mut bmp = [0_u8; 58];
+        bmp[..2].copy_from_slice(b"BM");
+        bmp[2..6].copy_from_slice(&58_u32.to_le_bytes());
+        bmp[10..14].copy_from_slice(&54_u32.to_le_bytes());
+        bmp[14..18].copy_from_slice(&40_u32.to_le_bytes());
+        bmp[18..22].copy_from_slice(&1_u32.to_le_bytes());
+        bmp[22..26].copy_from_slice(&1_u32.to_le_bytes());
+        bmp[26..28].copy_from_slice(&1_u16.to_le_bytes());
+        bmp[28..30].copy_from_slice(&24_u16.to_le_bytes());
+        bmp[34..38].copy_from_slice(&4_u32.to_le_bytes());
+        let mut pictures = vec![(&bmp[..], bmp.len(), 0); 2000];
+        pictures.push((DEFAULT_IMAGE, DEFAULT_IMAGE.len(), 3));
+        budget_tagged_wav(&path, 3, &pictures);
+        let manager = ArtworkManager::new(directory.path());
+        let artwork = manager.load(&track(path)).unwrap();
+        assert!(!artwork.is_placeholder());
+        assert_eq!(fs::read(file_path(artwork.uri())).unwrap(), bmp);
+    }
+
+    #[test]
+    fn metadata_budget_keeps_small_and_boundary_covers_across_id3_versions() {
+        let directory = tempfile::tempdir().unwrap();
+        for version in [2, 3, 4] {
+            for size in [DEFAULT_IMAGE.len(), MAX_IMAGE_BYTES] {
+                let path = directory.path().join(format!("small-{version}-{size}.wav"));
+                budget_tagged_wav(&path, version, &[(DEFAULT_IMAGE, size, 3)]);
+                let manager = ArtworkManager::new(directory.path());
+                let artwork = manager.load(&track(path)).unwrap();
+                assert!(!artwork.is_placeholder(), "ID3v2.{version}, {size} bytes");
+                let retained = fs::read(file_path(artwork.uri())).unwrap();
+                assert_eq!(retained.len(), size);
+                assert!(retained.starts_with(DEFAULT_IMAGE));
+            }
+        }
+    }
+
+    #[test]
+    fn metadata_budget_skips_oversized_cover_and_keeps_following_cover() {
+        let directory = tempfile::tempdir().unwrap();
+        for version in [2, 3, 4] {
+            for size in [
+                MAX_IMAGE_BYTES + 1,
+                if version == 2 { 9 } else { 27 } * 1024 * 1024,
+            ] {
+                let path = directory
+                    .path()
+                    .join(format!("oversized-{version}-{size}.wav"));
+                budget_tagged_wav(
+                    &path,
+                    version,
+                    &[
+                        (DEFAULT_IMAGE, size, 3),
+                        (DEFAULT_IMAGE, DEFAULT_IMAGE.len(), 3),
+                    ],
+                );
+                let manager = ArtworkManager::new(directory.path());
+                let artwork = manager.load(&track(path)).unwrap();
+                assert!(!artwork.is_placeholder());
+                assert_eq!(fs::read(file_path(artwork.uri())).unwrap(), DEFAULT_IMAGE);
+            }
+        }
+    }
+
+    #[test]
+    fn metadata_budget_caps_aggregate_covers_without_changing_fallback_choice() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("aggregate.wav");
+        budget_tagged_wav(
+            &path,
+            4,
+            &[
+                (DEFAULT_IMAGE, MAX_IMAGE_BYTES, 0),
+                (DEFAULT_IMAGE, MAX_IMAGE_BYTES, 0),
+                (DEFAULT_IMAGE, DEFAULT_IMAGE.len(), 3),
+            ],
+        );
+        let manager = ArtworkManager::new(directory.path());
+        let artwork = manager.load(&track(path)).unwrap();
+        assert!(!artwork.is_placeholder());
+        assert_eq!(
+            fs::metadata(file_path(artwork.uri())).unwrap().len(),
+            MAX_IMAGE_BYTES as u64
+        );
+    }
+
+    #[test]
+    fn metadata_budget_oversized_only_uses_default_cover() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("only-oversized.wav");
+        budget_tagged_wav(&path, 3, &[(DEFAULT_IMAGE, 27 * 1024 * 1024, 3)]);
+        let manager = ArtworkManager::new(directory.path());
+        assert!(manager.load(&track(path)).unwrap().is_placeholder());
     }
 
     fn file_path(uri: &str) -> PathBuf {
