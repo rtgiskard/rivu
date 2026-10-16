@@ -14,7 +14,7 @@ use crate::{
 
 use super::{
     BORDER, TEXT,
-    artwork::{Artwork, ArtworkLoader, ArtworkView},
+    artwork::{Artwork, ArtworkImages, ArtworkLoader, ArtworkView},
     caption, column,
     components::{LIST_ROW_REMS, quiet_icon_button, scrollable_list, track_list_row},
     format_time, icon_button,
@@ -63,6 +63,7 @@ pub(super) struct AlbumBrowser {
     i18n: Arc<crate::i18n::Localizer>,
     localized_text: BTreeMap<&'static str, SharedString>,
     manager: Arc<ArtworkManager>,
+    images: ArtworkImages,
     default_album: Entity<Artwork>,
     visible: bool,
     revision: u64,
@@ -75,7 +76,6 @@ pub(super) struct AlbumBrowser {
     albums: paged::PagedRows<AlbumSummary>,
     tracks: paged::PagedRows<LibraryRow>,
     covers: BTreeMap<usize, ArtworkView>,
-    retired: Vec<ArtworkView>,
     loader: ArtworkLoader,
     demand: Range<usize>,
     columns: usize,
@@ -98,6 +98,7 @@ impl AlbumBrowser {
         handle: CoreHandle,
         manager: Arc<ArtworkManager>,
         default_album: Entity<Artwork>,
+        images: ArtworkImages,
         cx: &mut Context<Self>,
     ) -> Self {
         let localized_text = [
@@ -138,6 +139,7 @@ impl AlbumBrowser {
             localized_text,
             handle,
             manager,
+            images,
             default_album,
             visible: false,
             revision: 0,
@@ -150,7 +152,6 @@ impl AlbumBrowser {
             albums: paged::PagedRows::default(),
             tracks: paged::PagedRows::default(),
             covers: BTreeMap::new(),
-            retired: Vec::new(),
             loader: ArtworkLoader::default(),
             demand: 0..0,
             columns: 1,
@@ -214,7 +215,6 @@ impl AlbumBrowser {
         let _ = self.loader.prepare(None);
         for cover in std::mem::take(&mut self.covers).into_values() {
             cover.replace(None, cx);
-            self.retired.push(cover);
         }
     }
 
@@ -464,19 +464,22 @@ impl AlbumBrowser {
             !self.demand.contains(index) || self.albums.get(*index).is_none()
         }) {
             cover.replace(None, cx);
-            self.retired.push(cover);
         }
         let mut changed = false;
         for index in self.demand.clone() {
             let Some(album) = self.albums.get(index) else {
                 continue;
             };
-            changed |= self.covers.entry(index).or_default().replace(
-                self.manager
-                    .cached(&album.representative)
-                    .filter(|artwork| !artwork.is_placeholder()),
-                cx,
-            );
+            changed |= self
+                .covers
+                .entry(index)
+                .or_insert_with(|| ArtworkView::new(self.images.clone()))
+                .replace(
+                    self.manager
+                        .cached(&album.representative)
+                        .filter(|artwork| !artwork.is_placeholder()),
+                    cx,
+                );
         }
         let next = self.demand.clone().find_map(|index| {
             let track = &self.albums.get(index)?.representative;
@@ -505,14 +508,12 @@ impl AlbumBrowser {
         }
     }
 
-    pub(super) fn retire_images(&mut self, window: &mut Window) {
-        for cover in self.retired.drain(..).chain(self.covers.values().cloned()) {
-            cover.release_retired(window);
-        }
+    pub(super) fn retire_all_images(&mut self, cx: &mut App) {
+        self.clear_covers(cx);
     }
 
     pub(super) fn release_all_images(&mut self, window: &mut Window, cx: &mut App) {
-        for cover in self.retired.drain(..).chain(self.covers.values().cloned()) {
+        for cover in self.covers.values() {
             cover.release_all_images(window, cx);
         }
     }

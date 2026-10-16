@@ -421,6 +421,7 @@ pub(super) struct GuiApp {
     interaction: LayoutInteraction,
     error: Option<String>,
     artwork_manager: Arc<crate::artwork::ArtworkManager>,
+    artwork_images: artwork::ArtworkImages,
     artwork_loader: artwork::ArtworkLoader,
     artwork_view: artwork::ArtworkView,
     default_album: Entity<artwork::Artwork>,
@@ -855,9 +856,15 @@ impl GuiApp {
                 this.refresh(cx);
                 this.sync_analysis(cx);
                 if !this.window_visible {
+                    // Hidden windows may never deliver another paint/frame.
+                    // Flush both current and already-scheduled retired owners.
+                    this.album_artwork.update(cx, |artwork, cx| {
+                        artwork.release_all_images(window, cx);
+                    });
                     for albums in this.album_browsers.values() {
                         albums.update(cx, |albums, cx| albums.release_all_images(window, cx));
                     }
+                    this.artwork_images.release_all_retired(window, cx);
                 }
                 this.request_frame(window, cx);
                 cx.notify();
@@ -889,6 +896,7 @@ impl GuiApp {
         .detach();
         let default_album = cx.new(|cx| artwork::Artwork::new(&i18n, cx));
         let album_default = default_album.read(cx).circular();
+        let artwork_images = artwork::ArtworkImages::default();
         let mut app = Self {
             i18n: Arc::clone(&i18n),
             localized_text,
@@ -913,13 +921,18 @@ impl GuiApp {
             playlist_action: None,
             album_artwork: cx.new(|cx| {
                 let default_album = cx.new(|_| album_default);
-                album_artwork::AlbumArtwork::new(Arc::clone(&artwork_manager), default_album)
+                album_artwork::AlbumArtwork::new(
+                    Arc::clone(&artwork_manager),
+                    default_album,
+                    artwork_images.clone(),
+                )
             }),
             default_album,
             album_browsers: HashMap::new(),
             artwork_manager,
             artwork_loader: artwork::ArtworkLoader::default(),
-            artwork_view: artwork::ArtworkView::default(),
+            artwork_view: artwork::ArtworkView::new(artwork_images.clone()),
+            artwork_images,
             visuals: visualization::Visuals::new(),
             audio_visualizer: visualization::AudioVisualizer::new(),
             catalog_open: false,
@@ -981,6 +994,7 @@ impl GuiApp {
         for albums in self.album_browsers.values() {
             albums.update(cx, |albums, cx| albums.release_all_images(window, cx));
         }
+        self.artwork_images.release_all_retired(window, cx);
     }
     fn send(&mut self, command: Command, cx: &mut Context<Self>) {
         if let Err(error) = self.handle.send(command) {
@@ -1460,12 +1474,15 @@ impl GuiApp {
                     self.handle.clone(),
                     Arc::clone(&self.artwork_manager),
                     self.default_album.clone(),
+                    self.artwork_images.clone(),
                     cx,
                 )
             });
             window
-                .observe_release(&albums, cx, |albums, window, cx| {
-                    albums.release_all_images(window, cx);
+                .observe_release(&albums, cx, |albums, _, cx| {
+                    // A live panel removal still leaves the previous scene.
+                    // The window root schedules retirement after its next paint.
+                    albums.retire_all_images(cx);
                 })
                 .detach();
             albums

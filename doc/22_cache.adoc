@@ -199,14 +199,20 @@ Maintenance ignores symlinks and unrelated names, reports inspection/deletion
 failures, and leaves the fallback and audio sources untouched.
 
 GUI previews keep decoded images separate from this session-wide lookup cache.
-Each selected lookup result has one window-local image owner; repeated metadata
-panels share its pending load or completed decode. Loading starts only when a
-preview requests the image and uses GPUI's background loader, not render-time
-file I/O. Replaced owners are retired at the next window-frame boundary;
-retirement cancels pending loads and removes completed images from the renderer.
-Window close or reload releases current and retired images. Another window
-owns an independent decode, so releasing one cannot evict the other's image.
-The source lookup result remains held for the image owner's lifetime.
+Within one window, metadata previews, album cards, and the large artwork panel
+share one pending load or completed decode per immutable content path, even
+when different tracks reference the same bytes. Each consumer retains its own
+lookup identity and source-file protection. Loading starts only when a preview
+requests the image and uses GPUI's background loader, not render-time file I/O.
+
+Replaced or hidden consumers retire through a window-owned queue after scene
+replacement; removed panels need not paint again. Releasing one consumer cannot
+cancel or unload another's image. Only the last retired consumer cancels the
+pending load or removes the completed image from the renderer. Hiding the large
+artwork panel retires its display owner; a late lookup may warm the session cache
+but cannot restore that hidden owner. Window hide, close, or reload releases
+current and retired display owners without waiting for another frame. Another
+window owns an independent decode.
 
 Generated default covers share a separate window-local cache across square
 previews, cards, and circular artwork panels. GPUI background assets rasterize
@@ -228,9 +234,10 @@ evicted images. Generation failures are logged and display `Artwork unavailable`
 Generated bitmaps remain in RAM/GPU memory and never create disk files; existing
 media-cover/MPRIS disk paths and encoded-file maintenance are unchanged.
 
-Revisiting a released image decodes it again; there is no decoded-image reuse
-cache across selections or windows. GPUI still handles display scaling;
-all animation frames are retained and preview playback behavior is unchanged.
+Revisiting an image after its last consumer retires decodes it again; there is
+no idle decoded-image cache across selections or windows. A still-live consumer
+can supply the shared decode. GPUI still handles display scaling; all animation
+frames are retained and preview playback behavior is unchanged.
 Rivu does not generate thumbnails or resize decoded real-cover pixel buffers:
 a single large image or multi-frame animation can still consume substantial
 memory. Encoded-file maintenance does not measure or reclaim decoded images,

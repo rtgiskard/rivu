@@ -1,8 +1,9 @@
 use std::{
     cell::RefCell,
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     hash::{Hash, Hasher},
-    rc::Rc,
+    path::Path,
+    rc::{Rc, Weak},
     sync::Arc,
 };
 
@@ -19,67 +20,171 @@ use gpui::{
 
 use super::{BG, GuiApp};
 
+#[derive(Default)]
+struct ArtworkImagesState {
+    entries: HashMap<Arc<Path>, Weak<ArtworkImageOwner>>,
+    retired: Vec<ArtworkViewImage>,
+    pending_retired: Option<Vec<ArtworkViewImage>>,
+    retirement_generation: u64,
+}
+
+/// Shared by one window, never by the application session. Weak entries are
+/// removed with their last consumer instead of retaining an idle decode cache.
 #[derive(Clone, Default)]
-pub(super) struct ArtworkView(Rc<RefCell<ArtworkViewState>>);
+pub(super) struct ArtworkImages(Rc<RefCell<ArtworkImagesState>>);
+
+impl ArtworkImages {
+    fn acquire(&self, artwork: LoadedArtwork, cx: &mut App) -> Rc<ArtworkImageOwner> {
+        let path = artwork.path();
+        if let Some(owner) = self.0.borrow().entries.get(&path).and_then(Weak::upgrade) {
+            return owner;
+        }
+        let owner = Rc::new(ArtworkImageOwner {
+            image: ArtworkImage::new(artwork, cx),
+            registry: Rc::downgrade(&self.0),
+            path: Arc::clone(&path),
+        });
+        self.0
+            .borrow_mut()
+            .entries
+            .insert(path, Rc::downgrade(&owner));
+        owner
+    }
+
+    fn retire(&self, image: ArtworkViewImage, cx: &App) {
+        // A result never requested by any rendered consumer has no scene.
+        if image.owner.image.read(cx).item.is_some() {
+            self.0.borrow_mut().retired.push(image);
+        }
+    }
+
+    /// Called by the window root's paint, including after a panel was removed.
+    pub(super) fn release_retired(&self, window: &mut Window) {
+        let mut state = self.0.borrow_mut();
+        if state.retired.is_empty() || state.pending_retired.is_some() {
+            return;
+        }
+        state.pending_retired = Some(std::mem::take(&mut state.retired));
+        state.retirement_generation = state.retirement_generation.wrapping_add(1);
+        let generation = state.retirement_generation;
+        let images = self.clone();
+        window.on_next_frame(move |window, cx| {
+            let retired = {
+                let mut state = images.0.borrow_mut();
+                if state.retirement_generation != generation {
+                    return;
+                }
+                state.pending_retired.take().unwrap_or_default()
+            };
+            for image in retired {
+                image.owner.release(window, cx);
+            }
+        });
+    }
+
+    /// Hiding/closing a window cannot wait for an unguaranteed future frame.
+    pub(super) fn release_all_retired(&self, window: &mut Window, cx: &mut App) {
+        let (retired, pending) = {
+            let mut state = self.0.borrow_mut();
+            state.retirement_generation = state.retirement_generation.wrapping_add(1);
+            (
+                std::mem::take(&mut state.retired),
+                state.pending_retired.take().unwrap_or_default(),
+            )
+        };
+        for image in retired.into_iter().chain(pending) {
+            image.owner.release(window, cx);
+        }
+    }
+}
+
+/// A consumer lease, deliberately separate from the ImageCache entity held by
+/// GPUI elements. Old scenes must not prevent the last consumer from unloading.
+struct ArtworkImageOwner {
+    image: Entity<ArtworkImage>,
+    registry: Weak<RefCell<ArtworkImagesState>>,
+    path: Arc<Path>,
+}
+
+impl ArtworkImageOwner {
+    fn release(self: Rc<Self>, window: &mut Window, cx: &mut App) {
+        if Rc::strong_count(&self) == 1 {
+            self.image.update(cx, |image, cx| image.clear(window, cx));
+        }
+    }
+}
+
+impl Drop for ArtworkImageOwner {
+    fn drop(&mut self) {
+        if let Some(registry) = self.registry.upgrade() {
+            registry.borrow_mut().entries.remove(&self.path);
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct ArtworkView {
+    state: Rc<RefCell<ArtworkViewState>>,
+    images: ArtworkImages,
+}
+
+struct ArtworkViewImage {
+    // Keep the exact lookup result and its file protection per consumer even
+    // when another track's immutable content path shares the decoded image.
+    artwork: LoadedArtwork,
+    owner: Rc<ArtworkImageOwner>,
+}
 
 #[derive(Default)]
 struct ArtworkViewState {
-    current: Option<Entity<ArtworkImage>>,
-    retired: Vec<Entity<ArtworkImage>>,
+    current: Option<ArtworkViewImage>,
 }
 
 impl ArtworkView {
+    pub(super) fn new(images: ArtworkImages) -> Self {
+        Self {
+            state: Rc::default(),
+            images,
+        }
+    }
+
     pub(super) fn replace(&self, next: Option<LoadedArtwork>, cx: &mut App) -> bool {
-        let mut state = self.0.borrow_mut();
-        if state.current.as_ref().map(|image| &image.read(cx).artwork) == next.as_ref() {
+        let mut state = self.state.borrow_mut();
+        if state.current.as_ref().map(|image| &image.artwork) == next.as_ref() {
             return false;
         }
-        let next = next.map(|artwork| ArtworkImage::new(artwork, cx));
+        let next = next.map(|artwork| ArtworkViewImage {
+            owner: self.images.acquire(artwork.clone(), cx),
+            artwork,
+        });
         if let Some(old) = std::mem::replace(&mut state.current, next) {
-            // Results never requested by a rendered preview have no scene to retire.
-            if old.read(cx).item.is_some() {
-                state.retired.push(old);
-            }
+            self.images.retire(old, cx);
         }
         true
     }
 
-    pub(super) fn image(&self, cx: &App) -> Option<Img> {
-        let state = self.0.borrow();
+    pub(super) fn image(&self, _: &App) -> Option<Img> {
+        let state = self.state.borrow();
         let image = state.current.as_ref()?;
-        Some(img(image.read(cx).artwork.path()).image_cache(image))
+        Some(img(image.artwork.path()).image_cache(&image.owner.image))
     }
 
     pub(super) fn aspect_ratio(&self, cx: &App) -> Option<f32> {
-        let state = self.0.borrow();
-        let image = state.current.as_ref()?.read(cx);
+        let state = self.state.borrow();
+        let image = state.current.as_ref()?.owner.image.read(cx);
         let decoded = image.item.as_ref()?.get()?.ok()?;
         let size = decoded.size(0);
         Some(size.width.0 as f32 / size.height.0 as f32)
     }
 
-    pub(super) fn release_retired(&self, window: &mut Window) {
-        let retired = std::mem::take(&mut self.0.borrow_mut().retired);
-        if !retired.is_empty() {
-            window.on_next_frame(move |window, cx| {
-                for image in retired {
-                    image.update(cx, |image, cx| image.clear(window, cx));
-                }
-            });
-        }
-    }
-
     pub(super) fn release_all_images(&self, window: &mut Window, cx: &mut App) {
-        let mut state = self.0.borrow_mut();
-        let current = state.current.take();
-        for image in current.into_iter().chain(state.retired.drain(..)) {
-            image.update(cx, |image, cx| image.clear(window, cx));
+        if let Some(image) = self.state.borrow_mut().current.take() {
+            image.owner.release(window, cx);
         }
     }
 }
 
-/// One immutable source per owner. Repeated metadata panels share the same load;
-/// another window owns its own decode, so releasing this image cannot evict it.
+/// One immutable content path and one pending/completed decode per window.
 struct ArtworkImage {
     artwork: LoadedArtwork,
     item: Option<ImageCacheItem>,

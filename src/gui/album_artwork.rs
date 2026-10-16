@@ -14,7 +14,7 @@ use crate::{
     model::{PlaybackStatus, Track},
 };
 
-use super::artwork::{Artwork, ArtworkLoader, ArtworkView};
+use super::artwork::{Artwork, ArtworkImages, ArtworkLoader, ArtworkView};
 
 /// Pacing is measured between native frame requests, not after frame delivery.
 /// A late wake schedules only one frame and establishes a fresh deadline.
@@ -165,11 +165,15 @@ pub(super) struct AlbumArtwork {
 }
 
 impl AlbumArtwork {
-    pub(super) fn new(manager: Arc<ArtworkManager>, default_album: Entity<Artwork>) -> Self {
+    pub(super) fn new(
+        manager: Arc<ArtworkManager>,
+        default_album: Entity<Artwork>,
+        images: ArtworkImages,
+    ) -> Self {
         Self {
             manager,
             loader: ArtworkLoader::default(),
-            view: ArtworkView::default(),
+            view: ArtworkView::new(images),
             default_album,
             track: None,
             status: PlaybackStatus::Stopped,
@@ -217,7 +221,10 @@ impl AlbumArtwork {
             || self.rotation.settings != settings;
         if switched {
             self.track = track.cloned();
-            // Do not show the previous track while the latest lookup is pending.
+        }
+        if switched || self.visible && !visible {
+            // Neither a track switch nor the last panel hiding may retain the
+            // previous display owner. Rendering retires its old scene safely.
             self.view.replace(None, cx);
         }
         self.status = status;
@@ -290,10 +297,11 @@ impl AlbumArtwork {
                 .spawn(async move { manager.load(&track) })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                if this
-                    .track
-                    .as_ref()
-                    .is_some_and(|track| identity.matches(track))
+                if this.visible
+                    && this
+                        .track
+                        .as_ref()
+                        .is_some_and(|track| identity.matches(track))
                 {
                     this.replace_artwork(loaded, cx);
                 }
@@ -347,10 +355,6 @@ impl AlbumArtwork {
             });
         });
         cx.notify();
-    }
-
-    pub(super) fn image_releaser(&self) -> ArtworkView {
-        self.view.clone()
     }
 
     pub(super) fn release_all_images(&mut self, window: &mut Window, cx: &mut App) {

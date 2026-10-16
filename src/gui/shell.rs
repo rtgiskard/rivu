@@ -42,8 +42,7 @@ impl Render for GuiApp {
         let paint_visuals = self.visuals.clone();
         let paint_visualizer = self.audio_visualizer.clone();
         let paint_waveform = self.waveform.read(cx).image_releaser();
-        let paint_artwork = self.artwork_view.clone();
-        let paint_album_artwork = self.album_artwork.read(cx).image_releaser();
+        let paint_artwork_images = self.artwork_images.clone();
         let root = self.layouts.current_mut().root.take();
         let layout_view = root
             .as_ref()
@@ -59,11 +58,6 @@ impl Render for GuiApp {
                     .into_any_element()
             });
         self.layouts.current_mut().root = root;
-        let paint_album_browsers = self
-            .album_browsers
-            .values()
-            .map(Entity::downgrade)
-            .collect::<Vec<_>>();
         let mut app = column()
             .id("rivu")
             .relative()
@@ -333,7 +327,7 @@ impl Render for GuiApp {
             .child(
                 canvas(
                     |_, _, _| (),
-                    move |_, _, window, cx| {
+                    move |_, _, window, _| {
                         let entity = docking_view.clone();
                         window.on_mouse_event::<MouseExitEvent>(move |_, phase, window, cx| {
                             if phase == DispatchPhase::Capture {
@@ -344,11 +338,7 @@ impl Render for GuiApp {
                         paint_visuals.release_retired(window);
                         paint_waveform.release_retired(window);
                         paint_visualizer.release_retired_images(window);
-                        paint_artwork.release_retired(window);
-                        paint_album_artwork.release_retired(window);
-                        for albums in &paint_album_browsers {
-                            let _ = albums.update(cx, |albums, _| albums.retire_images(window));
-                        }
+                        paint_artwork_images.release_retired(window);
                         paint_visuals.finish_prepaint();
                     },
                 )
