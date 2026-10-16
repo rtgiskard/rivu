@@ -213,15 +213,48 @@ is playing, playback continues as that track's retained occurrence.
 Saving a queue as a playlist: link:03_playlist.adoc#_desktop_ui[Playlists].
 Scrolling and query retries: link:02_library.adoc#_paged_views[Library].
 
+[[keyboard-controls]]
+== Keyboard controls
+
+GUI and TUI share playback keys outside text editors, menus and dialogs:
+
+[cols="1,2",options="header"]
+|===
+|Key |Action
+|Space |Play/pause
+|n / p |Next/previous track
+|[ / ] |Lower/raise volume by five percentage points
+|r / s |Cycle repeat mode / toggle shuffle
+|Ctrl+Left / Ctrl+Right |Seek backward/forward five seconds
+|Ctrl+Home / Ctrl+End |Seek to the track's start/end
+|===
+
+Bare Left/Right are reserved for container navigation, not seeking. Home/End
+select the first/last item in lists supporting row navigation. Enter opens a
+directory or plays the current object. Delete removes selected Queue or playlist
+entries, never media files; the bare `d` key is not a removal shortcut.
+Undeclared Ctrl/Alt/Shift/Super combinations do not inherit bare-key actions.
+
+F1 opens context-sensitive help. The desktop also offers *Keyboard shortcuts*
+in the application menu. Help can be scrolled with Up/Down, PageUp/PageDown and
+Home/End; F1 or Escape closes it without operating the list underneath.
+F5 retries failed loading in the current browsable view without rescanning files.
+Editors retain their text and editing keys, including spaces, `R` and `?`.
+In the GUI, a focused button owns Enter/Space instead of also controlling playback.
+Escape cancels only the innermost interaction or leaves the focused editor before
+returning from its containing view. See
+link:01_config.adoc#_desktop_keyboard_navigation[desktop control navigation].
+
 == Terminal client
 
-`?` toggles context-sensitive help; `/` searches, `t` browses directories, and
-`P` lists playlists. Up/Down and PageUp/PageDown navigate. In Search, Tab switches
-between the query and results; Enter from the query focuses results, and Enter
-on a result plays it. Enter on a directory opens it; Enter on a directory
-track plays it. Right opens playlist entries; Enter plays a selected playlist,
-playlist track, or queue occurrence. In playlist details, `a` enqueues the selected
-track. In Queue, `d` or Delete removes the selected occurrence.
+`/` searches Library, `t` browses directories, and `P` lists playlists.
+Up/Down and PageUp/PageDown navigate; Home/End select the first/last row.
+In Search, Tab or Shift+Tab switches between the query and results; Enter from
+the query focuses results, and Enter on a result plays it. Playback keys apply
+to results, not the query editor. Enter on a directory opens it; Enter on a
+directory track plays it. Right opens playlist entries; Enter plays a selected
+playlist, playlist track, or queue occurrence. In playlist details, `a` enqueues
+the selected track. Delete removes the selected Queue occurrence or playlist entry.
 Queue rows show the track title before the artist.
 
 Left/Backspace goes to the parent directory; Left/Esc leaves playlist details.

@@ -8,6 +8,7 @@ pub mod cue;
 pub mod gui;
 pub mod i18n;
 pub mod ipc;
+pub(crate) mod keyboard;
 pub mod library;
 pub mod logging;
 pub mod model;

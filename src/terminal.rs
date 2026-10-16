@@ -1,10 +1,10 @@
 use crate::{
     i18n::Localizer,
     ipc,
+    keyboard::{self, Action, Context as KeyboardContext, Modifiers},
     model::{
         ClientSnapshot, Command, DirectoryRow, LibraryRow, LibrarySort, PlaybackStatus,
         PlaylistEntryRow, PlaylistSummary, Query, QueryStamp, QueueRow, RepeatMode,
-        playback_key_command,
     },
     projection::{QueryProjection, TuiSnapshot},
     response::{Ack, StateSections, ViewResponse},
@@ -12,7 +12,7 @@ use crate::{
 use anyhow::{Context, Result};
 use crossbeam_channel::{Receiver, Sender, bounded};
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEvent, KeyEventKind},
+    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -23,7 +23,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Gauge, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, Borders, Gauge, List, ListItem, ListState, Paragraph},
 };
 use signal_hook::{
     SigId,
@@ -582,7 +582,9 @@ fn run_loop(
             if event::poll(Duration::from_millis(50))? {
                 match event::read()? {
                     Event::Key(key)
-                        if key.kind != KeyEventKind::Release && key.code == KeyCode::Char('q') =>
+                        if key.kind != KeyEventKind::Release
+                            && resolve_key(key, KeyboardContext::TuiQueue)
+                                == Some(Action::Close) =>
                     {
                         break;
                     }
@@ -846,6 +848,7 @@ struct UiState {
     queue_anchor: Option<u64>,
     queue_selected_id: Option<u64>,
     show_help: bool,
+    help_selection: ListState,
     message: Option<Notice>,
     requested: Option<QueryRequest>,
     projection: QueryProjection,
@@ -863,6 +866,7 @@ impl UiState {
             queue_anchor: None,
             queue_selected_id: None,
             show_help: false,
+            help_selection: ListState::default(),
             message: None,
             requested: None,
             projection: QueryProjection::default(),
@@ -1145,30 +1149,92 @@ impl UiState {
         }
     }
 
+    fn keyboard_context(&self) -> KeyboardContext {
+        match &self.view {
+            View::Queue => KeyboardContext::TuiQueue,
+            View::Search(search) if search.focus == SearchFocus::Query => {
+                KeyboardContext::TuiSearchQuery
+            }
+            View::Search(_) => KeyboardContext::TuiSearchResults,
+            View::Tree(_) => KeyboardContext::TuiTree,
+            View::Playlists(_) => KeyboardContext::TuiPlaylists,
+            View::PlaylistDetail { .. } => KeyboardContext::TuiPlaylistTracks,
+        }
+    }
+
     fn key_action(&mut self, key: KeyEvent, state: &TuiSnapshot) -> KeyAction {
-        if key.code == KeyCode::Char('R') {
+        let context = self.keyboard_context();
+        if self.show_help {
+            let action = resolve_key(key, KeyboardContext::TuiHelp);
+            let len = help_bindings(context).count();
+            match action {
+                Some(Action::Help | Action::Cancel) => self.show_help = false,
+                Some(Action::Up | Action::Down) => {
+                    move_selection(&mut self.help_selection, len, action == Some(Action::Down));
+                }
+                Some(Action::PageUp | Action::PageDown) => {
+                    move_selection_page(
+                        &mut self.help_selection,
+                        len,
+                        self.page_size,
+                        action == Some(Action::PageDown),
+                    );
+                }
+                Some(Action::First) => self.help_selection.select((len != 0).then_some(0)),
+                Some(Action::Last) => self.help_selection.select(len.checked_sub(1)),
+                _ => return KeyAction::Ignored,
+            }
+            self.mark_local_change();
+            return KeyAction::Ignored;
+        }
+        // The query editor owns all printable characters, including keys that
+        // control playback elsewhere. Control/Alt/Super chords are never text.
+        if context == KeyboardContext::TuiSearchQuery
+            && !key.modifiers.intersects(
+                KeyModifiers::CONTROL
+                    | KeyModifiers::ALT
+                    | KeyModifiers::SUPER
+                    | KeyModifiers::HYPER
+                    | KeyModifiers::META,
+            )
+            && let KeyCode::Char(character) = key.code
+        {
+            if let View::Search(search) = &mut self.view {
+                search.query.push(character);
+                search.filter(Instant::now());
+            }
             self.cancel_query();
             self.mark_local_change();
             return KeyAction::Ignored;
         }
-        // A failed demand stays failed until explicit retry or a different key/demand.
-        if key.code == KeyCode::Char('?') {
-            self.show_help = !self.show_help;
-            self.mark_local_change();
+        let Some(action) = resolve_key(key, context) else {
             return KeyAction::Ignored;
-        }
-        if !matches!(self.view, View::Search(_)) {
-            match key.code {
-                KeyCode::Char('/') => return KeyAction::Search,
-                KeyCode::Char('t') => return KeyAction::Tree,
-                KeyCode::Char('P') => {
-                    self.view = View::Playlists(PagedList::default());
-                    self.cancel_query();
-                    self.mark_local_change();
-                    return KeyAction::Ignored;
-                }
-                _ => {}
+        };
+        match action {
+            Action::Help => {
+                self.show_help = true;
+                self.help_selection = ListState::default().with_selected(Some(0));
+                self.mark_local_change();
+                return KeyAction::Ignored;
             }
+            Action::Retry => {
+                self.cancel_query();
+                self.mark_local_change();
+                return KeyAction::Ignored;
+            }
+            Action::Close => return KeyAction::Quit,
+            Action::Search => return KeyAction::Search,
+            Action::Library => return KeyAction::Tree,
+            Action::Playlists => {
+                self.view = View::Playlists(PagedList::default());
+                self.cancel_query();
+                self.mark_local_change();
+                return KeyAction::Ignored;
+            }
+            _ => {}
+        }
+        if let Some(command) = keyboard::playback_command(action, &state.playback) {
+            return KeyAction::Command(command);
         }
         let page_size = self.page_size;
         let view = std::mem::take(&mut self.view);
@@ -1176,46 +1242,37 @@ impl UiState {
         let mut command = None;
         match view {
             View::Search(mut search) => {
-                let close = key.code == KeyCode::Esc;
-                if !close {
-                    match key.code {
-                        KeyCode::Tab => {
-                            search.focus = match search.focus {
-                                SearchFocus::Query => SearchFocus::Results,
-                                SearchFocus::Results => SearchFocus::Query,
-                            };
-                            changed = true;
-                        }
-                        KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown
-                            if search.focus == SearchFocus::Results =>
-                        {
-                            changed = search.results.navigate(key.code, page_size);
-                        }
-                        KeyCode::Enter if search.focus == SearchFocus::Results => {
-                            command = search
-                                .results
-                                .selected()
-                                .map(|track| Command::Play { track_id: track.id });
-                        }
-                        KeyCode::Enter => {
-                            search.focus = SearchFocus::Results;
-                            changed = true;
-                        }
-                        KeyCode::Backspace if search.focus == SearchFocus::Query => {
-                            if search.query.pop().is_some() {
-                                search.filter(Instant::now());
-                                self.cancel_query();
-                                changed = true;
-                            }
-                        }
-                        KeyCode::Char(character) if search.focus == SearchFocus::Query => {
-                            search.query.push(character);
+                let close = action == Action::Cancel && search.focus == SearchFocus::Query;
+                match action {
+                    Action::Traverse => {
+                        search.focus = match search.focus {
+                            SearchFocus::Query => SearchFocus::Results,
+                            SearchFocus::Results => SearchFocus::Query,
+                        };
+                        changed = true;
+                    }
+                    Action::Cancel if !close => {
+                        search.focus = SearchFocus::Query;
+                        changed = true;
+                    }
+                    Action::Activate if search.focus == SearchFocus::Results => {
+                        command = search
+                            .results
+                            .selected()
+                            .map(|track| Command::Play { track_id: track.id });
+                    }
+                    Action::Activate => {
+                        search.focus = SearchFocus::Results;
+                        changed = true;
+                    }
+                    Action::Backspace => {
+                        if search.query.pop().is_some() {
                             search.filter(Instant::now());
                             self.cancel_query();
                             changed = true;
                         }
-                        _ => {}
                     }
+                    _ => changed = search.results.navigate_action(action, page_size),
                 }
                 self.view = if close {
                     self.cancel_query();
@@ -1226,68 +1283,63 @@ impl UiState {
                 changed |= close;
             }
             View::Tree(mut tree) => {
-                let close = key.code == KeyCode::Esc;
-                if !close {
-                    match key.code {
-                        KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown => {
-                            changed = tree.entries.navigate(key.code, page_size);
-                        }
-                        KeyCode::Enter => {
-                            let directory = tree.directory.clone();
-                            command = tree.activate();
-                            changed = tree.directory != directory;
-                            if changed {
-                                self.cancel_query();
-                            }
-                        }
-                        KeyCode::Backspace | KeyCode::Left => {
-                            changed = tree.parent();
-                            if changed {
-                                self.cancel_query();
-                            }
-                        }
-                        _ => {
-                            self.view = View::Tree(tree);
-                            return key_action(key, state);
+                let mut close = false;
+                match action {
+                    Action::Cancel | Action::Parent => {
+                        changed = tree.parent();
+                        close = action == Action::Cancel && !changed;
+                        if changed || close {
+                            self.cancel_query();
                         }
                     }
+                    Action::Activate | Action::Expand => {
+                        let directory = tree.directory.clone();
+                        if action == Action::Activate
+                            || matches!(
+                                tree.entries.selected(),
+                                Some(DirectoryRow::Directory { .. })
+                            )
+                        {
+                            command = tree.activate();
+                        }
+                        changed = tree.directory != directory;
+                        if changed {
+                            self.cancel_query();
+                        }
+                    }
+                    _ => changed = tree.entries.navigate_action(action, page_size),
                 }
-                self.view = if close {
-                    self.cancel_query();
-                    View::Queue
-                } else {
-                    View::Tree(tree)
-                };
+                self.view = if close { View::Queue } else { View::Tree(tree) };
                 changed |= close;
             }
             View::PlaylistDetail {
                 playlists,
                 mut detail,
             } => {
-                let close = matches!(key.code, KeyCode::Esc | KeyCode::Left);
-                if !close {
-                    match key.code {
-                        KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown => {
-                            changed = detail.entries.navigate(key.code, page_size);
-                            if changed {
-                                detail.entry_anchor = None;
-                                detail.selected_entry_id =
-                                    detail.entries.selected().map(|entry| entry.id);
-                            }
-                        }
-                        KeyCode::Enter => {
-                            command = detail.entries.selected().map(|entry| Command::Play {
-                                track_id: entry.track_id,
-                            });
-                        }
-                        KeyCode::Char('a') => {
-                            command = detail.entries.selected().map(|entry| Command::Enqueue {
-                                track_ids: vec![entry.track_id],
-                            });
-                        }
-                        _ => {
-                            self.view = View::PlaylistDetail { playlists, detail };
-                            return key_action(key, state);
+                let close = matches!(action, Action::Cancel | Action::Parent);
+                match action {
+                    Action::Activate => {
+                        command = detail.entries.selected().map(|entry| Command::Play {
+                            track_id: entry.track_id,
+                        })
+                    }
+                    Action::Enqueue => {
+                        command = detail.entries.selected().map(|entry| Command::Enqueue {
+                            track_ids: vec![entry.track_id],
+                        })
+                    }
+                    Action::Remove => {
+                        command = detail
+                            .entries
+                            .selected()
+                            .map(|entry| Command::RemovePlaylistEntry { entry_id: entry.id })
+                    }
+                    _ => {
+                        changed = detail.entries.navigate_action(action, page_size);
+                        if changed {
+                            detail.entry_anchor = None;
+                            detail.selected_entry_id =
+                                detail.entries.selected().map(|entry| entry.id);
                         }
                     }
                 }
@@ -1304,40 +1356,32 @@ impl UiState {
                 changed |= close;
             }
             View::Playlists(mut playlists) => {
-                let close = key.code == KeyCode::Esc;
-                if !close {
-                    match key.code {
-                        KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown => {
-                            changed = playlists.navigate(key.code, page_size);
-                        }
-                        KeyCode::Right => {
-                            if let Some(playlist) = playlists.selected() {
-                                let detail = PlaylistDetail {
-                                    playlist_id: playlist.id,
-                                    name: playlist.name.clone(),
-                                    entries: PagedList::default(),
-                                    entry_anchor: None,
-                                    selected_entry_id: None,
-                                };
-                                self.view = View::PlaylistDetail {
-                                    playlists: (playlists.selection, playlists.viewport_rows),
-                                    detail,
-                                };
-                                self.cancel_query();
-                                self.mark_local_change();
-                                return KeyAction::Ignored;
-                            }
-                        }
-                        KeyCode::Enter => {
-                            command = playlists.selected().map(|playlist| Command::PlayPlaylist {
+                let close = action == Action::Cancel;
+                match action {
+                    Action::Expand => {
+                        if let Some(playlist) = playlists.selected() {
+                            let detail = PlaylistDetail {
                                 playlist_id: playlist.id,
-                            });
-                        }
-                        _ => {
-                            self.view = View::Playlists(playlists);
-                            return key_action(key, state);
+                                name: playlist.name.clone(),
+                                entries: PagedList::default(),
+                                entry_anchor: None,
+                                selected_entry_id: None,
+                            };
+                            self.view = View::PlaylistDetail {
+                                playlists: (playlists.selection, playlists.viewport_rows),
+                                detail,
+                            };
+                            self.cancel_query();
+                            self.mark_local_change();
+                            return KeyAction::Ignored;
                         }
                     }
+                    Action::Activate => {
+                        command = playlists.selected().map(|playlist| Command::PlayPlaylist {
+                            playlist_id: playlist.id,
+                        })
+                    }
+                    _ => changed = playlists.navigate_action(action, page_size),
                 }
                 self.view = if close {
                     self.cancel_query();
@@ -1347,35 +1391,32 @@ impl UiState {
                 };
                 changed |= close;
             }
-            View::Queue => {
-                changed = match key.code {
-                    KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown => {
-                        let changed = self.queue.navigate(key.code, page_size);
-                        if changed {
-                            self.queue_anchor = None;
-                            self.queue_selected_id = self.queue.selected().map(|row| row.id);
-                        }
-                        changed
+            View::Queue => match action {
+                Action::Activate => {
+                    command = self
+                        .queue
+                        .selected()
+                        .map(|entry| Command::PlayQueue { queue_id: entry.id })
+                }
+                Action::Remove => {
+                    command = self
+                        .queue
+                        .selected()
+                        .map(|entry| Command::RemoveQueue { queue_id: entry.id })
+                }
+                _ => {
+                    changed = self.queue.navigate_action(action, page_size);
+                    if changed {
+                        self.queue_anchor = None;
+                        self.queue_selected_id = self.queue.selected().map(|row| row.id);
                     }
-                    KeyCode::Enter => {
-                        command = self
-                            .queue
-                            .selected()
-                            .map(|entry| Command::PlayQueue { queue_id: entry.id });
-                        false
-                    }
-                    KeyCode::Char('d') | KeyCode::Delete => {
-                        command = self
-                            .queue
-                            .selected()
-                            .map(|entry| Command::RemoveQueue { queue_id: entry.id });
-                        false
-                    }
-                    _ => return key_action(key, state),
-                };
-            }
+                }
+            },
         }
         if changed {
+            if matches!(action, Action::First | Action::Last) {
+                self.cancel_query();
+            }
             self.mark_local_change();
         }
         command.map_or(KeyAction::Ignored, KeyAction::Command)
@@ -1482,20 +1523,30 @@ impl<T> PagedList<T> {
             .retain(|offset, _| (first..=last).contains(offset));
     }
 
-    fn navigate(&mut self, key: KeyCode, page_size: usize) -> bool {
+    fn navigate_action(&mut self, action: Action, page_size: usize) -> bool {
         if !self.loaded {
             return false;
         }
-        let changed = match key {
-            KeyCode::Up | KeyCode::Down => {
-                move_selection(&mut self.selection, self.total, key == KeyCode::Down)
+        let changed = match action {
+            Action::Up | Action::Down => {
+                move_selection(&mut self.selection, self.total, action == Action::Down)
             }
-            KeyCode::PageUp | KeyCode::PageDown => move_selection_page(
+            Action::PageUp | Action::PageDown => move_selection_page(
                 &mut self.selection,
                 self.total,
                 page_size,
-                key == KeyCode::PageDown,
+                action == Action::PageDown,
             ),
+            Action::First | Action::Last => {
+                let next = if action == Action::First {
+                    (self.total != 0).then_some(0)
+                } else {
+                    self.total.checked_sub(1)
+                };
+                let changed = next != self.selection.selected();
+                self.selection.select(next);
+                changed
+            }
             _ => false,
         };
         self.set_viewport(self.viewport_rows);
@@ -1677,36 +1728,93 @@ enum KeyAction {
     Ignored,
 }
 
-fn key_action(key: KeyEvent, state: &TuiSnapshot) -> KeyAction {
-    if key.code == KeyCode::Char('q') {
-        return KeyAction::Quit;
+fn resolve_key(key: KeyEvent, context: KeyboardContext) -> Option<Action> {
+    if key
+        .modifiers
+        .intersects(KeyModifiers::HYPER | KeyModifiers::META)
+    {
+        return None;
     }
-
+    let modifiers = Modifiers {
+        control: key.modifiers.contains(KeyModifiers::CONTROL),
+        alt: key.modifiers.contains(KeyModifiers::ALT),
+        shift: key.modifiers.contains(KeyModifiers::SHIFT) || key.code == KeyCode::BackTab,
+        platform: key.modifiers.contains(KeyModifiers::SUPER),
+        function: false,
+    };
     let mut encoded = [0_u8; 4];
-    let key_name = match key.code {
+    let name = match key.code {
         KeyCode::Char(' ') => "space",
-        KeyCode::Char(character) => {
-            let bytes = character.encode_utf8(&mut encoded).as_bytes();
-            std::str::from_utf8(bytes).expect("char encoding is valid UTF-8")
-        }
+        KeyCode::Char(character) => character.encode_utf8(&mut encoded),
         KeyCode::Left => "left",
         KeyCode::Right => "right",
+        KeyCode::Up => "up",
+        KeyCode::Down => "down",
         KeyCode::Home => "home",
         KeyCode::End => "end",
-        _ => return KeyAction::Ignored,
+        KeyCode::PageUp => "pageup",
+        KeyCode::PageDown => "pagedown",
+        KeyCode::Enter => "enter",
+        KeyCode::Esc => "escape",
+        KeyCode::Tab | KeyCode::BackTab => "tab",
+        KeyCode::Backspace => "backspace",
+        KeyCode::Delete => "delete",
+        KeyCode::F(1) => "f1",
+        KeyCode::F(5) => "f5",
+        _ => return None,
     };
-    playback_key_command(key_name, &state.playback).map_or(KeyAction::Ignored, KeyAction::Command)
+    keyboard::resolve(name, modifiers, context)
+}
+
+fn help_bindings(context: KeyboardContext) -> impl Iterator<Item = &'static keyboard::Binding> {
+    keyboard::bindings(context).chain(keyboard::bindings(KeyboardContext::TuiHelp).filter(
+        move |binding| {
+            !keyboard::bindings(context).any(|existing| std::ptr::eq(existing, *binding))
+        },
+    ))
 }
 
 fn draw_loading(frame: &mut ratatui::Frame<'_>, i18n: &Localizer) {
+    let close = keyboard::bindings(KeyboardContext::TuiQueue)
+        .find(|binding| binding.action == Action::Close)
+        .expect("Terminal exit binding");
     frame.render_widget(
-        Paragraph::new(i18n.text("terminal-connecting"))
-            .block(Block::default().title("Rivu").borders(Borders::ALL)),
+        Paragraph::new(format!(
+            "{}\n{}  {}",
+            i18n.text("terminal-connecting"),
+            close.label,
+            i18n.text(close.description)
+        ))
+        .block(Block::default().title("Rivu").borders(Borders::ALL)),
         frame.area(),
     );
 }
 
 fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut UiState) {
+    if ui.show_help {
+        let context = ui.keyboard_context();
+        let items: Vec<_> = help_bindings(context)
+            .map(|binding| {
+                ListItem::new(format!(
+                    "{:<22} {}",
+                    binding.label,
+                    ui.i18n.text(binding.description)
+                ))
+            })
+            .collect();
+        ui.page_size = frame.area().height.saturating_sub(2).max(1) as usize;
+        let mut block = Block::default()
+            .title(ui.i18n.text("terminal-keys"))
+            .borders(Borders::ALL);
+        if context == KeyboardContext::TuiSearchQuery {
+            block = block.title_bottom(ui.i18n.text("keyboard-query-input"));
+        }
+        let list = List::new(items)
+            .block(block)
+            .highlight_style(Style::default().fg(Color::Yellow));
+        frame.render_stateful_widget(list, frame.area(), &mut ui.help_selection);
+        return;
+    }
     let i18n = &ui.i18n;
     let area = frame.area();
     let outer = Layout::default()
@@ -1740,17 +1848,10 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut UiState) {
         .block(Block::default().borders(Borders::BOTTOM)),
         outer[0],
     );
-    let columns = if ui.show_help {
-        Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
-            .split(outer[1])
-    } else {
-        Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(100)])
-            .split(outer[1])
-    };
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(100)])
+        .split(outer[1]);
     if matches!(&ui.view, View::Search(_)) {
         ui.page_size = columns[0].height.saturating_sub(5).max(1) as usize;
     } else {
@@ -1783,21 +1884,6 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut UiState) {
             .ratio(ratio),
         outer[2],
     );
-    let keys = i18n.text(match &ui.view {
-        View::Search(_) => "terminal-help-search",
-        View::Tree(_) => "terminal-help-tree",
-        View::PlaylistDetail { .. } => "terminal-help-playlist",
-        View::Playlists(_) => "terminal-help-playlists",
-        View::Queue => "terminal-help-queue",
-    });
-    if ui.show_help {
-        let help = Paragraph::new(keys).wrap(Wrap { trim: true }).block(
-            Block::default()
-                .title(i18n.text("terminal-keys"))
-                .borders(Borders::ALL),
-        );
-        frame.render_widget(help, columns[1]);
-    }
     let status = format!(
         "󰕾 {:>3}% 󰒝 {} 󰑖 {} 󰘦 {}",
         (state.playback.volume * 100.0).round() as u8,
@@ -1817,14 +1903,14 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut UiState) {
         Paragraph::new(status).style(Style::default().fg(Color::Rgb(86, 95, 137))),
         status_columns[0],
     );
-    let prompt = ui.message.as_ref().map_or(
-        if ui.show_help {
-            i18n.text("terminal-close-help")
-        } else {
-            i18n.text("terminal-open-help")
-        },
-        |notice| notice.text.as_str(),
-    );
+    let help = keyboard::bindings(ui.keyboard_context())
+        .find(|binding| binding.action == Action::Help)
+        .expect("Every terminal context declares help");
+    let help_prompt = format!("{}  {}", help.label, i18n.text(help.description));
+    let prompt = ui
+        .message
+        .as_ref()
+        .map_or(help_prompt.as_str(), |notice| notice.text.as_str());
     frame.render_widget(
         Paragraph::new(prompt)
             .alignment(Alignment::Right)
@@ -2356,14 +2442,6 @@ mod tests {
         terminal
             .draw(|frame| draw_queue(frame, frame.area(), &state, &mut tui.ui.queue, &tui.ui.i18n))
             .unwrap();
-        let text: String = terminal
-            .backend()
-            .buffer()
-            .content
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect();
-        assert!(text.contains("Queue — empty; / to search, t to browse"));
     }
 
     #[test]
@@ -2416,8 +2494,7 @@ mod tests {
                 .apply_query(&state, &request, Err("queue unavailable".into()))
         );
         assert!(tui.ui.query_request(&state).is_none());
-        tui.ui
-            .key_action(KeyEvent::from(KeyCode::Char('R')), &state);
+        tui.ui.key_action(KeyEvent::from(KeyCode::F(5)), &state);
         let retried = tui.ui.query_request(&state).unwrap();
         assert_eq!(retried.stamp, request.stamp);
         assert_ne!(retried.generation, request.generation);
@@ -2845,7 +2922,7 @@ mod tests {
         assert!(tui.ui.query_request(&next).is_none());
         tui.ui.key_action(KeyEvent::from(KeyCode::Char('?')), &next);
         assert!(tui.ui.query_request(&next).is_none());
-        tui.ui.key_action(KeyEvent::from(KeyCode::Char('R')), &next);
+        tui.ui.key_action(KeyEvent::from(KeyCode::F(5)), &next);
         let retried = tui.ui.query_request(&next).unwrap();
         assert_eq!(retried.stamp, request.stamp);
         assert_ne!(retried.generation, request.generation);
@@ -3030,11 +3107,11 @@ mod tests {
                             .all(|index| list.get(index) == Some(&index))
                     );
                     let before = list.selection.selected().unwrap();
-                    list.navigate(
+                    list.navigate_action(
                         if down {
-                            KeyCode::PageDown
+                            Action::PageDown
                         } else {
-                            KeyCode::PageUp
+                            Action::PageUp
                         },
                         10,
                     );
@@ -3117,7 +3194,7 @@ mod tests {
         ui.requested = Some(request.clone());
         assert!(ui.apply_query(&state, &request, Err("connection failed".into())));
         assert!(ui.query_request(&state).is_none());
-        ui.key_action(KeyEvent::from(KeyCode::Char('R')), &state);
+        ui.key_action(KeyEvent::from(KeyCode::F(5)), &state);
         let retried = ui.query_request(&state).unwrap();
         assert_eq!(retried.stamp, request.stamp);
         assert_ne!(retried.generation, request.generation);
@@ -3597,7 +3674,7 @@ mod tests {
             ..UiState::default()
         };
         ui.key_action(KeyEvent::from(KeyCode::Enter), &state);
-        ui.key_action(KeyEvent::from(KeyCode::Backspace), &state);
+        ui.key_action(KeyEvent::from(KeyCode::Esc), &state);
         let View::Tree(tree) = &mut ui.view else {
             panic!("expected parent directory")
         };
@@ -3651,5 +3728,197 @@ mod tests {
         playlists.set_viewport(10);
         assert_eq!(playlists.selection.selected(), Some(34));
         assert_eq!(playlists.selection.offset(), 30);
+    }
+
+    #[test]
+    fn query_editor_keeps_printable_shortcuts_and_rejects_modified_text() {
+        let state = TuiSnapshot::default();
+        let mut ui = UiState {
+            view: View::Search(LibrarySearch::default()),
+            ..UiState::default()
+        };
+        for character in "R? q Aa/[]!春".chars() {
+            assert!(matches!(
+                ui.key_action(KeyEvent::from(KeyCode::Char(character)), &state),
+                KeyAction::Ignored
+            ));
+        }
+        for modifiers in [
+            KeyModifiers::CONTROL,
+            KeyModifiers::ALT,
+            KeyModifiers::SUPER,
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        ] {
+            ui.key_action(KeyEvent::new(KeyCode::Char('q'), modifiers), &state);
+            ui.key_action(KeyEvent::new(KeyCode::Backspace, modifiers), &state);
+        }
+        let View::Search(search) = &ui.view else {
+            panic!("query stays open")
+        };
+        assert_eq!(search.query, "R? q Aa/[]!春");
+        ui.key_action(KeyEvent::from(KeyCode::BackTab), &state);
+        assert!(matches!(&ui.view, View::Search(search) if search.focus == SearchFocus::Results));
+        assert!(matches!(
+            ui.key_action(KeyEvent::from(KeyCode::Char('q')), &state),
+            KeyAction::Ignored
+        ));
+        assert!(matches!(
+            ui.key_action(KeyEvent::from(KeyCode::Char(' ')), &state),
+            KeyAction::Command(Command::Toggle)
+        ));
+        ui.key_action(KeyEvent::from(KeyCode::Esc), &state);
+        assert!(matches!(&ui.view, View::Search(search) if search.focus == SearchFocus::Query));
+        ui.key_action(KeyEvent::from(KeyCode::Esc), &state);
+        assert!(matches!(ui.view, View::Queue));
+    }
+
+    #[test]
+    fn help_scrolls_every_binding_without_touching_the_underlying_queue() {
+        for language in ["en-US", "zh-CN"] {
+            let state = TuiSnapshot::default();
+            let mut ui = UiState::new(Arc::new(Localizer::new(language)));
+            ui.queue.total = 100;
+            ui.queue.loaded = true;
+            ui.queue.selection.select(Some(7));
+            ui.key_action(KeyEvent::from(KeyCode::F(1)), &state);
+            let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+            let mut visible = String::new();
+            for _ in 0..help_bindings(KeyboardContext::TuiQueue).count() {
+                terminal.draw(|frame| draw(frame, &state, &mut ui)).unwrap();
+                visible.push_str(&terminal_text(&terminal));
+                ui.key_action(KeyEvent::from(KeyCode::Down), &state);
+            }
+            for binding in keyboard::bindings(KeyboardContext::TuiQueue) {
+                assert!(
+                    visible.contains(ui.i18n.text(binding.description)),
+                    "{}",
+                    binding.description
+                );
+            }
+            for key in [
+                KeyCode::Home,
+                KeyCode::End,
+                KeyCode::PageUp,
+                KeyCode::PageDown,
+                KeyCode::Up,
+                KeyCode::Down,
+                KeyCode::Char('q'),
+                KeyCode::Enter,
+                KeyCode::Delete,
+            ] {
+                assert!(matches!(
+                    ui.key_action(KeyEvent::from(key), &state),
+                    KeyAction::Ignored
+                ));
+            }
+            assert_eq!(ui.queue.selection.selected(), Some(7));
+            assert!(ui.show_help);
+            ui.key_action(KeyEvent::from(KeyCode::Esc), &state);
+            assert!(!ui.show_help);
+            assert_eq!(ui.queue.selection.selected(), Some(7));
+        }
+    }
+
+    #[test]
+    fn boundary_navigation_queries_unloaded_pages_and_rejects_old_demands() {
+        let mut state = TuiSnapshot::default();
+        state.queue.total = 100;
+        state.system.page_size = 3;
+        let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::new("en-US")));
+        let old = tui.ui.query_request(&state).unwrap();
+        tui.ui.key_action(KeyEvent::from(KeyCode::End), &state);
+        let last = tui.ui.query_request(&state).unwrap();
+        assert_eq!(last.offset, 99);
+        assert!(!tui.ui.apply_query(&state, &old, Ok(response(&old, 100))));
+        tui.ui.key_action(KeyEvent::from(KeyCode::Home), &state);
+        let first = tui.ui.query_request(&state).unwrap();
+        assert_eq!(first.offset, 0);
+        assert_ne!(first.generation, old.generation);
+        assert!(!tui.ui.apply_query(&state, &last, Ok(response(&last, 100))));
+        assert!(!tui.ui.apply_query(&state, &old, Ok(response(&old, 100))));
+        assert!(
+            tui.ui
+                .apply_query(&state, &first, Ok(response(&first, 100)))
+        );
+    }
+
+    #[test]
+    fn terminal_routes_playback_chords_and_exit_without_stopping_core() {
+        let state = TuiSnapshot {
+            playback: crate::model::PlaybackState {
+                status: PlaybackStatus::Playing,
+                position: 12.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut ui = UiState::default();
+        assert!(
+            matches!(ui.key_action(KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL), &state), KeyAction::Command(Command::Seek { seconds }) if seconds == 7.0)
+        );
+        assert!(matches!(
+            ui.key_action(KeyEvent::from(KeyCode::Char(' ')), &state),
+            KeyAction::Command(Command::Toggle)
+        ));
+        for key in [
+            KeyCode::Left,
+            KeyCode::Right,
+            KeyCode::Char('d'),
+            KeyCode::Char('?'),
+            KeyCode::Char('R'),
+        ] {
+            assert!(matches!(
+                ui.key_action(KeyEvent::from(key), &state),
+                KeyAction::Ignored
+            ));
+        }
+        for modifiers in [
+            KeyModifiers::CONTROL,
+            KeyModifiers::ALT,
+            KeyModifiers::SHIFT,
+            KeyModifiers::SUPER,
+        ] {
+            assert_eq!(
+                resolve_key(
+                    KeyEvent::new(KeyCode::Char('q'), modifiers),
+                    KeyboardContext::TuiQueue
+                ),
+                None
+            );
+            assert!(matches!(
+                ui.key_action(KeyEvent::new(KeyCode::Char('q'), modifiers), &state),
+                KeyAction::Ignored
+            ));
+        }
+        assert!(matches!(
+            ui.key_action(KeyEvent::from(KeyCode::Char('q')), &state),
+            KeyAction::Quit
+        ));
+    }
+
+    #[test]
+    fn playlist_removal_targets_the_selected_entry_only() {
+        let state = query_snapshot();
+        let mut ui = UiState {
+            view: playlist_view(1),
+            ..UiState::default()
+        };
+        load_visible(&mut ui, &state);
+        ui.key_action(KeyEvent::from(KeyCode::Down), &state);
+        assert!(matches!(
+            ui.key_action(KeyEvent::from(KeyCode::Delete), &state),
+            KeyAction::Command(Command::RemovePlaylistEntry { entry_id: 1 })
+        ));
+        assert!(matches!(
+            ui.key_action(
+                KeyEvent::new(KeyCode::Delete, KeyModifiers::CONTROL),
+                &state
+            ),
+            KeyAction::Ignored
+        ));
+        assert!(matches!(
+            ui.key_action(KeyEvent::from(KeyCode::Char('d')), &state),
+            KeyAction::Ignored
+        ));
     }
 }

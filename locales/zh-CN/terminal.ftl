@@ -7,18 +7,14 @@ terminal-stopped = 已停止
 terminal-now-playing = 正在播放：{ $artist } — { $title }
 terminal-queue-added = 已加入队列
 terminal-queue-removed = 已移出队列
-terminal-connecting =
-    正在连接核心…
-    按 q 退出
+terminal-connecting = 正在连接核心…
 terminal-nothing-playing = 暂无播放
 terminal-keys = 快捷键
 terminal-on = 开
 terminal-off = 关
 terminal-repeat-all = 全部
 terminal-repeat-one = 单曲
-terminal-close-help = ?  关闭帮助
-terminal-open-help = ?  帮助
-terminal-empty-queue = 队列为空；/ 搜索，t 浏览
+terminal-empty-queue = 队列为空
 terminal-queue-loading = 队列 — { $selected }/{ $total } — 加载中
 terminal-queue-range = 队列 — { $selected }/{ $total }
 terminal-page-loading = { $title } — 加载中
@@ -28,84 +24,47 @@ terminal-playlist-name = 播放列表 — { $name }
 terminal-playlists = 播放列表
 terminal-playlist-count = { $name }  （{ $count } 首）
 terminal-missing-suffix = { " " }[文件缺失]
-terminal-query-to-results = 搜索 — Tab 切换到结果
+terminal-query-to-results = 搜索
 terminal-query = 搜索
 terminal-library = 音乐库
-terminal-library-focus = 音乐库 — Tab 切换焦点
+terminal-library-focus = 音乐库
 terminal-library-tree = 音乐库目录
 terminal-library-directory = 音乐库目录 — { $path }
-terminal-help-search =
-    输入      搜索音乐库
-    Tab       切换搜索框/结果
-    ↑/↓       选择结果
-    PgUp/Dn   翻页
-    R         重新加载
-    Backspace 删除字符
-    Enter     切到结果/播放选中曲目
-    Esc       返回队列
-
-    匹配标题、艺人、专辑和路径。
-terminal-help-tree =
-    ↑/↓       选择条目
-    PgUp/Dn   翻页
-    R         重新加载
-    Enter     打开目录/播放曲目
-    Backspace/← 上级目录
-    Esc       返回队列
-    /         搜索音乐库
-    P         播放列表
-    空格      播放/暂停
-    n/p       下一首/上一首
-    →         快进 5 秒
-    Home/End  跳到开头/结尾
-    r         循环模式
-    s         随机播放
-    { "[/]" }       音量
-    q         退出
-terminal-help-playlist =
-    ↑/↓       选择曲目
-    PgUp/Dn   翻页
-    R         重新加载
-    Enter     播放曲目
-    a         加入队列
-    ←/Esc     返回播放列表
-    空格      播放/暂停
-    n/p       下一首/上一首
-    Home/End  跳到开头/结尾
-    r         循环模式
-    s         随机播放
-    { "[/]" }       音量
-    q         退出
-terminal-help-playlists =
-    ↑/↓       选择播放列表
-    PgUp/Dn   翻页
-    R         重新加载
-    →         打开播放列表
-    Enter     播放列表
-    Esc       返回队列
-    P         播放列表
-    /         搜索音乐库
-    t         浏览目录
-    空格      播放/暂停
-    n/p       下一首/上一首
-    Home/End  跳到开头/结尾
-    r         循环模式
-    s         随机播放
-    { "[/]" }       音量
-    q         退出
-terminal-help-queue =
-    ↑/↓       选择曲目
-    PgUp/Dn   翻页
-    R         重新加载
-    Enter     播放所选曲目
-    d/Del     移出队列
-    /         搜索音乐库
-    t         浏览目录
-    P         播放列表
-    空格      播放/暂停
-    ←/→       快退/快进 5 秒
-    Home/End  跳到开头/结尾
-    r         循环模式
-    s         随机播放
-    { "[/]" }       音量
-    q         退出
+keyboard-help = 打开或关闭键盘帮助
+keyboard-retry = 重试加载当前视图
+keyboard-cancel = 返回上一层
+keyboard-close = 离开当前前端，核心继续播放
+keyboard-search = 搜索当前列表
+keyboard-library = 浏览音乐库目录
+keyboard-playlists = 浏览播放列表
+keyboard-toggle = 播放／暂停
+keyboard-next = 下一首
+keyboard-previous = 上一首
+keyboard-volume-down = 音量降低 5 个百分点
+keyboard-volume-up = 音量提高 5 个百分点
+keyboard-repeat = 切换循环模式
+keyboard-shuffle = 切换随机播放
+keyboard-seek-backward = 后退 5 秒
+keyboard-seek-forward = 前进 5 秒
+keyboard-seek-start = 跳到曲目开头
+keyboard-seek-end = 跳到曲目结尾
+keyboard-up = 向上移动
+keyboard-down = 向下移动
+keyboard-first = 跳到第一项
+keyboard-last = 跳到最后一项
+keyboard-page-up = 向上翻页
+keyboard-page-down = 向下翻页
+keyboard-activate = 打开或播放当前对象
+keyboard-remove = 移除所选条目，保留媒体文件
+keyboard-parent = 返回上级
+keyboard-expand = 打开所选容器
+keyboard-enqueue = 将所选曲目加入队列
+keyboard-traverse = 切换焦点
+keyboard-select-all = 全选条目
+keyboard-extend-up = 向上扩展选择
+keyboard-extend-down = 向下扩展选择
+keyboard-add-extend-up = 向选择中追加上方范围
+keyboard-add-extend-down = 向选择中追加下方范围
+keyboard-backspace = 删除搜索词的前一个字符
+keyboard-library-search = 搜索音乐库
+keyboard-query-input = 输入文本以搜索标题、艺人、专辑和路径

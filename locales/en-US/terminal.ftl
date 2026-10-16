@@ -7,18 +7,14 @@ terminal-stopped = Stopped
 terminal-now-playing = Now playing: { $artist } — { $title }
 terminal-queue-added = Added to queue
 terminal-queue-removed = Removed from queue
-terminal-connecting =
-    Connecting to core…
-    q to quit
+terminal-connecting = Connecting to core…
 terminal-nothing-playing = Nothing playing
 terminal-keys = Keys
 terminal-on = on
 terminal-off = off
 terminal-repeat-all = all
 terminal-repeat-one = one
-terminal-close-help = ?  close help
-terminal-open-help = ?  help
-terminal-empty-queue = Queue — empty; / to search, t to browse
+terminal-empty-queue = Queue — empty
 terminal-queue-loading = Queue — { $selected }/{ $total } — loading
 terminal-queue-range = Queue — { $selected }/{ $total }
 terminal-page-loading = { $title } — loading
@@ -31,84 +27,47 @@ terminal-playlist-count = { $name }  ({ $count ->
    *[other] { $count } tracks
     })
 terminal-missing-suffix = { " " }[missing]
-terminal-query-to-results = Search query — Tab to results
+terminal-query-to-results = Search query
 terminal-query = Search query
 terminal-library = Library
-terminal-library-focus = Library — Tab to focus
+terminal-library-focus = Library
 terminal-library-tree = Library tree
 terminal-library-directory = Library tree — { $path }
-terminal-help-search =
-    Type      search library
-    Tab       query/results focus
-    ↑/↓       select result
-    PgUp/Dn   scroll screen
-    R         retry loading
-    Backspace edit query
-    Enter     focus results/play selected
-    Esc       return to queue
-
-    Search matches title, artist, album and path.
-terminal-help-tree =
-    ↑/↓       select entry
-    PgUp/Dn   scroll screen
-    R         retry loading
-    Enter     open directory/play track
-    Backspace/← parent directory
-    Esc       return to queue
-    /         search library
-    P         playlists
-    Space     play/pause
-    n/p       next/previous
-    →         seek forward 5 sec
-    Home/End  seek start/end
-    r         repeat mode
-    s         shuffle
-    { "[/]" }       volume
-    q         quit
-terminal-help-playlist =
-    ↑/↓       select track
-    PgUp/Dn   scroll screen
-    R         retry loading
-    Enter     play track
-    a         add track to queue
-    ←/Esc     back to playlists
-    Space     play/pause
-    n/p       next/previous
-    Home/End  seek start/end
-    r         repeat mode
-    s         shuffle
-    { "[/]" }       volume
-    q         quit
-terminal-help-playlists =
-    ↑/↓       select playlist
-    PgUp/Dn   scroll screen
-    R         retry loading
-    →         open playlist
-    Enter     play playlist
-    Esc       return to queue
-    P         playlists
-    /         search library
-    t         browse library tree
-    Space     play/pause
-    n/p       next/previous
-    Home/End  seek start/end
-    r         repeat mode
-    s         shuffle
-    { "[/]" }       volume
-    q         quit
-terminal-help-queue =
-    ↑/↓       select queue
-    PgUp/Dn   scroll screen
-    R         retry loading
-    Enter     play selected
-    d/Del     remove selected
-    /         search library
-    t         browse library tree
-    P         playlists
-    Space     play/pause
-    ←/→       seek 5 sec
-    Home/End  seek start/end
-    r         repeat mode
-    s         shuffle
-    { "[/]" }       volume
-    q         quit
+keyboard-help = Show or close keyboard help
+keyboard-retry = Retry loading the current view
+keyboard-cancel = Go back one level
+keyboard-close = Close this frontend; keep core playing
+keyboard-search = Search the current list
+keyboard-library = Browse the library tree
+keyboard-playlists = Browse playlists
+keyboard-toggle = Play / pause
+keyboard-next = Next track
+keyboard-previous = Previous track
+keyboard-volume-down = Lower volume by 5 percentage points
+keyboard-volume-up = Raise volume by 5 percentage points
+keyboard-repeat = Cycle repeat mode
+keyboard-shuffle = Toggle shuffle
+keyboard-seek-backward = Seek backward 5 seconds
+keyboard-seek-forward = Seek forward 5 seconds
+keyboard-seek-start = Seek to the start of the track
+keyboard-seek-end = Seek to the end of the track
+keyboard-up = Move up
+keyboard-down = Move down
+keyboard-first = Go to the first item
+keyboard-last = Go to the last item
+keyboard-page-up = Page up
+keyboard-page-down = Page down
+keyboard-activate = Open or play the current object
+keyboard-remove = Remove selected entries; keep media files
+keyboard-parent = Go to the parent
+keyboard-expand = Open the selected container
+keyboard-enqueue = Add the selected track to the queue
+keyboard-traverse = Move focus
+keyboard-select-all = Select all entries
+keyboard-extend-up = Extend selection upward
+keyboard-extend-down = Extend selection downward
+keyboard-add-extend-up = Add an upward range to the selection
+keyboard-add-extend-down = Add a downward range to the selection
+keyboard-backspace = Delete the previous query character
+keyboard-library-search = Search the library
+keyboard-query-input = Type text to search title, artist, album and path
