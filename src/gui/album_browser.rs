@@ -25,6 +25,7 @@ use super::{
     components::{LIST_ROW_REMS, quiet_icon_button, scrollable_list, track_list_row},
     format_time, icon_button,
     input::{Input, InputEvent},
+    list_interaction::{ContentDrag, ContentMenuRequest, TrackSource},
     paged, panel_surface, panel_toolbar, row,
 };
 
@@ -148,6 +149,8 @@ pub(super) struct AlbumBrowser {
     playback_status: PlaybackStatus,
     _search_subscription: Subscription,
 }
+
+impl EventEmitter<ContentMenuRequest> for AlbumBrowser {}
 
 impl AlbumBrowser {
     pub(super) fn new(
@@ -677,9 +680,12 @@ impl AlbumBrowser {
         let key = album.key.clone();
         let play_key = key.clone();
         let enqueue_key = key.clone();
+        let menu_key = key.clone();
+        let drag_key = key.clone();
         let image = self.covers.get(&index).and_then(|cover| cover.image(cx));
         let directory = key.directory.to_string_lossy().into_owned();
         let title = album_title(&self.i18n, &key);
+        let drag_label: SharedString = title.clone().into();
         let actions = row()
             .id(("album-actions", index))
             .absolute()
@@ -733,6 +739,28 @@ impl AlbumBrowser {
                     this.open(key.clone(), cx);
                 }
             }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |_, event: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    cx.emit(ContentMenuRequest {
+                        source: TrackSource::Album(menu_key.clone()),
+                        position: event.position,
+                        play: Some(Command::PlayAlbum {
+                            key: menu_key.clone(),
+                        }),
+                    });
+                }),
+            )
+            .on_drag(
+                ContentDrag::new(TrackSource::Album(drag_key)),
+                move |_, _, window, cx| {
+                    super::components::begin_list_drag(window, cx);
+                    cx.new(|_| super::components::ListDragPreview {
+                        label: drag_label.clone(),
+                    })
+                },
+            )
             .rounded_md()
             .hover(|style| style.bg(rgb(HIGHLIGHT)))
             .overflow_hidden()
@@ -844,6 +872,7 @@ impl Render for AlbumBrowser {
         if let Some(key) = &self.selected {
             let play_key = key.clone();
             let enqueue_key = key.clone();
+            let menu_key = key.clone();
             header = header
                 .child(icon_button(
                     "albums-back",
@@ -857,6 +886,20 @@ impl Render for AlbumBrowser {
                 ))
                 .child(
                     div()
+                        .id("album-selected-title")
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(move |_, event: &MouseDownEvent, _, cx| {
+                                cx.stop_propagation();
+                                cx.emit(ContentMenuRequest {
+                                    source: TrackSource::Album(menu_key.clone()),
+                                    position: event.position,
+                                    play: Some(Command::PlayAlbum {
+                                        key: menu_key.clone(),
+                                    }),
+                                });
+                            }),
+                        )
                         .flex_1()
                         .min_w_0()
                         .truncate()
@@ -940,6 +983,7 @@ impl Render for AlbumBrowser {
                                             .into_any_element();
                                     };
                                     let id = track.id;
+                                    let drag_label: SharedString = track.title.clone().into();
                                     let marker =
                                         track_marker(this.current_track, this.playback_status, id);
                                     track_list_row(
@@ -960,6 +1004,26 @@ impl Render for AlbumBrowser {
                                             }
                                         },
                                     ))
+                                    .on_mouse_down(
+                                        MouseButton::Right,
+                                        cx.listener(move |_, event: &MouseDownEvent, _, cx| {
+                                            cx.stop_propagation();
+                                            cx.emit(ContentMenuRequest {
+                                                source: TrackSource::Tracks(vec![id]),
+                                                position: event.position,
+                                                play: Some(Command::Play { track_id: id }),
+                                            });
+                                        }),
+                                    )
+                                    .on_drag(
+                                        ContentDrag::new(TrackSource::Tracks(vec![id])),
+                                        move |_, _, window, cx| {
+                                            super::components::begin_list_drag(window, cx);
+                                            cx.new(|_| super::components::ListDragPreview {
+                                                label: drag_label.clone(),
+                                            })
+                                        },
+                                    )
                                     .when(track.missing, |row| {
                                         row.child(caption(this.tr("gl-missing")))
                                     })

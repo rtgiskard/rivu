@@ -252,7 +252,16 @@ impl GuiApp {
                 LibraryNode::Directory(_) => None,
             })
             .collect::<Vec<_>>();
-        ids.sort_unstable();
+        ids.sort_unstable_by_key(|id| {
+            (
+                self.browser
+                    .library
+                    .tree()
+                    .index_of(&LibraryNode::Track(*id))
+                    .unwrap_or(usize::MAX),
+                *id,
+            )
+        });
         ids.dedup();
         ids
     }
@@ -663,6 +672,8 @@ impl GuiApp {
                                             .child(scan.min_h_0().h(gpui::rems(1.5)).w(gpui::rems(1.4))),
                                     )
                                 });
+                            let menu_node = id.clone();
+                            let menu_root = path.clone().filter(|path| this.state.system.config.library_roots.contains(path));
                             let row_view = super::components::lazy_row_tooltip(
                                 super::tree_row(
                                     gpui::ElementId::named_usize("library-node", index),
@@ -678,14 +689,26 @@ impl GuiApp {
                                         id == track.id && started.elapsed() < std::time::Duration::from_secs(2))), |view| {
                                     view.bg(gpui::rgb(super::HIGHLIGHT)).border_l_2().border_color(gpui::rgb(super::ACCENT))
                                 })
-                                .when_some(path.clone().filter(|path| this.state.system.config.library_roots.contains(path)), |view, root| {
-                                    view.on_mouse_down(gpui::MouseButton::Right, cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
-                                        this.panel_menu = None;
-                                        this.library_root_menu = Some((root.clone(), event.position));
-                                        cx.stop_propagation();
-                                        cx.notify();
-                                    }))
-                                })
+                                .on_mouse_down(gpui::MouseButton::Right, cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
+                                    this.focus_layout(window, cx);
+                                    this.browser.focus_list(ListFocus::Library);
+                                    if this.library_range_pending() { cx.stop_propagation(); return; }
+                                    let selected = match &menu_node {
+                                        LibraryNode::Track(id) => this.browser.library.selected().contains(id),
+                                        LibraryNode::Directory(_) => this.browser.library.selected_nodes().contains(&menu_node),
+                                    };
+                                    if !selected { this.select_library_row(menu_node.clone(), index, false, false, cx); }
+                                    let nodes = this.browser.library.drag_nodes(&menu_node);
+                                    let track_ids = this.library_drag_track_ids(&nodes);
+                                    let only_tracks = nodes.iter().all(|node| matches!(node, LibraryNode::Track(_)));
+                                    let play = match &menu_node { LibraryNode::Track(track_id) => Some(Command::Play { track_id: *track_id }), _ => None };
+                                    let remove = only_tracks.then(|| Command::RemoveTracks { track_ids: track_ids.clone() });
+                                    this.open_object_menu(super::ContentMenuRequest {
+                                        source: super::TrackSource::Tracks(track_ids), position: event.position, play,
+                                    }, super::list_interaction::ContentGuard::Library(this.state.library.revision, this.state.library.structure_revision),
+                                        remove, Some(nodes), menu_root.clone(), cx);
+                                    cx.stop_propagation();
+                                }))
                                 .child(name_cell)
                                 .when_some(
                                     match entry {

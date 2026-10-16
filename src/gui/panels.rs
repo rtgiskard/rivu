@@ -83,6 +83,7 @@ pub(super) struct PlaylistDrag {
     source_id: i64,
     // GPUI keeps the original on_drag value; the constructor creates only its preview.
     entry_ids: std::cell::OnceCell<Vec<i64>>,
+    track_ids: std::cell::OnceCell<Vec<i64>>,
     revision: u64,
     stamp: crate::model::QueryStamp,
     selection_generation: u64,
@@ -123,6 +124,171 @@ pub(super) enum PlaylistAction {
 }
 
 impl GuiApp {
+    fn can_transfer_content(
+        &self,
+        value: &dyn std::any::Any,
+        destination: super::DragDestination,
+    ) -> bool {
+        if let super::DragDestination::Playlist(id) = destination
+            && !self
+                .state
+                .library
+                .playlist_entry_revisions
+                .contains_key(&id)
+        {
+            return false;
+        }
+        if let Some(drag) = value.downcast_ref::<super::ContentDrag>() {
+            return self.can_drop_content(drag);
+        }
+        if let Some(drag) = value.downcast_ref::<LibraryDrag>() {
+            return self.can_resolve_library_drag(drag);
+        }
+        if let Some(drag) = value.downcast_ref::<QueueDrag>() {
+            return matches!(destination, super::DragDestination::Playlist(_))
+                && drag.revision == self.state.queue.revision
+                && drag.entries.get().is_some_and(|rows| !rows.is_empty());
+        }
+        if let Some(drag) = value.downcast_ref::<PlaylistDrag>() {
+            if matches!(destination, super::DragDestination::Playlist(id) if id == drag.playlist_id)
+            {
+                return self.can_drop_playlist_entries(drag, None);
+            }
+            return self
+                .state
+                .library
+                .playlist_entry_revisions
+                .get(&drag.playlist_id)
+                == Some(&drag.revision)
+                && drag.track_ids.get().is_some_and(|ids| !ids.is_empty());
+        }
+        false
+    }
+
+    fn transfer_queue_drag(
+        &mut self,
+        drag: &QueueDrag,
+        destination: super::DragDestination,
+        cx: &mut Context<Self>,
+    ) {
+        self.refresh(cx);
+        if !self.can_transfer_content(drag, destination) {
+            return;
+        }
+        let ids = drag
+            .entries
+            .get()
+            .unwrap()
+            .iter()
+            .map(|row| row.track_id)
+            .collect();
+        self.send_content_tracks(ids, destination, cx);
+    }
+
+    fn transfer_playlist_drag(
+        &mut self,
+        drag: &PlaylistDrag,
+        destination: super::DragDestination,
+        cx: &mut Context<Self>,
+    ) {
+        self.refresh(cx);
+        if !self.can_transfer_content(drag, destination) {
+            return;
+        }
+        if matches!(destination, super::DragDestination::Playlist(id) if id == drag.playlist_id) {
+            self.move_playlist_entries(drag, None, cx);
+        } else {
+            self.send_content_tracks(drag.track_ids.get().unwrap().clone(), destination, cx);
+        }
+    }
+
+    fn append_playlist_to_queue(&mut self, playlist_id: i64, cx: &mut Context<Self>) {
+        self.refresh(cx);
+        if self.content_resolution {
+            self.error = Some(self.i18n.text("li-source-busy").to_owned());
+            cx.notify();
+            return;
+        }
+        if !self
+            .state
+            .library
+            .playlist_entry_revisions
+            .contains_key(&playlist_id)
+        {
+            return;
+        }
+        self.content_resolution = true;
+        let generation = self.content_generation;
+        let revision = self.playlist_revision(playlist_id);
+        let revisions = self.state.query_revisions(Some(playlist_id));
+        let handle = self.handle.clone();
+        cx.spawn(async move |this, cx| {
+            let result: anyhow::Result<Vec<i64>> = cx
+                .background_executor()
+                .spawn(async move {
+                    let mut after = None;
+                    let mut ids = Vec::new();
+                    loop {
+                        let query = crate::model::Query::PlaylistEntryBatch {
+                            playlist_id,
+                            after,
+                            limit: crate::model::MAX_QUERY_ROWS,
+                            expected: Some(revisions),
+                        };
+                        let response = handle.query(query.clone());
+                        anyhow::ensure!(
+                            query.stamp(response.revisions) == query.stamp(revisions),
+                            "playlist changed"
+                        );
+                        let crate::response::ViewResponse::PlaylistEntryBatch(batch) = response
+                            .result
+                            .map_err(|error| anyhow::anyhow!(error.to_string()))?
+                        else {
+                            anyhow::bail!("unexpected playlist response");
+                        };
+                        anyhow::ensure!(
+                            batch.rows.len() <= crate::model::MAX_QUERY_ROWS
+                                && (batch.next.is_none()
+                                    || (!batch.rows.is_empty() && batch.next != after)),
+                            "incomplete playlist response"
+                        );
+                        ids.extend(batch.rows.into_iter().map(|row| row.track_id));
+                        let Some(next) = batch.next else {
+                            return Ok(ids);
+                        };
+                        after = Some(next);
+                    }
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.content_resolution = false;
+                this.refresh(cx);
+                if this.content_generation != generation
+                    || !this.window_visible
+                    || this.state.system.shutting_down
+                {
+                    return;
+                }
+                match result {
+                    Ok(ids)
+                        if this
+                            .state
+                            .library
+                            .playlist_entry_revisions
+                            .get(&playlist_id)
+                            == Some(&revision) =>
+                    {
+                        this.send_content_tracks(ids, super::DragDestination::Queue, cx)
+                    }
+                    Ok(_) => this.error = Some(this.i18n.text("li-source-changed").to_owned()),
+                    Err(error) => this.error = Some(error.to_string()),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn last_played_text(&self, track_id: i64, stored_at: Option<i64>) -> String {
         let current = self
             .state
@@ -438,15 +604,6 @@ impl GuiApp {
         form_field(label, self.input(field))
     }
 
-    pub(super) fn panel_selected_tracks(&self) -> Vec<i64> {
-        if self.library_range_pending() {
-            return Vec::new();
-        }
-        let mut tracks: Vec<_> = self.browser.library.selected().iter().copied().collect();
-        // Match library drag ordering instead of exposing HashSet iteration order.
-        tracks.sort_unstable();
-        tracks
-    }
     pub(super) fn panel_track_text(&self, track: &crate::model::LibraryRow) -> (String, String) {
         let detail = format!(
             "{}{}{} · {}{}",
@@ -989,7 +1146,7 @@ impl GuiApp {
                     } else if let Some(drag) = value.downcast_ref::<LibraryDrag>() {
                         this.can_resolve_library_drag(drag)
                     } else {
-                        false
+                        this.can_transfer_content(value, super::DragDestination::Queue)
                     }
                 })
             })
@@ -999,6 +1156,18 @@ impl GuiApp {
                 this.resolve_library_drag(drag.nodes(), super::DragDestination::Queue, cx);
             }))
             .drag_over::<LibraryDrag>(|style, _, _, _| style.border_color(rgb(ACCENT)))
+            .on_drop(cx.listener(|this, drag: &super::ContentDrag, window, cx| {
+                window.prevent_default();
+                cx.stop_propagation();
+                this.drop_content(drag, super::DragDestination::Queue, cx);
+            }))
+            .on_drop(cx.listener(|this, drag: &PlaylistDrag, window, cx| {
+                window.prevent_default();
+                cx.stop_propagation();
+                this.transfer_playlist_drag(drag, super::DragDestination::Queue, cx);
+            }))
+            .drag_over::<super::ContentDrag>(|style, _, _, _| style.border_color(rgb(ACCENT)))
+            .drag_over::<PlaylistDrag>(|style, _, _, _| style.border_color(rgb(ACCENT)))
             .child(header.child(tools))
             .when(
                 self.browser.queue.busy || self.browser.queue.selection_error.is_some(),
@@ -1135,14 +1304,48 @@ impl GuiApp {
                                 )
                                 .on_mouse_down(
                                     gpui::MouseButton::Right,
-                                    cx.listener(move |this, _, window, cx| {
-                                        this.focus_layout(window, cx);
-                                        this.browser.focus_list(ListFocus::Queue);
-                                        if !this.browser.queue.contains(&id) {
-                                            this.select_queue_entry(id, false, false, cx);
-                                            cx.notify();
-                                        }
-                                    }),
+                                    cx.listener(
+                                        move |this, event: &gpui::MouseDownEvent, window, cx| {
+                                            this.focus_layout(window, cx);
+                                            this.browser.focus_list(ListFocus::Queue);
+                                            if this.browser.queue.contains(&id)
+                                                && !this.browser.queue.ready()
+                                            {
+                                                cx.stop_propagation();
+                                                return;
+                                            }
+                                            if !this.browser.queue.contains(&id) {
+                                                this.select_queue_entry(id, false, false, cx);
+                                                cx.notify();
+                                            }
+                                            let rows = this.browser.queue.ordered();
+                                            let track_ids = if rows.iter().any(|row| row.id == id) {
+                                                rows.iter().map(|row| row.track_id).collect()
+                                            } else {
+                                                vec![track_id]
+                                            };
+                                            let queue_ids = if rows.iter().any(|row| row.id == id) {
+                                                rows.iter().map(|row| row.id).collect()
+                                            } else {
+                                                vec![id]
+                                            };
+                                            this.open_object_menu(
+                                                super::ContentMenuRequest {
+                                                    source: super::TrackSource::Tracks(track_ids),
+                                                    position: event.position,
+                                                    play: Some(Command::PlayQueue { queue_id: id }),
+                                                },
+                                                super::list_interaction::ContentGuard::Queue(
+                                                    revision,
+                                                ),
+                                                Some(Command::RemoveQueueEntries { queue_ids }),
+                                                None,
+                                                None,
+                                                cx,
+                                            );
+                                            cx.stop_propagation();
+                                        },
+                                    ),
                                 )
                                 .on_click(cx.listener(
                                     move |this, event: &gpui::ClickEvent, window, cx| {
@@ -1246,7 +1449,7 @@ impl GuiApp {
                         } else if let Some(drag) = value.downcast_ref::<LibraryDrag>() {
                             this.can_resolve_library_drag(drag)
                         } else {
-                            false
+                            this.can_transfer_content(value, super::DragDestination::Queue)
                         }
                     })
                 })
@@ -1256,6 +1459,18 @@ impl GuiApp {
                     this.resolve_library_drag(drag.nodes(), super::DragDestination::Queue, cx);
                 }))
                 .drag_over::<LibraryDrag>(|style, _, _, _| style.border_color(rgb(ACCENT)))
+                .on_drop(cx.listener(|this, drag: &super::ContentDrag, window, cx| {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    this.drop_content(drag, super::DragDestination::Queue, cx);
+                }))
+                .on_drop(cx.listener(|this, drag: &PlaylistDrag, window, cx| {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    this.transfer_playlist_drag(drag, super::DragDestination::Queue, cx);
+                }))
+                .drag_over::<super::ContentDrag>(|style, _, _, _| style.border_color(rgb(ACCENT)))
+                .drag_over::<PlaylistDrag>(|style, _, _, _| style.border_color(rgb(ACCENT)))
                 .h_full()
                 .min_h_0()
                 .w_full()
@@ -1316,6 +1531,36 @@ impl GuiApp {
                     this.dismiss_playlist_action(window, cx);
                     cx.stop_propagation();
                 }))
+                .child(super::menu_item(
+                    "playlist-row-play",
+                    self.tr("li-replace-queue"),
+                    cx,
+                    move |this, window, cx| {
+                        this.refresh(cx);
+                        if this.state.queue.total == 0 {
+                            this.dismiss_playlist_action(window, cx);
+                            this.send(Command::PlayPlaylist { playlist_id: id }, cx);
+                        } else {
+                            let name = match this.playlist_action.take() {
+                                Some(PlaylistAction::Menu(target, _)) => target.name,
+                                _ => return,
+                            };
+                            this.playlist_action =
+                                Some(PlaylistAction::Play(PlaylistTarget { id, name }));
+                            cx.notify();
+                        }
+                    },
+                ))
+                .child(super::menu_item(
+                    "playlist-row-queue",
+                    self.tr("li-queue"),
+                    cx,
+                    move |this, window, cx| {
+                        this.dismiss_playlist_action(window, cx);
+                        this.append_playlist_to_queue(id, cx);
+                    },
+                ))
+                .child(super::components::menu_separator())
                 .child(
                     super::menu_item(
                         "playlist-row-add",
@@ -1355,7 +1600,7 @@ impl GuiApp {
                         );
                     },
                 ))
-                .child(super::menu_item(
+                .child(danger_control(super::menu_item(
                     "playlist-row-delete",
                     self.tr("gl-delete"),
                     cx,
@@ -1363,7 +1608,7 @@ impl GuiApp {
                         this.playlist_action = Some(PlaylistAction::Delete(delete.clone()));
                         cx.notify();
                     },
-                ));
+                )));
             return gpui::anchored()
                 .position(position)
                 .snap_to_window()
@@ -1701,6 +1946,8 @@ impl GuiApp {
                                 cx,
                                 move |this, window, cx| {
                                     this.focus_layout(window, cx);
+                                    this.content_menu = None;
+                                    this.panel_menu = None;
                                     this.playlist_action = Some(PlaylistAction::Menu(
                                         PlaylistTarget {
                                             id,
@@ -1721,6 +1968,15 @@ impl GuiApp {
                             gpui::MouseButton::Right,
                             cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
                                 this.focus_layout(window, cx);
+                                this.content_menu = None;
+                                this.panel_menu = None;
+                                this.browser.focus_playlists();
+                                this.select_playlist_container(
+                                    id,
+                                    context_name.to_string(),
+                                    index,
+                                    cx,
+                                );
                                 this.playlist_action = Some(PlaylistAction::Menu(
                                     PlaylistTarget {
                                         id,
@@ -1738,6 +1994,55 @@ impl GuiApp {
                             this.select_playlist_container(id, name.to_string(), index, cx);
                             cx.notify();
                         }))
+                        .on_drop(cx.listener(move |this, drag: &LibraryDrag, window, cx| {
+                            window.prevent_default();
+                            cx.stop_propagation();
+                            this.resolve_library_drag(
+                                drag.nodes(),
+                                super::DragDestination::Playlist(id),
+                                cx,
+                            );
+                        }))
+                        .on_drop(
+                            cx.listener(move |this, drag: &super::ContentDrag, window, cx| {
+                                window.prevent_default();
+                                cx.stop_propagation();
+                                this.drop_content(drag, super::DragDestination::Playlist(id), cx);
+                            }),
+                        )
+                        .on_drop(cx.listener(move |this, drag: &QueueDrag, window, cx| {
+                            window.prevent_default();
+                            cx.stop_propagation();
+                            this.transfer_queue_drag(
+                                drag,
+                                super::DragDestination::Playlist(id),
+                                cx,
+                            );
+                        }))
+                        .on_drop(cx.listener(move |this, drag: &PlaylistDrag, window, cx| {
+                            window.prevent_default();
+                            cx.stop_propagation();
+                            this.transfer_playlist_drag(
+                                drag,
+                                super::DragDestination::Playlist(id),
+                                cx,
+                            );
+                        }))
+                        .can_drop({
+                            let owner = cx.weak_entity();
+                            move |value, _, cx| {
+                                owner.upgrade().is_some_and(|owner| {
+                                    owner.read(cx).can_transfer_content(
+                                        value,
+                                        super::DragDestination::Playlist(id),
+                                    )
+                                })
+                            }
+                        })
+                        .drag_over::<LibraryDrag>(|style, _, _, _| style.bg(rgb(HIGHLIGHT)))
+                        .drag_over::<super::ContentDrag>(|style, _, _, _| style.bg(rgb(HIGHLIGHT)))
+                        .drag_over::<QueueDrag>(|style, _, _, _| style.bg(rgb(HIGHLIGHT)))
+                        .drag_over::<PlaylistDrag>(|style, _, _, _| style.bg(rgb(HIGHLIGHT)))
                         .into_any_element()
                     })
                     .collect::<Vec<_>>()
@@ -1802,6 +2107,7 @@ impl GuiApp {
                                 playlist_id,
                                 source_id: id,
                                 entry_ids: Default::default(),
+                                track_ids: Default::default(),
                                 revision,
                                 stamp,
                                 selection_generation,
@@ -1895,6 +2201,55 @@ impl GuiApp {
                                     this.browser.focus_list(ListFocus::PlaylistTracks);
                                 }),
                             )
+                            .on_mouse_down(
+                                gpui::MouseButton::Right,
+                                cx.listener(
+                                    move |this, event: &gpui::MouseDownEvent, window, cx| {
+                                        this.focus_layout(window, cx);
+                                        this.browser.focus_list(ListFocus::PlaylistTracks);
+                                        if this.browser.playlists.track_selection.contains(id)
+                                            && !this.browser.playlists.track_selection.ready()
+                                        {
+                                            cx.stop_propagation();
+                                            return;
+                                        }
+                                        if !this.browser.playlists.track_selection.contains(id) {
+                                            this.select_playlist_entry(id, index, false, false, cx);
+                                        }
+                                        let rows = this.browser.playlists.track_selection.ordered();
+                                        let track_ids = if rows.iter().any(|row| row.id == id) {
+                                            rows.iter().map(|row| row.track_id).collect()
+                                        } else {
+                                            vec![track_id]
+                                        };
+                                        let entry_ids = if rows.iter().any(|row| row.id == id) {
+                                            rows.iter().map(|row| row.id).collect()
+                                        } else {
+                                            vec![id]
+                                        };
+                                        this.open_object_menu(
+                                            super::ContentMenuRequest {
+                                                source: super::TrackSource::Tracks(track_ids),
+                                                position: event.position,
+                                                play: Some(Command::Play { track_id }),
+                                            },
+                                            super::list_interaction::ContentGuard::Playlist(
+                                                playlist_id,
+                                                revision,
+                                            ),
+                                            Some(Command::RemovePlaylistEntries {
+                                                playlist_id,
+                                                entry_ids,
+                                                expected_revision: revision,
+                                            }),
+                                            None,
+                                            None,
+                                            cx,
+                                        );
+                                        cx.stop_propagation();
+                                    },
+                                ),
+                            )
                             .on_click(cx.listener(
                                 move |this, event: &gpui::ClickEvent, window, cx| {
                                     this.focus_layout(window, cx);
@@ -1919,6 +2274,19 @@ impl GuiApp {
                                     drag.entry_ids.get_or_init(|| {
                                         drag_owner
                                             .update(cx, |this, cx| {
+                                                this.refresh(cx);
+                                                if this.playlist_revision(drag.playlist_id)
+                                                    != drag.revision
+                                                    || this.browser.playlists.selection_generation()
+                                                        != drag.selection_generation
+                                                    || !this
+                                                        .browser
+                                                        .playlists
+                                                        .track_selection
+                                                        .ready()
+                                                {
+                                                    return Vec::new();
+                                                }
                                                 if !this
                                                     .browser
                                                     .playlists
@@ -1933,6 +2301,23 @@ impl GuiApp {
                                                         cx,
                                                     );
                                                 }
+                                                let tracks = if this
+                                                    .browser
+                                                    .playlists
+                                                    .track_selection
+                                                    .contains(drag.source_id)
+                                                {
+                                                    this.browser
+                                                        .playlists
+                                                        .track_selection
+                                                        .ordered()
+                                                        .iter()
+                                                        .map(|row| row.track_id)
+                                                        .collect()
+                                                } else {
+                                                    vec![track_id]
+                                                };
+                                                let _ = drag.track_ids.set(tracks);
                                                 this.browser
                                                     .playlists
                                                     .track_selection
@@ -1956,14 +2341,30 @@ impl GuiApp {
                             .on_drop(cx.listener(move |this, drag: &PlaylistDrag, window, cx| {
                                 window.prevent_default();
                                 cx.stop_propagation();
-                                this.move_playlist_entries(drag, Some(id), cx);
+                                if drag.playlist_id == playlist_id {
+                                    this.move_playlist_entries(drag, Some(id), cx);
+                                } else {
+                                    this.transfer_playlist_drag(
+                                        drag,
+                                        super::DragDestination::Playlist(playlist_id),
+                                        cx,
+                                    );
+                                }
                             }))
                             .can_drop({
                                 let owner = cx.weak_entity();
                                 move |value, _, cx| {
                                     owner.upgrade().is_some_and(|owner| {
                                         value.downcast_ref::<PlaylistDrag>().is_some_and(|drag| {
-                                            owner.read(cx).can_drop_playlist_entries(drag, Some(id))
+                                            let app = owner.read(cx);
+                                            if drag.playlist_id == playlist_id {
+                                                app.can_drop_playlist_entries(drag, Some(id))
+                                            } else {
+                                                app.can_transfer_content(
+                                                    drag,
+                                                    super::DragDestination::Playlist(playlist_id),
+                                                )
+                                            }
                                         })
                                     })
                                 }
@@ -1977,16 +2378,23 @@ impl GuiApp {
             .with_decoration(paged::viewport_demand(
                 cx.processor(|this, range, _, cx| this.ensure_entry_range(range, cx)),
             ))
-            .on_drop(cx.listener(|this, drag: &PlaylistDrag, window, cx| {
+            .on_drop(cx.listener(move |this, drag: &PlaylistDrag, window, cx| {
                 window.prevent_default();
-                this.move_playlist_entries(drag, None, cx);
+                this.transfer_playlist_drag(
+                    drag,
+                    super::DragDestination::Playlist(playlist_id),
+                    cx,
+                );
             }))
             .can_drop({
                 let owner = cx.weak_entity();
                 move |value, _, cx| {
                     owner.upgrade().is_some_and(|owner| {
                         value.downcast_ref::<PlaylistDrag>().is_some_and(|drag| {
-                            owner.read(cx).can_drop_playlist_entries(drag, None)
+                            owner.read(cx).can_transfer_content(
+                                drag,
+                                super::DragDestination::Playlist(playlist_id),
+                            )
                         })
                     })
                 }
@@ -2023,16 +2431,23 @@ impl GuiApp {
                             .flex_1()
                             .min_h(gpui::rems(1.))
                             .w_full()
-                            .on_drop(cx.listener(|this, drag: &PlaylistDrag, window, cx| {
+                            .on_drop(cx.listener(move |this, drag: &PlaylistDrag, window, cx| {
                                 window.prevent_default();
-                                this.move_playlist_entries(drag, None, cx);
+                                this.transfer_playlist_drag(
+                                    drag,
+                                    super::DragDestination::Playlist(playlist_id),
+                                    cx,
+                                );
                             }))
                             .can_drop({
                                 let owner = cx.weak_entity();
                                 move |value, _, cx| {
                                     owner.upgrade().is_some_and(|owner| {
                                         value.downcast_ref::<PlaylistDrag>().is_some_and(|drag| {
-                                            owner.read(cx).can_drop_playlist_entries(drag, None)
+                                            owner.read(cx).can_transfer_content(
+                                                drag,
+                                                super::DragDestination::Playlist(playlist_id),
+                                            )
                                         })
                                     })
                                 }
@@ -2057,14 +2472,37 @@ impl GuiApp {
                 move |value, _, cx| {
                     owner.upgrade().is_some_and(|owner| {
                         let app = owner.read(cx);
-                        value.downcast_ref::<LibraryDrag>().is_some_and(|drag| {
-                            app.browser.playlists.selected().is_some()
-                                && app.can_resolve_library_drag(drag)
+                        app.browser.playlists.selected().is_some_and(|id| {
+                            app.can_transfer_content(value, super::DragDestination::Playlist(id))
                         })
                     })
                 }
             })
             .drag_over::<LibraryDrag>(|style, _, _, _| style.border_color(rgb(ACCENT)))
+            .on_drop(cx.listener(|this, drag: &super::ContentDrag, window, cx| {
+                window.prevent_default();
+                cx.stop_propagation();
+                if let Some(id) = this.browser.playlists.selected() {
+                    this.drop_content(drag, super::DragDestination::Playlist(id), cx);
+                }
+            }))
+            .on_drop(cx.listener(|this, drag: &QueueDrag, window, cx| {
+                window.prevent_default();
+                cx.stop_propagation();
+                if let Some(id) = this.browser.playlists.selected() {
+                    this.transfer_queue_drag(drag, super::DragDestination::Playlist(id), cx);
+                }
+            }))
+            .on_drop(cx.listener(|this, drag: &PlaylistDrag, window, cx| {
+                window.prevent_default();
+                cx.stop_propagation();
+                if let Some(id) = this.browser.playlists.selected() {
+                    this.transfer_playlist_drag(drag, super::DragDestination::Playlist(id), cx);
+                }
+            }))
+            .drag_over::<super::ContentDrag>(|style, _, _, _| style.border_color(rgb(ACCENT)))
+            .drag_over::<QueueDrag>(|style, _, _, _| style.border_color(rgb(ACCENT)))
+            .drag_over::<PlaylistDrag>(|style, _, _, _| style.border_color(rgb(ACCENT)))
             .child(panel_header(
                 self.tr("gl-playlists"),
                 self.i18n.format(
@@ -2713,6 +3151,8 @@ impl GuiApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        use super::list_interaction::{ContentDrag, ContentMenuRequest, TrackSource};
+
         let history_len = self.browser.history.len();
         let playback = (
             self.state.current_track().map(|track| track.id),
@@ -2845,10 +3285,14 @@ impl GuiApp {
                                     };
                                     let last_played =
                                         this.last_played_text(id, Some(item.played_at));
+                                    let selected = this.browser.history.contains(id);
+                                    let generation = this.browser.history.generation();
+                                    let drag_owner = cx.weak_entity();
+                                    let drag_i18n = this.i18n.clone();
                                     Some(
                                         list_row(
                                             ("history-entry", id as u64),
-                                            this.browser.history.contains(id),
+                                            selected,
                                         )
                                         .gap_0()
                                         .group("history-track-row")
@@ -2889,7 +3333,7 @@ impl GuiApp {
                                         .child(
                                             hover_actions(
                                                 "history-track-row",
-                                                this.browser.history.contains(id),
+                                                selected,
                                             )
                                             .child(
                                                 this.track_favorite_toggle(
@@ -2900,6 +3344,27 @@ impl GuiApp {
                                                     cx,
                                                 ),
                                             ),
+                                        )
+                                        .on_mouse_down(
+                                            gpui::MouseButton::Right,
+                                            cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
+                                                cx.stop_propagation();
+                                                this.focus_layout(window, cx);
+                                                this.browser.focus_history();
+                                                this.refresh(cx);
+                                                let ids = this.browser.history.drag_ids(id, generation);
+                                                if ids.is_empty() {
+                                                    return;
+                                                }
+                                                if !this.browser.history.contains(id) {
+                                                    this.select_history_track(id, false, false, cx);
+                                                }
+                                                this.open_content_menu(ContentMenuRequest {
+                                                    source: TrackSource::Tracks(ids),
+                                                    position: event.position,
+                                                    play: Some(Command::Play { track_id: id }),
+                                                }, cx);
+                                            }),
                                         )
                                         .on_click(cx.listener(
                                             move |this, event: &gpui::ClickEvent, window, cx| {
@@ -2916,7 +3381,27 @@ impl GuiApp {
                                                     this.send(Command::Play { track_id: id }, cx);
                                                 }
                                             },
-                                        )),
+                                        ))
+                                        .on_drag(ContentDrag::pending(), move |drag, _, window, cx| {
+                                            let ids = drag_owner
+                                                .update(cx, |this, cx| {
+                                                    this.refresh(cx);
+                                                    let ids = this.browser.history.drag_ids(id, generation);
+                                                    if !ids.is_empty() && !this.browser.history.contains(id) {
+                                                        this.select_history_track(id, false, false, cx);
+                                                    }
+                                                    ids
+                                                })
+                                                .unwrap_or_default();
+                                            let count = ids.len();
+                                            drag.initialize(TrackSource::Tracks(ids));
+                                            super::components::begin_list_drag(window, cx);
+                                            let label = drag_i18n.format(
+                                                "gl-track-count",
+                                                &[("count", count.into())],
+                                            ).into();
+                                            cx.new(|_| super::components::ListDragPreview { label })
+                                        }),
                                     )
                                 })
                                 .collect::<Vec<_>>()
@@ -2945,6 +3430,7 @@ mod playlist_drag_tests {
             playlist_id: 8,
             source_id: 40,
             entry_ids: std::cell::OnceCell::from(vec![7, 40, 2]),
+            track_ids: std::cell::OnceCell::from(vec![9, 9, 3]),
             revision: 19,
             stamp: Default::default(),
             selection_generation: 4,

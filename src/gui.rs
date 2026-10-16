@@ -8,6 +8,7 @@ mod fonts;
 mod input;
 mod layout;
 mod library;
+mod list_interaction;
 mod loading;
 mod metadata;
 mod paged;
@@ -47,6 +48,7 @@ use layout::interaction::{
 };
 use layout::{Axis, Edge, LayoutSet, Node};
 use library::LibraryNode;
+use list_interaction::{ContentDrag, ContentMenuRequest, TrackSource};
 use metadata::session::MetadataSession;
 use queries::ViewRequestKind;
 pub(crate) use session::UiSession;
@@ -522,7 +524,9 @@ pub(super) struct GuiApp {
     layouts_open: bool,
     layout_action: Option<layout::layout_manager::Action>,
     panel_menu: Option<PanelMenu>,
-    library_remove_pending: Option<Vec<i64>>,
+    content_menu: Option<list_interaction::ContentMenu>,
+    content_generation: u64,
+    content_resolution: bool,
     library_root_menu: Option<(PathBuf, Point<Pixels>)>,
     waveform: Entity<visualization::Waveform>,
     full_waveform_request: FullWaveformRequest,
@@ -1079,7 +1083,9 @@ impl GuiApp {
             layouts_open: false,
             layout_action: None,
             panel_menu: None,
-            library_remove_pending: None,
+            content_menu: None,
+            content_generation: 0,
+            content_resolution: false,
             library_root_menu: None,
             waveform,
             full_waveform_request: FullWaveformRequest::default(),
@@ -1350,6 +1356,8 @@ impl GuiApp {
         }
         self.apply_interaction_cancellation(cancellation, cx);
         self.panel_menu = None;
+        self.content_menu = None;
+        self.content_generation = self.content_generation.wrapping_add(1);
         cx.notify();
     }
 
@@ -1366,6 +1374,8 @@ impl GuiApp {
             .layout_changed(self.layouts.current().root.as_ref());
         self.apply_interaction_cancellation(cancellation, cx);
         self.panel_menu = None;
+        self.content_menu = None;
+        self.content_generation = self.content_generation.wrapping_add(1);
         self.browser.clear_focus();
     }
 
@@ -1594,6 +1604,10 @@ impl GuiApp {
                     cx,
                 )
             });
+            cx.subscribe(&albums, |this, _, request: &ContentMenuRequest, cx| {
+                this.open_content_menu(request.clone(), cx);
+            })
+            .detach();
             window
                 .observe_release(&albums, cx, |albums, _, cx| {
                     // A live panel removal still leaves the previous scene.

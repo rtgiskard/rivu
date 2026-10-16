@@ -9,8 +9,6 @@ pub(super) enum PanelMenuPage {
     AudioVisualizerStyle,
     AlbumArtworkStyle,
     ConfirmClearQueue,
-    ConfirmRemoveLibrary,
-    Playlists,
     LibraryColumns,
 }
 
@@ -152,6 +150,14 @@ impl Render for GuiApp {
                     }
                     return;
                 }
+                if this.content_menu.is_some() {
+                    if key == "escape" {
+                        this.content_menu = None;
+                        cx.notify();
+                    }
+                    cx.stop_propagation();
+                    return;
+                }
                 if this.library_root_menu.is_some() {
                     if key == "escape" {
                         this.library_root_menu = None;
@@ -273,6 +279,7 @@ impl Render for GuiApp {
                     || this.playlist_action.is_some()
                     || this.app_menu_open
                     || this.panel_menu.is_some()
+                    || this.content_menu.is_some()
                     || this.catalog_open;
                 this.scroll_views.click(event.position, modal);
             }))
@@ -646,9 +653,6 @@ impl Render for GuiApp {
             );
         }
 
-        if self.panel_menu.is_none() {
-            self.library_remove_pending = None;
-        }
         if let Some(state) = self.panel_menu {
             let panel_kind = self
                 .layouts
@@ -662,7 +666,6 @@ impl Render for GuiApp {
             let is_waveform = panel_kind == Some("waveform");
             let is_audio_visualizer = panel_kind == Some("audio_visualizer");
             let is_album_artwork = panel_kind == Some("album_artwork");
-            let has_selected_queue = self.browser.queue.ready() && self.browser.queue.len() > 0;
             let mut menu = context_menu_container("panel-context-menu")
                 .max_w((window.viewport_size().width - px(UI_INSET * 2.)).max(px(0.)))
                 .max_h((window.viewport_size().height - px(UI_INSET * 2.)).max(px(0.)))
@@ -675,54 +678,6 @@ impl Render for GuiApp {
             match state.page {
                 PanelMenuPage::Main => {
                     if is_library {
-                        let can_edit = !self.library_range_pending()
-                            && !self.browser.library.selected().is_empty();
-                        menu = menu
-                            .child(components::disabled_control(
-                                menu_item(
-                                    "library-enqueue",
-                                    self.tr("gl-enqueue-selected"),
-                                    cx,
-                                    |this, _, cx| {
-                                        if this.library_range_pending()
-                                            || this.browser.library.selected().is_empty()
-                                        {
-                                            return;
-                                        }
-                                        this.panel_menu = None;
-                                        this.send(
-                                            Command::Enqueue {
-                                                track_ids: this.panel_selected_tracks(),
-                                            },
-                                            cx,
-                                        );
-                                    },
-                                ),
-                                !can_edit,
-                            ))
-                            .child(components::disabled_control(
-                                components::danger_control(menu_item(
-                                    "library-remove",
-                                    self.tr("gl-remove-library-selected"),
-                                    cx,
-                                    move |this, _, cx| {
-                                        if this.library_range_pending()
-                                            || this.browser.library.selected().is_empty()
-                                        {
-                                            return;
-                                        }
-                                        this.library_remove_pending =
-                                            Some(this.panel_selected_tracks());
-                                        this.panel_menu = Some(PanelMenu {
-                                            page: PanelMenuPage::ConfirmRemoveLibrary,
-                                            ..state
-                                        });
-                                        cx.notify();
-                                    },
-                                )),
-                                !can_edit,
-                            ))
-                            .child(components::menu_separator());
                         menu = menu.child(menu_item(
                             "library-columns-menu",
                             self.tr("shell-track-information-menu"),
@@ -993,53 +948,6 @@ impl Render for GuiApp {
                     }
                     if is_queue {
                         menu = menu
-                            .child(components::disabled_control(
-                                menu_item(
-                                    "queue-add-playlist",
-                                    self.tr("shell-add-playlist-menu"),
-                                    cx,
-                                    move |this, _, cx| {
-                                        this.refresh(cx);
-                                        if !this.browser.queue.ready()
-                                            || this.browser.queue.len() == 0
-                                        {
-                                            return;
-                                        }
-                                        this.panel_menu = Some(PanelMenu {
-                                            page: PanelMenuPage::Playlists,
-                                            ..state
-                                        });
-                                        cx.notify();
-                                    },
-                                ),
-                                !has_selected_queue,
-                            ))
-                            .child(components::disabled_control(
-                                menu_item(
-                                    "queue-toggle-favorite",
-                                    self.tr("shell-toggle-favorite"),
-                                    cx,
-                                    |this, _, cx| {
-                                        this.refresh(cx);
-                                        let mut track_ids: Vec<_> = this
-                                            .browser
-                                            .queue
-                                            .ordered()
-                                            .into_iter()
-                                            .map(|row| row.track_id)
-                                            .collect();
-                                        track_ids.sort_unstable();
-                                        track_ids.dedup();
-                                        if track_ids.is_empty() {
-                                            return;
-                                        }
-                                        this.panel_menu = None;
-                                        this.send(Command::ToggleFavorite { track_ids }, cx);
-                                        cx.notify();
-                                    },
-                                ),
-                                !has_selected_queue,
-                            ))
                             .child(menu_item(
                                 "randomize-queue",
                                 self.tr("shell-randomize-queue"),
@@ -1066,7 +974,7 @@ impl Render for GuiApp {
                                 cx,
                                 |this, window, cx| this.save_queue_as_playlist(window, cx),
                             ))
-                            .child(menu_item(
+                            .child(components::danger_control(menu_item(
                                 "clear-queue",
                                 self.tr("shell-clear-queue"),
                                 cx,
@@ -1077,7 +985,7 @@ impl Render for GuiApp {
                                     });
                                     cx.notify();
                                 },
-                            ));
+                            )));
                     }
                     menu = menu
                         .when(
@@ -1282,42 +1190,6 @@ impl Render for GuiApp {
                             },
                         ));
                 }
-                PanelMenuPage::ConfirmRemoveLibrary => {
-                    let count = self.library_remove_pending.as_ref().map_or(0, Vec::len);
-                    menu = menu
-                        .child(
-                            div().px(gpui::px(UI_INSET)).py_2().text_sm().child(
-                                self.i18n.format(
-                                    "gl-confirm-remove-library",
-                                    &[("count", count.into())],
-                                ),
-                            ),
-                        )
-                        .child(menu_item(
-                            "cancel-remove-library",
-                            self.tr("gl-cancel"),
-                            cx,
-                            |this, _, cx| {
-                                this.library_remove_pending = None;
-                                this.panel_menu = None;
-                                cx.notify();
-                            },
-                        ))
-                        .child(components::danger_control(menu_item(
-                            "confirm-remove-library",
-                            self.tr("gl-remove-library-selected"),
-                            cx,
-                            |this, _, cx| {
-                                this.panel_menu = None;
-                                if let Some(track_ids) = this.library_remove_pending.take()
-                                    && !track_ids.is_empty()
-                                {
-                                    this.send(Command::RemoveTracks { track_ids }, cx);
-                                }
-                                cx.notify();
-                            },
-                        )));
-                }
                 PanelMenuPage::ConfirmClearQueue => {
                     menu = menu
                         .child(div().px(gpui::px(UI_INSET)).py_2().text_sm().child(
@@ -1356,134 +1228,6 @@ impl Render for GuiApp {
                                 ))),
                         );
                 }
-                PanelMenuPage::Playlists => {
-                    menu = menu
-                        .child(components::menu_title(self.tr("shell-add-playlist")))
-                        .child(components::menu_separator());
-                    menu = menu.child(
-                        menu_item(
-                            "queue-create-playlist",
-                            self.tr("shell-new-playlist"),
-                            cx,
-                            |this, window, cx| {
-                                let mut seen = HashSet::new();
-                                let track_ids: Vec<_> = this
-                                    .browser
-                                    .queue
-                                    .ordered()
-                                    .iter()
-                                    .map(|row| row.track_id)
-                                    .filter(|id| seen.insert(*id))
-                                    .collect();
-                                if track_ids.is_empty() {
-                                    return;
-                                }
-                                this.begin_playlist_name(
-                                    super::playlist_editor::PlaylistNameAction::Create {
-                                        track_ids,
-                                    },
-                                    String::new(),
-                                    window,
-                                    cx,
-                                );
-                            },
-                        )
-                        .w_full(),
-                    );
-                    if has_selected_queue {
-                        if !self.browser.playlists.summaries().rows.is_empty() {
-                            let row_height = window.rem_size() * 2.0;
-                            let height = (row_height
-                                * self.browser.playlists.summaries().rows.len() as f32)
-                                .min(window.rem_size() * components::POPOVER_MAX_REMS)
-                                .min(window.viewport_size().height * 0.5);
-                            menu = menu.child(
-                                uniform_list(
-                                    "queue-playlist-targets",
-                                    self.browser.playlists.summaries().rows.len(),
-                                    cx.processor(
-                                        move |this, range: std::ops::Range<usize>, _, cx| {
-                                            range
-                                                .map(|index| {
-                                                    let Some(playlist) = this
-                                                        .browser
-                                                        .playlists
-                                                        .summaries()
-                                                        .rows
-                                                        .get(index)
-                                                    else {
-                                                        return this
-                                                            .paged_loading_row(
-                                                                ViewRequestKind::Summaries,
-                                                                index,
-                                                                cx,
-                                                            )
-                                                            .h(row_height);
-                                                    };
-                                                    let playlist_id = playlist.id;
-                                                    menu_item(
-                                                        ("queue-playlist", playlist_id as u64),
-                                                        div()
-                                                            .min_w_0()
-                                                            .truncate()
-                                                            .child(playlist.name.clone()),
-                                                        cx,
-                                                        move |this, _, cx| {
-                                                            let track_ids = this
-                                                                .browser
-                                                                .queue
-                                                                .ordered()
-                                                                .iter()
-                                                                .map(|row| row.track_id)
-                                                                .collect();
-                                                            this.panel_menu = None;
-                                                            this.send(
-                                                                Command::AddPlaylist {
-                                                                    playlist_id,
-                                                                    track_ids,
-                                                                },
-                                                                cx,
-                                                            );
-                                                            cx.notify();
-                                                        },
-                                                    )
-                                                    .h(row_height)
-                                                    .w_full()
-                                                    .overflow_hidden()
-                                                })
-                                                .collect()
-                                        },
-                                    ),
-                                )
-                                .with_decoration(paged::viewport_demand(cx.processor(
-                                    |this, range, _, cx| {
-                                        this.ensure_playlist_range(range, cx);
-                                    },
-                                )))
-                                .h(height)
-                                .flex_shrink_0()
-                                .w_full(),
-                            );
-                        }
-                    } else {
-                        menu =
-                            menu.child(panels::caption(self.tr("shell-queue-entry-unavailable")));
-                    }
-                    menu = menu
-                        .child(components::menu_separator())
-                        .child(components::menu_back(
-                            "queue-playlist-back",
-                            self.tr("shell-back"),
-                            cx,
-                            move |this, _, cx| {
-                                this.panel_menu = Some(PanelMenu {
-                                    page: PanelMenuPage::Main,
-                                    ..state
-                                });
-                                cx.notify();
-                            },
-                        ));
-                }
             }
             app = app.child(
                 anchored()
@@ -1492,6 +1236,7 @@ impl Render for GuiApp {
                     .child(menu),
             );
         }
+        app = app.child(self.content_menu_overlay(window, cx));
 
         if let Some((root, position)) = self.library_root_menu.clone() {
             let menu = context_menu_container("library-root-menu")

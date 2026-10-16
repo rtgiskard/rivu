@@ -167,18 +167,21 @@ drag start, even if selection changes during the gesture. Dropping on a row
 inserts before it; dropping below the rows appends. Dropping on a member of the
 dragged group or pressing Esc leaves queue order unchanged. A drag is rejected
 if queue contents change before it is dropped.
-Dragging library tracks or directories onto Queue appends the resolved tracks.
+Dragging Library tracks or directories, album cards or tracks, recent tracks,
+or playlist tracks onto Queue appends the resolved tracks. Dragging queue
+occurrences to a named playlist catalog row copies their track IDs in queue
+order without removing occurrences; playlist deduplication still applies.
 Removing the current occurrence stops playback; removing other occurrences does
 not. Queue controls remain available while the layout is locked.
 
-The Queue panel menu groups Add to playlist, Toggle favorite, Randomize queue,
-Remove duplicates, Save queue as playlist, and Clear queue in that order.
-Add to playlist and Toggle favorite act on selected occurrences and are
-unavailable without a ready selection. Toggle favorite reverses each selected
-track's favorite state once, even when the selection contains repeated occurrences.
-Randomize, Remove duplicates, and Clear act on the entire queue. Clear requires
-confirmation. Randomizing changes queue order without changing the current
-playback or shuffle setting.
+The Queue panel menu contains Randomize queue, Remove duplicates,
+Save queue as playlist, and Clear queue. These actions target the entire queue;
+Clear requires confirmation. Track-group actions live in row context menus:
+Append to queue, Add to playlist, explicit Favorite and Unfavorite, and removal
+of the selected occurrences. Play targets the clicked occurrence. Favorite
+changes apply once per library track, including repeated queue occurrences.
+See the link:02_library.adoc#_desktop_selection_and_directory_tree[shared track-menu rules].
+Randomizing changes queue order without changing the current playback or shuffle setting.
 Removing duplicates keeps each track at its first position; if a later duplicate
 is playing, playback continues as that track's retained occurrence.
 

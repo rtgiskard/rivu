@@ -40,9 +40,10 @@ The Playlists panel keeps New playlist, Import, and Export together at the top.
 Export stays in place and is unavailable until a playlist is selected. New playlist
 opens a blank name dialog. Hover a catalog row to reveal its Play and actions
 buttons; these target that row without changing the selected playlist. The actions
-menu offers Add current track (unavailable without a current playback track),
-Rename, and Delete. Add current track uses the playback track, not any Library
-selection. Rename opens the current name; Enter submits, and Cancel or
+menu offers Play / replace queue, Append to queue, Add current track (unavailable
+without a current playback track), Rename, and Delete. Append copies the complete
+playlist in its saved order without changing playback. Add current track uses the
+playback track, not any Library selection. Rename opens the current name; Enter submits, and Cancel or
 Esc discards the draft. Empty names are rejected. Saving runs in the background
 and prevents repeat submissions; failures keep the dialog and draft available
 for correction. A submitted save cannot be cancelled, including by closing the window.
@@ -81,10 +82,18 @@ playlist's membership or order changes, after deletion, or after the selection
 switches, including switching away and back. Renaming either playlist or editing
 another playlist does not invalidate the content revision.
 
-To save selected queue tracks under a chosen name, use the Queue panel menu's
-Add to playlist → New playlist… action. It opens its own
-name dialog; no input in the Playlists panel is required. The tracks selected
-when the dialog opens are saved without changing the queue.
+Dragging playlist tracks to Queue or another playlist copies their track IDs in
+playlist order without removing source entries. A named catalog row is an
+explicit destination, even when another playlist is selected. Library tracks and
+directories, album cards and tracks, recent tracks, and queue occurrences can
+also be dropped on a catalog row. Playlist additions retain existing entries and
+append only previously absent track IDs in source order.
+
+Right-click a track or selected group and choose Add to playlist to select an
+existing playlist or New playlist. The shared name dialog saves the captured
+tracks without changing the source collection. This selector also works when
+the Playlists panel is not visible. Track menus follow the
+link:02_library.adoc#_desktop_selection_and_directory_tree[shared selection rules].
 
 Use the Queue panel context menu's Save queue as playlist action to save a
 non-empty queue. The shared playlist name dialog starts with a date-and-time
@@ -94,10 +103,10 @@ the dialog and draft for correction and retry. Closing the window does not
 cancel a save already submitted to the core. Queue selection status appears
 only while loading or after an error; Retry remains available after an error.
 
-Recent tracks has sortable, shrinking columns and padded header hover targets.
-Hover a recent track to reveal its shared Library favorite toggle.
+link:02_library.adoc#_recent_tracks[Recent tracks] supports independent multiselect,
+batch favorites, and transfers to Queue or playlists.
 
-Playlist catalogs, entries, and the Queue panel's playlist-destination menu
+Playlist catalogs, entries, and track-menu playlist selectors
 load rows automatically while scrolling. Entry numbering and drag reordering use
 absolute playlist positions. Scrolling away preserves selected entry identities,
 not their metadata pages. See link:02_library.adoc#_paged_views[Library] for

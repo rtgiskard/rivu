@@ -235,8 +235,9 @@ impl GuiApp {
                 && self.window_visible
                 && !self.state.system.shutting_down
                 && self
-                    .panel_menu
-                    .is_some_and(|menu| matches!(menu.page, shell::PanelMenuPage::Playlists)))
+                    .content_menu
+                    .as_ref()
+                    .is_some_and(|menu| menu.playlists))
     }
 
     pub(super) fn request_root_counts(&mut self, cx: &mut Context<Self>) {

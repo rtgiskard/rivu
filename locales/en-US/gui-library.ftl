@@ -542,3 +542,14 @@ gl-playlist-range-changed = Playlist range changed while loading
 gl-playlist-changed-select = Playlist changed while selecting; select the track again.
 
 gl-metadata-wrong-track = Received details for a different track
+
+li-play = Play
+li-queue = Append to queue
+li-playlist = Add to playlist…
+li-favorite = Favorite
+li-unfavorite = Unfavorite
+li-replace-queue = Play / replace queue…
+li-confirm-remove = Remove these selected items?
+li-folder = Folder settings…
+li-source-changed = Source changed. Try again.
+li-source-busy = A collection is loading. Try again shortly.

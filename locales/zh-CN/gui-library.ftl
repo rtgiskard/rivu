@@ -494,3 +494,14 @@ gl-playlist-range-changed = 加载期间播放列表范围已改变
 gl-playlist-changed-select = 选择期间播放列表已改变，请重新选择曲目。
 
 gl-metadata-wrong-track = 收到的详情属于另一首曲目
+
+li-play = 播放
+li-queue = 追加到队列
+li-playlist = 添加到列表…
+li-favorite = 收藏
+li-unfavorite = 取消收藏
+li-replace-queue = 播放／替换队列…
+li-confirm-remove = 移除这些选中项？
+li-folder = 文件夹设置…
+li-source-changed = 来源已改变，请重试。
+li-source-busy = 正在加载集合，请稍后重试。

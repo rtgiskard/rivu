@@ -19,6 +19,7 @@ impl GuiApp {
             || self.layouts_open
             || self.app_menu_open
             || self.panel_menu.is_some()
+            || self.content_menu.is_some()
             || self.catalog_open
     }
 

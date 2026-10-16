@@ -352,16 +352,25 @@ range. Changing the endpoint keeps the original anchor. Range selection includes
 unloaded rows; selection actions and dragging are disabled while it loads.
 Changing search, favorites, or the missing filter cancels a loading range; its old
 results cannot change the selection for the new filters.
-Batch track actions and library dragging use stable track-ID order.
+Batch track actions and library dragging identify tracks by stable library IDs.
+
+Right-clicking a selected track preserves its group; right-clicking an unselected
+track selects that track alone. Track menus offer Play, Append to queue,
+Add to playlist, Favorite, and Unfavorite, followed by removal where applicable.
+Play targets the clicked track; the other actions target the captured group.
+Favorite and Unfavorite set every target explicitly, rather than toggling mixed
+states. Library removal deletes records and references, never audio files.
+Panel and background menus contain panel or collection operations, not actions
+on a previously selected track group.
 
 Dragging a selected row carries the selection at drag start; dragging an
 unselected row carries that row alone. The dragged set stays fixed for the
 gesture even if the underlying selection changes. Press Esc to cancel a drag
 without adding tracks to its destination.
 
-Right-click a configured root in the desktop Library panel and choose
-`Remove library (keep files)` to remove its configured path. Audio files and
-stored track records are retained; the root no longer appears in this view or
+Right-click a configured root in the desktop Library panel, open Folder actions,
+and choose `Remove library (keep files)` to remove its configured path. Audio files
+and stored track records are retained; the root no longer appears in this view or
 participates in scans of configured roots. Add the path again to restore access.
 
 Configured roots are identified by their paths. Click a directory or group
@@ -384,6 +393,21 @@ The scan status row offers a close button after completion or failure. Closing
 it hides the result and progress bar without changing imported tracks or the
 separate error message. A new scan shows progress again.
 
+== Recent tracks
+
+Recent tracks keeps its own selection, independent of Library. Click selects one
+track; Ctrl/Cmd-click toggles tracks, Shift-click selects an inclusive range,
+and Ctrl/Cmd+Shift-click adds a range. Ctrl/Cmd+A selects all recent tracks when
+this panel has focus. Sorting preserves selected track identities; refreshes
+discard selections that no longer exist.
+
+Right-click a track for the shared track actions, including batch Favorite and
+Unfavorite. Drag selected tracks to Queue or a named playlist catalog row to
+append them in their displayed order; dragging an unselected track carries only
+that track. These transfers do not remove history entries or change Library
+selection. Double-click plays the clicked track. Columns remain sortable and
+shrink to fit; hovering a row exposes its individual favorite toggle.
+
 == Albums
 
 Add the dockable `Albums` panel to browse a continuously scrolling cover grid.
@@ -397,6 +421,13 @@ These buttons do not open album details. Double-click a track row to play that
 track individually; a single click does not start playback. Track rows also
 offer individual playback and queue actions. Album actions include tracks beyond
 the currently loaded rows.
+
+Right-click an album card for actions on the complete album, including adding it
+to a playlist and setting or clearing favorites. Drag a card to Queue or a named
+playlist catalog row to append the complete album in album order. Track rows
+offer the shared track menu and can be dragged individually to either destination.
+Album transfers resolve all members before submission; failures or a concurrent
+collection change do not submit a partial album.
 
 Search matches effective album titles or any member artist across the library,
 not just the loaded rows. Matching an artist keeps the complete album visible,
