@@ -1,7 +1,7 @@
 use crate::{
     analysis::{AnalysisControl, AnalysisFrame, DisplayDemand},
     audio::{self, AudioCommand, AudioEngine, AudioEvent},
-    config::{Config, LibraryColumn},
+    config::{Config, ConfigPatch, LibraryColumn},
     library::{self, M3uItem, ScanResult},
     logging,
     model::*,
@@ -52,17 +52,14 @@ pub(crate) enum Navigation {
     Previous,
 }
 
-#[expect(
-    clippy::large_enum_variant,
-    reason = "Inline configuration transfer avoids another allocation in the bounded request channel"
-)]
 pub(crate) enum GuiConfigChange {
     ToggleStillMode,
     ToggleWaveformSeek,
     ToggleLibraryColumn(LibraryColumn),
     AddLibraryRoot(std::path::PathBuf),
     RemoveLibraryRoot(std::path::PathBuf),
-    Settings(Config),
+    // Only the cold Settings request allocates; ordinary queue slots stay small.
+    Settings(Box<ConfigPatch>),
 }
 struct Request {
     operation: Operation,
@@ -182,9 +179,9 @@ impl CoreHandle {
             .context("Rivu is busy or stopped")
     }
 
-    pub(crate) fn apply_gui_settings(&self, config: Config) -> Ack {
+    pub(crate) fn apply_gui_settings(&self, patch: ConfigPatch) -> Ack {
         self.operation_ack(
-            Operation::GuiConfig(GuiConfigChange::Settings(config)),
+            Operation::GuiConfig(GuiConfigChange::Settings(Box::new(patch))),
             Duration::from_secs(12),
         )
     }
@@ -3352,31 +3349,149 @@ mod tests {
     }
 
     #[test]
-    fn settings_apply_resolves_unedited_playback_and_library_columns_at_execution() {
-        let (_directory, mut core) = fixture();
-        let mut draft = core.state.system.config.as_ref().clone();
-        draft.volume = 0.4;
+    fn settings_apply_merges_every_unedited_field_at_execution() {
+        let (directory, mut core) = fixture();
+        let _audio = recording_audio(&mut core);
+        let baseline = core.state.system.config.clone();
+        let mut draft = baseline.as_ref().clone();
+        draft.scan_max_depth = 7;
+        let patch = ConfigPatch::between(&baseline, &draft);
+        core.command(Command::Volume { value: 0.2 }).unwrap();
+        core.command(Command::Device {
+            name: Some("live-output".into()),
+        })
+        .unwrap();
         core.command(Command::Shuffle { enabled: true }).unwrap();
         core.command(Command::Repeat {
             mode: RepeatMode::One,
         })
         .unwrap();
+        let added = directory.path().join("added");
+        core.update_gui_config(GuiConfigChange::AddLibraryRoot(added.clone()))
+            .unwrap();
+        core.update_gui_config(GuiConfigChange::ToggleStillMode)
+            .unwrap();
+        core.update_gui_config(GuiConfigChange::ToggleWaveformSeek)
+            .unwrap();
         for column in LibraryColumn::ALL {
             core.update_gui_config(GuiConfigChange::ToggleLibraryColumn(column))
                 .unwrap();
         }
-        let columns = core.state.system.config.library_columns;
-        core.update_gui_config(GuiConfigChange::Settings(draft))
+        let mut expected = core.state.system.config.as_ref().clone();
+        expected.scan_max_depth = 7;
+        // These playback changes are still newer than the persisted snapshot.
+        core.command(Command::Volume { value: 0.3 }).unwrap();
+        core.command(Command::Device {
+            name: Some("pending-output".into()),
+        })
+        .unwrap();
+        expected.volume = 0.3;
+        expected.output_device = Some("pending-output".into());
+        core.update_gui_config(GuiConfigChange::Settings(Box::new(patch)))
             .unwrap();
-        assert!(core.state.playback.shuffle);
-        assert_eq!(core.state.playback.repeat, RepeatMode::One);
-        assert_eq!(core.state.playback.volume, 0.4);
-        assert_eq!(core.state.system.config.library_columns, columns);
-        let saved = Config::load(&core.state.system.config_path).unwrap();
-        assert!(saved.shuffle);
-        assert_eq!(saved.repeat, RepeatMode::One);
-        assert_eq!(saved.volume, 0.4);
-        assert_eq!(saved.library_columns, columns);
+        core.publish();
+        let visible = GuiSnapshot::from_core(&core.shared.read());
+        assert_eq!(*visible.system.config, expected);
+        assert_eq!(visible.playback.volume, 0.3);
+        assert!(visible.playback.shuffle);
+        assert_eq!(visible.playback.repeat, RepeatMode::One);
+        assert!(visible.system.config.library_roots.contains(&added));
+        assert_eq!(
+            Config::load(&core.state.system.config_path).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn settings_apply_explicit_fields_override_newer_conflicting_values() {
+        let (directory, mut core) = fixture();
+        let _audio = recording_audio(&mut core);
+        core.command(Command::Device {
+            name: Some("original-output".into()),
+        })
+        .unwrap();
+        core.flush_config(true).unwrap();
+        let baseline = core.state.system.config.clone();
+        let mut draft = baseline.as_ref().clone();
+        draft.volume = 0.4;
+        draft.output_device = None;
+        draft.library_roots.clear();
+        draft.still_mode = true;
+        let patch = ConfigPatch::between(&baseline, &draft);
+        core.command(Command::Volume { value: 0.2 }).unwrap();
+        core.command(Command::Device {
+            name: Some("external-output".into()),
+        })
+        .unwrap();
+        core.update_gui_config(GuiConfigChange::AddLibraryRoot(
+            directory.path().join("external"),
+        ))
+        .unwrap();
+        core.update_gui_config(GuiConfigChange::Settings(Box::new(patch)))
+            .unwrap();
+        core.publish();
+        let visible = GuiSnapshot::from_core(&core.shared.read());
+        assert_eq!(visible.playback.volume, 0.4);
+        assert_eq!(visible.system.selected_device, None);
+        assert!(visible.system.config.library_roots.is_empty());
+        assert!(visible.system.config.still_mode);
+        assert_eq!(
+            Config::load(&core.state.system.config_path).unwrap(),
+            *visible.system.config
+        );
+    }
+
+    #[test]
+    fn settings_failed_save_retry_merges_against_latest_runtime() {
+        let (_directory, mut core) = fixture();
+        let audio = recording_audio(&mut core);
+        let baseline = core.state.system.config.clone();
+        let mut draft = baseline.as_ref().clone();
+        draft.scan_max_depth = 7;
+        let patch = ConfigPatch::between(&baseline, &draft);
+        std::fs::create_dir(&core.state.system.config_path).unwrap();
+        assert!(
+            core.update_gui_config(GuiConfigChange::Settings(Box::new(patch.clone())))
+                .is_err()
+        );
+        assert_eq!(*core.state.system.config, *baseline);
+        assert!(audio.try_recv().is_err());
+        std::fs::remove_dir(&core.state.system.config_path).unwrap();
+        core.command(Command::Volume { value: 0.2 }).unwrap();
+        core.update_gui_config(GuiConfigChange::Settings(Box::new(patch)))
+            .unwrap();
+        core.publish();
+        let visible = GuiSnapshot::from_core(&core.shared.read());
+        assert_eq!(visible.playback.volume, 0.2);
+        assert_eq!(visible.system.config.scan_max_depth, 7);
+        assert_eq!(
+            Config::load(&core.state.system.config_path).unwrap(),
+            *visible.system.config
+        );
+    }
+
+    #[test]
+    fn settings_saved_audio_failure_keeps_committed_desired_configuration() {
+        let (_directory, mut core) = fixture();
+        let (commands, receiver) = bounded(1);
+        drop(receiver);
+        core.engine.commands = commands;
+        let baseline = core.state.system.config.clone();
+        let mut draft = baseline.as_ref().clone();
+        draft.scan_max_depth = 7;
+        let error = core
+            .update_gui_config(GuiConfigChange::Settings(Box::new(ConfigPatch::between(
+                &baseline, &draft,
+            ))))
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("Configuration saved, but audio application failed"));
+        core.publish();
+        let visible = GuiSnapshot::from_core(&core.shared.read());
+        assert_eq!(visible.system.config.scan_max_depth, 7);
+        assert_eq!(
+            Config::load(&core.state.system.config_path).unwrap(),
+            *visible.system.config
+        );
     }
 
     #[test]

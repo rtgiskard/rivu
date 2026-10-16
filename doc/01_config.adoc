@@ -198,12 +198,25 @@ restarting playback. The application menu also offers a Visualizations toggle be
 Layouts; On enables visualizations and Off pauses them, saving immediately.
 Both controls use `visualizations.still_mode`; neither affects artwork or animation.
 
-Shuffle and Repeat are playback controls, not desktop settings. Applying settings
-preserves their values at the time the core executes the request, including
-changes made while the dialog was open or waiting to save. Library track-information
-columns are also preserved when applying Settings. Adding a library root,
-toggling a Library column, or toggling waveform seeking does not overwrite playback
-or output-device settings.
+Settings keeps an independent draft based on the configuration at opening or the
+most recent successful Apply. Apply submits only fields whose values differ from
+that baseline. Core merges those edits into its latest configuration when the
+request executes, not when it is queued. Unedited changes from playback controls,
+CLI clients, or other desktop controls—including volume, output device, library
+roots, Still Mode, Shuffle, Repeat, and Library columns—are preserved. An explicitly
+changed field takes the draft value even if another control changed it meanwhile;
+editing the roots field replaces the whole roots list.
+
+After successful Apply, the baseline and untouched controls reflect the committed
+configuration. Edits made while Apply was pending remain in the draft, including
+partially typed or invalid text, for the next Apply. Failed Apply retains the draft
+and its previous baseline for correction or retry; the saved-but-audio-failed
+contract above still applies. Discard closes the editor and drops unsubmitted
+edits, but does not cancel an Apply already sent to Core. Its later completion
+cannot replace the draft or feedback of a reopened editor.
+
+Adding a library root, toggling a Library column, or toggling waveform seeking
+does not overwrite playback or output-device settings.
 Interface → Layout includes Layout snapping and Layout grid spacing. These save
 `interface.layout_snap_enabled` (default `true`) and `interface.layout_snap_grid_px` (default `8`,
 integer `1`–`64` logical pixels before interface scaling) in `config.toml`.

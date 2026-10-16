@@ -359,6 +359,111 @@ pub struct Config {
     pub pipewire_auto_mix: bool,
 }
 
+// Keep Settings requests field-based: omitted fields belong to the latest Core state.
+// Nested Option fields distinguish leaving a value alone from explicitly clearing it.
+macro_rules! config_patch {
+    ($( $field:ident : $ty:ty, )*) => {
+        #[derive(Clone, Debug, Default, PartialEq)]
+        pub(crate) struct ConfigPatch {
+            $( $field: Option<$ty>, )*
+        }
+
+        impl ConfigPatch {
+            pub(crate) fn between(baseline: &Config, draft: &Config) -> Self {
+                fn changed<T: Clone + PartialEq>(baseline: &T, draft: &T) -> Option<T> {
+                    (baseline != draft).then(|| draft.clone())
+                }
+                Self {
+                    $( $field: changed(&baseline.$field, &draft.$field), )*
+                }
+            }
+
+            pub(crate) fn apply_to(self, config: &mut Config) {
+                $( if let Some(value) = self.$field { config.$field = value; } )*
+            }
+        }
+    };
+}
+
+config_patch! {
+    library_roots: Vec<PathBuf>,
+    scan_max_depth: u32,
+    output_device: Option<String>,
+    volume: f32,
+    shuffle: bool,
+    repeat: RepeatMode,
+    play_count_threshold_percent: f64,
+    tray_enabled: bool,
+    mpris_enabled: bool,
+    log_level: LogLevel,
+    log_to_file: bool,
+    log_retention_weeks: u32,
+    page_size: u32,
+    library_columns: LibraryColumns,
+    ui_language: String,
+    ui_font: String,
+    ui_scale: f32,
+    layout_snap_enabled: bool,
+    layout_snap_grid_px: u32,
+    still_mode: bool,
+    analysis_fps: u32,
+    visual_background: RgbColor,
+    visual_palette: VisualizationPalette,
+    spectrum_style: SpectrumStyle,
+    analysis_fft_size: u32,
+    analysis_window: AnalysisWindow,
+    spectrum_interpolate: bool,
+    spectrum_bar_width: f32,
+    spectrum_bars: u32,
+    spectrum_gap: f32,
+    spectrum_peaks: bool,
+    spectrum_peak_hold_ms: u32,
+    spectrum_peak_gravity: f32,
+    spectrum_bar_hold_ms: u32,
+    spectrum_bar_gravity: f32,
+    spectrum_smoothing_ms: u32,
+    spectrum_grid: bool,
+    spectrum_labels: bool,
+    audio_visualizer_style: AudioVisualizerStyle,
+    audio_visualizer_grid: bool,
+    audio_visualizer_labels: bool,
+    audio_visualizer_sensitivity: f32,
+    audio_visualizer_rotation_speed: f32,
+    audio_visualizer_bar_width: f32,
+    audio_visualizer_bar_glow_layers: u32,
+    audio_visualizer_ring_opacity: f32,
+    audio_visualizer_bloom_intensity: f32,
+    audio_visualizer_inner_diameter: f32,
+    audio_visualizer_fade_when_idle: bool,
+    audio_visualizer_primary_color: RgbColor,
+    audio_visualizer_secondary_color: RgbColor,
+    spectrogram_labels: bool,
+    spectrogram_interpolate: bool,
+    spectrogram_sampling_points_scale: f32,
+    spectrogram_interpolation_points: u32,
+    waveform_labels: bool,
+    waveform_seek_enabled: bool,
+    visualization_db_range: f32,
+    spectrum_db_range: Option<f32>,
+    spectrogram_db_range: Option<f32>,
+    audio_visualizer_db_range: Option<f32>,
+    spectrogram_history_seconds: u32,
+    waveform_cursor_color: RgbColor,
+    waveform_glow: f32,
+    waveform_rms_gain: f32,
+    waveform_peak_gain: f32,
+    waveform_peak_gamma: f32,
+    album_artwork_style: AlbumArtworkStyle,
+    album_artwork_mode: AlbumArtworkMode,
+    album_artwork_period_seconds: f32,
+    album_artwork_direction: AlbumArtworkDirection,
+    album_artwork_fps: u16,
+    visualization_cache: bool,
+    media_read_buffer_mb: u32,
+    ffmpeg_enabled: bool,
+    pipewire_auto_mix: bool,
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {

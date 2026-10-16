@@ -2,12 +2,17 @@ use super::*;
 
 impl Core {
     pub(in crate::core) fn update_gui_config(&mut self, change: GuiConfigChange) -> Result<()> {
-        if let GuiConfigChange::Settings(mut config) = change {
-            // These controls are not edited by the Settings dialog. Resolve at
-            // execution, not before enqueueing behind pending playback commands.
+        if let GuiConfigChange::Settings(patch) = change {
+            // Playback controls can be newer than the last persisted config.
+            // Only explicit draft changes override the owner's execution-time state.
+            let mut config = self.state.system.config.as_ref().clone();
+            config.volume = self.state.playback.volume;
             config.shuffle = self.state.playback.shuffle;
             config.repeat = self.state.playback.repeat;
-            config.library_columns = self.state.system.config.library_columns;
+            config
+                .output_device
+                .clone_from(&self.state.system.selected_device);
+            patch.apply_to(&mut config);
             return self.command(Command::Configure {
                 config: std::sync::Arc::new(config),
             });

@@ -10,8 +10,8 @@ use crate::{
     artwork::{ArtworkCacheReport, ArtworkManager},
     config::{
         AlbumArtworkDirection, AlbumArtworkMode, AlbumArtworkOptions, AlbumArtworkStyle,
-        AnalysisWindow, AudioVisualizerOptions, AudioVisualizerStyle, Config, LogLevel, RgbColor,
-        SpectrumStyle, VisualizationPalette,
+        AnalysisWindow, AudioVisualizerOptions, AudioVisualizerStyle, Config, ConfigPatch,
+        LogLevel, RgbColor, SpectrumStyle, VisualizationPalette,
     },
     core::CoreHandle,
     i18n::Localizer,
@@ -440,6 +440,12 @@ pub(super) enum SettingsEvent {
 
 impl EventEmitter<SettingsEvent> for Settings {}
 
+struct SettingsSubmission {
+    session: u64,
+    config: Config,
+    inputs: HashMap<Field, String>,
+}
+
 /// Unsaved preferences stay independent from live playback snapshots.
 pub(super) struct Settings {
     i18n: Arc<Localizer>,
@@ -461,6 +467,7 @@ pub(super) struct Settings {
     scrolls: HashMap<&'static str, Rc<ScrollHandle>>,
     active_scroll: Option<ScrollHandle>,
     _subscriptions: Vec<Subscription>,
+    baseline: Arc<Config>,
     draft: Config,
     inputs: HashMap<Field, Entity<Input>>,
     initialized: bool,
@@ -534,6 +541,7 @@ impl Settings {
             scrolls: HashMap::new(),
             active_scroll: None,
             _subscriptions: vec![artwork_cache_subscription],
+            baseline: Arc::clone(&config),
             draft: config.as_ref().clone(),
             inputs: HashMap::new(),
             initialized: false,
@@ -607,9 +615,6 @@ impl Settings {
     }
 
     fn cancel(&mut self, cx: &mut Context<Self>) {
-        if self.applying {
-            return;
-        }
         self.active = false;
         self.dropdown.close();
         self.reset(&self.handle.config_snapshot(), cx);
@@ -860,15 +865,29 @@ impl Settings {
         }
     }
 
-    fn set_value(&mut self, field: Field, value: impl Into<SharedString>, cx: &mut App) {
+    fn set_value(
+        &mut self,
+        field: Field,
+        value: impl Into<SharedString>,
+        unchanged: Option<&HashMap<Field, String>>,
+        cx: &mut App,
+    ) {
+        if unchanged.is_some_and(|inputs| {
+            inputs
+                .get(&field)
+                .is_none_or(|submitted| self.inputs[&field].read(cx).text() != submitted)
+        }) {
+            return;
+        }
         self.inputs[&field].update(cx, |input, cx| input.set_text(value.into(), cx));
     }
 
-    fn reset(&mut self, config: &Config, cx: &mut App) {
+    fn reset(&mut self, config: &Arc<Config>, cx: &mut App) {
         self.session = self.session.wrapping_add(1);
         self.visualizer_panel = None;
         self.artwork_panel = None;
-        self.draft = config.clone();
+        self.baseline = Arc::clone(config);
+        self.draft = config.as_ref().clone();
         self.applying = false;
         self.feedback = None;
         self.artwork_cache_report = None;
@@ -877,6 +896,10 @@ impl Settings {
     }
 
     fn fill(&mut self, cx: &mut App) {
+        self.fill_unchanged(None, cx);
+    }
+
+    fn fill_unchanged(&mut self, unchanged: Option<&HashMap<Field, String>>, cx: &mut App) {
         self.set_value(
             Field::Roots,
             self.draft
@@ -885,91 +908,118 @@ impl Settings {
                 .map(|path| path.to_string_lossy())
                 .collect::<Vec<_>>()
                 .join(";"),
+            unchanged,
             cx,
         );
         self.set_value(
             Field::ScanMaxDepth,
             self.draft.scan_max_depth.to_string(),
+            unchanged,
             cx,
         );
-        self.set_value(Field::Volume, (self.draft.volume * 100.).to_string(), cx);
+        self.set_value(
+            Field::Volume,
+            (self.draft.volume * 100.).to_string(),
+            unchanged,
+            cx,
+        );
         self.set_value(
             Field::PlayCountThreshold,
             self.draft.play_count_threshold_percent.to_string(),
+            unchanged,
             cx,
         );
         self.set_value(
             Field::LogRetentionWeeks,
             self.draft.log_retention_weeks.to_string(),
+            unchanged,
             cx,
         );
         self.set_value(
             Field::MediaReadBuffer,
             self.draft.media_read_buffer_mb.to_string(),
+            unchanged,
             cx,
         );
         self.font_value = self.draft.ui_font.clone();
-        self.set_value(Field::Font, self.draft.ui_font.clone(), cx);
-        self.set_value(Field::Scale, self.draft.ui_scale.to_string(), cx);
+        self.set_value(Field::Font, self.draft.ui_font.clone(), unchanged, cx);
+        self.set_value(Field::Scale, self.draft.ui_scale.to_string(), unchanged, cx);
         self.set_value(
             Field::LayoutSnapGrid,
             self.draft.layout_snap_grid_px.to_string(),
+            unchanged,
             cx,
         );
-        self.set_value(Field::Fps, self.draft.analysis_fps.to_string(), cx);
+        self.set_value(
+            Field::Fps,
+            self.draft.analysis_fps.to_string(),
+            unchanged,
+            cx,
+        );
         self.set_value(
             Field::Background,
             self.draft.visual_background.to_string(),
+            unchanged,
             cx,
         );
         self.set_value(
             Field::VisualizationDb,
             self.draft.visualization_db_range.to_string(),
+            unchanged,
             cx,
         );
         self.set_value(
             Field::AudioVisualizerSensitivity,
             self.draft.audio_visualizer_sensitivity.to_string(),
+            unchanged,
             cx,
         );
         self.set_value(
             Field::AudioVisualizerRotationSpeed,
             self.draft.audio_visualizer_rotation_speed.to_string(),
+            unchanged,
             cx,
         );
         self.set_value(
             Field::AudioVisualizerBarWidth,
             self.draft.audio_visualizer_bar_width.to_string(),
+            unchanged,
             cx,
         );
         self.set_value(
             Field::AudioVisualizerBarGlowLayers,
             self.draft.audio_visualizer_bar_glow_layers.to_string(),
+            unchanged,
             cx,
         );
         self.set_value(
             Field::AudioVisualizerRingOpacity,
             self.draft.audio_visualizer_ring_opacity.to_string(),
+            unchanged,
             cx,
         );
         self.set_value(
             Field::AudioVisualizerBloomIntensity,
             self.draft.audio_visualizer_bloom_intensity.to_string(),
+            unchanged,
             cx,
         );
         self.set_value(
             Field::AudioVisualizerInnerDiameter,
             self.draft.audio_visualizer_inner_diameter.to_string(),
+            unchanged,
             cx,
         );
         self.set_value(
             Field::AudioVisualizerPrimaryColor,
             self.draft.audio_visualizer_primary_color.to_string(),
+            unchanged,
             cx,
         );
         self.set_value(
             Field::AudioVisualizerSecondaryColor,
             self.draft.audio_visualizer_secondary_color.to_string(),
+            unchanged,
             cx,
         );
         self.set_value(
@@ -978,6 +1028,7 @@ impl Settings {
                 .audio_visualizer_db_range
                 .map(|range| range.to_string())
                 .unwrap_or_default(),
+            unchanged,
             cx,
         );
         self.set_value(
@@ -986,42 +1037,55 @@ impl Settings {
                 .spectrum_db_range
                 .map(|range| range.to_string())
                 .unwrap_or_default(),
+            unchanged,
             cx,
         );
-        self.set_value(Field::SpectrumGap, self.draft.spectrum_gap.to_string(), cx);
+        self.set_value(
+            Field::SpectrumGap,
+            self.draft.spectrum_gap.to_string(),
+            unchanged,
+            cx,
+        );
         self.set_value(
             Field::SpectrumHold,
             self.draft.spectrum_peak_hold_ms.to_string(),
+            unchanged,
             cx,
         );
         self.set_value(
             Field::SpectrumGravity,
             self.draft.spectrum_peak_gravity.to_string(),
+            unchanged,
             cx,
         );
         self.set_value(
             Field::SpectrumBarHold,
             self.draft.spectrum_bar_hold_ms.to_string(),
+            unchanged,
             cx,
         );
         self.set_value(
             Field::SpectrumBarGravity,
             self.draft.spectrum_bar_gravity.to_string(),
+            unchanged,
             cx,
         );
         self.set_value(
             Field::SpectrumSmoothing,
             self.draft.spectrum_smoothing_ms.to_string(),
+            unchanged,
             cx,
         );
         self.set_value(
             Field::SpectrumBarWidth,
             self.draft.spectrum_bar_width.to_string(),
+            unchanged,
             cx,
         );
         self.set_value(
             Field::SpectrumBars,
             self.draft.spectrum_bars.to_string(),
+            unchanged,
             cx,
         );
         self.set_value(
@@ -1030,52 +1094,67 @@ impl Settings {
                 .spectrogram_db_range
                 .map(|range| range.to_string())
                 .unwrap_or_default(),
+            unchanged,
             cx,
         );
         self.set_value(
             Field::SpectrogramHistory,
             self.draft.spectrogram_history_seconds.to_string(),
+            unchanged,
             cx,
         );
         self.set_value(
             Field::SpectrogramSamplingPointsScale,
             self.draft.spectrogram_sampling_points_scale.to_string(),
+            unchanged,
             cx,
         );
         self.set_value(
             Field::SpectrogramInterpolationPoints,
             self.draft.spectrogram_interpolation_points.to_string(),
+            unchanged,
             cx,
         );
         self.set_value(
             Field::CursorColor,
             self.draft.waveform_cursor_color.to_string(),
+            unchanged,
             cx,
         );
-        self.set_value(Field::Glow, self.draft.waveform_glow.to_string(), cx);
+        self.set_value(
+            Field::Glow,
+            self.draft.waveform_glow.to_string(),
+            unchanged,
+            cx,
+        );
         self.set_value(
             Field::WaveformRmsGain,
             self.draft.waveform_rms_gain.to_string(),
+            unchanged,
             cx,
         );
         self.set_value(
             Field::WaveformPeakGain,
             self.draft.waveform_peak_gain.to_string(),
+            unchanged,
             cx,
         );
         self.set_value(
             Field::WaveformPeakGamma,
             self.draft.waveform_peak_gamma.to_string(),
+            unchanged,
             cx,
         );
         self.set_value(
             Field::AlbumArtworkPeriod,
             self.draft.album_artwork_period_seconds.to_string(),
+            unchanged,
             cx,
         );
         self.set_value(
             Field::AlbumArtworkFps,
             self.draft.album_artwork_fps.to_string(),
+            unchanged,
             cx,
         );
     }
@@ -1439,31 +1518,75 @@ impl Settings {
                 return;
             }
         };
-        self.applying = true;
-        self.feedback = None;
-        let session = self.session;
+        let (patch, submission) = self.begin_settings_apply(config, cx);
         let handle = self.handle.clone();
         cx.spawn(async move |this, cx| {
-            let response = cx
+            let (response, committed) = cx
                 .background_executor()
-                .spawn(async move { handle.apply_gui_settings(config) })
+                .spawn(async move {
+                    let response = handle.apply_gui_settings(patch);
+                    (response, handle.config_snapshot())
+                })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                if this.session != session {
-                    return;
-                }
-                this.applying = false;
-                this.feedback = Some(if response.ok {
+                let result = if response.ok {
                     Ok(())
                 } else {
                     Err(response
                         .error
                         .unwrap_or_else(|| this.tr("settings-save-error").to_string()))
-                });
-                cx.notify();
+                };
+                this.complete_settings_apply(submission, committed, result, cx);
             });
         })
         .detach();
+        cx.notify();
+    }
+
+    fn begin_settings_apply(
+        &mut self,
+        config: Config,
+        cx: &App,
+    ) -> (ConfigPatch, SettingsSubmission) {
+        let patch = ConfigPatch::between(&self.baseline, &config);
+        // Numeric/text controls live in Input entities. Establish the submitted
+        // values in draft too, so later toggle/dropdown edits have the same origin.
+        self.draft = config.clone();
+        self.applying = true;
+        self.feedback = None;
+        let submission = SettingsSubmission {
+            session: self.session,
+            config,
+            inputs: self
+                .inputs
+                .iter()
+                .map(|(&field, input)| (field, input.read(cx).text().to_owned()))
+                .collect(),
+        };
+        (patch, submission)
+    }
+
+    fn complete_settings_apply(
+        &mut self,
+        submission: SettingsSubmission,
+        committed: Arc<Config>,
+        result: std::result::Result<(), String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.session != submission.session {
+            return;
+        }
+        self.applying = false;
+        if result.is_ok() {
+            let later_edits = ConfigPatch::between(&submission.config, &self.draft);
+            self.draft = committed.as_ref().clone();
+            later_edits.apply_to(&mut self.draft);
+            self.baseline = committed;
+            // Preserve even invalid or partially typed input, including its caret.
+            self.fill_unchanged(Some(&submission.inputs), cx);
+            self.font_value = self.value(Field::Font, cx);
+        }
+        self.feedback = Some(result);
         cx.notify();
     }
 
@@ -2943,20 +3066,12 @@ impl Settings {
                     ),
                     self.applying,
                 ))
-                .child(disabled_control(
-                    icon_button(
-                        "settings-discard",
-                        "",
-                        self.tr("settings-discard-changes-and-close"),
-                        cx,
-                        |this, _, cx| {
-                            if this.applying {
-                                return;
-                            }
-                            this.cancel(cx);
-                        },
-                    ),
-                    self.applying,
+                .child(icon_button(
+                    "settings-discard",
+                    "",
+                    self.tr("settings-discard-changes-and-close"),
+                    cx,
+                    |this, _, cx| this.cancel(cx),
                 )),
         );
         if self.dropdown.is_open() {
@@ -3117,5 +3232,194 @@ impl Render for Settings {
                     )
                     .child(panel),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{core::Runtime, model::Command};
+    // gpui::* also imports its test macro; expansion needs Rust's builtin attribute.
+    use core::prelude::v1::test;
+
+    fn fixture(cx: &mut TestAppContext) -> (tempfile::TempDir, Runtime, Entity<Settings>) {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        Config {
+            volume: 0.0,
+            ffmpeg_enabled: false,
+            mpris_enabled: false,
+            ..Config::default()
+        }
+        .save(&path)
+        .unwrap();
+        let runtime = Runtime::start(directory.path(), &path).unwrap();
+        let config = runtime.handle.config_snapshot();
+        let settings = cx.new(|cx| {
+            Settings::new(
+                Arc::new(Localizer::new("en-US")),
+                runtime.handle.clone(),
+                Arc::new(ArtworkManager::new(directory.path())),
+                Arc::new(Vec::new()),
+                ("disabled".into(), "disabled".into()),
+                1.0,
+                cx,
+            )
+        });
+        settings.update(cx, |this, cx| {
+            this.initialize_settings(cx);
+            this.reset(&config, cx);
+            this.active = true;
+        });
+        (directory, runtime, settings)
+    }
+
+    fn submit(
+        settings: &Entity<Settings>,
+        cx: &mut TestAppContext,
+    ) -> (ConfigPatch, SettingsSubmission) {
+        settings.update(cx, |this, cx| {
+            this.begin_settings_apply(this.parse(cx).unwrap(), cx)
+        })
+    }
+
+    fn execute(
+        runtime: &Runtime,
+        patch: ConfigPatch,
+    ) -> (Arc<Config>, std::result::Result<(), String>) {
+        let response = runtime.handle.apply_gui_settings(patch);
+        let result = if response.ok {
+            Ok(())
+        } else {
+            Err(response.error.unwrap())
+        };
+        (runtime.handle.config_snapshot(), result)
+    }
+
+    #[gpui::test]
+    fn successful_settings_apply_rebases_untouched_controls_and_keeps_later_edits(
+        cx: &mut TestAppContext,
+    ) {
+        let (_directory, runtime, settings) = fixture(cx);
+        settings.update(cx, |this, cx| {
+            this.set_value(Field::ScanMaxDepth, "7", None, cx)
+        });
+        let (patch, submission) = submit(&settings, cx);
+        assert!(
+            runtime
+                .handle
+                .request_ack(Command::Volume { value: 0.2 })
+                .ok
+        );
+        let (committed, result) = execute(&runtime, patch);
+        assert!(result.is_ok());
+        // Hold the completion while a user leaves invalid text and changes a switch.
+        settings.update(cx, |this, cx| {
+            this.set_value(Field::ScanMaxDepth, "1e", None, cx);
+            this.draft.still_mode = true;
+            this.complete_settings_apply(submission, committed, result, cx);
+            assert_eq!(this.baseline.scan_max_depth, 7);
+            assert_eq!(this.baseline.volume, 0.2);
+            assert_eq!(this.value(Field::Volume, cx), "20");
+            assert_eq!(this.value(Field::ScanMaxDepth, cx), "1e");
+            assert!(this.draft.still_mode);
+            assert!(this.parse(cx).is_err());
+            this.set_value(Field::ScanMaxDepth, "9", None, cx);
+        });
+        let (patch, submission) = submit(&settings, cx);
+        assert!(
+            runtime
+                .handle
+                .request_ack(Command::Volume { value: 0.3 })
+                .ok
+        );
+        let (committed, result) = execute(&runtime, patch);
+        assert!(result.is_ok());
+        settings.update(cx, |this, cx| {
+            this.complete_settings_apply(submission, committed, result, cx);
+            let visible = this.parse(cx).unwrap();
+            assert_eq!(visible.scan_max_depth, 9);
+            assert_eq!(visible.volume, 0.3);
+            assert!(visible.still_mode);
+            assert_eq!(visible, *this.baseline);
+        });
+    }
+
+    #[gpui::test]
+    fn failed_settings_apply_retains_edits_and_baseline_for_retry(cx: &mut TestAppContext) {
+        let (directory, runtime, settings) = fixture(cx);
+        let path = directory.path().join("config.toml");
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        settings.update(cx, |this, cx| {
+            this.set_value(Field::ScanMaxDepth, "7", None, cx)
+        });
+        let (patch, submission) = submit(&settings, cx);
+        let (committed, result) = execute(&runtime, patch);
+        assert!(result.is_err());
+        settings.update(cx, |this, cx| {
+            this.set_value(Field::ScanMaxDepth, "9", None, cx);
+            this.draft.still_mode = true;
+            this.complete_settings_apply(submission, committed, result, cx);
+            assert_eq!(
+                this.baseline.scan_max_depth,
+                crate::config::DEFAULT_SCAN_MAX_DEPTH
+            );
+            assert_eq!(this.value(Field::ScanMaxDepth, cx), "9");
+            assert!(this.draft.still_mode);
+            assert!(!this.applying);
+            assert!(matches!(&this.feedback, Some(Err(_))));
+        });
+        std::fs::remove_dir(&path).unwrap();
+        assert!(
+            runtime
+                .handle
+                .request_ack(Command::Volume { value: 0.2 })
+                .ok
+        );
+        let (patch, submission) = submit(&settings, cx);
+        let (committed, result) = execute(&runtime, patch);
+        assert!(result.is_ok());
+        settings.update(cx, |this, cx| {
+            this.complete_settings_apply(submission, committed, result, cx);
+            assert_eq!(this.baseline.scan_max_depth, 9);
+            assert_eq!(this.baseline.volume, 0.2);
+            assert!(this.baseline.still_mode);
+            assert_eq!(this.parse(cx).unwrap(), *this.baseline);
+        });
+    }
+
+    #[gpui::test]
+    fn settings_completion_cannot_modify_a_reopened_edit_session(cx: &mut TestAppContext) {
+        let (_directory, runtime, settings) = fixture(cx);
+        settings.update(cx, |this, cx| {
+            this.set_value(Field::ScanMaxDepth, "7", None, cx)
+        });
+        let (patch, old_submission) = submit(&settings, cx);
+        let (old_committed, old_result) = execute(&runtime, patch);
+        assert!(old_result.is_ok());
+        settings.update(cx, |this, cx| {
+            this.cancel(cx);
+            assert!(!this.active);
+            let reopened = this.handle.config_snapshot();
+            this.reset(&reopened, cx);
+            this.active = true;
+            this.set_value(Field::ScanMaxDepth, "9", None, cx);
+        });
+        let (patch, submission) = submit(&settings, cx);
+        settings.update(cx, |this, cx| {
+            this.complete_settings_apply(old_submission, old_committed, old_result, cx);
+            assert!(this.applying);
+            assert!(this.feedback.is_none());
+            assert_eq!(this.baseline.scan_max_depth, 7);
+            assert_eq!(this.value(Field::ScanMaxDepth, cx), "9");
+        });
+        let (committed, result) = execute(&runtime, patch);
+        assert!(result.is_ok());
+        settings.update(cx, |this, cx| {
+            this.complete_settings_apply(submission, committed, result, cx);
+            assert!(!this.applying);
+            assert_eq!(this.parse(cx).unwrap().scan_max_depth, 9);
+        });
     }
 }
