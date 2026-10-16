@@ -225,7 +225,6 @@ impl GuiApp {
             ManualAction::ReloadPlayback => {
                 self.metadata.discard_draft();
                 self.clear_metadata_selection(cx);
-                self.retry_metadata(cx);
             }
             ManualAction::Close(window) => {
                 cx.defer(move |cx| {
@@ -335,12 +334,6 @@ impl GuiApp {
         self.sync_metadata_query();
         self.metadata_needs_refresh = true;
         self.demand_metadata(cx);
-    }
-
-    pub(super) fn retry_metadata(&mut self, cx: &mut Context<Self>) {
-        if let Some(id) = self.metadata.identity() {
-            self.load_metadata_track(id, cx);
-        }
     }
 
     pub(super) fn reload_playback_metadata(&mut self, cx: &mut Context<Self>) {

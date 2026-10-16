@@ -62,6 +62,10 @@ and only the latest queued demand may then run. Metadata drafts/save baselines,
 occurrence identities, unavailable state, and relocation operations remain
 business-owned rather than being swallowed by a generic payload cache.
 
+Explicit Details selections load through a track query. Playback-follow Details
+use the Core's current-track snapshot; reloading playback does not start a second
+track read or leave a query reservation behind.
+
 Root-count batches run one at a time. Tree reads share at most four physical
 workers and four coalesced latest pending branch demands; unscheduled demand
 owns no loading token. Completion re-drives current visible demand, while
