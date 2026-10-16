@@ -1063,9 +1063,10 @@ impl UiState {
                             changed = search.results.navigate(key.code, page_size);
                         }
                         KeyCode::Enter if search.focus == SearchFocus::Results => {
-                            command = search.results.selected().map(|track| Command::Enqueue {
-                                track_ids: vec![track.id],
-                            });
+                            command = search
+                                .results
+                                .selected()
+                                .map(|track| Command::Play { track_id: track.id });
                         }
                         KeyCode::Enter => {
                             search.focus = SearchFocus::Results;
@@ -1460,9 +1461,7 @@ impl LibraryTree {
                 self.entries = PagedList::default();
                 None
             }
-            DirectoryRow::Track(track) => Some(Command::Enqueue {
-                track_ids: vec![track.id],
-            }),
+            DirectoryRow::Track(track) => Some(Command::Play { track_id: track.id }),
         }
     }
 
@@ -2584,9 +2583,6 @@ mod tests {
             assert!(rendered.contains("row-3"), "{rendered}");
             let selected = ui.key_action(KeyEvent::from(KeyCode::Enter), &state);
             match selected {
-                KeyAction::Command(Command::Enqueue { track_ids }) => {
-                    assert_eq!(track_ids, vec![3])
-                }
                 KeyAction::Command(Command::PlayPlaylist { playlist_id: 3 })
                 | KeyAction::Command(Command::Play { track_id: 3 }) => {}
                 _ => panic!("selection did not activate the global row"),

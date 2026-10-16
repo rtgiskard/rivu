@@ -41,7 +41,7 @@ terminal-help-search =
     PgUp/Dn   翻页
     R         重新加载
     Backspace 删除字符
-    Enter     切换到结果
+    Enter     切到结果/播放选中曲目
     Esc       返回队列
 
     匹配标题、艺人、专辑和路径。
@@ -49,7 +49,7 @@ terminal-help-tree =
     ↑/↓       选择条目
     PgUp/Dn   翻页
     R         重新加载
-    Enter     打开目录/添加曲目
+    Enter     打开目录/播放曲目
     Backspace/← 上级目录
     Esc       返回队列
     /         搜索音乐库

@@ -185,8 +185,8 @@ Scrolling and query retries: link:02_library.adoc#_paged_views[Library].
 `?` toggles context-sensitive help; `/` searches, `t` browses directories, and
 `P` lists playlists. Up/Down and PageUp/PageDown navigate. In Search, Tab switches
 between the query and results; Enter from the query focuses results, and Enter
-on a result enqueues it. Enter on a directory opens it; Enter on a directory
-track enqueues it. Right opens playlist entries; Enter plays a selected playlist,
+on a result plays it. Enter on a directory opens it; Enter on a directory
+track plays it. Right opens playlist entries; Enter plays a selected playlist,
 playlist track, or queue occurrence. In playlist details, `a` enqueues the selected
 track. In Queue, `d` or Delete removes the selected occurrence.
 Queue rows show the track title before the artist.

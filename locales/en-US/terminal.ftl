@@ -44,7 +44,7 @@ terminal-help-search =
     PgUp/Dn   scroll screen
     R         retry loading
     Backspace edit query
-    Enter     focus results
+    Enter     focus results/play selected
     Esc       return to queue
 
     Search matches title, artist, album and path.
@@ -52,7 +52,7 @@ terminal-help-tree =
     ↑/↓       select entry
     PgUp/Dn   scroll screen
     R         retry loading
-    Enter     open directory/add track
+    Enter     open directory/play track
     Backspace/← parent directory
     Esc       return to queue
     /         search library
