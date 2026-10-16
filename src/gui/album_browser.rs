@@ -725,7 +725,6 @@ impl Render for AlbumBrowser {
                 ));
         } else {
             header = header
-                .child(div().text_lg().child(self.tr("gl-albums")))
                 .child(div().flex_1().min_w_0().child(self.search.clone()))
                 .child(icon_button(
                     "albums-sort",
