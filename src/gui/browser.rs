@@ -108,6 +108,7 @@ impl BrowserState {
     pub(super) fn clear_selection(&mut self) {
         self.library.clear_selection();
         self.queue.clear();
+        self.history.clear_selection();
         self.remove_playlist_selection();
     }
 }
@@ -345,17 +346,6 @@ impl LibraryBrowser {
         let index = self.tree.ready_selection()?;
         self.navigation_intent = None;
         Some((id, index))
-    }
-
-    pub(super) fn focus_track(&mut self, id: i64) {
-        self.remember_selection();
-        let node = LibraryNode::Track(id);
-        if let Some(index) = self.tree.index_of(&node) {
-            self.tree.focus_selection(&node, index);
-            self.tree
-                .scroll
-                .scroll_to_item(index, ScrollStrategy::Nearest);
-        }
     }
 
     pub(super) fn refresh_tree(&mut self, page_size: usize) {
@@ -902,10 +892,23 @@ impl PlaylistBrowser {
     }
 }
 
+pub(super) struct HistoryCommit {
+    pub(super) track_id: i64,
+    selected: HashSet<i64>,
+    anchor: Option<i64>,
+    generation: u64,
+    selection_generation: u64,
+}
+
 pub(super) struct HistoryBrowser {
     source: Arc<Vec<HistoryEntry>>,
     indices: Vec<usize>,
     title_keys: Vec<String>,
+    positions: std::collections::HashMap<i64, usize>,
+    selected: HashSet<i64>,
+    anchor: Option<i64>,
+    generation: u64,
+    selection_generation: u64,
     playback: Option<(i64, i64)>,
     sort: HistorySort,
     descending: bool,
@@ -917,6 +920,11 @@ impl Default for HistoryBrowser {
             source: Arc::default(),
             indices: Vec::new(),
             title_keys: Vec::new(),
+            positions: Default::default(),
+            selected: HashSet::new(),
+            anchor: None,
+            generation: 0,
+            selection_generation: 0,
             playback: None,
             sort: HistorySort::Recent,
             descending: true,
@@ -941,6 +949,8 @@ impl HistoryBrowser {
             .map(|entry| entry.title.to_lowercase())
             .collect();
         self.rebuild();
+        self.selected.retain(|id| self.positions.contains_key(id));
+        self.anchor = self.anchor.filter(|id| self.positions.contains_key(id));
     }
 
     fn rebuild(&mut self) {
@@ -967,6 +977,102 @@ impl HistoryBrowser {
                 ordering
             }
         });
+        self.positions.clear();
+        self.positions.extend(
+            self.indices
+                .iter()
+                .enumerate()
+                .map(|(position, &index)| (self.source[index].track_id, position)),
+        );
+        self.generation = self.generation.wrapping_add(1);
+    }
+
+    pub(super) fn contains(&self, id: i64) -> bool {
+        self.selected.contains(&id)
+    }
+
+    pub(super) fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub(super) fn prepare_selection(
+        &self,
+        id: i64,
+        shift: bool,
+        additive: bool,
+    ) -> Option<HistoryCommit> {
+        let &position = self.positions.get(&id)?;
+        let mut selected = if additive {
+            self.selected.clone()
+        } else {
+            HashSet::new()
+        };
+        let anchor = self.anchor.filter(|id| self.positions.contains_key(id));
+        if shift {
+            let start = anchor.map_or(position, |id| self.positions[&id]);
+            selected.extend(
+                self.indices[start.min(position)..=start.max(position)]
+                    .iter()
+                    .map(|&index| self.source[index].track_id),
+            );
+        } else if !additive || !selected.remove(&id) {
+            selected.insert(id);
+        }
+        Some(HistoryCommit {
+            track_id: id,
+            selected,
+            anchor: if shift { anchor.or(Some(id)) } else { Some(id) },
+            generation: self.generation,
+            selection_generation: self.selection_generation,
+        })
+    }
+
+    pub(super) fn commit_valid(&self, commit: &HistoryCommit) -> bool {
+        commit.generation == self.generation
+            && commit.selection_generation == self.selection_generation
+            && self.positions.contains_key(&commit.track_id)
+    }
+
+    pub(super) fn commit_selection(&mut self, commit: HistoryCommit) -> bool {
+        if !self.commit_valid(&commit) {
+            return false;
+        }
+        self.selected = commit.selected;
+        self.anchor = commit.anchor;
+        self.selection_generation = self.selection_generation.wrapping_add(1);
+        true
+    }
+
+    pub(super) fn select_all(&mut self) {
+        self.selected.clear();
+        self.selected.extend(self.positions.keys().copied());
+        self.anchor = None;
+        self.selection_generation = self.selection_generation.wrapping_add(1);
+    }
+
+    pub(super) fn clear_selection(&mut self) {
+        self.selected.clear();
+        self.anchor = None;
+        self.selection_generation = self.selection_generation.wrapping_add(1);
+    }
+
+    pub(super) fn ordered_selection(&self) -> Vec<i64> {
+        self.indices
+            .iter()
+            .map(|&index| self.source[index].track_id)
+            .filter(|id| self.selected.contains(id))
+            .collect()
+    }
+
+    pub(super) fn drag_ids(&self, id: i64, generation: u64) -> Vec<i64> {
+        if generation != self.generation || !self.positions.contains_key(&id) {
+            return Vec::new();
+        }
+        if self.contains(id) {
+            self.ordered_selection()
+        } else {
+            vec![id]
+        }
     }
 
     pub(super) fn len(&self) -> usize {
@@ -1035,6 +1141,145 @@ mod tests {
         library.clear_locate_filters();
         assert_eq!(library.selected(), &selected);
         assert_eq!(library.selected_nodes(), &nodes);
+    }
+
+    fn history_selection_source(ids: &[i64]) -> Arc<Vec<HistoryEntry>> {
+        Arc::new(
+            ids.iter()
+                .map(|&id| HistoryEntry {
+                    track_id: id,
+                    title: format!("track {}", 10 - id),
+                    play_count: id as u64,
+                    played_at: 100 - id,
+                    favorite: false,
+                })
+                .collect(),
+        )
+    }
+
+    fn select_history(history: &mut HistoryBrowser, id: i64, shift: bool, additive: bool) {
+        let commit = history.prepare_selection(id, shift, additive).unwrap();
+        assert!(history.commit_selection(commit));
+    }
+
+    #[test]
+    fn history_selection_is_independent_and_ranges_follow_visible_order() {
+        let mut browser = BrowserState::default();
+        browser.library.select_node(&LibraryNode::Track(99), false);
+        browser
+            .history
+            .sync(&history_selection_source(&[1, 2, 3, 4]), None);
+        select_history(&mut browser.history, 2, false, false);
+        select_history(&mut browser.history, 4, true, false);
+        assert_eq!(browser.history.ordered_selection(), [2, 3, 4]);
+        select_history(&mut browser.history, 1, false, true);
+        assert_eq!(browser.history.ordered_selection(), [1, 2, 3, 4]);
+        select_history(&mut browser.history, 3, false, true);
+        assert_eq!(browser.history.ordered_selection(), [1, 2, 4]);
+        select_history(&mut browser.history, 4, true, true);
+        assert_eq!(browser.history.ordered_selection(), [1, 2, 3, 4]);
+        assert_eq!(browser.library.selected(), &HashSet::from([99]));
+        browser.history.set_sort(HistorySort::Title);
+        assert_eq!(browser.history.ordered_selection(), [4, 3, 2, 1]);
+        select_history(&mut browser.history, 2, false, false);
+        select_history(&mut browser.history, 4, true, false);
+        assert_eq!(browser.history.ordered_selection(), [4, 3, 2]);
+    }
+
+    #[test]
+    fn history_prepared_selection_is_atomic_and_stale_projection_cannot_commit() {
+        let mut history = HistoryBrowser::default();
+        let source = history_selection_source(&[1, 2, 3]);
+        history.sync(&source, None);
+        select_history(&mut history, 1, false, false);
+        let canceled = history.prepare_selection(3, true, false).unwrap();
+        assert_eq!(history.ordered_selection(), [1]);
+        drop(canceled);
+        assert_eq!(history.ordered_selection(), [1]);
+        let old_sort = history.prepare_selection(2, false, false).unwrap();
+        history.set_sort(HistorySort::Title);
+        assert!(!history.commit_valid(&old_sort));
+        assert!(!history.commit_selection(old_sort));
+        let old_source = history.prepare_selection(3, false, false).unwrap();
+        history.sync(&history_selection_source(&[1, 2]), None);
+        assert!(!history.commit_selection(old_source));
+        assert_eq!(history.ordered_selection(), [1]);
+        assert!(history.prepare_selection(3, false, false).is_none());
+    }
+
+    #[test]
+    fn history_selection_changes_and_global_clear_reject_pending_commits() {
+        let mut browser = BrowserState::default();
+        browser
+            .history
+            .sync(&history_selection_source(&[1, 2, 3]), None);
+        select_history(&mut browser.history, 1, false, false);
+        let old_selection = browser.history.prepare_selection(2, true, false).unwrap();
+        select_history(&mut browser.history, 3, false, true);
+        assert!(!browser.history.commit_selection(old_selection));
+        assert_eq!(browser.history.ordered_selection(), [1, 3]);
+        let before_all = browser.history.prepare_selection(2, false, false).unwrap();
+        browser.history.select_all();
+        assert!(!browser.history.commit_selection(before_all));
+        let before_clear = browser.history.prepare_selection(2, false, false).unwrap();
+        browser.library.select_node(&LibraryNode::Track(99), false);
+        browser.clear_selection();
+        assert!(browser.history.ordered_selection().is_empty());
+        assert!(browser.history.anchor.is_none());
+        assert!(browser.library.selected().is_empty());
+        assert!(!browser.history.commit_selection(before_clear));
+    }
+
+    #[test]
+    fn history_refresh_prunes_removed_ids_and_select_all_uses_current_projection() {
+        let mut history = HistoryBrowser::default();
+        history.sync(&history_selection_source(&[1, 2, 3, 4]), None);
+        select_history(&mut history, 2, false, false);
+        select_history(&mut history, 4, false, true);
+        history.set_sort(HistorySort::Title);
+        history.sync(&history_selection_source(&[4, 3, 1]), None);
+        assert_eq!(history.ordered_selection(), [4]);
+        history.select_all();
+        assert_eq!(history.ordered_selection(), [4, 3, 1]);
+        history.sync(&Arc::default(), None);
+        assert!(history.ordered_selection().is_empty());
+        assert!(history.anchor.is_none());
+    }
+
+    #[test]
+    fn history_drag_freezes_current_group_without_including_unselected_rows() {
+        let mut history = HistoryBrowser::default();
+        let source = history_selection_source(&[1, 2, 3, 4]);
+        history.sync(&source, None);
+        let rendered_generation = history.generation();
+        select_history(&mut history, 2, false, false);
+        select_history(&mut history, 4, false, true);
+        // Selection can change after rendering but before the actual drag begins.
+        let frozen = history.drag_ids(4, rendered_generation);
+        assert_eq!(frozen, [2, 4]);
+        assert_eq!(history.drag_ids(3, rendered_generation), [3]);
+        assert_eq!(history.ordered_selection(), [2, 4]);
+        history.set_sort(HistorySort::Title);
+        assert!(history.drag_ids(4, rendered_generation).is_empty());
+        assert_eq!(history.drag_ids(4, history.generation()), [4, 2]);
+        assert_eq!(frozen, [2, 4]);
+        let sorted_generation = history.generation();
+        history.sync(&history_selection_source(&[1, 2, 3]), None);
+        assert!(history.drag_ids(4, sorted_generation).is_empty());
+        assert!(history.drag_ids(4, history.generation()).is_empty());
+    }
+
+    #[test]
+    fn history_playback_reorder_preserves_selected_ids_but_invalidates_old_drag() {
+        let mut history = HistoryBrowser::default();
+        let source = history_selection_source(&[1, 2, 3]);
+        history.sync(&source, None);
+        history.select_all();
+        let generation = history.generation();
+        history.sync(&source, Some((3, 200)));
+        assert_eq!(history.ordered_selection(), [3, 1, 2]);
+        assert!(history.drag_ids(1, generation).is_empty());
+        assert_eq!(history.drag_ids(1, history.generation()), [3, 1, 2]);
     }
 
     #[test]

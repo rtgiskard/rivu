@@ -1294,37 +1294,33 @@ impl GuiApp {
             })
     }
 
-    fn select_track(&mut self, id: i64, multi: bool, cx: &mut Context<Self>) {
+    pub(super) fn select_history_track(
+        &mut self,
+        id: i64,
+        shift: bool,
+        multi: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(commit) = self.browser.history.prepare_selection(id, shift, multi) else {
+            return;
+        };
         let intent = self.begin_manual_intent();
         self.ready_manual_action(
             intent,
             metadata::ManualAction::History {
-                track_id: id,
-                multi,
+                commit,
                 structure_revision: self.state.library.structure_revision,
             },
             cx,
         );
     }
 
-    fn commit_history_selection(&mut self, id: i64, multi: bool, cx: &mut Context<Self>) {
-        self.browser.library.invalidate_selection();
-        self.browser
-            .library
-            .select_node(&LibraryNode::Track(id), multi);
-        self.browser.library.focus_track(id);
-        if let Some(selected) = self
-            .browser
-            .library
-            .selected()
-            .contains(&id)
-            .then_some(id)
-            .or_else(|| self.browser.library.selected().iter().copied().min())
-        {
-            self.request_track(selected, cx);
-        } else {
-            self.clear_metadata_selection(cx);
+    fn commit_history_selection(&mut self, commit: browser::HistoryCommit, cx: &mut Context<Self>) {
+        let id = commit.track_id;
+        if !self.browser.history.commit_selection(commit) {
+            return;
         }
+        self.request_track(id, cx);
         self.sync_waveform(cx);
         cx.notify();
     }

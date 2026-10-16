@@ -2848,7 +2848,7 @@ impl GuiApp {
                                     Some(
                                         list_row(
                                             ("history-entry", id as u64),
-                                            this.browser.library.selected().contains(&id),
+                                            this.browser.history.contains(id),
                                         )
                                         .gap_0()
                                         .group("history-track-row")
@@ -2889,7 +2889,7 @@ impl GuiApp {
                                         .child(
                                             hover_actions(
                                                 "history-track-row",
-                                                this.browser.library.selected().contains(&id),
+                                                this.browser.history.contains(id),
                                             )
                                             .child(
                                                 this.track_favorite_toggle(
@@ -2905,7 +2905,13 @@ impl GuiApp {
                                             move |this, event: &gpui::ClickEvent, window, cx| {
                                                 this.focus_layout(window, cx);
                                                 this.browser.focus_history();
-                                                this.select_track(id, false, cx);
+                                                let modifiers = event.modifiers();
+                                                this.select_history_track(
+                                                    id,
+                                                    modifiers.shift,
+                                                    modifiers.control || modifiers.platform,
+                                                    cx,
+                                                );
                                                 if event.click_count() == 2 {
                                                     this.send(Command::Play { track_id: id }, cx);
                                                 }

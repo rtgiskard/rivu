@@ -181,6 +181,18 @@ impl Render for GuiApp {
                     return;
                 }
                 let modifiers = event.keystroke.modifiers;
+                if this.browser.focus() == Some(BrowserFocus::History)
+                    && key == "a"
+                    && (modifiers.control || modifiers.platform)
+                    && !modifiers.alt
+                    && !modifiers.shift
+                    && !modifiers.function
+                {
+                    this.browser.history.select_all();
+                    cx.notify();
+                    cx.stop_propagation();
+                    return;
+                }
                 if this.active_list_focus() == Some(ListFocus::PlaylistTracks)
                     && !modifiers.alt
                     && !modifiers.function
