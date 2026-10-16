@@ -839,6 +839,7 @@ impl GuiApp {
                         .into()
                     }),
             )
+            .child(self.library_search.clone())
             .child(disabled_control(
                 icon_button(
                     ("library-locate-playing", panel_id),
@@ -913,14 +914,7 @@ impl GuiApp {
                 ),
                 self.browser.library.force_scan(),
             ));
-        let mut panel = panel_surface(("library-panel", panel_id))
-            .child(tools)
-            .child(
-                div()
-                    .w_full()
-                    .flex_shrink_0()
-                    .child(self.library_search.clone()),
-            );
+        let mut panel = panel_surface(("library-panel", panel_id)).child(tools);
         if let Some((track_id, result)) = &self.browser.library.locate.notice
             && self
                 .state
@@ -3383,12 +3377,19 @@ impl GuiApp {
             .child(div().w(px(12.)).flex_shrink_0());
         let scroll = self.scroll_views.list(("history", panel_id));
         panel_surface(("history-panel", panel_id))
-            .child(panel_header(
-                self.tr("gl-recent-tracks"),
-                self.i18n
-                    .format("gl-track-count", &[("count", history_total.into())]),
-            ))
-            .child(panel_toolbar().child(self.history_search.clone()))
+            .child(
+                row()
+                    .items_end()
+                    .child(
+                        panel_header(
+                            self.tr("gl-recent-tracks"),
+                            self.i18n
+                                .format("gl-track-count", &[("count", history_total.into())]),
+                        )
+                        .flex_1(),
+                    )
+                    .child(self.history_search.clone()),
+            )
             .when(history_len == 0, |panel| {
                 panel.child(caption(self.tr(if history_total == 0 {
                     "search-empty"
