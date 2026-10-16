@@ -407,6 +407,242 @@ fn scan_rejects_fifo_sheets_before_or_after_discovery_without_losing_owned_track
 }
 
 #[test]
+fn fifo_cue_sources_are_local_errors_and_allow_subsequent_scans() -> Result<()> {
+    for enabled in [false, true] {
+        for replace_after_discovery in [false, true] {
+            let directory = tempfile::tempdir()?;
+            let root = directory.path().to_path_buf();
+            let audio = root.join("audio.wav");
+            let good = root.join("good.wav");
+            let sheet = root.join("album.cue");
+            wav(&audio, 225)?;
+            wav(&good, 150)?;
+            two_track_sheet(&sheet)?;
+            let full = scan_paths(&[audio.clone(), good.clone()], &[], enabled)?;
+            let mut known = known_records(&full.records);
+            let baseline = scan_paths(std::slice::from_ref(&root), &[], enabled)?;
+            let store = crate::store::Store::open(Path::new(":memory:"))?;
+            store.apply_scan(&baseline)?;
+            let ids = [
+                store.track_id_for_source(&sheet, Some(1))?.unwrap(),
+                store.track_id_for_source(&sheet, Some(2))?.unwrap(),
+            ];
+            let replace = |path: &Path| {
+                fs::remove_file(path).unwrap();
+                let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+                // SAFETY: name is a live NUL-terminated path; mkfifo retains no pointer.
+                assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+            };
+            if !replace_after_discovery {
+                replace(&audio);
+                // Even a matching cache entry must not authorize a nonregular source.
+                let metadata = fs::metadata(&audio)?;
+                let source = known.iter_mut().find(|file| file.path == audio).unwrap();
+                source.size = metadata.len();
+                source.modified_ns = cache_modified_ns(metadata.modified().ok());
+            }
+            let worker_audio = audio.clone();
+            let worker_root = root.clone();
+            let (completed, receive) = std::sync::mpsc::channel();
+            let worker = std::thread::spawn(move || {
+                let run = || -> Result<(ScanResult, ScanResult, bool)> {
+                    let mut terminal = false;
+                    let result = scan_paths_at_depth(
+                        std::slice::from_ref(&worker_root),
+                        &known,
+                        enabled,
+                        1,
+                        |phase, processed, total, _, path| {
+                            if replace_after_discovery
+                                && phase == ScanPhase::ReadingMetadata
+                                && processed == 0
+                            {
+                                replace(&worker_audio);
+                            }
+                            terminal |= phase == ScanPhase::ReadingMetadata
+                                && total == Some(processed)
+                                && path.is_none();
+                        },
+                    )?;
+                    fs::remove_file(&worker_audio)?;
+                    wav(&worker_audio, 225)?;
+                    let next = scan_paths(&[worker_root], &known, enabled)?;
+                    Ok((result, next, terminal))
+                };
+                completed.send(run()).unwrap();
+            });
+            // Do not join on timeout: an unopened FIFO must never hang the suite.
+            let (result, next, terminal) = receive.recv_timeout(Duration::from_secs(5))??;
+            worker.join().unwrap();
+            assert!(terminal);
+            assert!(!result.errors.is_empty());
+            assert!(
+                result
+                    .errors
+                    .iter()
+                    .all(|error| error.contains("not an ordinary file"))
+            );
+            assert_eq!(result.records.len(), 1);
+            assert_eq!(result.records[0].path, good);
+            assert!(result.suppressed_sources.is_empty());
+            assert!(
+                result
+                    .uncertainties
+                    .contains(&ScanUncertainty::CueSheet(sheet))
+            );
+            assert!(result.uncertainties.contains(&ScanUncertainty::File(audio)));
+            store.apply_scan(&result)?;
+            store.remove_missing_tracks()?;
+            for id in ids {
+                assert!(!store.track(id)?.unwrap().missing);
+            }
+            assert!(next.errors.is_empty(), "{:?}", next.errors);
+            assert_eq!(next.records.len(), 3);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn regular_audio_symlink_is_scanned_hashed_and_used_by_cue() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let actual = tempfile::tempdir()?;
+    let target = actual.path().join("source.wav");
+    wav(&target, 225)?;
+    let audio = directory.path().join("audio.wav");
+    std::os::unix::fs::symlink(&target, &audio)?;
+    two_track_sheet(&directory.path().join("album.cue"))?;
+    let expected = blake3::hash(&fs::read(target)?).to_hex().to_string();
+    for enabled in [false, true] {
+        let result = scan_paths(
+            &[directory.path().to_path_buf(), audio.clone()],
+            &[],
+            enabled,
+        )?;
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.records.len(), 3);
+        assert!(result.records.iter().all(|record| {
+            record.path == audio && record.fingerprint.as_deref() == Some(expected.as_str())
+        }));
+        assert_eq!(
+            result
+                .records
+                .iter()
+                .filter(|record| record.cue.is_some())
+                .count(),
+            2
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn opened_scan_source_keeps_metadata_and_hash_when_its_symlink_is_retargeted() -> Result<()> {
+    for enabled in [false, true] {
+        for cue in [false, true] {
+            let directory = tempfile::tempdir()?;
+            let root = directory.path().to_path_buf();
+            let first = root.join("first.wav");
+            let second = root.join("second.wav");
+            let audio = root.join("audio.wav");
+            let sheet = root.join("album.cue");
+            wav(&first, 225)?;
+            wav(&second, 75)?;
+            std::os::unix::fs::symlink(&first, &audio)?;
+            two_track_sheet(&sheet)?;
+            let metadata = fs::metadata(&first)?;
+            let expected = blake3::hash(&fs::read(&first)?).to_hex().to_string();
+            #[cfg(feature = "ffmpeg")]
+            if enabled {
+                // Exercise loaded-runtime WAVE inspection as well as native-only opens.
+                crate::audio::probe_details(&first, true, true)?;
+            }
+            let requested = if cue { sheet } else { audio.clone() };
+            let mut lookups = 0;
+            let result = super::scan_paths(
+                &[requested],
+                |path| {
+                    assert_eq!(path, audio.as_path());
+                    lookups += 1;
+                    // The scanner has opened the original target before this lookup.
+                    fs::remove_file(&audio)?;
+                    std::os::unix::fs::symlink(&second, &audio)?;
+                    Ok(None)
+                },
+                enabled,
+                &[root],
+                1,
+                &ScanCancellation::default(),
+                |_, _, _, _, _| {},
+            )?;
+            assert_eq!(lookups, 1);
+            assert!(result.errors.is_empty(), "{:?}", result.errors);
+            assert_eq!(result.records.len(), if cue { 2 } else { 1 });
+            assert!(result.records.iter().all(|record| {
+                record.path == audio
+                    && record.size == metadata.len()
+                    && record.modified_ns == cache_modified_ns(metadata.modified().ok())
+                    && record.fingerprint.as_deref() == Some(expected.as_str())
+            }));
+            let duration: f64 = result
+                .records
+                .iter()
+                .map(|record| record.media.duration.unwrap())
+                .sum();
+            assert_eq!(duration, 3.0);
+            assert_ne!(blake3::hash(&fs::read(&audio)?).to_hex().as_str(), expected);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn in_place_source_changes_fail_scans_instead_of_mixing_versions() -> Result<()> {
+    for enabled in [false, true] {
+        for (cached, frames) in [(false, 75), (true, 75), (false, 300), (true, 300)] {
+            let directory = tempfile::tempdir()?;
+            let root = directory.path().to_path_buf();
+            let audio = root.join("audio.wav");
+            wav(&audio, 225)?;
+            let baseline = scan_paths(std::slice::from_ref(&audio), &[], enabled)?;
+            let known = known_records(&baseline.records).pop().unwrap();
+            let mut changed = false;
+            let result = super::scan_paths(
+                std::slice::from_ref(&audio),
+                |path| {
+                    assert_eq!(path, audio.as_path());
+                    // Rewrite the already opened inode, not a replacement pathname.
+                    wav(&audio, frames)?;
+                    changed = true;
+                    Ok(cached.then(|| known.clone()))
+                },
+                enabled,
+                &[root],
+                1,
+                &ScanCancellation::default(),
+                |_, _, _, _, _| {},
+            )?;
+            assert!(changed);
+            assert!(result.records.is_empty());
+            assert_eq!(result.errors.len(), 1);
+            assert!(result.errors[0].contains("changed while scanning"));
+            assert_eq!(result.uncertainties, [ScanUncertainty::File(audio.clone())]);
+            let next = scan_paths(std::slice::from_ref(&audio), &[], enabled)?;
+            assert!(next.errors.is_empty(), "{:?}", next.errors);
+            assert_eq!(
+                next.records[0].media.duration,
+                Some(f64::from(frames) / 75.0)
+            );
+            assert_eq!(
+                next.records[0].fingerprint,
+                Some(blake3::hash(&fs::read(&audio)?).to_hex().to_string())
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn failed_audio_probe_is_not_missing_or_cleanable_but_true_deletion_is() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let root = directory.path().to_path_buf();

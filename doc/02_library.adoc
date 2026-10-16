@@ -81,6 +81,18 @@ CUE sheets share the import/export reader: only ordinary files up to 1 MiB are
 accepted, with nonblocking opens and bounded reads. Oversized or nonordinary
 sheets are local CUE errors; their owned tracks remain protected while other
 readable audio is saved.
+Audio sources, including CUE references, must also be ordinary files. Playback,
+waveform loading, metadata probes, and fingerprint reads check the object actually
+opened with a nonblocking open; normal symlinks to ordinary files remain supported.
+FIFOs without writers are rejected rather than waiting for a producer. FFmpeg
+decodes the checked file object instead of reopening its original pathname, so
+replacing that name cannot bypass the check. A failed CUE source is a local scan
+error: readable sources are still saved, the scan reaches completion, and later
+scans remain available.
+Fresh metadata probes and fingerprint reads for a scan use the same opened source
+object, even if its pathname is replaced or a symlink is retargeted. Changes to
+the opened object's size or modification/change timestamps during analysis cause
+a local source error instead of saving a mixed-version record.
 Ordinary scans reuse valid metadata and fingerprints when file size and modification
 time match; force scans reprobe and reread source content. Neither resets user edits.
 Representable pre-epoch modification times remain valid cache keys; unavailable or

@@ -6,7 +6,7 @@
 use super::{
     Channel, MediaInfo,
     bitrate::PacketStats,
-    source::{DECODE_WORK_BUDGET, DecodeStep, check_cancelled},
+    source::{DECODE_WORK_BUDGET, DecodeStep, SourceIdentity, check_cancelled},
 };
 use anyhow::{Context, Result, bail};
 use libloading::Library;
@@ -14,6 +14,7 @@ use std::{
     ffi::{CStr, CString, c_char, c_int},
     fs::File,
     io::ErrorKind,
+    os::fd::AsRawFd,
     os::unix::fs::FileExt,
     path::{Path, PathBuf},
     ptr,
@@ -390,6 +391,9 @@ fn rational_seconds(value: i64, q: AVRational) -> Option<f64> {
 pub(super) struct Input {
     rt: &'static Runtime,
     path: PathBuf,
+    identity: SourceIdentity,
+    // Keep the descriptor path valid until the format context is closed.
+    file: Option<File>,
     format: *mut AVFormatContext,
     stream: c_int,
     stream_ptr: *mut AVStream,
@@ -397,21 +401,16 @@ pub(super) struct Input {
 }
 unsafe impl Send for Input {}
 impl Input {
-    fn open(path: &Path, rt: &'static Runtime) -> Result<Self> {
-        let path = crate::library::logical_path(path)?;
-        let metadata = std::fs::metadata(&path)?;
-        if !metadata.is_file() {
-            bail!("FFmpeg backend only accepts regular local files");
-        }
-        Self::open_validated(path, rt)
-    }
-
-    fn open_validated(path: PathBuf, rt: &'static Runtime) -> Result<Self> {
-        let cpath = CString::new(path.as_os_str().as_encoded_bytes())
-            .context("FFmpeg path contains NUL")?;
+    fn from_file(path: PathBuf, file: File, rt: &'static Runtime) -> Result<Self> {
+        let identity = SourceIdentity::from_file(&file)?;
+        // FFmpeg opens its own independently seekable descriptor to this exact
+        // checked object, never the original path that could now name a FIFO.
+        let cpath = CString::new(format!("/proc/self/fd/{}", file.as_raw_fd()))?;
         let mut input = Self {
             rt,
             path,
+            identity,
+            file: Some(file),
             format: ptr::null_mut(),
             stream: 0,
             stream_ptr: ptr::null_mut(),
@@ -513,31 +512,29 @@ impl Drop for Input {
 }
 
 /// Inspect WAVE only with a loaded runtime, preserving the file for native decoding.
-pub(super) fn inspect_wave(path: &Path) -> Result<Option<(File, Option<Input>)>> {
+pub(super) fn inspect_wave(path: &Path, file: &File) -> Result<Option<Input>> {
     let rt = match LazyLock::get(&RUNTIME) {
         Some(Ok(rt)) => rt,
         _ => return Ok(None),
     };
     let path = crate::library::logical_path(path)?;
-    if !std::fs::metadata(&path)?.is_file() {
-        bail!("FFmpeg backend only accepts regular local files");
-    }
-    let file = File::open(&path)?;
     let mut magic = [0; 12];
     // Positional reading leaves native decoding at byte zero without a seek.
     match file.read_exact_at(&mut magic, 0) {
         Ok(()) => {}
-        Err(error) if error.kind() == ErrorKind::UnexpectedEof => return Ok(Some((file, None))),
+        Err(error) if error.kind() == ErrorKind::UnexpectedEof => return Ok(None),
         Err(error) => return Err(error).context("read WAVE container magic"),
     }
     if !matches!(&magic[..4], b"RIFF" | b"RIFX" | b"RF64" | b"BW64") || &magic[8..] != b"WAVE" {
-        return Ok(Some((file, None)));
+        return Ok(None);
     }
-    Ok(Some((file, Some(Input::open_validated(path, rt)?))))
+    Ok(Some(Input::from_file(path, file.try_clone()?, rt)?))
 }
 
 pub(super) struct Decoder {
     rt: &'static Runtime,
+    identity: SourceIdentity,
+    _file: File,
     format: *mut AVFormatContext,
     codec: *mut AVCodecContext,
     packet: *mut AVPacket,
@@ -556,9 +553,14 @@ pub(super) struct Decoder {
 }
 unsafe impl Send for Decoder {}
 impl Decoder {
-    pub(super) fn open(path: &Path, cancelled: Option<&AtomicBool>) -> Result<Self> {
+    pub(super) fn from_file(
+        path: &Path,
+        file: File,
+        cancelled: Option<&AtomicBool>,
+    ) -> Result<Self> {
         check_cancelled(cancelled)?;
-        let input = Input::open(path, runtime()?)?;
+        let path = crate::library::logical_path(path)?;
+        let input = Input::from_file(path, file, runtime()?)?;
         Self::from_input(input, cancelled)
     }
     pub(super) fn from_input(mut input: Input, cancelled: Option<&AtomicBool>) -> Result<Self> {
@@ -705,6 +707,8 @@ impl Decoder {
         };
         let mut decoder = Self {
             rt,
+            identity: input.identity,
+            _file: input.file.take().expect("FFmpeg input owns its local file"),
             format,
             codec,
             packet,
@@ -752,6 +756,9 @@ impl Decoder {
         };
         decoder.primed = Some((frames, timestamp));
         Ok(decoder)
+    }
+    pub(super) fn identity(&self) -> SourceIdentity {
+        self.identity
     }
     pub(super) fn info(&self) -> &MediaInfo {
         &self.info
@@ -1057,6 +1064,7 @@ unsafe fn copy_samples<T: Copy>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audio::open_regular_file;
 
     #[test]
     fn encoded_duration_restores_skip_discard_and_rejects_manual_or_malformed_trim() {
@@ -1110,9 +1118,56 @@ mod tests {
     }
 
     #[test]
+    fn ffmpeg_opens_the_checked_file_when_its_path_is_replaced_by_fifo() {
+        let original = pcm_file();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("audio.wav");
+        std::fs::copy(original.path(), &path).unwrap();
+        let file = open_regular_file(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let name = CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: name is a live NUL-terminated path; mkfifo retains no pointer.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        let (completed, receive) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let input = Input::from_file(path, file, runtime().unwrap()).unwrap();
+            let mut decoder = Decoder::from_input(input, None).unwrap();
+            let mut frames = Vec::new();
+            let mut samples = 0;
+            loop {
+                match decoder.next_frames(&mut frames, None, &mut 64).unwrap() {
+                    DecodeStep::Frames(_) => samples += frames.len(),
+                    DecodeStep::Yield => (),
+                    DecodeStep::Eof => break,
+                }
+            }
+            assert_eq!(samples, 16_000);
+            // Decoder seek may return preroll; Source owns sample-accurate clipping.
+            // Rewinding must still replay the checked object, not the FIFO path.
+            decoder.seek(0.0, None).unwrap();
+            samples = 0;
+            loop {
+                match decoder.next_frames(&mut frames, None, &mut 64).unwrap() {
+                    DecodeStep::Frames(_) => samples += frames.len(),
+                    DecodeStep::Yield => (),
+                    DecodeStep::Eof => break,
+                }
+            }
+            assert_eq!(samples, 16_000);
+            completed.send(()).unwrap();
+        });
+        // Do not join on timeout: reopening the substituted path would hang.
+        receive
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        worker.join().unwrap();
+    }
+
+    #[test]
     fn complete_ffmpeg_decode_counts_primed_selected_packets_not_pcm_or_other_streams() {
         let file = pcm_file();
-        let mut decoder = Decoder::open(file.path(), None).unwrap();
+        let mut decoder =
+            Decoder::from_file(file.path(), open_regular_file(file.path()).unwrap(), None).unwrap();
         assert_eq!(decoder.completed_bitrate(), None);
         let mut frames = Vec::new();
         let mut injected = false;
@@ -1161,7 +1216,9 @@ mod tests {
     fn ffmpeg_missing_packet_duration_and_corrupt_packet_never_become_exact() {
         let file = pcm_file();
         for corrupt in [false, true] {
-            let mut decoder = Decoder::open(file.path(), None).unwrap();
+            let mut decoder =
+                Decoder::from_file(file.path(), open_regular_file(file.path()).unwrap(), None)
+                    .unwrap();
             let read = decoder.rt.f.read_frame;
             let mut frames = Vec::new();
             loop {
@@ -1191,7 +1248,8 @@ mod tests {
     #[test]
     fn skipped_ffmpeg_packets_yield_without_cancellation_or_eof() {
         let file = pcm_file();
-        let mut decoder = Decoder::open(file.path(), None).unwrap();
+        let mut decoder =
+            Decoder::from_file(file.path(), open_regular_file(file.path()).unwrap(), None).unwrap();
         decoder.seek(0.0, None).unwrap();
         let mut frames = Vec::new();
         let mut budget = 3;
@@ -1222,7 +1280,9 @@ mod tests {
         use std::sync::atomic::Ordering;
         let file = pcm_file();
         for skip in [false, true] {
-            let mut decoder = Decoder::open(file.path(), None).unwrap();
+            let mut decoder =
+                Decoder::from_file(file.path(), open_regular_file(file.path()).unwrap(), None)
+                    .unwrap();
             decoder.seek(1.25, None).unwrap();
             let cancelled = AtomicBool::new(false);
             let mut packets = 0;

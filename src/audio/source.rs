@@ -7,7 +7,9 @@ use super::{
 use crate::model::DecoderHint;
 use anyhow::{Context, Result, anyhow, bail};
 use std::{
-    fs::File,
+    fs::{File, OpenOptions},
+    io::Seek,
+    os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::Path,
     sync::atomic::{AtomicBool, Ordering},
 };
@@ -35,6 +37,50 @@ use symphonia::{
 
 const PROBE_BUFFER_LEN: usize = 2 * BYTES_PER_MEBIBYTE;
 pub(super) const DECODE_WORK_BUDGET: usize = 64;
+
+/// Open before inspecting metadata so a replaced path cannot block on a FIFO.
+/// Normal symlinks are followed; only the actual opened object must be regular.
+pub(crate) fn open_regular_file(path: &Path) -> Result<File> {
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+        .with_context(|| format!("Opening {}", path.display()))?;
+    if !file.metadata()?.is_file() {
+        bail!("Audio source {} is not an ordinary file", path.display());
+    }
+    Ok(file)
+}
+
+/// Content version captured from the same file descriptor used by the decoder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SourceIdentity {
+    device: u64,
+    inode: u64,
+    len: u64,
+    modified: (i64, i64),
+    changed: (i64, i64),
+}
+
+impl SourceIdentity {
+    pub(crate) fn from_file(file: &File) -> Result<Self> {
+        let metadata = file.metadata()?;
+        if !metadata.is_file() {
+            bail!("Audio source is not an ordinary file");
+        }
+        Ok(Self::from_metadata(&metadata))
+    }
+
+    pub(crate) fn from_metadata(metadata: &std::fs::Metadata) -> Self {
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            len: metadata.len(),
+            modified: (metadata.mtime(), metadata.mtime_nsec()),
+            changed: (metadata.ctime(), metadata.ctime_nsec()),
+        }
+    }
+}
 
 #[derive(Debug, PartialEq)]
 pub(super) enum DecodeStep<T> {
@@ -81,6 +127,22 @@ pub struct ProbeResult {
 
 pub fn probe(path: &Path, ffmpeg_enabled: bool) -> Result<MediaInfo> {
     Ok(Source::open(path, PROBE_BUFFER_LEN, DecoderHint::Auto, ffmpeg_enabled)?.info)
+}
+
+/// Probe the already opened object without looking up its original path again.
+pub(crate) fn probe_file(path: &Path, mut file: File, ffmpeg_enabled: bool) -> Result<MediaInfo> {
+    SourceIdentity::from_file(&file)?;
+    file.rewind()
+        .context("Rewinding audio source for probing")?;
+    Ok(Source::open_file_with_cancel(
+        path,
+        file,
+        PROBE_BUFFER_LEN,
+        DecoderHint::Auto,
+        ffmpeg_enabled,
+        None,
+    )?
+    .info)
 }
 
 pub fn probe_details(path: &Path, ffmpeg_enabled: bool, enhanced: bool) -> Result<ProbeResult> {
@@ -304,6 +366,7 @@ impl std::fmt::Display for UnsupportedNative {
 impl std::error::Error for UnsupportedNative {}
 
 pub(super) struct Source {
+    identity: SourceIdentity,
     format: Option<Box<dyn FormatReader>>,
     track: u32,
     decode: Decode,
@@ -341,11 +404,28 @@ impl Source {
         cancelled: Option<&AtomicBool>,
     ) -> Result<Self> {
         check_cancelled(cancelled)?;
+        Self::open_file_with_cancel(
+            path,
+            open_regular_file(path)?,
+            buffer_len,
+            decoder_hint,
+            ffmpeg_enabled,
+            cancelled,
+        )
+    }
+
+    fn open_file_with_cancel(
+        path: &Path,
+        file: File,
+        buffer_len: usize,
+        decoder_hint: DecoderHint,
+        ffmpeg_enabled: bool,
+        cancelled: Option<&AtomicBool>,
+    ) -> Result<Self> {
+        check_cancelled(cancelled)?;
         match decoder_hint {
             DecoderHint::Auto => (),
             DecoderHint::Native => {
-                let file =
-                    File::open(path).with_context(|| format!("Opening {}", path.display()))?;
                 return Self::open_native(path, buffer_len, file, cancelled);
             }
             DecoderHint::Ffmpeg => {
@@ -353,19 +433,15 @@ impl Source {
                     bail!("This track requires FFmpeg, but the FFmpeg extension is disabled");
                 }
                 return Self::from_ffmpeg(
-                    super::ffmpeg::Decoder::open(path, cancelled)?,
+                    super::ffmpeg::Decoder::from_file(path, file, cancelled)?,
                     cancelled,
                 );
             }
         }
-        let inspected = if ffmpeg_enabled {
-            super::ffmpeg::inspect_wave(path)?
+        let input = if ffmpeg_enabled {
+            super::ffmpeg::inspect_wave(path, &file)?
         } else {
             None
-        };
-        let (file, input) = match inspected {
-            Some((file, input)) => (Some(file), input),
-            None => (None, None),
         };
         if input.as_ref().is_some_and(|input| !input.is_pcm()) {
             drop(file);
@@ -374,9 +450,15 @@ impl Source {
                 cancelled,
             );
         }
-        let file = match file {
-            Some(file) => file,
-            None => File::open(path).with_context(|| format!("Opening {}", path.display()))?,
+        // Native probing consumes its descriptor even when it rejects the codec.
+        // Retain this exact object for Auto fallback, not its mutable pathname.
+        let fallback = if ffmpeg_enabled && input.is_none() {
+            Some(
+                file.try_clone()
+                    .context("Retaining audio source for FFmpeg fallback")?,
+            )
+        } else {
+            None
         };
         match Self::open_native(path, buffer_len, file, cancelled) {
             Ok(mut source) => {
@@ -390,7 +472,7 @@ impl Source {
             {
                 let decoded = match input {
                     Some(input) => super::ffmpeg::Decoder::from_input(input, cancelled),
-                    None => super::ffmpeg::Decoder::open(path, cancelled),
+                    None => super::ffmpeg::Decoder::from_file(path, fallback.unwrap(), cancelled),
                 };
                 decoded.and_then(|decode| Self::from_ffmpeg(decode, cancelled)).with_context(|| format!("Native decoder rejected the audio ({native_error:#}); FFmpeg extension failed"))
             }
@@ -406,6 +488,7 @@ impl Source {
         }
         // Container duration is only an estimate, never a decoder EOF.
         let mut source = Self {
+            identity: decode.identity(),
             format: None,
             track: 0,
             decode: Decode::Ffmpeg(Box::new(decode)),
@@ -438,6 +521,7 @@ impl Source {
         file: File,
         cancelled: Option<&AtomicBool>,
     ) -> Result<Self> {
+        let identity = SourceIdentity::from_file(&file)?;
         let mut hint = Hint::new();
         if let Some(extension) = path.extension().and_then(|value| value.to_str()) {
             hint.with_extension(extension);
@@ -590,6 +674,7 @@ impl Source {
         };
         metadata_tags(format.metadata(), track, &mut info);
         let mut source = Self {
+            identity,
             time_base: track_time_base.unwrap_or_else(|| TimeBase::try_new(1, rate).unwrap()),
             format: Some(format),
             track,
@@ -775,6 +860,10 @@ impl Source {
                 DecodeStep::Eof => return Ok(false),
             }
         }
+    }
+
+    pub(super) fn identity(&self) -> SourceIdentity {
+        self.identity
     }
 
     pub(super) fn uses_ffmpeg(&self) -> bool {
@@ -1552,6 +1641,78 @@ mod tests {
     }
 
     #[test]
+    fn audio_entries_reject_writerless_fifo_and_fifo_symlink() {
+        let directory = tempfile::tempdir().unwrap();
+        let fifo = directory.path().join("audio.wav");
+        let name = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: name is a live NUL-terminated path; mkfifo retains no pointer.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        let alias = directory.path().join("alias.wav");
+        std::os::unix::fs::symlink(&fifo, &alias).unwrap();
+        let (completed, receive) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let cancelled = AtomicBool::new(false);
+            for path in [&fifo, &alias] {
+                for enabled in [false, true] {
+                    for hint in [DecoderHint::Auto, DecoderHint::Native, DecoderHint::Ffmpeg] {
+                        if hint == DecoderHint::Ffmpeg && (!enabled || !cfg!(feature = "ffmpeg")) {
+                            continue;
+                        }
+                        let error = Source::open(path, PROBE_BUFFER_LEN, hint, enabled)
+                            .err()
+                            .expect("A FIFO is not an audio source");
+                        assert!(format!("{error:#}").contains("not an ordinary file"));
+                        let error =
+                            Source::waveform(path, None, hint, 2, enabled, &cancelled).unwrap_err();
+                        assert!(format!("{error:#}").contains("not an ordinary file"));
+                    }
+                    let error = probe(path, enabled).err().unwrap();
+                    assert!(format!("{error:#}").contains("not an ordinary file"));
+                    let error = probe_details(path, enabled, false).err().unwrap();
+                    assert!(format!("{error:#}").contains("not an ordinary file"));
+                }
+                #[cfg(feature = "ffmpeg")]
+                {
+                    let error = probe_details(path, true, true).err().unwrap();
+                    assert!(format!("{error:#}").contains("not an ordinary file"));
+                }
+            }
+            completed.send(()).unwrap();
+        });
+        // Do not join on timeout: a regression must fail rather than hang the suite.
+        receive
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn regular_symlink_preserves_native_ffmpeg_and_waveform_source() {
+        let file = pcm_file();
+        let directory = tempfile::tempdir().unwrap();
+        let alias = directory.path().join("alias.wav");
+        std::os::unix::fs::symlink(file.path(), &alias).unwrap();
+        let identity = SourceIdentity::from_file(file.as_file()).unwrap();
+        let mut reference =
+            Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Native, false).unwrap();
+        let expected = decode_remaining(&mut reference);
+        let cancelled = AtomicBool::new(false);
+        for enabled in [false, true] {
+            for hint in [DecoderHint::Auto, DecoderHint::Native, DecoderHint::Ffmpeg] {
+                if hint == DecoderHint::Ffmpeg && (!enabled || !cfg!(feature = "ffmpeg")) {
+                    continue;
+                }
+                let mut source = Source::open(&alias, PROBE_BUFFER_LEN, hint, enabled).unwrap();
+                assert_eq!(source.identity(), identity);
+                assert_eq!(decode_remaining(&mut source), expected);
+                let frame = Source::waveform(&alias, None, hint, 2, enabled, &cancelled).unwrap();
+                assert!(frame.complete);
+                assert_eq!(frame.duration, Some(2.0));
+            }
+        }
+    }
+
+    #[test]
     fn underestimated_metadata_does_not_limit_seek_cue_or_completed_waveform() {
         let file = pcm_file();
         let cancelled = AtomicBool::new(false);
@@ -1720,6 +1881,39 @@ mod tests {
         .err()
         .unwrap();
         assert_eq!(error.to_string(), "Waveform loading cancelled");
+    }
+
+    #[test]
+    fn opened_auto_fallback_never_reopens_a_replaced_source_path() {
+        let unsupported = aac_packet_file(0x40);
+        let replacement = opus_file();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("source.aac");
+        let next = directory.path().join("replacement.opus");
+        std::fs::copy(unsupported.path(), &path).unwrap();
+        let file = open_regular_file(&path).unwrap();
+        std::fs::copy(replacement.path(), &next).unwrap();
+        std::fs::rename(next, &path).unwrap();
+        match Source::open_file_with_cancel(
+            &path,
+            file,
+            PROBE_BUFFER_LEN,
+            DecoderHint::Auto,
+            true,
+            None,
+        ) {
+            Ok(source) => {
+                assert!(source.uses_ffmpeg());
+                assert_eq!(
+                    source.info.sample_rate, 44_100,
+                    "Not the replacement Opus stream"
+                );
+            }
+            Err(error) => assert!(
+                error.to_string().contains("FFmpeg extension failed"),
+                "{error:#}"
+            ),
+        }
     }
 
     #[test]

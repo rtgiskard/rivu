@@ -1,10 +1,10 @@
 use super::paths::{is_audio_path, is_cue_path, logical_path};
-use crate::audio::probe;
+use crate::audio::{SourceIdentity, open_regular_file, probe_file};
 use crate::model::{CueSegment, MediaInfo, ScanPhase};
 use anyhow::{Context, Result, anyhow, bail};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
-use std::io::Read;
+use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -637,22 +637,34 @@ fn lookup_and_scan_file(
     cancellation: &ScanCancellation,
 ) -> Result<ScanRecord> {
     cancellation.check()?;
+    path.to_str().context("Audio source path is not UTF-8")?;
+    let file = open_regular_file(path)?;
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("read metadata for {}", path.display()))?;
+    cancellation.check()?;
     let known = known_source(path);
     cancellation.check()?;
-    scan_file(path, known?.as_ref(), ffmpeg_enabled, cancellation)
+    scan_file(
+        path,
+        file,
+        metadata,
+        known?.as_ref(),
+        ffmpeg_enabled,
+        cancellation,
+    )
 }
 
 fn scan_file(
     path: &Path,
+    mut file: File,
+    metadata: fs::Metadata,
     known: Option<&KnownFile>,
     ffmpeg_enabled: bool,
     cancellation: &ScanCancellation,
 ) -> Result<ScanRecord> {
     cancellation.check()?;
-    path.to_str().context("Audio source path is not UTF-8")?;
-    let metadata =
-        fs::metadata(path).with_context(|| format!("read metadata for {}", path.display()))?;
-    cancellation.check()?;
+    let identity = SourceIdentity::from_metadata(&metadata);
     let size = metadata.len();
     let modified_ns = cache_modified_ns(metadata.modified().ok());
     let unchanged = known.filter(|known| known.matches_metadata(size, modified_ns));
@@ -664,16 +676,26 @@ fn scan_file(
         Some(media) => media.clone(),
         None => {
             cancellation.check()?;
-            let media = probe(path, ffmpeg_enabled).with_context(|| "probe audio");
+            let media =
+                probe_file(path, file.try_clone()?, ffmpeg_enabled).with_context(|| "probe audio");
             cancellation.check()?;
             media?
         }
     };
     let fingerprint = match unchanged.and_then(|known| known.fingerprint.as_ref()) {
         Some(fingerprint) => fingerprint.clone(),
-        None => hash_file(path, cancellation)?,
+        None => {
+            file.rewind()
+                .with_context(|| format!("rewind {} for hashing", path.display()))?;
+            // Growth cannot keep hashing alive; the version check below rejects it.
+            hash_reader((&mut file).take(size), cancellation)
+                .with_context(|| format!("hash {}", path.display()))?
+        }
     };
     cancellation.check()?;
+    if SourceIdentity::from_file(&file)? != identity {
+        bail!("Audio source {} changed while scanning", path.display());
+    }
     Ok(ScanRecord {
         path: path.to_path_buf(),
         size,
@@ -682,12 +704,6 @@ fn scan_file(
         media,
         cue: None,
     })
-}
-
-fn hash_file(path: &Path, cancellation: &ScanCancellation) -> Result<String> {
-    cancellation.check()?;
-    let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
-    hash_reader(file, cancellation).with_context(|| format!("hash {}", path.display()))
 }
 
 pub(super) fn hash_reader(

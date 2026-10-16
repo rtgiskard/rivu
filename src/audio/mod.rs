@@ -52,14 +52,14 @@ mod ffmpeg {
         }
     }
 
-    pub(super) fn inspect_wave(_: &Path) -> Result<Option<(File, Option<Input>)>> {
+    pub(super) fn inspect_wave(_: &Path, _: &File) -> Result<Option<Input>> {
         Ok(None)
     }
 
     pub(super) struct Decoder;
 
     impl Decoder {
-        pub(super) fn open(_: &Path, _: Option<&AtomicBool>) -> Result<Self> {
+        pub(super) fn from_file(_: &Path, _: File, _: Option<&AtomicBool>) -> Result<Self> {
             bail!("FFmpeg extension is not compiled; rebuild with --features ffmpeg")
         }
 
@@ -69,6 +69,10 @@ mod ffmpeg {
         }
 
         pub(super) fn info(&self) -> &MediaInfo {
+            unreachable!("FFmpeg decoder cannot be opened without the ffmpeg feature")
+        }
+
+        pub(super) fn identity(&self) -> super::source::SourceIdentity {
             unreachable!("FFmpeg decoder cannot be opened without the ffmpeg feature")
         }
 
@@ -104,6 +108,7 @@ mod worker;
 
 use format::Channel;
 pub use output::devices;
+pub(crate) use source::{SourceIdentity, open_regular_file, probe_file};
 pub use source::{probe, probe_details};
 pub use waveform::WaveformFrame;
 
