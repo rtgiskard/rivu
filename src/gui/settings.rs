@@ -281,6 +281,12 @@ fn settings_group(title: impl Into<SharedString>, content: impl IntoElement) -> 
     section_group(title, content)
 }
 
+fn settings_card(title: impl Into<SharedString>, content: impl IntoElement) -> Div {
+    settings_group(title, content)
+        .border_color(rgb(BORDER))
+        .rounded(rems(5. / 16.))
+}
+
 fn settings_tooltip(
     text: impl Into<SharedString>,
 ) -> impl Fn(&mut Window, &mut App) -> gpui::AnyView {
@@ -1964,8 +1970,8 @@ impl Settings {
         )
         .relative()
         .child(self.measurement(Measured::Language, cx));
-        let interface = settings_group(
-            self.tr("settings-interface"),
+        settings_card(
+            self.tr("settings-appearance-layout"),
             column()
                 .gap_2()
                 .child(form_field(self.tr("settings-language"), language))
@@ -1973,9 +1979,9 @@ impl Settings {
                 .child(two_column(
                     self.font_control(cx).min_w(rems(180. / 16.)),
                     self.field(Field::Scale).min_w(rems(180. / 16.)),
-                )),
-        );
-        column().child(interface)
+                ))
+                .child(self.layout_settings(cx)),
+        )
     }
 
     fn layout_settings(&mut self, cx: &mut Context<Self>) -> Div {
@@ -2080,10 +2086,11 @@ impl Settings {
         )
         .relative()
         .child(self.measurement(Measured::SettingsLogLevel, cx));
-        let logging = settings_group(
+        settings_card(
             self.tr("settings-logging"),
             column()
                 .gap_2()
+                .child(caption(self.tr("settings-logging-scope")))
                 .child(
                     row()
                         .items_start()
@@ -2112,10 +2119,7 @@ impl Settings {
                     cx,
                     |draft| draft.log_to_file = !draft.log_to_file,
                 ))),
-        );
-        column()
-            .child(caption(self.tr("settings-logging-scope")))
-            .child(logging)
+        )
     }
 
     fn sidebar(&self, cx: &mut Context<Self>) -> Div {
@@ -2822,12 +2826,11 @@ impl Settings {
                 column()
                     .gap_3()
                     .child(self.basic_settings(cx))
-                    .child(settings_group(
-                        self.tr("settings-layout"),
-                        self.layout_settings(cx),
+                    .child(settings_card(
+                        self.tr("settings-album-artwork"),
+                        self.artwork_settings(cx),
                     ))
-                    .child(self.artwork_settings(cx))
-                    .child(settings_group(
+                    .child(settings_card(
                         self.tr("settings-desktop-integration"),
                         self.desktop_settings(cx),
                     ))
