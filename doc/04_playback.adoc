@@ -189,6 +189,7 @@ on a result enqueues it. Enter on a directory opens it; Enter on a directory
 track enqueues it. Right opens playlist entries; Enter plays a selected playlist,
 playlist track, or queue occurrence. In playlist details, `a` enqueues the selected
 track. In Queue, `d` or Delete removes the selected occurrence.
+Queue rows show the track title before the artist.
 
 Left/Backspace goes to the parent directory; Left/Esc leaves playlist details.
 Esc returns from search, the tree, or the playlist catalog to Queue. `q` exits

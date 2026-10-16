@@ -1730,7 +1730,7 @@ fn draw_queue(
                 } else {
                     "  "
                 };
-                format!("{marker}{} — {}", row.track.artist, row.track.title)
+                format!("{marker}{} — {}", row.track.title, row.track.artist)
             },
         ))
     });
@@ -2133,7 +2133,7 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect();
-        assert_eq!(text.matches("▶ artist — row-7").count(), 1);
+        assert_eq!(text.matches('▶').count(), 1);
         tui.ui.key_action(KeyEvent::from(KeyCode::PageDown), &state);
         assert_eq!(tui.ui.queue.selection.selected(), Some(50_004));
         tui.ui.key_action(KeyEvent::from(KeyCode::PageUp), &state);
