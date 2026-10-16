@@ -3,10 +3,11 @@ use crate::{
     ipc,
     model::{
         ClientSnapshot, Command, DirectoryRow, LibraryRow, LibrarySort, PlaybackStatus,
-        PlaylistEntryRow, PlaylistSummary, Query, QueueRow, RepeatMode, playback_key_command,
+        PlaylistEntryRow, PlaylistSummary, Query, QueryStamp, QueueRow, RepeatMode,
+        playback_key_command,
     },
-    projection::TuiSnapshot,
-    response::{Ack, PlaylistEntryRevision, StateSections, ViewResponse},
+    projection::{QueryProjection, TuiSnapshot},
+    response::{Ack, StateSections, ViewResponse},
 };
 use anyhow::{Context, Result};
 use crossbeam_channel::{Receiver, Sender, bounded};
@@ -305,25 +306,23 @@ struct QueryRequest {
     kind: QueryKind,
     offset: usize,
     limit: usize,
-    view_revision: u64,
-    library_revision: u64,
-    structure_revision: u64,
-    playlist_revision: u64,
-    playlist_entry_revision: Option<PlaylistEntryRevision>,
-    queue_revision: u64,
+    generation: u64,
+    stamp: QueryStamp,
 }
 
-impl QueryRequest {
-    fn query(&self) -> Query {
-        let offset = self.offset;
-        let limit = self.limit;
-        match &self.kind {
+impl QueryKind {
+    fn query(&self, offset: usize, limit: usize) -> Query {
+        self.clone().into_query(offset, limit)
+    }
+
+    fn into_query(self, offset: usize, limit: usize) -> Query {
+        match self {
             QueryKind::Queue => Query::QueuePage { offset, limit },
             QueryKind::QueueSelection(queue_id) => Query::QueueEntries {
-                queue_ids: vec![*queue_id],
+                queue_ids: vec![queue_id],
             },
             QueryKind::Search(query) => Query::LibraryPage {
-                query: Some(query.clone()),
+                query: Some(query),
                 favorite: None,
                 missing: None,
                 sort: LibrarySort::Id,
@@ -331,7 +330,7 @@ impl QueryRequest {
                 limit,
             },
             QueryKind::Directory(path) => Query::DirectoryPage {
-                path: path.clone(),
+                path,
                 query: None,
                 favorite: None,
                 missing: None,
@@ -340,14 +339,41 @@ impl QueryRequest {
             },
             QueryKind::Playlists => Query::PlaylistSummaries { offset, limit },
             QueryKind::Playlist(playlist_id) => Query::PlaylistEntries {
-                playlist_id: *playlist_id,
+                playlist_id,
                 offset,
                 limit,
             },
-            QueryKind::PlaylistSelection { entry_id, .. } => Query::PlaylistEntry {
-                entry_id: *entry_id,
+            QueryKind::PlaylistSelection {
+                playlist_id,
+                entry_id,
+            } => Query::PlaylistEntryLocations {
+                playlist_id,
+                entry_ids: vec![entry_id],
             },
         }
+    }
+
+    fn playlist_id(&self) -> Option<i64> {
+        match self {
+            Self::Playlist(id)
+            | Self::PlaylistSelection {
+                playlist_id: id, ..
+            } => Some(*id),
+            _ => None,
+        }
+    }
+
+    fn changed(self, previous: &TuiSnapshot, next: &TuiSnapshot) -> bool {
+        let playlist_id = self.playlist_id();
+        let query = self.into_query(0, 0);
+        query.stamp(previous.query_revisions(playlist_id))
+            != query.stamp(next.query_revisions(playlist_id))
+    }
+}
+
+impl QueryRequest {
+    fn query(&self) -> Query {
+        self.kind.query(self.offset, self.limit)
     }
 }
 
@@ -586,7 +612,7 @@ fn run_loop(
                             } else {
                                 View::Search(LibrarySearch::default())
                             };
-                            tui.ui.requested = None;
+                            tui.ui.cancel_query();
                             tui.ui.mark_local_change();
                             tui.snapshot.clone()
                         }
@@ -640,40 +666,71 @@ impl TuiState {
     }
 
     fn apply_snapshot(&mut self, next: TuiSnapshot) {
-        let reordered = if let View::PlaylistDetail { detail, .. } = &mut self.ui.view {
-            let changed = self
-                .snapshot
-                .library
-                .playlist_entry_revisions
-                .get(&detail.playlist_id)
-                != next
-                    .library
-                    .playlist_entry_revisions
-                    .get(&detail.playlist_id);
-            if changed {
+        let page_size_changed = self.snapshot.system.page_size != next.system.page_size;
+        let rows_changed = self
+            .ui
+            .view_query_kind(false)
+            .is_some_and(|kind| kind.changed(&self.snapshot, &next));
+        let resolving_selection = match &self.ui.view {
+            View::Queue => self.ui.queue_anchor.is_some(),
+            View::PlaylistDetail { detail, .. } => detail.entry_anchor.is_some(),
+            _ => false,
+        };
+        let query_changed = if resolving_selection {
+            self.ui
+                .view_query_kind(true)
+                .is_some_and(|kind| kind.changed(&self.snapshot, &next))
+        } else {
+            rows_changed
+        };
+        let deleted_playlist = if let View::PlaylistDetail { detail, .. } = &mut self.ui.view {
+            let compact = Query::PlaylistEntryLocations {
+                playlist_id: detail.playlist_id,
+                entry_ids: Vec::new(),
+            };
+            let scope = Some(detail.playlist_id);
+            if compact.stamp(self.snapshot.query_revisions(scope))
+                != compact.stamp(next.query_revisions(scope))
+            {
                 detail.entry_anchor = detail
                     .entry_anchor
+                    .or(detail.selected_entry_id)
                     .or_else(|| detail.entries.selected().map(|entry| entry.id));
             }
-            changed
+            !next
+                .library
+                .playlist_entry_revisions
+                .contains_key(&detail.playlist_id)
         } else {
             false
         };
-        if self.snapshot.library.revision != next.library.revision
-            || self.snapshot.library.playlist_revision != next.library.playlist_revision
-            || self.snapshot.system.page_size != next.system.page_size
-            || reordered
-        {
+        self.ui.sync_queue(&self.snapshot, &next);
+        if rows_changed || page_size_changed {
             self.ui.invalidate_views();
+        }
+        if (query_changed && !matches!(self.ui.view, View::Queue)) || page_size_changed {
+            self.ui.cancel_query();
+        }
+        if deleted_playlist {
+            let View::PlaylistDetail { playlists, .. } = std::mem::take(&mut self.ui.view) else {
+                unreachable!();
+            };
+            self.ui.view = View::Playlists(PagedList {
+                selection: playlists.0,
+                viewport_rows: playlists.1,
+                ..PagedList::default()
+            });
+            self.ui.cancel_query();
         }
         if self.snapshot.system.library_roots != next.system.library_roots
             && let View::Tree(tree) = &mut self.ui.view
         {
             tree.roots = LibraryTree::roots(&next.system.library_roots);
-            tree.entries.clear();
-            self.ui.requested = None;
+            // The top-level forest is local demand, not a DirectoryPage projection.
+            if tree.directory.as_os_str().is_empty() {
+                tree.entries.clear();
+            }
         }
-        self.ui.sync_queue(&self.snapshot, &next);
         if let Some(message) = snapshot_message(&self.snapshot, &next, &self.ui.i18n) {
             self.ui.set_message(Some(message));
         }
@@ -735,10 +792,11 @@ struct UiState {
     queue: PagedList<QueueRow>,
     // Resolve the selected occurrence after edits before requesting its new viewport.
     queue_anchor: Option<u64>,
+    queue_selected_id: Option<u64>,
     show_help: bool,
     message: Option<Notice>,
     requested: Option<QueryRequest>,
-    query_revision: u64,
+    projection: QueryProjection,
     failed_request: Option<QueryRequest>,
     local_revision: u64,
     // Keyboard PageUp/PageDown distance follows the terminal viewport, not query limits.
@@ -751,10 +809,11 @@ impl UiState {
             view: View::default(),
             queue: PagedList::default(),
             queue_anchor: None,
+            queue_selected_id: None,
             show_help: false,
             message: None,
             requested: None,
-            query_revision: 0,
+            projection: QueryProjection::default(),
             failed_request: None,
             local_revision: 0,
             page_size: 0,
@@ -785,7 +844,31 @@ impl UiState {
         changed
     }
 
-    fn query_request(&self, state: &TuiSnapshot) -> Option<QueryRequest> {
+    fn view_query_kind(&self, selection: bool) -> Option<QueryKind> {
+        match &self.view {
+            View::Queue => Some(if selection {
+                self.queue_anchor
+                    .map_or(QueryKind::Queue, QueryKind::QueueSelection)
+            } else {
+                QueryKind::Queue
+            }),
+            View::Search(search) => Some(QueryKind::Search(search.query.clone())),
+            View::Tree(tree) if !tree.directory.as_os_str().is_empty() => {
+                Some(QueryKind::Directory(tree.directory.clone()))
+            }
+            View::Playlists(_) => Some(QueryKind::Playlists),
+            View::PlaylistDetail { detail, .. } => Some(match detail.entry_anchor {
+                Some(entry_id) if selection => QueryKind::PlaylistSelection {
+                    playlist_id: detail.playlist_id,
+                    entry_id,
+                },
+                _ => QueryKind::Playlist(detail.playlist_id),
+            }),
+            _ => None,
+        }
+    }
+
+    fn query_request(&mut self, state: &TuiSnapshot) -> Option<QueryRequest> {
         let limit = state.system.page_size as usize;
         let (kind, offset) = match &self.view {
             View::Queue if state.queue.total != 0 => match self.queue_anchor {
@@ -801,45 +884,37 @@ impl UiState {
                 tree.entries.next_offset(limit)?,
             ),
             View::Playlists(playlists) => (QueryKind::Playlists, playlists.next_offset(limit)?),
-            View::PlaylistDetail { detail, .. } => match detail.entry_anchor {
-                Some(entry_id) => (
-                    QueryKind::PlaylistSelection {
-                        playlist_id: detail.playlist_id,
-                        entry_id,
-                    },
-                    0,
-                ),
-                None => (
-                    QueryKind::Playlist(detail.playlist_id),
-                    detail.entries.next_offset(limit)?,
-                ),
-            },
+            View::PlaylistDetail { detail, .. }
+                if state
+                    .library
+                    .playlist_entry_revisions
+                    .contains_key(&detail.playlist_id) =>
+            {
+                match detail.entry_anchor {
+                    Some(entry_id) => (
+                        QueryKind::PlaylistSelection {
+                            playlist_id: detail.playlist_id,
+                            entry_id,
+                        },
+                        0,
+                    ),
+                    None => (
+                        QueryKind::Playlist(detail.playlist_id),
+                        detail.entries.next_offset(limit)?,
+                    ),
+                }
+            }
             _ => return None,
         };
-        let playlist_entry_revision = match &kind {
-            QueryKind::Playlist(playlist_id) | QueryKind::PlaylistSelection { playlist_id, .. } => {
-                Some(PlaylistEntryRevision {
-                    playlist_id: *playlist_id,
-                    revision: state
-                        .library
-                        .playlist_entry_revisions
-                        .get(playlist_id)
-                        .copied()
-                        .unwrap_or(state.library.playlist_revision),
-                })
-            }
-            _ => None,
-        };
+        let query = kind.query(offset, limit);
+        let revisions = state.query_revisions(kind.playlist_id());
+        self.projection.sync(&query, revisions);
         let request = QueryRequest {
             kind,
             offset,
             limit,
-            view_revision: self.query_revision,
-            library_revision: state.library.revision,
-            structure_revision: state.library.structure_revision,
-            playlist_revision: state.library.playlist_revision,
-            playlist_entry_revision,
-            queue_revision: state.queue.revision,
+            generation: self.projection.generation(),
+            stamp: query.stamp(revisions),
         };
         if self.failed_request.as_ref() == Some(&request) {
             None
@@ -869,24 +944,10 @@ impl UiState {
                 return true;
             }
         };
-        let revision_matches = match &request.kind {
-            QueryKind::Queue | QueryKind::QueueSelection(_) => {
-                result.revisions.queue == request.queue_revision
-            }
-            QueryKind::Directory(_) => result.revisions.structure == request.structure_revision,
-            QueryKind::Playlists => {
-                result.revisions.library == request.library_revision
-                    && result.revisions.playlist == request.playlist_revision
-            }
-            QueryKind::Playlist(_) | QueryKind::PlaylistSelection { .. } => {
-                result.revisions.library == request.library_revision
-                    && result.revisions.playlist == request.playlist_revision
-                    && (result.revisions.playlist_entries == request.playlist_entry_revision
-                        || matches!(&result.view, ViewResponse::PlaylistEntry(None)))
-            }
-            QueryKind::Search(_) => result.revisions.library == request.library_revision,
-        };
-        if !revision_matches {
+        if !self
+            .projection
+            .accepts(&request.query(), request.generation, result.revisions)
+        {
             self.requested = None;
             return false;
         }
@@ -894,6 +955,7 @@ impl UiState {
             (View::Queue, ViewResponse::QueuePage(page)) if request.kind == QueryKind::Queue => {
                 self.queue
                     .insert(request.offset, request.limit, page.total, page.rows);
+                self.queue_selected_id = self.queue.selected().map(|row| row.id);
             }
             (View::Queue, ViewResponse::QueueEntries(rows)) => {
                 if let QueryKind::QueueSelection(queue_id) = request.kind {
@@ -901,6 +963,8 @@ impl UiState {
                         self.queue.selection.select(Some(row.position));
                         self.queue.set_viewport(self.queue.viewport_rows);
                     }
+                    self.queue_selected_id =
+                        rows.iter().find(|row| row.id == queue_id).map(|row| row.id);
                     self.queue_anchor = None;
                 } else {
                     self.set_message(Some(self.i18n.text("terminal-unexpected-response").into()));
@@ -922,15 +986,21 @@ impl UiState {
                 detail
                     .entries
                     .insert(request.offset, request.limit, page.total, page.rows);
+                detail.selected_entry_id = detail.entries.selected().map(|entry| entry.id);
             }
-            (View::PlaylistDetail { detail, .. }, ViewResponse::PlaylistEntry(entry)) => {
+            (
+                View::PlaylistDetail { detail, .. },
+                ViewResponse::PlaylistEntryLocations(entries),
+            ) => {
                 if let QueryKind::PlaylistSelection {
                     playlist_id,
                     entry_id,
                 } = request.kind
                 {
-                    let entry = entry
-                        .filter(|entry| entry.id == entry_id && entry.playlist_id == playlist_id);
+                    let entry = entries
+                        .into_iter()
+                        .find(|entry| entry.id == entry_id && entry.playlist_id == playlist_id);
+                    detail.selected_entry_id = entry.as_ref().map(|entry| entry.id);
                     if let Some(entry) = entry {
                         detail.entries.total = entry.total;
                         detail.entries.loaded = true;
@@ -979,12 +1049,13 @@ impl UiState {
     }
 
     fn sync_queue(&mut self, previous: &TuiSnapshot, next: &TuiSnapshot) {
-        if previous.queue.revision == next.queue.revision {
+        if !QueryKind::Queue.changed(previous, next) {
             return;
         }
         self.queue_anchor = self
             .queue_anchor
-            .or_else(|| self.queue.selected().map(|row| row.id));
+            .or_else(|| self.queue.selected().map(|row| row.id))
+            .or(self.queue_selected_id);
         let selected = self.queue.selection.selected().unwrap_or(0);
         self.queue.clear();
         self.queue.total = next.queue.total;
@@ -994,35 +1065,41 @@ impl UiState {
             .select((next.queue.total != 0).then(|| selected.min(next.queue.total - 1)));
         if next.queue.total == 0 {
             self.queue_anchor = None;
+            self.queue_selected_id = None;
         }
         self.queue.set_viewport(self.queue.viewport_rows);
+        if matches!(self.view, View::Queue) {
+            self.cancel_query();
+        }
+    }
+
+    fn cancel_query(&mut self) {
         self.requested = None;
         self.failed_request = None;
+        self.projection.cancel();
     }
 
     fn invalidate_views(&mut self) {
-        self.requested = None;
-        self.failed_request = None;
-        self.query_revision = self.query_revision.wrapping_add(1);
         match &mut self.view {
             View::Search(search) => search.results.clear(),
             View::Tree(tree) => tree.entries.clear(),
             View::Playlists(playlists) => playlists.clear(),
             View::PlaylistDetail { detail, .. } => detail.entries.clear(),
-            View::Queue => {}
+            View::Queue => {
+                // Queue data changes are reconciled by sync_queue; this also handles page size.
+                self.queue.pages.clear();
+                self.queue.fetch_size = 0;
+            }
         }
     }
 
     fn key_action(&mut self, key: KeyEvent, state: &TuiSnapshot) -> KeyAction {
         if key.code == KeyCode::Char('R') {
-            self.requested = None;
-            self.failed_request = None;
+            self.cancel_query();
             self.mark_local_change();
             return KeyAction::Ignored;
         }
-        if self.failed_request.is_some() {
-            self.failed_request = None;
-        }
+        // A failed demand stays failed until explicit retry or a different key/demand.
         if key.code == KeyCode::Char('?') {
             self.show_help = !self.show_help;
             self.mark_local_change();
@@ -1034,7 +1111,7 @@ impl UiState {
                 KeyCode::Char('t') => return KeyAction::Tree,
                 KeyCode::Char('P') => {
                     self.view = View::Playlists(PagedList::default());
-                    self.requested = None;
+                    self.cancel_query();
                     self.mark_local_change();
                     return KeyAction::Ignored;
                 }
@@ -1075,20 +1152,21 @@ impl UiState {
                         KeyCode::Backspace if search.focus == SearchFocus::Query => {
                             if search.query.pop().is_some() {
                                 search.filter(Instant::now());
-                                self.requested = None;
+                                self.cancel_query();
                                 changed = true;
                             }
                         }
                         KeyCode::Char(character) if search.focus == SearchFocus::Query => {
                             search.query.push(character);
                             search.filter(Instant::now());
-                            self.requested = None;
+                            self.cancel_query();
                             changed = true;
                         }
                         _ => {}
                     }
                 }
                 self.view = if close {
+                    self.cancel_query();
                     View::Queue
                 } else {
                     View::Search(search)
@@ -1107,13 +1185,13 @@ impl UiState {
                             command = tree.activate();
                             changed = tree.directory != directory;
                             if changed {
-                                self.requested = None;
+                                self.cancel_query();
                             }
                         }
                         KeyCode::Backspace | KeyCode::Left => {
                             changed = tree.parent();
                             if changed {
-                                self.requested = None;
+                                self.cancel_query();
                             }
                         }
                         _ => {
@@ -1122,7 +1200,12 @@ impl UiState {
                         }
                     }
                 }
-                self.view = if close { View::Queue } else { View::Tree(tree) };
+                self.view = if close {
+                    self.cancel_query();
+                    View::Queue
+                } else {
+                    View::Tree(tree)
+                };
                 changed |= close;
             }
             View::PlaylistDetail {
@@ -1136,6 +1219,8 @@ impl UiState {
                             changed = detail.entries.navigate(key.code, page_size);
                             if changed {
                                 detail.entry_anchor = None;
+                                detail.selected_entry_id =
+                                    detail.entries.selected().map(|entry| entry.id);
                             }
                         }
                         KeyCode::Enter => {
@@ -1155,7 +1240,7 @@ impl UiState {
                     }
                 }
                 self.view = if close {
-                    self.requested = None;
+                    self.cancel_query();
                     View::Playlists(PagedList {
                         selection: playlists.0,
                         viewport_rows: playlists.1,
@@ -1180,12 +1265,13 @@ impl UiState {
                                     name: playlist.name.clone(),
                                     entries: PagedList::default(),
                                     entry_anchor: None,
+                                    selected_entry_id: None,
                                 };
                                 self.view = View::PlaylistDetail {
                                     playlists: (playlists.selection, playlists.viewport_rows),
                                     detail,
                                 };
-                                self.requested = None;
+                                self.cancel_query();
                                 self.mark_local_change();
                                 return KeyAction::Ignored;
                             }
@@ -1202,6 +1288,7 @@ impl UiState {
                     }
                 }
                 self.view = if close {
+                    self.cancel_query();
                     View::Queue
                 } else {
                     View::Playlists(playlists)
@@ -1214,6 +1301,7 @@ impl UiState {
                         let changed = self.queue.navigate(key.code, page_size);
                         if changed {
                             self.queue_anchor = None;
+                            self.queue_selected_id = self.queue.selected().map(|row| row.id);
                         }
                         changed
                     }
@@ -1392,6 +1480,7 @@ struct PlaylistDetail {
     name: String,
     entries: PagedList<PlaylistEntryRow>,
     entry_anchor: Option<i64>,
+    selected_entry_id: Option<i64>,
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -2019,6 +2108,7 @@ mod tests {
             name: "我的列表".into(),
             entries: PagedList::default(),
             entry_anchor: None,
+            selected_entry_id: None,
         };
         detail.entries.set_viewport(4);
         detail.entries.insert(
@@ -2273,7 +2363,9 @@ mod tests {
         assert!(tui.ui.query_request(&state).is_none());
         tui.ui
             .key_action(KeyEvent::from(KeyCode::Char('R')), &state);
-        assert_eq!(tui.ui.query_request(&state), Some(request));
+        let retried = tui.ui.query_request(&state).unwrap();
+        assert_eq!(retried.stamp, request.stamp);
+        assert_ne!(retried.generation, request.generation);
         load_queue(&mut tui.ui, &state);
     }
 
@@ -2387,22 +2479,16 @@ mod tests {
             QueryKind::PlaylistSelection {
                 playlist_id,
                 entry_id,
-            } => ViewResponse::PlaylistEntry(Some(crate::model::PlaylistEntryLocation {
+            } => ViewResponse::PlaylistEntryLocations(vec![crate::model::PlaylistEntryLocation {
                 id: *entry_id,
                 playlist_id: *playlist_id,
                 position: *entry_id as usize,
                 track_id: *entry_id,
                 total,
-            })),
+            }]),
         };
         QueryResult {
-            revisions: QueryRevisions {
-                library: request.library_revision,
-                structure: request.structure_revision,
-                playlist: request.playlist_revision,
-                playlist_entries: request.playlist_entry_revision,
-                queue: request.queue_revision,
-            },
+            revisions: request.stamp.revisions(),
             view,
         }
     }
@@ -2448,10 +2534,273 @@ mod tests {
             .collect()
     }
 
+    fn playlist_view(playlist_id: i64) -> View {
+        View::PlaylistDetail {
+            playlists: (ListState::default(), 1),
+            detail: PlaylistDetail {
+                playlist_id,
+                name: "collection".into(),
+                entries: PagedList::default(),
+                entry_anchor: None,
+                selected_entry_id: None,
+            },
+        }
+    }
+
+    fn query_snapshot() -> TuiSnapshot {
+        let mut state = TuiSnapshot::default();
+        state.system.page_size = 3;
+        state.queue.total = 12;
+        state.queue.revision = 5;
+        state.library.revision = 6;
+        state.library.structure_revision = 7;
+        state.library.playlist_revision = 8;
+        Arc::make_mut(&mut state.library.playlist_entry_revisions).insert(1, 9);
+        state
+    }
+
+    #[test]
+    fn unrelated_updates_preserve_pending_and_loaded_terminal_pages() {
+        for view in [
+            View::Queue,
+            View::Search(LibrarySearch::default()),
+            View::Tree(LibraryTree {
+                directory: "/music".into(),
+                ..LibraryTree::default()
+            }),
+            View::Playlists(PagedList::default()),
+            playlist_view(1),
+        ] {
+            let state = query_snapshot();
+            let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::new("en-US")));
+            tui.ui.view = view;
+            let request = tui.ui.query_request(&state).unwrap();
+            tui.ui.requested = Some(request.clone());
+            let mut next = state.clone();
+            next.library.revision += 1;
+            next.library.structure_revision += 1;
+            next.library.playlist_revision += 1;
+            next.queue.revision += 1;
+            Arc::make_mut(&mut next.library.playlist_entry_revisions).insert(1, 10);
+            Arc::make_mut(&mut next.library.playlist_entry_revisions).insert(2, 11);
+            match request.kind {
+                QueryKind::Queue => next.queue.revision = state.queue.revision,
+                QueryKind::Search(_) => next.library.revision = state.library.revision,
+                QueryKind::Directory(_) => {
+                    next.library.revision = state.library.revision;
+                    next.library.structure_revision = state.library.structure_revision;
+                }
+                QueryKind::Playlists => {
+                    next.library.playlist_revision = state.library.playlist_revision
+                }
+                QueryKind::Playlist(_) => {
+                    next.library.revision = state.library.revision;
+                    Arc::make_mut(&mut next.library.playlist_entry_revisions).insert(1, 9);
+                }
+                _ => unreachable!(),
+            }
+            tui.apply_snapshot(next.clone());
+            assert_eq!(tui.ui.requested.as_ref(), Some(&request));
+            assert_eq!(tui.ui.query_request(&next), Some(request.clone()));
+            let mut result = response(&request, 12);
+            result.revisions = next.query_revisions(request.kind.playlist_id());
+            assert!(tui.ui.apply_query(&next, &request, Ok(result)));
+            load_visible(&mut tui.ui, &next);
+            let generation = tui.ui.projection.generation();
+            tui.apply_snapshot(state);
+            assert_eq!(tui.ui.projection.generation(), generation);
+            assert!(tui.ui.query_request(&tui.snapshot).is_none());
+        }
+    }
+
+    #[test]
+    fn directory_pages_refresh_for_metadata_and_structure_but_not_publication() {
+        for metadata in [true, false] {
+            let state = query_snapshot();
+            let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::new("en-US")));
+            tui.ui.view = View::Tree(LibraryTree {
+                directory: "/music".into(),
+                ..LibraryTree::default()
+            });
+            let first = tui.ui.query_request(&state).unwrap();
+            assert!(tui.ui.apply_query(&state, &first, Ok(response(&first, 12))));
+            let pending = tui.ui.query_request(&state).unwrap();
+            let mut next = state.clone();
+            if metadata {
+                next.library.revision += 1;
+            } else {
+                next.library.structure_revision += 1;
+            }
+            tui.apply_snapshot(next.clone());
+            assert!(
+                !tui.ui
+                    .apply_query(&next, &pending, Ok(response(&pending, 12)))
+            );
+            let View::Tree(tree) = &tui.ui.view else {
+                unreachable!()
+            };
+            assert!(tree.entries.pages.is_empty());
+            let fresh = tui.ui.query_request(&next).unwrap();
+            assert_ne!(fresh.stamp, first.stamp);
+            let mut result = response(&fresh, 12);
+            if metadata {
+                result.revisions.library = state.library.revision;
+            } else {
+                result.revisions.structure = state.library.structure_revision;
+            }
+            assert!(!tui.ui.apply_query(&next, &fresh, Ok(result)));
+            load_visible(&mut tui.ui, &next);
+            next.system.revision += 1;
+            tui.apply_snapshot(next.clone());
+            assert!(tui.ui.query_request(&next).is_none());
+        }
+    }
+
+    #[test]
+    fn playlist_metadata_refresh_keeps_occurrence_and_compact_lookup_scope() {
+        let state = query_snapshot();
+        let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::new("en-US")));
+        tui.ui.view = playlist_view(1);
+        load_visible(&mut tui.ui, &state);
+        let mut next = state.clone();
+        next.library.revision += 1;
+        tui.apply_snapshot(next.clone());
+        let rows = tui.ui.query_request(&next).unwrap();
+        assert_eq!(rows.kind, QueryKind::Playlist(1));
+        let View::PlaylistDetail { detail, .. } = &tui.ui.view else {
+            unreachable!()
+        };
+        assert_eq!(detail.selected_entry_id, Some(0));
+        assert!(detail.entry_anchor.is_none());
+        // The metadata refresh emptied pages; a subsequent reorder must still know
+        // the selected occurrence rather than treating cache eviction as deletion.
+        Arc::make_mut(&mut next.library.playlist_entry_revisions).insert(1, 10);
+        tui.apply_snapshot(next.clone());
+        let lookup = tui.ui.query_request(&next).unwrap();
+        assert_eq!(
+            lookup.kind,
+            QueryKind::PlaylistSelection {
+                playlist_id: 1,
+                entry_id: 0
+            }
+        );
+        assert!(!tui.ui.apply_query(&next, &rows, Ok(response(&rows, 12))));
+        tui.ui.requested = Some(lookup.clone());
+        next.library.revision += 1;
+        next.library.playlist_revision += 1;
+        next.queue.revision += 1;
+        tui.apply_snapshot(next.clone());
+        assert_eq!(tui.ui.requested.as_ref(), Some(&lookup));
+        assert_eq!(tui.ui.query_request(&next), Some(lookup.clone()));
+        let mut located = response(&lookup, 12);
+        located.revisions = next.query_revisions(Some(1));
+        assert!(tui.ui.apply_query(&next, &lookup, Ok(located)));
+        let rows = tui.ui.query_request(&next).unwrap();
+        assert_eq!(rows.kind, QueryKind::Playlist(1));
+        assert_eq!(
+            rows.stamp,
+            rows.query().stamp(next.query_revisions(Some(1)))
+        );
+        // An empty compact result is an observed removed occurrence, with the
+        // scoped token still captured atomically by PlaylistEntryLocations.
+        Arc::make_mut(&mut next.library.playlist_entry_revisions).insert(1, 11);
+        tui.apply_snapshot(next.clone());
+        let removed = tui.ui.query_request(&next).unwrap();
+        assert!(tui.ui.apply_query(
+            &next,
+            &removed,
+            Ok(QueryResult {
+                revisions: next.query_revisions(Some(1)),
+                view: ViewResponse::PlaylistEntryLocations(Vec::new()),
+            })
+        ));
+        let View::PlaylistDetail { detail, .. } = &tui.ui.view else {
+            unreachable!()
+        };
+        assert!(detail.entry_anchor.is_none());
+        assert!(detail.selected_entry_id.is_none());
+        assert_eq!(
+            tui.ui.query_request(&next).unwrap().kind,
+            QueryKind::Playlist(1)
+        );
+    }
+
+    #[test]
+    fn deleted_playlist_returns_to_summaries_and_rejects_pending_rows() {
+        let state = query_snapshot();
+        let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::new("en-US")));
+        tui.ui.view = playlist_view(1);
+        let request = tui.ui.query_request(&state).unwrap();
+        let mut next = state.clone();
+        Arc::make_mut(&mut next.library.playlist_entry_revisions).remove(&1);
+        next.library.playlist_revision += 1;
+        tui.apply_snapshot(next.clone());
+        assert!(matches!(tui.ui.view, View::Playlists(_)));
+        assert!(
+            !tui.ui
+                .apply_query(&next, &request, Ok(response(&request, 12)))
+        );
+        assert_eq!(
+            tui.ui.query_request(&next).unwrap().kind,
+            QueryKind::Playlists
+        );
+    }
+
+    #[test]
+    fn terminal_page_demand_does_not_change_projection_but_page_size_does() {
+        let state = query_snapshot();
+        let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::new("en-US")));
+        tui.ui.view = View::Playlists(PagedList::default());
+        let first = tui.ui.query_request(&state).unwrap();
+        assert!(tui.ui.apply_query(&state, &first, Ok(response(&first, 12))));
+        let second = tui.ui.query_request(&state).unwrap();
+        assert_ne!(first.offset, second.offset);
+        assert_eq!(first.generation, second.generation);
+        assert_eq!(first.stamp, second.stamp);
+        let mut next = state.clone();
+        next.system.page_size = 5;
+        tui.apply_snapshot(next.clone());
+        assert!(
+            !tui.ui
+                .apply_query(&next, &second, Ok(response(&second, 12)))
+        );
+        let resized = tui.ui.query_request(&next).unwrap();
+        assert_eq!(resized.limit, 5);
+        assert_ne!(resized.generation, second.generation);
+        assert_eq!(resized.stamp, second.stamp);
+    }
+
+    #[test]
+    fn queue_updates_and_unrelated_keys_do_not_retry_failed_playlist_pages() {
+        let state = query_snapshot();
+        let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::new("en-US")));
+        tui.ui.view = View::Playlists(PagedList::default());
+        let request = tui.ui.query_request(&state).unwrap();
+        assert!(
+            tui.ui
+                .apply_query(&state, &request, Err("unavailable".into()))
+        );
+        let mut next = state.clone();
+        next.queue.revision += 1;
+        tui.apply_snapshot(next.clone());
+        assert!(tui.ui.query_request(&next).is_none());
+        tui.ui.key_action(KeyEvent::from(KeyCode::Char('?')), &next);
+        assert!(tui.ui.query_request(&next).is_none());
+        tui.ui.key_action(KeyEvent::from(KeyCode::Char('R')), &next);
+        let retried = tui.ui.query_request(&next).unwrap();
+        assert_eq!(retried.stamp, request.stamp);
+        assert_ne!(retried.generation, request.generation);
+        assert!(
+            !tui.ui
+                .apply_query(&next, &request, Ok(response(&request, 12)))
+        );
+    }
+
     #[test]
     fn playlist_reorder_preserves_unrelated_terminal_views() {
         let mut snapshot = TuiSnapshot::default();
         snapshot.system.page_size = 3;
+        Arc::make_mut(&mut snapshot.library.playlist_entry_revisions).insert(2, 0);
         for view in [
             View::Search(LibrarySearch::default()),
             View::Tree(LibraryTree {
@@ -2466,17 +2815,18 @@ mod tests {
                     name: "other".into(),
                     entries: PagedList::default(),
                     entry_anchor: None,
+                    selected_entry_id: None,
                 },
             },
         ] {
             let mut tui = TuiState::new(snapshot.clone(), Arc::new(Localizer::new("en-US")));
             tui.ui.view = view;
             load_visible(&mut tui.ui, &snapshot);
-            let revision = tui.ui.query_revision;
+            let generation = tui.ui.projection.generation();
             let mut next = snapshot.clone();
             Arc::make_mut(&mut next.library.playlist_entry_revisions).insert(1, 1);
             tui.apply_snapshot(next);
-            assert_eq!(tui.ui.query_revision, revision);
+            assert_eq!(tui.ui.projection.generation(), generation);
             assert!(tui.ui.query_request(&tui.snapshot).is_none());
         }
     }
@@ -2485,6 +2835,7 @@ mod tests {
     fn terminal_playlist_reorder_relocates_identity_and_rejects_stale_results() {
         let mut snapshot = TuiSnapshot::default();
         snapshot.system.page_size = 1;
+        Arc::make_mut(&mut snapshot.library.playlist_entry_revisions).insert(1, 0);
         let mut tui = TuiState::new(snapshot, Arc::new(Localizer::new("en-US")));
         tui.ui.view = View::PlaylistDetail {
             playlists: (ListState::default(), 1),
@@ -2493,6 +2844,7 @@ mod tests {
                 name: "one".into(),
                 entries: PagedList::default(),
                 entry_anchor: None,
+                selected_entry_id: None,
             },
         };
         let first = tui.ui.query_request(&tui.snapshot).unwrap();
@@ -2521,10 +2873,10 @@ mod tests {
         assert!(!tui.ui.apply_query(&tui.snapshot, &lookup, Ok(old_lookup)));
         let lookup = tui.ui.query_request(&tui.snapshot).unwrap();
         let mut located = response(&lookup, 12);
-        let ViewResponse::PlaylistEntry(Some(entry)) = &mut located.view else {
-            panic!("expected entry location");
+        let ViewResponse::PlaylistEntryLocations(entries) = &mut located.view else {
+            panic!("expected entry locations");
         };
-        entry.position = 9;
+        entries[0].position = 9;
         assert!(tui.ui.apply_query(&tui.snapshot, &lookup, Ok(located)));
         let page = tui.ui.query_request(&tui.snapshot).unwrap();
         assert_eq!(page.kind, QueryKind::Playlist(1));
@@ -2547,6 +2899,7 @@ mod tests {
     fn every_queried_view_renders_across_batches_without_resetting_scroll() {
         let mut state = TuiSnapshot::default();
         state.system.page_size = 3;
+        Arc::make_mut(&mut state.library.playlist_entry_revisions).insert(7, 0);
         let views = [
             View::Search(LibrarySearch {
                 focus: SearchFocus::Results,
@@ -2564,6 +2917,7 @@ mod tests {
                     name: "collection".into(),
                     entries: PagedList::default(),
                     entry_anchor: None,
+                    selected_entry_id: None,
                 },
             },
         ];
@@ -2661,12 +3015,12 @@ mod tests {
             };
             render_view(&mut ui);
             load_visible(&mut ui, &state);
+            assert!(ui.query_request(&state).is_none());
             let View::Tree(tree) = &ui.view else {
                 unreachable!()
             };
             assert_eq!(tree.entries.total, roots.len());
             assert!(tree.entries.loaded);
-            assert!(ui.query_request(&state).is_none());
             if roots.is_empty() {
                 assert!(tree.entries.selection.selected().is_none());
                 continue;
@@ -2705,7 +3059,10 @@ mod tests {
         assert!(ui.apply_query(&state, &request, Err("connection failed".into())));
         assert!(ui.query_request(&state).is_none());
         ui.key_action(KeyEvent::from(KeyCode::Char('R')), &state);
-        assert_eq!(ui.query_request(&state), Some(request.clone()));
+        let retried = ui.query_request(&state).unwrap();
+        assert_eq!(retried.stamp, request.stamp);
+        assert_ne!(retried.generation, request.generation);
+        let request = retried;
         let mut stale = response(&request, 12);
         stale.revisions.playlist = 1;
         ui.requested = Some(request.clone());
@@ -2727,7 +3084,7 @@ mod tests {
         });
         let mut worker = spawn_query_worker(directory.path(), 1);
         let state = TuiSnapshot::default();
-        let ui = UiState {
+        let mut ui = UiState {
             view: View::Playlists(PagedList::default()),
             ..UiState::default()
         };
@@ -2814,12 +3171,12 @@ mod tests {
             kind: QueryKind::Queue,
             offset: 0,
             limit: 20,
-            view_revision: 0,
-            library_revision: 0,
-            structure_revision: 0,
-            playlist_revision: 0,
-            playlist_entry_revision: None,
-            queue_revision: 0,
+            generation: 0,
+            stamp: Query::QueuePage {
+                offset: 0,
+                limit: 20,
+            }
+            .stamp(QueryRevisions::default()),
         };
         worker.request(request.clone());
         active.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -2998,12 +3355,12 @@ mod tests {
             kind: QueryKind::Queue,
             offset: 0,
             limit: 20,
-            view_revision: 0,
-            library_revision: 0,
-            structure_revision: 0,
-            playlist_revision: 0,
-            playlist_entry_revision: None,
-            queue_revision: 0,
+            generation: 0,
+            stamp: Query::QueuePage {
+                offset: 0,
+                limit: 20,
+            }
+            .stamp(QueryRevisions::default()),
         };
         queries.request(request);
         queries.sender.take();
@@ -3078,12 +3435,12 @@ mod tests {
             kind: QueryKind::Queue,
             offset: 0,
             limit: 20,
-            view_revision: 0,
-            library_revision: 0,
-            structure_revision: 0,
-            playlist_revision: 0,
-            playlist_entry_revision: None,
-            queue_revision: 0,
+            generation: 0,
+            stamp: Query::QueuePage {
+                offset: 0,
+                limit: 20,
+            }
+            .stamp(QueryRevisions::default()),
         });
         connected.recv_timeout(Duration::from_secs(5)).unwrap();
         worker.cancel();
@@ -3132,12 +3489,12 @@ mod tests {
             kind: QueryKind::Queue,
             offset: 0,
             limit: 20,
-            view_revision: 0,
-            library_revision: 0,
-            structure_revision: 0,
-            playlist_revision: 0,
-            playlist_entry_revision: None,
-            queue_revision: 0,
+            generation: 0,
+            stamp: Query::QueuePage {
+                offset: 0,
+                limit: 20,
+            }
+            .stamp(QueryRevisions::default()),
         };
         worker.request(request.clone());
         active.recv_timeout(Duration::from_secs(5)).unwrap();
