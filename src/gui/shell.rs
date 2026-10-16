@@ -597,7 +597,7 @@ impl Render for GuiApp {
                                 .child(if !self.state.system.config.still_mode {
                                     "✓"
                                 } else {
-                                    ""
+                                    ""
                                 }),
                         ),
                     )
