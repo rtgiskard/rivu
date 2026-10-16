@@ -89,7 +89,7 @@ impl Playback {
         {
             let mut waveform = waveform.write();
             waveform.set_still_mode(still_mode);
-            waveform.select_source(&path, range, decoder_hint, source.info().duration);
+            waveform.select_source(&path, range, decoder_hint, &source);
         }
         Ok(Self {
             source,
@@ -312,7 +312,7 @@ impl Playback {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
+    use std::io::{Seek, SeekFrom, Write};
 
     fn pcm() -> tempfile::NamedTempFile {
         pcm_samples(16_000)
@@ -336,19 +336,38 @@ mod tests {
         file
     }
 
+    fn pcm_level(samples: u32, level: i16) -> tempfile::NamedTempFile {
+        let mut file = pcm_samples(samples);
+        file.seek(SeekFrom::Start(44)).unwrap();
+        for _ in 0..samples {
+            file.write_all(&level.to_le_bytes()).unwrap();
+        }
+        file
+    }
+
     fn test_playback(
         path: &std::path::Path,
         range: PlaybackRange,
     ) -> (Playback, impl FnMut(&mut [f32], u64) + use<>) {
-        let mut source = Source::open(path, 64 * 1024, DecoderHint::Auto, false).unwrap();
-        source.restrict(range).unwrap();
-        let waveform = Arc::new(RwLock::new(WaveformFrame::default()));
-        waveform.write().select_source(
+        test_playback_with_waveform(
             path,
             Some(range),
-            DecoderHint::Auto,
-            source.info().duration,
-        );
+            Arc::new(RwLock::new(WaveformFrame::default())),
+        )
+    }
+
+    fn test_playback_with_waveform(
+        path: &std::path::Path,
+        range: Option<PlaybackRange>,
+        waveform: Arc<RwLock<WaveformFrame>>,
+    ) -> (Playback, impl FnMut(&mut [f32], u64) + use<>) {
+        let mut source = Source::open(path, 64 * 1024, DecoderHint::Auto, false).unwrap();
+        if let Some(range) = range {
+            source.restrict(range).unwrap();
+        }
+        waveform
+            .write()
+            .select_source(path, range, DecoderHint::Auto, &source);
         let (output, render) = super::super::output::test_backend(8_000, false, source.layout());
         let waveform_weights = super::super::output::analysis_weights(source.layout());
         let playback = Playback {
@@ -368,6 +387,115 @@ mod tests {
             still_mode: false,
         };
         (playback, render)
+    }
+
+    #[test]
+    fn same_path_replacement_retires_complete_envelopes_but_not_an_open_decoder() {
+        let file = pcm_level(320, 3277);
+        let waveform = Arc::new(RwLock::new(WaveformFrame::default()));
+        let (mut first, mut render) =
+            test_playback_with_waveform(file.path(), None, waveform.clone());
+        first.fill().unwrap();
+        render(&mut [0.0; 320], 0);
+        render(&mut [0.0; 160], 100);
+        assert!(first.finished());
+        let completed = waveform.read().clone();
+        assert!(completed.complete);
+        assert!(
+            completed
+                .peaks
+                .iter()
+                .all(|peak| *peak == Some(3277.0 / 32768.0))
+        );
+
+        // An unchanged Load reuses the completed result without a PCM scan or
+        // allocating a playback accumulator before ordinary playback needs it.
+        let (mut reopened, _) = test_playback_with_waveform(file.path(), None, waveform.clone());
+        assert_eq!(waveform.read().revision, completed.revision);
+        assert_eq!(waveform.read().identity, completed.identity);
+        assert!(reopened.waveform_accumulator.is_none());
+        assert!(!reopened.eof);
+
+        let replacement = pcm_level(320, 26214);
+        std::fs::rename(replacement.path(), file.path()).unwrap();
+        // The decoder already holds A, even though the path now names B.
+        reopened.fill().unwrap();
+        assert_eq!(waveform.read().revision, completed.revision);
+        assert_eq!(waveform.read().peaks, completed.peaks);
+        let (output, mut render) =
+            super::super::output::test_backend(8_000, false, reopened.source.layout());
+        reopened
+            .restart_output_with(Some(0.0), |_, _| Ok(output))
+            .unwrap();
+        reopened.fill().unwrap();
+        let mut samples = [0.0; 320];
+        render(&mut samples, 0);
+        assert!(samples.iter().all(|sample| *sample == 3277.0 / 32768.0));
+        assert_eq!(waveform.read().identity, completed.identity);
+        assert_eq!(waveform.read().rms_counts, completed.rms_counts);
+
+        let (mut fresh, mut render) =
+            test_playback_with_waveform(file.path(), None, waveform.clone());
+        assert!(waveform.read().revision > completed.revision);
+        assert_ne!(waveform.read().identity, completed.identity);
+        assert!(!waveform.read().complete);
+        assert!(waveform.read().peaks.is_empty());
+        fresh.fill().unwrap();
+        render(&mut samples, 0);
+        render(&mut [0.0; 160], 100);
+        assert!(fresh.finished());
+        assert!(samples.iter().all(|sample| *sample == 26214.0 / 32768.0));
+        assert!(waveform.read().complete);
+        assert!(
+            waveform
+                .read()
+                .peaks
+                .iter()
+                .all(|peak| *peak == Some(26214.0 / 32768.0))
+        );
+        assert!(waveform.read().revision > completed.revision);
+    }
+
+    #[test]
+    fn seeking_retains_decoded_coverage_without_reidentifying_the_path() {
+        let file = pcm_level(16_000, 3277);
+        let (mut playback, _) = test_playback(
+            file.path(),
+            PlaybackRange {
+                start_seconds: 0.0,
+                end_seconds: Some(2.0),
+            },
+        );
+        playback.fill().unwrap();
+        let before = playback.waveform.read().clone();
+        assert!(!before.complete);
+        assert!(before.peaks.iter().any(Option::is_some));
+        let replacement = pcm_level(16_000, 26214);
+        std::fs::rename(replacement.path(), file.path()).unwrap();
+        let (output, mut render) =
+            super::super::output::test_backend(8_000, false, playback.source.layout());
+        playback
+            .restart_output_with(Some(1.0), |_, _| Ok(output))
+            .unwrap();
+        assert_eq!(playback.waveform.read().identity, before.identity);
+        assert_eq!(playback.waveform.read().revision, before.revision);
+        assert_eq!(playback.waveform.read().peaks, before.peaks);
+        playback.fill().unwrap();
+        let mut samples = [0.0; 160];
+        render(&mut samples, 0);
+        assert!(samples.iter().all(|sample| *sample == 3277.0 / 32768.0));
+        let after = playback.waveform.read();
+        assert_eq!(after.identity, before.identity);
+        assert!(!after.complete);
+        for (old, new) in before.peaks.iter().zip(&after.peaks) {
+            if old.is_some() {
+                assert_eq!(new, old);
+            }
+        }
+        assert!(
+            after.peaks.iter().filter(|peak| peak.is_some()).count()
+                > before.peaks.iter().filter(|peak| peak.is_some()).count()
+        );
     }
 
     fn assert_waveform_absent(playback: &Playback) {

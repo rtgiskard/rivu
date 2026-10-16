@@ -195,8 +195,19 @@ matching request and retires its full result, leaving playback untouched. A
 subsequent explicit load reads the latest saved hint and replaces any pending
 request. Request generation, captured content/decode identity and suspension
 generation reject stale results independently of the playback buffer's hint or
-revision. Progressive playback still follows its active decoder's path and
-range; refreshing a saved hint does not reject that decoder's existing frame.
+revision.
+
+Progressive playback identity belongs to the opened decoder, not the latest
+library fingerprint. Each successful Load captures the actual opened regular
+file's device/inode, size, modification and change timestamps, together with the
+path, range, decoder hint, actual backend, initial duration, sample rate and
+channel count. Atomic replacement or a changed decode/timeline format retires
+the prior envelope even at the same path. Seeking the existing decoder and
+reopening unchanged content retain cached coverage, including completed results
+and duration corrected at EOF. Identity is captured once at open: there is no
+per-frame filesystem lookup or extra whole-track PCM scan. A library refresh or
+saved hint change cannot relabel or discard data from an already opened old
+file descriptor; only a subsequent Load selects the replacement content.
 
 RMS fills extend above and below the centerline for the respective stereo
 channels. Each display column has its own gradient endpoint, preserving color

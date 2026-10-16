@@ -1,6 +1,9 @@
 //! A bounded, progressively filled envelope of the PCM already decoded for playback.
 
-use super::PlaybackRange;
+use super::{
+    PlaybackRange,
+    source::{Source, SourceIdentity},
+};
 use crate::model::DecoderHint;
 use std::{
     path::{Path, PathBuf},
@@ -63,6 +66,23 @@ pub(crate) struct RmsPrefix {
     counts: [u64; 3],
 }
 
+/// Captured when a decoder is loaded, never refreshed from a path or library
+/// snapshot. Keep the initial duration separate from the EOF-corrected timeline.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum WaveformIdentity {
+    Progressive {
+        content: SourceIdentity,
+        ffmpeg: bool,
+        duration: Option<f64>,
+        sample_rate: u32,
+        channels: u16,
+    },
+    FullScan {
+        duration: Option<f64>,
+        sample_rate: u32,
+    },
+}
+
 #[derive(Clone, Debug)]
 pub struct WaveformFrame {
     pub revision: u64,
@@ -91,6 +111,7 @@ pub struct WaveformFrame {
     pub(crate) suspended: bool,
     pub(crate) suspension_generation: u64,
     pub(crate) full_scan_cancelled: Weak<AtomicBool>,
+    pub(crate) identity: Option<WaveformIdentity>,
 }
 
 impl Default for WaveformFrame {
@@ -119,6 +140,7 @@ impl Default for WaveformFrame {
             suspended: false,
             suspension_generation: 0,
             full_scan_cancelled: Weak::new(),
+            identity: None,
         }
     }
 }
@@ -231,6 +253,7 @@ impl WaveformAccumulator {
         if shared.path != self.frame.path
             || shared.range != self.frame.range
             || shared.decoder_hint != self.frame.decoder_hint
+            || shared.identity != self.frame.identity
             || shared.revision != self.published_revision
             || shared.complete
         {
@@ -333,6 +356,7 @@ impl WaveformFrame {
                 path: self.path.take(),
                 range: self.range,
                 decoder_hint: self.decoder_hint,
+                identity: self.identity,
                 duration: self.duration,
                 span_seconds: self.span_seconds,
                 suspended,
@@ -405,18 +429,46 @@ impl WaveformFrame {
         self.rms_prefixes[index] = prefix;
     }
 
-    /// Reopening the same source retains its timeline and results unless Still
-    /// Mode discarded them. Metadata selection alone never allocates bins.
+    /// Only a decoder with the same opened content, backend and initial audio
+    /// format may reuse coverage. A seek keeps this decoder and its identity.
     pub(super) fn select_source(
         &mut self,
         path: &Path,
         range: Option<PlaybackRange>,
         decoder_hint: DecoderHint,
-        duration: Option<f64>,
+        source: &Source,
     ) {
-        if self.matches(path, range, decoder_hint) {
+        let duration = source
+            .info()
+            .duration
+            .filter(|value| value.is_finite() && *value > 0.0);
+        self.select_identity(
+            path,
+            range,
+            decoder_hint,
+            duration,
+            WaveformIdentity::Progressive {
+                content: source.identity(),
+                ffmpeg: source.uses_ffmpeg(),
+                duration,
+                sample_rate: source.info().sample_rate,
+                channels: source.info().channels,
+            },
+        );
+    }
+
+    fn select_identity(
+        &mut self,
+        path: &Path,
+        range: Option<PlaybackRange>,
+        decoder_hint: DecoderHint,
+        duration: Option<f64>,
+        identity: WaveformIdentity,
+    ) {
+        if self.matches(path, range, decoder_hint) && self.identity == Some(identity) {
             return;
         }
+        self.identity = Some(identity);
         self.path = Some(path.to_owned());
         self.range = range;
         self.decoder_hint = decoder_hint;
@@ -447,7 +499,17 @@ impl WaveformFrame {
         duration: Option<f64>,
         sample_rate: u32,
     ) {
-        self.select_source(path, range, decoder_hint, duration);
+        let duration = duration.filter(|value| value.is_finite() && *value > 0.0);
+        self.select_identity(
+            path,
+            range,
+            decoder_hint,
+            duration,
+            WaveformIdentity::FullScan {
+                duration,
+                sample_rate,
+            },
+        );
         self.prepare_bins(sample_rate);
     }
 
@@ -786,6 +848,7 @@ mod tests {
         assert_eq!(actual.right_rms_counts, expected.right_rms_counts);
         assert_eq!(actual.revision, expected.revision);
         assert_eq!(actual.complete, expected.complete);
+        assert_eq!(actual.identity, expected.identity);
         assert_eq!(actual.duration, expected.duration);
         assert_eq!(actual.span_seconds, expected.span_seconds);
         assert_eq!(actual.max_peak, expected.max_peak);
@@ -1261,7 +1324,7 @@ mod tests {
             Path::new("track.wav"),
             None,
             DecoderHint::Auto,
-            Some(99.0),
+            Some(4.0),
             1,
         );
         frame.push(1.0, &[0.5], 1, 1);
@@ -1270,6 +1333,83 @@ mod tests {
         assert_eq!(frame.revision, revision);
         assert_eq!(frame.peaks, [None, Some(0.5), None, None]);
         assert_eq!(frame.duration, Some(4.0));
+    }
+
+    #[test]
+    fn progressive_reuse_requires_opened_content_backend_and_initial_format() {
+        let file = tempfile::tempfile().unwrap();
+        let replacement = tempfile::tempfile().unwrap();
+        let content = SourceIdentity::from_file(&file).unwrap();
+        let other_content = SourceIdentity::from_file(&replacement).unwrap();
+        let identity =
+            |content, ffmpeg, duration, sample_rate, channels| WaveformIdentity::Progressive {
+                content,
+                ffmpeg,
+                duration,
+                sample_rate,
+                channels,
+            };
+        let original = identity(content, false, Some(4.0), 1, 1);
+        let path = Path::new("track.wav");
+        let mut completed = WaveformFrame::default();
+        completed.select_identity(path, None, DecoderHint::Auto, Some(4.0), original);
+        completed.prepare_bins(1);
+        completed.push(0.0, &[0.1; 2], 1, 1);
+        completed.finish_scan(2.0);
+        let cached = completed.clone();
+        completed.select_identity(path, None, DecoderHint::Auto, Some(4.0), original);
+        assert_same_bins(&completed, &cached);
+        assert_eq!(completed.duration, Some(2.0), "keep actual EOF duration");
+
+        for next in [
+            identity(other_content, false, Some(4.0), 1, 1),
+            identity(content, true, Some(4.0), 1, 1),
+            identity(content, false, Some(3.0), 1, 1),
+            identity(content, false, Some(4.0), 2, 1),
+            identity(content, false, Some(4.0), 1, 2),
+        ] {
+            let mut fresh = cached.clone();
+            fresh.select_identity(path, None, DecoderHint::Auto, Some(4.0), next);
+            assert_eq!(fresh.revision, cached.revision + 1);
+            assert!(!fresh.complete);
+            assert!(fresh.peaks.is_empty());
+            assert!(fresh.rms_counts.is_empty());
+            assert_eq!(fresh.identity, Some(next));
+        }
+
+        // Explicit scans have their own owner; no bins cross that boundary.
+        completed.select(path, None, DecoderHint::Auto, Some(4.0), 1);
+        assert!(!completed.complete);
+        assert_eq!(completed.peaks, [None; 4]);
+    }
+
+    #[test]
+    fn old_content_cannot_publish_into_same_path_even_with_equal_revisions() {
+        let file = tempfile::tempfile().unwrap();
+        let replacement = tempfile::tempfile().unwrap();
+        let identity = |file| WaveformIdentity::Progressive {
+            content: SourceIdentity::from_file(file).unwrap(),
+            ffmpeg: false,
+            duration: Some(4.0),
+            sample_rate: 1,
+            channels: 1,
+        };
+        let mut shared = WaveformFrame::default();
+        shared.select_identity(
+            Path::new("track.wav"),
+            None,
+            DecoderHint::Auto,
+            Some(4.0),
+            identity(&file),
+        );
+        shared.prepare_bins(1);
+        shared.push(0.0, &[0.1], 1, 1);
+        let mut old = WaveformAccumulator::new(shared.clone());
+        old.push(1.0, &[0.8], 1, 1);
+        shared.identity = Some(identity(&replacement));
+        let expected = shared.clone();
+        old.publish(&mut shared);
+        assert_same_bins(&shared, &expected);
     }
 
     #[test]
