@@ -161,7 +161,12 @@ controls. Each action targets that occurrence without changing the selection;
 the favorite toggle updates its library track, including other occurrences.
 Move-up is unavailable on the first row and move-down on the last. The toolbar
 offers removal for a multi-selection and saving the entire queue as a playlist.
-Dragging a row onto another row moves it; a multi-selection can be dragged as a group.
+Dragging a selected row moves the selected group in its original queue order;
+dragging an unselected row moves only that occurrence. The group is fixed at
+drag start, even if selection changes during the gesture. Dropping on a row
+inserts before it; dropping below the rows appends. Dropping on a member of the
+dragged group or pressing Esc leaves queue order unchanged. A drag is rejected
+if queue contents change before it is dropped.
 Dragging library tracks or directories onto Queue appends the resolved tracks.
 Removing the current occurrence stops playback; removing other occurrences does
 not. Queue controls remain available while the layout is locked.

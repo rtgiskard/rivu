@@ -132,8 +132,6 @@ gl-play-track = Play track
 
 gl-remove-playlist = Remove from playlist
 
-gl-drop-select-playlist = Select a playlist before dropping tracks.
-
 gl-playlists = Playlists
 
 gl-new-playlist = New playlist…
@@ -258,6 +256,11 @@ gl-unknown-album = Unknown album
 gl-move-playlist-entries = Move { $count } { $count ->
         [one] playlist entry
        *[other] playlist entries
+    }
+
+gl-move-queue-entries = Move { $count } { $count ->
+        [one] queue entry
+       *[other] queue entries
     }
 
 gl-played-at = { $time }{ $paused ->

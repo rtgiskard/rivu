@@ -256,17 +256,24 @@ impl Render for PanelDrag {
     }
 }
 
-#[derive(Clone)]
-pub(super) struct QueueDrag {
-    pub(super) queue_id: u64,
-    pub(super) position: usize,
-    pub(super) revision: u64,
-    pub(super) label: SharedString,
+struct QueueDrag {
+    owner: EntityId,
+    source: queue::QueueIdentity,
+    // GPUI retains this payload; the drag constructor only creates its preview.
+    entries: std::cell::OnceCell<Vec<queue::QueueIdentity>>,
+    revision: u64,
 }
 
-impl Render for QueueDrag {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        drag_preview(self.label.clone(), window, cx)
+impl QueueDrag {
+    fn insertion_index(&self, target: Option<queue::QueueIdentity>, total: usize) -> Option<usize> {
+        let entries = self.entries.get()?;
+        if entries.is_empty()
+            || target.is_some_and(|target| entries.iter().any(|row| row.id == target.id))
+        {
+            return None;
+        }
+        let position = target.map_or(total, |target| target.position);
+        position.checked_sub(entries.iter().filter(|row| row.position < position).count())
     }
 }
 
@@ -2421,6 +2428,62 @@ impl GuiApp {
                 }),
             )
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod queue_drag_tests {
+    use super::{QueueDrag, queue::QueueIdentity};
+
+    fn identity(position: usize) -> QueueIdentity {
+        QueueIdentity {
+            id: position as u64 + 10,
+            track_id: 7,
+            position,
+        }
+    }
+
+    fn drag(positions: &[usize]) -> QueueDrag {
+        QueueDrag {
+            owner: 1_u64.into(),
+            source: identity(positions[0]),
+            entries: std::cell::OnceCell::from(
+                positions.iter().copied().map(identity).collect::<Vec<_>>(),
+            ),
+            revision: 4,
+        }
+    }
+
+    fn reordered(drag: &QueueDrag, target: Option<usize>) -> Vec<u64> {
+        let index = drag.insertion_index(target.map(identity), 5).unwrap();
+        let selected: Vec<_> = drag
+            .entries
+            .get()
+            .unwrap()
+            .iter()
+            .map(|row| row.id)
+            .collect();
+        let mut remaining: Vec<_> = (0..5)
+            .map(identity)
+            .map(|row| row.id)
+            .filter(|id| !selected.contains(id))
+            .collect();
+        remaining.splice(index..index, selected);
+        remaining
+    }
+
+    #[test]
+    fn queue_drop_inserts_before_target_or_appends_in_source_order() {
+        assert_eq!(reordered(&drag(&[1]), Some(4)), [10, 12, 13, 11, 14]);
+        assert_eq!(reordered(&drag(&[3]), Some(1)), [10, 13, 11, 12, 14]);
+        assert_eq!(reordered(&drag(&[1]), None), [10, 12, 13, 14, 11]);
+        // All rows share a track ID; distinct queue occurrences must survive.
+        let group = drag(&[1, 3]);
+        assert_eq!(reordered(&group, Some(4)), [10, 12, 11, 13, 14]);
+        assert_eq!(reordered(&group, Some(0)), [11, 13, 10, 12, 14]);
+        assert_eq!(reordered(&group, None), [10, 12, 14, 11, 13]);
+        assert_eq!(group.insertion_index(Some(identity(1)), 5), None);
+        assert_eq!(group.insertion_index(Some(identity(3)), 5), None);
     }
 }
 

@@ -356,7 +356,8 @@ Batch track actions and library dragging use stable track-ID order.
 
 Dragging a selected row carries the selection at drag start; dragging an
 unselected row carries that row alone. The dragged set stays fixed for the
-gesture even if the underlying selection changes.
+gesture even if the underlying selection changes. Press Esc to cancel a drag
+without adding tracks to its destination.
 
 Right-click a configured root in the desktop Library panel and choose
 `Remove library (keep files)` to remove its configured path. Audio files and

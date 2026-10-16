@@ -72,7 +72,9 @@ focus from inputs, dialogs, or another panel.
 Once loading completes, an empty playlist shows its empty state. Drag a selected
 track to move the selected group in its original playlist order; dragging an
 unselected track moves only that entry. Dropping on a row inserts before that
-entry; dropping below the rows appends. Dropping on a selected target does nothing.
+entry; dropping below the rows appends. The dragged group is fixed at drag start,
+even if track selection changes during the gesture. Dropping on a member of that
+group or pressing Esc leaves playlist order unchanged.
 This saves playlist order without changing the queue. Drags carry stable entry
 identities and a playlist content/lifetime revision, and are rejected after that
 playlist's membership or order changes, after deletion, or after the selection

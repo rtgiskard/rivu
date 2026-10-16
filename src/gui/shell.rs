@@ -81,9 +81,11 @@ impl Render for GuiApp {
                 if event.keystroke.key == "escape"
                     && (this.interaction.docking().is_some()
                         || this.interaction.dragging().is_some()
-                        || this.interaction.seek_preview().is_some())
+                        || this.interaction.seek_preview().is_some()
+                        || cx.has_active_drag())
                 {
                     this.cancel_interaction(window, cx);
+                    cx.stop_active_drag(window);
                     cx.stop_propagation();
                     return;
                 }

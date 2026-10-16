@@ -194,20 +194,18 @@ impl LibraryDragPreview {
 
 impl Render for LibraryDragPreview {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Window coordinates avoid the source row's grab offset; GPUI fits actual bounds.
-        gpui::anchored()
-            .position(window.mouse_position() + gpui::point(px(10.), px(10.)))
-            .child(
-                super::components::drag_preview_surface(window, cx)
-                    .gap_2()
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .font_family(super::fonts::SYMBOLS_FAMILY)
-                            .child(self.icon),
-                    )
-                    .child(div().min_w_0().truncate().child(self.label.clone())),
-            )
+        super::components::anchor_list_drag_preview(
+            super::components::drag_preview_surface(window, cx)
+                .gap_2()
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .font_family(super::fonts::SYMBOLS_FAMILY)
+                        .child(self.icon),
+                )
+                .child(div().min_w_0().truncate().child(self.label.clone())),
+            window,
+        )
     }
 }
 
@@ -242,6 +240,10 @@ fn tree_guides(tree: &DirectoryTree, index: usize) -> gpui::Div {
 }
 
 impl GuiApp {
+    pub(super) fn can_resolve_library_drag(&self, drag: &LibraryDrag) -> bool {
+        !self.library_range_pending() && !drag.nodes().is_empty()
+    }
+
     pub(super) fn library_drag_track_ids(&self, nodes: &[LibraryNode]) -> Vec<i64> {
         let mut ids = nodes
             .iter()
@@ -261,6 +263,9 @@ impl GuiApp {
         destination: super::DragDestination,
         cx: &mut Context<Self>,
     ) {
+        if self.library_range_pending() || nodes.is_empty() {
+            return;
+        }
         let mut directories = nodes
             .iter()
             .filter_map(|node| match node {
@@ -271,12 +276,6 @@ impl GuiApp {
         directories.sort();
         directories.dedup();
         let track_ids = self.library_drag_track_ids(nodes);
-        if self.library_range_pending() {
-            return;
-        }
-        if directories.is_empty() && track_ids.is_empty() {
-            return;
-        }
         match destination {
             super::DragDestination::Queue => self.send(
                 Command::EnqueueSources {
@@ -729,7 +728,8 @@ impl GuiApp {
                                         source: id.clone(),
                                         nodes: std::cell::OnceCell::new(),
                                     },
-                                    move |drag, _, _, cx| {
+                                    move |drag, _, window, cx| {
+                                        super::components::begin_list_drag(window, cx);
                                         app.update(cx, |this, cx| {
                                             let nodes = drag.nodes.get_or_init(|| {
                                                 this.browser.library.drag_nodes(&drag.source)

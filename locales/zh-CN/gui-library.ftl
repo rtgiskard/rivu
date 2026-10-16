@@ -132,8 +132,6 @@ gl-play-track = 播放此曲目
 
 gl-remove-playlist = 从播放列表移除
 
-gl-drop-select-playlist = 请先选择播放列表，再拖入曲目。
-
 gl-playlists = 播放列表
 
 gl-new-playlist = 新建播放列表…
@@ -253,6 +251,8 @@ gl-current = 当前
 gl-unknown-album = 未知专辑
 
 gl-move-playlist-entries = 移动 { $count } 个播放列表项
+
+gl-move-queue-entries = 移动 { $count } 个队列项
 
 gl-played-at = { $time }{ $paused ->
         [1] （已暂停）

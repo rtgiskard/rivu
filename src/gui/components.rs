@@ -505,6 +505,42 @@ pub(crate) fn drag_preview(label: impl Into<SharedString>, window: &Window, cx: 
     drag_preview_surface(window, cx).child(div().min_w_0().truncate().child(label.into()))
 }
 
+/// The constructor runs before GPUI installs its active drag. Defer within the
+/// same event cycle, rather than waiting for another pointer move or timer.
+pub(crate) fn begin_list_drag(window: &Window, cx: &mut gpui::App) {
+    window.defer(cx, |window, cx| {
+        cx.set_active_drag_cursor_style(gpui::CursorStyle::ClosedHand, window);
+    });
+}
+
+/// Anchor list previews to the pointer, independently of the source row's grab offset.
+pub(crate) fn anchor_list_drag_preview(
+    surface: impl IntoElement,
+    window: &Window,
+) -> gpui::Anchored {
+    gpui::anchored()
+        .position(window.mouse_position() + gpui::point(px(10.), px(10.)))
+        .child(surface)
+}
+
+pub(crate) fn list_drag_preview(
+    label: impl Into<SharedString>,
+    window: &Window,
+    cx: &gpui::App,
+) -> gpui::Anchored {
+    anchor_list_drag_preview(drag_preview(label, window, cx), window)
+}
+
+pub(crate) struct ListDragPreview {
+    pub(crate) label: SharedString,
+}
+
+impl Render for ListDragPreview {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        list_drag_preview(self.label.clone(), window, cx)
+    }
+}
+
 pub(crate) fn tree_row(id: impl Into<ElementId>, depth: usize, selected: bool) -> Stateful<Div> {
     div()
         .id(id)

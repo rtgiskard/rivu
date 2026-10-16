@@ -74,7 +74,6 @@ shell-panel-spectrum = 频谱
 shell-panel-spectrogram = 声谱图
 shell-panel-waveform = 波形
 shell-panel-audio-visualizer = 音频可视化
-shell-move-queue-entry = 移动队列条目
 shell-library-locked = 当前布局没有音乐库面板，请先解锁再添加。
 shell-load-layouts-error = 加载布局失败：{ $error }
 shell-save-layouts-error = 保存布局失败：{ $error }

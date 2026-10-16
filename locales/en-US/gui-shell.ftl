@@ -74,7 +74,6 @@ shell-panel-spectrum = Spectrum
 shell-panel-spectrogram = Spectrogram
 shell-panel-waveform = Waveform
 shell-panel-audio-visualizer = Audio Visualizer
-shell-move-queue-entry = Move queue entry
 shell-library-locked = Library panel is not in this locked layout; unlock it to add Library.
 shell-load-layouts-error = Could not load layouts: { $error }
 shell-save-layouts-error = Saving layouts: { $error }
