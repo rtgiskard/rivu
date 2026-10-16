@@ -96,6 +96,7 @@ fn resolve_album(
     let mut total = None;
     let scope = Query::AlbumTracks {
         key,
+        query: None,
         offset: 0,
         limit: crate::model::MAX_QUERY_ROWS,
     };
@@ -215,6 +216,7 @@ impl GuiApp {
             self.content_resolution = true;
             let query = Query::AlbumTracks {
                 key: key.clone(),
+                query: None,
                 offset: 0,
                 limit: crate::model::MAX_QUERY_ROWS,
             };
@@ -292,6 +294,7 @@ impl GuiApp {
                 );
                 let query = Query::AlbumTracks {
                     key: key.clone(),
+                    query: None,
                     offset: 0,
                     limit: crate::model::MAX_QUERY_ROWS,
                 };
@@ -669,6 +672,7 @@ mod tests {
                 directory: PathBuf::from("/album"),
                 title: "Album".into(),
             },
+            query: None,
             offset: 0,
             limit: crate::model::MAX_QUERY_ROWS,
         }

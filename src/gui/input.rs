@@ -138,6 +138,32 @@ impl Input {
         self.focus_handle.is_focused(window)
     }
 
+    pub(super) fn focus_and_select_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus_handle.focus(window, cx);
+        self.move_to(0, cx);
+        self.select_to(self.content.len(), cx);
+    }
+
+    /// Cancel the current preedit without clearing committed input text.
+    pub(super) fn dismiss_composition(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(marked) = self.marked_range.take() else {
+            return false;
+        };
+        self.content = format!(
+            "{}{}",
+            &self.content[..marked.start],
+            &self.content[marked.end..]
+        )
+        .into();
+        self.selected_range = marked.start..marked.start;
+        self.selection_reversed = false;
+        self.last_layout = None;
+        self.last_bounds = None;
+        cx.emit(InputEvent::Changed { user: true });
+        cx.notify();
+        true
+    }
+
     /// Returns the current value.
     pub fn text(&self) -> &str {
         &self.content

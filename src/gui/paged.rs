@@ -56,6 +56,9 @@ impl<T> Default for PagedRows<T> {
 }
 
 impl<T> PagedRows<T> {
+    pub(super) fn total(&self) -> Option<usize> {
+        self.total
+    }
     pub(super) fn len(&self) -> usize {
         self.total.unwrap_or(1)
     }

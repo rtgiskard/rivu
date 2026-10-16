@@ -79,7 +79,6 @@ shell-load-layouts-error = Could not load layouts: { $error }
 shell-save-layouts-error = Saving layouts: { $error }
 shell-save-layout-error = Saving layout: { $error }
 shell-visualizer-gone = This visualizer instance no longer exists
-shell-search-placeholder = Search title, artist or album
 shell-playlist-name = Playlist name
 shell-layout-name = Layout name
 shell-title = Title

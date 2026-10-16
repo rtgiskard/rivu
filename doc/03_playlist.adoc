@@ -37,6 +37,9 @@ See link:04_playback.adoc#_queue[Playback queue].
 == Desktop UI
 
 The Playlists panel keeps New playlist, Import, and Export together at the top.
+The catalog and selected playlist's tracks have independent optional searches;
+see link:02_library.adoc#_desktop_list_search[Desktop list search]. Filtering does
+not restrict whole-playlist Play, Append, or Export actions.
 Export stays in place and is unavailable until a playlist is selected. New playlist
 opens a blank name dialog. Hover a catalog row to reveal its Play and actions
 buttons; these target that row without changing the selected playlist. The actions
@@ -66,7 +69,7 @@ Hover controls for Play, Favorite, and Remove target only that row, never the gr
 Hover row actions are separated by one em, with Play before Favorite.
 Double-click or Enter plays the
 active track individually. With playlist tracks focused, arrows move the active
-track, Shift+arrows extend a range, Ctrl/Cmd+A selects every entry, and Delete
+track, Shift+arrows extend a range, Ctrl/Cmd+A selects every matching entry, and Delete
 removes the selection. These keys do not target the playlist catalog or steal
 focus from inputs, dialogs, or another panel.
 

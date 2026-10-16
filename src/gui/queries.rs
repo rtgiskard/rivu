@@ -40,6 +40,7 @@ pub(super) struct ViewRequests {
     queued: HashMap<ViewRequestKind, (Query, u64)>,
     // Latest intent outlives logical cancellation, hiding and worker completion.
     demands: HashMap<ViewRequestKind, ViewDemand>,
+    immediate: HashSet<ViewRequestKind>,
     directory_workers: HashSet<library::TreeBranch>,
     directory_queued: std::collections::VecDeque<(library::TreeBranch, usize)>,
     root_count_workers: HashSet<usize>,
@@ -78,6 +79,9 @@ impl ViewRequests {
                 selection_generation,
                 quiet_until: now + Duration::from_millis(80),
             };
+        }
+        if self.immediate.remove(&kind) {
+            demand.quiet_until = now;
         }
         let delay = demand.quiet_until.saturating_duration_since(now);
         let replaced = self
@@ -161,6 +165,64 @@ impl ViewRequests {
 }
 
 impl GuiApp {
+    pub(super) fn apply_playlist_search(&mut self, query: Option<String>, cx: &mut Context<Self>) {
+        if self.browser.playlists.summaries().query == query {
+            return;
+        }
+        self.begin_manual_intent();
+        if !self.metadata_protected(cx) {
+            self.clear_metadata_selection(cx);
+        }
+        self.content_menu = None;
+        if matches!(
+            self.playlist_action,
+            Some(super::panels::PlaylistAction::Menu(..))
+        ) {
+            self.playlist_action = None;
+        }
+        self.browser.remove_playlist_selection();
+        self.playlist_entries_search
+            .update(cx, |search, cx| search.reset(cx));
+        self.browser.requests.cancel(ViewRequestKind::Summaries);
+        self.browser.playlists.search_summaries(query);
+        self.browser
+            .requests
+            .immediate
+            .insert(ViewRequestKind::Summaries);
+        if self.playlist_view_demand(ViewRequestKind::Summaries) {
+            self.request_playlist_summaries(0, cx);
+        }
+        cx.notify();
+    }
+
+    pub(super) fn apply_playlist_entries_search(
+        &mut self,
+        query: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.browser.playlists.entries().query == query {
+            return;
+        }
+        self.begin_manual_intent();
+        if !self.metadata_protected(cx) {
+            self.clear_metadata_selection(cx);
+        }
+        self.content_menu = None;
+        self.browser.requests.cancel(ViewRequestKind::Entries);
+        self.browser.playlists.search_entries(query);
+        self.browser
+            .requests
+            .immediate
+            .insert(ViewRequestKind::Entries);
+        if let Some(id) = self.browser.playlists.selected() {
+            self.sync_entry_projection(cx);
+            if self.panel_demand("playlists") {
+                self.request_playlist_entries(id, 0, cx);
+            }
+        }
+        cx.notify();
+    }
+
     pub(super) fn cancel_window_reads(&mut self) {
         for kind in [
             ViewRequestKind::Summaries,
@@ -179,6 +241,7 @@ impl GuiApp {
         }
         if !self.browser.requests.directory_workers.is_empty()
             || !self.browser.requests.root_count_workers.is_empty()
+            || self.browser.library.search_count_pending
         {
             self.browser.library.cancel_pending_reads();
             self.browser.requests.cancel_directory_demand();
@@ -420,6 +483,10 @@ impl GuiApp {
                     this.dispatch_queued_view(kind, cx);
                     return;
                 }
+                if !accepted {
+                    this.dispatch_queued_view(kind, cx);
+                    return;
+                }
                 let result = match result {
                     Ok(result) => result,
                     Err(error) => {
@@ -438,10 +505,6 @@ impl GuiApp {
                         return;
                     }
                 };
-                if !accepted {
-                    this.dispatch_queued_view(kind, cx);
-                    return;
-                }
                 this.dispatch_queued_view(kind, cx);
                 match result {
                     ViewResponse::PlaylistSummaries(page) if kind == ViewRequestKind::Summaries => {
@@ -481,6 +544,146 @@ impl GuiApp {
         }
     }
 
+    fn request_library_search_counts(&mut self, cx: &mut Context<Self>) {
+        let roots = &self.state.system.config.library_roots;
+        let buffer = self.browser.library.buffer();
+        let query = Query::LibraryRootPage {
+            path: Default::default(),
+            query: buffer.query.clone(),
+            favorite: buffer.favorite,
+            missing: buffer.missing,
+            sort: buffer.sort,
+            offset: 0,
+            limit: 0,
+        };
+        let revisions = self.state.query_revisions(None);
+        let library = &mut self.browser.library;
+        let roots_changed = library.search_count_roots != *roots;
+        let changed = library.search_count_projection.sync(&query, revisions);
+        if roots_changed || changed {
+            if roots_changed {
+                library.search_count_projection.cancel();
+            }
+            library.search_count_roots = roots.clone();
+            library.search_counts = None;
+            library.search_count_failed = false;
+            self.library_search
+                .update(cx, |search, cx| search.clear_counts(cx));
+        }
+        if library.search_counts.is_some()
+            || library.search_count_failed
+            || library.search_count_pending
+        {
+            return;
+        }
+        let roots = roots.clone();
+        library.search_count_pending = true;
+        let generation = library.search_count_projection.generation();
+        let ticket = library.search_count_projection.ticket();
+        let handle = self.handle.clone();
+        let worker_query = query.clone();
+        let worker_roots = roots.clone();
+        cx.spawn(async move |this, cx| {
+            let counts = cx
+                .background_executor()
+                .spawn(async move {
+                    // Nested configured roots describe the same tracks, not extra occurrences.
+                    let mut matched = 0;
+                    let mut total = 0;
+                    for (index, root) in worker_roots.iter().enumerate() {
+                        if worker_roots
+                            .iter()
+                            .enumerate()
+                            .any(|(other_index, parent)| {
+                                index != other_index
+                                    && root.starts_with(parent)
+                                    && (root != parent || other_index < index)
+                            })
+                        {
+                            continue;
+                        }
+                        let Query::LibraryRootPage {
+                            query,
+                            favorite,
+                            missing,
+                            sort,
+                            ..
+                        } = &worker_query
+                        else {
+                            unreachable!()
+                        };
+                        let response = handle.query_if_current(
+                            Query::LibraryRootPage {
+                                path: root.clone(),
+                                query: query.clone(),
+                                favorite: *favorite,
+                                missing: *missing,
+                                sort: *sort,
+                                offset: 0,
+                                limit: 0,
+                            },
+                            ticket.clone(),
+                        );
+                        if worker_query.stamp(response.revisions) != worker_query.stamp(revisions) {
+                            return None;
+                        }
+                        let Ok(ViewResponse::LibraryPage(page)) = response.result else {
+                            return None;
+                        };
+                        matched += page.total;
+                        if query.is_none() && favorite.is_none() && missing.is_none() {
+                            total += page.total;
+                        } else {
+                            let response = handle.query_if_current(
+                                Query::LibraryRootPage {
+                                    path: root.clone(),
+                                    query: None,
+                                    favorite: None,
+                                    missing: None,
+                                    sort: *sort,
+                                    offset: 0,
+                                    limit: 0,
+                                },
+                                ticket.clone(),
+                            );
+                            if worker_query.stamp(response.revisions)
+                                != worker_query.stamp(revisions)
+                            {
+                                return None;
+                            }
+                            let Ok(ViewResponse::LibraryPage(page)) = response.result else {
+                                return None;
+                            };
+                            total += page.total;
+                        }
+                    }
+                    Some((matched, total))
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.refresh(cx);
+                this.browser.library.search_count_pending = false;
+                if this.browser.library.search_count_projection.accepts(
+                    &query,
+                    generation,
+                    this.state.query_revisions(None),
+                ) && roots == this.state.system.config.library_roots
+                {
+                    this.browser.library.search_counts = counts;
+                    this.browser.library.search_count_failed = counts.is_none();
+                    if let Some((matched, total)) = counts {
+                        this.library_search
+                            .update(cx, |search, cx| search.set_counts(matched, total, cx));
+                    }
+                } else if this.panel_demand("library") {
+                    this.request_library_search_counts(cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     pub(super) fn request_directory_page(
         &mut self,
         branch: library::TreeBranch,
@@ -490,6 +693,7 @@ impl GuiApp {
         if !self.panel_demand("library") {
             return;
         }
+        self.request_library_search_counts(cx);
         let page_size = self.view_page_size();
         if self
             .browser
@@ -545,13 +749,7 @@ impl GuiApp {
         let tree_active = self.browser.library.tree_active();
         let missing = self.browser.library.buffer().missing;
         let sort = self.browser.library.buffer().sort;
-        let delay = if query.is_some() {
-            crate::model::SEARCH_DEBOUNCE
-        } else {
-            Duration::ZERO
-        };
         cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(delay).await;
             if !this
                 .update(cx, |this, cx| {
                     this.refresh(cx);
@@ -718,6 +916,7 @@ impl GuiApp {
             return;
         };
         let query = Query::PlaylistSummaryBatch {
+            query: None,
             after: id.checked_sub(1),
             limit: 1,
             expected: None,
@@ -733,6 +932,7 @@ impl GuiApp {
         let generation = self.browser.requests.next_generation();
         self.request_view(
             Query::PlaylistSummaryBatch {
+                query: None,
                 after: id.checked_sub(1),
                 limit: 1,
                 expected: None,
@@ -858,16 +1058,26 @@ impl GuiApp {
         self.request_directory_page(library::TreeBranch::default(), 0, cx);
     }
 
-    pub(super) fn refresh_search(&mut self, cx: &mut Context<Self>) {
-        let query = self.value(Field::Search, cx).trim().to_lowercase();
+    pub(super) fn apply_library_search(&mut self, query: Option<String>, cx: &mut Context<Self>) {
+        let query = query.unwrap_or_default().trim().to_lowercase();
+        if self
+            .browser
+            .library
+            .buffer()
+            .query
+            .as_deref()
+            .unwrap_or_default()
+            == query
+        {
+            return;
+        }
         self.browser.library.refresh_search(query);
         self.request_directory_page(library::TreeBranch::default(), 0, cx);
+        cx.notify();
     }
 
     pub(super) fn refresh_filter(&mut self, cx: &mut Context<Self>) {
         self.browser.library.refresh_filter();
-        let query = self.value(Field::Search, cx).trim().to_lowercase();
-        self.browser.library.prepare_query(query);
         self.request_directory_page(library::TreeBranch::default(), 0, cx);
     }
 
@@ -894,6 +1104,7 @@ mod tests {
         let start = Instant::now();
         let kind = ViewRequestKind::Entries;
         let query = |offset| crate::model::Query::PlaylistEntries {
+            query: None,
             playlist_id: 1,
             offset,
             limit: 20,
@@ -950,7 +1161,11 @@ mod tests {
     fn playlist_replacement_and_hidden_reopen_preserve_remaining_quiet_interval() {
         let start = Instant::now();
         let kind = ViewRequestKind::Summaries;
-        let query = |offset| crate::model::Query::PlaylistSummaries { offset, limit: 20 };
+        let query = |offset| crate::model::Query::PlaylistSummaries {
+            query: None,
+            offset,
+            limit: 20,
+        };
         let revisions = Default::default();
         let mut requests = ViewRequests::default();
         requests
@@ -1018,6 +1233,7 @@ mod tests {
         let start = Instant::now();
         let kind = ViewRequestKind::Entries;
         let query = crate::model::Query::PlaylistEntries {
+            query: None,
             playlist_id: 1,
             offset: 0,
             limit: 20,
@@ -1063,15 +1279,18 @@ mod tests {
         let mut library = GuiLibrarySnapshot::default();
         Arc::make_mut(&mut library.playlist_entry_revisions).insert(1, 0);
         let summaries = Query::PlaylistSummaries {
+            query: None,
             offset: 0,
             limit: 20,
         };
         let entries = Query::PlaylistEntries {
+            query: None,
             playlist_id: 1,
             offset: 0,
             limit: 20,
         };
         let compact = Query::PlaylistEntryLocations {
+            query: None,
             playlist_id: 1,
             entry_ids: vec![3],
         };

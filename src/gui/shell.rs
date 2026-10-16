@@ -101,6 +101,10 @@ impl Render for GuiApp {
             }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let key = event.keystroke.key.as_str();
+                if key == "escape" && this.dismiss_input_composition(window, cx) {
+                    cx.stop_propagation();
+                    return;
+                }
                 if this.playlist_action.is_some() {
                     if key == "escape" {
                         this.dismiss_playlist_action(window, cx);
@@ -179,6 +183,24 @@ impl Render for GuiApp {
                     cx.stop_propagation();
                     return;
                 }
+                let modifiers = event.keystroke.modifiers;
+                if key == "f"
+                    && (modifiers.control || modifiers.platform)
+                    && !modifiers.alt
+                    && !modifiers.shift
+                    && !modifiers.function
+                    && this.route_search_key(true, window, cx)
+                {
+                    cx.stop_propagation();
+                    return;
+                }
+                if key == "escape" && this.route_search_key(false, window, cx) {
+                    if !this.input_focused(window, cx) {
+                        this.focus_layout(window, cx);
+                    }
+                    cx.stop_propagation();
+                    return;
+                }
                 if this.input_focused(window, cx) {
                     if key == "escape" {
                         this.focus_layout(window, cx);
@@ -196,6 +218,17 @@ impl Render for GuiApp {
                 {
                     this.browser.history.select_all();
                     cx.notify();
+                    cx.stop_propagation();
+                    return;
+                }
+                if this.active_list_focus() == Some(ListFocus::Queue)
+                    && key == "a"
+                    && (modifiers.control || modifiers.platform)
+                    && !modifiers.alt
+                    && !modifiers.shift
+                    && !modifiers.function
+                {
+                    this.select_all_queue_entries(cx);
                     cx.stop_propagation();
                     return;
                 }

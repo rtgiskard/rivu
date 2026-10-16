@@ -79,7 +79,6 @@ shell-load-layouts-error = 加载布局失败：{ $error }
 shell-save-layouts-error = 保存布局失败：{ $error }
 shell-save-layout-error = 保存布局失败：{ $error }
 shell-visualizer-gone = 此可视化面板已不存在
-shell-search-placeholder = 搜索标题、艺人或专辑
 shell-playlist-name = 播放列表名称
 shell-layout-name = 布局名称
 shell-title = 标题

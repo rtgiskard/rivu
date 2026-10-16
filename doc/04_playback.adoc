@@ -144,6 +144,9 @@ double-click plays the selected occurrence. A right-click on an already
 selected row preserves the selection; otherwise it selects that row. Up/Down
 navigate the focused queue, Enter plays the selected occurrence, and Delete
 removes selected occurrences.
+Optional link:02_library.adoc#_desktop_list_search[Desktop list search] filters
+the visible occurrences without changing playback order. Selection actions apply
+to the matching occurrences; repeated tracks remain distinct queue entries.
 
 Use the crosshair button (*Locate playing entry in Queue*) in the Queue toolbar
 or beside the Playback title to scroll to the current occurrence and briefly

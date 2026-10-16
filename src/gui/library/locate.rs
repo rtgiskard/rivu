@@ -1,6 +1,6 @@
 use super::{TreeBranch, tree::TreeItem};
 use crate::{
-    gui::{Field, GuiApp},
+    gui::GuiApp,
     model::{DirectoryRow, LibraryLocateResult, Query},
     projection::QueryProjection,
     response::{QueryRevisions, ViewResponse},
@@ -254,7 +254,11 @@ impl GuiApp {
             cx.notify();
             return;
         }
-        self.set_value(Field::Search, "", cx);
+        self.library_search
+            .update(cx, |search, cx| search.clear(cx));
+        if self.browser.library.buffer().query.is_some() {
+            self.browser.library.clear_selection();
+        }
         self.browser.library.clear_locate_filters();
         self.request_directory_page(TreeBranch::default(), 0, cx);
         self.locate_playing_library(window, cx);

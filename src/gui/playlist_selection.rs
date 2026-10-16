@@ -30,13 +30,15 @@ pub(super) struct EntryIdentity {
     pub(super) id: i64,
     pub(super) track_id: i64,
     pub(super) position: usize,
+    pub(super) offset: usize,
 }
 impl EntryIdentity {
-    pub(super) fn row(row: &PlaylistEntryRow, position: usize) -> Self {
+    pub(super) fn row(row: &PlaylistEntryRow, offset: usize) -> Self {
         Self {
             id: row.id,
             track_id: row.track_id,
-            position,
+            position: row.position,
+            offset,
         }
     }
 }
@@ -46,6 +48,7 @@ impl From<&PlaylistEntryLocation> for EntryIdentity {
             id: row.id,
             track_id: row.track_id,
             position: row.position,
+            offset: row.offset,
         }
     }
 }
@@ -73,6 +76,7 @@ impl EntryNavigationScope {
 
     fn same_occurrences(self, other: Self) -> bool {
         let query = Query::PlaylistEntryLocations {
+            query: None,
             playlist_id: self.playlist_id,
             entry_ids: Vec::new(),
         };
@@ -83,6 +87,7 @@ impl EntryNavigationScope {
 impl PartialEq for EntryNavigationScope {
     fn eq(&self, other: &Self) -> bool {
         let query = Query::PlaylistEntries {
+            query: None,
             playlist_id: self.playlist_id,
             offset: 0,
             limit: 1,
@@ -123,6 +128,7 @@ enum EntryNavigationEffect {
 #[derive(Default)]
 pub(super) struct EntrySelection {
     selected: HashMap<i64, EntryIdentity>,
+    pub(super) query: Option<String>,
     pub(super) active: Option<EntryIdentity>,
     anchor: Option<EntryIdentity>,
     generation: u64,
@@ -286,7 +292,7 @@ impl EntrySelection {
             .navigation
             .filter(|job| job.scope.same_occurrences(scope))
             .map(|job| job.offset)
-            .or(self.active.map(|row| row.position));
+            .or(self.active.map(|row| row.offset));
         let offset = match current {
             Some(index) if down => index.saturating_add(1).min(total - 1),
             Some(index) => index.saturating_sub(1),
@@ -379,6 +385,7 @@ impl EntrySelection {
             job.scope.playlist_id,
             job.scope.revision,
             job.scope.metadata,
+            self.query.clone(),
         );
         match response {
             Ok(Some(ViewResponse::PlaylistEntries(page))) => {
@@ -397,8 +404,8 @@ impl EntrySelection {
                     && let Some(anchor) = self.anchor
                 {
                     Some(EntryNavigationRange {
-                        start: anchor.position.min(job.offset),
-                        end: anchor.position.max(job.offset) + 1,
+                        start: anchor.offset.min(job.offset),
+                        end: anchor.offset.max(job.offset) + 1,
                         anchor,
                         additive: job.multi,
                     })
@@ -446,7 +453,15 @@ impl EntryRangePages {
         let Some((offset, limit)) = self.next() else {
             return false;
         };
-        if page.total < self.end || page.rows.is_empty() || page.rows.len() > limit {
+        if page.total < self.end
+            || page.rows.is_empty()
+            || page.rows.len() > limit
+            || page
+                .rows
+                .iter()
+                .enumerate()
+                .any(|(index, row)| row.offset != offset + index)
+        {
             return false;
         }
         self.identities.extend(
@@ -466,14 +481,17 @@ fn entry_query_result(
     playlist_id: i64,
     revision: u64,
     metadata: u64,
+    filter: Option<String>,
 ) -> Result<Option<ViewResponse>, crate::response::QueryError> {
     let result = response.result?;
     let query = match &result {
         ViewResponse::PlaylistEntryLocations(_) => Query::PlaylistEntryLocations {
+            query: filter,
             playlist_id,
             entry_ids: Vec::new(),
         },
         _ => Query::PlaylistEntries {
+            query: filter,
             playlist_id,
             offset: 0,
             limit: 1,
@@ -496,6 +514,7 @@ fn entry_query_result(
 impl GuiApp {
     pub(super) fn playlist_occurrence_stamp(&self, playlist_id: i64) -> crate::model::QueryStamp {
         Query::PlaylistEntryLocations {
+            query: None,
             playlist_id,
             entry_ids: Vec::new(),
         }
@@ -504,7 +523,9 @@ impl GuiApp {
 
     pub(super) fn sync_entry_projection(&mut self, cx: &mut Context<Self>) {
         if let Some(playlist_id) = self.browser.playlists.selected() {
+            let filter = self.browser.playlists.entries().query.clone();
             let query = Query::PlaylistEntryLocations {
+                query: filter.clone(),
                 playlist_id,
                 entry_ids: Vec::new(),
             };
@@ -524,6 +545,7 @@ impl GuiApp {
                 .navigation_projection
                 .sync(
                     &Query::PlaylistEntries {
+                        query: filter,
                         playlist_id,
                         offset: 0,
                         limit: 1,
@@ -553,11 +575,15 @@ impl GuiApp {
             && self.browser.playlists.track_selection.current(generation)
             && {
                 let query = Query::PlaylistEntryLocations {
+                    query: self.browser.playlists.entries().query.clone(),
                     playlist_id,
                     entry_ids: Vec::new(),
                 };
                 let expected = QueryRevisions {
-                    library,
+                    playlist_metadata: Some(PlaylistEntryRevision {
+                        playlist_id,
+                        revision: library,
+                    }),
                     playlist_entries: Some(PlaylistEntryRevision {
                         playlist_id,
                         revision,
@@ -602,10 +628,15 @@ impl GuiApp {
         selection.refresh_pending = false;
         let generation = selection.generation;
         let revision = self.playlist_revision(playlist_id);
-        let library = self.state.library.revision;
+        let library = self
+            .state
+            .library
+            .metadata_revisions
+            .playlist_revision(playlist_id, self.state.library.revision);
         let handle = self.handle.clone();
         let ticket = self.browser.playlists.track_selection.projection.ticket();
         let i18n = std::sync::Arc::clone(&self.i18n);
+        let filter = self.browser.playlists.entries().query.clone();
         cx.spawn(async move |this, cx| {
             async {
                 let mut identities = Vec::with_capacity(ids.len());
@@ -622,11 +653,13 @@ impl GuiApp {
                     let handle = handle.clone();
                     let entry_ids = chunk.to_vec();
                     let ticket = ticket.clone();
+                    let query = filter.clone();
                     let response = cx
                         .background_executor()
                         .spawn(async move {
                             handle.query_if_current(
                                 Query::PlaylistEntryLocations {
+                                    query,
                                     playlist_id,
                                     entry_ids,
                                 },
@@ -634,8 +667,13 @@ impl GuiApp {
                             )
                         })
                         .await;
-                    let result = match entry_query_result(response, playlist_id, revision, library)
-                    {
+                    let result = match entry_query_result(
+                        response,
+                        playlist_id,
+                        revision,
+                        library,
+                        filter.clone(),
+                    ) {
                         Ok(result) => result,
                         Err(error) => {
                             let _ = this.update(cx, |this, cx| {
@@ -709,6 +747,8 @@ impl GuiApp {
     ) {
         self.begin_manual_intent();
         if self.browser.playlists.select(id, name, index) {
+            self.playlist_entries_search
+                .update(cx, |search, cx| search.reset(cx));
             self.request_playlist_entries(id, 0, cx);
             self.sync_entry_projection(cx);
         }
@@ -757,8 +797,8 @@ impl GuiApp {
             self.queue_playlist_range(
                 intent,
                 commit,
-                anchor.position.min(index),
-                anchor.position.max(index) + 1,
+                anchor.offset.min(index),
+                anchor.offset.max(index) + 1,
                 cx,
             );
         } else {
@@ -797,7 +837,7 @@ impl GuiApp {
         self.request_track(commit.target.track_id, cx);
         if commit.scroll {
             self.scroll_views
-                .scroll_list_to("playlist-entries", commit.target.position);
+                .scroll_list_to("playlist-entries", commit.target.offset);
         }
         self.sync_waveform(cx);
         cx.notify();
@@ -836,6 +876,7 @@ impl GuiApp {
             .navigation_projection
             .ticket();
         let i18n = std::sync::Arc::clone(&self.i18n);
+        let filter = self.browser.playlists.entries().query.clone();
         cx.spawn(async move |this, cx| {
             let result: Result<Option<Vec<EntryIdentity>>, String> = async {
                 let mut pages = EntryRangePages::new(job.start, job.end);
@@ -853,11 +894,13 @@ impl GuiApp {
                     let handle = handle.clone();
                     let scope = job.commit.scope;
                     let ticket = ticket.clone();
+                    let query = filter.clone();
                     let response = cx
                         .background_executor()
                         .spawn(async move {
                             handle.query_if_current(
                                 Query::PlaylistEntries {
+                                    query,
                                     playlist_id: scope.playlist_id,
                                     offset,
                                     limit,
@@ -871,6 +914,7 @@ impl GuiApp {
                         scope.playlist_id,
                         scope.revision,
                         scope.metadata,
+                        filter.clone(),
                     )
                     .map_err(|error| error.to_string())?;
                     let Some(ViewResponse::PlaylistEntries(page)) = result else {
@@ -1009,12 +1053,14 @@ impl GuiApp {
             .track_selection
             .navigation_projection
             .ticket();
+        let query = self.browser.playlists.entries().query.clone();
         cx.spawn(async move |this, cx| {
             let response = cx
                 .background_executor()
                 .spawn(async move {
                     handle.query_if_current(
                         Query::PlaylistEntries {
+                            query,
                             playlist_id: job.scope.playlist_id,
                             offset: job.offset,
                             limit: 1,
@@ -1117,6 +1163,7 @@ mod tests {
             id,
             track_id: id + 100,
             position,
+            offset: position,
         }
     }
     fn page(offset: usize, count: usize, total: usize) -> Page<PlaylistEntryRow> {
@@ -1126,6 +1173,8 @@ mod tests {
                 .map(|position| PlaylistEntryRow {
                     id: position as i64,
                     track_id: position as i64 + 100,
+                    position,
+                    offset: position,
                     title: String::new(),
                     artist: String::new(),
                     album: String::new(),
@@ -1153,6 +1202,44 @@ mod tests {
             revisions: QueryRevisions::default(),
             result: Err(QueryError::Message(message.into())),
         }
+    }
+
+    #[test]
+    fn filtered_range_keeps_original_positions_and_matching_offsets() {
+        let mut result = page(0, 3, 3);
+        for (row, position) in result.rows.iter_mut().zip([4, 40, 400]) {
+            row.position = position;
+        }
+        let mut range = EntryRangePages::new(0, 3);
+        assert!(range.accept(result));
+        assert_eq!(
+            range
+                .identities
+                .iter()
+                .map(|row| (row.position, row.offset))
+                .collect::<Vec<_>>(),
+            [(4, 0), (40, 1), (400, 2)]
+        );
+    }
+
+    #[test]
+    fn filtered_navigation_advances_by_matching_offset_not_occurrence_position() {
+        let scope = navigation_scope();
+        let mut selection = EntrySelection {
+            query: Some("needle".into()),
+            ..Default::default()
+        };
+        selection.select(
+            EntryIdentity {
+                id: 5,
+                track_id: 105,
+                position: 400,
+                offset: 1,
+            },
+            false,
+        );
+        assert!(selection.navigate(scope, 3, true, false, false));
+        assert_eq!(selection.navigation.unwrap().offset, 2);
     }
 
     #[test]
@@ -1920,7 +2007,7 @@ mod tests {
             revisions: QueryRevisions::default(),
             result: Err(QueryError::Message("core unavailable".into())),
         };
-        let error = super::entry_query_result(response, 9, 12, 6).unwrap_err();
+        let error = super::entry_query_result(response, 9, 12, 6, None).unwrap_err();
         selection.fail(error.to_string());
         assert!(!selection.busy);
         assert!(selection.error.is_some());
@@ -1981,7 +2068,7 @@ mod tests {
                 result: Ok(ViewResponse::PlaylistEntries(page(0, 1, 1))),
             };
             assert!(
-                super::entry_query_result(response, 9, 12, 6)
+                super::entry_query_result(response, 9, 12, 6, None)
                     .unwrap()
                     .is_none()
             );
@@ -1991,7 +2078,7 @@ mod tests {
             result: Ok(ViewResponse::PlaylistEntries(page(0, 1, 1))),
         };
         let Some(ViewResponse::PlaylistEntries(page)) =
-            super::entry_query_result(response, 9, 12, 6).unwrap()
+            super::entry_query_result(response, 9, 12, 6, None).unwrap()
         else {
             panic!("current payload rejected");
         };
@@ -2012,7 +2099,8 @@ mod tests {
                 },
                 9,
                 12,
-                6
+                6,
+                None
             )
             .unwrap()
             .is_some()
@@ -2030,7 +2118,8 @@ mod tests {
                 },
                 9,
                 12,
-                6
+                6,
+                None
             )
             .unwrap()
             .is_some()

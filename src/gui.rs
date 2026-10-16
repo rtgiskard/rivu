@@ -18,6 +18,7 @@ mod playlist_selection;
 mod queries;
 mod queue;
 mod scrolling;
+mod search;
 pub(crate) mod session;
 mod settings;
 mod shell;
@@ -51,6 +52,7 @@ use library::LibraryNode;
 use list_interaction::{ContentDrag, ContentMenuRequest, TrackSource};
 use metadata::session::MetadataSession;
 use queries::ViewRequestKind;
+use search::{ListSearch, SearchEvent};
 pub(crate) use session::UiSession;
 use shell::{PanelMenu, PanelMenuPage};
 use std::{
@@ -88,7 +90,6 @@ const SPLIT_GUTTER: f32 = 4.0;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Field {
-    Search,
     PlaylistName,
     LayoutName,
     Title,
@@ -491,6 +492,12 @@ pub(super) struct GuiApp {
     session: Weak<RefCell<UiSession>>,
     layout_path: PathBuf,
     inputs: HashMap<Field, Entity<Input>>,
+    queue_search: Entity<ListSearch>,
+    playlist_search: Entity<ListSearch>,
+    playlist_entries_search: Entity<ListSearch>,
+    history_search: Entity<ListSearch>,
+    library_search: Entity<ListSearch>,
+    search_panel: Option<u64>,
     browser: BrowserState,
     loading_text: loading::LoadingText<loading::LoadingOwner>,
     metadata: MetadataSession,
@@ -567,6 +574,15 @@ impl GuiApp {
         self.inputs
             .values()
             .any(|input| input.read(cx).is_focused(window))
+            || [
+                &self.queue_search,
+                &self.playlist_search,
+                &self.playlist_entries_search,
+                &self.history_search,
+                &self.library_search,
+            ]
+            .iter()
+            .any(|search| search.read(cx).input_focused(window, cx))
             || self
                 .album_browsers
                 .values()
@@ -575,6 +591,122 @@ impl GuiApp {
 
     fn focus_layout(&self, window: &mut Window, cx: &mut Context<Self>) {
         self.layout_focus.focus(window, cx);
+    }
+
+    fn route_search_key(
+        &mut self,
+        focus: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let searches = [
+            &self.library_search,
+            &self.queue_search,
+            &self.playlist_search,
+            &self.playlist_entries_search,
+            &self.history_search,
+        ];
+        if let Some(search) = searches
+            .iter()
+            .find(|search| search.read(cx).input_focused(window, cx))
+        {
+            let search = (*search).clone();
+            return search.update(cx, |search, cx| {
+                if focus {
+                    search.focus(window, cx);
+                    true
+                } else {
+                    search.escape(window, cx)
+                }
+            });
+        }
+        if let Some(albums) = self
+            .album_browsers
+            .values()
+            .find(|albums| albums.read(cx).input_focused(window, cx))
+            .cloned()
+        {
+            return albums.update(cx, |albums, cx| {
+                if focus {
+                    albums.focus_search(window, cx);
+                    true
+                } else {
+                    albums.escape_search(window, cx)
+                }
+            });
+        }
+        let panels = self.layouts.current().active_panels();
+        if self.input_focused(window, cx) {
+            return false;
+        }
+        let panel = self
+            .search_panel
+            .and_then(|id| panels.iter().find(|panel| panel.id == id).copied())
+            .or_else(|| {
+                let kind = match self.browser.focus() {
+                    Some(BrowserFocus::List(ListFocus::Library)) => "library",
+                    Some(BrowserFocus::List(ListFocus::Queue)) => "queue",
+                    Some(BrowserFocus::List(ListFocus::PlaylistTracks))
+                    | Some(BrowserFocus::Playlists) => "playlists",
+                    Some(BrowserFocus::History) => "history",
+                    None => return None,
+                };
+                panels.iter().find(|panel| panel.kind == kind).copied()
+            })
+            .or_else(|| {
+                panels
+                    .iter()
+                    .find(|panel| {
+                        matches!(
+                            panel.kind.as_str(),
+                            "library" | "queue" | "playlists" | "history" | "albums"
+                        )
+                    })
+                    .copied()
+            });
+        let Some(panel) = panel else {
+            return false;
+        };
+        let search = match panel.kind.as_str() {
+            "library" => self.library_search.clone(),
+            "queue" => self.queue_search.clone(),
+            "history" => self.history_search.clone(),
+            "playlists"
+                if self.browser.focus() == Some(BrowserFocus::List(ListFocus::PlaylistTracks)) =>
+            {
+                self.playlist_entries_search.clone()
+            }
+            "playlists" => self.playlist_search.clone(),
+            "albums" => {
+                let Some(albums) = self.album_browsers.get(&panel.id).cloned() else {
+                    return false;
+                };
+                return albums.update(cx, |albums, cx| {
+                    if focus {
+                        albums.focus_search(window, cx);
+                        true
+                    } else {
+                        albums.escape_search(window, cx)
+                    }
+                });
+            }
+            _ => return false,
+        };
+        search.update(cx, |search, cx| {
+            if focus {
+                search.focus(window, cx);
+                true
+            } else {
+                search.escape(window, cx)
+            }
+        })
+    }
+
+    fn dismiss_input_composition(&self, window: &Window, cx: &mut Context<Self>) -> bool {
+        self.inputs
+            .values()
+            .find(|input| input.read(cx).is_focused(window))
+            .is_some_and(|input| input.update(cx, |input, cx| input.dismiss_composition(cx)))
     }
 
     fn activate_library(
@@ -596,9 +728,8 @@ impl GuiApp {
             self.browser.focus_list(ListFocus::Library);
             self.catalog_open = false;
             if focus_search {
-                self.input(Field::Search).update(cx, |input, cx| {
-                    input.focus_handle(cx).focus(window, cx);
-                });
+                self.library_search
+                    .update(cx, |search, cx| search.focus(window, cx));
             }
             self.persist_layout(cx);
         } else if self.layouts.current().locked {
@@ -614,9 +745,8 @@ impl GuiApp {
             self.browser.focus_list(ListFocus::Library);
             self.catalog_open = false;
             if focus_search {
-                self.input(Field::Search).update(cx, |input, cx| {
-                    input.focus_handle(cx).focus(window, cx);
-                });
+                self.library_search
+                    .update(cx, |search, cx| search.focus(window, cx));
             }
             self.persist_layout(cx);
         }
@@ -785,7 +915,6 @@ impl GuiApp {
         let ui_font = fonts::resolve(&state.system.config.ui_font, cx);
         let mut inputs = HashMap::new();
         for (field, placeholder) in [
-            (Field::Search, "shell-search-placeholder"),
             (Field::PlaylistName, "shell-playlist-name"),
             (Field::LayoutName, "shell-layout-name"),
             (Field::Title, "shell-title"),
@@ -798,6 +927,39 @@ impl GuiApp {
             );
         }
         let mut subscriptions = Vec::new();
+        let queue_search = cx.new(|cx| ListSearch::new(Arc::clone(&i18n), cx));
+        let playlist_search = cx.new(|cx| ListSearch::new(Arc::clone(&i18n), cx));
+        let playlist_entries_search = cx.new(|cx| ListSearch::new(Arc::clone(&i18n), cx));
+        let history_search = cx.new(|cx| ListSearch::new(Arc::clone(&i18n), cx));
+        let library_search = cx.new(|cx| ListSearch::new(Arc::clone(&i18n), cx));
+        subscriptions.push(cx.subscribe(&queue_search, |this, _, event, cx| {
+            let SearchEvent::Changed(query) = event;
+            this.apply_queue_search(query.clone(), cx);
+        }));
+        subscriptions.push(cx.subscribe(&playlist_search, |this, _, event, cx| {
+            let SearchEvent::Changed(query) = event;
+            this.apply_playlist_search(query.clone(), cx);
+        }));
+        subscriptions.push(
+            cx.subscribe(&playlist_entries_search, |this, _, event, cx| {
+                let SearchEvent::Changed(query) = event;
+                this.apply_playlist_entries_search(query.clone(), cx);
+            }),
+        );
+        subscriptions.push(cx.subscribe(&history_search, |this, _, event, cx| {
+            let SearchEvent::Changed(query) = event;
+            this.begin_manual_intent();
+            this.browser.history.set_query(query.clone());
+            if !this.metadata_protected(cx) {
+                this.clear_metadata_selection(cx);
+            }
+            this.scroll_views.scroll_list_to("history", 0);
+            cx.notify();
+        }));
+        subscriptions.push(cx.subscribe(&library_search, |this, _, event, cx| {
+            let SearchEvent::Changed(query) = event;
+            this.apply_library_search(query.clone(), cx);
+        }));
         let settings = cx.new(|cx| {
             settings::Settings::new(
                 Arc::clone(&i18n),
@@ -945,12 +1107,6 @@ impl GuiApp {
                 }
             }),
         );
-        subscriptions.push(cx.subscribe(&inputs[&Field::Search], |this, _, event, cx| {
-            if matches!(event, InputEvent::Changed { .. }) {
-                this.refresh_search(cx);
-                cx.notify();
-            }
-        }));
         subscriptions.push(cx.subscribe_in(
             &inputs[&Field::LayoutName],
             window,
@@ -1045,6 +1201,12 @@ impl GuiApp {
             session,
             layout_path,
             inputs,
+            queue_search,
+            playlist_search,
+            playlist_entries_search,
+            history_search,
+            library_search,
+            search_panel: None,
             browser: BrowserState::default(),
             loading_text: loading::LoadingText::default(),
             metadata: MetadataSession::default(),
@@ -2197,8 +2359,10 @@ impl GuiApp {
                             .when(!self.layouts.current().locked, |view| view.cursor_move())
                             .bg(rgb(if active == panel_id { HIGHLIGHT } else { PANEL }))
                             .text_color(rgb(if active == panel_id { TEXT } else { SECONDARY }))
-                            .on_click(cx.listener(move |this, _, _, cx| {
+                            .on_click(cx.listener(move |this, _, window, cx| {
                                 this.layouts.current_mut().activate(panel_id);
+                                this.search_panel = Some(panel_id);
+                                this.focus_layout(window, cx);
                                 this.interaction.set_target_group(Some(node_id));
                                 this.persist_layout(cx);
                             }))
@@ -2294,6 +2458,9 @@ impl GuiApp {
                     .min_w_0()
                     .p(gpui::px(UI_INSET))
                     .overflow_hidden()
+                    .capture_any_mouse_down(cx.listener(move |this, _: &MouseDownEvent, _, _| {
+                        this.search_panel = Some(active);
+                    }))
                     .child(content);
                 let mut panel = column()
                     .id(("group", node_id))
@@ -2484,6 +2651,7 @@ mod queue_drag_tests {
             id: position as u64 + 10,
             track_id: 7,
             position,
+            offset: position,
         }
     }
 

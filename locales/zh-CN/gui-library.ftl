@@ -1,3 +1,12 @@
+search-toggle = 搜索当前列表（Ctrl+F）
+search-placeholder = 搜索标题…
+search-clear = 清除搜索
+search-count = { $matched } / { $total }
+search-empty = 列表为空
+search-no-matches = 无匹配结果
+search-clear-and-locate = 清除搜索并定位
+gl-album-tracks-no-matches = 无匹配的专辑曲目
+
 gl-played-now = 刚刚（播放中）
 
 gl-played-none = 从未

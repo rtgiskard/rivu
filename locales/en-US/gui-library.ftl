@@ -1,3 +1,12 @@
+search-toggle = Search this list (Ctrl+F)
+search-placeholder = Search titles…
+search-clear = Clear search
+search-count = { $matched } / { $total }
+search-empty = This list is empty
+search-no-matches = No matches
+search-clear-and-locate = Clear search and locate
+gl-album-tracks-no-matches = No matching album tracks
+
 gl-played-now = Just now (playing)
 
 gl-played-none = Never

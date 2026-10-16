@@ -10,6 +10,27 @@ queue or remove them from the library. Removal requires confirmation and applies
 to the tracks selected when removal was requested; cancelling leaves them unchanged.
 Audio files are not deleted.
 
+== Desktop list search
+
+Use a list's Search button, or Ctrl+F with that list focused, to open its search
+field. Each list keeps its own search condition. A nonempty search stays visible;
+clear it to restore the complete list. Esc clears the search first and folds an
+empty field on the next press, after dismissing any active popup or composition.
+Counts show matches and the unfiltered total; no matches is distinct from an empty
+collection. Searching changes the view, not the saved contents or playback order.
+
+Library retains its combined text, favorite, and missing-file filters. Albums
+searches album titles and member artists. Playlist names search by name; playlist,
+queue, and album track lists search track title, artist, album, and file name.
+Recent tracks searches the displayed track titles. Track searches cover the whole
+collection, including unloaded pages, rather than just the rows on screen.
+
+Changing the search clears that list's selection. Select all operates on matching
+rows only. Queue and playlist drag reordering is unavailable while filtered; clear
+the search before dragging to reorder. Playing or appending a whole playlist still uses its
+complete saved contents, not its search results. If search hides the playing
+track, use the explicit clear-and-locate action to reveal it.
+
 == Roots and scanning
 
 Scanning requires at least one configured `library.roots`. Add a directory with
@@ -397,8 +418,8 @@ separate error message. A new scan shows progress again.
 
 Recent tracks keeps its own selection, independent of Library. Click selects one
 track; Ctrl/Cmd-click toggles tracks, Shift-click selects an inclusive range,
-and Ctrl/Cmd+Shift-click adds a range. Ctrl/Cmd+A selects all recent tracks when
-this panel has focus. Sorting preserves selected track identities; refreshes
+and Ctrl/Cmd+Shift-click adds a range. Ctrl/Cmd+A selects all matching recent tracks
+when this panel has focus. Sorting preserves selected track identities; refreshes
 discard selections that no longer exist.
 
 Right-click a track for the shared track actions, including batch Favorite and
@@ -421,6 +442,9 @@ These buttons do not open album details. Double-click a track row to play that
 track individually; a single click does not start playback. Track rows also
 offer individual playback and queue actions. Album actions include tracks beyond
 the currently loaded rows.
+
+Missing artists are shown as `-` in album cards and album track rows. Album query
+results preserve a missing artist as an empty value rather than a display label.
 
 Right-click an album card for actions on the complete album, including adding it
 to a playlist and setting or clearing favorites. Drag a card to Queue or a named

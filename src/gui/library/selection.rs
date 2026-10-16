@@ -1388,7 +1388,11 @@ mod tests {
                     revisions(7, 3),
                 )
                 .unwrap();
-            assert_eq!(library.selected(), &HashSet::from([0]));
+            if change_search {
+                assert!(library.selected().is_empty());
+            } else {
+                assert_eq!(library.selected(), &HashSet::from([0]));
+            }
             assert!(library.range_selection.anchor.is_none());
             assert!(library.range_selection.active.is_none());
             library.refresh_search(String::new());

@@ -1,5 +1,6 @@
-//! Queue pages and compact selections use Query-owned Q-only stamps. Page demand,
-//! logical generations and physical worker gates have separate lifetimes: retiring
+//! Queue pages and compact selections use Query-owned stamps. Filtered views also
+//! depend on metadata and retain separate matching offsets and occurrence positions.
+//! Page demand, logical generations and physical worker gates have separate lifetimes: retiring
 //! work never releases its gate, and only authoritative identity lookups delete a
 //! selected occurrence. Hidden state sync does not demand metadata pages; failures
 //! remain parked until explicit retry. Now-playing locate never enters selection
@@ -37,9 +38,11 @@ struct QueueJob {
     target: QueueTarget,
     anchor: Option<QueueIdentity>,
     shift: bool,
+    all: bool,
     multi: bool,
     scroll: bool,
     total: usize,
+    query: Option<String>,
 }
 
 /// Selection retains only occurrence identity and absolute position, never track metadata.
@@ -48,6 +51,7 @@ pub(super) struct QueueIdentity {
     pub(super) id: u64,
     pub(super) track_id: i64,
     pub(super) position: usize,
+    pub(super) offset: usize,
 }
 impl From<&QueueRow> for QueueIdentity {
     fn from(row: &QueueRow) -> Self {
@@ -55,6 +59,7 @@ impl From<&QueueRow> for QueueIdentity {
             id: row.id,
             track_id: row.track_id,
             position: row.position,
+            offset: row.offset,
         }
     }
 }
@@ -95,15 +100,17 @@ impl QueueLocate {
         // A cancelled lookup still owns the worker gate until its response arrives.
     }
 
-    fn query(id: u64) -> Query {
-        Query::QueueEntries {
-            queue_ids: vec![id],
-        }
-    }
-
-    fn begin(&mut self, id: u64, revisions: QueryRevisions) -> QueueLocateRequest {
+    fn begin(
+        &mut self,
+        id: u64,
+        filter: Option<String>,
+        revisions: QueryRevisions,
+    ) -> QueueLocateRequest {
         self.invalidate();
-        let query = Self::query(id);
+        let query = Query::QueueEntries {
+            query: filter,
+            queue_ids: vec![id],
+        };
         self.projection.sync(&query, revisions);
         let request = QueueLocateRequest {
             generation: self.projection.generation(),
@@ -161,6 +168,7 @@ struct QueueReconcileJob {
     ids: Vec<u64>,
     generation: u64,
     stamp: QueryStamp,
+    query: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -172,6 +180,8 @@ enum QueueWorker {
 #[derive(Default)]
 pub(super) struct QueueSelection {
     pub(super) rows: paged::PagedRows<QueueRow>,
+    pub(super) query: Option<String>,
+    pub(super) locate_filtered: Option<u64>,
     selected: HashMap<u64, QueueIdentity>,
     anchor: Option<QueueIdentity>,
     page_projection: QueryProjection,
@@ -268,33 +278,41 @@ impl QueueSelection {
         }
         self.anchor = Some(row);
         self.active = Some(row);
-        self.rows.pin(Some(row.position));
+        self.rows.pin(Some(row.offset));
     }
-    fn query() -> Query {
+    fn query(&self) -> Query {
         Query::QueuePage {
+            query: self.query.clone(),
             offset: 0,
             limit: 1,
         }
     }
     fn current(&self, generation: u64, stamp: QueryStamp) -> bool {
         self.projection
-            .accepts(&Self::query(), generation, stamp.revisions())
+            .accepts(&self.query(), generation, stamp.revisions())
     }
     fn sync(&mut self, revisions: QueryRevisions, total: usize) -> bool {
-        let query = Self::query();
+        let query = self.query();
         let changed = self.page_projection.sync(&query, revisions);
         self.projection.sync(&query, revisions);
-        self.rows.set_total(total);
+        if self.query.is_none() {
+            self.rows.set_total(total);
+        }
         if changed {
             self.locate.invalidate();
-            self.rows.invalidate();
+            self.locate_filtered = None;
+            if self.query.is_some() {
+                self.rows.clear();
+            } else {
+                self.rows.invalidate();
+            }
             self.cancel();
         }
         changed
     }
-    fn reconcile_query() -> Query {
-        // Chunk boundaries are demand; selection cancellation owns the chosen ID set.
+    fn reconcile_query(&self) -> Query {
         Query::QueueEntries {
+            query: self.query.clone(),
             queue_ids: Vec::new(),
         }
     }
@@ -308,17 +326,18 @@ impl QueueSelection {
         if ids.is_empty() {
             return;
         }
-        let query = Self::reconcile_query();
+        let query = self.reconcile_query();
         self.reconcile_projection.sync(&query, revisions);
         self.busy = true;
         self.reconcile_pending = Some(QueueReconcileJob {
             ids,
             generation: self.reconcile_projection.generation(),
             stamp: query.stamp(revisions),
+            query: self.query.clone(),
         });
     }
     fn reconcile_current(&self, job: &QueueReconcileJob, revisions: QueryRevisions) -> bool {
-        let query = Self::reconcile_query();
+        let query = self.reconcile_query();
         self.reconcile_projection
             .accepts(&query, job.generation, revisions)
             && query.stamp(revisions) == job.stamp
@@ -362,7 +381,11 @@ impl QueueSelection {
         self.rows.begin(offset, limit);
         self.page_worker = true;
         Some((
-            Query::QueuePage { offset, limit },
+            Query::QueuePage {
+                query: self.query.clone(),
+                offset,
+                limit,
+            },
             self.page_projection.generation(),
         ))
     }
@@ -379,7 +402,7 @@ impl QueueSelection {
             .map(|row| (row.id, row))
             .collect();
         self.busy = false;
-        self.rows.pin(self.active().map(|row| row.position));
+        self.rows.pin(self.active().map(|row| row.offset));
     }
     fn take_job(&mut self) -> Option<QueueJob> {
         if self.worker.is_some() {
@@ -416,30 +439,55 @@ impl QueueSelection {
         self.anchor = Some(anchor);
         self.active = Some(target);
         self.busy = false;
-        self.rows.pin(Some(target.position));
+        self.rows.pin(Some(target.offset));
         true
     }
 }
 
 impl GuiApp {
+    pub(super) fn apply_queue_search(&mut self, query: Option<String>, cx: &mut Context<Self>) {
+        if self.browser.queue.query == query {
+            return;
+        }
+        self.begin_manual_intent();
+        if !self.metadata_protected(cx) {
+            self.clear_metadata_selection(cx);
+        }
+        self.content_menu = None;
+        self.browser.queue.clear();
+        self.browser.queue.query = query;
+        self.browser.queue.locate_filtered = None;
+        self.browser.queue.rows.clear();
+        self.scroll_views.scroll_list_to("queue", 0);
+        self.sync_queue(cx);
+        self.ensure_queue_range(0..1, cx);
+        cx.notify();
+    }
     pub(super) fn locate_playing_queue(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.refresh(cx);
         let Some(id) = self.state.queue.current_id else {
             return;
         };
-        let request = self
-            .browser
-            .queue
-            .locate
-            .begin(id, self.state.query_revisions(None));
-        let position = self.state.queue.current_position.or_else(|| {
+        self.browser.queue.locate_filtered = None;
+        let filter = self.browser.queue.query.clone();
+        let request =
             self.browser
                 .queue
-                .rows
-                .iter()
-                .find(|row| row.id == id)
-                .map(|row| row.position)
-        });
+                .locate
+                .begin(id, filter.clone(), self.state.query_revisions(None));
+        let position = self
+            .browser
+            .queue
+            .rows
+            .iter()
+            .find(|row| row.id == id)
+            .map(|row| row.offset)
+            .or_else(|| {
+                filter
+                    .is_none()
+                    .then_some(self.state.queue.current_position)
+                    .flatten()
+            });
         if let Some(position) = position {
             self.browser.queue.locate.resolve(request, position);
             self.ensure_queue_range(position..position.saturating_add(1), cx);
@@ -467,17 +515,17 @@ impl GuiApp {
         }
         let handle = self.handle.clone();
         let ticket = self.browser.queue.locate.projection.ticket();
+        let query = self
+            .browser
+            .queue
+            .locate
+            .query
+            .clone()
+            .expect("active locate query");
         cx.spawn(async move |this, cx| {
             let response = cx
                 .background_executor()
-                .spawn(async move {
-                    handle.query_if_current(
-                        Query::QueueEntries {
-                            queue_ids: vec![request.id],
-                        },
-                        ticket,
-                    )
-                })
+                .spawn(async move { handle.query_if_current(query, ticket) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.browser.queue.locate.release_worker(request);
@@ -492,11 +540,13 @@ impl GuiApp {
                     match response.result {
                         Ok(ViewResponse::QueueEntries(rows)) => {
                             if let Some(row) = rows.into_iter().find(|row| row.id == request.id) {
-                                this.browser.queue.locate.resolve(request, row.position);
+                                this.browser.queue.locate.resolve(request, row.offset);
                                 this.ensure_queue_range(
-                                    row.position..row.position.saturating_add(1),
+                                    row.offset..row.offset.saturating_add(1),
                                     cx,
                                 );
+                            } else if this.browser.queue.query.is_some() {
+                                this.browser.queue.locate_filtered = Some(request.id);
                             } else {
                                 this.error =
                                     Some(this.i18n.text("gl-queue-locate-missing").to_owned());
@@ -609,13 +659,21 @@ impl GuiApp {
                     let handle = handle.clone();
                     let queue_ids = chunk.to_vec();
                     let ticket = ticket.clone();
+                    let query = job.query.clone();
                     let response = cx
                         .background_executor()
                         .spawn(async move {
-                            handle.query_if_current(Query::QueueEntries { queue_ids }, ticket)
+                            handle
+                                .query_if_current(Query::QueueEntries { query, queue_ids }, ticket)
                         })
                         .await;
-                    if QueueSelection::reconcile_query().stamp(response.revisions) != job.stamp {
+                    if (Query::QueueEntries {
+                        query: job.query.clone(),
+                        queue_ids: Vec::new(),
+                    })
+                    .stamp(response.revisions)
+                        != job.stamp
+                    {
                         return Ok(None);
                     }
                     match response.result {
@@ -733,7 +791,11 @@ impl GuiApp {
         let intent = self.begin_manual_intent();
         self.browser.queue.manual = Some(intent);
         let generation = self.browser.queue.projection.generation();
-        let stamp = QueueSelection::query().stamp(self.state.query_revisions(None));
+        let stamp = self
+            .browser
+            .queue
+            .query()
+            .stamp(self.state.query_revisions(None));
         if shift && anchor.is_some() {
             self.browser.queue.pending = Some(QueueJob {
                 intent,
@@ -742,9 +804,11 @@ impl GuiApp {
                 target: QueueTarget::Row(row),
                 anchor,
                 shift,
+                all: false,
                 multi,
                 scroll: false,
-                total: self.state.queue.total,
+                total: self.browser.queue.rows.len(),
+                query: self.browser.queue.query.clone(),
             });
             self.browser.queue.busy = true;
             self.dispatch_queue_selection(cx);
@@ -766,7 +830,11 @@ impl GuiApp {
     }
 
     pub(in crate::gui) fn queue_commit_valid(&self, commit: &QueueCommit) -> bool {
-        QueueSelection::query().stamp(self.state.query_revisions(None)) == commit.stamp
+        self.browser
+            .queue
+            .query()
+            .stamp(self.state.query_revisions(None))
+            == commit.stamp
             && self.browser.queue.current(commit.generation, commit.stamp)
     }
 
@@ -796,7 +864,7 @@ impl GuiApp {
         self.request_track(commit.target.track_id, cx);
         if commit.scroll {
             self.scroll_views
-                .scroll_list_to("queue", commit.target.position);
+                .scroll_list_to("queue", commit.target.offset);
         }
         self.sync_waveform(cx);
         cx.notify();
@@ -804,7 +872,7 @@ impl GuiApp {
 
     pub(super) fn navigate_queue(&mut self, down: bool, cx: &mut Context<Self>) {
         self.refresh(cx);
-        let total = self.state.queue.total;
+        let total = self.browser.queue.rows.len();
         if total == 0 || (self.browser.queue.busy && self.browser.queue.navigation.is_none()) {
             return;
         }
@@ -812,7 +880,7 @@ impl GuiApp {
             .browser
             .queue
             .navigation
-            .or_else(|| self.browser.queue.active().map(|row| row.position));
+            .or_else(|| self.browser.queue.active().map(|row| row.offset));
         let offset = match current {
             Some(index) if down => index.saturating_add(1).min(total - 1),
             Some(index) => index.saturating_sub(1),
@@ -822,13 +890,31 @@ impl GuiApp {
         if current == Some(offset) {
             return;
         }
-        self.start_queue_navigation(offset, cx);
+        self.start_queue_navigation(offset, false, cx);
     }
 
-    fn start_queue_navigation(&mut self, offset: usize, cx: &mut Context<Self>) {
+    pub(super) fn select_all_queue_entries(&mut self, cx: &mut Context<Self>) {
+        self.refresh(cx);
+        if self
+            .browser
+            .queue
+            .rows
+            .total()
+            .is_some_and(|total| total > 0)
+            && self.browser.queue.ready()
+        {
+            self.start_queue_navigation(0, true, cx);
+        }
+    }
+
+    fn start_queue_navigation(&mut self, offset: usize, all: bool, cx: &mut Context<Self>) {
         let anchor = self.browser.queue.anchor;
         let intent = self.begin_manual_intent();
-        let stamp = QueueSelection::query().stamp(self.state.query_revisions(None));
+        let stamp = self
+            .browser
+            .queue
+            .query()
+            .stamp(self.state.query_revisions(None));
         let queue = &mut self.browser.queue;
         queue.manual = Some(intent);
         queue.navigation = Some(offset);
@@ -840,9 +926,11 @@ impl GuiApp {
             target: QueueTarget::Offset(offset),
             anchor,
             shift: false,
+            all,
             multi: false,
             scroll: true,
-            total: self.state.queue.total,
+            total: queue.rows.len(),
+            query: queue.query.clone(),
         });
         self.dispatch_queue_selection(cx);
         cx.notify();
@@ -850,7 +938,12 @@ impl GuiApp {
 
     fn queue_job_current(&self, job: &QueueJob) -> bool {
         self.manual_intent_current(job.intent)
-            && QueueSelection::query().stamp(self.state.query_revisions(None)) == job.stamp
+            && self
+                .browser
+                .queue
+                .query()
+                .stamp(self.state.query_revisions(None))
+                == job.stamp
             && self.browser.queue.current(job.generation, job.stamp)
     }
 
@@ -881,14 +974,28 @@ impl GuiApp {
                     QueueTarget::Offset(offset) => {
                         let handle = handle.clone();
                         let ticket = ticket.clone();
+                        let query = job.query.clone();
                         let response = cx
                             .background_executor()
                             .spawn(async move {
-                                handle
-                                    .query_if_current(Query::QueuePage { offset, limit: 1 }, ticket)
+                                handle.query_if_current(
+                                    Query::QueuePage {
+                                        query,
+                                        offset,
+                                        limit: 1,
+                                    },
+                                    ticket,
+                                )
                             })
                             .await;
-                        if QueueSelection::query().stamp(response.revisions) != job.stamp {
+                        if (Query::QueuePage {
+                            query: job.query.clone(),
+                            offset: 0,
+                            limit: 1,
+                        })
+                        .stamp(response.revisions)
+                            != job.stamp
+                        {
                             return Err(i18n.text("gl-queue-changed").into());
                         }
                         let ViewResponse::QueuePage(page) =
@@ -896,20 +1003,27 @@ impl GuiApp {
                         else {
                             return Err(i18n.text("gl-queue-selection-response").into());
                         };
-                        let Some(row) = page.rows.first().filter(|row| row.position == offset)
-                        else {
+                        let Some(row) = page.rows.first().filter(|row| row.offset == offset) else {
                             return Err(i18n.text("gl-queue-changed").into());
                         };
                         QueueIdentity::from(row)
                     }
                 };
-                let anchor = job.anchor.unwrap_or(target);
+                let anchor = if job.all {
+                    target
+                } else {
+                    job.anchor.unwrap_or(target)
+                };
                 let mut rows = None;
-                if job.shift && job.anchor.is_some() {
-                    let (start, end) = (
-                        anchor.position.min(target.position),
-                        anchor.position.max(target.position) + 1,
-                    );
+                if job.all || (job.shift && job.anchor.is_some()) {
+                    let (start, end) = if job.all {
+                        (0, job.total)
+                    } else {
+                        (
+                            anchor.offset.min(target.offset),
+                            anchor.offset.max(target.offset) + 1,
+                        )
+                    };
                     let mut identities = Vec::with_capacity(end - start);
                     let mut offset = start;
                     while offset < end {
@@ -925,13 +1039,28 @@ impl GuiApp {
                         let limit = (end - offset).min(crate::model::MAX_QUERY_ROWS);
                         let handle = handle.clone();
                         let ticket = ticket.clone();
+                        let query = job.query.clone();
                         let response = cx
                             .background_executor()
                             .spawn(async move {
-                                handle.query_if_current(Query::QueuePage { offset, limit }, ticket)
+                                handle.query_if_current(
+                                    Query::QueuePage {
+                                        query,
+                                        offset,
+                                        limit,
+                                    },
+                                    ticket,
+                                )
                             })
                             .await;
-                        if QueueSelection::query().stamp(response.revisions) != job.stamp {
+                        if (Query::QueuePage {
+                            query: job.query.clone(),
+                            offset: 0,
+                            limit: 1,
+                        })
+                        .stamp(response.revisions)
+                            != job.stamp
+                        {
                             return Err(i18n.text("gl-queue-changed").into());
                         }
                         let ViewResponse::QueuePage(Page { rows: page, total }) =
@@ -944,7 +1073,7 @@ impl GuiApp {
                             || page
                                 .iter()
                                 .enumerate()
-                                .any(|(index, row)| row.position != offset + index)
+                                .any(|(index, row)| row.offset != offset + index)
                         {
                             return Err(i18n.text("gl-queue-changed").into());
                         }
@@ -1014,6 +1143,7 @@ mod tests {
             id,
             track_id: 1,
             position,
+            offset: position,
             track: LibraryRow {
                 id: 1,
                 title: String::new(),
@@ -1034,8 +1164,29 @@ mod tests {
             id,
             track_id: 1,
             position,
+            offset: position,
         }
     }
+    #[test]
+    fn filtered_queue_demands_matching_pages_and_keeps_occurrence_identity() {
+        let mut queue = queue(7);
+        let mut source = row(20, 400);
+        source.offset = 1;
+        let identity = QueueIdentity::from(&source);
+        assert_eq!((identity.position, identity.offset), (400, 1));
+        queue.query = Some("needle".into());
+        assert!(queue.sync(revisions(7), 200_000));
+        assert_eq!(queue.rows.total(), None);
+        let (query, _) = queue.demand_page(0..3, 20).unwrap();
+        assert!(
+            matches!(query, crate::model::Query::QueuePage { query: Some(query), offset: 0, .. } if query == "needle")
+        );
+        queue.select(identity, false);
+        assert_eq!(queue.ordered_ids(), [20]);
+        assert_eq!(queue.active().unwrap().position, 400);
+        assert_eq!(queue.active().unwrap().offset, 1);
+    }
+
     #[test]
     fn playing_locate_reveals_exact_duplicate_occurrence_without_selecting() {
         let mut queue = queue(7);
@@ -1044,7 +1195,7 @@ mod tests {
         let anchor = queue.anchor;
         let active = queue.active;
         let generation = queue.projection.generation();
-        let request = queue.locate.begin(11, revisions(7));
+        let request = queue.locate.begin(11, None, revisions(7));
         assert!(queue.locate.current(request, revisions(7), Some(11)));
         queue.locate.resolve(request, 199_999);
         let reveal = queue.locate.reveal.unwrap();
@@ -1061,9 +1212,9 @@ mod tests {
     #[test]
     fn playing_locate_rejects_replaced_targets_and_revisions_with_one_worker() {
         let mut queue = queue(7);
-        let old = queue.locate.begin(10, revisions(7));
+        let old = queue.locate.begin(10, None, revisions(7));
         assert_eq!(queue.locate.take_job(), Some(old));
-        let latest = queue.locate.begin(11, revisions(7));
+        let latest = queue.locate.begin(11, None, revisions(7));
         assert!(queue.locate.take_job().is_none());
         assert!(!queue.locate.current(old, revisions(7), Some(10)));
         assert!(!queue.locate.current(latest, revisions(7), Some(10)));
@@ -1103,13 +1254,13 @@ mod tests {
     #[test]
     fn selection_changes_cancel_pending_navigation_and_range_results() {
         let mut queue = queue(7);
-        let stamp = QueueSelection::query().stamp(revisions(7));
+        let stamp = queue.query().stamp(revisions(7));
         let generation = queue.projection.generation();
         queue.select(identity(1, 0), false);
         assert!(!queue.current(generation, stamp));
         assert!(!queue.current(
             queue.projection.generation(),
-            QueueSelection::query().stamp(revisions(8))
+            queue.query().stamp(revisions(8))
         ));
         queue.busy = true;
         queue.navigation = Some(199_999);
@@ -1123,7 +1274,7 @@ mod tests {
         let mut queue = queue(0);
         queue.select(identity(1, 0), false);
         let generation = queue.projection.generation();
-        let stamp = QueueSelection::query().stamp(revisions(0));
+        let stamp = queue.query().stamp(revisions(0));
         let anchor = identity(2, 199_997);
         let range = vec![anchor, identity(3, 199_998), identity(4, 199_999)];
         let target = identity(4, 199_999);
@@ -1147,7 +1298,7 @@ mod tests {
         ));
         assert!(!queue.complete_range(
             queue.projection.generation(),
-            QueueSelection::query().stamp(revisions(1)),
+            queue.query().stamp(revisions(1)),
             anchor,
             target,
             vec![identity(1, 0)],
@@ -1172,10 +1323,12 @@ mod tests {
         queue.pending = Some(QueueJob {
             intent: old,
             generation: queue.projection.generation(),
-            stamp: QueueSelection::query().stamp(revisions(0)),
+            stamp: queue.query().stamp(revisions(0)),
             target: QueueTarget::Offset(1),
             anchor: queue.anchor,
             shift: false,
+            all: false,
+            query: None,
             multi: false,
             scroll: true,
             total: 10,
@@ -1186,10 +1339,12 @@ mod tests {
         queue.pending = Some(QueueJob {
             intent: latest,
             generation: queue.projection.generation(),
-            stamp: QueueSelection::query().stamp(revisions(0)),
+            stamp: queue.query().stamp(revisions(0)),
             target: QueueTarget::Offset(8),
             anchor: queue.anchor,
             shift: false,
+            all: false,
+            query: None,
             multi: false,
             scroll: true,
             total: 10,
@@ -1217,7 +1372,7 @@ mod tests {
         queue.select(identity(10, 10), false);
         let selected_generation = queue.projection.generation();
         let page_generation = queue.page_projection.generation();
-        let locate = queue.locate.begin(11, revisions(7));
+        let locate = queue.locate.begin(11, None, revisions(7));
         queue.rows.begin(20, 20);
         queue.rows.fail("offline".into());
         let mut unrelated = revisions(7);
@@ -1230,15 +1385,12 @@ mod tests {
         assert_eq!(queue.rows.get(10).unwrap().id, 10);
         assert_eq!(queue.rows.error(20), Some("offline"));
         assert_eq!(queue.ordered_ids(), vec![10]);
-        assert!(queue.current(
-            selected_generation,
-            QueueSelection::query().stamp(unrelated)
-        ));
-        assert!(queue.page_projection.accepts(
-            &QueueSelection::query(),
-            page_generation,
-            unrelated
-        ));
+        assert!(queue.current(selected_generation, queue.query().stamp(unrelated)));
+        assert!(
+            queue
+                .page_projection
+                .accepts(&queue.query(), page_generation, unrelated)
+        );
         assert!(queue.locate.current(locate, unrelated, Some(11)));
         assert!(queue.reconcile_pending.is_none());
     }
@@ -1325,7 +1477,7 @@ mod tests {
         let mut queue = queue(7);
         queue.select(identity(10, 199_999), false);
         let selection_generation = queue.projection.generation();
-        let locate = queue.locate.begin(11, revisions(7));
+        let locate = queue.locate.begin(11, None, revisions(7));
         let (old, generation) = queue.demand_page(0..10, 20).unwrap();
         assert!(queue.demand_page(0..10, 40).is_none());
         assert!(
@@ -1333,10 +1485,7 @@ mod tests {
                 .page_projection
                 .accepts(&old, generation, revisions(7))
         );
-        assert!(queue.current(
-            selection_generation,
-            QueueSelection::query().stamp(revisions(7))
-        ));
+        assert!(queue.current(selection_generation, queue.query().stamp(revisions(7))));
         assert_eq!(queue.ordered_ids(), vec![10]);
         assert!(queue.locate.current(locate, revisions(7), Some(11)));
         assert!(queue.reconcile_pending.is_none());

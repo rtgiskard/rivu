@@ -87,7 +87,7 @@ impl BrowserState {
     }
 
     pub(super) fn accept_playlist_summaries(&mut self, page: Page<PlaylistSummary>) {
-        if page.total == 0 {
+        if page.total == 0 && self.playlists.summaries.query.is_none() {
             self.remove_playlist_selection();
         }
         self.playlists.accept_summaries(page);
@@ -100,6 +100,7 @@ impl BrowserState {
         }
         if let Some(summary) = first.filter(|summary| summary.id == id) {
             self.playlists.selected_name = summary.name;
+            self.playlists.selected_total = Some(summary.entry_count);
         } else {
             self.remove_playlist_selection();
         }
@@ -143,6 +144,11 @@ pub(super) struct LibraryViewBuffer {
 
 pub(super) struct LibraryBrowser {
     pub(super) projection: QueryProjection,
+    pub(super) search_count_projection: QueryProjection,
+    pub(super) search_count_pending: bool,
+    pub(super) search_count_failed: bool,
+    pub(super) search_count_roots: Vec<std::path::PathBuf>,
+    pub(super) search_counts: Option<(usize, usize)>,
     buffer: LibraryViewBuffer,
     tree: DirectoryTree,
     range_selection: LibrarySelection,
@@ -161,6 +167,11 @@ impl Default for LibraryBrowser {
     fn default() -> Self {
         Self {
             projection: Default::default(),
+            search_count_projection: Default::default(),
+            search_count_pending: false,
+            search_count_failed: false,
+            search_count_roots: Vec::new(),
+            search_counts: None,
             buffer: LibraryViewBuffer {
                 sort: LibrarySort::Album,
                 ..Default::default()
@@ -243,6 +254,9 @@ impl LibraryBrowser {
 
     pub(super) fn cancel_pending_reads(&mut self) {
         self.projection.cancel();
+        if self.search_count_pending {
+            self.search_count_projection.cancel();
+        }
         if !self.counts.pending.is_empty() {
             self.counts.owner.cancel();
             self.counts.pending.clear();
@@ -594,6 +608,7 @@ impl LibraryBrowser {
     }
 
     pub(super) fn refresh_search(&mut self, query: String) {
+        self.clear_selection();
         self.prepare_query(query);
         self.scroll_filter_to_top();
     }
@@ -616,6 +631,7 @@ impl LibraryBrowser {
 
 #[derive(Default)]
 pub(super) struct PlaylistSummaryBuffer {
+    pub(super) query: Option<String>,
     pub(super) offset: usize,
     pub(super) total: usize,
     pub(super) rows: PagedRows<PlaylistSummary>,
@@ -623,6 +639,7 @@ pub(super) struct PlaylistSummaryBuffer {
 }
 
 pub(super) struct PlaylistEntriesBuffer {
+    pub(super) query: Option<String>,
     pub(super) playlist_id: Option<i64>,
     pub(super) offset: usize,
     pub(super) total: usize,
@@ -637,6 +654,7 @@ impl Default for PlaylistEntriesBuffer {
         rows.set_total(0);
         Self {
             playlist_id: None,
+            query: None,
             offset: 0,
             total: 0,
             rows,
@@ -658,16 +676,35 @@ pub(super) struct PlaylistBrowser {
     selected: Option<i64>,
     pub(super) track_selection: super::playlist_selection::EntrySelection,
     selected_name: String,
+    selected_total: Option<usize>,
     selection_generation: u64,
 }
 
 impl PlaylistBrowser {
+    pub(super) fn selected_total(&self) -> Option<usize> {
+        self.selected_total
+    }
+    pub(super) fn search_summaries(&mut self, query: Option<String>) {
+        self.summaries.query = query;
+        self.summaries.total = 0;
+        self.summaries.rows.clear();
+        self.summaries.scroll.scroll_to_item(0, ScrollStrategy::Top);
+    }
+    pub(super) fn search_entries(&mut self, query: Option<String>) {
+        self.track_selection.query = query.clone();
+        self.entries.query = query;
+        self.track_selection.clear();
+        self.entries.total = 0;
+        self.entries.rows.clear();
+        self.entries.scroll.scroll_to_item(0, ScrollStrategy::Top);
+    }
     pub(super) fn refresh_changes(
         &self,
         previous: &crate::projection::GuiLibrarySnapshot,
         next: &crate::projection::GuiLibrarySnapshot,
     ) -> PlaylistRefresh {
         let summaries_query = Query::PlaylistSummaries {
+            query: self.summaries.query.clone(),
             offset: 0,
             limit: 1,
         };
@@ -675,6 +712,7 @@ impl PlaylistBrowser {
             != summaries_query.stamp(next.query_revisions(None));
         let entries = self.entries.playlist_id.is_some_and(|playlist_id| {
             let query = Query::PlaylistEntries {
+                query: self.entries.query.clone(),
                 playlist_id,
                 offset: 0,
                 limit: 1,
@@ -711,6 +749,7 @@ impl PlaylistBrowser {
             self.entries.offset = offset;
             self.entries.rows.begin(offset, page_size);
             Query::PlaylistEntries {
+                query: self.entries.query.clone(),
                 playlist_id: self
                     .entries
                     .playlist_id
@@ -722,6 +761,7 @@ impl PlaylistBrowser {
             self.summaries.offset = offset;
             self.summaries.rows.begin(offset, page_size);
             Query::PlaylistSummaries {
+                query: self.summaries.query.clone(),
                 offset,
                 limit: page_size,
             }
@@ -778,6 +818,12 @@ impl PlaylistBrowser {
         }
         self.selected = Some(id);
         self.selected_name = name;
+        self.selected_total = self
+            .summaries
+            .rows
+            .get(index)
+            .filter(|row| row.id == id)
+            .map(|row| row.entry_count);
         self.summaries.rows.pin(Some(index));
         changed
     }
@@ -785,6 +831,7 @@ impl PlaylistBrowser {
     pub(super) fn clear_selection(&mut self) {
         self.selection_generation = self.selection_generation.wrapping_add(1);
         self.selected = None;
+        self.selected_total = None;
         self.track_selection.clear();
         self.selected_name.clear();
         self.summaries.rows.pin(None);
@@ -805,6 +852,7 @@ impl PlaylistBrowser {
                 id,
                 track_id,
                 position: index,
+                offset: index,
             },
             false,
         );
@@ -816,13 +864,15 @@ impl PlaylistBrowser {
             self.track_selection
                 .active
                 .filter(|_| self.track_selection.ready())
-                .map(|row| row.position),
+                .map(|row| row.offset),
         );
     }
 
     pub(super) fn prepare_entries(&mut self, id: i64) {
         let changed = self.entries.playlist_id != Some(id);
         if changed {
+            self.entries.query = None;
+            self.track_selection.query = None;
             self.track_selection.clear();
             self.entries.rows.clear();
             self.entries.total = 0;
@@ -857,6 +907,7 @@ impl PlaylistBrowser {
             .find(|row| Some(row.id) == self.selected)
         {
             self.selected_name.clone_from(&summary.name);
+            self.selected_total = Some(summary.entry_count);
         }
     }
 
@@ -904,6 +955,7 @@ pub(super) struct HistoryBrowser {
     source: Arc<Vec<HistoryEntry>>,
     indices: Vec<usize>,
     title_keys: Vec<String>,
+    query: Option<String>,
     positions: std::collections::HashMap<i64, usize>,
     selected: HashSet<i64>,
     anchor: Option<i64>,
@@ -920,6 +972,7 @@ impl Default for HistoryBrowser {
             source: Arc::default(),
             indices: Vec::new(),
             title_keys: Vec::new(),
+            query: None,
             positions: Default::default(),
             selected: HashSet::new(),
             anchor: None,
@@ -953,9 +1006,27 @@ impl HistoryBrowser {
         self.anchor = self.anchor.filter(|id| self.positions.contains_key(id));
     }
 
+    pub(super) fn set_query(&mut self, query: Option<String>) {
+        let query = query.map(|query| query.to_lowercase());
+        self.clear_selection();
+        if self.query == query {
+            return;
+        }
+        self.query = query;
+        self.rebuild();
+    }
+
+    pub(super) fn total(&self) -> usize {
+        self.source.len()
+    }
+
     fn rebuild(&mut self) {
         self.indices.clear();
-        self.indices.extend(0..self.source.len());
+        self.indices.extend((0..self.source.len()).filter(|&index| {
+            self.query
+                .as_ref()
+                .is_none_or(|query| self.title_keys[index].contains(query))
+        }));
         self.indices.sort_by(|&a, &b| {
             let ordering = match self.sort {
                 HistorySort::Recent => {
@@ -1160,6 +1231,44 @@ mod tests {
     fn select_history(history: &mut HistoryBrowser, id: i64, shift: bool, additive: bool) {
         let commit = history.prepare_selection(id, shift, additive).unwrap();
         assert!(history.commit_selection(commit));
+    }
+
+    #[test]
+    fn history_search_rebuilds_cached_matches_and_keeps_identity_and_sort() {
+        let mut history = HistoryBrowser::default();
+        history.sync(&history_selection_source(&[1, 2, 3, 4]), None);
+        history.select_all();
+        let old_commit = history.prepare_selection(2, false, false).unwrap();
+        history.set_query(Some("TRACK 8".into()));
+        assert_eq!(history.total(), 4);
+        assert_eq!(history.len(), 1);
+        assert_eq!(history.get(0).unwrap().track_id, 2);
+        assert!(history.ordered_selection().is_empty());
+        assert!(!history.commit_selection(old_commit));
+        history.select_all();
+        assert_eq!(history.ordered_selection(), [2]);
+        history.set_sort(HistorySort::Title);
+        assert_eq!(history.ordered_selection(), [2]);
+        let previous_match = history.prepare_selection(2, false, false).unwrap();
+        let mut updated = history_selection_source(&[4, 3, 2, 1]);
+        let updated_rows = Arc::make_mut(&mut updated);
+        updated_rows[0].title = "Track 8 remastered".into();
+        updated_rows[2].title = "Different title".into();
+        history.sync(&updated, None);
+        assert_eq!(history.len(), 1);
+        assert_eq!(history.get(0).unwrap().track_id, 4);
+        assert!(history.ordered_selection().is_empty());
+        assert!(!history.commit_selection(previous_match));
+        history.select_all();
+        assert_eq!(history.ordered_selection(), [4]);
+        history.sync(&history_selection_source(&[1, 3, 4]), None);
+        assert_eq!(history.len(), 0);
+        assert_eq!(history.total(), 3);
+        assert!(history.ordered_selection().is_empty());
+        history.set_query(None);
+        assert_eq!(history.len(), 3);
+        assert_eq!(history.get(0).unwrap().track_id, 4);
+        assert!(history.ordered_selection().is_empty());
     }
 
     #[test]
@@ -1523,6 +1632,7 @@ mod tests {
             library.select_node(&LibraryNode::Track(41), false);
             let branch = TreeBranch::default();
             for (index, query) in ["first", "second", ""].into_iter().enumerate() {
+                library.select_node(&LibraryNode::Track(41), false);
                 let previous_query = library.buffer().query.clone();
                 let generation = index as u64 + 1;
                 library.prepare_directory(branch.clone(), 0, 20, generation);
@@ -1538,7 +1648,8 @@ mod tests {
                 library.refresh_search(query.into());
                 assert_eq!(library.tree_active(), tree_active);
                 assert_eq!(library.tree.ready_selection(), None);
-                assert!(library.selected().contains(&41));
+                assert!(library.selected().is_empty());
+                assert!(library.selected_nodes().is_empty());
                 assert!(!library.directory_request_pending(
                     &branch,
                     generation,
@@ -2063,6 +2174,8 @@ mod tests {
                 .map(|index| PlaylistEntryRow {
                     id: index as i64,
                     track_id: index as i64,
+                    position: index,
+                    offset: index,
                     title: format!("entry {index}"),
                     artist: String::new(),
                     album: String::new(),
@@ -2081,6 +2194,7 @@ mod tests {
             id: 41,
             playlist_id: 1,
             position: 7_000,
+            offset: 7_000,
             track_id: 99,
             total: 10_000,
         }]);
@@ -2102,6 +2216,7 @@ mod tests {
             id: 41,
             playlist_id: 1,
             position: 6_000,
+            offset: 6_000,
             track_id: 99,
             total: 10_000,
         }]);
@@ -2139,6 +2254,7 @@ mod tests {
             id: 41,
             playlist_id: 1,
             position: 0,
+            offset: 0,
             track_id: 99,
             total: 1,
         }]);
@@ -2150,6 +2266,7 @@ mod tests {
             id: 41,
             playlist_id: 2,
             position: 0,
+            offset: 0,
             track_id: 99,
             total: 1,
         }]);
