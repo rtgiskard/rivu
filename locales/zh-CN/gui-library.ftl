@@ -149,8 +149,6 @@ gl-import-m3u = 导入 M3U
 
 gl-export-playlist = 导出播放列表
 
-gl-remove-entries = 移除所选项目
-
 gl-not-loaded = 未加载
 
 gl-no-track = 未选择曲目

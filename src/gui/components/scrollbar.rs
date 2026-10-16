@@ -14,10 +14,49 @@ const THUMB_WIDTH: f32 = 6.;
 const IDLE_THUMB_WIDTH: f32 = 2.;
 const MIN_THUMB_HEIGHT: f32 = 24.;
 
+#[derive(Clone)]
+enum ScrollSource {
+    List(UniformListScrollHandle),
+    Area(Rc<gpui::ScrollHandle>),
+}
+
+impl ScrollSource {
+    fn handle(&self) -> gpui::ScrollHandle {
+        match self {
+            Self::List(scroll) => scroll.0.borrow().base_handle.clone(),
+            Self::Area(scroll) => scroll.as_ref().clone(),
+        }
+    }
+
+    fn same_handle(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::List(a), Self::List(b)) => Rc::ptr_eq(&a.0, &b.0),
+            (Self::Area(a), Self::Area(b)) => Rc::ptr_eq(a, b),
+            _ => false,
+        }
+    }
+}
+
+pub(super) fn scrollable_area(
+    id: impl Into<ElementId>,
+    child: impl IntoElement,
+    scroll: &Rc<gpui::ScrollHandle>,
+) -> impl IntoElement {
+    scrollable(id, child, ScrollSource::Area(scroll.clone()))
+}
+
 pub(super) fn scrollable_list(
     id: impl Into<ElementId>,
     child: impl IntoElement,
     scroll: &UniformListScrollHandle,
+) -> impl IntoElement {
+    scrollable(id, child, ScrollSource::List(scroll.clone()))
+}
+
+fn scrollable(
+    id: impl Into<ElementId>,
+    child: impl IntoElement,
+    scroll: ScrollSource,
 ) -> impl IntoElement {
     div()
         .id(id)
@@ -40,9 +79,7 @@ pub(super) fn scrollable_list(
         )
         // Keep this after the list: its prepaint reads this frame's list metrics,
         // including wheel offsets, deferred scroll requests and shrink clamping.
-        .child(Scrollbar {
-            scroll: scroll.clone(),
-        })
+        .child(Scrollbar { scroll })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -54,15 +91,15 @@ struct Geometry {
 }
 
 impl Geometry {
-    fn read(track: Bounds<Pixels>, scroll: &UniformListScrollHandle) -> Self {
-        let state = scroll.0.borrow();
+    fn read(track: Bounds<Pixels>, scroll: &ScrollSource) -> Self {
+        let handle = scroll.handle();
+        let viewport = handle.bounds();
+        let max_offset = handle.max_offset().y.max(px(0.));
         Self {
             track,
-            viewport: state.base_handle.bounds(),
-            content_height: state
-                .last_item_size
-                .map_or(px(0.), |size| size.contents.height),
-            max_offset: state.base_handle.max_offset().y.max(px(0.)),
+            viewport,
+            content_height: viewport.size.height + max_offset,
+            max_offset,
         }
     }
 
@@ -143,7 +180,7 @@ struct Gesture {
 }
 
 struct ScrollbarState {
-    scroll: UniformListScrollHandle,
+    scroll: ScrollSource,
     geometry: Geometry,
     hovered: bool,
     // An owned press survives geometry invalidation so its release cannot reach
@@ -166,14 +203,14 @@ impl ScrollbarState {
     }
 
     fn set_offset(&self, y: Pixels) {
-        let handle = &self.scroll.0.borrow().base_handle;
+        let handle = self.scroll.handle();
         let mut offset = handle.offset();
         offset.y = y.clamp(-self.geometry.max_offset, px(0.));
         handle.set_offset(offset);
     }
 
     fn begin(&mut self, y: Pixels) {
-        let offset = self.scroll.0.borrow().base_handle.offset().y;
+        let offset = self.scroll.handle().offset().y;
         let Some(thumb) = self.geometry.thumb(offset) else {
             return;
         };
@@ -207,7 +244,7 @@ impl ScrollbarState {
 }
 
 struct Scrollbar {
-    scroll: UniformListScrollHandle,
+    scroll: ScrollSource,
 }
 
 struct FrameState {
@@ -273,14 +310,14 @@ impl Element for Scrollbar {
                 });
                 {
                     let mut retained = state.borrow_mut();
-                    if !Rc::ptr_eq(&retained.scroll.0, &self.scroll.0) {
+                    if !retained.scroll.same_handle(&self.scroll) {
                         retained.scroll = self.scroll.clone();
                         retained.cancel_motion();
                     }
                     retained.update_geometry(geometry);
                     // UniformList already clamps before laying out its rows.
                     // Retain the same invariant for empty lists as well.
-                    let offset = self.scroll.0.borrow().base_handle.offset().y;
+                    let offset = self.scroll.handle().offset().y;
                     retained.set_offset(offset);
                 }
                 (state.clone(), state)
@@ -305,7 +342,7 @@ impl Element for Scrollbar {
         {
             let mut state = frame.state.borrow_mut();
             state.hovered = frame.hitbox.is_hovered(window);
-            let offset = self.scroll.0.borrow().base_handle.offset().y;
+            let offset = self.scroll.handle().offset().y;
             paint_scroll_edges(state.geometry, offset, window);
             if let Some(mut thumb) = state.geometry.thumb(offset) {
                 let expanded = state.gesture.is_some() || state.hovered;
@@ -375,7 +412,7 @@ impl Element for Scrollbar {
             if phase == DispatchPhase::Bubble && hitbox.should_handle_scroll(window) {
                 let state = state.borrow();
                 let delta = event.delta.pixel_delta(window.line_height()).y;
-                let offset = state.scroll.0.borrow().base_handle.offset().y;
+                let offset = state.scroll.handle().offset().y;
                 state.set_offset(offset + delta);
                 window.refresh();
                 cx.stop_propagation();
@@ -399,7 +436,7 @@ mod tests {
 
     fn state(geometry: Geometry) -> ScrollbarState {
         ScrollbarState {
-            scroll: UniformListScrollHandle::new(),
+            scroll: ScrollSource::List(UniformListScrollHandle::new()),
             geometry,
             hovered: false,
             gesture: None,
@@ -437,17 +474,17 @@ mod tests {
     fn track_jump_and_drag_preserve_grab_offset_and_capture_release() {
         let mut state = state(geometry(100., 1_000.));
         state.begin(px(60.));
-        assert_eq!(state.scroll.0.borrow().base_handle.offset().y, px(-450.));
+        assert_eq!(state.scroll.handle().offset().y, px(-450.));
         assert!(state.move_pointer(px(500.), true));
-        assert_eq!(state.scroll.0.borrow().base_handle.offset().y, px(-900.));
+        assert_eq!(state.scroll.handle().offset().y, px(-900.));
         assert!(state.move_pointer(px(-100.), true));
-        assert_eq!(state.scroll.0.borrow().base_handle.offset().y, px(0.));
+        assert_eq!(state.scroll.handle().offset().y, px(0.));
         assert!(state.release());
         assert!(!state.move_pointer(px(60.), true));
         state.begin(px(15.));
         assert_eq!(state.gesture.unwrap().grab_offset, Some(px(5.)));
         assert!(state.move_pointer(px(53.), true));
-        assert_eq!(state.scroll.0.borrow().base_handle.offset().y, px(-450.));
+        assert_eq!(state.scroll.handle().offset().y, px(-450.));
     }
 
     #[test]
@@ -457,13 +494,13 @@ mod tests {
         state.update_geometry(geometry(80., 1_000.));
         assert_eq!(state.gesture.unwrap().grab_offset, None);
         assert!(state.move_pointer(px(60.), true));
-        assert_eq!(state.scroll.0.borrow().base_handle.offset().y, px(0.));
+        assert_eq!(state.scroll.handle().offset().y, px(0.));
         assert!(state.release());
 
         state.begin(px(15.));
         state.update_geometry(geometry(80., 20.));
         state.set_offset(px(-900.));
-        assert_eq!(state.scroll.0.borrow().base_handle.offset().y, px(0.));
+        assert_eq!(state.scroll.handle().offset().y, px(0.));
         assert!(state.release());
         state.begin(px(15.));
         assert!(state.gesture.is_none());

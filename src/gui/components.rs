@@ -107,6 +107,15 @@ pub(crate) fn scrollable_list(
     scrollbar::scrollable_list(id, child, scroll)
 }
 
+/// Applies the same scrollbar and edge treatment to a standard scroll viewport.
+pub(crate) fn scrollable_area(
+    id: impl Into<gpui::ElementId>,
+    child: impl gpui::IntoElement,
+    scroll: &std::rc::Rc<gpui::ScrollHandle>,
+) -> impl gpui::IntoElement {
+    scrollbar::scrollable_area(id, child, scroll)
+}
+
 // GPUI renders tooltips and drag views as independent roots after the window root.
 // Read its resolved font now, rather than capturing settings when an overlay is created.
 fn overlay_font(window: &Window, cx: &gpui::App) -> gpui::Font {

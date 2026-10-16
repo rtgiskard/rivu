@@ -777,7 +777,7 @@ impl GuiApp {
     pub(super) fn library_panel(
         &mut self,
         panel_id: u64,
-        tab_bar_visible: bool,
+        _tab_bar_visible: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -815,30 +815,19 @@ impl GuiApp {
             self.i18n
                 .format("gl-entry-count", &[("count", (total).into())])
         };
-        let mut tools = panel_toolbar();
-        tools = tools
-            .when(!tab_bar_visible, |tools| {
-                tools.child(
-                    div()
-                        .text_sm()
-                        .text_color(rgb(TEXT))
-                        .child(self.tr("gl-library")),
-                )
-            })
-            .child(
-                caption(selection_label.clone())
-                    .id(("library-selection-count", panel_id))
-                    .w(gpui::rems(6.))
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .tooltip(move |_, cx| {
-                        cx.new(|_| super::ButtonTooltip {
-                            text: selection_label.clone().into(),
-                        })
-                        .into()
-                    }),
-            )
+        let heading = panel_header(self.tr("gl-library"), selection_label.clone())
+            .flex_1()
+            .min_w_0()
+            .id(("library-selection-count", panel_id))
+            .tooltip(move |_, cx| {
+                cx.new(|_| super::ButtonTooltip {
+                    text: selection_label.clone().into(),
+                })
+                .into()
+            });
+        let tools = panel_toolbar()
+            .min_w_0()
+            .flex_shrink(1.)
             .child(self.library_search.clone())
             .child(disabled_control(
                 icon_button(
@@ -890,13 +879,6 @@ impl GuiApp {
                 ),
                 self.browser.library.missing_only(),
             ))
-            .child(icon_button(
-                ("library-add-root", panel_id),
-                "󰐕",
-                self.tr("gl-add-root"),
-                cx,
-                |this, _, cx| this.choose_library_root(cx),
-            ))
             .child(active_control(
                 icon_button(
                     ("library-force-scan", panel_id),
@@ -913,8 +895,16 @@ impl GuiApp {
                     },
                 ),
                 self.browser.library.force_scan(),
+            ))
+            .child(icon_button(
+                ("library-add-root", panel_id),
+                "󰐕",
+                self.tr("gl-add-root"),
+                cx,
+                |this, _, cx| this.choose_library_root(cx),
             ));
-        let mut panel = panel_surface(("library-panel", panel_id)).child(tools);
+        let mut panel = panel_surface(("library-panel", panel_id))
+            .child(row().items_end().child(heading).child(tools));
         if let Some((track_id, result)) = &self.browser.library.locate.notice
             && self
                 .state
@@ -1038,7 +1028,7 @@ impl GuiApp {
     pub(super) fn queue_panel(
         &mut self,
         panel_id: u64,
-        tab_bar_visible: bool,
+        _tab_bar_visible: bool,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -1052,36 +1042,27 @@ impl GuiApp {
             }
         });
         let selection_count = self.browser.queue.len();
-        let header = row()
-            .flex_wrap()
-            .flex_shrink_0()
-            .when(!tab_bar_visible, |header| {
-                header.child(
-                    div()
-                        .text_sm()
-                        .text_color(rgb(TEXT))
-                        .child(self.tr("gl-queue")),
-                )
-            })
-            .child(
-                caption(self.i18n.format(
-                    "gl-queue-count",
-                    &[
-                        ("total", (self.state.queue.total).into()),
-                        ("selected", (selection_count).into()),
-                    ],
-                ))
-                .flex_shrink_0()
-                .id(("queue-count", panel_id))
-                .tooltip({
-                    let text = self.tr("gl-queue-drag-hint");
-                    move |_, cx| {
-                        cx.new(|_| super::ButtonTooltip { text: text.clone() })
-                            .into()
-                    }
-                }),
-            );
-        let mut tools = panel_toolbar().min_h(px(32.)).child(disabled_control(
+        let header = panel_header(
+            self.tr("gl-queue"),
+            self.i18n.format(
+                "gl-queue-count",
+                &[
+                    ("total", (self.state.queue.total).into()),
+                    ("selected", (selection_count).into()),
+                ],
+            ),
+        )
+        .flex_1()
+        .min_w_0()
+        .id(("queue-count", panel_id))
+        .tooltip({
+            let text = self.tr("gl-queue-drag-hint");
+            move |_, cx| {
+                cx.new(|_| super::ButtonTooltip { text: text.clone() })
+                    .into()
+            }
+        });
+        let tools = panel_toolbar().min_h(px(32.)).child(disabled_control(
             icon_button(
                 ("queue-locate-playing", panel_id),
                 "",
@@ -1090,30 +1071,11 @@ impl GuiApp {
                 |this, window, cx| this.locate_playing_queue(window, cx),
             ),
             self.state.queue.current_id.is_none(),
-        ));
-        tools = tools
+        ))
             .min_w_0()
-            .flex_basis(gpui::rems(4.5))
-            .flex_grow(1.)
+            .max_w(gpui::rems(20.5))
             .flex_shrink(1.)
             .child(self.queue_search.clone());
-        if selection_count > 1 {
-            tools = tools.child(icon_button(
-                ("queue-remove", panel_id),
-                "",
-                self.tr("gl-remove-queue-selected"),
-                cx,
-                |this, _, cx| {
-                    let queue_ids = this.selected_queue_ids_in_order();
-                    if queue_ids.len() > 1 {
-                        this.browser.queue.clear();
-
-                        this.send(Command::RemoveQueueEntries { queue_ids }, cx);
-                        cx.notify();
-                    }
-                },
-            ));
-        }
         let (selection_message, selection_kind): (SharedString, _) =
             if let Some(error) = &self.browser.queue.selection_error {
                 (error.clone().into(), StatusKind::Error)
@@ -1196,7 +1158,7 @@ impl GuiApp {
             }))
             .drag_over::<super::ContentDrag>(|style, _, _, _| style.border_color(rgb(ACCENT)))
             .drag_over::<PlaylistDrag>(|style, _, _, _| style.border_color(rgb(ACCENT)))
-            .child(header.child(tools))
+            .child(row().items_end().child(header).child(tools))
             .when(
                 self.browser
                     .queue
@@ -1920,9 +1882,9 @@ impl GuiApp {
             self.tr("gl-selection-unavailable")
         };
         let selection_status = row()
-            .flex_1()
+            .flex_shrink_0()
             .min_w_0()
-            .h_full()
+            .h(gpui::rems(2.))
             .overflow_hidden()
             .child(
                 status_message(selection_message.clone(), StatusKind::Info)
@@ -2172,6 +2134,13 @@ impl GuiApp {
                             this.browser.focus_list(ListFocus::PlaylistTracks)
                         }),
                     )
+                    .child(div().flex_1().min_w_0().child(caption(total.map_or_else(
+                        || "—".to_owned(),
+                        |count| {
+                            self.i18n
+                                .format("gl-track-count", &[("count", count.into())])
+                        },
+                    ))))
                     .child(self.playlist_entries_search.clone()),
             );
             self.scroll_views.register_list(
@@ -2615,24 +2584,29 @@ impl GuiApp {
             .drag_over::<super::ContentDrag>(|style, _, _, _| style.border_color(rgb(ACCENT)))
             .drag_over::<QueueDrag>(|style, _, _, _| style.border_color(rgb(ACCENT)))
             .drag_over::<PlaylistDrag>(|style, _, _, _| style.border_color(rgb(ACCENT)))
-            .child(panel_header(
-                self.tr("gl-playlists"),
-                self.i18n.format(
-                    "gl-playlist-count",
-                    &[
-                        ("total", (self.browser.playlists.summaries().total).into()),
-                        (
-                            "selected",
-                            (self.browser.playlists.track_selection.len()).into(),
-                        ),
-                    ],
-                ),
-            ))
             .child(
                 row()
                     .min_h(gpui::rems(2.))
                     .flex_wrap()
                     .flex_shrink_0()
+                    .items_end()
+                    .child(
+                        panel_header(
+                            self.tr("gl-playlists"),
+                            self.i18n.format(
+                                "gl-playlist-count",
+                                &[
+                                    ("total", self.browser.playlists.summaries().total.into()),
+                                    (
+                                        "selected",
+                                        self.browser.playlists.track_selection.len().into(),
+                                    ),
+                                ],
+                            ),
+                        )
+                        .flex_1()
+                        .min_w_0(),
+                    )
                     .on_mouse_down(
                         gpui::MouseButton::Left,
                         cx.listener(|this, _, _, _| this.browser.focus_playlists()),
@@ -2674,22 +2648,9 @@ impl GuiApp {
                             },
                         ),
                         playlist_id.is_none(),
-                    ))
-                    .when(self.browser.playlists.track_selection.len() > 0, |tools| {
-                        let disabled = !self.browser.playlists.track_selection.ready();
-                        tools.child(disabled_control(
-                            icon_button(
-                                ("playlist-remove-selected", panel_id),
-                                "",
-                                self.tr("gl-remove-entries"),
-                                cx,
-                                |this, _, cx| this.remove_playlist_selection(cx),
-                            ),
-                            disabled,
-                        ))
-                    })
-                    .child(selection_status),
+                    )),
             )
+            .when(selection_unavailable, |panel| panel.child(selection_status))
             .child(lists)
             .into_any_element()
     }

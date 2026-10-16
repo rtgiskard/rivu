@@ -64,7 +64,7 @@ uses the remaining panel space. Track rows use the Queue's numbering and text
 layout. Click a track to select it; Ctrl/Cmd-click toggles individual entries.
 Shift-click selects the inclusive range from the anchor, including unloaded pages;
 Ctrl/Cmd+Shift-click adds that range to the existing selection. The track count
-shows the selection size. A toolbar control removes selected entries together.
+shows the selection size. Use Delete to remove selected entries together.
 Hover controls for Play, Favorite, and Remove target only that row, never the group.
 Hover row actions are separated by one em, with Play before Favorite.
 Double-click or Enter plays the

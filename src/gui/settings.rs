@@ -288,6 +288,7 @@ fn settings_group(title: impl Into<SharedString>, content: impl IntoElement) -> 
 
 fn settings_card(title: impl Into<SharedString>, content: impl IntoElement) -> Div {
     settings_group(title, content)
+        .border_1()
         .border_color(rgb(BORDER))
         .rounded(rems(5. / 16.))
 }
@@ -310,11 +311,11 @@ fn spectrum_style_label(i18n: &Localizer, style: SpectrumStyle) -> String {
 }
 pub(super) const ALBUM_ARTWORK_STYLES: [AlbumArtworkStyle; 7] = [
     AlbumArtworkStyle::Plain,
+    AlbumArtworkStyle::Card,
     AlbumArtworkStyle::Vinyl,
     AlbumArtworkStyle::Glass,
-    AlbumArtworkStyle::Halo,
     AlbumArtworkStyle::Metal,
-    AlbumArtworkStyle::Card,
+    AlbumArtworkStyle::Halo,
     AlbumArtworkStyle::Duotone,
 ];
 
@@ -457,7 +458,7 @@ pub(super) struct Settings {
     focus: FocusHandle,
     active: bool,
     measured: Rc<RefCell<HashMap<Measured, Bounds<Pixels>>>>,
-    scrolls: HashMap<&'static str, ScrollHandle>,
+    scrolls: HashMap<&'static str, Rc<ScrollHandle>>,
     active_scroll: Option<ScrollHandle>,
     _subscriptions: Vec<Subscription>,
     draft: Config,
@@ -1766,7 +1767,7 @@ impl Settings {
     }
 
     fn library_settings(&mut self, cx: &mut Context<Self>) -> Div {
-        let library = settings_group(
+        let library = settings_card(
             self.tr("settings-library"),
             column()
                 .gap_2()
@@ -1869,13 +1870,13 @@ impl Settings {
             );
         let ffmpeg = self.draft.ffmpeg_enabled;
         let remix = self.draft.pipewire_auto_mix;
-        let playback = settings_group(
+        let playback = settings_card(
             self.tr("settings-playback"),
             column()
                 .gap_2()
                 .child(self.pair(Field::Volume, Field::PlayCountThreshold)),
         );
-        let audio = settings_group(
+        let audio = settings_card(
             self.tr("settings-audio"),
             column()
                 .gap_2()
@@ -2418,7 +2419,7 @@ impl Settings {
                 .child(self.measurement(Measured::SettingsWindow, cx));
                 column()
                     .gap_3()
-                    .child(settings_group(
+                    .child(settings_card(
                         settings.tr("settings-appearance"),
                         column()
                             .gap_2()
@@ -2430,11 +2431,11 @@ impl Settings {
                             .id("settings-appearance-help")
                             .tooltip(settings_tooltip(settings.tr("settings-appearance-help"))),
                     ))
-                    .child(settings_group(
+                    .child(settings_card(
                         settings.tr("settings-display-range"),
                         settings.single(Field::VisualizationDb),
                     ))
-                    .child(settings_group(
+                    .child(settings_card(
                         settings.tr("settings-frequency-analysis"),
                         column()
                             .gap_2()
@@ -2448,7 +2449,7 @@ impl Settings {
                             .id("settings-analysis-help")
                             .tooltip(settings_tooltip(settings.tr("settings-analysis-help"))),
                     ))
-                    .child(settings_group(
+                    .child(settings_card(
                         settings.tr("settings-processing-cache"),
                         row()
                             .gap_2()
@@ -2508,7 +2509,7 @@ impl Settings {
                 .child(self.measurement(Measured::SettingsStyle, cx));
                 column()
                     .gap_3()
-                    .child(settings_group(
+                    .child(settings_card(
                         settings.tr("settings-appearance"),
                         column()
                             .gap_2()
@@ -2557,14 +2558,14 @@ impl Settings {
                                     )),
                             ),
                     ))
-                    .child(settings_group(
+                    .child(settings_card(
                         settings.tr("settings-bar-motion"),
                         column()
                             .gap_2()
                             .child(settings.pair(Field::SpectrumBarHold, Field::SpectrumBarGravity))
                             .child(settings.single(Field::SpectrumSmoothing)),
                     ))
-                    .child(settings_group(
+                    .child(settings_card(
                         settings.tr("settings-peak-markers"),
                         column()
                             .gap_2()
@@ -2589,7 +2590,7 @@ impl Settings {
             }
             VisualPage::Spectrogram => column()
                 .gap_3()
-                .child(settings_group(
+                .child(settings_card(
                     settings.tr("settings-display"),
                     column()
                         .gap_2()
@@ -2604,7 +2605,7 @@ impl Settings {
                             |draft| draft.spectrogram_labels = !draft.spectrogram_labels,
                         ))),
                 ))
-                .child(settings_group(
+                .child(settings_card(
                     settings.tr("settings-frequency-sampling"),
                     column()
                         .gap_2()
@@ -2667,7 +2668,7 @@ impl Settings {
                     _ => SharedString::default(),
                 };
                 let instance = settings.visualizer_panel.is_some();
-                let display = settings_group(
+                let display = settings_card(
                     if instance {
                         settings.tr("settings-this-instance")
                     } else {
@@ -2722,7 +2723,7 @@ impl Settings {
                 let content = column()
                     .gap_3()
                     .child(display)
-                    .child(settings_group(
+                    .child(settings_card(
                         settings.tr("settings-response-motion"),
                         column()
                             .gap_2()
@@ -2752,7 +2753,7 @@ impl Settings {
                                 settings.tr("settings-visualizer-motion-help"),
                             )),
                     ))
-                    .child(settings_group(
+                    .child(settings_card(
                         settings.tr("settings-bars-rings-section"),
                         column()
                             .gap_2()
@@ -2766,7 +2767,7 @@ impl Settings {
                                 settings.tr("settings-visualizer-bars-rings-help"),
                             )),
                     ));
-                content.child(settings_group(
+                content.child(settings_card(
                     settings.tr("settings-colors"),
                     column().gap_2().child(settings.pair(
                         Field::AudioVisualizerPrimaryColor,
@@ -2776,7 +2777,7 @@ impl Settings {
             }
             VisualPage::Waveform => column()
                 .gap_3()
-                .child(settings_group(
+                .child(settings_card(
                     settings.tr("settings-appearance-interaction"),
                     column()
                         .gap_2()
@@ -2807,7 +2808,7 @@ impl Settings {
                                 )),
                         ),
                 ))
-                .child(settings_group(
+                .child(settings_card(
                     settings.tr("settings-amplitude-display"),
                     column()
                         .gap_2()
@@ -2863,18 +2864,28 @@ impl Settings {
             }
         };
         let scroll = self.scrolls.entry(page_id).or_default().clone();
-        self.active_scroll = Some(scroll.clone());
+        self.active_scroll = Some(scroll.as_ref().clone());
         let mut body = row().flex_1().min_h_0().items_start();
         if self.visualizer_panel.is_none() && self.artwork_panel.is_none() {
+            let sidebar_scroll = self.scrolls.entry("settings-sidebar").or_default().clone();
             body = body.child(
-                self.sidebar(cx)
-                    .id("settings-sidebar")
-                    .h_full()
-                    .overflow_y_scroll(),
+                div().w(rems(11.)).h_full().flex_shrink_0().child(
+                    super::components::scrollable_area(
+                        "settings-sidebar-surface",
+                        self.sidebar(cx)
+                            .id("settings-sidebar")
+                            .w_full()
+                            .h_full()
+                            .overflow_y_scroll()
+                            .track_scroll(&sidebar_scroll),
+                        &sidebar_scroll,
+                    ),
+                ),
             );
         }
         panel = panel.child(
-            body.child(
+            body.child(super::components::scrollable_area(
+                page_id,
                 div()
                     .id(page_id)
                     .flex()
@@ -2886,7 +2897,8 @@ impl Settings {
                     .overflow_y_scroll()
                     .track_scroll(&scroll)
                     .child(content.flex_shrink_0().p(gpui::px(UI_INSET))),
-            ),
+                &scroll,
+            )),
         );
         let feedback = if self.applying {
             status_message(self.tr("settings-applying-settings"), StatusKind::Info)
@@ -2983,7 +2995,7 @@ impl Settings {
                     }),
                 )
                 .track_scroll(&self.device_scroll)
-                .h(px(height))
+                .h_full()
                 .w_full();
                 panel = panel.child(
                     deferred(
@@ -3010,7 +3022,13 @@ impl Settings {
                                             cx.notify();
                                         },
                                     ))
-                                    .child(choices),
+                                    .child(div().h(px(height)).w_full().child(
+                                        super::components::scrollable_list(
+                                            "settings-dropdown-scrollbar",
+                                            choices,
+                                            &self.device_scroll,
+                                        ),
+                                    )),
                             ),
                     )
                     .with_priority(2),

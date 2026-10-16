@@ -17,7 +17,7 @@ use super::{
     components::{LIST_ROW_REMS, scrollable_list, track_list_row},
     format_time, icon_button,
     list_interaction::{ContentDrag, ContentMenuRequest, TrackSource},
-    paged, panel_surface, panel_toolbar,
+    paged, panel_surface,
     panels::compact_icon_button,
     row,
     search::{ListSearch, SearchEvent},
@@ -1064,7 +1064,7 @@ impl Render for AlbumBrowser {
         }
         .filter(|(stamp, _)| Some(*stamp) == self.active_projection().stamp())
         .map(|(_, total)| total);
-        let mut header = panel_toolbar();
+        let mut header = row().items_end().flex_shrink_0().min_w_0();
         if let Some(key) = &self.selected {
             let play_key = key.clone();
             let enqueue_key = key.clone();
@@ -1102,6 +1102,7 @@ impl Render for AlbumBrowser {
                         .text_color(rgb(TEXT))
                         .child(album_title(&self.i18n, key)),
                 )
+                .child(self.tracks_search.clone())
                 .child(icon_button(
                     "album-play-all",
                     "",
@@ -1129,11 +1130,24 @@ impl Render for AlbumBrowser {
                             cx,
                         )
                     },
-                ))
-                .child(self.tracks_search.clone());
+                ));
         } else {
             header = header
-                .child(div().flex_1().min_w_0().child(self.album_search.clone()))
+                .child(
+                    super::panel_header(
+                        self.tr("gl-albums"),
+                        total.map_or_else(
+                            || "—".to_owned(),
+                            |count| {
+                                self.i18n
+                                    .format("gl-entry-count", &[("count", count.into())])
+                            },
+                        ),
+                    )
+                    .flex_1()
+                    .min_w_0(),
+                )
+                .child(self.album_search.clone())
                 .child(icon_button(
                     "albums-sort",
                     match self.sort {

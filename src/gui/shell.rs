@@ -595,9 +595,9 @@ impl Render for GuiApp {
                                     MUTED
                                 }))
                                 .child(if !self.state.system.config.still_mode {
-                                    self.tr("shell-on")
+                                    "✓"
                                 } else {
-                                    self.tr("shell-off")
+                                    ""
                                 }),
                         ),
                     )
@@ -813,16 +813,16 @@ impl Render for GuiApp {
                                         cx.notify();
                                     },
                                 )
-                                .child(div().ml_auto().child(
-                                    self.tr(
+                                .child(
+                                    div().ml_auto().text_color(rgb(ACCENT)).child(
                                         if options.mode == crate::config::AlbumArtworkMode::Rotating
                                         {
-                                            "shell-on"
+                                            "✓"
                                         } else {
-                                            "shell-off"
+                                            ""
                                         },
                                     ),
-                                )),
+                                ),
                             )
                             .child(menu_item(
                                 "album-artwork-settings",
@@ -910,11 +910,7 @@ impl Render for GuiApp {
                                         } else {
                                             MUTED
                                         }))
-                                        .child(if options.reference_lines {
-                                            self.tr("shell-on")
-                                        } else {
-                                            self.tr("shell-off")
-                                        }),
+                                        .child(if options.reference_lines { "✓" } else { "" }),
                                 ),
                             )
                             .child(
@@ -948,11 +944,7 @@ impl Render for GuiApp {
                                         } else {
                                             MUTED
                                         }))
-                                        .child(if options.labels {
-                                            self.tr("shell-on")
-                                        } else {
-                                            self.tr("shell-off")
-                                        }),
+                                        .child(if options.labels { "✓" } else { "" }),
                                 ),
                             )
                             .child(div().h(px(1.)).mx_2().my_1().bg(rgb(BORDER)))

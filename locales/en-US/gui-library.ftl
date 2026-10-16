@@ -149,8 +149,6 @@ gl-import-m3u = Import M3U
 
 gl-export-playlist = Export playlist
 
-gl-remove-entries = Remove selected entries
-
 gl-not-loaded = Not loaded
 
 gl-no-track = No track selected
