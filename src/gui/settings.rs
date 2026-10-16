@@ -784,7 +784,7 @@ impl Settings {
         )
     }
 
-    fn field_state(&self, field: Field, enabled: bool, reason: SharedString, cx: &App) -> Div {
+    fn field_state(&self, field: Field, enabled: bool, cx: &App) -> Div {
         if enabled {
             return self.field(field).min_w(rems(180. / 16.));
         }
@@ -806,10 +806,10 @@ impl Settings {
                     .overflow_hidden()
                     .child(self.value(field, cx)),
             );
-        column()
+        field
+            .form(self, control)
+            .opacity(0.45)
             .min_w(rems(180. / 16.))
-            .child(field.form(self, control).opacity(0.45))
-            .child(caption(reason).whitespace_normal())
     }
 
     fn value(&self, field: Field, cx: &App) -> String {
@@ -2259,7 +2259,6 @@ impl Settings {
         .relative()
         .child(self.measurement(Measured::AlbumArtworkDirection, cx));
         let rotating = draft.album_artwork_mode == AlbumArtworkMode::Rotating;
-        let reason = settings.tr("settings-artwork-static-inactive-hint");
         column()
             .gap_3()
             .child(caption(settings.tr("settings-artwork-motion-help")))
@@ -2278,14 +2277,9 @@ impl Settings {
                                 .id("settings-artwork-direction-field"),
                             !rotating,
                         )),
-                        settings.field_state(
-                            Field::AlbumArtworkPeriod,
-                            rotating,
-                            reason.clone(),
-                            cx,
-                        ),
+                        settings.field_state(Field::AlbumArtworkPeriod, rotating, cx),
                     ))
-                    .child(settings.field_state(Field::AlbumArtworkFps, rotating, reason, cx)),
+                    .child(settings.field_state(Field::AlbumArtworkFps, rotating, cx)),
             ))
     }
 
@@ -2475,26 +2469,11 @@ impl Settings {
                             .child(two_column(
                                 form_field(settings.tr("settings-style"), style)
                                     .min_w(rems(180. / 16.)),
-                                settings.field_state(
-                                    Field::SpectrumBars,
-                                    !solid,
-                                    settings.tr("settings-spectrum-solid-inactive-hint"),
-                                    cx,
-                                ),
+                                settings.field_state(Field::SpectrumBars, !solid, cx),
                             ))
                             .child(two_column(
-                                settings.field_state(
-                                    Field::SpectrumBarWidth,
-                                    !solid,
-                                    settings.tr("settings-spectrum-solid-inactive-hint"),
-                                    cx,
-                                ),
-                                settings.field_state(
-                                    Field::SpectrumGap,
-                                    !solid,
-                                    settings.tr("settings-spectrum-solid-inactive-hint"),
-                                    cx,
-                                ),
+                                settings.field_state(Field::SpectrumBarWidth, !solid, cx),
+                                settings.field_state(Field::SpectrumGap, !solid, cx),
                             ))
                             .child(settings.single(Field::SpectrumDb))
                             .child(
@@ -2530,22 +2509,14 @@ impl Settings {
                                         cx,
                                         |draft| draft.spectrum_labels = !draft.spectrum_labels,
                                     )),
-                            )
-                            .id("settings-spectrum-appearance-help")
-                            .tooltip(settings_tooltip(
-                                settings.tr("settings-spectrum-auto-bars-help"),
-                            )),
+                            ),
                     ))
                     .child(settings_group(
                         settings.tr("settings-bar-motion"),
                         column()
                             .gap_2()
                             .child(settings.pair(Field::SpectrumBarHold, Field::SpectrumBarGravity))
-                            .child(settings.single(Field::SpectrumSmoothing))
-                            .id("settings-bar-motion-help")
-                            .tooltip(settings_tooltip(
-                                settings.tr("settings-spectrum-bar-motion-help"),
-                            )),
+                            .child(settings.single(Field::SpectrumSmoothing)),
                     ))
                     .child(settings_group(
                         settings.tr("settings-peak-markers"),
@@ -2561,16 +2532,10 @@ impl Settings {
                                 |draft| draft.spectrum_peaks = !draft.spectrum_peaks,
                             )))
                             .child(two_column(
-                                settings.field_state(
-                                    Field::SpectrumHold,
-                                    draft.spectrum_peaks,
-                                    settings.tr("settings-spectrum-peaks-inactive-hint"),
-                                    cx,
-                                ),
+                                settings.field_state(Field::SpectrumHold, draft.spectrum_peaks, cx),
                                 settings.field_state(
                                     Field::SpectrumGravity,
                                     draft.spectrum_peaks,
-                                    settings.tr("settings-spectrum-peaks-inactive-hint"),
                                     cx,
                                 ),
                             )),
@@ -2609,11 +2574,7 @@ impl Settings {
                             draft.spectrogram_interpolate,
                             cx,
                             |draft| draft.spectrogram_interpolate = !draft.spectrogram_interpolate,
-                        )))
-                        .id("settings-frequency-sampling-help")
-                        .tooltip(settings_tooltip(
-                            settings.tr("settings-spectrogram-frequency-rows-help"),
-                        )),
+                        ))),
                 )),
             VisualPage::AudioVisualizer => {
                 let style = dropdown_button(
@@ -2657,10 +2618,6 @@ impl Settings {
                     AudioVisualizerStyle::SpatialSpectrum => {
                         settings.tr("settings-spatial-spectrum-hint")
                     }
-                    AudioVisualizerStyle::FractalBeams => {
-                        settings.tr("settings-fractal-beams-hint")
-                    }
-                    AudioVisualizerStyle::FractalFlow => settings.tr("settings-fractal-flow-hint"),
                     _ => SharedString::default(),
                 };
                 let instance = settings.visualizer_panel.is_some();
@@ -2802,11 +2759,7 @@ impl Settings {
                                         draft.waveform_seek_enabled = !draft.waveform_seek_enabled
                                     },
                                 )),
-                        )
-                        .id("settings-waveform-help")
-                        .tooltip(settings_tooltip(
-                            settings.tr("settings-waveform-waterline-help"),
-                        )),
+                        ),
                 ))
                 .child(settings_group(
                     settings.tr("settings-amplitude-display"),
