@@ -2387,8 +2387,15 @@ impl GuiApp {
         key: Measured,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let value = value.clamp(0., 1.);
+        let is_dragging = match (self.interaction.dragging(), dragging) {
+            (Some(Dragging::Seek(active)), Dragging::Seek(id))
+            | (Some(Dragging::Volume(active)), Dragging::Volume(id)) => active == id,
+            _ => false,
+        };
         div()
             .id(id)
+            .group("playback-slider")
             .relative()
             .h(px(20.))
             .w_full()
@@ -2405,9 +2412,28 @@ impl GuiApp {
                     .child(
                         div()
                             .h_full()
-                            .w(relative(value.clamp(0., 1.)))
+                            .w(relative(value))
                             .rounded_full()
                             .bg(rgb(ACCENT)),
+                    ),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .mx(px(5.))
+                    .opacity(0.)
+                    .group_hover("playback-slider", |style| style.opacity(1.))
+                    .when(is_dragging, |view| view.opacity(1.))
+                    .child(
+                        div()
+                            .absolute()
+                            .top(px(5.))
+                            .left(relative(value))
+                            .ml(px(-5.))
+                            .size(px(10.))
+                            .rounded_full()
+                            .bg(rgb(TEXT)),
                     ),
             )
             .child(self.measurement(key))
@@ -2427,6 +2453,11 @@ impl GuiApp {
                     this.drag_position(event.position, event.modifiers.alt, cx);
                 }),
             )
+            .when(is_dragging, |view| {
+                // Volume release has no command; repaint after the root clears the drag.
+                view.on_mouse_up(MouseButton::Left, cx.listener(|_, _, _, cx| cx.notify()))
+                    .on_mouse_up_out(MouseButton::Left, cx.listener(|_, _, _, cx| cx.notify()))
+            })
             .into_any_element()
     }
 }

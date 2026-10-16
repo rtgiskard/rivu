@@ -170,11 +170,17 @@ impl GuiApp {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        const PLAYBACK_ARTIST_COLOR: u32 = 0x9aadd5;
+        const PLAYBACK_ALBUM_COLOR: u32 = 0xb0a0bf;
+
         let track = self.state.current_track();
         let title = track
             .map(|track| track.title.clone())
             .unwrap_or_else(|| self.i18n.text("gl-choose-track").into());
         let artist = track.map(|track| track.artist.clone()).unwrap_or_default();
+        let album = track.map(|track| track.album.clone()).unwrap_or_default();
+        let has_artist = !artist.trim().is_empty();
+        let has_album = !album.trim().is_empty();
         let status = match self.state.playback.status {
             PlaybackStatus::Playing => self.tr("gl-playing"),
             PlaybackStatus::Paused => self.tr("gl-paused"),
@@ -338,8 +344,7 @@ impl GuiApp {
             .size_full()
             .min_w_0()
             .min_h_0()
-            .p_2()
-            .gap_1()
+            .gap_2()
             .overflow_y_scroll()
             .track_scroll(&scroll)
             .child(
@@ -347,7 +352,15 @@ impl GuiApp {
                     .w_full()
                     .min_w_0()
                     .flex_shrink_0()
-                    .child(div().flex_1().min_w_0().text_lg().truncate().child(title))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_xl()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .truncate()
+                            .child(title),
+                    )
                     .child(disabled_control(
                         quiet_icon_button(icon_button(
                             ("playback-locate", panel_id),
@@ -371,11 +384,25 @@ impl GuiApp {
                     .w_full()
                     .min_w_0()
                     .flex_shrink_0()
-                    .child(caption(artist).min_w_0().truncate())
-                    .when_some(
-                        track.filter(|track| !track.album.is_empty()),
-                        |view, track| view.child(caption(track.album.clone()).min_w_0().truncate()),
-                    ),
+                    .when(has_artist, |view| {
+                        view.child(
+                            caption(artist)
+                                .text_color(rgb(PLAYBACK_ARTIST_COLOR))
+                                .min_w_0()
+                                .truncate(),
+                        )
+                    })
+                    .when(has_artist && has_album, |view| {
+                        view.child(caption("·").flex_shrink_0())
+                    })
+                    .when(has_album, |view| {
+                        view.child(
+                            caption(album)
+                                .text_color(rgb(PLAYBACK_ALBUM_COLOR))
+                                .min_w_0()
+                                .truncate(),
+                        )
+                    }),
             )
             .child(
                 row()
