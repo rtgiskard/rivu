@@ -1091,7 +1091,12 @@ impl GuiApp {
             ),
             self.state.queue.current_id.is_none(),
         ));
-        tools = tools.child(self.queue_search.clone());
+        tools = tools
+            .min_w_0()
+            .flex_basis(gpui::rems(4.5))
+            .flex_grow(1.)
+            .flex_shrink(1.)
+            .child(self.queue_search.clone());
         if selection_count > 1 {
             tools = tools.child(icon_button(
                 ("queue-remove", panel_id),

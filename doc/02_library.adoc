@@ -12,10 +12,12 @@ Audio files are not deleted.
 
 == Desktop list search
 
-Use a list's Search button, or Ctrl+F with that list focused, to open its search
-field. Each list keeps its own search condition. A nonempty search stays visible;
-clear it to restore the complete list. Esc clears the search first and folds an
-empty field on the next press, after dismissing any active popup or composition.
+Use a list's Search button, or Ctrl+F with that list focused, to open and focus its
+search field. Once open, the Search button focuses the field without closing it.
+Each list keeps its own search condition. A nonempty search stays visible; use
+the field's Clear search button to restore the complete list without closing the
+field. Esc clears the search first and folds an empty field on the next press,
+after dismissing any active popup or composition.
 While the search field is open, counts inside its right edge show matches and the
 unfiltered total; counts are hidden when it is folded. No matches is distinct from an empty
 collection. Searching changes the view, not the saved contents or playback order.

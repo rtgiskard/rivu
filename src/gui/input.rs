@@ -58,6 +58,7 @@ pub struct Input {
     placeholder: SharedString,
     trailing_space: Pixels,
     trailing_text: Option<SharedString>,
+    embedded: bool,
     scroll_offset: Pixels,
     selected_range: Range<usize>,
     selection_reversed: bool,
@@ -85,6 +86,7 @@ impl Input {
             placeholder: placeholder.into(),
             trailing_space: px(7.),
             trailing_text: None,
+            embedded: false,
             scroll_offset: px(0.),
             selected_range: end..end,
             selection_reversed: false,
@@ -98,6 +100,12 @@ impl Input {
     /// Reserve room for an overlaid trailing control without overlapping text.
     pub(super) fn with_trailing_space(mut self, space: Pixels) -> Self {
         self.trailing_space = space;
+        self
+    }
+
+    /// Let a containing compound control own the background and border.
+    pub(super) fn embedded(mut self) -> Self {
+        self.embedded = true;
         self
     }
 
@@ -831,12 +839,14 @@ impl Render for Input {
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
-            .bg(rgb(PANEL))
+            .when(!self.embedded, |view| {
+                view.bg(rgb(PANEL))
+                    .border_1()
+                    .border_color(if focused { rgb(ACCENT) } else { rgb(BORDER) })
+                    .rounded(px(5.) * scale)
+            })
             .text_color(rgb(TEXT))
             .when(!self.enabled, |view| view.opacity(0.4))
-            .border_1()
-            .border_color(if focused { rgb(ACCENT) } else { rgb(BORDER) })
-            .rounded(px(5.) * scale)
             .line_height(px(20.) * scale)
             .text_size(px(14.) * scale)
             .child(

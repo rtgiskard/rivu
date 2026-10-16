@@ -1,4 +1,5 @@
 search-toggle = Search this list (Ctrl+F)
+search-clear = Clear search
 search-placeholder = Search titles…
 search-count = { $matched } / { $total }
 search-empty = This list is empty
