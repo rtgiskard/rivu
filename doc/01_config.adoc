@@ -21,7 +21,7 @@ A minimal example (all omitted settings retain their defaults):
 roots = [] # Add music-directory paths before scanning
 
 [playback]
-volume = 70
+volume_percent = 70
 
 [interface]
 font = "sans-serif"
@@ -45,7 +45,8 @@ rejected; do not keep both tables.
 * Move library fields to `[library]`; rename `library_roots` to `roots`.
 * Move volume, shuffle, repeat, play-count threshold, output device,
   media read buffer, FFmpeg enablement, and PipeWire auto-mix fields to
-  `[playback]`, keeping their names.
+  `[playback]`, keeping their names; the integer `volume` key is migrated as
+  described under <<volume,volume control>>.
 * Move page size, layout snapping, tray, and MPRIS fields to `[interface]`,
   keeping their names; rename `ui_font` to `font` and `ui_scale` to `scale`.
 * Move logging fields to `[logging]`: `log_level` becomes `level`, `log_to_file`
@@ -120,11 +121,22 @@ are reported when needed; native decoders continue to work. A load failure is
 retained until restart. Disabling stops a track currently decoded through FFmpeg;
 native-decoded playback is unaffected.
 
-`playback.volume` is an integer percentage from `0` to `100`, defaulting to `70`.
-Settings and CLI volume inputs also accept integer percentages. Slider and MPRIS
-changes round to the nearest whole percent. Audio and IPC use a `0–1` gain in
-steps of `0.01`. Old fractional configuration values are rejected: replace
-`volume = 0.7` with `volume = 70`; integer `1` now means 1%, not 100%.
+[[volume]]
+`playback.volume_percent` accepts a finite percentage from `0` to `100`, including
+fractions, and defaults to `70`. Zero mutes; positive values use a dB-linear
+control curve: gain in dB is `0.6 * (percent - 100)`. Thus 50% is -30 dB and
+100% is unity gain (no amplification). This approximates uniform perceived
+steps; it does not normalize loudness between tracks.
+Settings accept fractional percentages; CLI inputs remain integer percentages.
+Slider, IPC, and MPRIS values use the same curve, with normalized `0–1` levels
+for IPC and MPRIS. Values are not rounded to whole percentages internally.
+
+An existing grouped `playback.volume` integer from `0` to `100` is read once as
+the old linear-gain percentage and converted to the new scale, preserving gain.
+Saving writes only `volume_percent`; its fractional value preserves the
+conversion across restarts. Do not specify both keys. For example, an old 50%
+gain becomes approximately 89.97% on the new scale, without becoming louder.
+
 `playback.shuffle` defaults to `false`; `playback.repeat` accepts `off`, `all`, or `one` and defaults
 to `off`. `playback.play_count_threshold_percent` defaults to `20` and must be finite and
 in `[0, 100)`; zero still requires some confirmed heard time. Edit the threshold

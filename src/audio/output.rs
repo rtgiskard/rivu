@@ -95,6 +95,7 @@ struct OutputShared {
     heard: AtomicU64,
     retired: AtomicU64,
     timing_error: AtomicU32,
+    // Linear amplitude gain; conversion happens outside the realtime callback.
     volume: AtomicU32,
 }
 impl OutputShared {
@@ -109,7 +110,7 @@ impl OutputShared {
             heard: AtomicU64::new(0),
             retired: AtomicU64::new(0),
             timing_error: AtomicU32::new(0),
-            volume: AtomicU32::new(volume.to_bits()),
+            volume: AtomicU32::new(crate::volume::gain(volume).to_bits()),
         }
     }
 
@@ -255,7 +256,7 @@ impl Output {
     pub(super) fn set_volume(&self, volume: f32) {
         self.shared
             .volume
-            .store(volume.to_bits(), Ordering::Release);
+            .store(crate::volume::gain(volume).to_bits(), Ordering::Release);
     }
 
     pub(super) fn vacant_frames(&self) -> usize {
@@ -513,6 +514,23 @@ mod tests {
     use super::*;
     use crate::analysis::AnalysisFrame;
     use parking_lot::RwLock;
+
+    #[test]
+    fn volume_changes_apply_perceptual_gain_to_rendered_samples() {
+        let (mut output, mut callback, _analyzer) = test_output(1000, false);
+        for (millis, (level, expected)) in [(0.0, 0.0), (0.5, 0.031622775), (1.0, 1.0)]
+            .into_iter()
+            .enumerate()
+        {
+            output.set_volume(level);
+            assert_eq!(output.push(&[0.5, -0.25]), 1);
+            let mut data = [1.0_f32; 2];
+            callback.render(&mut data, timestamp(millis as u64, millis as u64 + 20));
+            assert!((data[0] - 0.5 * expected).abs() < 0.0000001);
+            assert!((data[1] + 0.25 * expected).abs() < 0.0000001);
+            assert_eq!(callback.consumer.occupied_len(), 0);
+        }
+    }
 
     #[test]
     fn device_names_require_the_native_prefix_without_aliases() {

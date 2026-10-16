@@ -38,37 +38,124 @@ file_group!(Library, LibraryView {
     scan_max_depth => scan_max_depth: u32,
 });
 
-fn deserialize_volume<'de, D: serde::Deserializer<'de>>(
+fn deserialize_volume_percent<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<f32>, D::Error> {
+    let percent = f64::deserialize(deserializer)?;
+    if !percent.is_finite() || !(0.0..=100.0).contains(&percent) {
+        return Err(serde::de::Error::custom(
+            "playback.volume_percent must be finite and between 0 and 100 (inclusive)",
+        ));
+    }
+    Ok(Some((percent / 100.0) as f32))
+}
+
+fn deserialize_legacy_volume<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> std::result::Result<Option<f32>, D::Error> {
     let percent = u8::deserialize(deserializer)?;
     if percent > 100 {
         return Err(serde::de::Error::custom(
-            "playback.volume must be an integer from 0 to 100",
+            "legacy playback.volume must be an integer from 0 to 100",
         ));
     }
-    Ok(Some(f32::from(percent) / 100.))
+    Ok(Some(crate::volume::level(f32::from(percent) / 100.0)))
 }
 
-fn serialize_volume<S: serde::Serializer>(
+fn serialize_volume_percent<S: serde::Serializer>(
     volume: &f32,
     serializer: S,
 ) -> std::result::Result<S::Ok, S::Error> {
-    serializer.serialize_u8((volume * 100.).round() as u8)
+    serializer.serialize_f64(f64::from(*volume) * 100.0)
 }
 
-file_group!(Playback, PlaybackView {
+// The legacy key is load-only and represents linear gain, unlike the canonical
+// perceptual level. Keep this group explicit so the two cannot be conflated.
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct Playback {
+    output_device: Option<Option<String>>,
+    #[serde(deserialize_with = "deserialize_volume_percent")]
+    volume_percent: Option<f32>,
+    #[serde(deserialize_with = "deserialize_legacy_volume")]
+    volume: Option<f32>,
+    shuffle: Option<bool>,
+    repeat: Option<RepeatMode>,
+    play_count_threshold_percent: Option<f64>,
+    media_read_buffer_mb: Option<u32>,
+    ffmpeg_enabled: Option<bool>,
+    pipewire_auto_mix: Option<bool>,
+}
+
+fn deserialize_playback<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Playback, D::Error> {
+    let playback = Playback::deserialize(deserializer)?;
+    if playback.volume_percent.is_some() && playback.volume.is_some() {
+        return Err(serde::de::Error::custom(
+            "playback.volume_percent and legacy playback.volume cannot coexist",
+        ));
+    }
+    Ok(playback)
+}
+
+impl Playback {
+    fn apply(self, config: &mut Config) {
+        if let Some(value) = self.output_device {
+            config.output_device = value;
+        }
+        if let Some(value) = self.volume_percent.or(self.volume) {
+            config.volume = value;
+        }
+        if let Some(value) = self.shuffle {
+            config.shuffle = value;
+        }
+        if let Some(value) = self.repeat {
+            config.repeat = value;
+        }
+        if let Some(value) = self.play_count_threshold_percent {
+            config.play_count_threshold_percent = value;
+        }
+        if let Some(value) = self.media_read_buffer_mb {
+            config.media_read_buffer_mb = value;
+        }
+        if let Some(value) = self.ffmpeg_enabled {
+            config.ffmpeg_enabled = value;
+        }
+        if let Some(value) = self.pipewire_auto_mix {
+            config.pipewire_auto_mix = value;
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct PlaybackView<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
-    output_device => output_device: Option<String>,
-    #[serde(serialize_with = "serialize_volume", deserialize_with = "deserialize_volume")]
-    volume => volume: f32,
-    shuffle => shuffle: bool,
-    repeat => repeat: RepeatMode,
-    play_count_threshold_percent => play_count_threshold_percent: f64,
-    media_read_buffer_mb => media_read_buffer_mb: u32,
-    ffmpeg_enabled => ffmpeg_enabled: bool,
-    pipewire_auto_mix => pipewire_auto_mix: bool,
-});
+    output_device: &'a Option<String>,
+    #[serde(serialize_with = "serialize_volume_percent")]
+    volume_percent: &'a f32,
+    shuffle: &'a bool,
+    repeat: &'a RepeatMode,
+    play_count_threshold_percent: &'a f64,
+    media_read_buffer_mb: &'a u32,
+    ffmpeg_enabled: &'a bool,
+    pipewire_auto_mix: &'a bool,
+}
+
+impl<'a> From<&'a Config> for PlaybackView<'a> {
+    fn from(config: &'a Config) -> Self {
+        Self {
+            output_device: &config.output_device,
+            volume_percent: &config.volume,
+            shuffle: &config.shuffle,
+            repeat: &config.repeat,
+            play_count_threshold_percent: &config.play_count_threshold_percent,
+            media_read_buffer_mb: &config.media_read_buffer_mb,
+            ffmpeg_enabled: &config.ffmpeg_enabled,
+            pipewire_auto_mix: &config.pipewire_auto_mix,
+        }
+    }
+}
 
 file_group!(Interface, InterfaceView {
     language => ui_language: String,
@@ -189,6 +276,7 @@ struct VisualizationsView<'a> {
 #[serde(default, deny_unknown_fields)]
 pub(super) struct FileConfig {
     library: Library,
+    #[serde(deserialize_with = "deserialize_playback")]
     playback: Playback,
     interface: Interface,
     logging: Logging,

@@ -8,6 +8,11 @@ an error. If the next entry cannot be opened at natural end, playback stops.
 Use `rivu playback` for play, pause, resume (`play` without a track ID), stop,
 next, previous, seek, volume, shuffle, and repeat controls. Seek positions are
 seconds; CLI volume is an integer percentage from 0 to 100.
+Volume uses a dB-linear control curve rather than linear amplitude: 0% mutes,
+50% is -30 dB, and 100% leaves the source gain unchanged. Keyboard `[` and `]`
+change the level by five percentage points (3 dB away from mute). See
+link:01_config.adoc#volume[Volume configuration] for fractional values and
+migration of saved volume.
 
 The desktop Playback panel shows the current title, artist and album, playback
 progress, transport controls, and volume. Transport controls and volume stay on

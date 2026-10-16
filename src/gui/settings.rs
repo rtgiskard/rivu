@@ -880,11 +880,7 @@ impl Settings {
             self.draft.scan_max_depth.to_string(),
             cx,
         );
-        self.set_value(
-            Field::Volume,
-            format!("{:.0}", self.draft.volume * 100.),
-            cx,
-        );
+        self.set_value(Field::Volume, (self.draft.volume * 100.).to_string(), cx);
         self.set_value(
             Field::PlayCountThreshold,
             self.draft.play_count_threshold_percent.to_string(),
@@ -1082,7 +1078,11 @@ impl Settings {
             .map(PathBuf::from)
             .collect();
         config.scan_max_depth = self.number(Field::ScanMaxDepth, cx)?;
-        config.volume = f32::from(self.number::<u8>(Field::Volume, cx)?) / 100.;
+        let volume_percent = self.number::<f32>(Field::Volume, cx)?;
+        // Keep the exact migrated level when the displayed percentage is unchanged.
+        if volume_percent != self.draft.volume * 100. {
+            config.volume = volume_percent / 100.;
+        }
         config.play_count_threshold_percent = self.number(Field::PlayCountThreshold, cx)?;
         config.log_retention_weeks = self.number(Field::LogRetentionWeeks, cx)?;
         config.media_read_buffer_mb = self.number(Field::MediaReadBuffer, cx)?;

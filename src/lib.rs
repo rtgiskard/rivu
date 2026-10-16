@@ -17,3 +17,4 @@ pub mod response;
 pub mod store;
 pub mod terminal;
 pub(crate) mod tray;
+mod volume;

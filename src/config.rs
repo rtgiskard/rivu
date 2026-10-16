@@ -496,8 +496,8 @@ impl Config {
         );
         ensure!(
             self.volume.is_finite() && (0.0..=1.0).contains(&self.volume),
-            "playback.volume must be finite and between 0.0 and 1.0 (inclusive); got {}",
-            self.volume
+            "playback.volume_percent must be finite and between 0 and 100 (inclusive); got {}",
+            f64::from(self.volume) * 100.
         );
         ensure!(
             self.play_count_threshold_percent.is_finite()
@@ -997,20 +997,107 @@ mod tests {
     }
 
     #[test]
-    fn volume_file_uses_integer_percent_and_rejects_fractional_values() {
+    fn legacy_volume_migration_preserves_gain_across_save_and_reload() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.toml");
-        for percent in [0, 1, 70, 100] {
+        for percent in [0, 1, 50, 100] {
             fs::write(&path, format!("[playback]\nvolume = {percent}\n")).unwrap();
             let config = Config::load(&path).unwrap();
-            assert_eq!(config.volume, percent as f32 / 100.);
+            let expected_gain = percent as f32 / 100.0;
+            assert!((crate::volume::gain(config.volume) - expected_gain).abs() < 1e-6);
             config.save(&path).unwrap();
             let saved: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-            assert_eq!(saved["playback"]["volume"].as_integer(), Some(percent));
+            let playback = saved["playback"].as_table().unwrap();
+            assert!(!playback.contains_key("volume"));
+            assert!(playback.contains_key("volume_percent"));
+            let reloaded = Config::load(&path).unwrap();
+            assert_eq!(reloaded.volume, config.volume);
+            assert!((crate::volume::gain(reloaded.volume) - expected_gain).abs() < 1e-6);
         }
-        for value in ["-1", "101", "0.7", "70.0"] {
-            fs::write(&path, format!("[playback]\nvolume = {value}\n")).unwrap();
-            assert!(Config::load(&path).is_err());
+    }
+
+    #[test]
+    fn canonical_volume_accepts_numeric_percent_without_gain_migration() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        for (percent, level) in [
+            ("0", 0.0),
+            ("0.0", 0.0),
+            ("1", 0.01),
+            ("12.3456789", 0.123456789_f64 as f32),
+            ("50", 0.5),
+            ("100", 1.0),
+            ("100.0", 1.0),
+        ] {
+            fs::write(&path, format!("[playback]\nvolume_percent = {percent}\n")).unwrap();
+            let config = Config::load(&path).unwrap();
+            assert_eq!(config.volume, level);
+            config.save(&path).unwrap();
+            assert_eq!(Config::load(&path).unwrap().volume, level);
+        }
+    }
+
+    #[test]
+    fn volume_percent_round_trip_preserves_continuous_level_precision() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        for volume in [
+            0.0,
+            f32::from_bits(1),
+            f32::MIN_POSITIVE,
+            0.12345679,
+            f32::from_bits(0.5_f32.to_bits() + 1),
+            f32::from_bits(1.0_f32.to_bits() - 1),
+            1.0,
+        ] {
+            let config = Config {
+                volume,
+                ..Config::default()
+            };
+            config.save(&path).unwrap();
+            assert_eq!(Config::load(&path).unwrap().volume, volume);
+        }
+    }
+
+    #[test]
+    fn volume_file_rejects_conflicting_keys_and_invalid_values() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        for keys in [
+            "volume = 50\nvolume_percent = 50",
+            "volume_percent = 0\nvolume = 0",
+        ] {
+            fs::write(&path, format!("[playback]\n{keys}\n")).unwrap();
+            let error = Config::load(&path).unwrap_err();
+            assert!(format!("{error:#}").contains("cannot coexist"));
+        }
+        for (key, invalid_values) in [
+            (
+                "volume",
+                &[
+                    "-1", "101", "256", "0.7", "70.0", "nan", "inf", "-inf", "'50'", "true", "[]",
+                ][..],
+            ),
+            (
+                "volume_percent",
+                &[
+                    "-1",
+                    "-0.000001",
+                    "100.000001",
+                    "101",
+                    "nan",
+                    "inf",
+                    "-inf",
+                    "'50'",
+                    "true",
+                    "[]",
+                ][..],
+            ),
+        ] {
+            for value in invalid_values {
+                fs::write(&path, format!("[playback]\n{key} = {value}\n")).unwrap();
+                assert!(Config::load(&path).is_err(), "accepted {key} = {value}");
+            }
         }
     }
 
@@ -1252,13 +1339,13 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.toml");
         for contents in [
-            "playback.volume = [",
-            "playback.volume = 'loud'",
-            "playback.volume = -0.01",
-            "playback.volume = 1.01",
-            "playback.volume = nan",
-            "playback.volume = inf",
-            "playback.volume = -inf",
+            "playback.volume_percent = [",
+            "playback.volume_percent = 'loud'",
+            "playback.volume_percent = -0.01",
+            "playback.volume_percent = 100.01",
+            "playback.volume_percent = nan",
+            "playback.volume_percent = inf",
+            "playback.volume_percent = -inf",
             "playback.play_count_threshold_percent = -0.01",
             "playback.play_count_threshold_percent = 100.0",
             "playback.play_count_threshold_percent = nan",
