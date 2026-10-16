@@ -87,6 +87,12 @@ and images from hidden or removed panels are retired through the window
 lifecycle, without requiring those panels to paint again. Window closure
 releases the remaining retained images.
 
+The GUI staging frame releases optional density, spatial-spectrum, metrics, and
+band-energy payloads as their last display demand disappears. Unchanged demand
+keeps its buffers; losing all analysis demand also discards the shared spectrum
+copy. Restoring demand waits for a publication with the current display token
+and generation rather than restoring hidden results.
+
 After the window is destroyed, the application switches the graphical platform
 to headless mode, releasing the display connection and its shared GPU context.
 Reopening reconnects to the original display before creating a new window;

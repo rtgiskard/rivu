@@ -400,6 +400,34 @@ impl FullWaveformRequest {
     }
 }
 
+fn retain_analysis_staging(
+    frame: &mut crate::analysis::AnalysisFrame,
+    demand: crate::analysis::DisplayDemand,
+) {
+    if !demand.enabled {
+        *frame = crate::analysis::AnalysisFrame::default();
+        return;
+    }
+    // Release optional allocations immediately, without waiting for the worker's
+    // next publication or discarding data still used by another visible panel.
+    let visualizer = &mut frame.visualizer;
+    if !demand.visualizer.stereo_density {
+        visualizer.demand.stereo_density = false;
+        visualizer.density = Vec::new();
+        visualizer.correlation = None;
+        visualizer.balance = None;
+        visualizer.side_ratio = None;
+    }
+    if !demand.visualizer.spatial_spectrum {
+        visualizer.demand.spatial_spectrum = false;
+        visualizer.spatial = Vec::new();
+    }
+    if !demand.visualizer.band_energy {
+        visualizer.demand.band_energy = false;
+        visualizer.band_rms = [0.0; 3];
+    }
+}
+
 pub(super) struct GuiApp {
     pub(super) i18n: Arc<Localizer>,
     localized_text: HashMap<String, SharedString>,
@@ -1444,6 +1472,7 @@ impl GuiApp {
                 .spectrum_db
                 .clone_from(&frame.spectrum_db);
             self.analysis_staging.sequence = frame.sequence;
+            self.analysis_staging.display_token = frame.display_token;
             self.analysis_staging.sample_rate = frame.sample_rate;
             self.analysis_staging.sample_time = frame.sample_time;
             self.analysis_staging.generation = frame.generation;
@@ -1617,13 +1646,18 @@ impl GuiApp {
             let spectrum_changed = self.visuals.configure(&self.state.system.config);
             self.analysis_needs_refresh |=
                 spectrum_restored || spectrum_changed || audio_visualizer_changed;
+        } else {
+            // Reopening must wait for a current display-demand publication, not
+            // refresh a retained pre-hide frame with the same sequence.
+            self.analysis_needs_refresh = false;
         }
         self.analysis_worker_enabled = analysis_visible;
-        self.handle
-            .set_display_demand(crate::analysis::DisplayDemand {
-                enabled: analysis_visible,
-                visualizer: demand,
-            });
+        let demand = crate::analysis::DisplayDemand {
+            enabled: analysis_visible,
+            visualizer: demand,
+        };
+        retain_analysis_staging(&mut self.analysis_staging, demand);
+        self.handle.set_display_demand(demand);
         self.sync_waveform(cx);
     }
 
@@ -2310,7 +2344,171 @@ impl GuiApp {
 
 #[cfg(test)]
 mod state_tests {
-    use super::{BrowserFocus, ListFocus, visible_list_focus};
+    use super::{BrowserFocus, ListFocus, retain_analysis_staging, visible_list_focus};
+    use crate::analysis::{
+        AnalysisFrame, AnalysisSettings, AnalysisWorker, DisplayDemand, TapFrame, VisualizerDemand,
+    };
+    use parking_lot::RwLock;
+    use ringbuf::traits::Producer;
+    use std::{
+        sync::{Arc, atomic::Ordering},
+        thread,
+        time::{Duration, Instant},
+    };
+
+    #[test]
+    fn analysis_staging_releases_hidden_styles_and_waits_for_restored_publication() {
+        let shared = Arc::new(RwLock::new(AnalysisFrame::default()));
+        let worker = AnalysisWorker::new(shared.clone()).unwrap();
+        worker.configure(AnalysisSettings {
+            fps: 60,
+            fft_size: 512,
+            window: crate::config::AnalysisWindow::None,
+        });
+        worker.set_playback_active(true);
+        let all = DisplayDemand {
+            enabled: true,
+            visualizer: VisualizerDemand {
+                stereo_density: true,
+                spatial_spectrum: true,
+                band_energy: true,
+            },
+        };
+        worker.control.set_display_demand(all);
+        let mut producer = worker.producer();
+        let mut publish = |amplitude: f32| {
+            let token = worker.control.display_token();
+            let sequence = shared.read().sequence;
+            for index in 0..512 {
+                let sample = amplitude * (std::f32::consts::TAU * index as f32 / 32.0).sin();
+                assert!(
+                    producer
+                        .try_push(TapFrame {
+                            samples: [sample, -sample * 0.5],
+                            epoch: worker.control.epoch.load(Ordering::Acquire),
+                            demand_token: token,
+                            gap: false,
+                        })
+                        .is_ok()
+                );
+            }
+            worker.control.request_frame();
+            let deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                let frame = shared.read();
+                if frame.sequence > sequence
+                    && frame.display_token == token
+                    && frame.settings.is_some()
+                {
+                    break frame.clone();
+                }
+                drop(frame);
+                assert!(Instant::now() < deadline, "analysis publication timed out");
+                thread::sleep(Duration::from_millis(1));
+            }
+        };
+        let publication = publish(0.5);
+        assert!(
+            publication
+                .visualizer
+                .density
+                .iter()
+                .any(|value| *value > 0.0)
+        );
+        assert!(!publication.visualizer.spatial.is_empty());
+        assert!(
+            publication
+                .visualizer
+                .band_rms
+                .iter()
+                .any(|value| *value > 0.0)
+        );
+
+        for survivor in [
+            VisualizerDemand {
+                stereo_density: true,
+                ..Default::default()
+            },
+            VisualizerDemand {
+                spatial_spectrum: true,
+                ..Default::default()
+            },
+            VisualizerDemand {
+                band_energy: true,
+                ..Default::default()
+            },
+        ] {
+            let mut staging = publication.clone();
+            let frequencies = staging.frequencies_hz.as_ptr();
+            let spectrum = staging.spectrum_db.as_ptr();
+            let density = staging.visualizer.density.as_ptr();
+            let spatial = staging.visualizer.spatial.as_ptr();
+            retain_analysis_staging(
+                &mut staging,
+                DisplayDemand {
+                    enabled: true,
+                    visualizer: survivor,
+                },
+            );
+            assert_eq!(staging.frequencies_hz.as_ptr(), frequencies);
+            assert_eq!(staging.spectrum_db.as_ptr(), spectrum);
+            assert_eq!(staging.generation, publication.generation);
+            assert_eq!(staging.visualizer.demand, survivor);
+            if survivor.stereo_density {
+                assert_eq!(staging.visualizer.density.as_ptr(), density);
+                assert_eq!(
+                    staging.visualizer.correlation,
+                    publication.visualizer.correlation
+                );
+            } else {
+                assert_eq!(staging.visualizer.density.capacity(), 0);
+                assert_eq!(staging.visualizer.correlation, None);
+                assert_eq!(staging.visualizer.balance, None);
+                assert_eq!(staging.visualizer.side_ratio, None);
+            }
+            if survivor.spatial_spectrum {
+                assert_eq!(staging.visualizer.spatial.as_ptr(), spatial);
+            } else {
+                assert_eq!(staging.visualizer.spatial.capacity(), 0);
+            }
+            assert_eq!(
+                staging.visualizer.band_rms,
+                if survivor.band_energy {
+                    publication.visualizer.band_rms
+                } else {
+                    [0.0; 3]
+                }
+            );
+
+            retain_analysis_staging(&mut staging, DisplayDemand::default());
+            assert_eq!(staging.frequencies_hz.capacity(), 0);
+            assert_eq!(staging.spectrum_db.capacity(), 0);
+            assert_eq!(staging.visualizer.density.capacity(), 0);
+            assert_eq!(staging.visualizer.spatial.capacity(), 0);
+            assert_eq!(staging.settings, None);
+            retain_analysis_staging(&mut staging, all);
+            assert_eq!(staging.settings, None);
+            assert_eq!(staging.visualizer.demand, VisualizerDemand::default());
+            assert_eq!(staging.visualizer.density.capacity(), 0);
+            assert_eq!(staging.visualizer.spatial.capacity(), 0);
+        }
+
+        worker.control.set_display_demand(DisplayDemand::default());
+        worker.control.set_display_demand(all);
+        assert_ne!(publication.display_token, worker.control.display_token());
+        let restored = publish(0.0);
+        assert!(restored.generation > publication.generation);
+        assert_eq!(restored.visualizer.demand, all.visualizer);
+        assert!(
+            restored
+                .visualizer
+                .density
+                .iter()
+                .all(|value| *value == 0.0)
+        );
+        assert_eq!(restored.visualizer.band_rms, [0.0; 3]);
+        assert_eq!([restored.rms_left, restored.rms_right], [0.0; 2]);
+    }
 
     #[test]
     fn keyboard_focus_uses_only_visible_lists_after_tab_switch() {
