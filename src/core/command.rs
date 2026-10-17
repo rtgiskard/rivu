@@ -369,12 +369,13 @@ impl Core {
                 }
             }
             Command::Device { name } => {
-                self.output_settings_request = self.output_settings_request.wrapping_add(1);
+                let request = self.output_settings_request.wrapping_add(1);
                 self.audio(AudioCommand::OutputSettings {
-                    request: self.output_settings_request,
+                    request,
                     device: name.clone(),
                     auto_mix: self.state.system.config.pipewire_auto_mix,
                 })?;
+                self.output_settings_request = request;
                 self.state.system.selected_device = name;
             }
             Command::Analysis { enabled } => {
@@ -400,6 +401,9 @@ impl Core {
                     .map(|root| library::logical_path(root))
                     .collect::<Result<_>>()?;
                 Arc::make_mut(&mut config).library_roots = roots;
+                // No other producer can consume these slots while Core persists.
+                // Reject a busy batch before committing any desired settings.
+                self.engine.ensure_command_capacity(6)?;
                 let ffmpeg_status = if !config.ffmpeg_enabled {
                     "disabled".to_owned()
                 } else {
@@ -424,7 +428,7 @@ impl Core {
                 self.state.system.ffmpeg_status = ffmpeg_status;
                 self.state.system.config = config;
                 tracing::info!("configuration_updated");
-                self.output_settings_request = self.output_settings_request.wrapping_add(1);
+                let request = self.output_settings_request.wrapping_add(1);
                 let config = &self.state.system.config;
                 (|| -> Result<()> {
                     self.audio(AudioCommand::StillMode(config.still_mode))?;
@@ -433,12 +437,13 @@ impl Core {
                     self.audio(AudioCommand::AnalysisSettings(config.as_ref().into()))?;
                     self.audio(AudioCommand::FfmpegEnabled(config.ffmpeg_enabled))?;
                     self.audio(AudioCommand::OutputSettings {
-                        request: self.output_settings_request,
+                        request,
                         device: config.output_device.clone(),
                         auto_mix: config.pipewire_auto_mix,
                     })
                 })()
                 .context("Configuration saved, but audio application failed")?;
+                self.output_settings_request = request;
             }
             Command::MprisStatus { status } => {
                 self.state.system.mpris_status = status;

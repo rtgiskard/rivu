@@ -178,10 +178,7 @@ impl Core {
         }
     }
     pub(in crate::core) fn audio(&self, command: AudioCommand) -> Result<()> {
-        self.engine
-            .commands
-            .send(command)
-            .context("Audio worker unavailable")
+        self.engine.send(command)
     }
     pub(in crate::core) fn track(&self, id: i64) -> Result<Track> {
         self.store.track(id)?.context("Track not found")

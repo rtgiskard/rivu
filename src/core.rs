@@ -573,23 +573,17 @@ impl Runtime {
                         "initial_load_completed"
                     );
                 }
-                let _ = core
-                    .engine
-                    .commands
-                    .send(AudioCommand::StillMode(core.state.system.config.still_mode));
-                let _ = core
-                    .engine
-                    .commands
-                    .send(AudioCommand::Volume(core.state.playback.volume));
-                let _ = core.engine.commands.send(AudioCommand::FfmpegEnabled(
+                let _ = core.audio(AudioCommand::StillMode(core.state.system.config.still_mode));
+                let _ = core.audio(AudioCommand::Volume(core.state.playback.volume));
+                let _ = core.audio(AudioCommand::FfmpegEnabled(
                     core.state.system.config.ffmpeg_enabled,
                 ));
-                let _ = core.engine.commands.send(AudioCommand::OutputSettings {
+                let _ = core.audio(AudioCommand::OutputSettings {
                     request: core.output_settings_request,
                     device: core.state.system.selected_device.clone(),
                     auto_mix: core.state.system.config.pipewire_auto_mix,
                 });
-                let _ = core.engine.commands.send(AudioCommand::AnalysisSettings(
+                let _ = core.audio(AudioCommand::AnalysisSettings(
                     core.state.system.config.as_ref().into(),
                 ));
                 core.run(receiver, shutdown_receiver, &worker_control);

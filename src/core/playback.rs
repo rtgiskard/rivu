@@ -359,16 +359,16 @@ impl Core {
         result
     }
     pub(in crate::core) fn stop_playback(&mut self, natural: bool) -> Result<()> {
-        let commands = self.engine.commands.clone();
-        let events = self.engine.events.clone();
+        let stop = self.engine.stop_request();
         let generation = self.generation;
         let mut bookkeeping = Ok(());
-        let snapshot = audio::stop_and_snapshot(&commands, &events, |event| {
-            if bookkeeping.is_ok() {
-                bookkeeping = self.retiring_audio_event(generation, event);
-            }
-        })
-        .map(Some);
+        let snapshot = stop
+            .wait(|event| {
+                if bookkeeping.is_ok() {
+                    bookkeeping = self.retiring_audio_event(generation, event);
+                }
+            })
+            .map(Some);
         self.finish_playback(snapshot, natural, bookkeeping)
     }
 

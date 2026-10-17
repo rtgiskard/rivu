@@ -46,6 +46,9 @@ impl Core {
         config
             .output_device
             .clone_from(&self.state.system.selected_device);
+        if still_mode {
+            self.engine.ensure_command_capacity(1)?;
+        }
         self.write_config(&config)?;
         // A saved change remains the desired configuration even if audio is gone.
         self.state.system.config = Arc::new(config);

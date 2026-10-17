@@ -11,8 +11,9 @@
 //! output remains bounded by PipeWire's playback timestamps.
 //!
 //! Lifecycle events use bounded worker-thread backpressure; progress is best
-//! effort. Consumers must keep draining events while submitting commands.
-//! Shutdown cancels blocked event delivery without involving the output callback.
+//! effort. Ordinary command admission never waits for capacity, allowing the
+//! consumer to return to draining events after an explicit queue-full error.
+//! Stop/snapshot drains events while waiting; shutdown cancels blocked delivery.
 //!
 //! Scheduling rounds admit at most 64 commands, including coalesced seeks and
 //! read-ahead barriers. A refill submits only the initially vacant ring prefix
@@ -143,7 +144,7 @@ pub fn waveform(
 use crate::analysis::{AnalysisControl, AnalysisFrame, AnalysisSettings, AnalysisWorker};
 use crate::model::{DecoderHint, MediaInfo};
 use anyhow::{Context, Result};
-use crossbeam_channel::{Receiver, Sender, after, bounded, select};
+use crossbeam_channel::{Receiver, Sender, TrySendError, after, bounded, select};
 use parking_lot::{Mutex, RwLock};
 use std::{
     path::{Path, PathBuf},
@@ -220,7 +221,7 @@ pub enum AudioEvent {
 }
 
 pub struct AudioEngine {
-    pub commands: Sender<AudioCommand>,
+    commands: Sender<AudioCommand>,
     pub events: Receiver<AudioEvent>,
     pub analysis: Arc<RwLock<AnalysisFrame>>,
     pub(crate) analysis_control: Arc<AnalysisControl>,
@@ -264,17 +265,67 @@ impl AudioEngine {
             shutdown: Mutex::new(Some(shutdown)),
         })
     }
+    /// Admit an ordinary command without waiting on a worker blocked by events.
+    /// Success means queued, not applied; a full queue explicitly rejects it.
     pub fn send(&self, command: AudioCommand) -> Result<()> {
         if matches!(command, AudioCommand::Shutdown) {
             self.shutdown.lock().take();
             return Ok(());
         }
-        self.commands.send(command).context("Audio worker stopped")
+        self.commands
+            .try_send(command)
+            .map_err(|error| match error {
+                TrySendError::Full(_) => {
+                    anyhow::anyhow!("Audio command queue is full; command not queued")
+                }
+                TrySendError::Disconnected(_) => anyhow::anyhow!("Audio worker stopped"),
+            })
+    }
+
+    /// Core is the sole ordinary producer. Until its next send, the worker can
+    /// only free slots, so a complete batch can be admitted after persistence.
+    pub(crate) fn ensure_command_capacity(&self, count: usize) -> Result<()> {
+        let capacity = self
+            .commands
+            .capacity()
+            .expect("audio commands are bounded");
+        anyhow::ensure!(
+            count <= capacity.saturating_sub(self.commands.len()),
+            "Audio command queue has insufficient capacity; commands not queued"
+        );
+        Ok(())
+    }
+
+    pub(crate) fn stop_request(&self) -> AudioStop {
+        AudioStop {
+            commands: self.commands.clone(),
+            events: self.events.clone(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn replace_commands(
+        &mut self,
+        commands: Sender<AudioCommand>,
+    ) -> Sender<AudioCommand> {
+        std::mem::replace(&mut self.commands, commands)
+    }
+}
+
+/// A stop-only handle cannot submit ordinary commands behind Core's preflight.
+pub(crate) struct AudioStop {
+    commands: Sender<AudioCommand>,
+    events: Receiver<AudioEvent>,
+}
+
+impl AudioStop {
+    pub(crate) fn wait(self, observe: impl FnMut(AudioEvent)) -> Result<(u64, f64)> {
+        stop_and_snapshot(&self.commands, &self.events, observe)
     }
 }
 
 /// Preserve command order while freeing reverse-channel capacity until stop is acknowledged.
-pub(crate) fn stop_and_snapshot(
+fn stop_and_snapshot(
     commands: &Sender<AudioCommand>,
     events: &Receiver<AudioEvent>,
     mut observe: impl FnMut(AudioEvent),

@@ -753,6 +753,18 @@ shutdown rather than cancelling acknowledgements when shutdown starts.
 Clients allow 120 seconds for each non-Watch response read, including Hello;
 persistent sessions keep the same limit as one-shot requests.
 
+Audio admission has a separate 64-command queue and 128 worker-event slots.
+Ordinary audio admission never waits for capacity: a full queue returns an
+unsuccessful acknowledgement explicitly stating that the command was not queued.
+There is no automatic replay. Core can therefore keep draining critical lifecycle
+events, whose worker-thread delivery retains backpressure; progress remains
+best-effort. Configure checks capacity for its complete audio batch, and Still
+Mode for its single command, before persisting or publishing the change. Device
+request identity advances only after admission. A worker disconnect after settings
+are saved retains the committed desired configuration and reports audio-application
+failure. Ordered stop acknowledgement keeps draining events while waiting;
+shutdown independently cancels blocked event delivery.
+
 A timeout or client disconnect is not command cancellation: an operation
 already queued at the core may still execute. An unsuccessful acknowledgement
 caused by a response timeout therefore does not prove the requested mutation

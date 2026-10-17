@@ -894,7 +894,7 @@ fn relocation_rejects_database_identity_drift_after_fresh_verification() {
 fn recording_audio(core: &mut Core) -> Receiver<AudioCommand> {
     let (commands, receive) = bounded(64);
     let (record, recorded) = crossbeam_channel::unbounded();
-    let idle_commands = std::mem::replace(&mut core.engine.commands, commands);
+    let idle_commands = core.engine.replace_commands(commands);
     thread::spawn(move || {
         while let Ok(command) = receive.recv() {
             let snapshot = match &command {
@@ -909,6 +909,224 @@ fn recording_audio(core: &mut Core) -> Receiver<AudioCommand> {
         drop(idle_commands);
     });
     recorded
+}
+
+#[test]
+fn saturated_audio_admission_preserves_state_requests_events_and_command_order() {
+    let (_directory, mut core) = fixture();
+    let (commands, receive) = bounded(64);
+    core.engine.replace_commands(commands.clone());
+    core.command(Command::Device {
+        name: Some("accepted-output".into()),
+    })
+    .unwrap();
+    core.save(true).unwrap();
+    for index in 1..64 {
+        commands.send(AudioCommand::Volume(index as f32)).unwrap();
+    }
+    let (events, event_receive) = bounded(128);
+    for index in 0..128 {
+        events
+            .send(AudioEvent::OutputSettingsFailed {
+                request: core.output_settings_request,
+                device: core.state.system.selected_device.clone(),
+                auto_mix: core.state.system.config.pipewire_auto_mix,
+                message: format!("accepted failure {index}"),
+            })
+            .unwrap();
+    }
+    core.engine.events = event_receive;
+    let saved = std::fs::read(&core.state.system.config_path).unwrap();
+    let generation = core.generation;
+    let (finished, completion) = bounded(1);
+    let worker = thread::spawn(move || {
+        let result = core.command(Command::Device {
+            name: Some("rejected-output".into()),
+        });
+        finished
+            .send((core, result))
+            .unwrap_or_else(|_| panic!("Core result receiver stopped"));
+    });
+    let (mut core, result) = match completion.recv_timeout(Duration::from_secs(2)) {
+        Ok(result) => result,
+        Err(error) => {
+            // Unblock the old blocking-send implementation before failing, so
+            // this deterministic regression never leaves a parked Core thread.
+            drop(receive);
+            worker.join().unwrap();
+            panic!("saturated Core command did not return: {error}");
+        }
+    };
+    worker.join().unwrap();
+    assert!(result.unwrap_err().to_string().contains("not queued"));
+    assert_eq!(core.output_settings_request, 1);
+    assert_eq!(core.generation, generation);
+    assert_eq!(
+        core.state.system.selected_device.as_deref(),
+        Some("accepted-output")
+    );
+    assert_eq!(
+        std::fs::read(&core.state.system.config_path).unwrap(),
+        saved
+    );
+
+    core.state.playback.position = 2.0;
+    let volume = core.state.playback.volume;
+    let seek_revision = core.state.playback.seek_revision;
+    for (command, status) in [
+        (Command::Volume { value: 0.2 }, PlaybackStatus::Playing),
+        (Command::Pause, PlaybackStatus::Playing),
+        (Command::Resume, PlaybackStatus::Paused),
+        (Command::Seek { seconds: 5.0 }, PlaybackStatus::Playing),
+    ] {
+        core.state.playback.status = status;
+        assert!(
+            core.command(command)
+                .unwrap_err()
+                .to_string()
+                .contains("not queued")
+        );
+        assert_eq!(core.state.playback.status, status);
+        assert_eq!(core.state.playback.position, 2.0);
+        assert_eq!(core.state.playback.seek_revision, seek_revision);
+        assert_eq!(core.state.playback.volume, volume);
+    }
+    assert_eq!(receive.len(), 64);
+    assert_eq!(core.engine.events.len(), 128);
+    assert!(matches!(
+        receive.try_recv().unwrap(),
+        AudioCommand::OutputSettings { request: 1, device: Some(device), .. }
+            if device == "accepted-output"
+    ));
+    for index in 1..64 {
+        assert!(matches!(
+            receive.try_recv().unwrap(),
+            AudioCommand::Volume(value) if value == index as f32
+        ));
+    }
+    assert!(receive.try_recv().is_err());
+    for index in 0..128 {
+        let event = core.engine.events.try_recv().unwrap();
+        core.audio_event(event).unwrap();
+        assert_eq!(
+            core.state.system.last_error,
+            Some(format!("accepted failure {index}"))
+        );
+    }
+    core.command(Command::Device {
+        name: Some("next-accepted-output".into()),
+    })
+    .unwrap();
+    assert!(matches!(
+        receive.try_recv().unwrap(),
+        AudioCommand::OutputSettings { request: 2, .. }
+    ));
+    assert!(
+        receive.try_recv().is_err(),
+        "rejected commands must not be replayed"
+    );
+    drop(receive);
+    assert!(core.command(Command::Volume { value: 0.3 }).is_err());
+    assert_eq!(core.state.playback.volume, volume);
+}
+
+#[test]
+fn busy_audio_configuration_rejects_the_whole_batch_before_persistence() {
+    for available in [0, 1, 5, 6] {
+        let (_directory, mut core) = fixture();
+        core.state
+            .system
+            .config
+            .save(&core.state.system.config_path)
+            .unwrap();
+        let baseline = core.state.clone();
+        let saved = std::fs::read(&core.state.system.config_path).unwrap();
+        let (commands, receive) = bounded(64);
+        for index in 0..64 - available {
+            commands.send(AudioCommand::Volume(index as f32)).unwrap();
+        }
+        core.engine.replace_commands(commands);
+        let mut config = core.state.system.config.as_ref().clone();
+        config.volume = 0.25;
+        config.shuffle = true;
+        config.still_mode = true;
+        config.ffmpeg_enabled = false;
+        config.output_device = Some("configured-output".into());
+        let result = core.command(Command::Configure {
+            config: Arc::new(config.clone()),
+        });
+        if available < 6 {
+            assert!(result.unwrap_err().to_string().contains("not queued"));
+            assert_eq!(*core.state.system.config, *baseline.system.config);
+            assert_eq!(core.state.playback.volume, baseline.playback.volume);
+            assert_eq!(core.state.playback.shuffle, baseline.playback.shuffle);
+            assert_eq!(
+                core.state.system.selected_device,
+                baseline.system.selected_device
+            );
+            assert_eq!(core.output_settings_request, 0);
+            assert_eq!(
+                std::fs::read(&core.state.system.config_path).unwrap(),
+                saved
+            );
+            assert_eq!(receive.len(), 64 - available);
+            if available == 0 {
+                assert!(
+                    core.update_gui_config(GuiConfigChange::ToggleStillMode)
+                        .is_err()
+                );
+                assert_eq!(*core.state.system.config, *baseline.system.config);
+                assert_eq!(
+                    std::fs::read(&core.state.system.config_path).unwrap(),
+                    saved
+                );
+                assert_eq!(receive.len(), 64);
+            }
+        } else {
+            result.unwrap();
+            assert_eq!(*core.state.system.config, config);
+            assert_eq!(
+                Config::load(&core.state.system.config_path).unwrap(),
+                config
+            );
+            assert_eq!(core.output_settings_request, 1);
+            assert_eq!(receive.len(), 64);
+        }
+        for index in 0..64 - available {
+            assert!(matches!(
+                receive.try_recv().unwrap(),
+                AudioCommand::Volume(value) if value == index as f32
+            ));
+        }
+        if available == 6 {
+            assert!(matches!(
+                receive.try_recv().unwrap(),
+                AudioCommand::StillMode(true)
+            ));
+            assert!(matches!(
+                receive.try_recv().unwrap(),
+                AudioCommand::MediaReadBuffer(_)
+            ));
+            assert!(matches!(
+                receive.try_recv().unwrap(),
+                AudioCommand::Volume(0.25)
+            ));
+            assert!(matches!(
+                receive.try_recv().unwrap(),
+                AudioCommand::AnalysisSettings(_)
+            ));
+            assert!(matches!(
+                receive.try_recv().unwrap(),
+                AudioCommand::FfmpegEnabled(false)
+            ));
+            assert!(matches!(
+                receive.try_recv().unwrap(),
+                AudioCommand::OutputSettings { request: 1, device: Some(device), .. }
+                    if device == "configured-output"
+            ));
+        }
+        assert!(receive.try_recv().is_err());
+    }
 }
 
 fn navigation_fixture(status: PlaybackStatus) -> (tempfile::TempDir, Core) {
@@ -2822,9 +3040,9 @@ fn settings_failed_save_retry_merges_against_latest_runtime() {
 #[test]
 fn settings_saved_audio_failure_keeps_committed_desired_configuration() {
     let (_directory, mut core) = fixture();
-    let (commands, receiver) = bounded(1);
+    let (commands, receiver) = bounded(64);
     drop(receiver);
-    core.engine.commands = commands;
+    core.engine.replace_commands(commands);
     let baseline = core.state.system.config.clone();
     let mut draft = baseline.as_ref().clone();
     draft.scan_max_depth = 7;
@@ -7069,9 +7287,9 @@ fn unavailable_output_targets_remain_desired_and_persist_across_entry_points() {
 #[test]
 fn configure_saved_but_disconnected_audio_retains_desired_settings() {
     let (_directory, mut core) = fixture();
-    let (commands, receiver) = bounded(1);
+    let (commands, receiver) = bounded(64);
     drop(receiver);
-    core.engine.commands = commands;
+    core.engine.replace_commands(commands);
     let mut config = core.state.system.config.as_ref().clone();
     config.volume = 0.25;
     config.shuffle = true;
@@ -7129,7 +7347,7 @@ fn still_mode_saved_but_disconnected_audio_retains_desired_settings() {
     let (_directory, mut core) = fixture();
     let (commands, receiver) = bounded(1);
     drop(receiver);
-    core.engine.commands = commands;
+    core.engine.replace_commands(commands);
     // Pending playback settings must be incorporated in the same saved snapshot.
     core.state.playback.volume = 0.25;
     core.state.playback.shuffle = true;
