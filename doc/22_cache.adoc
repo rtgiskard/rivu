@@ -59,6 +59,13 @@ bound. Library payloads and failure markers share a least-recently-used bound of
 sixteen pages or current demand, including unverified ancestry, whichever is
 larger. Expansion and selection identities are retained separately from row payloads.
 
+Album member counts, pages, and whole-album queue actions use the existing
+`tracks_album_members` index: exact direct-parent directory and effective album
+title select the member range, followed by disc/track/title/ID ordering. They do
+not scan a directory's descendant paths or merge child directories into an album;
+root `/` remains its own direct-parent key. Unicode-whitespace-only album titles
+remain ineligible, and member search filters only that album's indexed range.
+
 Authoritative result counts are separate from retained scroll geometry. A data
 revision forgets counts and drops obsolete pages, failures, and positional pins,
 but retains nonempty geometry until a current result supplies its real total.
