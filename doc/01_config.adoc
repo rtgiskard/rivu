@@ -293,10 +293,12 @@ effect when starting the core; the running core does not watch the file.
 |Tokyo Night Day |`tokyo_night_day`
 |===
 
-Rivu Dark is Rivu's own preset, distinct from the upstream-named themes.
+Rivu Dark is Rivu's own blue-gray preset, with subdued structural separators,
+neutral hover backgrounds, and restrained blue selection and primary-action fills.
 Tokyo Night Day is a light theme. The Tokyo Night presets map colors from
 https://github.com/folke/tokyonight.nvim[Tokyo Night] to Rivu's interface roles;
-other applications' theme-file formats are not imported. Unknown theme
+text and selection colors receive local contrast adaptations without changing
+their hue families. Other applications' theme-file formats are not imported. Unknown theme
 names are configuration errors. The selected theme does not change visualization
 backgrounds, signal palettes, canvas labels, cursor colors, or album artwork.
 

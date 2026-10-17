@@ -773,7 +773,7 @@ pub(crate) fn menu_item_style(
         .border_color(gpui::transparent_black())
         .bg(rgb(theme.panel).alpha(0.0))
         .rounded_sm()
-        .hover(|style| style.bg(rgb(theme.selected_hover)))
+        .hover(|style| style.bg(rgb(theme.highlight)))
         .child(div().flex_1().min_w_0().whitespace_normal().child(label))
 }
 

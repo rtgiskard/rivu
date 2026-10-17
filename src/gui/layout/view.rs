@@ -307,11 +307,17 @@ impl GuiApp {
                             .text_xs()
                             .when(!self.layouts.current().locked, |view| view.cursor_move())
                             .bg(rgb(if active == panel_id {
-                                theme.highlight
+                                theme.selected
                             } else {
                                 theme.panel
                             }))
-                            .hover(|style| style.bg(rgb(theme.highlight)))
+                            .hover(|style| {
+                                style.bg(rgb(if active == panel_id {
+                                    theme.selected_hover
+                                } else {
+                                    theme.highlight
+                                }))
+                            })
                             .text_color(rgb(if active == panel_id {
                                 theme.text
                             } else {
