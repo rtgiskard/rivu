@@ -1,0 +1,462 @@
+use super::*;
+use crate::response::QueryRevisions;
+use crate::terminal::tests::*;
+use ratatui::backend::TestBackend;
+
+#[test]
+fn snapshot_theme_changes_recolor_main_help_and_details_without_changing_content() {
+    for overlay in 0..3 {
+        let mut tui = TuiState::new(TuiSnapshot::default(), Arc::new(Localizer::new("en-US")));
+        tui.ui.show_help = overlay == 1;
+        if overlay == 2 {
+            tui.ui.details = Some(Details {
+                text: "Track details".into(),
+                wrapped: Vec::new(),
+                width: 0,
+                scroll: 0,
+                max_scroll: 0,
+            });
+        }
+        let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
+        terminal
+            .draw(|frame| draw(frame, &tui.snapshot, &mut tui.ui))
+            .unwrap();
+        let content = terminal_text(&terminal);
+        for theme in crate::theme::Theme::ALL {
+            let mut next = tui.snapshot.clone();
+            next.system.ui_theme = theme;
+            next.system.revision += 1;
+            tui.apply_snapshot(next);
+            terminal
+                .draw(|frame| draw(frame, &tui.snapshot, &mut tui.ui))
+                .unwrap();
+            assert_eq!(terminal_text(&terminal), content);
+            let colors = TerminalColors::new(theme);
+            let cell = &terminal.backend().buffer()[(79, 11)];
+            assert_eq!(cell.bg, colors.bg);
+            if overlay == 2 {
+                assert_eq!(terminal.backend().buffer()[(0, 1)].fg, colors.text);
+            }
+        }
+    }
+}
+
+#[test]
+fn query_tail_preserves_graphemes_and_keeps_input_cursor_visible() {
+    let query = "春风e\u{301}夜航";
+    for language in ["en-US", "zh-CN"] {
+        let mut search = LibrarySearch {
+            query: query.into(),
+            ..LibrarySearch::default()
+        };
+        let i18n = Localizer::new(language);
+        for width in [1, 8, 18, 24, 60] {
+            let mut terminal = Terminal::new(TestBackend::new(width, 8)).unwrap();
+            terminal
+                .draw(|frame| {
+                    draw_search(
+                        frame,
+                        frame.area(),
+                        &mut search,
+                        &i18n,
+                        TerminalColors::new(crate::theme::Theme::default()),
+                    )
+                })
+                .unwrap();
+            let prefix = format!("  {} › ", i18n.text("terminal-search"));
+            if width as usize > Span::raw(prefix.as_str()).width() {
+                assert!(terminal.backend().cursor_visible());
+                let cursor = terminal.backend().cursor_position();
+                assert!(cursor.x < width);
+                assert_eq!(cursor.y, 0);
+            }
+            assert_eq!(search.query, query);
+        }
+        search.focus = SearchFocus::Results;
+        let mut terminal = Terminal::new(TestBackend::new(60, 8)).unwrap();
+        terminal
+            .draw(|frame| {
+                draw_search(
+                    frame,
+                    frame.area(),
+                    &mut search,
+                    &i18n,
+                    TerminalColors::new(crate::theme::Theme::default()),
+                )
+            })
+            .unwrap();
+        assert!(!terminal.backend().cursor_visible());
+    }
+    assert_eq!(query_tail(query, 5), ("e\u{301}夜航", 5));
+    assert_eq!(query_tail(query, 1), ("", 0));
+}
+
+#[test]
+fn metadata_columns_clip_whole_graphemes_without_shifting_duration() {
+    let title = "春风e\u{301}👩‍💻夜航".repeat(12);
+    let mut track = track(0);
+    track.title = title;
+    track.duration = Some(243.0);
+    track.favorite = true;
+    track.missing = true;
+    for width in [30, 60, 80, 110, 140] {
+        let line = BrowserColumns::new(width, true, std::iter::once(RowContent::track(&track)))
+            .line(
+                RowContent::track(&track),
+                TerminalColors::new(crate::theme::Theme::default()),
+            );
+        assert_eq!(line.width(), width as usize);
+        let text = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(text.ends_with("4:03"), "{text}");
+        assert!(text.contains('…'));
+        assert!(text.contains('') && text.contains(''));
+        assert!(!text.contains('\u{fffd}'));
+    }
+    assert_eq!(cell_text("春风", 3, false), "春…");
+    assert_eq!(cell_text("e\u{301}夜航", 4, false), "e\u{301}夜…");
+}
+
+#[test]
+fn browser_modes_leave_all_rows_below_the_count_header_for_items() {
+    let i18n = Localizer::new("en-US");
+    for mode in [
+        BrowserMode::Tracks,
+        BrowserMode::UnfocusedTracks,
+        BrowserMode::Labels,
+    ] {
+        let mut page = PagedList::default();
+        page.insert(0, 2, 2, vec![track(0), track(1)]);
+        let mut terminal = Terminal::new(TestBackend::new(80, 3)).unwrap();
+        terminal
+            .draw(|frame| {
+                draw_paged_list(
+                    frame,
+                    frame.area(),
+                    "Items".into(),
+                    &mut page,
+                    |track| RowContent::track(track),
+                    &i18n,
+                    BrowserStyle {
+                        mode,
+                        colors: TerminalColors::new(crate::theme::Theme::default()),
+                    },
+                );
+            })
+            .unwrap();
+        let text = terminal_text(&terminal);
+        let lines = text.lines().collect::<Vec<_>>();
+        assert!(lines[1].contains("row-0"), "{text}");
+        assert!(lines[2].contains("row-1"), "{text}");
+    }
+}
+
+#[test]
+fn compact_attributes_align_loaded_rows_and_keep_marker_gutter_stable() {
+    let mut first = track(0);
+    first.title = "first-title".into();
+    first.codec = "FLAC".into();
+    first.duration = Some(243.0);
+    let mut second = track(1);
+    second.artist = "longer artist".into();
+    second.codec = "PCM_S16LE".into();
+    second.duration = Some(6003.0);
+    let columns = BrowserColumns::new(
+        80,
+        true,
+        [&first, &second].into_iter().map(RowContent::track),
+    );
+    let text = |line: Line<'_>| {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
+    };
+    let colors = TerminalColors::new(crate::theme::Theme::default());
+    let first_text = text(columns.line(RowContent::track(&first), colors));
+    let second_text = text(columns.line(RowContent::track(&second), colors));
+    assert!(first_text.contains("flac") && !first_text.contains("FLAC"));
+    assert!(second_text.contains("pcm_s16le"));
+    assert_eq!(first_text.find("flac"), second_text.find("pcm_s16le"));
+    assert!(first_text.ends_with("4:03"));
+    assert!(second_text.ends_with("100:03"));
+    let gutter_width = Span::raw(first_text.split("first-title").next().unwrap()).width();
+    for marked in [false, true] {
+        first.favorite = marked;
+        first.missing = marked;
+        let mut row = RowContent::track(&first);
+        if marked {
+            row.marker = "󰐊";
+        }
+        let line = columns.line(row, colors);
+        assert_eq!(line.width(), 80);
+        let rendered = text(line);
+        let title_start = rendered.find("first-title").unwrap();
+        let gutter = &rendered[..title_start];
+        assert_eq!(Span::raw(gutter).width(), gutter_width);
+        assert!(gutter.ends_with("  "));
+    }
+}
+
+#[test]
+fn tiny_browser_rows_preserve_title_without_horizontal_overflow() {
+    let mut track = track(0);
+    track.title = "tiny".into();
+    track.artist = "artist ".repeat(20);
+    track.album = "album ".repeat(20);
+    track.codec = "PCM_S16LE".into();
+    track.duration = Some(6003.0);
+    for width in 0..=100 {
+        let line = BrowserColumns::new(width, true, std::iter::once(RowContent::track(&track)))
+            .line(
+                RowContent::track(&track),
+                TerminalColors::new(crate::theme::Theme::default()),
+            );
+        assert_eq!(line.width(), width as usize);
+        let text = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        if width >= 9 {
+            assert!(text.contains("tiny"), "width {width}: {text}");
+        }
+    }
+}
+
+#[test]
+fn playback_markers_follow_occurrence_and_status_not_selection() {
+    let mut state = TuiSnapshot::default();
+    state.queue.current_id = Some(17);
+    let mut page = PagedList::default();
+    page.set_viewport(2);
+    page.insert(
+        0,
+        2,
+        2,
+        vec![
+            QueueRow {
+                id: 17,
+                track_id: 0,
+                position: 0,
+                offset: 0,
+                track: track(0),
+            },
+            QueueRow {
+                id: 18,
+                track_id: 0,
+                position: 1,
+                offset: 1,
+                track: track(0),
+            },
+        ],
+    );
+    page.selection.select(Some(1));
+    for (status, symbol) in [
+        (PlaybackStatus::Playing, "󰐊"),
+        (PlaybackStatus::Paused, "󰏤"),
+        (PlaybackStatus::Stopped, "󰓛"),
+    ] {
+        state.playback.status = status;
+        let mut terminal = Terminal::new(TestBackend::new(80, 5)).unwrap();
+        terminal
+            .draw(|frame| {
+                draw_queue(
+                    frame,
+                    frame.area(),
+                    &state,
+                    &mut page,
+                    &Localizer::new("en-US"),
+                    TerminalColors::new(state.system.ui_theme),
+                )
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(0, 1)].symbol(), symbol);
+        assert_eq!(buffer[(0, 2)].symbol(), " ");
+        let colors = TerminalColors::new(state.system.ui_theme);
+        assert_eq!(buffer[(0, 1)].fg, colors.accent);
+        assert_ne!(buffer[(0, 1)].bg, colors.selected);
+        assert_eq!(buffer[(0, 2)].bg, colors.selected);
+        assert_eq!(page.selected().unwrap().id, 18);
+    }
+}
+
+#[test]
+fn localized_playlist_rendering_preserves_user_metadata() {
+    let mut detail = PlaylistDetail {
+        playlist_id: 1,
+        name: "我的列表".into(),
+        entries: PagedList::default(),
+        entry_anchor: None,
+        selected_entry_id: None,
+    };
+    detail.entries.set_viewport(4);
+    detail.entries.insert(
+        0,
+        4,
+        1,
+        vec![PlaylistEntryRow {
+            position: 0,
+            offset: 0,
+            id: 1,
+            track_id: 1,
+            artist: "原始艺人".into(),
+            title: "Original title".into(),
+            album: "原始专辑".into(),
+            duration: Some(243.0),
+            codec: "FLAC".into(),
+            favorite: false,
+            missing: true,
+        }],
+    );
+    for language in ["en-US", "zh-CN"] {
+        let i18n = Localizer::new(language);
+        let mut terminal = Terminal::new(TestBackend::new(80, 8)).unwrap();
+        terminal
+            .draw(|frame| {
+                draw_playlist_detail(
+                    frame,
+                    frame.area(),
+                    &mut detail,
+                    &i18n,
+                    TerminalColors::new(crate::theme::Theme::default()),
+                );
+            })
+            .unwrap();
+        let text = terminal_text(&terminal);
+        for metadata in ["我的列表", "原始艺人", "Original title"] {
+            assert!(text.contains(metadata), "{text}");
+        }
+    }
+}
+
+#[test]
+fn queue_mutations_relocate_selected_occurrence_and_clamp_deleted_selection() {
+    let mut state = TuiSnapshot::default();
+    state.queue.total = 12;
+    state.system.page_size = 3;
+    let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::new("en-US")));
+    tui.ui.queue.selection.select(Some(8));
+    load_queue(&mut tui.ui, &state);
+    state.queue.total = 11;
+    state.queue.revision = 1;
+    tui.apply_snapshot(state.clone());
+    assert!(tui.ui.queue.pages.is_empty());
+    let request = tui.ui.query_request(&state).unwrap();
+    assert_eq!(request.kind, QueryKind::QueueSelection(1008));
+    assert!(
+        matches!(request.query(), Query::QueueEntries { queue_ids, query: None } if queue_ids == vec![1008])
+    );
+    let relocated = QueryResult {
+        revisions: QueryRevisions {
+            queue: 1,
+            ..QueryRevisions::default()
+        },
+        view: ViewResponse::QueueEntries(vec![queue_row(2, 1008)]),
+    };
+    assert!(tui.ui.apply_query(&state, &request, Ok(relocated)));
+    assert_eq!(tui.ui.queue.selection.selected(), Some(2));
+    let request = tui.ui.query_request(&state).unwrap();
+    assert_eq!(request.offset, 0);
+    let mut page = response(&request, state.queue.total);
+    let ViewResponse::QueuePage(rows) = &mut page.view else {
+        unreachable!()
+    };
+    rows.rows[2] = queue_row(2, 1008);
+    tui.ui.apply_query(&state, &request, Ok(page));
+    state.queue.total = 2;
+    state.queue.revision = 2;
+    tui.apply_snapshot(state.clone());
+    let request = tui.ui.query_request(&state).unwrap();
+    assert_eq!(request.kind, QueryKind::QueueSelection(1008));
+    tui.ui.apply_query(
+        &state,
+        &request,
+        Ok(QueryResult {
+            revisions: QueryRevisions {
+                queue: 2,
+                ..QueryRevisions::default()
+            },
+            view: ViewResponse::QueueEntries(Vec::new()),
+        }),
+    );
+    assert_eq!(tui.ui.queue.selection.selected(), Some(1));
+    load_queue(&mut tui.ui, &state);
+    state.queue.total = 0;
+    state.queue.revision = 3;
+    tui.apply_snapshot(state.clone());
+    assert_eq!(tui.ui.queue.selection.selected(), None);
+    assert!(tui.ui.query_request(&state).is_none());
+    assert!(matches!(
+        tui.ui.key_action(KeyEvent::from(KeyCode::Enter), &state),
+        KeyAction::Ignored
+    ));
+    let mut terminal = Terminal::new(TestBackend::new(60, 6)).unwrap();
+    terminal
+        .draw(|frame| {
+            draw_queue(
+                frame,
+                frame.area(),
+                &state,
+                &mut tui.ui.queue,
+                &tui.ui.i18n,
+                TerminalColors::new(state.system.ui_theme),
+            )
+        })
+        .unwrap();
+}
+
+pub(in crate::terminal) fn render_view(ui: &mut UiState) -> String {
+    let height = match ui.view {
+        View::Search(_) => 6,
+        _ => 5,
+    };
+    let mut terminal = Terminal::new(TestBackend::new(60, height)).unwrap();
+    terminal
+        .draw(|frame| {
+            let area = frame.area();
+            match &mut ui.view {
+                View::Search(search) => draw_search(
+                    frame,
+                    area,
+                    search,
+                    &ui.i18n,
+                    TerminalColors::new(crate::theme::Theme::default()),
+                ),
+                View::Tree(tree) => draw_tree(
+                    frame,
+                    area,
+                    tree,
+                    &ui.i18n,
+                    TerminalColors::new(crate::theme::Theme::default()),
+                ),
+                View::Playlists(playlists) => draw_playlists(
+                    frame,
+                    area,
+                    playlists,
+                    &ui.i18n,
+                    TerminalColors::new(crate::theme::Theme::default()),
+                ),
+                View::PlaylistDetail { detail, .. } => draw_playlist_detail(
+                    frame,
+                    area,
+                    detail,
+                    &ui.i18n,
+                    TerminalColors::new(crate::theme::Theme::default()),
+                ),
+                View::Queue => panic!("expected a queried view"),
+            }
+        })
+        .unwrap();
+    terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect()
+}
