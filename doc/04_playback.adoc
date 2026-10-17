@@ -234,8 +234,8 @@ use its window controls and menus instead.
 
 Bare Left/Right are reserved for container navigation, not seeking. Home/End
 select the first/last item in lists supporting row navigation. Enter opens a
-directory or plays the current object. Delete removes selected Queue or playlist
-entries, never media files; the bare `d` key is not a removal shortcut.
+directory or plays the current object. `Remove entries` (Delete) removes selected
+Queue or playlist entries, never media files; bare `d` is not a removal shortcut.
 Undeclared Ctrl/Alt/Shift/Super combinations do not inherit bare-key actions.
 Application shortcuts and text editing use Ctrl, not Cmd/Super aliases.
 
@@ -254,16 +254,17 @@ link:01_config.adoc#_desktop_keyboard_navigation[desktop control navigation].
 == Terminal client
 
 `/` searches Library, `t` browses directories, and `P` lists playlists.
-Up/Down and PageUp/PageDown navigate; Home/End select the first/last row.
-In Search, Tab or Shift+Tab switches between the query and results; Enter from
-the query focuses results, and Enter on a result plays it. The query keeps the
-insertion point visible when text exceeds its available width. Playback keys apply
-to results, not the query editor. Enter on a directory opens it; Enter on a
-directory track plays it. Right opens playlist entries; Enter plays a selected
-playlist, playlist track, or queue occurrence. In playlist details, `a` enqueues
-the selected track. Delete removes the selected Queue occurrence or playlist entry,
-never media files. Moving the selection does not change the playing occurrence;
-its marker distinguishes playing, paused, and stopped states.
+Navigation, playback, removal, and help keys: <<keyboard-controls,Keyboard controls>>.
+
+In Search, `Tab`/`Shift+Tab` switches between the query and results. `Enter` from
+the query focuses results; on a result it plays the track. The query keeps the
+insertion point visible when text exceeds its width and owns printable characters,
+including `?`. Playback keys and help apply after focusing results.
+
+`Right` opens playlist entries; `Enter` plays a selected playlist, track, or queue
+occurrence. In playlist details, `a` enqueues the selected track. Moving selection
+does not change the playing occurrence; its marker distinguishes playing, paused,
+and stopped states.
 
 Track lists show titles with compact artist, album, codec, and duration information.
 Artist and album widths adapt to loaded content within bounded widths; secondary
@@ -283,12 +284,11 @@ available while browsing. Shuffle and repeat use dim icons when disabled and
 highlighted icons when enabled; single-track repeat has its own icon. Notifications
 retain explanatory text: warnings and failures have distinct symbols, and ordinary
 playback updates do not replace a still-visible failure. Shortcut hints are not
-shown during browsing; `?` or F1 opens help for the current view. In the query editor,
-`?` remains search text; Tab focuses results, where `?` opens help.
+shown during browsing; open help to view the current bindings.
 
 Left/Backspace goes to the parent directory; Left/Esc leaves playlist details.
-Esc returns from search, the tree, or the playlist catalog to Queue. `q` exits
-outside Search without stopping the core.
+Esc returns from search, the tree, or the playlist catalog to Queue.
+`Close client` (`q`) exits outside Search without stopping the core.
 Ctrl-C exits from every terminal view, including the query editor, help, details,
 and initial connection screen, without stopping the core. While initially connecting,
 `q` also exits the loading screen. `SIGINT` and `SIGTERM` close only the terminal

@@ -75,23 +75,24 @@ Open menus use `Up` and `Down` to move between available actions (wrapping at
 the ends), and `Enter` to choose one. `Escape` or `Left` returns from a submenu;
 at the top level it closes the menu without triggering a playback shortcut.
 
-The application menu groups Settings, Layouts, and Visualizations first, followed
-by Keyboard shortcuts and About, then Close window and Quit application.
-Open Keyboard shortcuts from this menu to view the desktop bindings; `Escape`
-or the close button dismisses the list. `F1` and `?` do not open or close it.
+Open Keyboard shortcuts from the application menu to view desktop bindings;
+`Escape` or the close button dismisses the list. `F1` and `?` do not open or close it.
 
 Dialogs keep `Tab` traversal inside their controls. In Settings, tab to a page
-button and press `Enter` to change pages, then tab through its fields and the
-Apply/Discard actions. Dropdown triggers also open with `Enter` or `Space`;
-`Up`/`Down` choose a candidate, `Enter` accepts, and `Escape` closes the list.
-Text editing and input-method composition retain their own keys; cancelling
-preedit does not also dismiss the containing dialog. Closing a dialog restores
-the invoking control when it is still present, otherwise the layout receives
-focus. Playback shortcuts apply to the layout, not to focused editors or buttons.
-Disabled controls are skipped during focus traversal. Dropdown navigation and
-confirmation accept unmodified keys only; Tab/Shift+Tab closes the dropdown and
-moves focus. Escape cancels preedit, then an open dropdown, then leaves a focused
-editor, before a later Escape closes the containing dialog.
+button and press `Enter` to change pages, then tab through its fields and
+Apply/Discard actions.
+
+Open dropdowns with `Enter` or `Space`. `Up`/`Down` selects with wraparound;
+`PageUp`/`PageDown` moves by the visible row count, clamping at either end without
+scrolling the settings underneath. `Enter` or, in non-editable dropdowns, `Space`
+accepts. Navigation and confirmation require unmodified keys; `Tab`/`Shift+Tab`
+closes the dropdown and moves focus.
+
+Editors and input methods retain their own keys. `Escape` cancels preedit, closes
+an open dropdown, leaves the focused editor, then closes the dialog on successive
+presses. Closing a dialog restores its invoking control if present, otherwise the
+layout receives focus. Playback shortcuts apply to the layout, not focused
+editors or buttons.
 Playback keys: link:04_playback.adoc#keyboard-controls[Keyboard controls].
 
 
@@ -201,10 +202,7 @@ Interface presents these sections together on one scrollable page, without
 separate sidebar subpages. Panel-specific artwork settings remain a focused editor.
 Logging is application-wide, including headless operation, and remains in `[logging]`.
 Visualizations contains shared settings and the four audio-data views.
-In an open dropdown, Up/Down moves the highlight with wraparound;
-PageUp/PageDown moves by the visible row count and clamps at the first or last
-option without scrolling the settings underneath. Enter or Space accepts an
-option in non-editable dropdowns, and Escape closes the dropdown.
+Dropdown keys: <<_desktop_keyboard_navigation,Desktop keyboard navigation>>.
 The system tray switch takes effect after restarting the graphical host, not
 merely reopening its window. Media read buffering applies to future source opens,
 including full waveform scans; it does not reopen the current track.
@@ -231,8 +229,6 @@ contract above still applies. Discard closes the editor and drops unsubmitted
 edits, but does not cancel an Apply already sent to Core. Its later completion
 cannot replace the draft or feedback of a reopened editor.
 
-Adding a library root, toggling a Library column, or toggling waveform seeking
-does not overwrite playback or output-device settings.
 Interface → Layout includes Layout snapping and Layout grid spacing. These save
 `interface.layout_snap_enabled` (default `true`) and `interface.layout_snap_grid_px` (default `16`,
 integer `1`–`64` logical pixels before interface scaling) in `config.toml`.
