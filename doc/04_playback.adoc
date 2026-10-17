@@ -226,19 +226,25 @@ GUI and TUI share playback keys outside text editors, menus and dialogs:
 |[ / ] |Lower/raise volume by five percentage points
 |r / s |Cycle repeat mode / toggle shuffle
 |Ctrl+Left / Ctrl+Right |Seek backward/forward five seconds
-|Ctrl+Home / Ctrl+End |Seek to the track's start/end
 |===
+
+The TUI additionally supports `Ctrl+Home` / `Ctrl+End` to seek to the track's
+start/end. The GUI does not bind these keys or the TUI's bare `q` and `t` actions;
+use its window controls and menus instead.
 
 Bare Left/Right are reserved for container navigation, not seeking. Home/End
 select the first/last item in lists supporting row navigation. Enter opens a
 directory or plays the current object. Delete removes selected Queue or playlist
 entries, never media files; the bare `d` key is not a removal shortcut.
 Undeclared Ctrl/Alt/Shift/Super combinations do not inherit bare-key actions.
+Application shortcuts and text editing use Ctrl, not Cmd/Super aliases.
 
-F1 opens context-sensitive help. The desktop also offers *Keyboard shortcuts*
-in the application menu. Help can be scrolled with Up/Down, PageUp/PageDown and
-Home/End; F1 or Escape closes it without operating the list underneath.
-F5 retries failed loading in the current browsable view without rescanning files.
+In the TUI, F1 or `?` opens context-sensitive help outside text editors.
+In the GUI, help opens only through *Keyboard shortcuts* in the application menu.
+Equivalent keys and paired operations share a help row; paired descriptions follow
+the displayed key order. Help can be scrolled with Up/Down, PageUp/PageDown and
+Home/End. Escape closes GUI help; F1, `?` or Escape closes TUI help, without
+operating the list underneath.
 Editors retain their text and editing keys, including spaces, `R` and `?`.
 In the GUI, a focused button owns Enter/Space instead of also controlling playback.
 Escape cancels only the innermost interaction or leaves the focused editor before
@@ -274,7 +280,7 @@ list while details are open.
 The bottom area keeps playback position, duration, volume, and playback modes
 available while browsing. Contextual key hints yield to temporary notifications;
 warnings and failures include distinct symbols, and ordinary playback updates do
-not replace a still-visible failure. F1 opens the complete help for the current view.
+not replace a still-visible failure. F1 or `?` opens the complete help for the current view.
 
 Left/Backspace goes to the parent directory; Left/Esc leaves playlist details.
 Esc returns from search, the tree, or the playlist catalog to Queue. `q` exits

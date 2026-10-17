@@ -220,10 +220,6 @@ impl DirectoryTree {
             .retain(|(candidate, _), page| candidate != key || !page.failed);
     }
 
-    pub(in crate::gui) fn retry_failed(&mut self) {
-        self.pages.retain(|_, page| !page.failed);
-    }
-
     pub(in crate::gui) fn request_pending(&self, key: &TreeBranch, generation: u64) -> bool {
         self.branches
             .get(key)

@@ -459,7 +459,7 @@ separate error message. A new scan shows progress again.
 
 Recent tracks keeps its own selection, independent of Library, using the
 link:02_library.adoc#_desktop_selection_and_directory_tree[shared selection rules].
-Ctrl/Cmd+A selects all matching recent tracks when this panel has focus. Sorting
+Ctrl+A selects all matching recent tracks when this panel has focus. Sorting
 preserves selected track identities; refreshes discard selections that no longer exist.
 
 Right-click a track for the shared track actions, including batch Favorite and
@@ -530,8 +530,9 @@ automatically while scrolling; there are no page numbers or manual load-more
 controls. Expand a GUI directory to browse its children. Collapsing it preserves
 descendant expansion choices
 for reopening. Loading more rows does not clear selections or metadata drafts.
-Failed GUI loads offer a retry action; F5 retries the current browsable view in
-both frontends. Pending keyboard navigation is cancelled when library data,
+Failed GUI loads offer a retry button that reloads data without rescanning files;
+TUI loads can be requested again by leaving and reopening the view.
+Pending keyboard navigation is cancelled when library data,
 filters, or batch size change; an old row index is never applied to the refreshed
 collection.
 GUI row-navigation and selection keys belong to the explicitly targeted visible

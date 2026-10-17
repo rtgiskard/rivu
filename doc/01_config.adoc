@@ -72,6 +72,11 @@ Open menus use `Up` and `Down` to move between available actions (wrapping at
 the ends), and `Enter` to choose one. `Escape` or `Left` returns from a submenu;
 at the top level it closes the menu without triggering a playback shortcut.
 
+The application menu groups Settings, Layouts, and Visualizations first, followed
+by Keyboard shortcuts and About, then Close window and Quit application.
+Open Keyboard shortcuts from this menu to view the desktop bindings; `Escape`
+or the close button dismisses the list. `F1` and `?` do not open or close it.
+
 Dialogs keep `Tab` traversal inside their controls. In Settings, tab to a page
 button and press `Enter` to change pages, then tab through its fields and the
 Apply/Discard actions. Dropdown triggers also open with `Enter` or `Space`;
@@ -84,7 +89,7 @@ Disabled controls are skipped during focus traversal. Dropdown navigation and
 confirmation accept unmodified keys only; Tab/Shift+Tab closes the dropdown and
 moves focus. Escape cancels preedit, then an open dropdown, then leaves a focused
 editor, before a later Escape closes the containing dialog.
-Playback, help and retry keys: link:04_playback.adoc#keyboard-controls[Keyboard controls].
+Playback keys: link:04_playback.adoc#keyboard-controls[Keyboard controls].
 
 
 === Language

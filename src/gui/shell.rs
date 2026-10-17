@@ -569,6 +569,7 @@ impl Render for GuiApp {
                                 }),
                         ),
                     )
+                    .child(components::menu_separator())
                     .child(menu_item(
                         "app-keyboard-help",
                         self.tr("shell-keyboard-help"),

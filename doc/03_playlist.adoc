@@ -69,7 +69,7 @@ Hover controls for Play, Favorite, and Remove target only that row, never the gr
 Double-click or Enter plays the
 active track individually. With playlist tracks focused, arrows move the active
 track, Home/End selects the first/last matching entry, Shift+arrows extend a range,
-Ctrl/Cmd+A selects every matching entry, and Delete removes the selection.
+Ctrl+A selects every matching entry, and Delete removes the selection.
 These keys do not target the playlist catalog or steal focus from inputs,
 dialogs, or another panel.
 

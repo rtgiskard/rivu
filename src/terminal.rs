@@ -1337,11 +1337,6 @@ impl UiState {
                 self.mark_local_change();
                 return KeyAction::Ignored;
             }
-            Action::Retry => {
-                self.cancel_query();
-                self.mark_local_change();
-                return KeyAction::Ignored;
-            }
             Action::Close => return KeyAction::Quit,
             Action::Details => {
                 self.open_details();
@@ -1885,18 +1880,13 @@ fn resolve_key(key: KeyEvent, context: KeyboardContext) -> Option<Action> {
         KeyCode::Backspace => "backspace",
         KeyCode::Delete => "delete",
         KeyCode::F(1) => "f1",
-        KeyCode::F(5) => "f5",
         _ => return None,
     };
     keyboard::resolve(name, modifiers, context)
 }
 
-fn help_bindings(context: KeyboardContext) -> impl Iterator<Item = &'static keyboard::Binding> {
-    keyboard::bindings(context).chain(keyboard::bindings(KeyboardContext::TuiHelp).filter(
-        move |binding| {
-            !keyboard::bindings(context).any(|existing| std::ptr::eq(existing, *binding))
-        },
-    ))
+fn help_bindings(context: KeyboardContext) -> impl Iterator<Item = keyboard::HelpRow> {
+    keyboard::help_rows(&[context, KeyboardContext::TuiHelp])
 }
 
 mod theme {
@@ -2003,7 +1993,7 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut UiState) {
         let items = help_bindings(context).map(|binding| {
             ListItem::new(Line::from(vec![
                 Span::styled(
-                    format!("{:<22}", binding.label),
+                    format!("{:<22}", binding.label()),
                     Style::default().fg(theme::FOCUS),
                 ),
                 Span::raw(ui.i18n.text(binding.description)),
@@ -3187,10 +3177,18 @@ mod tests {
                 .apply_query(&state, &request, Err("queue unavailable".into()))
         );
         assert!(tui.ui.query_request(&state).is_none());
-        tui.ui.key_action(KeyEvent::from(KeyCode::F(5)), &state);
-        let retried = tui.ui.query_request(&state).unwrap();
-        assert_eq!(retried.stamp, request.stamp);
-        assert_ne!(retried.generation, request.generation);
+        for key in [
+            KeyEvent::from(KeyCode::F(5)),
+            KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
+        ] {
+            tui.ui.key_action(key, &state);
+            assert!(tui.ui.query_request(&state).is_none());
+        }
+        state.queue.revision += 1;
+        tui.apply_snapshot(state.clone());
+        let refreshed = tui.ui.query_request(&state).unwrap();
+        assert_ne!(refreshed.stamp, request.stamp);
+        assert_ne!(refreshed.generation, request.generation);
         load_queue(&mut tui.ui, &state);
     }
 
@@ -3600,7 +3598,7 @@ mod tests {
     }
 
     #[test]
-    fn queue_updates_and_unrelated_keys_do_not_retry_failed_playlist_pages() {
+    fn failed_playlist_pages_ignore_retry_keys_and_recover_after_reopening() {
         let state = query_snapshot();
         let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::new("en-US")));
         tui.ui.view = View::Playlists(PagedList::default());
@@ -3615,13 +3613,28 @@ mod tests {
         assert!(tui.ui.query_request(&next).is_none());
         tui.ui.key_action(KeyEvent::from(KeyCode::Char('?')), &next);
         assert!(tui.ui.query_request(&next).is_none());
-        tui.ui.key_action(KeyEvent::from(KeyCode::F(5)), &next);
-        let retried = tui.ui.query_request(&next).unwrap();
-        assert_eq!(retried.stamp, request.stamp);
-        assert_ne!(retried.generation, request.generation);
+        tui.ui.key_action(KeyEvent::from(KeyCode::Esc), &next);
+        for key in [
+            KeyEvent::from(KeyCode::F(5)),
+            KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
+        ] {
+            tui.ui.key_action(key, &next);
+            assert!(tui.ui.query_request(&next).is_none());
+        }
+        tui.ui.key_action(KeyEvent::from(KeyCode::Esc), &next);
+        assert!(matches!(tui.ui.view, View::Queue));
+        tui.ui.key_action(KeyEvent::from(KeyCode::Char('P')), &next);
+        assert!(matches!(tui.ui.view, View::Playlists(_)));
+        let reopened = tui.ui.query_request(&next).unwrap();
+        assert_eq!(reopened.stamp, request.stamp);
+        assert_ne!(reopened.generation, request.generation);
         assert!(
             !tui.ui
                 .apply_query(&next, &request, Ok(response(&request, 12)))
+        );
+        assert!(
+            tui.ui
+                .apply_query(&next, &reopened, Ok(response(&reopened, 12)))
         );
     }
 
@@ -3876,7 +3889,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_load_retries_and_stale_revisions_do_not_stall_navigation() {
+    fn stale_revisions_do_not_stall_navigation() {
         let mut state = TuiSnapshot::default();
         state.system.page_size = 3;
         let mut ui = UiState {
@@ -3884,14 +3897,6 @@ mod tests {
             ..UiState::default()
         };
         let request = ui.query_request(&state).unwrap();
-        ui.requested = Some(request.clone());
-        assert!(ui.apply_query(&state, &request, Err("connection failed".into())));
-        assert!(ui.query_request(&state).is_none());
-        ui.key_action(KeyEvent::from(KeyCode::F(5)), &state);
-        let retried = ui.query_request(&state).unwrap();
-        assert_eq!(retried.stamp, request.stamp);
-        assert_ne!(retried.generation, request.generation);
-        let request = retried;
         let mut stale = response(&request, 12);
         stale.revisions.playlist = 1;
         ui.requested = Some(request.clone());
@@ -4481,7 +4486,7 @@ mod tests {
                 visible.push_str(&terminal_text(&terminal));
                 ui.key_action(KeyEvent::from(KeyCode::Down), &state);
             }
-            for binding in keyboard::bindings(KeyboardContext::TuiQueue) {
+            for binding in help_bindings(KeyboardContext::TuiQueue) {
                 assert!(
                     visible.contains(ui.i18n.text(binding.description)),
                     "{}",
@@ -4557,7 +4562,6 @@ mod tests {
             KeyCode::Left,
             KeyCode::Right,
             KeyCode::Char('d'),
-            KeyCode::Char('?'),
             KeyCode::Char('R'),
         ] {
             assert!(matches!(

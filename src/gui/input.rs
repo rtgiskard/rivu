@@ -128,13 +128,9 @@ impl Input {
             KeyBinding::new("home", Home, Some("Input")),
             KeyBinding::new("end", End, Some("Input")),
             KeyBinding::new("enter", SubmitInput, Some("Input")),
-            KeyBinding::new("cmd-a", SelectAll, Some("Input")),
             KeyBinding::new("ctrl-a", SelectAll, Some("Input")),
-            KeyBinding::new("cmd-c", Copy, Some("Input")),
             KeyBinding::new("ctrl-c", Copy, Some("Input")),
-            KeyBinding::new("cmd-v", Paste, Some("Input")),
             KeyBinding::new("ctrl-v", Paste, Some("Input")),
-            KeyBinding::new("cmd-x", Cut, Some("Input")),
             KeyBinding::new("ctrl-x", Cut, Some("Input")),
         ]);
     }

@@ -776,7 +776,7 @@ impl GuiApp {
                                                 LibraryNode::Track(id),
                                                 index,
                                                 modifiers.shift,
-                                                modifiers.control || modifiers.platform,
+                                                modifiers.control,
                                                 cx,
                                             );
                                             if event.click_count() == 2 {
@@ -785,7 +785,7 @@ impl GuiApp {
                                         }
                                         LibraryNode::Directory(path) => {
                                             let modifiers = event.modifiers();
-                                            let multi = modifiers.control || modifiers.platform;
+                                            let multi = modifiers.control;
                                             if !multi && !modifiers.shift {
                                                 let branch = visible
                                                     .branch

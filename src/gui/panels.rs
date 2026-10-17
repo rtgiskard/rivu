@@ -1374,7 +1374,7 @@ impl GuiApp {
                                         this.select_queue_entry(
                                             id,
                                             modifiers.shift,
-                                            modifiers.control || modifiers.platform,
+                                            modifiers.control,
                                             cx,
                                         );
                                         if event.click_count() == 2 {
@@ -2331,7 +2331,7 @@ impl GuiApp {
                                         id,
                                         index,
                                         modifiers.shift,
-                                        modifiers.control || modifiers.platform,
+                                        modifiers.control,
                                         cx,
                                     );
                                     if event.click_count() == 2 {
@@ -3475,7 +3475,7 @@ impl GuiApp {
                                                 this.select_history_track(
                                                     id,
                                                     modifiers.shift,
-                                                    modifiers.control || modifiers.platform,
+                                                    modifiers.control,
                                                     cx,
                                                 );
                                                 if event.click_count() == 2 {

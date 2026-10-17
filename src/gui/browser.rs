@@ -426,11 +426,6 @@ impl LibraryBrowser {
         self.tree.retry(branch);
     }
 
-    pub(super) fn retry_pages(&mut self) {
-        self.tree.retry_failed();
-        self.retry_root_counts();
-    }
-
     pub(super) fn expand_directory(&mut self, branch: &TreeBranch, expanded: bool) -> bool {
         self.invalidate_selection();
         self.cancel_navigation();

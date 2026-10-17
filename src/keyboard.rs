@@ -32,7 +32,6 @@ pub(crate) enum Context {
 pub(crate) enum Action {
     Help,
     Details,
-    Retry,
     Cancel,
     Close,
     Search,
@@ -80,7 +79,6 @@ pub(crate) struct Binding {
 
 const SHIFT: u8 = 1;
 const CONTROL: u8 = 2;
-const PLATFORM: u8 = 4;
 const GUI: u16 = (1 << 7) - 1;
 const GUI_LIST: u16 = GUI & !(1 << Context::Gui as u16);
 const TUI: u16 = ((1 << 13) - 1) & !GUI;
@@ -115,16 +113,31 @@ macro_rules! binding {
     };
 }
 static BINDINGS: &[Binding] = &[
-    binding!("f1", "F1", 0, GUI | TUI | HELP, Help, "keyboard-help"),
-    binding!("i", "i", 0, TUI & !QUERY, Details, "keyboard-details"),
     binding!(
-        "f5",
-        "F5",
+        "f1",
+        "F1",
         0,
-        GUI_LIST & !(1 << Context::GuiHistory as u16) | TUI,
-        Retry,
-        "keyboard-retry"
+        TUI | (1 << Context::TuiHelp as u16),
+        Help,
+        "keyboard-help"
     ),
+    binding!(
+        "?",
+        "?",
+        0,
+        (TUI | (1 << Context::TuiHelp as u16)) & !QUERY,
+        Help,
+        "keyboard-help"
+    ),
+    binding!(
+        "?",
+        "?",
+        SHIFT,
+        (TUI | (1 << Context::TuiHelp as u16)) & !QUERY,
+        Help,
+        "keyboard-help"
+    ),
+    binding!("i", "i", 0, TUI & !QUERY, Details, "keyboard-details"),
     binding!(
         "escape",
         "Escape",
@@ -133,9 +146,8 @@ static BINDINGS: &[Binding] = &[
         Cancel,
         "keyboard-cancel"
     ),
-    binding!("q", "q", 0, GUI | (TUI & !SEARCH), Close, "keyboard-close"),
+    binding!("q", "q", 0, TUI & !SEARCH, Close, "keyboard-close"),
     binding!("f", "Ctrl+F", CONTROL, GUI_LIST, Search, "keyboard-search"),
-    binding!("f", "Cmd+F", PLATFORM, GUI_LIST, Search, "keyboard-search"),
     binding!(
         "/",
         "/",
@@ -144,14 +156,7 @@ static BINDINGS: &[Binding] = &[
         Search,
         "keyboard-library-search"
     ),
-    binding!(
-        "t",
-        "t",
-        0,
-        GUI | (TUI & !SEARCH),
-        Library,
-        "keyboard-library"
-    ),
+    binding!("t", "t", 0, TUI & !SEARCH, Library, "keyboard-library"),
     binding!(
         "p",
         "P",
@@ -161,10 +166,10 @@ static BINDINGS: &[Binding] = &[
         "keyboard-playlists"
     ),
     binding!("space", "Space", 0, PLAYBACK, Toggle, "keyboard-toggle"),
-    binding!("n", "n", 0, PLAYBACK, Next, "keyboard-next"),
-    binding!("p", "p", 0, PLAYBACK, Previous, "keyboard-previous"),
-    binding!("[", "[", 0, PLAYBACK, VolumeDown, "keyboard-volume-down"),
-    binding!("]", "]", 0, PLAYBACK, VolumeUp, "keyboard-volume-up"),
+    binding!("n", "n", 0, PLAYBACK, Next, "keyboard-next-previous"),
+    binding!("p", "p", 0, PLAYBACK, Previous, "keyboard-next-previous"),
+    binding!("[", "[", 0, PLAYBACK, VolumeDown, "keyboard-volume-pair"),
+    binding!("]", "]", 0, PLAYBACK, VolumeUp, "keyboard-volume-pair"),
     binding!("r", "r", 0, PLAYBACK, Repeat, "keyboard-repeat"),
     binding!("s", "s", 0, PLAYBACK, Shuffle, "keyboard-shuffle"),
     binding!(
@@ -173,7 +178,7 @@ static BINDINGS: &[Binding] = &[
         CONTROL,
         PLAYBACK,
         SeekBackward,
-        "keyboard-seek-backward"
+        "keyboard-seek-pair"
     ),
     binding!(
         "right",
@@ -181,35 +186,35 @@ static BINDINGS: &[Binding] = &[
         CONTROL,
         PLAYBACK,
         SeekForward,
-        "keyboard-seek-forward"
+        "keyboard-seek-pair"
     ),
     binding!(
         "home",
         "Ctrl+Home",
         CONTROL,
-        PLAYBACK,
+        TUI & !QUERY,
         SeekStart,
-        "keyboard-seek-start"
+        "keyboard-seek-edges"
     ),
     binding!(
         "end",
         "Ctrl+End",
         CONTROL,
-        PLAYBACK,
+        TUI & !QUERY,
         SeekEnd,
-        "keyboard-seek-end"
+        "keyboard-seek-edges"
     ),
-    binding!("up", "Up", 0, LIST | HELP, Up, "keyboard-up"),
-    binding!("down", "Down", 0, LIST | HELP, Down, "keyboard-down"),
-    binding!("home", "Home", 0, LIST | HELP, First, "keyboard-first"),
-    binding!("end", "End", 0, LIST | HELP, Last, "keyboard-last"),
+    binding!("up", "Up", 0, LIST | HELP, Up, "keyboard-move-pair"),
+    binding!("down", "Down", 0, LIST | HELP, Down, "keyboard-move-pair"),
+    binding!("home", "Home", 0, LIST | HELP, First, "keyboard-list-edges"),
+    binding!("end", "End", 0, LIST | HELP, Last, "keyboard-list-edges"),
     binding!(
         "pageup",
         "PageUp",
         0,
         GUI | (TUI & !QUERY) | HELP,
         PageUp,
-        "keyboard-page-up"
+        "keyboard-page-pair"
     ),
     binding!(
         "pagedown",
@@ -217,7 +222,7 @@ static BINDINGS: &[Binding] = &[
         0,
         GUI | (TUI & !QUERY) | HELP,
         PageDown,
-        "keyboard-page-down"
+        "keyboard-page-pair"
     ),
     binding!(
         "enter",
@@ -293,20 +298,12 @@ static BINDINGS: &[Binding] = &[
         "keyboard-select-all"
     ),
     binding!(
-        "a",
-        "Cmd+A",
-        PLATFORM,
-        MULTI,
-        SelectAll,
-        "keyboard-select-all"
-    ),
-    binding!(
         "up",
         "Shift+Up",
         SHIFT,
         1 << Context::GuiPlaylistTracks as u16,
         ExtendUp,
-        "keyboard-extend-up"
+        "keyboard-extend-pair"
     ),
     binding!(
         "down",
@@ -314,7 +311,7 @@ static BINDINGS: &[Binding] = &[
         SHIFT,
         1 << Context::GuiPlaylistTracks as u16,
         ExtendDown,
-        "keyboard-extend-down"
+        "keyboard-extend-pair"
     ),
     binding!(
         "up",
@@ -322,7 +319,7 @@ static BINDINGS: &[Binding] = &[
         CONTROL | SHIFT,
         1 << Context::GuiPlaylistTracks as u16,
         AddExtendUp,
-        "keyboard-add-extend-up"
+        "keyboard-add-extend-pair"
     ),
     binding!(
         "down",
@@ -330,23 +327,7 @@ static BINDINGS: &[Binding] = &[
         CONTROL | SHIFT,
         1 << Context::GuiPlaylistTracks as u16,
         AddExtendDown,
-        "keyboard-add-extend-down"
-    ),
-    binding!(
-        "up",
-        "Cmd+Shift+Up",
-        PLATFORM | SHIFT,
-        1 << Context::GuiPlaylistTracks as u16,
-        AddExtendUp,
-        "keyboard-add-extend-up"
-    ),
-    binding!(
-        "down",
-        "Cmd+Shift+Down",
-        PLATFORM | SHIFT,
-        1 << Context::GuiPlaylistTracks as u16,
-        AddExtendDown,
-        "keyboard-add-extend-down"
+        "keyboard-add-extend-pair"
     ),
 ];
 
@@ -356,8 +337,63 @@ pub(crate) fn bindings(context: Context) -> impl Iterator<Item = &'static Bindin
         .filter(move |binding| binding.contexts & (1 << context as u16) != 0)
 }
 
+pub(crate) struct HelpRow {
+    pub description: &'static str,
+    contexts: u16,
+}
+
+impl HelpRow {
+    pub fn label(&self) -> String {
+        let mut label = String::new();
+        for (index, binding) in BINDINGS.iter().enumerate() {
+            if binding.contexts & self.contexts == 0
+                || binding.description != self.description
+                || BINDINGS[..index].iter().any(|earlier| {
+                    earlier.contexts & self.contexts != 0
+                        && earlier.description == self.description
+                        && earlier.label == binding.label
+                })
+            {
+                continue;
+            }
+            if let Some((prefix, key)) = binding.label.rsplit_once('+')
+                && label.starts_with(prefix)
+                && label.as_bytes().get(prefix.len()) == Some(&b'+')
+            {
+                label.push('/');
+                label.push_str(key);
+            } else {
+                if !label.is_empty() {
+                    label.push_str(" / ");
+                }
+                label.push_str(binding.label);
+            }
+        }
+        label
+    }
+}
+
+pub(crate) fn help_rows(contexts: &[Context]) -> impl Iterator<Item = HelpRow> + use<> {
+    let contexts = contexts
+        .iter()
+        .fold(0, |mask, context| mask | (1 << *context as u16));
+    BINDINGS
+        .iter()
+        .enumerate()
+        .filter_map(move |(index, binding)| {
+            (binding.contexts & contexts != 0
+                && !BINDINGS[..index].iter().any(|earlier| {
+                    earlier.contexts & contexts != 0 && earlier.description == binding.description
+                }))
+            .then_some(HelpRow {
+                description: binding.description,
+                contexts,
+            })
+        })
+}
+
 pub(crate) fn resolve(key: &str, mut modifiers: Modifiers, context: Context) -> Option<Action> {
-    if modifiers.alt || modifiers.function {
+    if modifiers.alt || modifiers.function || modifiers.platform {
         return None;
     }
     // Crossterm reports uppercase characters, whereas GPUI reports a lowercase
@@ -372,9 +408,7 @@ pub(crate) fn resolve(key: &str, mut modifiers: Modifiers, context: Context) -> 
     } else {
         key
     };
-    let bits = (u8::from(modifiers.shift) * SHIFT)
-        | (u8::from(modifiers.control) * CONTROL)
-        | (u8::from(modifiers.platform) * PLATFORM);
+    let bits = (u8::from(modifiers.shift) * SHIFT) | (u8::from(modifiers.control) * CONTROL);
     bindings(context)
         .find(|binding| binding.key == key && binding.modifiers == bits)
         .map(|binding| binding.action)
@@ -420,6 +454,135 @@ mod tests {
     use super::*;
 
     #[test]
+    fn super_is_not_a_control_alias() {
+        for (key, context, shift, action) in [
+            ("f", Context::GuiLibrary, false, Action::Search),
+            ("a", Context::GuiQueue, false, Action::SelectAll),
+            (
+                "down",
+                Context::GuiPlaylistTracks,
+                true,
+                Action::AddExtendDown,
+            ),
+        ] {
+            assert_eq!(
+                resolve(
+                    key,
+                    Modifiers {
+                        control: true,
+                        shift,
+                        ..Default::default()
+                    },
+                    context
+                ),
+                Some(action)
+            );
+            for control in [false, true] {
+                assert_eq!(
+                    resolve(
+                        key,
+                        Modifiers {
+                            control,
+                            shift,
+                            platform: true,
+                            ..Default::default()
+                        },
+                        context
+                    ),
+                    None
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn terminal_only_actions_do_not_leak_into_desktop_contexts() {
+        for (key, control, action) in [
+            ("q", false, Action::Close),
+            ("t", false, Action::Library),
+            ("home", true, Action::SeekStart),
+            ("end", true, Action::SeekEnd),
+        ] {
+            let modifiers = Modifiers {
+                control,
+                ..Default::default()
+            };
+            for context in [
+                Context::Gui,
+                Context::GuiLibrary,
+                Context::GuiQueue,
+                Context::GuiPlaylists,
+                Context::GuiPlaylistTracks,
+                Context::GuiAlbums,
+                Context::GuiHistory,
+                Context::GuiHelp,
+            ] {
+                assert_eq!(resolve(key, modifiers, context), None);
+            }
+            assert_eq!(resolve(key, modifiers, Context::TuiQueue), Some(action));
+        }
+    }
+
+    #[test]
+    fn help_shortcuts_belong_to_terminal_contexts_only() {
+        for context in [
+            Context::Gui,
+            Context::GuiQueue,
+            Context::GuiLibrary,
+            Context::GuiHelp,
+        ] {
+            assert_eq!(resolve("f1", Modifiers::default(), context), None);
+            for shift in [false, true] {
+                assert_eq!(
+                    resolve(
+                        "?",
+                        Modifiers {
+                            shift,
+                            ..Default::default()
+                        },
+                        context
+                    ),
+                    None
+                );
+            }
+        }
+        for context in [Context::TuiQueue, Context::TuiHelp] {
+            assert_eq!(
+                resolve("f1", Modifiers::default(), context),
+                Some(Action::Help)
+            );
+            for shift in [false, true] {
+                assert_eq!(
+                    resolve(
+                        "?",
+                        Modifiers {
+                            shift,
+                            ..Default::default()
+                        },
+                        context
+                    ),
+                    Some(Action::Help)
+                );
+            }
+            assert_eq!(
+                resolve(
+                    "?",
+                    Modifiers {
+                        control: true,
+                        ..Default::default()
+                    },
+                    context
+                ),
+                None
+            );
+        }
+        assert_eq!(
+            resolve("?", Modifiers::default(), Context::TuiSearchQuery),
+            None
+        );
+    }
+
+    #[test]
     fn shortcuts_require_the_declared_modifier_combination() {
         for context in [Context::GuiQueue, Context::TuiQueue] {
             assert_eq!(resolve("left", Modifiers::default(), context), None);
@@ -460,7 +623,7 @@ mod tests {
                 assert_eq!(resolve("q", modifiers, context), None);
                 assert_eq!(resolve("space", modifiers, context), None);
             }
-            for key in ["d", "?", "R"] {
+            for key in ["d", "R"] {
                 assert_eq!(resolve(key, Modifiers::default(), context), None);
             }
         }

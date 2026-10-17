@@ -149,11 +149,6 @@ impl GuiApp {
         }
         let context = self.keyboard_context();
         let action = keyboard::resolve(key, modifiers, context);
-        if action == Some(Action::Help) {
-            self.open_keyboard_help(window, cx);
-            cx.stop_propagation();
-            return;
-        }
         if action == Some(Action::Search) && self.route_search_key(true, window, cx) {
             cx.stop_propagation();
             return;
@@ -165,11 +160,6 @@ impl GuiApp {
         if self.input_focused(window, cx) {
             return;
         }
-        if action == Some(Action::Retry) {
-            self.retry_keyboard_panel(cx);
-            cx.stop_propagation();
-            return;
-        }
         // Native controls own Enter/Space; playback never also activates behind them.
         if !self.layout_focus.is_focused(window) {
             return;
@@ -177,8 +167,6 @@ impl GuiApp {
         let Some(action) = action else { return };
         match action {
             Action::Cancel => self.request_clear_selection(cx),
-            Action::Close => self.request_close_window(window, cx),
-            Action::Library => self.activate_library(window, cx, false),
             Action::Up | Action::Down => {
                 if let Some(focus) = self.active_list_focus() {
                     self.navigate_list(focus, action == Action::Down, cx);
@@ -247,49 +235,13 @@ impl GuiApp {
         cx.stop_propagation();
     }
 
-    fn retry_keyboard_panel(&mut self, cx: &mut Context<Self>) {
-        let context = self.keyboard_context();
-        match context {
-            KeyContext::GuiLibrary => {
-                self.browser.library.retry_pages();
-                self.request_root_counts(cx);
-            }
-            KeyContext::GuiQueue => {
-                if self.browser.queue.selection_error.is_some() {
-                    self.refresh_queue(cx);
-                }
-                self.retry_view_page(ViewRequestKind::Queue, cx);
-            }
-            KeyContext::GuiPlaylists => self.retry_view_page(ViewRequestKind::Summaries, cx),
-            KeyContext::GuiPlaylistTracks => {
-                if !self.browser.playlists.track_selection.ready()
-                    && !self.browser.playlists.track_selection.busy
-                {
-                    self.refresh_entry_selection(cx);
-                }
-                self.retry_view_page(ViewRequestKind::Entries, cx);
-            }
-            KeyContext::GuiAlbums => {
-                if let Some(albums) = self
-                    .search_panel
-                    .and_then(|id| self.album_browsers.get(&id))
-                    .cloned()
-                {
-                    albums.update(cx, |albums, cx| albums.retry(cx));
-                }
-            }
-            _ => {}
-        }
-        cx.notify();
-    }
-
     fn help_key(&mut self, action: Action, cx: &mut Context<Self>) {
         let handle = &self.help_scroll;
         let mut offset = handle.offset();
         let maximum = handle.max_offset().y.max(px(0.));
         let page = handle.bounds().size.height;
         match action {
-            Action::Help | Action::Cancel => self.keyboard_help = None,
+            Action::Cancel => self.keyboard_help = None,
             Action::Up => offset.y += px(32. * self.state.system.config.ui_scale),
             Action::Down => offset.y -= px(32. * self.state.system.config.ui_scale),
             Action::PageUp => offset.y += page,
@@ -307,7 +259,7 @@ impl GuiApp {
         context: KeyContext,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let rows = keyboard::bindings(context).map(|binding| {
+        let rows = keyboard::help_rows(&[context]).map(|binding| {
             row()
                 .gap_4()
                 .child(
@@ -315,7 +267,7 @@ impl GuiApp {
                         .w(rems(12.))
                         .flex_shrink_0()
                         .text_color(rgb(ACCENT))
-                        .child(binding.label),
+                        .child(binding.label()),
                 )
                 .child(div().flex_1().child(self.tr(binding.description)))
         });
@@ -378,8 +330,8 @@ impl GuiApp {
                     .child(caption(self.tr("shell-keyboard-help-navigation")))
                     .child(
                         row().flex_wrap().gap_2().children(
-                            keyboard::bindings(KeyContext::GuiHelp)
-                                .map(|binding| caption(binding.label)),
+                            keyboard::help_rows(&[KeyContext::GuiHelp])
+                                .map(|binding| caption(binding.label())),
                         ),
                     ),
             )
