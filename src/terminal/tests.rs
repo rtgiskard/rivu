@@ -63,6 +63,72 @@ pub(super) fn terminal_text(terminal: &Terminal<TestBackend>) -> String {
     }
     text
 }
+#[test]
+fn favorite_targets_only_selected_track_and_respects_input_ownership() {
+    let mut state = TuiSnapshot::default();
+    state.queue.current_id = Some(17);
+    let mut ui = UiState::default();
+    ui.queue.set_viewport(2);
+    ui.queue.insert(
+        0,
+        2,
+        2,
+        vec![
+            QueueRow {
+                id: 17,
+                track_id: 41,
+                position: 0,
+                offset: 0,
+                track: track(41),
+            },
+            QueueRow {
+                id: 18,
+                track_id: 42,
+                position: 1,
+                offset: 1,
+                track: track(42),
+            },
+        ],
+    );
+    ui.queue.selection.select(Some(1));
+    for _ in 0..2 {
+        assert!(matches!(
+            ui.key_action(KeyEvent::from(KeyCode::Char('m')), &state),
+            KeyAction::Command(Command::ToggleFavorite { track_ids }) if track_ids == vec![42]
+        ));
+    }
+    for key in [KeyCode::F(1), KeyCode::Char('i')] {
+        ui.key_action(KeyEvent::from(key), &state);
+        assert!(matches!(
+            ui.key_action(KeyEvent::from(KeyCode::Char('m')), &state),
+            KeyAction::Ignored
+        ));
+        ui.key_action(KeyEvent::from(KeyCode::Esc), &state);
+    }
+    ui.open_search();
+    ui.key_action(KeyEvent::from(KeyCode::Char('m')), &state);
+    assert!(matches!(&ui.view, View::Search(search) if search.query == "m"));
+    ui.view = View::Playlists(PagedList::default());
+    assert!(matches!(
+        ui.key_action(KeyEvent::from(KeyCode::Char('m')), &state),
+        KeyAction::Ignored
+    ));
+    let mut tree = LibraryTree::default();
+    tree.entries.set_viewport(1);
+    tree.entries.insert(
+        0,
+        1,
+        1,
+        vec![DirectoryRow::Directory {
+            path: "/music".into(),
+        }],
+    );
+    ui.view = View::Tree(tree);
+    assert!(matches!(
+        ui.key_action(KeyEvent::from(KeyCode::Char('m')), &state),
+        KeyAction::Ignored
+    ));
+}
 
 #[test]
 fn details_capture_full_metadata_and_own_keys_without_mutation() {

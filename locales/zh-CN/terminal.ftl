@@ -41,6 +41,7 @@ terminal-folders = 目录
 terminal-details = 详情
 terminal-favorite = 已收藏
 keyboard-details = 曲目详情
+keyboard-favorite = 切换所选曲目收藏
 keyboard-next-previous = 下一首／上一首
 keyboard-volume-pair = 音量 -/+5%
 keyboard-seek-pair = 后退／前进 5 秒

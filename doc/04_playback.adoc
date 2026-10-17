@@ -280,6 +280,10 @@ occurrence. In playlist details, `a` enqueues the selected track. Moving selecti
 does not change the playing occurrence; its marker distinguishes playing, paused,
 and stopped states.
 
+Press `m` (mark) to toggle the selected track's favorite state in Queue, Library, Search
+results, or playlist entries. It affects only that track, not a directory or an
+entire playlist. In the search query editor, `m` remains text input.
+
 Track lists show titles with compact artist, album, codec, and duration information.
 Artist and album widths adapt to loaded content within bounded widths; secondary
 information hides as the terminal narrows, and titles take priority. Codecs are

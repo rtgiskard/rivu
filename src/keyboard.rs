@@ -32,6 +32,7 @@ pub(crate) enum Context {
 pub(crate) enum Action {
     Help,
     Details,
+    Favorite,
     Cancel,
     Close,
     Search,
@@ -272,6 +273,14 @@ static BINDINGS: &[Binding] = &[
         1 << Context::TuiPlaylistTracks as u16,
         Enqueue,
         "keyboard-enqueue"
+    ),
+    binding!(
+        "m",
+        "m",
+        0,
+        TUI & !(QUERY | (1 << Context::TuiPlaylists as u16)),
+        Favorite,
+        "keyboard-favorite"
     ),
     binding!("tab", "Tab", 0, GUI | SEARCH, Traverse, "keyboard-traverse"),
     binding!(

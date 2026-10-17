@@ -1038,6 +1038,25 @@ impl UiState {
                 self.mark_local_change();
                 return KeyAction::Ignored;
             }
+            Action::Favorite => {
+                let track_id = match &self.view {
+                    View::Queue => self.queue.selected().map(|row| row.track.id),
+                    View::Search(search) => search.results.selected().map(|track| track.id),
+                    View::PlaylistDetail { detail, .. } => {
+                        detail.entries.selected().map(|entry| entry.track_id)
+                    }
+                    View::Tree(tree) => tree.entries.selected().and_then(|entry| match entry {
+                        DirectoryRow::Track(track) => Some(track.id),
+                        DirectoryRow::Directory { .. } => None,
+                    }),
+                    View::Playlists(_) => None,
+                };
+                return track_id.map_or(KeyAction::Ignored, |track_id| {
+                    KeyAction::Command(Command::ToggleFavorite {
+                        track_ids: vec![track_id],
+                    })
+                });
+            }
             Action::Search => return KeyAction::Search,
             Action::Traverse if !matches!(self.view, View::Search(_)) => {
                 self.switch_tab(
