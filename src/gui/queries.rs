@@ -164,6 +164,91 @@ impl ViewRequests {
     }
 }
 
+fn library_search_counts(
+    handle: &crate::core::CoreHandle,
+    request: &browser::SearchCountRequest,
+) -> Option<browser::SearchCountResult> {
+    let browser::SearchCountRequest {
+        query: worker_query,
+        roots,
+        revisions,
+        ticket,
+        ..
+    } = request;
+    let Query::LibraryRootPage {
+        query,
+        favorite,
+        missing,
+        sort,
+        ..
+    } = worker_query
+    else {
+        unreachable!()
+    };
+    let mut matched = 0;
+    let mut total = 0;
+    let mut root_counts = std::collections::HashMap::new();
+    for (index, root) in roots.iter().enumerate() {
+        // Nested configured roots describe the same tracks, not extra occurrences.
+        if roots.iter().enumerate().any(|(other_index, parent)| {
+            index != other_index
+                && root.starts_with(parent)
+                && (root != parent || other_index < index)
+        }) {
+            continue;
+        }
+        let response = handle.query_if_current(
+            Query::LibraryRootPage {
+                path: root.clone(),
+                query: query.clone(),
+                favorite: *favorite,
+                missing: *missing,
+                sort: *sort,
+                offset: 0,
+                limit: 0,
+            },
+            ticket.clone(),
+        );
+        if worker_query.stamp(response.revisions) != worker_query.stamp(*revisions) {
+            return None;
+        }
+        let Ok(ViewResponse::LibraryPage(page)) = response.result else {
+            return None;
+        };
+        let root_matched = page.total;
+        let root_total = if query.is_none() && favorite.is_none() && missing.is_none() {
+            root_matched
+        } else {
+            let response = handle.query_if_current(
+                Query::LibraryRootPage {
+                    path: root.clone(),
+                    query: None,
+                    favorite: None,
+                    missing: None,
+                    sort: *sort,
+                    offset: 0,
+                    limit: 0,
+                },
+                ticket.clone(),
+            );
+            if worker_query.stamp(response.revisions) != worker_query.stamp(*revisions) {
+                return None;
+            }
+            let Ok(ViewResponse::LibraryPage(page)) = response.result else {
+                return None;
+            };
+            page.total
+        };
+        matched += root_matched;
+        total += root_total;
+        root_counts.insert(root.clone(), (root_matched, root_total));
+    }
+    Some(browser::SearchCountResult {
+        totals: (matched, total),
+        roots: root_counts,
+    })
+}
+
 impl GuiApp {
     pub(super) fn apply_playlist_search(&mut self, query: Option<String>, cx: &mut Context<Self>) {
         if self.browser.playlists.summaries().query == query {
@@ -241,7 +326,7 @@ impl GuiApp {
         }
         if !self.browser.requests.directory_workers.is_empty()
             || !self.browser.requests.root_count_workers.is_empty()
-            || self.browser.library.search_count_pending
+            || self.browser.library.search_counts_pending()
         {
             self.browser.library.cancel_pending_reads();
             self.browser.requests.cancel_directory_demand();
@@ -546,140 +631,35 @@ impl GuiApp {
     }
 
     fn request_library_search_counts(&mut self, cx: &mut Context<Self>) {
-        let roots = &self.state.system.config.library_roots;
-        let buffer = self.browser.library.buffer();
-        let query = Query::LibraryRootPage {
-            path: Default::default(),
-            query: buffer.query.clone(),
-            favorite: buffer.favorite,
-            missing: buffer.missing,
-            sort: buffer.sort,
-            offset: 0,
-            limit: 0,
-        };
-        let revisions = self.state.query_revisions(None);
-        let library = &mut self.browser.library;
-        let roots_changed = library.search_count_roots != *roots;
-        let changed = library.search_count_projection.sync(&query, revisions);
-        if roots_changed || changed {
-            if roots_changed {
-                library.search_count_projection.cancel();
-            }
-            library.search_count_roots = roots.clone();
-            library.search_counts = None;
-            library.search_root_counts.clear();
-            library.search_count_failed = false;
+        let (changed, request) = self.browser.library.prepare_search_counts(
+            &self.state.system.config.library_roots,
+            self.state.query_revisions(None),
+        );
+        if changed {
             self.library_search
                 .update(cx, |search, cx| search.clear_counts(cx));
         }
-        if library.search_counts.is_some()
-            || library.search_count_failed
-            || library.search_count_pending
-        {
+        let Some(request) = request else {
             return;
-        }
-        let roots = roots.clone();
-        library.search_count_pending = true;
-        let generation = library.search_count_projection.generation();
-        let ticket = library.search_count_projection.ticket();
+        };
         let handle = self.handle.clone();
-        let worker_query = query.clone();
-        let worker_roots = roots.clone();
         cx.spawn(async move |this, cx| {
-            let counts = cx
+            let (request, counts) = cx
                 .background_executor()
                 .spawn(async move {
-                    // Nested configured roots describe the same tracks, not extra occurrences.
-                    let mut matched = 0;
-                    let mut total = 0;
-                    let mut root_counts = std::collections::HashMap::new();
-                    for (index, root) in worker_roots.iter().enumerate() {
-                        if worker_roots
-                            .iter()
-                            .enumerate()
-                            .any(|(other_index, parent)| {
-                                index != other_index
-                                    && root.starts_with(parent)
-                                    && (root != parent || other_index < index)
-                            })
-                        {
-                            continue;
-                        }
-                        let Query::LibraryRootPage {
-                            query,
-                            favorite,
-                            missing,
-                            sort,
-                            ..
-                        } = &worker_query
-                        else {
-                            unreachable!()
-                        };
-                        let response = handle.query_if_current(
-                            Query::LibraryRootPage {
-                                path: root.clone(),
-                                query: query.clone(),
-                                favorite: *favorite,
-                                missing: *missing,
-                                sort: *sort,
-                                offset: 0,
-                                limit: 0,
-                            },
-                            ticket.clone(),
-                        );
-                        if worker_query.stamp(response.revisions) != worker_query.stamp(revisions) {
-                            return None;
-                        }
-                        let Ok(ViewResponse::LibraryPage(page)) = response.result else {
-                            return None;
-                        };
-                        let root_matched = page.total;
-                        let root_total =
-                            if query.is_none() && favorite.is_none() && missing.is_none() {
-                                root_matched
-                            } else {
-                                let response = handle.query_if_current(
-                                    Query::LibraryRootPage {
-                                        path: root.clone(),
-                                        query: None,
-                                        favorite: None,
-                                        missing: None,
-                                        sort: *sort,
-                                        offset: 0,
-                                        limit: 0,
-                                    },
-                                    ticket.clone(),
-                                );
-                                if worker_query.stamp(response.revisions)
-                                    != worker_query.stamp(revisions)
-                                {
-                                    return None;
-                                }
-                                let Ok(ViewResponse::LibraryPage(page)) = response.result else {
-                                    return None;
-                                };
-                                page.total
-                            };
-                        matched += root_matched;
-                        total += root_total;
-                        root_counts.insert(root.clone(), (root_matched, root_total));
-                    }
-                    Some(((matched, total), root_counts))
+                    let counts = library_search_counts(&handle, &request);
+                    (request, counts)
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.refresh(cx);
-                this.browser.library.search_count_pending = false;
-                if this.browser.library.search_count_projection.accepts(
-                    &query,
-                    generation,
+                if this.browser.library.accept_search_counts(
+                    request,
+                    &this.state.system.config.library_roots,
                     this.state.query_revisions(None),
-                ) && roots == this.state.system.config.library_roots
-                {
-                    this.browser.library.search_count_failed = counts.is_none();
-                    if let Some(((matched, total), root_counts)) = counts {
-                        this.browser.library.search_counts = Some((matched, total));
-                        this.browser.library.search_root_counts = root_counts;
+                    counts,
+                ) {
+                    if let Some((matched, total)) = this.browser.library.search_counts() {
                         this.library_search
                             .update(cx, |search, cx| search.set_counts(matched, total, cx));
                     }
@@ -1105,6 +1085,115 @@ mod tests {
     use crate::projection::GuiLibrarySnapshot;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn library_search_counts_query_deduplicates_roots_and_resumes_cancelled_reads() {
+        use crate::{
+            config::Config,
+            core::Runtime,
+            gui::browser::LibraryBrowser,
+            library::{ScanRecord, ScanResult},
+            model::{MediaInfo, Query},
+            store::Store,
+        };
+
+        let directory = tempfile::tempdir().unwrap();
+        let parent = directory.path().join("music");
+        let nested = parent.join("album");
+        let sibling = directory.path().join("other");
+        let roots = vec![
+            nested.clone(),
+            parent.clone(),
+            parent.clone(),
+            sibling.clone(),
+        ];
+        let store = Store::open(&directory.path().join("library.db")).unwrap();
+        store
+            .apply_scan(&ScanResult {
+                roots: vec![directory.path().to_path_buf()],
+                records: [
+                    (parent.join("one.wav"), "needle"),
+                    (nested.join("two.wav"), "other"),
+                    (sibling.join("three.wav"), "needle"),
+                    (sibling.join("four.wav"), "other"),
+                    (directory.path().join("outside.wav"), "needle"),
+                ]
+                .into_iter()
+                .map(|(path, title)| ScanRecord {
+                    path,
+                    size: 1,
+                    modified_ns: 0,
+                    fingerprint: None,
+                    cue: None,
+                    media: MediaInfo {
+                        title: title.into(),
+                        artist: String::new(),
+                        album: String::new(),
+                        duration: Some(1.0),
+                        bitrate_bps: None,
+                        bitrate_exact: false,
+                        track_number: None,
+                        disc_number: None,
+                        bits_per_sample: None,
+                        release_date: None,
+                        codec: "PCM_S16LE".into(),
+                        channels: 1,
+                        sample_rate: 8000,
+                    },
+                })
+                .collect(),
+                ..Default::default()
+            })
+            .unwrap();
+        drop(store);
+        let config_path = directory.path().join("config.toml");
+        Config {
+            volume: 0.0,
+            ffmpeg_enabled: false,
+            mpris_enabled: false,
+            ..Config::default()
+        }
+        .save(&config_path)
+        .unwrap();
+        let runtime = Runtime::start(directory.path(), &config_path).unwrap();
+        let response = runtime
+            .handle
+            .query(Query::LibraryRootCounts { roots: Vec::new() });
+        assert!(response.result.is_ok());
+        let revisions = response.revisions;
+        let mut library = LibraryBrowser::default();
+        let (_, request) = library.prepare_search_counts(&roots, revisions);
+        let request = request.unwrap();
+        let result = super::library_search_counts(&runtime.handle, &request).unwrap();
+        assert_eq!(result.totals, (4, 4));
+        assert_eq!(result.roots.len(), 2);
+        assert_eq!(result.roots.get(&parent), Some(&(2, 2)));
+        assert_eq!(result.roots.get(&sibling), Some(&(2, 2)));
+        assert!(!result.roots.contains_key(&nested));
+        assert!(library.accept_search_counts(request, &roots, revisions, Some(result)));
+        library.refresh_search("needle".into());
+        let (_, request) = library.prepare_search_counts(&roots, revisions);
+        let request = request.unwrap();
+        library.cancel_pending_reads();
+        let cancelled = super::library_search_counts(&runtime.handle, &request);
+        assert!(cancelled.is_none());
+        assert!(!library.accept_search_counts(request, &roots, revisions, cancelled));
+        let (_, request) = library.prepare_search_counts(&roots, revisions);
+        let request = request.unwrap();
+        let result = super::library_search_counts(&runtime.handle, &request).unwrap();
+        assert_eq!(result.totals, (2, 4));
+        assert!(library.accept_search_counts(request, &roots, revisions, Some(result)));
+        assert_eq!(library.search_counts(), Some((2, 4)));
+        assert_eq!(library.root_count_label(&parent), "1 / 2");
+        assert_eq!(library.root_count_label(&sibling), "1 / 2");
+        let (_, request) = library.prepare_search_counts(&[], revisions);
+        let request = request.unwrap();
+        let result = super::library_search_counts(&runtime.handle, &request).unwrap();
+        assert_eq!(result.totals, (0, 0));
+        assert!(result.roots.is_empty());
+        assert!(library.accept_search_counts(request, &[], revisions, Some(result)));
+        assert_eq!(library.search_counts(), Some((0, 0)));
+    }
 
     #[test]
     fn queued_playlist_demand_uses_elapsed_latest_deadline() {

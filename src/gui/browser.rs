@@ -134,6 +134,30 @@ impl RootCounts {
 }
 
 #[derive(Default)]
+struct SearchCounts {
+    projection: QueryProjection,
+    // Logical cancellation retires the epoch, not the physical worker slot.
+    worker: Option<u64>,
+    failed: bool,
+    roots: Vec<std::path::PathBuf>,
+    totals: Option<(usize, usize)>,
+    root_counts: std::collections::HashMap<std::path::PathBuf, (usize, usize)>,
+}
+
+pub(super) struct SearchCountRequest {
+    pub(super) query: Query,
+    pub(super) roots: Vec<std::path::PathBuf>,
+    pub(super) revisions: QueryRevisions,
+    pub(super) ticket: crate::core::QueryTicket,
+    generation: u64,
+}
+
+pub(super) struct SearchCountResult {
+    pub(super) totals: (usize, usize),
+    pub(super) roots: std::collections::HashMap<std::path::PathBuf, (usize, usize)>,
+}
+
+#[derive(Default)]
 pub(super) struct LibraryViewBuffer {
     pub(super) query: Option<String>,
     pub(super) favorite: Option<bool>,
@@ -143,12 +167,7 @@ pub(super) struct LibraryViewBuffer {
 
 pub(super) struct LibraryBrowser {
     pub(super) projection: QueryProjection,
-    pub(super) search_count_projection: QueryProjection,
-    pub(super) search_count_pending: bool,
-    pub(super) search_count_failed: bool,
-    pub(super) search_count_roots: Vec<std::path::PathBuf>,
-    pub(super) search_counts: Option<(usize, usize)>,
-    pub(super) search_root_counts: std::collections::HashMap<std::path::PathBuf, (usize, usize)>,
+    search_counts: SearchCounts,
     buffer: LibraryViewBuffer,
     tree: DirectoryTree,
     range_selection: LibrarySelection,
@@ -167,12 +186,7 @@ impl Default for LibraryBrowser {
     fn default() -> Self {
         Self {
             projection: Default::default(),
-            search_count_projection: Default::default(),
-            search_count_pending: false,
-            search_count_failed: false,
-            search_count_roots: Vec::new(),
-            search_counts: None,
-            search_root_counts: Default::default(),
+            search_counts: SearchCounts::default(),
             buffer: LibraryViewBuffer {
                 sort: LibrarySort::Album,
                 ..Default::default()
@@ -193,6 +207,103 @@ impl Default for LibraryBrowser {
 }
 
 impl LibraryBrowser {
+    /// Reconcile the complete demand before reserving the sole physical worker.
+    /// The boolean tells the presentation layer to forget its previous counts.
+    pub(super) fn prepare_search_counts(
+        &mut self,
+        roots: &[std::path::PathBuf],
+        revisions: QueryRevisions,
+    ) -> (bool, Option<SearchCountRequest>) {
+        let query = Query::LibraryRootPage {
+            path: Default::default(),
+            query: self.buffer.query.clone(),
+            favorite: self.buffer.favorite,
+            missing: self.buffer.missing,
+            sort: self.buffer.sort,
+            offset: 0,
+            limit: 0,
+        };
+        let counts = &mut self.search_counts;
+        let roots_changed = counts.roots != roots;
+        let changed = counts.projection.sync(&query, revisions) || roots_changed;
+        if changed {
+            if roots_changed {
+                counts.projection.cancel();
+                counts.roots = roots.to_vec();
+            }
+            counts.totals = None;
+            counts.root_counts.clear();
+            counts.failed = false;
+        }
+        if counts.totals.is_some() || counts.failed || counts.worker.is_some() {
+            return (changed, None);
+        }
+        let generation = counts.projection.generation();
+        counts.worker = Some(generation);
+        (
+            changed,
+            Some(SearchCountRequest {
+                query,
+                roots: roots.to_vec(),
+                revisions,
+                ticket: counts.projection.ticket(),
+                generation,
+            }),
+        )
+    }
+
+    /// Completion releases its physical slot even when its payload is obsolete.
+    /// A current failure is retained until explicit retry or changed demand.
+    pub(super) fn accept_search_counts(
+        &mut self,
+        request: SearchCountRequest,
+        roots: &[std::path::PathBuf],
+        revisions: QueryRevisions,
+        result: Option<SearchCountResult>,
+    ) -> bool {
+        let counts = &mut self.search_counts;
+        if counts.worker != Some(request.generation) {
+            return false;
+        }
+        counts.worker = None;
+        let Query::LibraryRootPage {
+            query,
+            favorite,
+            missing,
+            sort,
+            ..
+        } = &request.query
+        else {
+            unreachable!()
+        };
+        if query != &self.buffer.query
+            || *favorite != self.buffer.favorite
+            || *missing != self.buffer.missing
+            || *sort != self.buffer.sort
+            || request.roots != roots
+            || counts.roots != roots
+            || !counts
+                .projection
+                .accepts(&request.query, request.generation, revisions)
+        {
+            return false;
+        }
+        counts.failed = result.is_none();
+        if let Some(result) = result {
+            counts.totals = Some(result.totals);
+            counts.root_counts = result.roots;
+        }
+        true
+    }
+
+    pub(super) fn search_counts_pending(&self) -> bool {
+        self.search_counts.worker.is_some()
+    }
+
+    pub(super) fn search_counts(&self) -> Option<(usize, usize)> {
+        self.search_counts.totals
+    }
+
     pub(super) fn projection_query(&self) -> Query {
         if self.tree_active {
             Query::DirectoryPage {
@@ -256,8 +367,8 @@ impl LibraryBrowser {
     pub(super) fn cancel_pending_reads(&mut self) {
         self.projection.cancel();
         self.tree.cancel_pending();
-        if self.search_count_pending {
-            self.search_count_projection.cancel();
+        if self.search_counts_pending() {
+            self.search_counts.projection.cancel();
         }
         if !self.counts.pending.is_empty() {
             self.counts.owner.cancel();
@@ -267,7 +378,7 @@ impl LibraryBrowser {
     }
 
     pub(super) fn retry_root_counts(&mut self) {
-        self.search_count_failed = false;
+        self.search_counts.failed = false;
         self.counts.failed.clear();
         self.counts.settled = false;
     }
@@ -344,7 +455,7 @@ impl LibraryBrowser {
             || self.buffer.favorite.is_some()
             || self.buffer.missing.is_some()
         {
-            self.search_root_counts.get(path).map_or_else(
+            self.search_counts.root_counts.get(path).map_or_else(
                 || "—".to_owned(),
                 |(matched, total)| format!("{matched} / {total}"),
             )
@@ -359,7 +470,7 @@ impl LibraryBrowser {
             || self.buffer.favorite.is_some()
             || self.buffer.missing.is_some()
         {
-            return self.search_count_failed;
+            return self.search_counts.failed;
         }
         self.counts.failed.iter().any(|&offset| {
             self.counts.roots
@@ -1193,6 +1304,139 @@ impl HistoryBrowser {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn search_count_result(root: &std::path::Path, totals: (usize, usize)) -> SearchCountResult {
+        SearchCountResult {
+            totals,
+            roots: [(root.to_path_buf(), totals)].into_iter().collect(),
+        }
+    }
+
+    #[test]
+    fn search_counts_changed_demand_rejects_old_completion_and_releases_worker() {
+        // Completion must also reject changes not yet reconciled by viewport demand.
+        for reconcile in [false, true] {
+            for change in 0..6 {
+                let mut library = LibraryBrowser::default();
+                let mut roots = vec![std::path::PathBuf::from("/music")];
+                let mut revisions = QueryRevisions::default();
+                let (changed, request) = library.prepare_search_counts(&roots, revisions);
+                assert!(changed);
+                let request = request.unwrap();
+                assert!(library.search_counts_pending());
+                match change {
+                    0 => roots[0] = "/other".into(),
+                    1 => library.refresh_search("needle".into()),
+                    2 => library.toggle_favorites(),
+                    3 => {
+                        library.toggle_missing();
+                        library.refresh_filter();
+                    }
+                    4 => revisions.library += 1,
+                    5 => revisions.structure += 1,
+                    _ => unreachable!(),
+                }
+                if reconcile {
+                    let (changed, replacement) = library.prepare_search_counts(&roots, revisions);
+                    assert!(changed);
+                    assert!(replacement.is_none());
+                    assert!(!request.ticket.is_current());
+                    assert!(library.search_counts_pending());
+                }
+                let stale = search_count_result(&request.roots[0], (99, 99));
+                assert!(!library.accept_search_counts(request, &roots, revisions, Some(stale)));
+                assert!(!library.search_counts_pending());
+                assert_eq!(library.search_counts(), None);
+                assert!(!library.root_count_failed(&roots[0]));
+                let (_, current) = library.prepare_search_counts(&roots, revisions);
+                assert!(library.accept_search_counts(
+                    current.unwrap(),
+                    &roots,
+                    revisions,
+                    Some(search_count_result(&roots[0], (2, 3))),
+                ));
+                assert_eq!(library.search_counts(), Some((2, 3)));
+                assert!(!library.search_counts_pending());
+                assert!(library.prepare_search_counts(&roots, revisions).1.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn search_counts_hidden_cancellation_keeps_worker_until_completion_then_resumes() {
+        for failed_completion in [false, true] {
+            let mut library = LibraryBrowser::default();
+            let roots = vec![std::path::PathBuf::from("/music")];
+            let revisions = QueryRevisions::default();
+            library.refresh_search("needle".into());
+            let (_, request) = library.prepare_search_counts(&roots, revisions);
+            let request = request.unwrap();
+            library.cancel_pending_reads();
+            assert!(!request.ticket.is_current());
+            assert!(library.search_counts_pending());
+            // Revealing before physical completion cannot submit another worker.
+            assert!(library.prepare_search_counts(&roots, revisions).1.is_none());
+            let result = (!failed_completion).then(|| search_count_result(&roots[0], (99, 99)));
+            assert!(!library.accept_search_counts(request, &roots, revisions, result));
+            assert!(!library.search_counts_pending());
+            assert_eq!(library.search_counts(), None);
+            assert!(!library.root_count_failed(&roots[0]));
+            let (_, request) = library.prepare_search_counts(&roots, revisions);
+            assert!(library.accept_search_counts(
+                request.unwrap(),
+                &roots,
+                revisions,
+                Some(search_count_result(&roots[0], (1, 3))),
+            ));
+            assert_eq!(library.root_count_label(&roots[0]), "1 / 3");
+            library.cancel_pending_reads();
+            assert_eq!(library.search_counts(), Some((1, 3)));
+            assert!(library.prepare_search_counts(&roots, revisions).1.is_none());
+        }
+    }
+
+    #[test]
+    fn search_counts_failure_requires_retry_or_changed_demand() {
+        let mut library = LibraryBrowser::default();
+        let roots = vec![std::path::PathBuf::from("/music")];
+        let revisions = QueryRevisions::default();
+        library.refresh_search("needle".into());
+        let (_, request) = library.prepare_search_counts(&roots, revisions);
+        assert!(library.accept_search_counts(request.unwrap(), &roots, revisions, None));
+        assert!(!library.search_counts_pending());
+        assert_eq!(library.search_counts(), None);
+        assert_eq!(library.root_count_label(&roots[0]), "—");
+        assert!(library.root_count_failed(&roots[0]));
+        library.cancel_pending_reads();
+        assert!(library.prepare_search_counts(&roots, revisions).1.is_none());
+        assert!(library.root_count_failed(&roots[0]));
+        library.retry_root_counts();
+        assert!(!library.root_count_failed(&roots[0]));
+        let (_, request) = library.prepare_search_counts(&roots, revisions);
+        // Retrying again while pending cannot release the worker slot.
+        library.retry_root_counts();
+        assert!(library.prepare_search_counts(&roots, revisions).1.is_none());
+        assert!(library.accept_search_counts(request.unwrap(), &roots, revisions, None));
+        library.refresh_search("other".into());
+        let (changed, request) = library.prepare_search_counts(&roots, revisions);
+        assert!(changed);
+        assert!(!library.root_count_failed(&roots[0]));
+        assert!(library.accept_search_counts(
+            request.unwrap(),
+            &roots,
+            revisions,
+            Some(search_count_result(&roots[0], (0, 3))),
+        ));
+        assert_eq!(library.search_counts(), Some((0, 3)));
+        assert_eq!(library.root_count_label(&roots[0]), "0 / 3");
+        // An accepted payload is invalidated together with its per-root counts.
+        library.refresh_search("third".into());
+        let (changed, request) = library.prepare_search_counts(&roots, revisions);
+        assert!(changed);
+        assert!(request.is_some());
+        assert_eq!(library.search_counts(), None);
+        assert_eq!(library.root_count_label(&roots[0]), "—");
+    }
 
     #[test]
     fn library_locate_expands_ancestry_without_changing_selected_identities() {

@@ -24,6 +24,18 @@ dispatched full-row read drains before retrying against current metadata.
 Duplicate source/target choices retain track identity across reference-only
 refreshes; command eligibility is checked against current targeted member facts.
 
+The Library browser owns search-count identity, accepted totals, per-root counts,
+failure retention, and its single physical worker slot. Preparation reconciles
+configured roots and the filtered query stamp before reserving that slot;
+completion releases it before accepting only the current roots, query, stamp,
+and generation. Changing demand or hiding retires old submissions without
+releasing the slot early. A stale completion cannot publish counts or a failure;
+visible demand resumes after it drains, while hidden demand waits until reveal.
+Current failures require explicit retry or changed demand. Query execution and
+search-widget updates remain with the GUI query dispatcher, not the owner.
+Aggregation counts duplicate and nested configured roots only once; this count
+payload does not determine whether the configured-root viewport remains mounted.
+
 Owners reconcile keys while hidden, but tree and Details reads require actual
 panel demand. An open Add to playlist chooser also demands playlist summaries,
 independently of the Playlists panel. An unchanged key retains bounded album pages

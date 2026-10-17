@@ -1177,7 +1177,7 @@ impl GuiApp {
         );
         // Track counts describe contents, not the configured root projection.
         // Keep its viewport mounted so root changes can demand a fresh forest.
-        if let Some((0, total)) = self.browser.library.search_counts
+        if let Some((0, total)) = self.browser.library.search_counts()
             && (total != 0 || self.browser.library.tree().row_count() == 0)
         {
             panel = panel.child(caption(
@@ -1247,7 +1247,7 @@ mod library_root_tests {
                 })
                 .collect::<Vec<_>>();
             assert_eq!(rendered, roots);
-            assert_eq!(this.browser.library.search_counts, Some((0, 0)));
+            assert_eq!(this.browser.library.search_counts(), Some((0, 0)));
             assert_eq!(this.state.library.track_total, 0);
             assert!(!this.state.system.scanning);
             assert!(this.state.system.scan_progress.is_none());
@@ -1314,7 +1314,6 @@ mod library_root_tests {
                     album_artwork: None,
                 }],
             });
-            this.browser.library.search_counts = Some((0, 0));
         });
         draw_library(window, &app);
         assert_roots(window, &app, &[]);
