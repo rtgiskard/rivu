@@ -113,7 +113,7 @@ gl-rename = Rename…
 
 gl-delete = Delete…
 
-gl-delete-playlist-note = Only the playlist is deleted. Music files are not touched.
+gl-delete-playlist-note = Only the playlist is deleted. Music files are not touched
 
 gl-cancel = Cancel
 
@@ -196,7 +196,7 @@ gl-play-count = Play count
 
 gl-last-played = Last played
 
-gl-save-metadata = Save metadata. Media files are never modified.
+gl-save-metadata = Save metadata. Media files are never modified
 
 gl-reload-playback = Reload current playback track
 
@@ -210,9 +210,9 @@ gl-auto = Auto
 
 gl-native = Native
 
-gl-decoder-save-note = Save to apply on the next track open or full waveform request.
+gl-decoder-save-note = Save to apply on the next track open or full waveform request
 
-gl-decoder-warning = FFmpeg requires the extension; native DTS-WAV decoding may produce noise.
+gl-decoder-warning = FFmpeg requires the extension; native DTS-WAV decoding may produce noise
 
 gl-tags = Tags
 
@@ -352,29 +352,29 @@ gl-duplicate-response = Unexpected same-files response
 
 gl-member-response = Unexpected member response
 
-gl-relocation-completed = Relocation completed. The old identity and user state were preserved; destination freshly verified before commit. No audio files were deleted.
+gl-relocation-completed = Relocation completed. The old identity and user state were preserved; destination freshly verified before commit. No audio files were deleted
 
-gl-verification-cancelled = Verification cancelled; no relocation committed.
+gl-verification-cancelled = Verification cancelled; no relocation committed
 
-gl-relocation-failed = Relocation failed; no state was merged. Refresh and choose again.
+gl-relocation-failed = Relocation failed; no state was merged. Refresh and choose again
 
-gl-verification-response = Unexpected verification result; refresh before deciding again.
+gl-verification-response = Unexpected verification result; refresh before deciding again
 
 gl-review-action-failed = Could not complete review action
 
-gl-kept-independent = Destination kept independent. Future scans will not relocate it into another identity.
+gl-kept-independent = Destination kept independent. Future scans will not relocate it into another identity
 
 gl-relocation-no-task = Relocation acknowledgement did not identify a verification task
 
 gl-groups-loading = Loading same-content groups…
 
-gl-groups-empty = No ordinary-file same-content groups.
+gl-groups-empty = No ordinary-file same-content groups
 
 gl-members-loading = Loading file metadata and checking paths…
 
-gl-select-relocation = Select a group, then choose a missing old record and an existing destination.
+gl-select-relocation = Select a group, then choose a missing old record and an existing destination
 
-gl-members-empty = This group no longer has members. Refresh to review current groups.
+gl-members-empty = This group no longer has members. Refresh to review current groups
 
 gl-exists-now = file exists now
 
@@ -396,7 +396,7 @@ gl-use-source = Use as old record
 
 gl-use-target = Use as destination
 
-gl-target-state-warning = Destination has user state/references: relocation into this row will be rejected, not merged.
+gl-target-state-warning = Destination has user state/references: relocation into this row will be rejected, not merged
 
 gl-confirm-relocation-note = Confirm relocation? Preserve the old ID, favorite, overrides, play history and references at the selected destination. The destination row must have no user state/references. Rivu rehashes its full bytes and revalidates the database before commit. No audio files are deleted.
 
@@ -420,7 +420,7 @@ gl-cancel-verification = Cancel verification
 
 gl-same-files-title = Same files / Relocation candidates
 
-gl-same-files-note = Review ordinary files with matching cached content. No audio files are deleted.
+gl-same-files-note = Review ordinary files with matching cached content. No audio files are deleted
 
 gl-refresh-groups = Refresh same-file groups
 

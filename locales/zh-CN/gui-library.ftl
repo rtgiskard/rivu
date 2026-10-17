@@ -113,7 +113,7 @@ gl-rename = 重命名…
 
 gl-delete = 删除…
 
-gl-delete-playlist-note = 仅删除播放列表，不会改动音乐文件。
+gl-delete-playlist-note = 仅删除播放列表，不会改动音乐文件
 
 gl-cancel = 取消
 
@@ -196,7 +196,7 @@ gl-play-count = 播放次数
 
 gl-last-played = 上次播放
 
-gl-save-metadata = 保存元数据，不会修改媒体文件。
+gl-save-metadata = 保存元数据，不会修改媒体文件
 
 gl-reload-playback = 重新加载当前播放曲目
 
@@ -210,9 +210,9 @@ gl-auto = 自动
 
 gl-native = 原生
 
-gl-decoder-save-note = 保存后，下次打开曲目或请求完整波形时生效。
+gl-decoder-save-note = 保存后，下次打开曲目或请求完整波形时生效
 
-gl-decoder-warning = FFmpeg 需启用扩展；原生解码 DTS-WAV 可能产生噪声。
+gl-decoder-warning = FFmpeg 需启用扩展；原生解码 DTS-WAV 可能产生噪声
 
 gl-tags = 标签
 
@@ -310,29 +310,29 @@ gl-duplicate-response = 重复文件查询返回了意外结果
 
 gl-member-response = 文件成员查询返回了意外结果
 
-gl-relocation-completed = 位置迁移完成。已保留原标识和用户状态，并在提交前重新验证目标文件。未删除任何音频文件。
+gl-relocation-completed = 位置迁移完成。已保留原标识和用户状态，并在提交前重新验证目标文件。未删除任何音频文件
 
-gl-verification-cancelled = 验证已取消，未提交位置迁移。
+gl-verification-cancelled = 验证已取消，未提交位置迁移
 
-gl-relocation-failed = 位置迁移失败，未合并任何状态。请刷新后重新选择。
+gl-relocation-failed = 位置迁移失败，未合并任何状态。请刷新后重新选择
 
-gl-verification-response = 验证返回了意外结果，请刷新后重新选择。
+gl-verification-response = 验证返回了意外结果，请刷新后重新选择
 
 gl-review-action-failed = 无法完成此操作
 
-gl-kept-independent = 已将目标文件保留为独立记录，后续扫描不会将其迁入其他标识。
+gl-kept-independent = 已将目标文件保留为独立记录，后续扫描不会将其迁入其他标识
 
 gl-relocation-no-task = 位置迁移响应未提供验证任务
 
 gl-groups-loading = 正在加载内容相同的文件组…
 
-gl-groups-empty = 没有内容相同的普通文件组。
+gl-groups-empty = 没有内容相同的普通文件组
 
 gl-members-loading = 正在加载文件元数据并检查路径…
 
-gl-select-relocation = 选择文件组，再选择缺失的原记录和现存的目标文件。
+gl-select-relocation = 选择文件组，再选择缺失的原记录和现存的目标文件
 
-gl-members-empty = 此组已无文件，请刷新查看当前分组。
+gl-members-empty = 此组已无文件，请刷新查看当前分组
 
 gl-exists-now = 文件现存
 
@@ -354,7 +354,7 @@ gl-use-source = 用作原记录
 
 gl-use-target = 用作目标文件
 
-gl-target-state-warning = 目标记录已有用户状态或引用，迁移将被拒绝，不会合并记录。
+gl-target-state-warning = 目标记录已有用户状态或引用，迁移将被拒绝，不会合并记录
 
 gl-confirm-relocation-note = 确认位置迁移？将在目标路径保留原 ID、收藏、自定义元数据、播放历史和引用。目标记录不能有用户状态或引用。Rivu 会重新计算完整文件哈希并在提交前再次验证数据库。不会删除音频文件。
 
@@ -378,7 +378,7 @@ gl-cancel-verification = 取消验证
 
 gl-same-files-title = 相同文件与位置迁移
 
-gl-same-files-note = 核对缓存内容相同的普通文件，不会删除音频文件。
+gl-same-files-note = 核对缓存内容相同的普通文件，不会删除音频文件
 
 gl-refresh-groups = 刷新相同文件分组
 
