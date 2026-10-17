@@ -2676,8 +2676,10 @@ mod tests {
     #[test]
     fn ffmpeg_quantized_timestamps_complete_without_hiding_missing_pcm() {
         let mut file = tempfile::NamedTempFile::new().unwrap();
-        file.write_all(include_bytes!("fixtures/quantized-aac.mka"))
-            .unwrap();
+        file.write_all(include_bytes!(
+            "../../tests/fixtures/audio/quantized-aac.mka"
+        ))
+        .unwrap();
         let mut source =
             Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Ffmpeg, true).unwrap();
         let rate = source.info.sample_rate;
