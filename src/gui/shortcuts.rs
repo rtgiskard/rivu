@@ -279,20 +279,8 @@ impl GuiApp {
             );
             row_count += 1;
         }
-        div()
-            .id("keyboard-help-modal")
+        crate::gui::components::modal_backdrop("keyboard-help-modal")
             .map(|surface| self.dialog_surface(surface))
-            .occlude()
-            .absolute()
-            .size_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(rgb(0x000000).alpha(0.58))
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
-            .on_mouse_down(MouseButton::Middle, |_, _, cx| cx.stop_propagation())
-            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
             .child(
                 column()
                     .id("keyboard-help-card")

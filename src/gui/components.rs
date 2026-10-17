@@ -735,15 +735,37 @@ pub(crate) fn dropdown_trigger(
         )
 }
 
+/// Full-window modal scrim that blocks pointer input from reaching its parent.
+/// Callers retain their focus scope, card, and dismissal policy.
+pub(crate) fn modal_backdrop(id: impl Into<ElementId>) -> Stateful<Div> {
+    div()
+        .id(id)
+        .occlude()
+        .absolute()
+        .size_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(rgb(0x000000).alpha(0.58))
+        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_mouse_down(gpui::MouseButton::Right, |_, _, cx| cx.stop_propagation())
+        .on_mouse_down(gpui::MouseButton::Middle, |_, _, cx| cx.stop_propagation())
+        .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+}
+
 /// Shared shell for application context menus. The caller supplies menu rows
 /// and owns dismissal and action dispatch.
 pub(crate) fn context_menu_container(
     theme: &'static crate::theme::Palette,
     id: impl Into<ElementId>,
+    window: &Window,
 ) -> Stateful<Div> {
     floating_surface(theme)
         .id(id)
         .w(gpui::rems(MENU_WIDTH / 16.))
+        .max_w((window.viewport_size().width - px(UI_INSET * 2.)).max(px(0.)))
+        .max_h((window.viewport_size().height - px(UI_INSET * 2.)).max(px(0.)))
+        .overflow_y_scroll()
         .occlude()
         .p_1()
         .gap_0()

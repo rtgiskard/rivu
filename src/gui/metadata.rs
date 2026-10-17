@@ -282,20 +282,8 @@ impl GuiApp {
             self.i18n.text("gl-metadata-discard-note")
         };
         Some(
-            div()
-                .id("metadata-confirmation-modal")
+            crate::gui::components::modal_backdrop("metadata-confirmation-modal")
                 .map(|surface| self.keyboard_scope.surface(surface))
-                .occlude()
-                .absolute()
-                .size_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(rgb(0x000000).alpha(0.58))
-                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_mouse_down(gpui::MouseButton::Right, |_, _, cx| cx.stop_propagation())
-                .on_mouse_down(gpui::MouseButton::Middle, |_, _, cx| cx.stop_propagation())
-                .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
                 .child(
                     column()
                         .id("metadata-confirmation-card")

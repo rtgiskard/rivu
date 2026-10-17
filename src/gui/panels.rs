@@ -2,10 +2,10 @@ use super::{
     Dragging, Field, GuiApp, HistorySort, ListFocus, Measured, UI_INSET, ViewRequestKind,
     components::{
         LIST_ROW_REMS, StatusKind, active_control, caption, column, compact_icon_button,
-        danger_control, disabled_control, form_field, hover_actions, icon_button, list_row,
-        list_row_height, list_viewport, panel_header, panel_surface, panel_toolbar,
-        quiet_icon_button, row, row_text, scrollable_list, sortable_header, status_message,
-        track_list_row,
+        context_menu_container, danger_control, disabled_control, form_field, hover_actions,
+        icon_button, list_row, list_row_height, list_viewport, panel_header, panel_surface,
+        panel_toolbar, quiet_icon_button, row, row_text, scrollable_list, sortable_header,
+        status_message, track_list_row,
     },
     fonts::tabular_numbers,
     format_time,
@@ -575,11 +575,8 @@ impl GuiApp {
             let has_tracks = self.state.current_track().is_some();
             let rename = target.clone();
             let delete = target.clone();
-            let menu = crate::gui::components::context_menu_container(theme, "playlist-row-menu")
+            let menu = context_menu_container(theme, "playlist-row-menu", window)
                 .map(|surface| self.menu_surface(surface))
-                .max_w((window.viewport_size().width - px(UI_INSET * 2.)).max(px(0.)))
-                .max_h((window.viewport_size().height - px(UI_INSET * 2.)).max(px(0.)))
-                .overflow_y_scroll()
                 .on_mouse_down_out(cx.listener(|this, _, window, cx| {
                     this.dismiss_playlist_action(window, cx);
                     cx.stop_propagation();
@@ -710,20 +707,8 @@ impl GuiApp {
                 &[("count", (self.state.queue.total).into())],
             )
         };
-        div()
-            .id("playlist-action-modal")
+        crate::gui::components::modal_backdrop("playlist-action-modal")
             .map(|surface| self.dialog_surface(surface))
-            .occlude()
-            .absolute()
-            .size_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(rgb(0x000000).alpha(0.58))
-            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .on_mouse_down(gpui::MouseButton::Right, |_, _, cx| cx.stop_propagation())
-            .on_mouse_down(gpui::MouseButton::Middle, |_, _, cx| cx.stop_propagation())
-            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
             .child(
                 column()
                     .id("playlist-action-card")

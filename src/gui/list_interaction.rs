@@ -489,11 +489,8 @@ impl GuiApp {
         let Some(state) = self.content_menu.as_ref() else {
             return div().into_any_element();
         };
-        let mut menu = context_menu_container(theme, "content-menu")
+        let mut menu = context_menu_container(theme, "content-menu", window)
             .map(|surface| self.menu_surface(surface))
-            .max_w((window.viewport_size().width - px(UI_INSET * 2.)).max(px(0.)))
-            .max_h((window.viewport_size().height - px(UI_INSET * 2.)).max(px(0.)))
-            .overflow_y_scroll()
             .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                 this.content_menu = None;
                 cx.stop_propagation();

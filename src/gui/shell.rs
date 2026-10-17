@@ -738,11 +738,8 @@ impl Render for GuiApp {
             let is_waveform = panel_kind == Some("waveform");
             let is_audio_visualizer = panel_kind == Some("audio_visualizer");
             let is_album_artwork = panel_kind == Some("album_artwork");
-            let mut menu = context_menu_container(theme, "panel-context-menu")
+            let mut menu = context_menu_container(theme, "panel-context-menu", window)
                 .map(|surface| self.menu_surface(surface))
-                .max_w((window.viewport_size().width - px(UI_INSET * 2.)).max(px(0.)))
-                .max_h((window.viewport_size().height - px(UI_INSET * 2.)).max(px(0.)))
-                .overflow_y_scroll()
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                     this.panel_menu = None;
                     cx.stop_propagation();
@@ -1357,37 +1354,8 @@ impl Render for GuiApp {
             .format("%Y-%m-%d %H:%M:%S %:z")
             .to_string();
             app = app.child(
-                div()
-                    .id("about-modal")
+                crate::gui::components::modal_backdrop("about-modal")
                     .map(|surface| self.dialog_surface(surface))
-                    .occlude()
-                    .absolute()
-                    .size_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .bg(rgb(0x000000).alpha(0.58))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|_, _, _, cx| {
-                            cx.stop_propagation();
-                        }),
-                    )
-                    .on_mouse_down(
-                        MouseButton::Right,
-                        cx.listener(|_, _, _, cx| {
-                            cx.stop_propagation();
-                        }),
-                    )
-                    .on_mouse_down(
-                        MouseButton::Middle,
-                        cx.listener(|_, _, _, cx| {
-                            cx.stop_propagation();
-                        }),
-                    )
-                    .on_scroll_wheel(cx.listener(|_, _, _, cx| {
-                        cx.stop_propagation();
-                    }))
                     .child(
                         row()
                             .id("about-card")

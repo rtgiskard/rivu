@@ -182,29 +182,8 @@ impl GuiApp {
                     )),
             );
         }
-        div()
-            .id("playlist-name-modal")
+        crate::gui::components::modal_backdrop("playlist-name-modal")
             .map(|surface| self.dialog_surface(surface))
-            .occlude()
-            .absolute()
-            .size_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(rgb(0x000000).alpha(0.58))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|_, _, _, cx| cx.stop_propagation()),
-            )
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(|_, _, _, cx| cx.stop_propagation()),
-            )
-            .on_mouse_down(
-                MouseButton::Middle,
-                cx.listener(|_, _, _, cx| cx.stop_propagation()),
-            )
-            .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.stop_propagation()))
             .child(
                 column()
                     .id("playlist-name-card")
