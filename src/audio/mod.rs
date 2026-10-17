@@ -73,6 +73,10 @@ mod ffmpeg {
             unreachable!("FFmpeg decoder cannot be opened without the ffmpeg feature")
         }
 
+        pub(super) fn time_base(&self) -> Result<symphonia::core::units::TimeBase> {
+            unreachable!("FFmpeg decoder cannot be opened without the ffmpeg feature")
+        }
+
         pub(super) fn identity(&self) -> super::source::SourceIdentity {
             unreachable!("FFmpeg decoder cannot be opened without the ffmpeg feature")
         }

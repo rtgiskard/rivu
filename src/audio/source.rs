@@ -500,6 +500,7 @@ impl Source {
         if info.sample_rate == 0 || layout.is_empty() {
             bail!("FFmpeg decoder returned incomplete audio metadata");
         }
+        let time_base = decode.time_base()?;
         // Container duration is only an estimate, never a decoder EOF.
         let mut source = Self {
             identity: decode.identity(),
@@ -507,7 +508,7 @@ impl Source {
             metadata_budget: metadata_budget(false),
             track: 0,
             decode: Decode::Ffmpeg(Box::new(decode)),
-            time_base: TimeBase::try_new(1, info.sample_rate).unwrap(),
+            time_base,
             frames: Vec::new(),
             frame_start: 0.0,
             layout,
@@ -2667,6 +2668,40 @@ mod tests {
                 assert_eq!(frame.revision, revision);
             }
         }
+    }
+
+    // FFmpeg-generated 440 Hz AAC, 48 kHz, 0.2 s, Matroska's 1 ms timestamps.
+    // Embedded so this regression needs the decoder runtime, not an ffmpeg CLI.
+    #[cfg(feature = "ffmpeg")]
+    #[test]
+    fn ffmpeg_quantized_timestamps_complete_without_hiding_missing_pcm() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(include_bytes!("fixtures/quantized-aac.mka"))
+            .unwrap();
+        let mut source =
+            Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Ffmpeg, true).unwrap();
+        let rate = source.info.sample_rate;
+        let channels = source.layout.len();
+        let mut frame = super::super::WaveformFrame::default();
+        frame.select(file.path(), None, DecoderHint::Ffmpeg, None, rate);
+        let tolerance = source.waveform_timestamp_tolerance();
+        let mut coverage = super::super::waveform::WaveformCoverage::new(0.0, tolerance);
+        let mut missing_pcm = super::super::waveform::WaveformCoverage::new(0.0, tolerance);
+        let mut packet = 0;
+        while let Some((samples, timestamp)) = source.next_frames().unwrap() {
+            coverage.record(timestamp, samples.len() / channels, rate);
+            if packet != 3 {
+                missing_pcm.record(timestamp, samples.len() / channels, rate);
+            }
+            frame.push(timestamp, samples, rate, channels);
+            packet += 1;
+        }
+        let mut incomplete = frame.clone();
+        coverage.finish(&mut frame);
+        missing_pcm.finish(&mut incomplete);
+        assert!(frame.complete, "container quantization is not missing PCM");
+        assert!(!incomplete.complete, "a missing AAC frame is a real gap");
+        assert_eq!(frame.duration, incomplete.duration);
     }
 
     #[test]

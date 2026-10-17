@@ -763,6 +763,14 @@ impl Decoder {
     pub(super) fn info(&self) -> &MediaInfo {
         &self.info
     }
+    pub(super) fn time_base(&self) -> Result<symphonia::core::units::TimeBase> {
+        let numer =
+            u32::try_from(self.time_base.num).context("Invalid FFmpeg time base numerator")?;
+        let denom =
+            u32::try_from(self.time_base.den).context("Invalid FFmpeg time base denominator")?;
+        symphonia::core::units::TimeBase::try_new(numer, denom)
+            .context("FFmpeg stream has a zero time base")
+    }
     pub(super) fn layout(&self) -> &[Channel] {
         &self.layout
     }

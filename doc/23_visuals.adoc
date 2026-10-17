@@ -202,8 +202,10 @@ cost of preview resolution. Normal decoder EOF corrects the timeline end even
 when coverage is incomplete; only capacity beyond that endpoint is removed.
 Unknown intervals inside the timeline remain blank and eligible for later
 playback updates. Complete coverage requires a traversal from zero without seeks
-or discarded PCM. Its timestamp-continuity check allows the opened container's
-timestamp quantization; sample-accurate sources retain a half-sample threshold.
+or discarded PCM. For both native and FFmpeg decoding, its timestamp-continuity
+check allows one container tick when timestamps are coarser than samples;
+sample-accurate sources retain a half-sample threshold. Gaps within the container's
+timestamp precision cannot be distinguished reliably from quantization.
 An undecoded interval is distinct from decoded silence. Peaks can survive
 disjoint visits, but RMS represents a contiguous sample interval rather than
 repeatedly counting seeked or replayed samples.
