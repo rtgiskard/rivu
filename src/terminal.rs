@@ -3,7 +3,8 @@ mod worker;
 
 use render::{RowContent, draw, draw_loading, fmt_time, track_label};
 use worker::{
-    QueryKind, QueryRequest, QueryResult, spawn_command_worker, spawn_query_worker, spawn_watcher,
+    QueryKind, QueryRequest, QueryResult, Watcher, spawn_command_worker, spawn_query_worker,
+    spawn_watcher,
 };
 
 use crate::{
@@ -129,7 +130,33 @@ fn run_loop(
     i18n: Arc<Localizer>,
     terminating: &AtomicBool,
 ) -> Result<()> {
-    let updates = spawn_watcher(data_dir);
+    run_loop_with_events(
+        data_dir,
+        terminal,
+        i18n,
+        terminating,
+        spawn_watcher(data_dir),
+        |timeout| {
+            if event::poll(timeout)? {
+                event::read().map(Some)
+            } else {
+                Ok(None)
+            }
+        },
+    )
+}
+
+fn run_loop_with_events<B: ratatui::backend::Backend>(
+    data_dir: &Path,
+    terminal: &mut Terminal<B>,
+    i18n: Arc<Localizer>,
+    terminating: &AtomicBool,
+    updates: Watcher,
+    mut next_event: impl FnMut(Duration) -> io::Result<Option<Event>>,
+) -> Result<()>
+where
+    B::Error: Send + Sync + 'static,
+{
     let mut workers = None;
     let mut tui = None::<TuiState>;
     let mut redraw = true;
@@ -138,9 +165,13 @@ fn run_loop(
     // Reuse the input loop's existing bounded wait; signals need no extra worker
     // or periodic wakeup and are observed even before the IPC handshake finishes.
     while !terminating.load(Ordering::Relaxed) {
-        while updates.receiver.try_recv().is_ok() {}
-        if let Some(update) = updates.latest.lock().take() {
-            let (instance_id, state) = update.map_err(anyhow::Error::msg)?;
+        if let Some((instance_id, state)) = updates.take_update()? {
+            // Shutdown belongs to the connection owner, not the projection or
+            // query workers. Exit before creating workers or dispatching work,
+            // including when shutdown is the loading screen's first snapshot.
+            if state.system.shutting_down {
+                break;
+            }
             if workers.is_none() {
                 workers = Some((
                     spawn_command_worker(data_dir, instance_id),
@@ -159,8 +190,8 @@ fn run_loop(
                 terminal.draw(|frame| draw_loading(frame, &i18n))?;
                 redraw = false;
             }
-            if event::poll(Duration::from_millis(50))? {
-                match event::read()? {
+            if let Some(event) = next_event(Duration::from_millis(50))? {
+                match event {
                     Event::Key(key)
                         if key.kind != KeyEventKind::Release
                             && resolve_key(key, KeyboardContext::TuiQueue)
@@ -233,8 +264,7 @@ fn run_loop(
             redraw = false;
             immediate_redraw = false;
         }
-        if event::poll(Duration::from_millis(50))? {
-            let event = event::read()?;
+        if let Some(event) = next_event(Duration::from_millis(50))? {
             match event {
                 Event::Resize(_, _) => {
                     redraw = true;

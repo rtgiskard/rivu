@@ -5,7 +5,7 @@ use crate::{
     response::{Ack, StateSections, ViewResponse},
 };
 use anyhow::{Context, Result};
-use crossbeam_channel::{Receiver, Sender, bounded};
+use crossbeam_channel::{Receiver, Sender, TryRecvError, bounded};
 use parking_lot::Mutex;
 use std::{
     sync::{
@@ -23,6 +23,28 @@ pub(super) struct Watcher {
     stopping: Arc<AtomicBool>,
     cancel_notify: Arc<tokio::sync::Notify>,
     worker: Option<JoinHandle<()>>,
+}
+
+impl Watcher {
+    pub(super) fn take_update(&self) -> Result<Option<(u32, ClientSnapshot)>> {
+        // The slot coalesces state, while channel closure is a terminal event:
+        // a dead watcher must never leave its owner polling an unchanged screen.
+        let disconnected = matches!(self.receiver.try_recv(), Err(TryRecvError::Disconnected));
+        let update = self
+            .latest
+            .lock()
+            .take()
+            .transpose()
+            .map_err(anyhow::Error::msg)?;
+        if disconnected
+            && !update
+                .as_ref()
+                .is_some_and(|(_, state)| state.system.shutting_down)
+        {
+            anyhow::bail!("TUI state watcher disconnected without a shutdown snapshot");
+        }
+        Ok(update)
+    }
 }
 
 impl Drop for Watcher {
@@ -73,6 +95,9 @@ pub(super) fn spawn_watcher(data_dir: &Path) -> Watcher {
         };
         *latest_worker.lock() = Some(Ok((state.2, state.0.clone())));
         let _ = sender.try_send(());
+        if state.0.system.shutting_down {
+            return;
+        }
         loop {
             match session.watch_until(state.1) {
                 Ok(Some(revisions)) => {
@@ -107,7 +132,7 @@ pub(super) fn spawn_watcher(data_dir: &Path) -> Watcher {
                         state.1 = revisions;
                     }
                 }
-                Ok(None) => break,
+                Ok(None) => break, // Only local owner cancellation ends a watch this way.
                 Err(error) => {
                     *latest_worker.lock() =
                         Some(Err(format!("TUI state watcher stopped: {error:#}")));

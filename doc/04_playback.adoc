@@ -253,6 +253,11 @@ link:01_config.adoc#_desktop_keyboard_navigation[desktop control navigation].
 
 == Terminal client
 
+When the terminal client receives shutdown state, it exits normally and restores
+the terminal, including while the first snapshot is loading. A Watch connection
+ending without a shutdown snapshot is an error and also restores the terminal.
+Exiting the client locally does not stop the core or playback.
+
 `Tab` cycles Queue → Playlists → Library → Queue; `Shift+Tab` reverses the order.
 The current top tab is highlighted and bold. Switching retains each page's
 selection and scroll position, including an open playlist or library directory.
