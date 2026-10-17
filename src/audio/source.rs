@@ -785,6 +785,23 @@ impl Source {
             .format
             .as_mut()
             .context("Native source has no format reader")?;
+        // A demuxer seeks to a packet containing the anchor, but the endpoint
+        // itself has no packet (notably in native FLAC). Keep the anchor inside
+        // the reported span; the original target below still controls discard.
+        // A short duration hint therefore never hides later samples or proves EOF.
+        let time = match format
+            .tracks()
+            .iter()
+            .find(|track| track.id == self.track)
+            .and_then(|track| duration(track, self.info.sample_rate))
+            .filter(|end| preroll >= *end)
+        {
+            Some(end) => {
+                Time::try_from_secs_f64((end - 1.0 / f64::from(self.info.sample_rate)).max(0.0))
+                    .context("Invalid seek anchor")?
+            }
+            None => time,
+        };
         let sought = self.metadata_budget.with(|| {
             format.seek(
                 SeekMode::Accurate,
@@ -1673,6 +1690,7 @@ mod tests {
         assert_eq!(source.completed_bitrate(), Some(705_600));
     }
 
+    #[track_caller]
     fn decode_remaining(source: &mut Source) -> Vec<f32> {
         let mut samples = Vec::new();
         while let Some((frames, _)) = source.next_frames().unwrap() {
@@ -1745,6 +1763,98 @@ mod tests {
             source.seek(0.0).unwrap();
             assert_eq!(decode_remaining(&mut source).len(), 96_000);
         }
+    }
+
+    // Real fixed-block FLAC frames, without an encoder process or binary fixture.
+    // Each one-second mono block has its own constant value so seek alignment is
+    // visible. The declared sample count can deliberately underestimate the data.
+    fn constant_flac_file(reported_samples: u64, blocks: u8) -> tempfile::NamedTempFile {
+        use symphonia::core::checksum::{Crc8Ccitt, Crc16Ansi};
+
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        let mut info = [0; 34];
+        info[..2].copy_from_slice(&8000_u16.to_be_bytes());
+        info[2..4].copy_from_slice(&8000_u16.to_be_bytes());
+        info[10..18]
+            .copy_from_slice(&((8000_u64 << 44) | (15 << 36) | reported_samples).to_be_bytes());
+        file.write_all(b"fLaC\x80\0\0\x22").unwrap();
+        file.write_all(&info).unwrap();
+        for number in 0..blocks {
+            // Fixed blocking, explicit 16-bit block length, 8 kHz, mono, 16 bits.
+            let mut frame = vec![0xff, 0xf8, 0x74, 0x08, number];
+            frame.extend_from_slice(&7999_u16.to_be_bytes());
+            let mut crc8 = Crc8Ccitt::new(0);
+            crc8.process_buf_bytes(&frame);
+            frame.push(crc8.crc());
+            frame.push(0); // Constant subframe, no wasted bits.
+            frame.extend_from_slice(&(i16::from(number) * 1000 - 5000).to_be_bytes());
+            let mut crc16 = Crc16Ansi::new(0);
+            crc16.process_buf_bytes(&frame);
+            frame.extend_from_slice(&crc16.crc().to_be_bytes());
+            file.write_all(&frame).unwrap();
+        }
+        file
+    }
+
+    #[test]
+    fn native_flac_physical_end_seeks_reach_eof_and_can_seek_back() {
+        let file = constant_flac_file(96_000, 12);
+        let mut source =
+            Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Native, false).unwrap();
+        assert_eq!(source.info().duration, Some(12.0));
+        let reference = decode_remaining(&mut source);
+        assert_eq!(reference.len(), 96_000);
+        for target in [12.0, 13.0] {
+            source.seek(target).unwrap();
+            assert!(source.next_frames().unwrap().is_none());
+            assert!(source.next_frames().unwrap().is_none());
+            assert_eq!(source.completed_bitrate(), None);
+            for restart in [0.0, 5.25, 12.0 - 1.0 / 8000.0] {
+                source.seek(restart).unwrap();
+                let offset = (restart * 8000.0).round() as usize;
+                assert_eq!(decode_remaining(&mut source), reference[offset..]);
+            }
+        }
+    }
+
+    #[test]
+    fn native_flac_underestimated_duration_keeps_seek_and_cue_samples() {
+        let file = constant_flac_file(64_000, 12);
+        let mut source =
+            Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Native, false).unwrap();
+        assert_eq!(source.info().duration, Some(8.0));
+        let reference = decode_remaining(&mut source);
+        assert_eq!(reference.len(), 96_000);
+        for target in [7.5, 8.0, 9.25, 12.0, 13.0] {
+            source.seek(target).unwrap();
+            let offset = ((target * 8000.0).round() as usize).min(reference.len());
+            assert_eq!(decode_remaining(&mut source), reference[offset..]);
+        }
+        for end_seconds in [Some(11.0), None] {
+            let mut source =
+                Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Native, false).unwrap();
+            source
+                .restrict(super::super::PlaybackRange {
+                    start_seconds: 9.0,
+                    end_seconds,
+                })
+                .unwrap();
+            let end = (end_seconds.unwrap_or(12.0) * 8000.0) as usize;
+            assert_eq!(decode_remaining(&mut source), reference[72_000..end]);
+            source.seek(end_seconds.unwrap_or(12.0) - 9.0).unwrap();
+            assert!(source.next_frames().unwrap().is_none());
+            source.seek(0.5).unwrap();
+            assert_eq!(decode_remaining(&mut source), reference[76_000..end]);
+        }
+    }
+
+    #[test]
+    fn native_flac_end_seek_does_not_hide_truncated_audio() {
+        let file = constant_flac_file(96_000, 11);
+        let mut source =
+            Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Native, false).unwrap();
+        // The advertised final sample is absent, not merely an exclusive endpoint.
+        assert!(source.seek(12.0).is_err());
     }
 
     fn pcm_file() -> tempfile::NamedTempFile {

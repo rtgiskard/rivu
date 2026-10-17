@@ -515,8 +515,6 @@ impl PacketParser {
     where
         B: ReadBytes + SeekBuffered,
     {
-        let init_pos = reader.pos();
-
         let mut frame_pos;
 
         let header = loop {
@@ -541,10 +539,9 @@ impl PacketParser {
         // Rewind reader back to the start of the frame.
         reader.seek_buffered(frame_pos);
 
-        // If the reader was moved, soft reset the parser.
-        if init_pos != reader.pos() {
-            self.soft_reset();
-        }
+        // Resynchronization starts a new packet sequence even if the caller
+        // already repositioned the reader at this header (for example, a seek).
+        self.soft_reset();
 
         Ok(ResyncInfo {
             ts: sync.ts.try_into().expect("flac timestamp is 36-bits maximum"),
