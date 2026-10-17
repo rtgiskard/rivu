@@ -1795,7 +1795,7 @@ impl Settings {
         ));
         content = column()
             .gap_2()
-            .child(self.field(Field::ArtworkDecodeBudget, cx))
+            .child(self.single(Field::ArtworkDecodeBudget, cx))
             .child(caption(colors, self.tr("settings-artwork-memory-help")))
             .child(caption(colors, self.tr("settings-artwork-disk-help")))
             .child(content);
