@@ -16,7 +16,17 @@ Scanning requires at least one configured `library.roots`. Add a directory with
 the GUI Library `+` button or set absolute directory paths in `config.toml`.
 Saved roots appear immediately in the desktop Library, even when empty or not
 yet scanned. Saving roots does not scan or enqueue music. Use a root's scan action,
-choose `Scan paths` in Library, or run:
+choose `Scan paths` in Library.
+
+Configured roots must not overlap after logical path normalization: duplicate
+paths and parent/child roots are rejected. For example, `/Music` and `/Music/Jazz`
+conflict, while `/Music` and `/Music2` do not. Symlink targets are not resolved;
+distinct logical aliases remain distinct roots. Existing overlapping configurations
+must be corrected before starting the host or saving settings.
+
+[Showing lines 21-25 of 678. Use :26 to continue]
+
+To scan from the command line, run:
 
 [source,sh]
 ----
@@ -401,9 +411,7 @@ without hovering and retries failed counts instead of rescanning. The failure
 state clears when the retry starts and returns if it fails again; once recovered,
 the action resumes normal rescanning. Counts refresh after
 structural library changes such as scans, removals, or path relocation. Editing
-tags, favorites, or playback statistics does not reload them. Overlapping roots count
-their own recursive contents independently and can show the same track in more
-than one group.
+tags, favorites, or playback statistics does not reload them.
 
 Search, favorites, and the missing filter apply to both the flat list and directory
 tree without switching views, and can be combined. Tree filtering shows only
@@ -446,8 +454,7 @@ participates in scans of configured roots. Add the path again to restore access.
 Configured roots are identified by their paths. Click a directory or group
 header to expand or collapse it. Tree and grouped-list expansion choices are
 kept separately when switching views; changing or clearing search preserves
-unrelated expansion choices. Overlapping roots expand independently: closing
-an enclosing root does not close the same directory shown as another root.
+unrelated expansion choices.
 Shift selection in the grouped list includes root headers as well as tracks,
 including ranges that cross groups or unloaded pages. Selected root headers
 support directory rescanning and dragging with the same recursive semantics

@@ -595,6 +595,20 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
+        let mut roots = self
+            .library_roots
+            .iter()
+            .map(|root| crate::library::logical_path(root))
+            .collect::<Result<Vec<_>>>()?;
+        roots.sort_unstable();
+        for pair in roots.windows(2) {
+            ensure!(
+                !pair[1].starts_with(&pair[0]),
+                "library.roots must not overlap: {} and {}",
+                pair[0].display(),
+                pair[1].display()
+            );
+        }
         ensure!(
             matches!(self.ui_language.as_str(), "auto" | "en-US" | "zh-CN"),
             "interface.language must be auto, en-US, or zh-CN; got {}",
@@ -1345,6 +1359,37 @@ mod tests {
             nested,
             ["audio_visualizer", "spectrogram", "spectrum", "waveform"]
         );
+    }
+
+    #[test]
+    fn library_roots_reject_logical_overlap_before_loading_or_saving() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let valid = Config {
+            library_roots: vec!["/Music".into(), "/Music2".into()],
+            ..Config::default()
+        };
+        valid.save(&path).unwrap();
+        assert_eq!(Config::load(&path).unwrap(), valid);
+        let original = fs::read(&path).unwrap();
+        for roots in [
+            vec!["/Music", "/Music/Jazz"],
+            vec!["/Music/Jazz", "/Music"],
+            vec!["/Music", "/Music/unused/.."],
+            vec!["/", "/Music"],
+            vec!["Music", "Music/./Jazz"],
+        ] {
+            let invalid = Config {
+                library_roots: roots.iter().map(PathBuf::from).collect(),
+                ..Config::default()
+            };
+            assert!(invalid.save(&path).is_err(), "{roots:?}");
+            assert_eq!(fs::read(&path).unwrap(), original);
+            let text = format!("[library]\nroots = {roots:?}\n");
+            let input = directory.path().join("invalid.toml");
+            fs::write(&input, text).unwrap();
+            assert!(Config::load(&input).is_err(), "{roots:?}");
+        }
     }
 
     fn entries(path: &Path) -> Vec<PathBuf> {

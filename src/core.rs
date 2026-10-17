@@ -3321,8 +3321,42 @@ mod tests {
     }
 
     #[test]
+    fn overlapping_root_changes_leave_published_and_saved_configuration_unchanged() {
+        let (directory, mut core) = fixture();
+        core.state
+            .system
+            .config
+            .save(&core.state.system.config_path)
+            .unwrap();
+        let before = core.state.system.config.clone();
+        let saved = std::fs::read(&core.state.system.config_path).unwrap();
+        for root in [directory.path().join("child"), directory.path().join("..")] {
+            assert!(
+                core.update_gui_config(GuiConfigChange::AddLibraryRoot(root.clone()))
+                    .is_err()
+            );
+            let mut config = before.as_ref().clone();
+            config.library_roots.push(root);
+            assert!(
+                core.command(Command::Configure {
+                    config: Arc::new(config)
+                })
+                .is_err()
+            );
+            assert_eq!(*core.state.system.config, *before);
+            assert_eq!(
+                std::fs::read(&core.state.system.config_path).unwrap(),
+                saved
+            );
+        }
+    }
+
+    [Showing lines 2570-2599 of 7082. Use :2600 to continue]
+    #[test]
     fn desktop_config_edits_preserve_live_playback_and_merge_roots() {
         let (directory, mut core) = fixture();
+        Arc::make_mut(&mut core.state.system.config).library_roots[0] =
+            directory.path().join("existing");
         core.command(Command::Volume { value: 0.25 }).unwrap();
         core.command(Command::Shuffle { enabled: true }).unwrap();
         core.command(Command::Repeat {
@@ -3358,6 +3392,8 @@ mod tests {
     #[test]
     fn settings_apply_merges_every_unedited_field_at_execution() {
         let (directory, mut core) = fixture();
+        Arc::make_mut(&mut core.state.system.config).library_roots[0] =
+            directory.path().join("existing");
         let _audio = recording_audio(&mut core);
         let baseline = core.state.system.config.clone();
         let mut draft = baseline.as_ref().clone();
@@ -3412,6 +3448,8 @@ mod tests {
     #[test]
     fn settings_apply_explicit_fields_override_newer_conflicting_values() {
         let (directory, mut core) = fixture();
+        Arc::make_mut(&mut core.state.system.config).library_roots[0] =
+            directory.path().join("existing");
         let _audio = recording_audio(&mut core);
         core.command(Command::Device {
             name: Some("original-output".into()),

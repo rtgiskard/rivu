@@ -45,6 +45,28 @@ Store transaction, including reference deletion and gap compaction. Metadata
 invalidation remains field-sensitive; failures roll back structural revision and
 content together. Already-unique deduplication leaves content and projections valid.
 
+=== Library root identity and configuration
+
+Configured library roots are logical paths, not filesystem object identities.
+Relative paths are resolved against the host's working directory; normalization
+removes `.` and collapses `..` lexically without resolving symlinks or requiring
+the path to exist. Distinct logical aliases may therefore refer to the same
+physical directory and still identify different library paths.
+
+Configuration validation rejects equal roots and ancestor/descendant pairs after
+normalization, using path-component boundaries rather than string prefixes.
+`/Music` and `/Music/Jazz` conflict; `/Music` and `/Music2` do not. This invariant
+applies to loading, saving, and command-driven configuration changes. A rejected
+change does not replace the persisted or published root list; overlapping legacy
+configurations require correction rather than automatic merging or deletion.
+Adding an already-configured root through the desktop remains an idempotent no-op.
+
+Root configuration remains owned by the configuration file, not by a database
+membership table. Removing a root changes only configuration: it does not delete
+tracks, user metadata, playlist or queue entries, or files. Track deletion is a
+separate library operation. Low-level path queries may accept overlapping ranges;
+that query capability does not permit overlapping configured roots.
+
 === Scanning and metadata ownership
 
 Scan-backed metadata and user overrides skip writes when their stored values are
@@ -650,8 +672,8 @@ directory normalization and component boundary: `/home/a` never includes
 per input, in input order, using a single batched query. Larger input batches
 return a query error. Counts include all scanned tracks, including missing ones,
 regardless of view filters; a root without scanned tracks returns zero. An empty
-path requests the entire library. Overlapping roots
-each count their own subtree independently. Clients keep unavailable counts
+path requests the entire library. Overlapping query paths each count their own
+subtree independently, even though configured roots must not overlap. Clients keep unavailable counts
 distinct from zero, split larger root sets into bounded requests, and discard
 results when their roots, request generation, or structure revision have changed.
 Library-content-only changes do not invalidate these unfiltered root totals.

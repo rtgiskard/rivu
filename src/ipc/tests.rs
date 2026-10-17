@@ -491,7 +491,7 @@ fn library_root_queries_run_through_real_owner_and_ipc_session() {
     drop(connection);
     let config_path = directory.path().join("config.toml");
     Config {
-        library_roots: vec![root.clone(), nested.clone(), empty.clone()],
+        library_roots: vec![root.clone(), empty.clone()],
         media_read_buffer_mb: 1,
         ..Config::default()
     }
