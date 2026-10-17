@@ -179,7 +179,7 @@ impl Render for ListSearch {
         }
         let mut field = row()
             .gap_0()
-            .h(gpui::rems(2.))
+            .min_h(gpui::rems(2.))
             .min_w_0()
             .max_w_full()
             .overflow_hidden()
