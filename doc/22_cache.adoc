@@ -41,6 +41,18 @@ panel demand. An open Add to playlist chooser also demands playlist summaries,
 independently of the Playlists panel. An unchanged key retains bounded album pages
 and page failures across hiding; covers are released independently.
 
+The browser owns the paired Playlist page and request transitions: search,
+selection changes, refresh, page-size changes, cancellation, and completion.
+Page lifecycle mutation stays private to the browser owner; GUI consumers borrow
+read-only page buffers and use explicit catalog or entry operations. A registered
+request carries its own identity and optional executable read, so queued demand
+can retain loading feedback without a second caller-supplied request kind.
+The GUI dispatcher executes reads and applies presentation feedback rather than
+separately maintaining page reservations and request validity. Retiring a page
+request does not release its submitted worker; an old completion cannot clear a
+replacement request. Selection-existence lookups remain independent of page-size
+changes.
+
 Album, Playlist catalog/entry, and Queue buffers retain at most the larger of
 eight pages or visible pages plus three; failed offsets have the same separate
 bound. Library payloads and failure markers share a least-recently-used bound of
@@ -74,6 +86,15 @@ business-owned rather than being swallowed by a generic payload cache.
 Explicit Details selections load through a track query. Playback-follow Details
 use the Core's current-track snapshot; reloading playback does not start a second
 track read or leave a query reservation behind.
+
+The Details read coordinator owns query freshness, the latest quiet deadline,
+coalesced demand, and the single reader slot. Preparing a read reserves the slot;
+the quiet timer rechecks visibility, editing identity, and query freshness before
+submission. An abandoned timer retires only its own reservation; submitted reads
+retain the slot until completion. The edit session remains authoritative for
+drafts and read/save acceptance, independently of query generations. Panel
+activation also drives demand, so revealing Details can resume reads without a
+new Core snapshot.
 
 Root-count batches run one at a time. Tree reads share at most four physical
 workers and four coalesced latest pending branch demands; unscheduled demand

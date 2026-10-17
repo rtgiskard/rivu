@@ -1,8 +1,8 @@
 //! Playlist occurrence selection is independent of bounded metadata pages.
 //! Jobs retain compact identities and publish atomically for their original token.
 //! Metadata-only changes retry pending navigation without invalidating occurrence identities.
-use super::metadata::{ManualAction, ManualIntentId};
-use super::*;
+use crate::gui::metadata::{ManualAction, ManualIntentId};
+use crate::gui::*;
 use crate::{
     model::{Page, PlaylistEntryLocation, PlaylistEntryRow, Query},
     response::{PlaylistEntryRevision, QueryRevisions, ViewResponse},
@@ -26,14 +26,14 @@ struct EntryRangeRequest {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct EntryIdentity {
-    pub(super) id: i64,
-    pub(super) track_id: i64,
-    pub(super) position: usize,
-    pub(super) offset: usize,
+pub(in crate::gui) struct EntryIdentity {
+    pub(in crate::gui) id: i64,
+    pub(in crate::gui) track_id: i64,
+    pub(in crate::gui) position: usize,
+    pub(in crate::gui) offset: usize,
 }
 impl EntryIdentity {
-    pub(super) fn row(row: &PlaylistEntryRow, offset: usize) -> Self {
+    pub(in crate::gui) fn row(row: &PlaylistEntryRow, offset: usize) -> Self {
         Self {
             id: row.id,
             track_id: row.track_id,
@@ -126,16 +126,16 @@ enum EntryNavigationEffect {
 }
 
 #[derive(Default)]
-pub(super) struct EntrySelection {
+pub(in crate::gui) struct EntrySelection {
     selected: HashMap<i64, EntryIdentity>,
-    pub(super) query: Option<String>,
-    pub(super) active: Option<EntryIdentity>,
+    pub(in crate::gui) query: Option<String>,
+    pub(in crate::gui) active: Option<EntryIdentity>,
     anchor: Option<EntryIdentity>,
     generation: u64,
     projection: crate::projection::QueryProjection,
     navigation_projection: crate::projection::QueryProjection,
-    pub(super) busy: bool,
-    pub(super) error: Option<String>,
+    pub(in crate::gui) busy: bool,
+    pub(in crate::gui) error: Option<String>,
     navigation: Option<EntryNavigationJob>,
     // Logical cancellation skips queued reads; dispatched reads retain the gate.
     navigation_in_flight: Option<EntryNavigationJob>,
@@ -146,16 +146,16 @@ pub(super) struct EntrySelection {
     refresh_pending: bool,
 }
 impl EntrySelection {
-    pub(super) fn len(&self) -> usize {
+    pub(in crate::gui) fn len(&self) -> usize {
         self.selected.len()
     }
-    pub(super) fn contains(&self, id: i64) -> bool {
+    pub(in crate::gui) fn contains(&self, id: i64) -> bool {
         self.selected.contains_key(&id)
     }
-    pub(super) fn ready(&self) -> bool {
+    pub(in crate::gui) fn ready(&self) -> bool {
         !self.busy && self.error.is_none()
     }
-    pub(super) fn cancel(&mut self) {
+    pub(in crate::gui) fn cancel(&mut self) {
         self.generation = self.generation.wrapping_add(1);
         self.projection.cancel();
         self.navigation_projection.cancel();
@@ -171,17 +171,17 @@ impl EntrySelection {
             self.cancel();
         }
     }
-    pub(super) fn clear(&mut self) {
+    pub(in crate::gui) fn clear(&mut self) {
         self.cancel();
         self.selected.clear();
         self.active = None;
         self.anchor = None;
     }
-    pub(super) fn invalidate(&mut self) {
+    pub(in crate::gui) fn invalidate(&mut self) {
         self.cancel();
         self.busy = !self.selected.is_empty() || self.active.is_some() || self.anchor.is_some();
     }
-    pub(super) fn select(&mut self, row: EntryIdentity, multi: bool) {
+    pub(in crate::gui) fn select(&mut self, row: EntryIdentity, multi: bool) {
         self.cancel();
         if !multi {
             self.selected.clear();
@@ -192,7 +192,7 @@ impl EntrySelection {
         self.active = Some(row);
         self.anchor = Some(row);
     }
-    pub(super) fn ids(&self) -> Vec<i64> {
+    pub(in crate::gui) fn ids(&self) -> Vec<i64> {
         let mut ids: Vec<_> = self.selected.keys().copied().collect();
         for owner in [self.active, self.anchor].into_iter().flatten() {
             if !ids.contains(&owner.id) {
@@ -201,7 +201,7 @@ impl EntrySelection {
         }
         ids
     }
-    pub(super) fn ordered(&self) -> Vec<EntryIdentity> {
+    pub(in crate::gui) fn ordered(&self) -> Vec<EntryIdentity> {
         if !self.ready() {
             return Vec::new();
         }
@@ -209,10 +209,10 @@ impl EntrySelection {
         rows.sort_unstable_by_key(|row| row.position);
         rows
     }
-    pub(super) fn ordered_ids(&self) -> Vec<i64> {
+    pub(in crate::gui) fn ordered_ids(&self) -> Vec<i64> {
         self.ordered().into_iter().map(|row| row.id).collect()
     }
-    pub(super) fn drag_ids(&self, source: i64) -> Vec<i64> {
+    pub(in crate::gui) fn drag_ids(&self, source: i64) -> Vec<i64> {
         if !self.ready() {
             Vec::new()
         } else if self.contains(source) {
@@ -227,7 +227,7 @@ impl EntrySelection {
         self.navigation = None;
     }
     #[cfg(test)]
-    pub(super) fn remove(&mut self, id: i64) {
+    pub(in crate::gui) fn remove(&mut self, id: i64) {
         self.cancel();
         self.selected.remove(&id);
         if self.active.is_some_and(|row| row.id == id) {
@@ -240,7 +240,7 @@ impl EntrySelection {
     fn current(&self, generation: u64) -> bool {
         self.generation == generation
     }
-    pub(super) fn reconcile(&mut self, rows: Vec<EntryIdentity>) {
+    pub(in crate::gui) fn reconcile(&mut self, rows: Vec<EntryIdentity>) {
         self.active = self
             .active
             .and_then(|old| rows.iter().find(|row| row.id == old.id).copied());
@@ -512,7 +512,10 @@ fn entry_query_result(
 }
 
 impl GuiApp {
-    pub(super) fn playlist_occurrence_stamp(&self, playlist_id: i64) -> crate::model::QueryStamp {
+    pub(in crate::gui) fn playlist_occurrence_stamp(
+        &self,
+        playlist_id: i64,
+    ) -> crate::model::QueryStamp {
         Query::PlaylistEntryLocations {
             query: None,
             playlist_id,
@@ -521,9 +524,9 @@ impl GuiApp {
         .stamp(self.state.query_revisions(Some(playlist_id)))
     }
 
-    pub(super) fn sync_entry_projection(&mut self, cx: &mut Context<Self>) {
-        if let Some(playlist_id) = self.browser.playlists.selected() {
-            let filter = self.browser.playlists.entries().query.clone();
+    pub(in crate::gui) fn sync_entry_projection(&mut self, cx: &mut Context<Self>) {
+        if let Some(playlist_id) = self.browser.playlists().selected() {
+            let filter = self.browser.playlists().entries().query.clone();
             let query = Query::PlaylistEntryLocations {
                 query: filter.clone(),
                 playlist_id,
@@ -532,16 +535,14 @@ impl GuiApp {
             let revisions = self.state.query_revisions(Some(playlist_id));
             if self
                 .browser
-                .playlists
-                .track_selection
+                .playlist_selection_mut()
                 .projection
                 .sync(&query, revisions)
             {
                 self.refresh_entry_selection(cx);
             }
             self.browser
-                .playlists
-                .track_selection
+                .playlist_selection_mut()
                 .navigation_projection
                 .sync(
                     &Query::PlaylistEntries {
@@ -555,7 +556,7 @@ impl GuiApp {
         }
     }
 
-    pub(super) fn playlist_revision(&self, id: i64) -> u64 {
+    pub(in crate::gui) fn playlist_revision(&self, id: i64) -> u64 {
         self.state
             .library
             .playlist_entry_revisions
@@ -570,12 +571,12 @@ impl GuiApp {
         revision: u64,
         library: u64,
     ) -> bool {
-        self.browser.playlists.selected() == Some(playlist_id)
-            && self.browser.playlists.entries().playlist_id == Some(playlist_id)
-            && self.browser.playlists.track_selection.current(generation)
+        self.browser.playlists().selected() == Some(playlist_id)
+            && self.browser.playlists().entries().playlist_id == Some(playlist_id)
+            && self.browser.playlists().track_selection.current(generation)
             && {
                 let query = Query::PlaylistEntryLocations {
-                    query: self.browser.playlists.entries().query.clone(),
+                    query: self.browser.playlists().entries().query.clone(),
                     playlist_id,
                     entry_ids: Vec::new(),
                 };
@@ -601,20 +602,20 @@ impl GuiApp {
         cx: &mut Context<Self>,
     ) {
         self.refresh(cx);
-        if self.browser.playlists.selected() == Some(playlist_id)
-            && self.browser.playlists.track_selection.current(generation)
+        if self.browser.playlists().selected() == Some(playlist_id)
+            && self.browser.playlists().track_selection.current(generation)
         {
             // Keep the pre-job selection intact; a failed partial range never becomes visible.
-            self.browser.playlists.track_selection.fail(message.clone());
+            self.browser.playlist_selection_mut().fail(message.clone());
             self.error = Some(message);
             cx.notify();
         }
     }
-    pub(super) fn refresh_entry_selection(&mut self, cx: &mut Context<Self>) {
-        let Some(playlist_id) = self.browser.playlists.selected() else {
+    pub(in crate::gui) fn refresh_entry_selection(&mut self, cx: &mut Context<Self>) {
+        let Some(playlist_id) = self.browser.playlists().selected() else {
             return;
         };
-        let selection = &mut self.browser.playlists.track_selection;
+        let selection = self.browser.playlist_selection_mut();
         selection.invalidate();
         if selection.refresh_in_flight {
             selection.refresh_pending = true;
@@ -634,9 +635,9 @@ impl GuiApp {
             .metadata_revisions
             .playlist_revision(playlist_id, self.state.library.revision);
         let handle = self.handle.clone();
-        let ticket = self.browser.playlists.track_selection.projection.ticket();
+        let ticket = self.browser.playlist_selection_mut().projection.ticket();
         let i18n = std::sync::Arc::clone(&self.i18n);
-        let filter = self.browser.playlists.entries().query.clone();
+        let filter = self.browser.playlists().entries().query.clone();
         cx.spawn(async move |this, cx| {
             async {
                 let mut identities = Vec::with_capacity(ids.len());
@@ -723,13 +724,13 @@ impl GuiApp {
                     if !this.entry_job_current(playlist_id, generation, revision, library) {
                         return;
                     }
-                    this.browser.playlists.accept_entry_locations(identities);
+                    this.browser.accept_playlist_entry_locations(identities);
                     cx.notify();
                 });
             }
             .await;
             let _ = this.update(cx, |this, cx| {
-                let selection = &mut this.browser.playlists.track_selection;
+                let selection = this.browser.playlist_selection_mut();
                 selection.refresh_in_flight = false;
                 if std::mem::take(&mut selection.refresh_pending) {
                     this.refresh_entry_selection(cx);
@@ -738,7 +739,7 @@ impl GuiApp {
         })
         .detach();
     }
-    pub(super) fn select_playlist_container(
+    pub(in crate::gui) fn select_playlist_container(
         &mut self,
         id: i64,
         name: String,
@@ -746,7 +747,7 @@ impl GuiApp {
         cx: &mut Context<Self>,
     ) {
         self.begin_manual_intent();
-        if self.browser.playlists.select(id, name, index) {
+        if self.browser.select_playlist(id, name, index) {
             self.playlist_entries_search
                 .update(cx, |search, cx| search.reset(cx));
             self.request_playlist_entries(id, 0, cx);
@@ -754,7 +755,7 @@ impl GuiApp {
         }
     }
 
-    pub(super) fn select_playlist_entry(
+    pub(in crate::gui) fn select_playlist_entry(
         &mut self,
         id: i64,
         index: usize,
@@ -763,12 +764,12 @@ impl GuiApp {
         cx: &mut Context<Self>,
     ) {
         self.refresh(cx);
-        if (shift || multi) && !self.browser.playlists.track_selection.ready() {
+        if (shift || multi) && !self.browser.playlists().track_selection.ready() {
             return;
         }
         let Some(row) = self
             .browser
-            .playlists
+            .playlists()
             .entries()
             .rows
             .get(index)
@@ -780,10 +781,10 @@ impl GuiApp {
         let Some(scope) = self.playlist_navigation_scope() else {
             return;
         };
-        let anchor = self.browser.playlists.track_selection.anchor;
+        let anchor = self.browser.playlists().track_selection.anchor;
         let intent = self.begin_manual_intent();
-        self.browser.playlists.track_selection.intent = Some(intent);
-        let generation = self.browser.playlists.track_selection.generation;
+        self.browser.playlist_selection_mut().intent = Some(intent);
+        let generation = self.browser.playlists().track_selection.generation;
         let commit = EntryCommit {
             scope,
             generation,
@@ -820,7 +821,7 @@ impl GuiApp {
         commit: EntryCommit,
         cx: &mut Context<Self>,
     ) {
-        let selection = &mut self.browser.playlists.track_selection;
+        let selection = self.browser.playlist_selection_mut();
         if let Some(rows) = commit.rows {
             selection.complete_range(
                 commit.generation,
@@ -832,7 +833,7 @@ impl GuiApp {
         } else {
             selection.select(commit.target, commit.multi);
         }
-        self.browser.playlists.sync_active_entry();
+        self.browser.sync_active_playlist_entry();
         self.browser.focus_list(ListFocus::PlaylistTracks);
         self.request_track(commit.target.track_id, cx);
         if commit.scroll {
@@ -851,7 +852,7 @@ impl GuiApp {
         end: usize,
         cx: &mut Context<Self>,
     ) {
-        let selection = &mut self.browser.playlists.track_selection;
+        let selection = self.browser.playlist_selection_mut();
         selection.busy = true;
         selection.intent = Some(intent);
         selection.range_request = Some(EntryRangeRequest {
@@ -864,19 +865,18 @@ impl GuiApp {
     }
 
     fn dispatch_playlist_range(&mut self, cx: &mut Context<Self>) {
-        let Some(mut job) = self.browser.playlists.track_selection.take_range() else {
+        let Some(mut job) = self.browser.playlist_selection_mut().take_range() else {
             return;
         };
         let generation = job.commit.generation;
         let handle = self.handle.clone();
         let ticket = self
             .browser
-            .playlists
-            .track_selection
+            .playlist_selection_mut()
             .navigation_projection
             .ticket();
         let i18n = std::sync::Arc::clone(&self.i18n);
-        let filter = self.browser.playlists.entries().query.clone();
+        let filter = self.browser.playlists().entries().query.clone();
         cx.spawn(async move |this, cx| {
             let result: Result<Option<Vec<EntryIdentity>>, String> = async {
                 let mut pages = EntryRangePages::new(job.start, job.end);
@@ -929,12 +929,11 @@ impl GuiApp {
             .await;
             let _ = this.update(cx, |this, cx| {
                 this.browser
-                    .playlists
-                    .track_selection
+                    .playlist_selection_mut()
                     .release_range_worker(generation);
                 this.refresh(cx);
                 if this.manual_intent_current(job.intent) && this.entry_commit_valid(&job.commit) {
-                    this.browser.playlists.track_selection.busy = false;
+                    this.browser.playlist_selection_mut().busy = false;
                     match result {
                         Ok(Some(rows)) => {
                             job.commit.rows = Some(rows);
@@ -965,8 +964,8 @@ impl GuiApp {
     }
 
     fn playlist_navigation_scope(&self) -> Option<EntryNavigationScope> {
-        let playlist_id = self.browser.playlists.selected()?;
-        (self.browser.playlists.entries().playlist_id == Some(playlist_id)).then(|| {
+        let playlist_id = self.browser.playlists().selected()?;
+        (self.browser.playlists().entries().playlist_id == Some(playlist_id)).then(|| {
             EntryNavigationScope {
                 playlist_id,
                 revision: self.playlist_revision(playlist_id),
@@ -979,31 +978,30 @@ impl GuiApp {
         })
     }
 
-    pub(super) fn select_all_playlist_entries(&mut self, cx: &mut Context<Self>) {
+    pub(in crate::gui) fn select_all_playlist_entries(&mut self, cx: &mut Context<Self>) {
         self.refresh(cx);
         let Some(scope) = self.playlist_navigation_scope() else {
             return;
         };
-        let Some(total) = self.browser.playlists.entries().rows.total() else {
+        let Some(total) = self.browser.playlists().entries().rows.total() else {
             return;
         };
         if !self
             .browser
-            .playlists
-            .track_selection
+            .playlist_selection_mut()
             .navigate_all(scope, total)
         {
             return;
         }
         let intent = self.begin_manual_intent();
-        let selection = &mut self.browser.playlists.track_selection;
+        let selection = self.browser.playlist_selection_mut();
         selection.navigate_to(scope, 0, false, false, true);
         selection.intent = Some(intent);
         self.dispatch_playlist_navigation(cx);
         cx.notify();
     }
 
-    pub(super) fn navigate_playlist(
+    pub(in crate::gui) fn navigate_playlist(
         &mut self,
         down: bool,
         shift: bool,
@@ -1014,46 +1012,45 @@ impl GuiApp {
         let Some(scope) = self.playlist_navigation_scope() else {
             return;
         };
-        let Some(total) = self.browser.playlists.entries().rows.total() else {
+        let Some(total) = self.browser.playlists().entries().rows.total() else {
             return;
         };
         if !self
             .browser
-            .playlists
-            .track_selection
+            .playlist_selection_mut()
             .navigate(scope, total, down, shift, multi)
         {
             return;
         }
         let offset = self
             .browser
-            .playlists
+            .playlists()
             .track_selection
             .navigation
             .unwrap()
             .offset;
         let intent = self.begin_manual_intent();
-        let selection = &mut self.browser.playlists.track_selection;
+        let selection = self.browser.playlist_selection_mut();
         selection.navigate_to(scope, offset, shift, multi, false);
         selection.intent = Some(intent);
         self.dispatch_playlist_navigation(cx);
         cx.notify();
     }
 
-    pub(super) fn jump_playlist_edge(&mut self, last: bool, cx: &mut Context<Self>) {
+    pub(in crate::gui) fn jump_playlist_edge(&mut self, last: bool, cx: &mut Context<Self>) {
         self.refresh(cx);
         let Some(scope) = self.playlist_navigation_scope() else {
             return;
         };
-        let Some(total) = self.browser.playlists.entries().rows.total() else {
+        let Some(total) = self.browser.playlists().entries().rows.total() else {
             return;
         };
-        let selection = &self.browser.playlists.track_selection;
+        let selection = &self.browser.playlists().track_selection;
         if total == 0 || (!selection.ready() && selection.navigation.is_none()) {
             return;
         }
         let intent = self.begin_manual_intent();
-        let selection = &mut self.browser.playlists.track_selection;
+        let selection = self.browser.playlist_selection_mut();
         selection.navigate_to(scope, if last { total - 1 } else { 0 }, false, false, false);
         selection.intent = Some(intent);
         self.dispatch_playlist_navigation(cx);
@@ -1061,23 +1058,22 @@ impl GuiApp {
     }
 
     fn dispatch_playlist_navigation(&mut self, cx: &mut Context<Self>) {
-        let Some(intent) = self.browser.playlists.track_selection.intent else {
+        let Some(intent) = self.browser.playlists().track_selection.intent else {
             return;
         };
         if !self.manual_intent_current(intent) {
             return;
         }
-        let Some(job) = self.browser.playlists.track_selection.take_navigation() else {
+        let Some(job) = self.browser.playlist_selection_mut().take_navigation() else {
             return;
         };
         let handle = self.handle.clone();
         let ticket = self
             .browser
-            .playlists
-            .track_selection
+            .playlist_selection_mut()
             .navigation_projection
             .ticket();
-        let query = self.browser.playlists.entries().query.clone();
+        let query = self.browser.playlists().entries().query.clone();
         cx.spawn(async move |this, cx| {
             let response = cx
                 .background_executor()
@@ -1096,7 +1092,7 @@ impl GuiApp {
             let _ = this.update(cx, |this, cx| {
                 this.refresh(cx);
                 let scope = this.playlist_navigation_scope();
-                let effect = this.browser.playlists.track_selection.finish_navigation(
+                let effect = this.browser.playlist_selection_mut().finish_navigation(
                     this.i18n.text("gl-playlist-navigation-response"),
                     job,
                     scope,
@@ -1107,7 +1103,7 @@ impl GuiApp {
                         EntryNavigationEffect::None => {}
                         EntryNavigationEffect::Reload => {
                             this.fail_manual_intent(intent);
-                            this.browser.playlists.track_selection.busy = false;
+                            this.browser.playlist_selection_mut().busy = false;
                             this.error = Some(this.i18n.text("gl-playlist-changed-select").into());
                         }
                         EntryNavigationEffect::Failed(message) => {
@@ -1133,7 +1129,7 @@ impl GuiApp {
                                     cx,
                                 );
                             } else {
-                                this.browser.playlists.track_selection.busy = false;
+                                this.browser.playlist_selection_mut().busy = false;
                                 this.ready_manual_action(
                                     intent,
                                     ManualAction::Playlist(commit),
@@ -1150,12 +1146,12 @@ impl GuiApp {
         })
         .detach();
     }
-    pub(super) fn remove_playlist_selection(&mut self, cx: &mut Context<Self>) {
+    pub(in crate::gui) fn remove_playlist_selection(&mut self, cx: &mut Context<Self>) {
         self.refresh(cx);
-        let Some(playlist_id) = self.browser.playlists.selected() else {
+        let Some(playlist_id) = self.browser.playlists().selected() else {
             return;
         };
-        let entry_ids = self.browser.playlists.track_selection.ordered_ids();
+        let entry_ids = self.browser.playlists().track_selection.ordered_ids();
         if entry_ids.is_empty() {
             return;
         }

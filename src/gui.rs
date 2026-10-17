@@ -12,10 +12,10 @@ mod loading;
 mod metadata;
 mod paged;
 mod panels;
-mod playlist_editor;
-mod playlist_selection;
+mod playlists;
 mod queries;
 mod queue;
+mod queue_replace;
 mod scrolling;
 pub(crate) mod session;
 mod settings;
@@ -33,6 +33,7 @@ use crate::{
 use anyhow::Result;
 use ashpd::desktop::file_chooser::SelectedFiles;
 use browser::BrowserState;
+use browser::requests::ViewRequestKind;
 use components::input::{Input, InputEvent};
 use components::search::{ListSearch, SearchEvent};
 use components::{ButtonTooltip, caption, drag_preview, list_row};
@@ -42,14 +43,13 @@ use layout::interaction::{
     Cancellation, DockGeometry, DockHover, DockRequest, DragCommit, Dragging, LayoutInteraction,
     Measured,
 };
+use layout::panel_menu::{PanelMenu, PanelMenuPage};
 use layout::save_owner::LayoutSaveHandle;
 use layout::{Axis, Edge, LayoutSet, Node};
 use library::LibraryNode;
 use list_interaction::{ContentDrag, ContentMenuRequest, TrackSource};
 use metadata::session::MetadataSession;
-use queries::ViewRequestKind;
 pub(crate) use session::UiSession;
-use shell::{PanelMenu, PanelMenuPage};
 use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
@@ -420,9 +420,7 @@ pub(super) struct GuiApp {
     browser: BrowserState,
     loading_text: loading::LoadingText<loading::LoadingOwner>,
     metadata: MetadataSession,
-    metadata_projection: crate::projection::QueryProjection,
-    metadata_load: metadata::MetadataLoadState,
-    metadata_needs_refresh: bool,
+    metadata_read: metadata::MetadataReadCoordinator,
     manual_intents: metadata::ManualIntents,
     duplicate_review: duplicates::DuplicateReview,
     metadata_decoder_hint: crate::model::DecoderHint,
@@ -444,8 +442,9 @@ pub(super) struct GuiApp {
     album_artwork: Entity<album_artwork::AlbumArtwork>,
     artwork_panels: HashMap<u64, Entity<album_artwork::AlbumArtworkPanel>>,
     album_browsers: HashMap<u64, Entity<album_browser::AlbumBrowser>>,
-    playlist_editor: Option<playlist_editor::PlaylistEditor>,
-    playlist_action: Option<panels::PlaylistAction>,
+    playlist_editor: Option<playlists::editor::PlaylistEditor>,
+    playlist_action: Option<playlists::PlaylistAction>,
+    queue_replace: Option<queue_replace::QueueReplacement>,
     settings: Entity<settings::Settings>,
     visuals: visualization::Visuals,
     audio_visualizer: visualization::AudioVisualizer,
@@ -746,8 +745,8 @@ impl GuiApp {
                 }
             }
             ListFocus::PlaylistTracks => {
-                if self.browser.playlists.track_selection.ready()
-                    && let Some(row) = self.browser.playlists.track_selection.active
+                if self.browser.playlists().track_selection.ready()
+                    && let Some(row) = self.browser.playlists().track_selection.active
                 {
                     self.send(
                         Command::Play {
@@ -1110,9 +1109,7 @@ impl GuiApp {
             browser: BrowserState::default(),
             loading_text: loading::LoadingText::default(),
             metadata: MetadataSession::default(),
-            metadata_projection: Default::default(),
-            metadata_load: metadata::MetadataLoadState::default(),
-            metadata_needs_refresh: false,
+            metadata_read: Default::default(),
             manual_intents: metadata::ManualIntents::default(),
             duplicate_review: duplicates::DuplicateReview::default(),
             metadata_decoder_hint: Default::default(),
@@ -1127,6 +1124,7 @@ impl GuiApp {
             error,
             playlist_editor: None,
             playlist_action: None,
+            queue_replace: None,
             album_artwork: cx.new(|cx| {
                 let default_album = cx.new(|_| album_default);
                 album_artwork::AlbumArtwork::new(
@@ -1215,7 +1213,7 @@ impl GuiApp {
             return;
         }
         self.begin_playlist_name(
-            playlist_editor::PlaylistNameAction::SaveQueue,
+            playlists::editor::PlaylistNameAction::SaveQueue,
             format!("Queue_{}", chrono::Local::now().format("%Y%m%d_%H%M%S")),
             window,
             cx,
@@ -1336,8 +1334,8 @@ impl GuiApp {
     ) -> Stateful<Div> {
         let theme = crate::gui::theme::palette(cx);
         let error = match kind {
-            ViewRequestKind::Summaries => self.browser.playlists.summaries().rows.error(index),
-            ViewRequestKind::Entries => self.browser.playlists.entries().rows.error(index),
+            ViewRequestKind::Summaries => self.browser.playlists().summaries().rows.error(index),
+            ViewRequestKind::Entries => self.browser.playlists().entries().rows.error(index),
             ViewRequestKind::Queue => self.browser.queue.rows.error(index),
             _ => None,
         };
@@ -1490,7 +1488,7 @@ impl GuiApp {
             }
             let playlist_refresh = self
                 .browser
-                .playlists
+                .playlists()
                 .refresh_changes(&self.state.library, &state.library);
             let roots_changed =
                 self.state.system.config.library_roots != state.system.config.library_roots;
@@ -1538,8 +1536,8 @@ impl GuiApp {
                 .sync(&self.state.library.history, self.history_playback());
             self.sync_metadata_default(cx);
             self.sync_full_waveform_request();
-            self.browser.playlists.reconcile_selection();
-            if self.browser.playlists.selected().is_some_and(|id| {
+            self.browser.reconcile_playlist_selection();
+            if self.browser.playlists().selected().is_some_and(|id| {
                 !self
                     .state
                     .library
@@ -1572,20 +1570,7 @@ impl GuiApp {
             if page_size_changed {
                 self.refresh_page_size();
             }
-            if playlist_refresh.summaries {
-                self.browser.playlists.invalidate_summaries();
-                self.browser
-                    .requests
-                    .cancel(queries::ViewRequestKind::Summaries);
-            }
-            if playlist_refresh.entries {
-                if let Some(id) = self.browser.playlists.entries().playlist_id {
-                    self.browser.playlists.prepare_entries(id);
-                }
-                self.browser
-                    .requests
-                    .cancel(queries::ViewRequestKind::Entries);
-            }
+            self.browser.refresh_playlists(playlist_refresh);
         }
         self.sync_album_artwork(cx);
         self.sync_loading_text(cx);

@@ -1,5 +1,5 @@
 use super::*;
-use super::{library::LibraryDrag, panels::PlaylistDrag, queue::QueueDrag};
+use super::{library::LibraryDrag, playlists::PlaylistDrag, queue::QueueDrag};
 use crate::gui::components::{POPOVER_MAX_REMS, caption, context_menu_container, menu_item};
 use crate::response::ViewResponse;
 
@@ -203,6 +203,7 @@ impl GuiApp {
         };
         self.panel_menu = None;
         self.playlist_action = None;
+        self.queue_replace = None;
         let tracks_only = nodes.as_ref().is_none_or(|nodes| {
             nodes
                 .iter()
@@ -552,7 +553,7 @@ impl GuiApp {
                             return;
                         };
                         this.begin_playlist_name(
-                            playlist_editor::PlaylistNameAction::Create { track_ids },
+                            playlists::editor::PlaylistNameAction::Create { track_ids },
                             String::new(),
                             window,
                             cx,
@@ -560,7 +561,7 @@ impl GuiApp {
                     },
                 ));
             }
-            let count = self.browser.playlists.summaries().rows.len();
+            let count = self.browser.playlists().summaries().rows.len();
             let height = (window.rem_size() * components::LIST_ROW_REMS * count.max(1) as f32)
                 .min(window.rem_size() * POPOVER_MAX_REMS)
                 .min(window.viewport_size().height * 0.5);
@@ -573,7 +574,7 @@ impl GuiApp {
                             range
                                 .map(|index| {
                                     let Some(playlist) =
-                                        this.browser.playlists.summaries().rows.get(index)
+                                        this.browser.playlists().summaries().rows.get(index)
                                     else {
                                         return this
                                             .paged_loading_row(

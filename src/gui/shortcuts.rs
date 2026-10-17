@@ -108,6 +108,13 @@ impl GuiApp {
             cx.stop_propagation();
             return;
         }
+        if self.queue_replace.is_some() {
+            if cancel {
+                self.dismiss_queue_replace(window, cx);
+            }
+            cx.stop_propagation();
+            return;
+        }
         if self.playlist_editor.is_some() {
             if cancel {
                 self.cancel_playlist_name(window, cx);

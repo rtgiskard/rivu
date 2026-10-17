@@ -1,5 +1,6 @@
 use super::{
     UI_INSET,
+    album_artwork::{ALBUM_ARTWORK_STYLES, album_artwork_style_label},
     components::{
         ButtonTooltip, DROPDOWN_ROW_REMS, DropdownItem, DropdownState, FocusScope,
         POPOVER_MAX_REMS, StatusKind, activate_control, active_control, button, caption, column,
@@ -9,6 +10,7 @@ use super::{
         row, section_group, status_message, toggle_button, two_column,
     },
     theme::palette,
+    visualization::audio_visualizer_style_label,
 };
 use crate::{
     artwork::{ArtworkCacheReport, ArtworkManager},
@@ -366,47 +368,6 @@ fn spectrum_style_label(i18n: &Localizer, style: SpectrumStyle) -> String {
         SpectrumStyle::Line => i18n.text("settings-line").to_owned(),
         SpectrumStyle::Solid => i18n.text("settings-solid").to_owned(),
     }
-}
-pub(super) const ALBUM_ARTWORK_STYLES: [AlbumArtworkStyle; 7] = [
-    AlbumArtworkStyle::Plain,
-    AlbumArtworkStyle::Card,
-    AlbumArtworkStyle::Vinyl,
-    AlbumArtworkStyle::Glass,
-    AlbumArtworkStyle::Metal,
-    AlbumArtworkStyle::Halo,
-    AlbumArtworkStyle::Duotone,
-];
-
-pub(super) fn album_artwork_style_id(style: AlbumArtworkStyle) -> &'static str {
-    match style {
-        AlbumArtworkStyle::Plain => "settings-plain",
-        AlbumArtworkStyle::Vinyl => "settings-vinyl",
-        AlbumArtworkStyle::Glass => "settings-glass",
-        AlbumArtworkStyle::Halo => "settings-halo",
-        AlbumArtworkStyle::Metal => "settings-metal",
-        AlbumArtworkStyle::Card => "settings-card",
-        AlbumArtworkStyle::Duotone => "settings-duotone",
-    }
-}
-
-pub(super) fn album_artwork_style_label(i18n: &Localizer, style: AlbumArtworkStyle) -> &str {
-    i18n.text(album_artwork_style_id(style))
-}
-
-pub(super) fn audio_visualizer_style_id(style: AudioVisualizerStyle) -> &'static str {
-    match style {
-        AudioVisualizerStyle::Bars => "settings-bars",
-        AudioVisualizerStyle::Rings => "settings-rings",
-        AudioVisualizerStyle::BarsRings => "settings-bars-rings",
-        AudioVisualizerStyle::StereoDensity => "settings-stereo-density",
-        AudioVisualizerStyle::SpatialSpectrum => "settings-spatial-spectrum",
-        AudioVisualizerStyle::FractalBeams => "settings-fractal-beams",
-        AudioVisualizerStyle::FractalFlow => "settings-fractal-flow",
-    }
-}
-
-pub(super) fn audio_visualizer_style_label(i18n: &Localizer, style: AudioVisualizerStyle) -> &str {
-    i18n.text(audio_visualizer_style_id(style))
 }
 
 fn visualization_palette_label(_i18n: &Localizer, palette: VisualizationPalette) -> String {

@@ -15,7 +15,7 @@ use super::{
         panel_toolbar, row, scrollable_list, status_message, track_list_row,
     },
     library::LibraryDrag,
-    panels::PlaylistDrag,
+    playlists::PlaylistDrag,
 };
 use crate::{
     model::{Page, Query, QueryStamp, QueueRow},

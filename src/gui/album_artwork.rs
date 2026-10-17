@@ -14,10 +14,37 @@ use crate::{
     config::{
         AlbumArtworkDirection, AlbumArtworkMode, AlbumArtworkOptions, AlbumArtworkStyle, Config,
     },
+    i18n::Localizer,
     model::{PlaybackStatus, Track},
 };
 
 use super::artwork::{Artwork, ArtworkDecoration, ArtworkImages, ArtworkLoader, ArtworkView};
+
+pub(super) const ALBUM_ARTWORK_STYLES: [AlbumArtworkStyle; 7] = [
+    AlbumArtworkStyle::Plain,
+    AlbumArtworkStyle::Card,
+    AlbumArtworkStyle::Vinyl,
+    AlbumArtworkStyle::Glass,
+    AlbumArtworkStyle::Metal,
+    AlbumArtworkStyle::Halo,
+    AlbumArtworkStyle::Duotone,
+];
+
+pub(super) fn album_artwork_style_id(style: AlbumArtworkStyle) -> &'static str {
+    match style {
+        AlbumArtworkStyle::Plain => "settings-plain",
+        AlbumArtworkStyle::Vinyl => "settings-vinyl",
+        AlbumArtworkStyle::Glass => "settings-glass",
+        AlbumArtworkStyle::Halo => "settings-halo",
+        AlbumArtworkStyle::Metal => "settings-metal",
+        AlbumArtworkStyle::Card => "settings-card",
+        AlbumArtworkStyle::Duotone => "settings-duotone",
+    }
+}
+
+pub(super) fn album_artwork_style_label(i18n: &Localizer, style: AlbumArtworkStyle) -> &str {
+    i18n.text(album_artwork_style_id(style))
+}
 
 /// Pacing is measured between native frame requests, not after frame delivery.
 /// A late wake schedules only one frame and establishes a fresh deadline.

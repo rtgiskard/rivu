@@ -1,22 +1,22 @@
-use super::*;
 use crate::gui::components::{
     StatusKind, caption, column, form_field, icon_button, row, status_message,
 };
+use crate::gui::*;
 
-pub(super) enum PlaylistNameAction {
+pub(in crate::gui) enum PlaylistNameAction {
     Create { track_ids: Vec<i64> },
     Rename { playlist_id: i64 },
     SaveQueue,
 }
 
-pub(super) struct PlaylistEditor {
+pub(in crate::gui) struct PlaylistEditor {
     action: PlaylistNameAction,
     pending: bool,
-    pub(super) error: Option<String>,
+    pub(in crate::gui) error: Option<String>,
 }
 
 impl GuiApp {
-    pub(super) fn begin_playlist_name(
+    pub(in crate::gui) fn begin_playlist_name(
         &mut self,
         action: PlaylistNameAction,
         name: String,
@@ -41,7 +41,11 @@ impl GuiApp {
         cx.notify();
     }
 
-    pub(super) fn cancel_playlist_name(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(in crate::gui) fn cancel_playlist_name(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self
             .playlist_editor
             .as_ref()
@@ -55,7 +59,11 @@ impl GuiApp {
         cx.notify();
     }
 
-    pub(super) fn submit_playlist_name(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(in crate::gui) fn submit_playlist_name(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let name = self.value(Field::PlaylistName, cx).trim().to_owned();
         let Some(editor) = self.playlist_editor.as_mut() else {
             return;
@@ -115,7 +123,7 @@ impl GuiApp {
         cx.notify();
     }
 
-    pub(super) fn playlist_name_dialog(
+    pub(in crate::gui) fn playlist_name_dialog(
         &self,
         window: &Window,
         cx: &mut Context<Self>,

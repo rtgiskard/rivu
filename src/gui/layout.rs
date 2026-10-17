@@ -14,6 +14,7 @@ mod docking_ui;
 pub(super) mod interaction;
 pub(super) mod layout_geometry;
 pub(super) mod layout_manager;
+pub(super) mod panel_menu;
 pub(super) mod save_owner;
 mod view;
 
