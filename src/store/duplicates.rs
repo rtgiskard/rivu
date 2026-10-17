@@ -330,9 +330,9 @@ mod tests {
                 raw_title,raw_artist,raw_album,duration,codec,channels,sample_rate,
                 bitrate_bps,bitrate_exact,track_number,disc_number,bits_per_sample,release_date,probe_version)
              VALUES(1,'/old/source.wav',?1,10,20,1,'Old','Artist','Album',1,'pcm',2,48000,
-                    1536000,0,1,1,16,'2024',3),
+                    1536000,0,1,1,16,'2024',1),
                    (2,'/new/target.wav',?1,10,30,0,'Target','New artist','New album',2,'flac',2,96000,
-                    300000,1,2,2,24,'2025',3)",
+                    300000,1,2,2,24,'2025',1)",
             [hash.as_bytes().as_slice()],
         )?;
         Ok(store)

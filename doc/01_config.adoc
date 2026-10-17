@@ -13,7 +13,7 @@ instance does not validate a configuration path that the instance will not use.
 Configuration symlinks are followed when saving, including relative chains and
 missing targets; saving atomically replaces the target file, not the links.
 Link loops and inaccessible targets are reported as errors without replacing the links.
-The file has five stable top-level domains: `[library]`, `[playback]`,
+Configuration is organized into `[library]`, `[playback]`,
 `[interface]`, `[logging]`, and `[visualizations]`. Audio visualization settings
 live in `[visualizations.spectrum]`, `[visualizations.spectrogram]`,
 `[visualizations.audio_visualizer]`, and `[visualizations.waveform]`.
@@ -157,8 +157,6 @@ steps; it does not normalize loudness between tracks.
 Settings accept fractional percentages; CLI inputs remain integer percentages.
 Slider, IPC, and MPRIS values use the same curve, with normalized `0–1` levels
 for IPC and MPRIS. Values are not rounded to whole percentages internally.
-
-For older volume settings, see <<_migrating_an_existing_file,Migrating an existing file>>.
 
 `playback.shuffle` defaults to `false`; `playback.repeat` accepts `off`, `all`, or `one` and defaults
 to `off`. `playback.play_count_threshold_percent` defaults to `20` and must be finite and
@@ -339,10 +337,6 @@ text and selection colors receive local contrast adaptations without changing
 their hue families. Other applications' theme-file formats are not imported. Unknown theme
 names are configuration errors. The selected theme does not change visualization
 backgrounds, signal palettes, canvas labels, cursor colors, or album artwork.
-
-Existing configurations using `rivu_night` must change it to `rivu_dark`.
-The removed `catppuccin_mocha` and `catppuccin_latte` values must be replaced
-with one of the themes above; obsolete values are configuration errors.
 
 Font: type to search installed families, or use the arrow to browse them and
 `serif`, `sans-serif`, and `monospace`. Enter or a click selects a choice; Space
@@ -629,7 +623,7 @@ strictly between `0` and `1`. They are cumulative fractions of pane content
 length, excluding separator gutters, not weights or fractions of adjacent panes.
 Splits require at least two children and cannot directly contain a split in the
 same direction. At most 32 splits may occur along any root-to-leaf path; tabs
-do not count toward this limit. Legacy child wrappers and weights are rejected.
+do not count toward this limit.
 Configuration remains TOML; layout persistence remains JSON.
 
 `tabs` requires a nonempty `panels` array. Its optional `active` is a zero-based
@@ -825,40 +819,3 @@ pause freezes it. Seeking, signal gaps, hiding the view, and style/FFT changes
 reset the scene. See link:23_visuals.adoc[Visualization Rendering Design] for
 analysis continuity, scene resource boundaries, and rendering trade-offs.
 
-== Migrating an existing file
-
-The old root-level format is no longer accepted. Rewrite it before starting
-Rivu; mixing old flat keys with grouped settings is also an error.
-
-Move an existing `[visualizations.album_artwork]` table to
-`[interface.album_artwork]`, keeping its fields and values. The old location is
-rejected; do not keep both tables.
-
-* Move library fields to `[library]`; rename `library_roots` to `roots`.
-* Move volume, shuffle, repeat, play-count threshold, output device,
-  media read buffer, FFmpeg enablement, and PipeWire auto-mix fields to
-  `[playback]`, keeping their names; the integer `volume` key is migrated as
-  described under <<volume,volume control>>.
-* Move page size, layout snapping, tray, and MPRIS fields to `[interface]`,
-  keeping their names; rename `ui_font` to `font` and `ui_scale` to `scale`.
-* Move logging fields to `[logging]`: `log_level` becomes `level`, `log_to_file`
-  becomes `to_file`, and `log_retention_weeks` becomes `retention_weeks`.
-* Move shared visualization and analysis fields to `[visualizations]`:
-  `visual_background` becomes `background`, `visual_palette` becomes `palette`,
-  `visualization_db_range` becomes `db_range`, and `visualization_cache` becomes
-  `cache`. Keep `still_mode`, `analysis_fps`, `analysis_fft_size`, and
-  `analysis_window` unchanged within that table.
-* Move every view-prefixed field to its corresponding nested view table and
-  remove only its `spectrum_`, `spectrogram_`, `audio_visualizer_`, or `waveform_`
-  prefix. Keep units and subfeature qualifiers, such as `history_seconds`,
-  `sampling_points_scale`, `rms_gain`, and `bloom_intensity`.
-
-Do not invent values for omitted optional fields: `playback.output_device` and
-each view's `db_range` remain unset and are omitted when saving. Other missing
-groups and fields inherit defaults; grouping does not change ranges or behavior.
-
-An existing grouped `playback.volume` integer from `0` to `100` is read once as
-the old linear-gain percentage and converted to the new scale, preserving gain.
-Saving writes only `volume_percent`; its fractional value preserves the
-conversion across restarts. Do not specify both keys. For example, an old 50%
-gain becomes approximately 89.97% on the new scale, without becoming louder.

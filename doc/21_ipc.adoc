@@ -57,7 +57,7 @@ Configuration validation rejects equal roots and ancestor/descendant pairs after
 normalization, using path-component boundaries rather than string prefixes.
 `/Music` and `/Music/Jazz` conflict; `/Music` and `/Music2` do not. This invariant
 applies to loading, saving, and command-driven configuration changes. A rejected
-change does not replace the persisted or published root list; overlapping legacy
+change does not replace the persisted or published root list; overlapping
 configurations require correction rather than automatic merging or deletion.
 Adding an already-configured root through the desktop remains an idempotent no-op.
 
@@ -78,6 +78,11 @@ The new-track minimum-duration policy is captured from configuration when a scan
 or playlist import starts. Merge applies it only after exact-identity and
 relocation matching; it does not filter previously stored identities. See
 link:02_library.adoc#_minimum_duration_for_new_tracks[Library] for admission rules.
+
+Raw metadata reuse also requires the stored probe version to match the current
+probe version (`1`). This cache-validity marker is independent of the database
+schema and IPC protocol. A mismatch requires a fresh probe during scanning but
+does not invalidate the cached file fingerprint.
 
 Scanning requests cached raw source metadata on demand through task-ID-tagged
 core events; it no longer copies a whole-library known-file snapshot at startup.
@@ -175,9 +180,9 @@ connection; unchanged effective grouping and artist values require no summary up
 Each changed member uses indexed counter operations, not a scan of the album.
 An ordered member index selects representatives by disc, track number, effective
 title, then ID. This trades summary and index storage plus write maintenance for
-cheaper reads. Only schema version 14 is supported; older and unversioned databases
-are rejected without migration, reset, or deletion. A fresh database creates the
-album summaries and triggers directly; there is no historical backfill path.
+cheaper reads. Only schema version 1 is supported; other versions and unversioned
+databases are rejected without migration, reset, or deletion. A fresh database
+creates the album summaries and triggers directly.
 Exact substring searches and OFFSET traversal still scale with matching album
 and artist summaries, not merely the requested page size.
 
@@ -302,7 +307,7 @@ The frame header is six bytes. `body_length` excludes the four-byte length field
 and includes the version, message type, and serialized body.
 
 Bodies use Postcard serialization without COBS framing. The current protocol
-version is `32`; clients and servers must use matching wire schemas. The four-byte
+version is `1`; clients and servers must use matching wire schemas. The four-byte
 frame length remains little-endian; body integers follow Postcard's encoding.
 Restart clients and hosts together after upgrading: incompatible versions are
 rejected before decoding the body. There is no compatibility alias or schema
@@ -352,10 +357,7 @@ listening descriptor closes, including on process death. No stale-file recovery
 or pathname cleanup is needed.
 
 Ownership is scoped to a Linux network namespace. Instances in different network
-namespaces must not share a data directory. Stop older Rivu versions before
-upgrading: their pathname socket and file lock do not coordinate with this
-transport. There is no legacy fallback. Old socket/lock files are ignored and
-may be removed after all old instances have stopped.
+namespaces must not share a data directory.
 
 The transport retains partial input across cancelled reads and keeps frames
 independent. Sessions process requests serially; frames have no request IDs or
@@ -421,8 +423,9 @@ Response types:
 * `Watch` — returns changed state revisions
 * `Error` — returns a protocol or request error
 
-Wire enum variant order is part of the binary protocol. Existing variants must
-not be reordered; new variants may only be appended.
+Wire enum variant and field order are part of the binary schema. Incompatible
+schema changes require a new protocol version and coordinated client and host
+updates; there is no obligation to preserve earlier schemas.
 
 == Revisions and watching
 

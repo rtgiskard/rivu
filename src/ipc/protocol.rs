@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-pub(super) const PROTOCOL_VERSION: u8 = 32;
+pub(super) const PROTOCOL_VERSION: u8 = 1;
 pub(super) const MAX_REQUEST: usize = 4 * 1024 * 1024;
 pub(super) const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 pub(super) const MAX_CLIENTS: usize = 16;
@@ -84,7 +84,7 @@ pub(super) enum WireRequest {
     Watch(StateRevisions),
 }
 
-/// Binary query wire format. Variant order is a protocol contract; append only.
+/// Binary query wire format. Variant order belongs to the versioned wire schema.
 #[derive(Serialize, Deserialize)]
 pub(super) enum WireQuery {
     LibraryPage {
@@ -111,13 +111,11 @@ pub(super) enum WireQuery {
         limit: u64,
     },
     PlaylistSummaries {
-        #[serde(default)]
         query: Option<String>,
         offset: u64,
         limit: u64,
     },
     PlaylistEntries {
-        #[serde(default)]
         query: Option<String>,
         playlist_id: i64,
         offset: u64,
@@ -136,14 +134,12 @@ pub(super) enum WireQuery {
         expected: Option<crate::response::QueryRevisions>,
     },
     PlaylistSummaryBatch {
-        #[serde(default)]
         query: Option<String>,
         after: Option<i64>,
         limit: u64,
         expected: Option<crate::response::QueryRevisions>,
     },
     PlaylistEntryBatch {
-        #[serde(default)]
         query: Option<String>,
         playlist_id: i64,
         after: Option<crate::model::BatchContinuation<crate::model::PlaylistEntryCursor>>,
@@ -175,20 +171,17 @@ pub(super) enum WireQuery {
         id: u64,
     },
     QueuePage {
-        #[serde(default)]
         query: Option<String>,
         offset: u64,
         limit: u64,
     },
     QueueBatch {
-        #[serde(default)]
         query: Option<String>,
         after: Option<crate::model::BatchContinuation<crate::model::QueueCursor>>,
         limit: u64,
         expected: Option<crate::response::QueryRevisions>,
     },
     QueueEntries {
-        #[serde(default)]
         query: Option<String>,
         queue_ids: Vec<u64>,
     },
@@ -208,7 +201,6 @@ pub(super) enum WireQuery {
         id: u64,
     },
     PlaylistEntryLocations {
-        #[serde(default)]
         query: Option<String>,
         playlist_id: i64,
         entry_ids: Vec<i64>,
@@ -220,7 +212,6 @@ pub(super) enum WireQuery {
         limit: u64,
     },
     AlbumTracks {
-        #[serde(default)]
         query: Option<String>,
         key: crate::model::AlbumKey,
         offset: u64,
@@ -232,7 +223,7 @@ pub(super) enum WireQuery {
     },
 }
 
-/// Binary command wire format. Variant order is a protocol contract; append only.
+/// Binary command wire format. Variant order belongs to the versioned wire schema.
 #[derive(Serialize, Deserialize)]
 pub(super) enum WireCommand {
     ShowWindow,
@@ -1462,7 +1453,6 @@ impl From<WireConfig> for crate::config::Config {
 pub(super) struct WireSystemState {
     scanning: bool,
     scan_message: String,
-    #[serde(default)]
     scan_progress: Option<ScanProgress>,
     last_error: Option<String>,
     devices: Arc<Vec<String>>,

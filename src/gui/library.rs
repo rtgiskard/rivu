@@ -1271,7 +1271,7 @@ mod library_root_tests {
         let runtime = Runtime::start(directory.path(), &config_path).unwrap();
         settle_config(&runtime.handle);
         let layouts = LayoutSaveOwner::new(directory.path().join("layouts.toml"));
-        // Finish constructor-time layout migration before installing GUI wakers.
+        // Finish initial layout persistence before installing GUI wakers.
         let (mut initial_layouts, _) = layouts.handle().snapshot();
         let config = runtime.handle.config_snapshot();
         initial_layouts

@@ -51,18 +51,6 @@ fn deserialize_volume_percent<'de, D: serde::Deserializer<'de>>(
     Ok(Some((percent / 100.0) as f32))
 }
 
-fn deserialize_legacy_volume<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> std::result::Result<Option<f32>, D::Error> {
-    let percent = u8::deserialize(deserializer)?;
-    if percent > 100 {
-        return Err(serde::de::Error::custom(
-            "legacy playback.volume must be an integer from 0 to 100",
-        ));
-    }
-    Ok(Some(crate::volume::level(f32::from(percent) / 100.0)))
-}
-
 fn serialize_volume_percent<S: serde::Serializer>(
     volume: &f32,
     serializer: S,
@@ -70,16 +58,12 @@ fn serialize_volume_percent<S: serde::Serializer>(
     serializer.serialize_f64(f64::from(*volume) * 100.0)
 }
 
-// The legacy key is load-only and represents linear gain, unlike the canonical
-// perceptual level. Keep this group explicit so the two cannot be conflated.
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct Playback {
     output_device: Option<Option<String>>,
     #[serde(deserialize_with = "deserialize_volume_percent")]
     volume_percent: Option<f32>,
-    #[serde(deserialize_with = "deserialize_legacy_volume")]
-    volume: Option<f32>,
     shuffle: Option<bool>,
     repeat: Option<RepeatMode>,
     play_count_threshold_percent: Option<f64>,
@@ -88,24 +72,12 @@ struct Playback {
     pipewire_auto_mix: Option<bool>,
 }
 
-fn deserialize_playback<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> std::result::Result<Playback, D::Error> {
-    let playback = Playback::deserialize(deserializer)?;
-    if playback.volume_percent.is_some() && playback.volume.is_some() {
-        return Err(serde::de::Error::custom(
-            "playback.volume_percent and legacy playback.volume cannot coexist",
-        ));
-    }
-    Ok(playback)
-}
-
 impl Playback {
     fn apply(self, config: &mut Config) {
         if let Some(value) = self.output_device {
             config.output_device = value;
         }
-        if let Some(value) = self.volume_percent.or(self.volume) {
+        if let Some(value) = self.volume_percent {
             config.volume = value;
         }
         if let Some(value) = self.shuffle {
@@ -280,7 +252,6 @@ struct VisualizationsView<'a> {
 #[serde(default, deny_unknown_fields)]
 pub(super) struct FileConfig {
     library: Library,
-    #[serde(deserialize_with = "deserialize_playback")]
     playback: Playback,
     interface: Interface,
     logging: Logging,

@@ -705,11 +705,9 @@ For the JSON history shape and `--limit` behavior, see <<_cli_output,CLI output>
 
 == SQLite maintenance
 
-Rivu creates and opens only version 14 library databases. Older versions,
-including versions 11 through 13, and unversioned databases are unsupported and
-rejected without migration, automatic reset, or deletion. Preserve the existing
-database and any WAL before changing versions or choosing to rebuild a library.
-Older Rivu versions that do not support version 14 cannot open these databases.
+Rivu creates and opens only schema version 1 library databases. Other versions
+and unversioned databases are rejected without changing the schema or user data.
+There is no automatic migration, reset, or deletion.
 
 If you choose to rebuild, stop the core and retain a separate backup of
 `library.db` and any `-wal`/`-shm` sidecars before using a fresh database and

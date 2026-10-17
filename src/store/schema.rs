@@ -8,6 +8,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
+const SCHEMA_VERSION: i64 = 1;
+
 const TRACK_TABLE: &str = "CREATE TABLE tracks(
     id INTEGER PRIMARY KEY AUTOINCREMENT,path TEXT NOT NULL,
     fingerprint BLOB CHECK(fingerprint IS NULL OR (typeof(fingerprint)='blob' AND length(fingerprint)=32)),
@@ -78,8 +80,11 @@ fn create_schema(conn: &Connection) -> Result<()> {
             current_id INTEGER REFERENCES queue_entries(id) ON DELETE SET NULL,
             revision INTEGER NOT NULL DEFAULT 0
         );
-        INSERT INTO queue_meta(singleton) VALUES(1);
-        INSERT INTO schema_meta(key,value) VALUES('version',14);",
+        INSERT INTO queue_meta(singleton) VALUES(1);",
+    )?;
+    tx.execute(
+        "INSERT INTO schema_meta(key,value) VALUES('version',?1)",
+        [SCHEMA_VERSION],
     )?;
     tx.execute_batch(TRACK_INDEXES)?;
     tx.execute_batch(QUEUE_METADATA_TRIGGER)?;
@@ -116,7 +121,7 @@ impl Store {
                     |row| row.get(0),
                 )
                 .context("Unsupported library database; back up the database and WAL before replacing it; rescanning cannot restore user state")?;
-            if version != 14 {
+            if version != SCHEMA_VERSION {
                 bail!(
                     "Unsupported database version {version}; back up the database and WAL before replacing it; rescanning cannot restore user state"
                 );
@@ -218,31 +223,12 @@ mod tests {
         let track = store.track(1)?.unwrap();
         assert!(track.bitrate_exact);
         assert_eq!(track.bitrate_bps, Some(128000));
-        assert_eq!(
-            store.conn.query_row(
-                "SELECT value FROM schema_meta WHERE key='version'",
-                [],
-                |row| row.get::<_, i64>(0)
-            )?,
-            14
-        );
         Ok(())
     }
 
     #[test]
     fn incompatible_databases_are_rejected_without_changing_schema_or_data() -> Result<()> {
-        for version in [
-            None,
-            Some(0),
-            Some(7),
-            Some(8),
-            Some(9),
-            Some(10),
-            Some(11),
-            Some(12),
-            Some(13),
-            Some(15),
-        ] {
+        for version in [None, Some(0), Some(2)] {
             let directory = tempfile::tempdir()?;
             let path = directory.path().join("library.db");
             let store = Store::open(&path)?;

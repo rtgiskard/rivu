@@ -25,7 +25,6 @@ fn eligible_title(title: &str) -> String {
 // changes need no rebuild. Each changed track does indexed counter updates, not a
 // scan of its album. The covering member index also bounds representative lookup.
 pub(super) fn create_summary_schema(conn: &Connection) -> Result<()> {
-    let eligible = eligible_title(TITLE);
     conn.execute_batch(&format!(
         "CREATE TABLE albums(
             directory TEXT NOT NULL,title TEXT NOT NULL,
@@ -39,18 +38,7 @@ pub(super) fn create_summary_schema(conn: &Connection) -> Result<()> {
             track_count INTEGER NOT NULL,
             PRIMARY KEY(directory,title,artist)
         ) WITHOUT ROWID;
-        CREATE INDEX tracks_album_members ON tracks({DIRECTORY},{TITLE},{ORDER});
-        INSERT INTO albums
-            SELECT {DIRECTORY},{TITLE},COUNT(*),
-                CASE COUNT(DISTINCT NULLIF(COALESCE(artist_override,raw_artist),''))
-                    WHEN 0 THEN NULL
-                    WHEN 1 THEN MAX(NULLIF(COALESCE(artist_override,raw_artist),''))
-                    ELSE 'Various artists' END
-            FROM tracks WHERE {eligible} GROUP BY {DIRECTORY},{TITLE};
-        INSERT INTO album_artists
-            SELECT {DIRECTORY},{TITLE},COALESCE(artist_override,raw_artist),COUNT(*)
-            FROM tracks WHERE {eligible} AND COALESCE(artist_override,raw_artist)<>''
-            GROUP BY {DIRECTORY},{TITLE},COALESCE(artist_override,raw_artist);"
+        CREATE INDEX tracks_album_members ON tracks({DIRECTORY},{TITLE},{ORDER});"
     ))?;
     let directory = |row: &str| DIRECTORY.replace("path", &format!("{row}.path"));
     let title = |row: &str| format!("COALESCE({row}.album_override,{row}.raw_album)");

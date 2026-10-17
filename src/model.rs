@@ -81,9 +81,7 @@ pub enum DecoderHint {
 pub struct Track {
     pub id: i64,
     pub path: PathBuf,
-    #[serde(default)]
     pub fingerprint: Option<String>,
-    #[serde(default)]
     pub cue: Option<CueSegment>,
     pub title: String,
     pub artist: String,
@@ -93,14 +91,12 @@ pub struct Track {
     pub channels: u16,
     pub sample_rate: u32,
     pub bitrate_bps: Option<u64>,
-    #[serde(default)]
     pub bitrate_exact: bool,
     pub track_number: Option<u32>,
     pub disc_number: Option<u32>,
     pub bits_per_sample: Option<u32>,
     pub release_date: Option<String>,
     pub favorite: bool,
-    #[serde(default)]
     pub decoder_hint: DecoderHint,
     pub missing: bool,
     pub play_count: u64,
@@ -115,7 +111,6 @@ pub struct LibraryRow {
     pub duration: Option<f64>,
     pub codec: String,
     pub bitrate_bps: Option<u64>,
-    #[serde(default)]
     pub bitrate_exact: bool,
     pub favorite: bool,
     pub missing: bool,
@@ -288,29 +283,19 @@ pub struct DatabaseOptimization {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LibrarySnapshot {
-    #[serde(default)]
     pub track_total: usize,
-    #[serde(default)]
     pub playlist_total: usize,
     /// Changes whenever the effective Track projection changes.
-    #[serde(default)]
     pub revision: u64,
     /// Changes only when the library tree or visible row ordering may change.
-    #[serde(default)]
     pub structure_revision: u64,
     /// Playlist summaries: identity, name, or member count. Not a content epoch.
-    #[serde(default)]
     pub playlist_revision: u64,
     /// Content/lifetime tokens for every extant playlist; absence means deletion.
-    #[serde(default)]
     pub playlist_entry_revisions: Arc<BTreeMap<i64, u64>>,
-    #[serde(default)]
     pub metadata_revisions: Arc<MetadataRevisions>,
-    #[serde(default)]
     pub duplicate_groups_revision: u64,
-    #[serde(default)]
     pub duplicate_members_revision: u64,
-    #[serde(default)]
     pub history: Arc<Vec<HistoryEntry>>,
 }
 
@@ -405,7 +390,6 @@ pub struct PlaybackState {
     pub duration: Option<f64>,
     /// Unix timestamp of the most recent confirmed playback activity.
     /// This is session state; durable track history is updated when the session ends.
-    #[serde(default)]
     pub last_heard_at: Option<i64>,
     pub volume: f32,
     pub shuffle: bool,
@@ -465,7 +449,6 @@ pub struct RelocationTaskStatus {
 pub struct SystemState {
     pub scanning: bool,
     pub scan_message: String,
-    #[serde(default)]
     pub scan_progress: Option<ScanProgress>,
     pub last_error: Option<String>,
     pub devices: Arc<Vec<String>>,
@@ -477,7 +460,6 @@ pub struct SystemState {
     pub ffmpeg_status: String,
     pub database_optimization: Option<DatabaseOptimization>,
     pub shutting_down: bool,
-    #[serde(default)]
     pub relocation_task: Option<RelocationTaskStatus>,
 }
 impl Default for SystemState {
@@ -1032,7 +1014,6 @@ pub enum Command {
     RemoveMissingTracks,
     Scan {
         paths: Vec<PathBuf>,
-        #[serde(default)]
         force: bool,
     },
     Play {

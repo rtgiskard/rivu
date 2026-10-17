@@ -2640,7 +2640,6 @@ mod tests {
             json!({"type":"split", "axis":"horizontal", "children":[leaf.clone()]}),
             json!({"type":"split", "axis":"Horizontal", "children":[leaf.clone(), leaf.clone()]}),
             json!({"type":"split", "axis":"horizontal", "children":[split, leaf.clone()]}),
-            json!({"type":"split", "axis":"vertical", "children":[{"weight":1, "node":leaf.clone()}, leaf.clone()]}),
         ] {
             assert!(
                 decoded(one_layout(root.clone())).is_err(),

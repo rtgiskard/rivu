@@ -221,8 +221,7 @@ solver is stored.
 `layout.json` contains the selected name and a nonempty map of named layouts.
 Serialization borrows runtime data and writes one strict format. Unknown fields,
 duplicate layout names, invalid boundaries, malformed trees, and excess depth
-are errors. Runtime IDs and edit locking are omitted; there is no legacy weight
-or wrapper compatibility path.
+are errors. Runtime IDs and edit locking are omitted.
 
 One save owner belongs to the desktop session, not to an individual window. All
 runtime save paths, including selected tabs, docking, named-layout operations,

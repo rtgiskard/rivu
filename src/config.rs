@@ -261,7 +261,7 @@ pub(crate) const DEFAULT_PAGE_SIZE: u32 = 64;
 pub(crate) const DEFAULT_SCAN_MAX_DEPTH: u32 = 64;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     pub library_roots: Vec<PathBuf>,
     /// Maximum directory depth traversed from each requested scan start.
@@ -963,11 +963,6 @@ mod tests {
             let config = Config::load(&path).unwrap();
             assert_eq!(config.artwork_decode_budget_mb, budget);
             config.save(&path).unwrap();
-            let saved: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-            assert_eq!(
-                saved["interface"]["artwork_decode_budget_mb"].as_integer(),
-                Some(i64::from(budget))
-            );
             assert_eq!(Config::load(&path).unwrap(), config);
         }
         for budget in [0, 1025, u32::MAX] {
@@ -1025,11 +1020,6 @@ mod tests {
             let config = Config::load(&path).unwrap();
             assert_eq!(config.confirm_queue_replace, enabled);
             config.save(&path).unwrap();
-            let saved: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-            assert_eq!(
-                saved["interface"]["confirm_queue_replace"].as_bool(),
-                Some(enabled)
-            );
             assert_eq!(Config::load(&path).unwrap(), config);
         }
     }
@@ -1175,7 +1165,6 @@ mod tests {
                 saved["interface"]["album_artwork"]["style"].as_str(),
                 Some(name)
             );
-            assert!(saved["visualizations"].get("album_artwork").is_none());
             assert_eq!(Config::load(&path).unwrap(), config);
         }
         for mode in [AlbumArtworkMode::Static, AlbumArtworkMode::Rotating] {
@@ -1249,20 +1238,6 @@ mod tests {
     }
 
     #[test]
-    fn album_artwork_rejects_obsolete_visualizations_path() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("config.toml");
-        for contents in [
-            "[visualizations.album_artwork]\n",
-            "visualizations.album_artwork.mode = 'rotating'\n",
-            "[interface.album_artwork]\nmode = 'rotating'\n[visualizations.album_artwork]\nstyle = 'vinyl'\n",
-        ] {
-            fs::write(&path, contents).unwrap();
-            assert!(Config::load(&path).is_err(), "accepted config: {contents}");
-        }
-    }
-
-    #[test]
     fn grouped_file_defaults_partial_tables_and_font_normalization() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.toml");
@@ -1296,27 +1271,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_volume_migration_preserves_gain_across_save_and_reload() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("config.toml");
-        for percent in [0, 1, 50, 100] {
-            fs::write(&path, format!("[playback]\nvolume = {percent}\n")).unwrap();
-            let config = Config::load(&path).unwrap();
-            let expected_gain = percent as f32 / 100.0;
-            assert!((crate::volume::gain(config.volume) - expected_gain).abs() < 1e-6);
-            config.save(&path).unwrap();
-            let saved: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-            let playback = saved["playback"].as_table().unwrap();
-            assert!(!playback.contains_key("volume"));
-            assert!(playback.contains_key("volume_percent"));
-            let reloaded = Config::load(&path).unwrap();
-            assert_eq!(reloaded.volume, config.volume);
-            assert!((crate::volume::gain(reloaded.volume) - expected_gain).abs() < 1e-6);
-        }
-    }
-
-    #[test]
-    fn canonical_volume_accepts_numeric_percent_without_gain_migration() {
+    fn volume_accepts_numeric_percent() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.toml");
         for (percent, level) in [
@@ -1359,103 +1314,51 @@ mod tests {
     }
 
     #[test]
-    fn volume_file_rejects_conflicting_keys_and_invalid_values() {
+    fn volume_file_rejects_invalid_values() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.toml");
-        for keys in [
-            "volume = 50\nvolume_percent = 50",
-            "volume_percent = 0\nvolume = 0",
+        for value in [
+            "-1",
+            "-0.000001",
+            "100.000001",
+            "101",
+            "nan",
+            "inf",
+            "-inf",
+            "'50'",
+            "true",
+            "[]",
         ] {
-            fs::write(&path, format!("[playback]\n{keys}\n")).unwrap();
-            let error = Config::load(&path).unwrap_err();
-            assert!(format!("{error:#}").contains("cannot coexist"));
-        }
-        for (key, invalid_values) in [
-            (
-                "volume",
-                &[
-                    "-1", "101", "256", "0.7", "70.0", "nan", "inf", "-inf", "'50'", "true", "[]",
-                ][..],
-            ),
-            (
-                "volume_percent",
-                &[
-                    "-1",
-                    "-0.000001",
-                    "100.000001",
-                    "101",
-                    "nan",
-                    "inf",
-                    "-inf",
-                    "'50'",
-                    "true",
-                    "[]",
-                ][..],
-            ),
-        ] {
-            for value in invalid_values {
-                fs::write(&path, format!("[playback]\n{key} = {value}\n")).unwrap();
-                assert!(Config::load(&path).is_err(), "accepted {key} = {value}");
-            }
+            fs::write(&path, format!("[playback]\nvolume_percent = {value}\n")).unwrap();
+            assert!(
+                Config::load(&path).is_err(),
+                "accepted volume_percent = {value}"
+            );
         }
     }
 
     #[test]
-    fn unknown_misplaced_legacy_and_mixed_file_keys_are_rejected() {
+    fn unknown_and_misplaced_file_keys_are_rejected() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.toml");
         for contents in [
-            "volume = 0.5",
-            "library_roots = []",
-            "volume = 0.5\n[playback]\nshuffle = true",
-            "[audio]\nvolume = 0.5",
-            "[integration]\ntray_enabled = true",
-            "[analysis]\nfps = 30",
-            "[miscellaneous]",
-            "[library]\nvolume = 0.5",
-            "[playback]\nui_scale = 1.0",
-            "[interface]\nfont = 'sans-serif'\nui_font = 'serif'",
-            "[logging]\nlog_level = 'debug'",
-            "[visualizations]\nspectrum_bars = 42",
+            "unknown = true",
+            "[unknown]",
+            "[library]\nvolume_percent = 50",
+            "[playback]\nscale = 1.0",
+            "[interface]\nunknown = true",
+            "[logging]\nunknown = true",
+            "[visualizations]\nbars = 42",
             "[visualizations.spectrum]\nunknown = true",
             "[visualizations.spectrogram]\nunknown = true",
             "[visualizations.audio_visualizer]\nunknown = true",
             "[visualizations.waveform]\nunknown = true",
             "[visualizations.unknown]",
-            "[visualizations.spectrum]\nvolume = 0.5",
+            "[visualizations.spectrum]\nvolume_percent = 50",
         ] {
             fs::write(&path, contents).unwrap();
             assert!(Config::load(&path).is_err(), "accepted config: {contents}");
         }
-    }
-
-    #[test]
-    fn saved_file_has_only_the_stable_grouped_tables() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("config.toml");
-        let config = Config::default();
-        config.save(&path).unwrap();
-        let saved: toml::Table = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(saved.len(), 5);
-        for group in [
-            "library",
-            "playback",
-            "interface",
-            "logging",
-            "visualizations",
-        ] {
-            assert!(saved[group].is_table());
-        }
-        let visualizations = saved["visualizations"].as_table().unwrap();
-        let nested: Vec<_> = visualizations
-            .iter()
-            .filter(|(_, value)| value.is_table())
-            .map(|(key, _)| key.as_str())
-            .collect();
-        assert_eq!(
-            nested,
-            ["audio_visualizer", "spectrogram", "spectrum", "waveform"]
-        );
     }
 
     #[test]

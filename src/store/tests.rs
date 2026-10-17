@@ -2072,26 +2072,6 @@ fn playlist_name_conflicts_preserve_catalog_entries_and_queue() {
 }
 
 #[test]
-fn legacy_duplicate_playlist_names_remain_readable_and_can_be_resolved() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("library.db");
-    let store = Store::open(&path).unwrap();
-    store
-        .conn
-        .execute_batch("INSERT INTO playlists(id,name) VALUES(1,'Mix'),(2,'Mix')")
-        .unwrap();
-    drop(store);
-    let store = Store::open(&path).unwrap();
-    assert_eq!(store.playlist_ids().unwrap(), [1, 2]);
-    assert!(!store.rename_playlist(1, "Mix").unwrap());
-    assert!(store.create_playlist("Mix").is_err());
-    assert!(store.rename_playlist(2, "Other").unwrap());
-    assert!(store.rename_playlist(2, "Mix").is_err());
-    store.delete_playlist(1).unwrap();
-    assert!(store.rename_playlist(2, "Mix").unwrap());
-}
-
-#[test]
 fn playlist_addition_with_missing_track_rolls_back_new_entries() {
     let store = Store::open(Path::new(":memory:")).unwrap();
     store
@@ -4387,43 +4367,6 @@ fn queue_dedup_uses_first_position_not_allocation_order_and_track_deletes_remove
             .total,
         0
     );
-}
-
-#[test]
-fn unsupported_database_versions_are_rejected_without_migration() {
-    fs::create_dir_all(".cache").unwrap();
-    let directory = tempfile::tempdir_in(".cache").unwrap();
-    for version in [6, 15] {
-        let path = directory.path().join(format!("version-{version}.db"));
-        let connection = rusqlite::Connection::open(&path).unwrap();
-        connection
-            .execute_batch("CREATE TABLE schema_meta(key TEXT PRIMARY KEY,value INTEGER NOT NULL);")
-            .unwrap();
-        connection
-            .execute("INSERT INTO schema_meta VALUES('version',?1)", [version])
-            .unwrap();
-        assert!(Store::open(&path).is_err());
-        assert_eq!(
-            connection
-                .query_row(
-                    "SELECT value FROM schema_meta WHERE key='version'",
-                    [],
-                    |row| row.get::<_, i64>(0)
-                )
-                .unwrap(),
-            version
-        );
-        assert_eq!(
-            connection
-                .query_row(
-                    "SELECT COUNT(*) FROM sqlite_master WHERE name='queue_entries'",
-                    [],
-                    |row| row.get::<_, i64>(0)
-                )
-                .unwrap(),
-            0
-        );
-    }
 }
 
 #[test]

@@ -92,8 +92,8 @@ The data directory contains `library.db` (library and playback state),
 `layout.json` (desktop layouts), the `artwork/` cache, and optional `logs/`.
 Stop the core before operating on `library.db`. Incompatible databases are rejected,
 not migrated or reset; preserve the database and any WAL before rebuilding.
-See link:doc/02_library.adoc#_sqlite_maintenance[SQLite maintenance] for supported
-versions, backups, and what rescanning cannot restore.
+See link:doc/02_library.adoc#_sqlite_maintenance[SQLite maintenance] for the supported
+schema, backups, and what rescanning cannot restore.
 IPC access and upgrade constraints are described in link:doc/21_ipc.adoc[IPC].
 
 

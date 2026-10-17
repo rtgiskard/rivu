@@ -9,7 +9,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 // Bump when probing semantics change; fingerprints remain reusable.
-const PROBE_VERSION: i64 = 3;
+const PROBE_VERSION: i64 = 1;
 
 /// Semantic facts and admission counts from one committed scan transaction.
 ///

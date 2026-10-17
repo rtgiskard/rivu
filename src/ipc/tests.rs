@@ -82,48 +82,74 @@ fn scan_task_query_and_cancel_wire_round_trip_preserve_id() {
 }
 
 #[test]
-fn optional_search_queries_round_trip_and_accept_absent_fields() {
-    let legacy_queries = [
-        serde_json::json!({"AlbumTracks": {"key": {"directory": "/music", "title": "Album"}, "offset": 2, "limit": 3}}),
-        serde_json::json!({"PlaylistSummaries": {"offset": 2, "limit": 3}}),
-        serde_json::json!({"PlaylistEntries": {"playlist_id": 10, "offset": 2, "limit": 3}}),
-        serde_json::json!({"PlaylistEntryLocations": {"playlist_id": 10, "entry_ids": [42, 43]}}),
-        serde_json::json!({"PlaylistSummaryBatch": {"after": 10, "limit": 3, "expected": null}}),
-        serde_json::json!({"PlaylistEntryBatch": {"playlist_id": 10, "after": null, "limit": 3, "expected": null}}),
-        serde_json::json!({"QueuePage": {"offset": 2, "limit": 3}}),
-        serde_json::json!({"QueueBatch": {"after": null, "limit": 3, "expected": null}}),
-        serde_json::json!({"QueueEntries": {"queue_ids": [42, 43]}}),
-    ];
+fn optional_search_queries_round_trip() {
     let mut encoded = Vec::new();
-    for legacy in legacy_queries {
-        let wire: WireQuery = serde_json::from_value(legacy.clone()).unwrap();
-        let absent = serde_json::to_value(&wire).unwrap();
-        let fields = absent.as_object().unwrap().values().next().unwrap();
-        assert!(fields.get("query").unwrap().is_null());
-        for filter in [None, Some("  MiXeD café / \"quoted\" %_  "), Some("")] {
-            let mut expected = legacy.clone();
-            expected
-                .as_object_mut()
-                .unwrap()
-                .values_mut()
-                .next()
-                .unwrap()
-                .as_object_mut()
-                .unwrap()
-                .insert("query".into(), serde_json::json!(filter));
-            let wire: WireQuery = serde_json::from_value(expected.clone()).unwrap();
-            let query = Query::try_from(wire).unwrap();
-            encode_request_frame_into(&WireRequest::Query(WireQuery::from(query)), &mut encoded)
-                .unwrap();
+    for filter in [None, Some(""), Some("  MiXeD café / \"quoted\" %_  ")] {
+        let query = filter.map(str::to_owned);
+        for expected in [
+            Query::AlbumTracks {
+                key: crate::model::AlbumKey {
+                    directory: "/music".into(),
+                    title: "Album".into(),
+                },
+                query: query.clone(),
+                offset: 2,
+                limit: 3,
+            },
+            Query::PlaylistSummaries {
+                query: query.clone(),
+                offset: 2,
+                limit: 3,
+            },
+            Query::PlaylistEntries {
+                query: query.clone(),
+                playlist_id: 10,
+                offset: 2,
+                limit: 3,
+            },
+            Query::PlaylistEntryLocations {
+                query: query.clone(),
+                playlist_id: 10,
+                entry_ids: vec![42, 43],
+            },
+            Query::PlaylistSummaryBatch {
+                query: query.clone(),
+                after: Some(10),
+                limit: 3,
+                expected: None,
+            },
+            Query::PlaylistEntryBatch {
+                query: query.clone(),
+                playlist_id: 10,
+                after: None,
+                limit: 3,
+                expected: None,
+            },
+            Query::QueuePage {
+                query: query.clone(),
+                offset: 2,
+                limit: 3,
+            },
+            Query::QueueBatch {
+                query: query.clone(),
+                after: None,
+                limit: 3,
+                expected: None,
+            },
+            Query::QueueEntries {
+                query: query.clone(),
+                queue_ids: vec![42, 43],
+            },
+        ] {
+            encode_request_frame_into(
+                &WireRequest::Query(WireQuery::from(expected.clone())),
+                &mut encoded,
+            )
+            .unwrap();
             let WireRequest::Query(decoded) = decode_request_frame(&encoded[4..]).unwrap() else {
                 panic!("expected query");
             };
-            assert_eq!(serde_json::to_value(&decoded).unwrap(), expected);
-            let query = Query::try_from(decoded).unwrap();
-            assert_eq!(
-                serde_json::to_value(WireQuery::from(query)).unwrap(),
-                expected
-            );
+            assert_eq!(Query::try_from(decoded).unwrap(), expected);
         }
     }
 }

@@ -1485,7 +1485,7 @@ mod tests {
         let expected = (audio_bytes * 8 * 48_000 + audio_packets * 960 / 2) / (audio_packets * 960);
         let mut source =
             Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Native, false).unwrap();
-        source.info.bitrate_bps = Some(128_000); // A legacy scan estimate.
+        source.info.bitrate_bps = Some(128_000); // A cached scan estimate.
         source.info.bitrate_exact = false;
         assert_eq!(
             source.completed_bitrate(),

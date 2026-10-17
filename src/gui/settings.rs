@@ -1225,7 +1225,8 @@ impl Settings {
         config.scan_max_depth = self.number(Field::ScanMaxDepth, cx)?;
         config.scan_min_duration_secs = self.number(Field::ScanMinDuration, cx)?;
         let volume_percent = self.number::<f32>(Field::Volume, cx)?;
-        // Keep the exact migrated level when the displayed percentage is unchanged.
+        // Preserve the exact level when the displayed percentage is unchanged:
+        // multiplying and dividing by 100 can otherwise lose f32 precision.
         if volume_percent != self.draft.volume * 100. {
             config.volume = volume_percent / 100.;
         }
