@@ -610,6 +610,13 @@ Query limits, revisions, and batch contracts: link:21_ipc.adoc[IPC].
 
 == CLI output
 
+Human-readable CLI output escapes terminal control characters in metadata,
+names, paths, device information, and error details. Embedded tabs and line
+breaks appear as `\t`, `\n`, and `\r`; other controls use visible escapes such
+as `\x1b` and `\u{009b}`. Ordinary Unicode and the command's own row/column
+separators are preserved. This display-only escaping does not modify stored
+values or JSON data.
+
 `--json` uses a command-specific shape rather than one universal response:
 
 * `library list` streams an array of full track records. `playlist list` streams

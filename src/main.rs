@@ -255,9 +255,83 @@ enum PlaylistAction {
     },
 }
 
+// Escape only untrusted display values, never stored data or layout separators.
+struct Terminal<T>(T);
+
+impl<T: std::fmt::Display> std::fmt::Display for Terminal<T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        struct Escaped<'a, 'b>(&'a mut std::fmt::Formatter<'b>);
+
+        impl std::fmt::Write for Escaped<'_, '_> {
+            fn write_str(&mut self, value: &str) -> std::fmt::Result {
+                let mut start = 0;
+                for (index, character) in value.char_indices() {
+                    if !character.is_control() {
+                        continue;
+                    }
+                    self.0.write_str(&value[start..index])?;
+                    match character {
+                        '\n' => self.0.write_str("\\n")?,
+                        '\r' => self.0.write_str("\\r")?,
+                        '\t' => self.0.write_str("\\t")?,
+                        '\0' => self.0.write_str("\\0")?,
+                        '\u{1}'..='\u{7f}' => write!(self.0, "\\x{:02x}", character as u32)?,
+                        _ => write!(self.0, "\\u{{{:04x}}}", character as u32)?,
+                    }
+                    start = index + character.len_utf8();
+                }
+                self.0.write_str(&value[start..])
+            }
+        }
+
+        use std::fmt::Write as _;
+        let alternate = formatter.alternate();
+        let mut output = Escaped(formatter);
+        if alternate {
+            write!(output, "{:#}", self.0)
+        } else {
+            write!(output, "{}", self.0)
+        }
+    }
+}
+
+fn terminal_text(value: &str) -> std::borrow::Cow<'_, str> {
+    if value.chars().any(char::is_control) {
+        Terminal(value).to_string().into()
+    } else {
+        value.into()
+    }
+}
+
+fn terminal_cli_error(mut error: clap::Error) -> clap::Error {
+    use clap::error::{ContextKind, ContextValue};
+
+    // Keep clap's trusted usage layout and styling, escaping only argv values.
+    for kind in [
+        ContextKind::InvalidArg,
+        ContextKind::InvalidSubcommand,
+        ContextKind::InvalidValue,
+        ContextKind::PriorArg,
+    ] {
+        if let Some(mut value) = error.remove(kind) {
+            match &mut value {
+                ContextValue::String(text) => *text = Terminal(&*text).to_string(),
+                ContextValue::Strings(texts) => {
+                    for text in texts {
+                        *text = Terminal(&*text).to_string();
+                    }
+                }
+                _ => {}
+            }
+            error.insert(kind, value);
+        }
+    }
+    error
+}
+
 fn main() {
     if let Err(error) = run() {
-        eprintln!("rivu: {error:#}");
+        eprintln!("rivu: {:#}", Terminal(&error));
         std::process::exit(1);
     }
 }
@@ -351,7 +425,10 @@ fn run() -> Result<()> {
     let mut command = Args::command();
     command.build();
     localize_help(&mut command, &i18n, "");
-    let args = Args::from_arg_matches(&command.get_matches())?;
+    let matches = command
+        .try_get_matches()
+        .unwrap_or_else(|error| terminal_cli_error(error).exit());
+    let args = Args::from_arg_matches(&matches)?;
     let config_path = args.config.unwrap_or_else(|| {
         args.data_dir
             .as_ref()
@@ -412,11 +489,11 @@ fn run() -> Result<()> {
                 i18n.format(
                     "core-probe",
                     &[
-                        ("path", path.display().to_string().into()),
-                        ("title", info.title.as_str().into()),
-                        ("artist", info.artist.as_str().into()),
-                        ("album", info.album.as_str().into()),
-                        ("codec", info.codec.as_str().into()),
+                        ("path", Terminal(path.display()).to_string().into()),
+                        ("title", terminal_text(&info.title).into()),
+                        ("artist", terminal_text(&info.artist).into()),
+                        ("album", terminal_text(&info.album).into()),
+                        ("codec", terminal_text(&info.codec).into()),
                         ("channels", info.channels.to_string().into()),
                         ("sample-rate", info.sample_rate.to_string().into()),
                         (
@@ -456,10 +533,13 @@ fn run() -> Result<()> {
                                 .map_or("—".into(), |v| v.to_string())
                                 .into()
                         ),
-                        ("date", info.release_date.as_deref().unwrap_or("—").into()),
+                        (
+                            "date",
+                            terminal_text(info.release_date.as_deref().unwrap_or("—")).into()
+                        ),
                         ("probe", result.probe_backend.to_string().into()),
                         ("decoder", result.decoder_backend.to_string().into()),
-                        ("ffmpeg", decoder_status.into()),
+                        ("ffmpeg", terminal_text(&decoder_status).into()),
                     ]
                 )
             );
@@ -471,7 +551,7 @@ fn run() -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&devices)?);
             } else {
                 for device in devices {
-                    println!("{device}");
+                    println!("{}", Terminal(device));
                 }
             }
             Ok(())
@@ -523,7 +603,12 @@ fn run() -> Result<()> {
                 .as_ref()
                 .context("State omitted library section")?;
             for entry in state.history.iter().take(limit) {
-                println!("{}\t{}\t{}", entry.played_at, entry.track_id, entry.title);
+                println!(
+                    "{}\t{}\t{}",
+                    entry.played_at,
+                    entry.track_id,
+                    Terminal(&entry.title)
+                );
             }
             Ok(())
         }
@@ -579,7 +664,7 @@ fn run() -> Result<()> {
                                 i18n.format(
                                     "core-duplicate-group",
                                     &[
-                                        ("fingerprint", group.fingerprint.into()),
+                                        ("fingerprint", terminal_text(&group.fingerprint).into()),
                                         ("total", group.total_members.to_string().into()),
                                         ("missing", group.missing_members.to_string().into()),
                                         ("present", group.present_members.to_string().into()),
@@ -603,7 +688,12 @@ fn run() -> Result<()> {
                                     "core-duplicate-member",
                                     &[
                                         ("id", member.track.id.to_string().into()),
-                                        ("path", member.track.path.display().to_string().into()),
+                                        (
+                                            "path",
+                                            Terminal(member.track.path.display())
+                                                .to_string()
+                                                .into()
+                                        ),
                                         (
                                             "status",
                                             i18n.text(if member.track.missing {
@@ -685,7 +775,7 @@ fn run() -> Result<()> {
                     )
                 );
                 if let Some(error) = task.error {
-                    eprintln!("{error}");
+                    eprintln!("{}", Terminal(error));
                 }
             }
             Ok(())
@@ -743,7 +833,7 @@ fn run() -> Result<()> {
                                 )
                             );
                             if let Some(error) = task.error {
-                                eprintln!("{error}");
+                                eprintln!("{}", Terminal(error));
                             }
                         }
                         return Ok(());
@@ -896,7 +986,7 @@ fn list_queue(i18n: &Localizer, data_dir: &Path, json: bool) -> Result<()> {
                     row.position,
                     row.id,
                     row.track_id,
-                    row.track.title,
+                    Terminal(&row.track.title),
                     if current == Some(row.id) { " *" } else { "" }
                 )?;
             }
@@ -959,10 +1049,10 @@ fn list_library(
                     output,
                     "{}\t{}\t{}\t{}\t{}{}{}\t",
                     track.id,
-                    track.title,
-                    track.artist,
-                    track.album,
-                    track.path.display(),
+                    Terminal(&track.title),
+                    Terminal(&track.artist),
+                    Terminal(&track.album),
+                    Terminal(track.path.display()),
                     if track.missing {
                         i18n.text("core-missing-marker")
                     } else {
@@ -1045,7 +1135,7 @@ fn list_playlists(i18n: &Localizer, data_dir: &Path, json: bool) -> Result<()> {
                         "core-playlist-summary",
                         &[
                             ("id", playlist.id.to_string().into()),
-                            ("name", playlist.name.as_str().into()),
+                            ("name", terminal_text(&playlist.name).into()),
                             ("count", playlist.entry_count.to_string().into()),
                         ]
                     )
@@ -1168,8 +1258,8 @@ fn show_state(i18n: &Localizer, response: &StateResponse, json: bool) -> Result<
                 "core-state-track",
                 &[
                     ("status", status.into()),
-                    ("artist", track.artist.as_str().into()),
-                    ("title", track.title.as_str().into()),
+                    ("artist", terminal_text(&track.artist).into()),
+                    ("title", terminal_text(&track.title).into()),
                     (
                         "position",
                         format!("{:.1}", playback.playback.position).into()
@@ -1210,11 +1300,11 @@ fn show_state(i18n: &Localizer, response: &StateResponse, json: bool) -> Result<
         "{}",
         i18n.format(
             "core-ffmpeg",
-            &[("status", system.ffmpeg_status.as_str().into())]
+            &[("status", terminal_text(&system.ffmpeg_status).into())]
         )
     );
     if let Some(error) = &system.last_error {
-        eprintln!("{error}");
+        eprintln!("{}", Terminal(error));
     }
     Ok(())
 }
@@ -1246,7 +1336,7 @@ fn show_scan(i18n: &Localizer, progress: &rivu::model::ScanProgress) {
         )
     );
     if let Some(path) = &progress.path {
-        println!("{}", path.display());
+        println!("{}", Terminal(path.display()));
     }
 }
 
@@ -1381,6 +1471,67 @@ fn translate(action: Action) -> Result<(Command, bool)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_display_escapes_all_c0_del_and_c1_controls() {
+        for value in (0u32..=0x1f).chain(0x7f..=0x9f) {
+            let character = char::from_u32(value).unwrap();
+            let expected = match character {
+                '\0' => "\\0".to_owned(),
+                '\t' => "\\t".to_owned(),
+                '\n' => "\\n".to_owned(),
+                '\r' => "\\r".to_owned(),
+                _ if value <= 0x7f => format!("\\x{value:02x}"),
+                _ => format!("\\u{{{value:04x}}}"),
+            };
+            assert_eq!(Terminal(character).to_string(), expected);
+        }
+        assert_eq!(
+            Terminal("\x1b[31mRed\x1b[0m\u{009b}31m").to_string(),
+            "\\x1b[31mRed\\x1b[0m\\u{009b}31m"
+        );
+    }
+
+    #[test]
+    fn terminal_display_preserves_unicode_and_program_separators() {
+        let title = "音楽 café e\u{301} 🎵\\literal\tline\nnext\x1b[31m";
+        let path = Path::new("音楽/\x1bsong\n.flac");
+        assert_eq!(
+            format!("7\t{}\t{}\n", Terminal(title), Terminal(path.display())),
+            "7\t音楽 café e\u{301} 🎵\\literal\\tline\\nnext\\x1b[31m\t音楽/\\x1bsong\\n.flac\n"
+        );
+    }
+
+    #[test]
+    fn terminal_display_preserves_alternate_error_chain_and_escapes_details() {
+        let error = anyhow::anyhow!("bad path 音楽/\x1b[31m\n.flac").context("load\tfailed");
+        assert_eq!(
+            format!("rivu: {:#}\n", Terminal(&error)),
+            "rivu: load\\tfailed: bad path 音楽/\\x1b[31m\\n.flac\n"
+        );
+    }
+
+    #[test]
+    fn cli_parse_errors_escape_untrusted_arguments_and_preserve_exit_status() {
+        for arguments in [
+            vec!["rivu", "\x1b[31m音楽\n"],
+            vec!["rivu", "--\x1b[31m音楽\t"],
+            vec!["rivu", "library", "history", "--limit", "\u{009b}31m\n"],
+        ] {
+            let error = Args::command().try_get_matches_from(arguments).unwrap_err();
+            let status = error.exit_code();
+            let error = terminal_cli_error(error);
+            assert_eq!(error.exit_code(), status);
+            assert_eq!(status, 2);
+            let rendered = error.render().to_string();
+            assert!(!rendered.chars().any(|character| {
+                character.is_control() && character != '\n' && character != '\t'
+            }));
+            assert!(rendered.contains("\\x1b") || rendered.contains("\\u{009b}"));
+            assert!(rendered.contains("\\n") || rendered.contains("\\t"));
+            assert!(rendered.contains('\n'));
+        }
+    }
 
     #[test]
     fn scan_paths_are_anchored_without_expansion() -> Result<()> {
