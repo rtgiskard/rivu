@@ -1218,13 +1218,15 @@ mod tests {
         assert!(text_system.all_font_names().is_empty());
 
         text_system.add_fonts(vec![Cow::Borrowed(include_bytes!(
-            "../../../assets/fonts/lilex/Lilex-Regular.ttf"
+            "../../../tests/fixtures/fonts/lilex/Lilex-Regular.ttf"
         ))])?;
         assert_eq!(text_system.all_font_names(), ["Lilex"]);
 
         text_system.add_fonts(vec![
             Cow::Borrowed(IBM_PLEX),
-            Cow::Borrowed(include_bytes!("../../../assets/fonts/lilex/Lilex-Bold.ttf")),
+            Cow::Borrowed(include_bytes!(
+                "../../../tests/fixtures/fonts/lilex/Lilex-Bold.ttf"
+            )),
         ])?;
         assert_eq!(text_system.all_font_names(), ["IBM Plex Sans", "Lilex"]);
         Ok(())
@@ -1250,8 +1252,8 @@ mod tests {
     }
 
     const IBM_PLEX: &[u8] =
-        include_bytes!("../../../assets/fonts/ibm-plex-sans/IBMPlexSans-Regular.ttf");
-    const LILEX: &[u8] = include_bytes!("../../../assets/fonts/lilex/Lilex-Regular.ttf");
+        include_bytes!("../../../tests/fixtures/fonts/ibm-plex-sans/IBMPlexSans-Regular.ttf");
+    const LILEX: &[u8] = include_bytes!("../../../tests/fixtures/fonts/lilex/Lilex-Regular.ttf");
 
     /// Every code point of `Bidi_Class=B`, each of which starts a new bidi
     /// paragraph and so can split one line into mixed-direction paragraphs.

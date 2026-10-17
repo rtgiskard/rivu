@@ -27,7 +27,8 @@ path backgrounds retain their existing behavior.
 Run `cargo test --manifest-path vendor/gpui_wgpu/Cargo.toml --lib` to exercise
 the patched shader and headless GPU regressions in their isolated test workspace.
 Compilation also requires the pinned upstream `assets/fonts/lilex` and
-`assets/fonts/ibm-plex-sans` fixtures under this repository's `assets/fonts/`.
+`assets/fonts/ibm-plex-sans` fixtures, placed under this repository's
+`tests/fixtures/fonts/` with their original subdirectory names.
 Upstream test-only font and image fixtures retain their original licenses.
 The isolated regression-test workspace keeps copied upstream crates outside
 Rivu's workspace lint targets, without suppressing upstream warnings or mixing

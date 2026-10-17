@@ -679,7 +679,7 @@ impl DefaultArtworkBitmap {
                     source
                         .rasterizer
                         .renderer
-                        .parse_svg(include_bytes!("../../assets/default_artwork.svg"))?,
+                        .parse_svg(include_bytes!("../../data/artwork/default.svg"))?,
                 );
             }
             // Filter at the final physical size, rather than asking the GPU
@@ -865,7 +865,7 @@ impl Render for Artwork {
 mod tests {
     use super::*;
 
-    const VINYL: &[u8] = include_bytes!("../../assets/album_vinyl.svg");
+    const VINYL: &[u8] = include_bytes!("../../data/artwork/vinyl.svg");
 
     fn cover_wave(path: &Path, image: &[u8]) {
         let mut picture = b"\0image/gif\0\x03\0".to_vec();

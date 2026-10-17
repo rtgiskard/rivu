@@ -183,12 +183,12 @@ struct Instance {
 }
 
 const DECORATIONS: [&[u8]; 6] = [
-    include_bytes!("../../assets/album_vinyl.svg"),
-    include_bytes!("../../assets/album_glass.svg"),
-    include_bytes!("../../assets/album_halo.svg"),
-    include_bytes!("../../assets/album_metal.svg"),
-    include_bytes!("../../assets/album_card.svg"),
-    include_bytes!("../../assets/album_duotone.svg"),
+    include_bytes!("../../data/artwork/vinyl.svg"),
+    include_bytes!("../../data/artwork/glass.svg"),
+    include_bytes!("../../data/artwork/halo.svg"),
+    include_bytes!("../../data/artwork/metal.svg"),
+    include_bytes!("../../data/artwork/card.svg"),
+    include_bytes!("../../data/artwork/duotone.svg"),
 ];
 
 fn decoration_index(style: AlbumArtworkStyle) -> Option<usize> {

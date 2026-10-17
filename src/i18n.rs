@@ -3,27 +3,27 @@ use fluent_bundle::{FluentArgs, FluentResource, FluentValue, concurrent::FluentB
 use std::collections::HashMap;
 
 const EN: &str = concat!(
-    include_str!("../locales/en-US/core.ftl"),
+    include_str!("../data/locales/en-US/core.ftl"),
     "\n",
-    include_str!("../locales/en-US/gui-shell.ftl"),
+    include_str!("../data/locales/en-US/gui-shell.ftl"),
     "\n",
-    include_str!("../locales/en-US/gui-settings.ftl"),
+    include_str!("../data/locales/en-US/gui-settings.ftl"),
     "\n",
-    include_str!("../locales/en-US/gui-library.ftl"),
+    include_str!("../data/locales/en-US/gui-library.ftl"),
     "\n",
-    include_str!("../locales/en-US/terminal.ftl"),
+    include_str!("../data/locales/en-US/terminal.ftl"),
     "\n",
 );
 const ZH: &str = concat!(
-    include_str!("../locales/zh-CN/core.ftl"),
+    include_str!("../data/locales/zh-CN/core.ftl"),
     "\n",
-    include_str!("../locales/zh-CN/gui-shell.ftl"),
+    include_str!("../data/locales/zh-CN/gui-shell.ftl"),
     "\n",
-    include_str!("../locales/zh-CN/gui-settings.ftl"),
+    include_str!("../data/locales/zh-CN/gui-settings.ftl"),
     "\n",
-    include_str!("../locales/zh-CN/gui-library.ftl"),
+    include_str!("../data/locales/zh-CN/gui-library.ftl"),
     "\n",
-    include_str!("../locales/zh-CN/terminal.ftl"),
+    include_str!("../data/locales/zh-CN/terminal.ftl"),
     "\n",
 );
 

@@ -128,6 +128,9 @@ The install command builds the default variant and installs the executable,
 desktop entry, and icons. Ensure `~/.local/bin` is on `PATH`.
 Use `make build` to build without installing, or `cargo build --release` directly.
 Build outputs default to `.cache/target/`; `CARGO_TARGET_DIR` overrides that path.
+Static application resources live under `data/` (icons, artwork, desktop entries,
+and translations); test-only samples live under `tests/fixtures/`. These source
+directories are separate from the runtime data directory selected by `--data-dir`.
 
 Linux builds prefer `mold` when available and otherwise use the toolchain's
 default linker. Install it optionally with `sudo pacman -S --needed mold`.

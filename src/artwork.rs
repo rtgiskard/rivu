@@ -21,7 +21,7 @@ use symphonia::{
     default::get_probe,
 };
 
-pub(crate) static DEFAULT_IMAGE: &[u8] = include_bytes!("../assets/rivu.png");
+pub(crate) static DEFAULT_IMAGE: &[u8] = include_bytes!("../data/icons/rivu.png");
 
 const MAX_ARTWORK_ENTRIES: usize = 64;
 const MAX_IMAGE_BYTES: usize = symphonia_metadata::budget::MAX_VISUAL_BYTES;
