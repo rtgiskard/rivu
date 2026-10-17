@@ -63,7 +63,7 @@ fn query_tail_preserves_graphemes_and_keeps_input_cursor_visible() {
                     )
                 })
                 .unwrap();
-            let prefix = format!("  {} › ", i18n.text("terminal-search"));
+            let prefix = format!(" 󰍉 {} › ", i18n.text("terminal-search"));
             if width as usize > Span::raw(prefix.as_str()).width() {
                 assert!(terminal.backend().cursor_visible());
                 let cursor = terminal.backend().cursor_position();
@@ -111,9 +111,10 @@ fn metadata_columns_clip_whole_graphemes_without_shifting_duration() {
             .iter()
             .map(|span| span.content.as_ref())
             .collect::<String>();
-        assert!(text.ends_with("4:03"), "{text}");
+        let (before_duration, _) = text.split_once("4:03").unwrap();
+        assert_eq!(Span::raw(before_duration).width(), width as usize - 11);
         assert!(text.contains('…'));
-        assert!(text.contains('') && text.contains(''));
+        assert!(text.contains('󰓎') && text.contains('󰩋'));
         assert!(!text.contains('\u{fffd}'));
     }
     assert_eq!(cell_text("春风", 3, false), "春…");
@@ -125,37 +126,57 @@ fn browser_modes_leave_all_rows_below_the_count_header_for_items() {
     let i18n = Localizer::new("en-US");
     for mode in [
         BrowserMode::Tracks,
+        BrowserMode::PlaylistTracks,
         BrowserMode::UnfocusedTracks,
         BrowserMode::Labels,
     ] {
         let mut page = PagedList::default();
         page.insert(0, 2, 2, vec![track(0), track(1)]);
-        let mut terminal = Terminal::new(TestBackend::new(80, 3)).unwrap();
-        terminal
-            .draw(|frame| {
-                draw_paged_list(
-                    frame,
-                    frame.area(),
-                    "Items".into(),
-                    &mut page,
-                    |track| RowContent::track(track),
-                    &i18n,
-                    BrowserStyle {
-                        mode,
-                        colors: TerminalColors::new(crate::theme::Theme::default()),
-                    },
-                );
-            })
-            .unwrap();
-        let text = terminal_text(&terminal);
-        let lines = text.lines().collect::<Vec<_>>();
-        assert!(lines[1].contains("row-0"), "{text}");
-        assert!(lines[2].contains("row-1"), "{text}");
+        for width in [1, 2, 3, 4, 12, 80] {
+            let mut terminal = Terminal::new(TestBackend::new(width, 3)).unwrap();
+            terminal
+                .draw(|frame| {
+                    draw_paged_list(
+                        frame,
+                        frame.area(),
+                        "Items".into(),
+                        &mut page,
+                        |track| RowContent::track(track),
+                        &i18n,
+                        BrowserStyle {
+                            mode,
+                            colors: TerminalColors::new(crate::theme::Theme::default()),
+                        },
+                    );
+                })
+                .unwrap();
+            let text = terminal_text(&terminal);
+            let lines = text.lines().collect::<Vec<_>>();
+            let buffer = terminal.backend().buffer();
+            for y in 0..3 {
+                assert_eq!(buffer[(0, y)].symbol(), " ");
+                assert_eq!(buffer[(width - 1, y)].symbol(), " ");
+            }
+            if width >= 12 {
+                let indent = if matches!(mode, BrowserMode::PlaylistTracks) {
+                    2
+                } else {
+                    1
+                };
+                assert!(lines[0].starts_with(" Items"), "{text}");
+                for (index, line) in lines[1..].iter().enumerate() {
+                    assert!(
+                        line.starts_with(&format!("{}row-{index}", " ".repeat(indent))),
+                        "{text}"
+                    );
+                }
+            }
+        }
     }
 }
 
 #[test]
-fn compact_attributes_align_loaded_rows_and_keep_marker_gutter_stable() {
+fn compact_attributes_align_loaded_rows_and_states_do_not_shift_titles() {
     let mut first = track(0);
     first.title = "first-title".into();
     first.codec = "FLAC".into();
@@ -181,23 +202,44 @@ fn compact_attributes_align_loaded_rows_and_keep_marker_gutter_stable() {
     assert!(first_text.contains("flac") && !first_text.contains("FLAC"));
     assert!(second_text.contains("pcm_s16le"));
     assert_eq!(first_text.find("flac"), second_text.find("pcm_s16le"));
-    assert!(first_text.ends_with("4:03"));
-    assert!(second_text.ends_with("100:03"));
-    let gutter_width = Span::raw(first_text.split("first-title").next().unwrap()).width();
+    assert!(first_text.trim_end().ends_with("4:03"));
+    assert!(second_text.trim_end().ends_with("100:03"));
     for marked in [false, true] {
         first.favorite = marked;
         first.missing = marked;
         let mut row = RowContent::track(&first);
         if marked {
-            row.marker = "󰐊";
+            row.marker = "";
         }
         let line = columns.line(row, colors);
         assert_eq!(line.width(), 80);
         let rendered = text(line);
-        let title_start = rendered.find("first-title").unwrap();
-        let gutter = &rendered[..title_start];
-        assert_eq!(Span::raw(gutter).width(), gutter_width);
-        assert!(gutter.ends_with("  "));
+        assert!(rendered.starts_with("first-title"));
+        if marked {
+            assert!(rendered.trim_end().ends_with(" 󰓎 󰩋"));
+        }
+    }
+    for marker in ["󰉋", "󰲋"] {
+        for width in [3, 12, 80] {
+            let columns = BrowserColumns::new(width, false, std::iter::empty());
+            let line = columns.line(RowContent::label(Cow::Borrowed("name"), marker), colors);
+            assert_eq!(line.width(), width as usize);
+            let rendered = text(line);
+            assert!(rendered.starts_with(&format!("{marker} ")));
+            if width >= 12 {
+                assert!(rendered.starts_with(&format!("{} name", cell_text(marker, 2, false))));
+            }
+        }
+    }
+    for width in 0..=100 {
+        let columns = BrowserColumns::new(width, true, std::iter::once(RowContent::track(&first)));
+        let mut row = RowContent::track(&first);
+        row.file_icon = true;
+        let line = columns.line(row, colors);
+        assert_eq!(line.width(), width as usize);
+        if columns.title >= 3 {
+            assert!(text(line).starts_with("󰎇 "));
+        }
     }
 }
 
@@ -256,9 +298,9 @@ fn playback_markers_follow_occurrence_and_status_not_selection() {
     );
     page.selection.select(Some(1));
     for (status, symbol) in [
-        (PlaybackStatus::Playing, "󰐊"),
+        (PlaybackStatus::Playing, ""),
         (PlaybackStatus::Paused, "󰏤"),
-        (PlaybackStatus::Stopped, "󰓛"),
+        (PlaybackStatus::Stopped, ""),
     ] {
         state.playback.status = status;
         let mut terminal = Terminal::new(TestBackend::new(80, 5)).unwrap();
@@ -275,12 +317,14 @@ fn playback_markers_follow_occurrence_and_status_not_selection() {
             })
             .unwrap();
         let buffer = terminal.backend().buffer();
-        assert_eq!(buffer[(0, 1)].symbol(), symbol);
-        assert_eq!(buffer[(0, 2)].symbol(), " ");
+        let marker_x = (0..buffer.area.width)
+            .find(|&x| buffer[(x, 1)].symbol() == symbol)
+            .expect("current queue occurrence has its playback marker");
+        assert_eq!(buffer[(marker_x, 2)].symbol(), " ");
         let colors = TerminalColors::new(state.system.ui_theme);
-        assert_eq!(buffer[(0, 1)].fg, colors.accent);
-        assert_ne!(buffer[(0, 1)].bg, colors.selected);
-        assert_eq!(buffer[(0, 2)].bg, colors.selected);
+        assert_eq!(buffer[(marker_x, 1)].fg, colors.accent);
+        assert_ne!(buffer[(marker_x, 1)].bg, colors.selected);
+        assert_eq!(buffer[(marker_x, 2)].bg, colors.selected);
         assert_eq!(page.selected().unwrap().id, 18);
     }
 }

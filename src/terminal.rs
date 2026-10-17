@@ -775,7 +775,7 @@ impl UiState {
             }
             View::Tree(tree) => tree.entries.selected().map(|entry| match entry {
                 DirectoryRow::Track(track) => RowContent::track(track),
-                DirectoryRow::Directory { path } => RowContent::label(path.to_string_lossy(), ""),
+                DirectoryRow::Directory { path } => RowContent::label(path.to_string_lossy(), "󰉋"),
             }),
             View::Playlists(playlists) => playlists
                 .selected()
@@ -805,10 +805,10 @@ impl UiState {
             ));
         }
         if row.favorite {
-            text.push_str(&format!("\n\n {}", self.i18n.text("terminal-favorite")));
+            text.push_str(&format!("\n\n󰓎 {}", self.i18n.text("terminal-favorite")));
         }
         if row.missing {
-            text.push_str(&format!("\n\n {}", self.i18n.text("gl-missing")));
+            text.push_str(&format!("\n\n󰩋 {}", self.i18n.text("gl-missing")));
         }
         self.startup_hint_deadline = None;
         self.details = Some(Details {

@@ -286,6 +286,19 @@ information hides as the terminal narrows, and titles take priority. Codecs are
 shown in lowercase and unknown durations as `–:––`. Long values are shortened with
 an ellipsis without changing metadata. These automatic widths are independent of
 the desktop Library column settings.
+Playback status, favorites, and missing-file warnings occupy compact fixed slots
+at the right edge, after the duration, rather than before track titles. Directory
+and playlist type icons precede their names. Library directory-view files likewise
+show the desktop file icon before their titles. Each type prefix reserves a
+two-cell icon slot followed by one empty cell; other track lists do not reserve
+type-icon slots. Status slots hide below 14 columns.
+Playback, favorite, missing-file, directory, and search symbols match their desktop
+counterparts. Unfavorited tracks leave the favorite slot blank.
+Queue, Library, Playlists, and search result lists leave one character cell empty
+on each side. Playlist-detail tracks have one additional cell of left indentation
+relative to their list header. These insets reduce the width available for columns;
+narrow windows still clip content to fit. Entering Library directories does not
+add indentation or tree branches.
 
 Outside the query editor, `i` opens read-only details for the selected loaded item,
 including full text hidden by the list's width. Details retain that metadata until

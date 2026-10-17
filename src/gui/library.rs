@@ -660,7 +660,7 @@ impl GuiApp {
                                                     .text_sm()
                                                     .font_family(super::fonts::SYMBOLS_FAMILY)
                                                     .text_color(gpui::rgb(theme.error))
-                                                    .child("󰌶"),
+                                                    .child("󰩋"),
                                             )
                                         }),
                                 )
@@ -1099,7 +1099,7 @@ impl GuiApp {
                 theme,
                 icon_button(
                     ("library-filter-missing", panel_id),
-                    "󰌶",
+                    "󰩋",
                     self.tr("gl-filter-missing"),
                     cx,
                     |this, _, cx| {
@@ -1113,7 +1113,7 @@ impl GuiApp {
                 theme,
                 icon_button(
                     ("library-force-scan", panel_id),
-                    "󰑐",
+                    "󱉶",
                     if self.browser.library.force_scan() {
                         self.tr("gl-force-on")
                     } else {

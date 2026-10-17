@@ -54,9 +54,9 @@ impl TerminalColors {
 
 fn playback_symbol(status: PlaybackStatus) -> &'static str {
     match status {
-        PlaybackStatus::Playing => "󰐊",
+        PlaybackStatus::Playing => "",
         PlaybackStatus::Paused => "󰏤",
-        PlaybackStatus::Stopped => "󰓛",
+        PlaybackStatus::Stopped => "",
     }
 }
 
@@ -390,6 +390,7 @@ pub(super) struct RowContent<'a> {
     pub(super) favorite: bool,
     pub(super) missing: bool,
     marker: &'static str,
+    file_icon: bool,
     is_track: bool,
 }
 
@@ -404,6 +405,7 @@ impl<'a> RowContent<'a> {
             favorite: track.favorite,
             missing: track.missing,
             marker: " ",
+            file_icon: false,
             is_track: true,
         }
     }
@@ -418,6 +420,7 @@ impl<'a> RowContent<'a> {
             favorite: entry.favorite,
             missing: entry.missing,
             marker: " ",
+            file_icon: false,
             is_track: true,
         }
     }
@@ -432,6 +435,7 @@ impl<'a> RowContent<'a> {
             favorite: false,
             missing: false,
             marker,
+            file_icon: false,
             is_track: false,
         }
     }
@@ -450,7 +454,7 @@ struct BrowserColumns {
 impl BrowserColumns {
     fn new<'a>(width: u16, tracks: bool, rows: impl Iterator<Item = RowContent<'a>>) -> Self {
         let width = width as usize;
-        let markers = if width >= 14 { 9 } else { 0 };
+        let markers = if tracks && width >= 14 { 7 } else { 0 };
         let mut artist = 0;
         let mut album = 0;
         let mut codec = 0;
@@ -509,26 +513,33 @@ impl BrowserColumns {
 
     fn line(self, row: RowContent<'_>, colors: TerminalColors) -> Line<'static> {
         let mut spans = Vec::with_capacity(13);
-        if self.markers != 0 {
-            for (symbol, color, width) in [
-                (row.marker, colors.accent, 3),
-                (if row.favorite { "" } else { " " }, colors.secondary, 3),
-                (if row.missing { "" } else { " " }, colors.warning, 2),
-            ] {
-                spans.push(Span::styled(
-                    cell_text(symbol, width, false),
-                    Style::default().fg(color),
-                ));
-            }
-            // Always separate the fixed marker slots from the title.
-            spans.push(Span::raw(" "));
-        }
         let title = if self.artist == 0 {
             track_label(&row.title, row.artist)
         } else {
             Cow::Borrowed(row.title.as_ref())
         };
-        spans.push(Span::raw(cell_text(&title, self.title, false)));
+        let prefix = if row.file_icon {
+            "󰎇"
+        } else if !row.is_track {
+            row.marker
+        } else {
+            " "
+        };
+        if !prefix.trim().is_empty() && self.title >= 3 {
+            let prefix_width = 3;
+            let padding = prefix_width - Span::raw(prefix).width();
+            spans.push(Span::styled(
+                format!("{prefix}{:padding$}", ""),
+                Style::default().fg(colors.accent),
+            ));
+            spans.push(Span::raw(cell_text(
+                &title,
+                self.title.saturating_sub(prefix_width),
+                false,
+            )));
+        } else {
+            spans.push(Span::raw(cell_text(&title, self.title, false)));
+        }
         for (text, width, codec) in [
             (row.artist, self.artist, false),
             (row.album, self.album, false),
@@ -554,6 +565,19 @@ impl BrowserColumns {
                 cell_text(&duration, self.duration - 2, true),
                 Style::default().fg(colors.secondary),
             ));
+        }
+        if self.markers != 0 {
+            spans.push(Span::raw(" "));
+            for (symbol, color) in [
+                (if row.is_track { row.marker } else { " " }, colors.accent),
+                (if row.favorite { "󰓎" } else { " " }, colors.secondary),
+                (if row.missing { "󰩋" } else { " " }, colors.warning),
+            ] {
+                spans.push(Span::styled(
+                    cell_text(symbol, 2, false),
+                    Style::default().fg(color),
+                ));
+            }
         }
         Line::from(spans)
     }
@@ -634,6 +658,7 @@ fn draw_queue(
 #[derive(Clone, Copy)]
 enum BrowserMode {
     Tracks,
+    PlaylistTracks,
     UnfocusedTracks,
     Labels,
 }
@@ -654,6 +679,12 @@ fn draw_paged_list<T>(
     style: BrowserStyle,
 ) {
     let BrowserStyle { mode, colors } = style;
+    let area = Rect::new(
+        area.x + area.width.min(1),
+        area.y,
+        area.width.saturating_sub(2),
+        area.height,
+    );
     let tracks = !matches!(mode, BrowserMode::Labels);
     let focused = !matches!(mode, BrowserMode::UnfocusedTracks);
     page.set_viewport(area.height.saturating_sub(1) as usize);
@@ -667,7 +698,16 @@ fn draw_paged_list<T>(
         title
     };
     let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(area);
-    let columns = BrowserColumns::new(area.width, tracks, page.pages.values().flatten().map(&row));
+    let mut items_area = rows[1];
+    if matches!(mode, BrowserMode::PlaylistTracks) {
+        items_area.x += items_area.width.min(1);
+        items_area.width = items_area.width.saturating_sub(1);
+    }
+    let columns = BrowserColumns::new(
+        items_area.width,
+        tracks,
+        page.pages.values().flatten().map(&row),
+    );
     let count = if page.loaded {
         format!(
             " {}/{} ",
@@ -695,7 +735,7 @@ fn draw_paged_list<T>(
     frame.render_widget(Paragraph::new(title_line), rows[0]);
     let items = (page.selection.offset()..page.visible_end()).map(|index| {
         ListItem::new(page.get(index).map_or_else(
-            || Line::from(cell_text("…", area.width as usize, false)),
+            || Line::from(cell_text("…", items_area.width as usize, false)),
             |item| columns.line(row(item), colors),
         ))
     });
@@ -710,7 +750,7 @@ fn draw_paged_list<T>(
         } else {
             Style::default().bg(colors.selected)
         }),
-        rows[1],
+        items_area,
         &mut selection,
     );
 }
@@ -730,7 +770,7 @@ fn draw_playlist_detail(
         |entry| RowContent::playlist(entry),
         i18n,
         BrowserStyle {
-            mode: BrowserMode::Tracks,
+            mode: BrowserMode::PlaylistTracks,
             colors,
         },
     );
@@ -791,7 +831,7 @@ fn draw_search(
 ) {
     let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(area);
     let focused = search.focus == SearchFocus::Query;
-    let prefix = format!("  {} › ", i18n.text("terminal-search"));
+    let prefix = format!(" 󰍉 {} › ", i18n.text("terminal-search"));
     let prefix_width = Line::from(prefix.as_str()).width().min(area.width as usize);
     let input_width = area.width as usize - prefix_width;
     let (tail, cursor) = query_tail(
@@ -860,9 +900,13 @@ fn draw_tree(
                 path.file_name()
                     .unwrap_or(path.as_os_str())
                     .to_string_lossy(),
-                "",
+                "󰉋",
             ),
-            DirectoryRow::Track(track) => RowContent::track(track),
+            DirectoryRow::Track(track) => {
+                let mut content = RowContent::track(track);
+                content.file_icon = true;
+                content
+            }
         },
         i18n,
         BrowserStyle {
