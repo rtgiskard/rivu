@@ -908,10 +908,7 @@ fn list_queue(i18n: &Localizer, data_dir: &Path, json: bool) -> Result<()> {
             expected,
         })?;
         expected.get_or_insert(response.revisions);
-        let view = match listing_result(i18n, response.result)? {
-            Some(view) => view,
-            None => return Ok(()),
-        };
+        let view = listing_result(i18n, response.result)?;
         let ViewResponse::QueueBatch(batch) = view else {
             bail!("Queue query returned an unexpected response");
         };
@@ -976,10 +973,7 @@ fn list_library(
             expected,
         })?;
         expected.get_or_insert(response.revisions);
-        let view = match listing_result(i18n, response.result)? {
-            Some(view) => view,
-            None => return Ok(()),
-        };
+        let view = listing_result(i18n, response.result)?;
         let ViewResponse::TrackBatch(batch) = view else {
             bail!("Library query returned an unexpected response");
         };
@@ -1057,10 +1051,7 @@ fn list_playlists(i18n: &Localizer, data_dir: &Path, json: bool) -> Result<()> {
             expected,
         })?;
         expected.get_or_insert(response.revisions);
-        let view = match listing_result(i18n, response.result)? {
-            Some(view) => view,
-            None => return Ok(()),
-        };
+        let view = listing_result(i18n, response.result)?;
         let ViewResponse::PlaylistSummaryBatch(batch) = view else {
             bail!("Playlist query returned an unexpected response");
         };
@@ -1105,10 +1096,7 @@ fn list_playlists(i18n: &Localizer, data_dir: &Path, json: bool) -> Result<()> {
                     expected: entry_expected,
                 })?;
                 entry_expected = Some(response.revisions);
-                let view = match listing_result(i18n, response.result)? {
-                    Some(view) => view,
-                    None => return Ok(()),
-                };
+                let view = listing_result(i18n, response.result)?;
                 let ViewResponse::PlaylistEntryBatch(entries) = view else {
                     bail!("Playlist entries query returned an unexpected response");
                 };
@@ -1156,16 +1144,10 @@ fn list_playlists(i18n: &Localizer, data_dir: &Path, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn listing_result<T>(
-    i18n: &Localizer,
-    result: std::result::Result<T, QueryError>,
-) -> Result<Option<T>> {
+fn listing_result<T>(i18n: &Localizer, result: std::result::Result<T, QueryError>) -> Result<T> {
     match result {
-        Ok(value) => Ok(Some(value)),
-        Err(QueryError::RevisionChanged) => {
-            eprintln!("{}", i18n.text("core-listing-changed"));
-            Ok(None)
-        }
+        Ok(value) => Ok(value),
+        Err(QueryError::RevisionChanged) => bail!("{}", i18n.text("core-listing-changed")),
         Err(error) => Err(anyhow::Error::from(error)),
     }
 }

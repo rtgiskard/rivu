@@ -5,6 +5,11 @@ CLI scan paths are relative to the invoking client's working directory;
 absolute paths are accepted. Playlist management and exchange are described in
 link:03_playlist.adoc[Playlists].
 
+CLI queue, library, and playlist listings stream revision-consistent batches.
+If the data changes during traversal, the command reports failure and exits with
+status 1 without retrying. Output already written may be incomplete, including
+JSON; consumers must check the exit status rather than parse failed output.
+
 In the desktop Library, use the right-click menu to add selected tracks to the
 queue or remove them from the library. Removal requires confirmation and applies
 to the tracks selected when removal was requested; cancelling leaves them unchanged.
@@ -582,7 +587,7 @@ does not have to wait for a stalled query.
 
 CLI library and playlist listings include all matching rows, independently of
 `interface.page_size`. If relevant data changes while a listing is being read, the command
-stops, prints a `Listing incomplete` notice on stderr, and exits successfully.
+stops, prints a `Listing incomplete` notice on stderr, and exits with status 1.
 Already emitted text may be incomplete, and JSON may be invalid; discard it and
 retry. GUI/TUI refresh stale query results automatically.
 
