@@ -14,7 +14,9 @@ Audio files are not deleted.
 
 Scanning requires at least one configured `library.roots`. Add a directory with
 the GUI Library `+` button or set absolute directory paths in `config.toml`.
-Saving roots does not scan or enqueue music. Choose `Scan paths` in Library or run:
+Saved roots appear immediately in the desktop Library, even when empty or not
+yet scanned. Saving roots does not scan or enqueue music. Use a root's scan action,
+choose `Scan paths` in Library, or run:
 
 [source,sh]
 ----

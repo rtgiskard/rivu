@@ -843,7 +843,6 @@ impl GuiApp {
                         Err(error) => {
                             this.browser.library.fail_directory(&branch, generation);
                             this.error = Some(error.to_string());
-                            cx.notify();
                             return;
                         }
                     };
@@ -874,9 +873,9 @@ impl GuiApp {
                             .library
                             .accept_directory(&branch, generation, page);
                     }
-                    cx.notify();
                 })();
                 this.dispatch_directory_demand(cx);
+                cx.notify();
             });
         })
         .detach();

@@ -1001,24 +1001,24 @@ impl GuiApp {
             ("library-projection", panel_id),
             &self.browser.library.tree().scroll,
         );
+        // Track counts describe contents, not the configured root projection.
+        // Keep its viewport mounted so root changes can demand a fresh forest.
+        if let Some((0, total)) = self.browser.library.search_counts
+            && (total != 0 || self.browser.library.tree().row_count() == 0)
+        {
+            panel = panel.child(caption(
+                theme,
+                self.i18n
+                    .text(if total == 0 {
+                        "search-empty"
+                    } else {
+                        "search-no-matches"
+                    })
+                    .to_owned(),
+            ));
+        }
         panel
-            .child(
-                if let Some((0, total)) = self.browser.library.search_counts {
-                    caption(
-                        theme,
-                        self.i18n
-                            .text(if total == 0 {
-                                "search-empty"
-                            } else {
-                                "search-no-matches"
-                            })
-                            .to_owned(),
-                    )
-                    .into_any_element()
-                } else {
-                    self.library_directory_list(panel_id, cx)
-                },
-            )
+            .child(self.library_directory_list(panel_id, cx))
             .into_any_element()
     }
     fn send_queue_row_action(&mut self, revision: u64, command: Command, cx: &mut Context<Self>) {
@@ -3725,5 +3725,155 @@ mod playlist_drag_tests {
             ..drag
         };
         assert!(empty.command(None).is_none());
+    }
+}
+
+#[cfg(test)]
+mod library_root_tests {
+    use super::GuiApp;
+    use crate::{
+        config::Config,
+        core::{CoreHandle, GuiConfigChange, Runtime},
+        gui::{
+            layout::{Node, Panel, save_owner::LayoutSaveOwner},
+            library::tree::TreeItem,
+        },
+        i18n::Localizer,
+        model::{DirectoryRow, Query},
+    };
+    use gpui::{AppContext, Entity, IntoElement, VisualTestContext, point, px, size};
+    use std::{path::PathBuf, sync::Arc};
+
+    fn settle_config(handle: &CoreHandle) {
+        // Core dispatch is FIFO: this response follows config publication.
+        assert!(
+            handle
+                .query(Query::LibraryRootCounts { roots: Vec::new() })
+                .result
+                .is_ok()
+        );
+    }
+
+    fn draw_library(window: &mut VisualTestContext, app: &Entity<GuiApp>) {
+        // The first draw demands the forest; the second renders accepted roots
+        // after the independently completed zero-track count.
+        for _ in 0..2 {
+            app.update(&mut window.cx, |this, cx| this.refresh(cx));
+            window.draw(point(px(0.), px(0.)), size(px(900.), px(600.)), |_, _| {
+                app.clone().into_any_element()
+            });
+            window.run_until_parked();
+        }
+    }
+
+    fn assert_roots(window: &mut VisualTestContext, app: &Entity<GuiApp>, roots: &[PathBuf]) {
+        app.update(&mut window.cx, |this, _| {
+            let tree = this.browser.library.tree();
+            let rendered = (0..tree.row_count())
+                .map(|index| match tree.item(index) {
+                    Some(TreeItem::Entry(row)) if row.depth == 0 => match row.row {
+                        DirectoryRow::Directory { path } => path,
+                        DirectoryRow::Track(_) => panic!("forest contains a track"),
+                    },
+                    _ => panic!("configured root was not projected by viewport demand"),
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(rendered, roots);
+            assert_eq!(this.browser.library.search_counts, Some((0, 0)));
+            assert_eq!(this.state.library.track_total, 0);
+            assert!(!this.state.system.scanning);
+            assert!(this.state.system.scan_progress.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn empty_library_projects_first_added_appended_and_removed_roots(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        Config {
+            volume: 0.0,
+            ffmpeg_enabled: false,
+            mpris_enabled: false,
+            ..Config::default()
+        }
+        .save(&config_path)
+        .unwrap();
+        let runtime = Runtime::start(directory.path(), &config_path).unwrap();
+        settle_config(&runtime.handle);
+        let layouts = LayoutSaveOwner::new(directory.path().join("layouts.toml"));
+        // Finish constructor-time layout migration before installing GUI wakers.
+        let (mut initial_layouts, _) = layouts.handle().snapshot();
+        let config = runtime.handle.config_snapshot();
+        initial_layouts
+            .current_mut()
+            .initialize_audio_visualizers(config.as_ref().into());
+        initial_layouts
+            .current_mut()
+            .initialize_album_artworks(config.as_ref().into());
+        layouts.handle().submit(&initial_layouts);
+        layouts.flush().unwrap();
+        let artwork = Arc::new(crate::artwork::ArtworkManager::new(directory.path()));
+        let window = cx.add_empty_window();
+        let app = window.update(|window, cx| {
+            cx.new(|cx| {
+                GuiApp::new(
+                    runtime.handle.clone(),
+                    layouts.handle(),
+                    artwork,
+                    std::rc::Weak::new(),
+                    Arc::new(Localizer::new("en-US")),
+                    window,
+                    cx,
+                )
+            })
+        });
+        // Native worker threads cannot wake GPUI's deterministic scheduler.
+        // FIFO Core barriers and draw_library's refresh own test synchronization.
+        runtime.handle.set_wakeup(|| {});
+        layouts.handle().set_wakeup(|| {});
+        app.update(&mut window.cx, |this, _| {
+            this.window_visible = true;
+            this.layouts.current_mut().root = Some(Node::Tabs {
+                id: 1,
+                active: 2,
+                panels: vec![Panel {
+                    id: 2,
+                    kind: "library".into(),
+                    show_tab_bar: false,
+                    audio_visualizer: None,
+                    album_artwork: None,
+                }],
+            });
+            this.browser.library.search_counts = Some((0, 0));
+        });
+        draw_library(window, &app);
+        assert_roots(window, &app, &[]);
+
+        let first = directory.path().join("first");
+        let second = directory.path().join("second");
+        std::fs::create_dir(&first).unwrap();
+        std::fs::create_dir(&second).unwrap();
+        for (change, expected) in [
+            (
+                GuiConfigChange::AddLibraryRoot(first.clone()),
+                vec![first.clone()],
+            ),
+            (
+                GuiConfigChange::AddLibraryRoot(second.clone()),
+                vec![first.clone(), second.clone()],
+            ),
+            (
+                GuiConfigChange::RemoveLibraryRoot(first),
+                vec![second.clone()],
+            ),
+            (GuiConfigChange::RemoveLibraryRoot(second), Vec::new()),
+        ] {
+            runtime.handle.update_gui_config(change).unwrap();
+            settle_config(&runtime.handle);
+            draw_library(window, &app);
+            assert_roots(window, &app, &expected);
+        }
     }
 }
