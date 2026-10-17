@@ -2,6 +2,10 @@
 
 use super::*;
 use crate::config::AudioVisualizerStyle;
+use crate::gui::components::{
+    ButtonTooltip, button, caption, column, context_menu_container, copyable_message, icon_button,
+    menu_item, row,
+};
 
 #[derive(Clone, Copy)]
 pub(super) enum PanelMenuPage {
@@ -1272,7 +1276,7 @@ impl Render for GuiApp {
                             ),
                         ))
                         .child(
-                            panels::caption(theme, self.tr("shell-clear-stops-playback"))
+                            caption(theme, self.tr("shell-clear-stops-playback"))
                                 .px(gpui::px(UI_INSET))
                                 .pb_2(),
                         )

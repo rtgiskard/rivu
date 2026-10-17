@@ -1,6 +1,10 @@
 //! Bounded ordinary-file review. Projections own data validity; Core owns task IDs.
 
 use super::*;
+use crate::gui::components::{
+    ButtonTooltip, StatusKind, active_control, button, caption, column, icon_button, panel_header,
+    panel_toolbar, row, status_message,
+};
 use crate::{
     model::{Page, RelocationPhase, RelocationTaskStatus},
     projection::QueryProjection,

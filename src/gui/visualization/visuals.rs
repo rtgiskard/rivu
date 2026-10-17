@@ -762,7 +762,7 @@ impl Visuals {
                     .text_size(px(10.0))
                     .line_height(px(12.0))
                     .tooltip(move |_, cx| {
-                        cx.new(|_| super::super::ButtonTooltip {
+                        cx.new(|_| crate::gui::components::ButtonTooltip {
                             text: tooltip.clone(),
                         })
                         .into()

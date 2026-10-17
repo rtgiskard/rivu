@@ -1,4 +1,5 @@
 use super::super::*;
+use crate::gui::components::{column, icon_button, row};
 
 impl GuiApp {
     pub(in crate::gui) fn measurement(&self, key: Measured) -> AnyElement {

@@ -10,8 +10,9 @@ use super::metadata::{ManualAction, ManualIntentId};
 use super::*;
 use super::{
     components::{
-        LIST_ROW_REMS, compact_icon_button, disabled_control, hover_actions, scrollable_list,
-        track_list_row,
+        ButtonTooltip, LIST_ROW_REMS, StatusKind, button, caption, compact_icon_button,
+        disabled_control, hover_actions, icon_button, list_viewport, panel_header, panel_surface,
+        panel_toolbar, row, scrollable_list, status_message, track_list_row,
     },
     library::LibraryDrag,
     panels::PlaylistDrag,
@@ -1644,10 +1645,7 @@ impl GuiApp {
         .id(("queue-count", panel_id))
         .tooltip({
             let text = self.tr("gl-queue-drag-hint");
-            move |_, cx| {
-                cx.new(|_| super::ButtonTooltip { text: text.clone() })
-                    .into()
-            }
+            move |_, cx| cx.new(|_| ButtonTooltip { text: text.clone() }).into()
         });
         let tools = panel_toolbar()
             .min_h(px(32.))
@@ -1688,7 +1686,7 @@ impl GuiApp {
                     .min_w_0()
                     .truncate()
                     .tooltip(move |_, cx| {
-                        cx.new(|_| super::ButtonTooltip {
+                        cx.new(|_| ButtonTooltip {
                             text: selection_message.clone(),
                         })
                         .into()

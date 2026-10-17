@@ -1,5 +1,6 @@
 use super::*;
 use super::{library::LibraryDrag, panels::PlaylistDrag, queue::QueueDrag};
+use crate::gui::components::{POPOVER_MAX_REMS, caption, context_menu_container, menu_item};
 use crate::response::ViewResponse;
 
 #[derive(Clone)]

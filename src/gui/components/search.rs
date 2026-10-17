@@ -1,14 +1,19 @@
 //! Shared interaction state for optional list-local search.
 
-use super::{Input, InputEvent, Localizer, icon_button, row};
+use super::{
+    icon_button,
+    input::{Input, InputEvent},
+    row,
+};
+use crate::i18n::Localizer;
 use gpui::{prelude::*, *};
 use std::sync::Arc;
 
-pub(super) enum SearchEvent {
+pub(in crate::gui) enum SearchEvent {
     Changed(Option<String>),
 }
 
-pub(super) struct ListSearch {
+pub(in crate::gui) struct ListSearch {
     i18n: Arc<Localizer>,
     input: Entity<Input>,
     focus_handle: FocusHandle,
@@ -24,7 +29,7 @@ pub(super) struct ListSearch {
 impl EventEmitter<SearchEvent> for ListSearch {}
 
 impl ListSearch {
-    pub(super) fn new(i18n: Arc<Localizer>, cx: &mut Context<Self>) -> Self {
+    pub(in crate::gui) fn new(i18n: Arc<Localizer>, cx: &mut Context<Self>) -> Self {
         let input =
             cx.new(|cx| Input::new("", i18n.text("search-placeholder").to_owned(), cx).embedded());
         let subscription = cx.subscribe(&input, |this, _, event, cx| {
@@ -80,7 +85,7 @@ impl ListSearch {
         }
     }
 
-    pub(super) fn focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(in crate::gui) fn focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.expanded {
             self.expansion = self.expansion.wrapping_add(1);
             self.expanded = true;
@@ -90,11 +95,11 @@ impl ListSearch {
         cx.notify();
     }
 
-    pub(super) fn toggle(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(in crate::gui) fn toggle(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.focus(window, cx);
     }
 
-    pub(super) fn clear(&mut self, cx: &mut Context<Self>) {
+    pub(in crate::gui) fn clear(&mut self, cx: &mut Context<Self>) {
         self.timer.take();
         self.generation = self.generation.wrapping_add(1);
         self.input.update(cx, |input, cx| input.set_text("", cx));
@@ -102,13 +107,13 @@ impl ListSearch {
         cx.notify();
     }
 
-    pub(super) fn reset(&mut self, cx: &mut Context<Self>) {
+    pub(in crate::gui) fn reset(&mut self, cx: &mut Context<Self>) {
         self.clear(cx);
         self.expanded = false;
         cx.notify();
     }
 
-    pub(super) fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    pub(in crate::gui) fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if self.input_focused(window, cx)
             && self
                 .input
@@ -131,18 +136,23 @@ impl ListSearch {
         false
     }
 
-    pub(super) fn input_focused(&self, window: &Window, cx: &App) -> bool {
+    pub(in crate::gui) fn input_focused(&self, window: &Window, cx: &App) -> bool {
         self.input.read(cx).is_focused(window)
     }
 
-    pub(super) fn set_counts(&mut self, matched: usize, total: usize, cx: &mut Context<Self>) {
+    pub(in crate::gui) fn set_counts(
+        &mut self,
+        matched: usize,
+        total: usize,
+        cx: &mut Context<Self>,
+    ) {
         if self.counts != Some((matched, total)) {
             self.counts = Some((matched, total));
             cx.notify();
         }
     }
 
-    pub(super) fn clear_counts(&mut self, cx: &mut Context<Self>) {
+    pub(in crate::gui) fn clear_counts(&mut self, cx: &mut Context<Self>) {
         if self.counts.take().is_some() {
             cx.notify();
         }

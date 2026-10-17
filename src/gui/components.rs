@@ -1,13 +1,56 @@
 mod dropdown;
+pub(crate) mod input;
 #[cfg(test)]
 mod keyboard_tests;
 mod scrollbar;
+pub(crate) mod search;
 
+use super::fonts;
 use super::{GuiApp, UI_INSET};
 
 use gpui::{
-    Context, Div, ElementId, Render, SharedString, Stateful, Window, div, prelude::*, px, rgb,
+    ClipboardItem, Context, Div, ElementId, Render, SharedString, Stateful, Window, div,
+    prelude::*, px, rgb,
 };
+pub(crate) fn row() -> Div {
+    div().flex().items_center().gap_2().min_w_0()
+}
+pub(crate) fn column() -> Div {
+    div().flex().flex_col().min_w_0().min_h_0().gap_2()
+}
+pub(crate) fn copyable_message<T: 'static>(
+    id: impl Into<ElementId>,
+    message: String,
+    cx: &mut Context<T>,
+) -> Stateful<Div> {
+    row()
+        .id(id)
+        .flex_1()
+        .min_w_0()
+        .overflow_hidden()
+        .cursor_pointer()
+        .child(
+            div()
+                .flex_initial()
+                .min_w_0()
+                .truncate()
+                .child(message.clone()),
+        )
+        .child(div().flex_shrink_0().child("⧉"))
+        .tooltip({
+            let message: SharedString = message.clone().into();
+            move |_, cx| {
+                cx.new(|_| ButtonTooltip {
+                    text: message.clone(),
+                })
+                .into()
+            }
+        })
+        .on_click(cx.listener(move |_, _, _, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string(message.clone()));
+            cx.stop_propagation();
+        }))
+}
 pub(crate) const LIST_ROW_REMS: f32 = 2.625;
 pub(crate) const MENU_WIDTH: f32 = 260.0;
 pub(crate) const POPOVER_MAX_REMS: f32 = 15.0;
@@ -195,7 +238,7 @@ pub(crate) fn status_message(
 
 /// Shared wrapping toolbar shell for panel actions.
 pub(crate) fn panel_toolbar() -> Div {
-    super::row().flex_wrap().flex_shrink_0()
+    row().flex_wrap().flex_shrink_0()
 }
 
 /// Shared root surface for docked panels.
@@ -218,7 +261,7 @@ pub(crate) fn panel_header(
     title: impl Into<SharedString>,
     subtitle: impl Into<SharedString>,
 ) -> Div {
-    super::column()
+    column()
         .gap_1()
         .flex_shrink_0()
         .child(
@@ -389,14 +432,14 @@ pub(crate) fn button<T: 'static>(
 }
 
 /// Sortable list header control with shared active-direction styling.
-pub(crate) fn sortable_header(
+pub(crate) fn sortable_header<T: 'static>(
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
     active: bool,
     descending: bool,
     width: Option<gpui::Pixels>,
-    cx: &mut Context<GuiApp>,
-    action: impl Fn(&mut GuiApp, &mut Window, &mut Context<GuiApp>) + 'static,
+    cx: &mut Context<T>,
+    action: impl Fn(&mut T, &mut Window, &mut Context<T>) + 'static,
 ) -> Stateful<Div> {
     let theme = crate::gui::theme::palette(cx);
     let mut control = div()
@@ -424,7 +467,7 @@ pub(crate) fn sortable_header(
             control.child(
                 div()
                     .flex_shrink_0()
-                    .font_family(super::fonts::SYMBOLS_FAMILY)
+                    .font_family(fonts::SYMBOLS_FAMILY)
                     .child(if descending { "󰁅" } else { "󰁝" }),
             )
         });
@@ -446,7 +489,7 @@ pub(crate) fn icon_button<T: 'static>(
 ) -> Stateful<Div> {
     let hint = hint.into();
     button(id, icon, cx, action)
-        .font_family(super::fonts::SYMBOLS_FAMILY)
+        .font_family(fonts::SYMBOLS_FAMILY)
         .text_size(gpui::rems(1.))
         .size(gpui::rems(2.))
         .p_0()
@@ -549,7 +592,7 @@ pub(crate) fn metadata_item(
     copy: Option<Stateful<Div>>,
 ) -> Div {
     // Captions use 0.75rem, so 1.5rem is a 2em label/value gap.
-    super::row()
+    row()
         .items_start()
         .group("metadata-field")
         .gap(gpui::rems(1.5))
@@ -557,7 +600,7 @@ pub(crate) fn metadata_item(
         .min_w_0()
         .child(caption(theme, label).w(label_width).flex_shrink_0())
         .child(
-            super::row()
+            row()
                 .flex_1()
                 .min_w_0()
                 .gap_1()
@@ -580,7 +623,7 @@ pub(crate) fn artwork_preview(
     image: impl IntoElement,
     aspect_ratio: Option<f32>,
 ) -> Div {
-    super::column()
+    column()
         .w_full()
         .gap_2()
         .child(caption(theme, label))
@@ -597,11 +640,11 @@ pub(crate) fn artwork_preview(
 }
 
 /// Menu item with shared application event handling.
-pub(crate) fn menu_item(
+pub(crate) fn menu_item<T: 'static>(
     id: impl Into<ElementId>,
     label: impl IntoElement,
-    cx: &mut Context<GuiApp>,
-    action: impl Fn(&mut GuiApp, &mut Window, &mut Context<GuiApp>) + 'static,
+    cx: &mut Context<T>,
+    action: impl Fn(&mut T, &mut Window, &mut Context<T>) + 'static,
 ) -> Stateful<Div> {
     let theme = crate::gui::theme::palette(cx);
     activate_control(menu_item_style(theme, id, label), cx, action)
@@ -623,15 +666,15 @@ pub(crate) fn menu_title(
         .child(title.into())
 }
 
-pub(crate) fn menu_back(
+pub(crate) fn menu_back<T: 'static>(
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
-    cx: &mut Context<GuiApp>,
-    action: impl Fn(&mut GuiApp, &mut Window, &mut Context<GuiApp>) + 'static,
+    cx: &mut Context<T>,
+    action: impl Fn(&mut T, &mut Window, &mut Context<T>) + 'static,
 ) -> Stateful<Div> {
     let label = label.into();
     menu_item(id, "", cx, action)
-        .font_family(super::fonts::SYMBOLS_FAMILY)
+        .font_family(fonts::SYMBOLS_FAMILY)
         .tooltip(move |_, cx| {
             cx.new(|_| ButtonTooltip {
                 text: label.clone(),
@@ -646,7 +689,7 @@ pub(crate) fn section_group(
     title: impl Into<SharedString>,
     content: impl IntoElement,
 ) -> Div {
-    super::column()
+    column()
         .gap_2()
         .p_2()
         // Retain the established content inset without painting a nested frame.
@@ -658,7 +701,7 @@ pub(crate) fn section_group(
 
 /// Shared responsive two-column layout.
 pub(crate) fn two_column(first: Div, second: Div) -> Div {
-    super::row()
+    row()
         .items_start()
         .flex_wrap()
         .gap_4()
@@ -672,7 +715,7 @@ pub(crate) fn form_field(
     label: impl Into<SharedString>,
     control: impl IntoElement,
 ) -> Div {
-    super::column()
+    column()
         .w_full()
         .flex_shrink_0()
         .gap_1()
@@ -693,7 +736,7 @@ pub(crate) fn dropdown_trigger(
             div()
                 .flex_shrink_0()
                 .text_color(rgb(theme.muted))
-                .font_family(super::fonts::SYMBOLS_FAMILY)
+                .font_family(fonts::SYMBOLS_FAMILY)
                 .child("󰅀"),
         )
 }
@@ -888,15 +931,13 @@ pub(crate) fn track_list_row(
                 .flex_shrink_0()
                 .text_xs()
                 .whitespace_nowrap()
-                .font_features(super::fonts::tabular_numbers())
+                .font_features(fonts::tabular_numbers())
                 .text_color(rgb(if playing {
                     theme.accent
                 } else {
                     theme.secondary
                 }))
-                .when(playing, |view| {
-                    view.font_family(super::fonts::SYMBOLS_FAMILY)
-                })
+                .when(playing, |view| view.font_family(fonts::SYMBOLS_FAMILY))
                 .child(if playing {
                     "".to_owned()
                 } else {
@@ -1027,7 +1068,7 @@ fn track_row_text(
 ) -> Stateful<Div> {
     let title = title.into();
     let detail = detail.into();
-    let view = super::column()
+    let view = column()
         .id(id)
         .flex_1()
         .gap_0()
@@ -1056,13 +1097,13 @@ pub(super) fn hover_actions(
     group: &'static str,
     selected: bool,
 ) -> Div {
-    super::row()
+    row()
         .absolute()
         .right_0()
         .top_0()
         .h_full()
         .gap_0()
-        .bg(super::components::row_background(theme, selected, true))
+        .bg(row_background(theme, selected, true))
         .invisible()
         .group_hover(group, |style| style.visible())
 }

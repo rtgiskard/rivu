@@ -12,13 +12,15 @@ use crate::{
 
 use super::{
     artwork::{Artwork, ArtworkImages, ArtworkLoader, ArtworkView},
-    caption, column,
-    components::compact_icon_button,
-    components::{LIST_ROW_REMS, scrollable_list, track_list_row},
-    format_time, icon_button,
+    components::{
+        ButtonTooltip, LIST_ROW_REMS, caption, column, compact_icon_button, icon_button,
+        panel_surface, row, scrollable_list,
+        search::{ListSearch, SearchEvent},
+        track_list_row,
+    },
+    format_time,
     list_interaction::{ContentDrag, ContentMenuRequest, TrackSource},
-    paged, panel_surface, row,
-    search::{ListSearch, SearchEvent},
+    paged,
 };
 
 fn card_icon_button(
@@ -49,7 +51,7 @@ fn card_icon_button(
             cx.stop_propagation();
         }))
         .tooltip(move |_, cx| {
-            cx.new(|_| super::ButtonTooltip { text: hint.clone() })
+            cx.new(|_| ButtonTooltip { text: hint.clone() })
                 .into()
         })
 }
@@ -976,7 +978,7 @@ impl AlbumBrowser {
                     .truncate()
                     .child(title.clone())
                     .tooltip(move |_, cx| {
-                        cx.new(|_| super::ButtonTooltip {
+                        cx.new(|_| ButtonTooltip {
                             text: format!("{title}\n{directory}").into(),
                         })
                         .into()
@@ -1135,7 +1137,7 @@ impl Render for AlbumBrowser {
         } else {
             header = header
                 .child(
-                    super::panel_header(
+                    crate::gui::components::panel_header(
                         theme,
                         self.tr("gl-albums"),
                         total.map_or_else(

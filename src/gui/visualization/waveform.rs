@@ -1306,7 +1306,7 @@ impl Waveform {
             )
             .when(labels, |panel| {
                 panel.child(
-                    super::super::row()
+                    crate::gui::components::row()
                         .absolute()
                         .bottom_0()
                         .left_0()

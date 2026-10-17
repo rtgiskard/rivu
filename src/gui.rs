@@ -5,7 +5,6 @@ mod browser;
 mod components;
 mod duplicates;
 mod fonts;
-mod input;
 mod layout;
 mod library;
 mod list_interaction;
@@ -18,7 +17,6 @@ mod playlist_selection;
 mod queries;
 mod queue;
 mod scrolling;
-mod search;
 pub(crate) mod session;
 mod settings;
 mod shell;
@@ -35,16 +33,11 @@ use crate::{
 use anyhow::Result;
 use ashpd::desktop::file_chooser::SelectedFiles;
 use browser::BrowserState;
-pub(super) use components::{
-    ButtonTooltip, DropdownItem, DropdownState, POPOVER_MAX_REMS, StatusKind, active_control,
-    artwork_preview, button, caption, context_menu_container, drag_preview, dropdown_container,
-    dropdown_row, dropdown_trigger, form_field, icon_button, list_row, list_viewport, menu_item,
-    metadata_item, panel_header, panel_surface, panel_toolbar, row_text, section_group,
-    sortable_header, status_message, toggle_button, tree_row, two_column,
-};
+use components::input::{Input, InputEvent};
+use components::search::{ListSearch, SearchEvent};
+use components::{ButtonTooltip, caption, drag_preview, list_row};
 use futures::{StreamExt, channel::mpsc};
 use gpui::{prelude::*, *};
-use input::{Input, InputEvent};
 use layout::interaction::{
     Cancellation, DockGeometry, DockHover, DockRequest, DragCommit, Dragging, LayoutInteraction,
     Measured,
@@ -55,7 +48,6 @@ use library::LibraryNode;
 use list_interaction::{ContentDrag, ContentMenuRequest, TrackSource};
 use metadata::session::MetadataSession;
 use queries::ViewRequestKind;
-use search::{ListSearch, SearchEvent};
 pub(crate) use session::UiSession;
 use shell::{PanelMenu, PanelMenuPage};
 use std::{
@@ -175,13 +167,6 @@ fn panel_spec(kind: &str) -> Option<&'static PanelSpec> {
     PANELS.iter().find(|panel| panel.kind == kind)
 }
 
-fn row() -> Div {
-    div().flex().items_center().gap_2().min_w_0()
-}
-fn column() -> Div {
-    div().flex().flex_col().min_w_0().min_h_0().gap_2()
-}
-
 fn chooser_path(files: &SelectedFiles) -> Option<PathBuf> {
     files
         .uris()
@@ -200,39 +185,6 @@ fn chooser_result<T>(
     }
 }
 
-fn copyable_message<T: 'static>(
-    id: impl Into<ElementId>,
-    message: String,
-    cx: &mut Context<T>,
-) -> Stateful<Div> {
-    row()
-        .id(id)
-        .flex_1()
-        .min_w_0()
-        .overflow_hidden()
-        .cursor_pointer()
-        .child(
-            div()
-                .flex_initial()
-                .min_w_0()
-                .truncate()
-                .child(message.clone()),
-        )
-        .child(div().flex_shrink_0().child("⧉"))
-        .tooltip({
-            let message: SharedString = message.clone().into();
-            move |_, cx| {
-                cx.new(|_| ButtonTooltip {
-                    text: message.clone(),
-                })
-                .into()
-            }
-        })
-        .on_click(cx.listener(move |_, _, _, cx| {
-            cx.write_to_clipboard(ClipboardItem::new_string(message.clone()));
-            cx.stop_propagation();
-        }))
-}
 fn format_time(seconds: f64) -> String {
     let seconds = if seconds.is_finite() {
         seconds.max(0.) as u64

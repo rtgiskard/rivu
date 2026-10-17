@@ -1,4 +1,5 @@
 use super::*;
+use crate::gui::components::{caption, column, icon_button, row};
 use crate::keyboard::{self, Action, Context as KeyContext, Modifiers as KeyModifiers};
 
 fn visible_panel(node: &Node, id: u64) -> Option<&layout::Panel> {

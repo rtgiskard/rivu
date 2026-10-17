@@ -1,17 +1,17 @@
 use super::{
-    Dragging, Field, GuiApp, HistorySort, ListFocus, Measured, StatusKind, UI_INSET,
-    ViewRequestKind, active_control, column,
+    Dragging, Field, GuiApp, HistorySort, ListFocus, Measured, UI_INSET, ViewRequestKind,
     components::{
-        LIST_ROW_REMS, compact_icon_button, danger_control, disabled_control, hover_actions,
-        list_row_height, primary_control, quiet_icon_button, scrollable_list, track_list_row,
+        LIST_ROW_REMS, StatusKind, active_control, caption, column, compact_icon_button,
+        danger_control, disabled_control, form_field, hover_actions, icon_button, list_row,
+        list_row_height, list_viewport, panel_header, panel_surface, panel_toolbar,
+        primary_control, quiet_icon_button, row, row_text, scrollable_list, sortable_header,
+        status_message, track_list_row,
     },
     fonts::tabular_numbers,
-    form_field, format_time, icon_button,
+    format_time,
     library::LibraryDrag,
-    list_viewport, paged, panel_header, panel_surface, panel_toolbar, row, row_text,
-    sortable_header, status_message,
+    paged,
 };
-pub(super) use super::{caption, list_row};
 use crate::{
     gui::queue::QueueDrag,
     model::{Command, PlaybackStatus, RepeatMode},
@@ -313,7 +313,7 @@ impl GuiApp {
                     .tooltip({
                         let text = self.tr("gl-volume");
                         move |_, cx| {
-                            cx.new(|_| super::ButtonTooltip { text: text.clone() })
+                            cx.new(|_| crate::gui::components::ButtonTooltip { text: text.clone() })
                                 .into()
                         }
                     }),
@@ -544,7 +544,7 @@ impl GuiApp {
             let has_tracks = self.state.current_track().is_some();
             let rename = target.clone();
             let delete = target.clone();
-            let menu = super::context_menu_container(theme, "playlist-row-menu")
+            let menu = crate::gui::components::context_menu_container(theme, "playlist-row-menu")
                 .map(|surface| self.menu_surface(surface))
                 .max_w((window.viewport_size().width - px(UI_INSET * 2.)).max(px(0.)))
                 .max_h((window.viewport_size().height - px(UI_INSET * 2.)).max(px(0.)))
@@ -553,7 +553,7 @@ impl GuiApp {
                     this.dismiss_playlist_action(window, cx);
                     cx.stop_propagation();
                 }))
-                .child(super::menu_item(
+                .child(crate::gui::components::menu_item(
                     "playlist-row-play",
                     self.tr("li-replace-queue"),
                     cx,
@@ -573,7 +573,7 @@ impl GuiApp {
                         }
                     },
                 ))
-                .child(super::menu_item(
+                .child(crate::gui::components::menu_item(
                     "playlist-row-queue",
                     self.tr("li-queue"),
                     cx,
@@ -584,7 +584,7 @@ impl GuiApp {
                 ))
                 .child(super::components::menu_separator(theme))
                 .child(
-                    super::menu_item(
+                    crate::gui::components::menu_item(
                         "playlist-row-add",
                         self.tr("gl-add-current"),
                         cx,
@@ -606,7 +606,7 @@ impl GuiApp {
                     .opacity(if has_tracks { 1. } else { 0.4 })
                     .when(!has_tracks, |view| view.cursor_default()),
                 )
-                .child(super::menu_item(
+                .child(crate::gui::components::menu_item(
                     "playlist-row-rename",
                     self.tr("gl-rename"),
                     cx,
@@ -624,7 +624,7 @@ impl GuiApp {
                 ))
                 .child(super::components::danger_menu_item(
                     theme,
-                    super::menu_item(
+                    crate::gui::components::menu_item(
                         "playlist-row-delete",
                         self.tr("gl-delete"),
                         cx,
@@ -815,7 +815,7 @@ impl GuiApp {
                     |text| text.invisible(),
                 )
                 .tooltip(move |_, cx| {
-                    cx.new(|_| super::ButtonTooltip {
+                    cx.new(|_| crate::gui::components::ButtonTooltip {
                         text: message.clone(),
                     })
                     .into()
@@ -906,7 +906,7 @@ impl GuiApp {
                     .min_w_0()
                     .truncate()
                     .tooltip(move |_, cx| {
-                        cx.new(|_| super::ButtonTooltip {
+                        cx.new(|_| crate::gui::components::ButtonTooltip {
                             text: selection_message.clone(),
                         })
                         .into()

@@ -99,18 +99,18 @@ impl Input {
     }
 
     /// Reserve room for an overlaid trailing control without overlapping text.
-    pub(super) fn with_trailing_space(mut self, space: Pixels) -> Self {
+    pub(in crate::gui) fn with_trailing_space(mut self, space: Pixels) -> Self {
         self.trailing_space = space;
         self
     }
 
     /// Let a containing compound control own the background and border.
-    pub(super) fn embedded(mut self) -> Self {
+    pub(in crate::gui) fn embedded(mut self) -> Self {
         self.embedded = true;
         self
     }
 
-    pub(super) fn set_trailing_text(&mut self, text: SharedString, cx: &mut Context<Self>) {
+    pub(in crate::gui) fn set_trailing_text(&mut self, text: SharedString, cx: &mut Context<Self>) {
         if self.trailing_text.as_ref() != Some(&text) {
             self.trailing_text = Some(text);
             cx.notify();
@@ -139,7 +139,7 @@ impl Input {
     }
 
     /// Disabled inputs retain their entity and value but reject user editing.
-    pub(super) fn set_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+    pub(in crate::gui) fn set_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
         if self.enabled == enabled {
             return;
         }
@@ -155,18 +155,22 @@ impl Input {
         self.focus_handle.is_focused(window)
     }
 
-    pub(super) fn is_composing(&self) -> bool {
+    pub(in crate::gui) fn is_composing(&self) -> bool {
         self.marked_range.is_some()
     }
 
-    pub(super) fn focus_and_select_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(in crate::gui) fn focus_and_select_all(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.focus_handle.focus(window, cx);
         self.move_to(0, cx);
         self.select_to(self.content.len(), cx);
     }
 
     /// Cancel the current preedit without clearing committed input text.
-    pub(super) fn dismiss_composition(&mut self, cx: &mut Context<Self>) -> bool {
+    pub(in crate::gui) fn dismiss_composition(&mut self, cx: &mut Context<Self>) -> bool {
         let Some(marked) = self.marked_range.take() else {
             return false;
         };

@@ -1,12 +1,14 @@
 use super::{
-    ButtonTooltip, DropdownItem, DropdownState, POPOVER_MAX_REMS, StatusKind, UI_INSET,
-    active_control, button, caption, column,
-    components::{DROPDOWN_ROW_REMS, FocusScope, activate_control, disabled_control, dropdown_key},
-    copyable_message, dropdown_container, dropdown_row, dropdown_trigger, form_field, icon_button,
-    input::{Input, InputEvent},
-    row, section_group, status_message,
+    UI_INSET,
+    components::{
+        ButtonTooltip, DROPDOWN_ROW_REMS, DropdownItem, DropdownState, FocusScope,
+        POPOVER_MAX_REMS, StatusKind, activate_control, active_control, button, caption, column,
+        copyable_message, disabled_control, dropdown_container, dropdown_key, dropdown_row,
+        dropdown_trigger, form_field, icon_button,
+        input::{Input, InputEvent},
+        row, section_group, status_message, toggle_button, two_column,
+    },
     theme::palette,
-    toggle_button, two_column,
 };
 use crate::{
     artwork::{ArtworkCacheReport, ArtworkManager},

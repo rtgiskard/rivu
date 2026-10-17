@@ -12,10 +12,13 @@
 
 pub(in crate::gui) mod session;
 
-use super::components::disabled_control;
 use super::{
-    Field, GuiApp, UI_INSET, active_control, artwork_preview, button, caption, column, format_time,
-    icon_button, metadata_item, panel_header, panel_surface, row, section_group,
+    Field, GuiApp, UI_INSET,
+    components::{
+        active_control, artwork_preview, button, caption, column, disabled_control, icon_button,
+        metadata_item, panel_header, panel_surface, row, section_group,
+    },
+    format_time,
 };
 use crate::model::{Command, DecoderHint};
 use crate::{model::Query, response::ViewResponse};
@@ -1097,7 +1100,7 @@ impl GuiApp {
                                             .truncate(),
                                     )
                                     .tooltip(move |_, cx| {
-                                        cx.new(|_| super::ButtonTooltip {
+                                        cx.new(|_| crate::gui::components::ButtonTooltip {
                                             text: status.clone(),
                                         })
                                         .into()
@@ -1123,7 +1126,7 @@ impl GuiApp {
                                 )
                                 .id(("metadata-path", panel_id))
                                 .tooltip(move |_, cx| {
-                                    cx.new(|_| super::ButtonTooltip {
+                                    cx.new(|_| crate::gui::components::ButtonTooltip {
                                         text: path_tooltip.clone(),
                                     })
                                     .into()

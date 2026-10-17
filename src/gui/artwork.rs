@@ -736,7 +736,9 @@ impl Artwork {
         img(move |window: &mut Window, cx: &mut App| {
             cache.update(cx, |cache, cx| cache.load(side, window, cx))
         })
-        .with_fallback(move || super::caption(theme, fallback.clone()).into_any_element())
+        .with_fallback(move || {
+            crate::gui::components::caption(theme, fallback.clone()).into_any_element()
+        })
     }
 }
 

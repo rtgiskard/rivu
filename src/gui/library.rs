@@ -1,10 +1,13 @@
 mod locate;
 pub(super) mod tree;
 
-use super::components::{disabled_control, quiet_icon_button};
 use super::{
-    GuiApp, ListFocus, active_control, browser::selection::LibraryRowRequest, button, caption,
-    column, icon_button, list_viewport, panel_header, panel_surface, panel_toolbar, row,
+    GuiApp, ListFocus,
+    browser::selection::LibraryRowRequest,
+    components::{
+        active_control, button, caption, column, disabled_control, icon_button, list_viewport,
+        panel_header, panel_surface, panel_toolbar, quiet_icon_button, row,
+    },
 };
 use crate::{
     config::{LibraryColumn, LibraryColumns},
@@ -118,7 +121,7 @@ fn track_columns(
                 },
             ),
         };
-        let cell = super::caption(theme, value).truncate();
+        let cell = crate::gui::components::caption(theme, value).truncate();
         cells = cells.child(match column {
             LibraryColumn::Artist | LibraryColumn::Album => {
                 cell.max_w(gpui::rems(6.0)).flex_initial().min_w_0()
@@ -488,7 +491,7 @@ impl GuiApp {
                                     status,
                                 } => {
                                     let failed = status == BranchStatus::Error;
-                                    let placeholder = super::tree_row(
+                                    let placeholder = crate::gui::components::tree_row(
                                         theme,
                                         gpui::ElementId::named_usize("library-loading", index),
                                         0,
@@ -509,7 +512,7 @@ impl GuiApp {
                                                     .h_full()
                                                     .pl(gpui::rems(depth as f32 * 1.25))
                                                     .child(
-                                                        super::caption(theme, this.tr(if failed { "gl-unavailable" } else { "gl-loading" }))
+                                                        crate::gui::components::caption(theme, this.tr(if failed { "gl-unavailable" } else { "gl-loading" }))
                                                             .when(!this.loading_text.show_branch(&branch, failed), |text| text.invisible())
                                                             .min_w_0()
                                                             .truncate(),
@@ -646,7 +649,7 @@ impl GuiApp {
                                                 .when(path.is_none(), |view| view.flex_1()),
                                         )
                                         .when(path.is_some() && !detail.is_empty(), |view| {
-                                            view.child(super::caption(theme, detail.clone()).min_w_0().truncate()
+                                            view.child(crate::gui::components::caption(theme, detail.clone()).min_w_0().truncate()
                                                 .when(visible.status == BranchStatus::Loading && !visible.branch.as_ref().is_some_and(|branch| this.loading_text.show_branch(branch, false)), |text| text.invisible())
                                                 .text_overflow(gpui::TextOverflow::Truncate("..".into())))
                                         })
@@ -667,8 +670,8 @@ impl GuiApp {
                                         row()
                                             .gap_1()
                                             .flex_shrink_0()
-                                            .child(super::caption(theme, "󰎇").font_family(super::fonts::SYMBOLS_FAMILY))
-                                            .child(super::caption(theme, count.map_or_else(|| "—".to_owned(), |total| total.to_string()))
+                                            .child(crate::gui::components::caption(theme, "󰎇").font_family(super::fonts::SYMBOLS_FAMILY))
+                                            .child(crate::gui::components::caption(theme, count.map_or_else(|| "—".to_owned(), |total| total.to_string()))
                                                 .font_features(super::fonts::tabular_numbers())),
                                     )
                                 });
@@ -702,7 +705,7 @@ impl GuiApp {
                             let menu_node = id.clone();
                             let menu_root = path.clone().filter(|path| this.state.system.config.library_roots.contains(path));
                             let row_view = super::components::lazy_row_tooltip(
-                                super::tree_row(
+                                crate::gui::components::tree_row(
                                     theme,
                                     gpui::ElementId::named_usize("library-node", index),
                                     0,
@@ -975,7 +978,7 @@ impl GuiApp {
                     .min_w_0()
                     .truncate()
                     .tooltip(move |_, cx| {
-                        cx.new(|_| super::ButtonTooltip { text: path.clone() })
+                        cx.new(|_| crate::gui::components::ButtonTooltip { text: path.clone() })
                             .into()
                     }),
             )
@@ -987,7 +990,7 @@ impl GuiApp {
                     .min_w_0()
                     .truncate()
                     .tooltip(move |_, cx| {
-                        cx.new(|_| super::ButtonTooltip {
+                        cx.new(|_| crate::gui::components::ButtonTooltip {
                             text: message.clone(),
                         })
                         .into()
@@ -1042,7 +1045,7 @@ impl GuiApp {
             .min_w_0()
             .id(("library-selection-count", panel_id))
             .tooltip(move |_, cx| {
-                cx.new(|_| super::ButtonTooltip {
+                cx.new(|_| crate::gui::components::ButtonTooltip {
                     text: selection_label.clone().into(),
                 })
                 .into()
