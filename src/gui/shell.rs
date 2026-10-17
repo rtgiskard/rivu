@@ -144,7 +144,9 @@ impl GuiApp {
                                 || !scope.handle().contains_focused(window, cx))
                         {
                             scope.handle().focus(window, cx);
-                            scope.advance(false, window, cx);
+                            if !matches!(surface, KeyboardSurface::Menu(..)) {
+                                scope.advance(false, window, cx);
+                            }
                         }
                     });
                 });

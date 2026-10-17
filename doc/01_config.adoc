@@ -71,9 +71,10 @@ activates a focused button or switch.
 Unavailable controls cannot be activated and are skipped by keyboard navigation.
 Panel tabs are also tab stops: activate a tab with `Enter`/`Space`, or press
 `Shift+F10` (the Menu key also works) to open its panel menu.
-Open menus use `Up` and `Down` to move between available actions (wrapping at
-the ends), and `Enter` to choose one. `Escape` or `Left` returns from a submenu;
-at the top level it closes the menu without triggering a playback shortcut.
+Menus open without a focused action. Use `Up` or `Down` to enter and move between
+available actions (wrapping at the ends), or use `Tab`/`Shift+Tab`. `Enter` chooses
+the focused action. `Escape` or `Left` returns from a submenu; at the top level it
+closes the menu without triggering a playback shortcut.
 
 Open Shortcuts from the application menu to view desktop bindings;
 `Escape` or the close button dismisses the list. `F1` and `?` do not open or close it.
