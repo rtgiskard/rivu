@@ -32,6 +32,7 @@ impl ListSearch {
     pub(in crate::gui) fn new(i18n: Arc<Localizer>, cx: &mut Context<Self>) -> Self {
         let input =
             cx.new(|cx| Input::new("", i18n.text("search-placeholder").to_owned(), cx).embedded());
+        input.update(cx, |input, cx| input.set_trailing_text("—".into(), cx));
         let subscription = cx.subscribe(&input, |this, _, event, cx| {
             if matches!(event, InputEvent::Changed { user: true }) {
                 this.edited(cx);
@@ -79,7 +80,7 @@ impl ListSearch {
     fn apply(&mut self, query: Option<String>, cx: &mut Context<Self>) {
         if self.query != query {
             self.query = query.clone();
-            self.counts = None;
+            self.clear_counts(cx);
             cx.emit(SearchEvent::Changed(query));
             cx.notify();
         }
@@ -148,12 +149,20 @@ impl ListSearch {
     ) {
         if self.counts != Some((matched, total)) {
             self.counts = Some((matched, total));
+            let text = self.i18n.format(
+                "search-count",
+                &[("matched", matched.into()), ("total", total.into())],
+            );
+            self.input
+                .update(cx, |input, cx| input.set_trailing_text(text.into(), cx));
             cx.notify();
         }
     }
 
     pub(in crate::gui) fn clear_counts(&mut self, cx: &mut Context<Self>) {
         if self.counts.take().is_some() {
+            self.input
+                .update(cx, |input, cx| input.set_trailing_text("—".into(), cx));
             cx.notify();
         }
     }
@@ -204,16 +213,6 @@ impl Render for ListSearch {
                 .bg(gpui::transparent_black())
                 .rounded_none(),
             );
-        let count = match self.counts {
-            Some((matched, total)) => self.i18n.format(
-                "search-count",
-                &[("matched", matched.into()), ("total", total.into())],
-            ),
-            None => "—".to_owned(),
-        };
-        self.input.update(cx, |input, cx| {
-            input.set_trailing_text(count.into(), cx);
-        });
         field = field
             .child(div().flex_1().min_w_0().child(self.input.clone()))
             .when(!self.input.read(cx).text().is_empty(), |field| {
