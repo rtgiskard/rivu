@@ -6,7 +6,6 @@
 //! read-only buffers and tree state. Only the owners prepare, accept, retry, and
 //! pin payloads or start and complete range selection.
 
-#[path = "library/selection.rs"]
 pub(super) mod selection;
 
 use super::queue::QueueSelection;

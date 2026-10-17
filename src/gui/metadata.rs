@@ -12,10 +12,15 @@
 
 pub(in crate::gui) mod session;
 
-use super::{Field, GuiApp, UI_INSET, column, icon_button, panel_header, row};
+use super::components::disabled_control;
+use super::{
+    Field, GuiApp, UI_INSET, active_control, artwork_preview, button, caption, column, format_time,
+    icon_button, metadata_item, panel_header, panel_surface, row, section_group,
+};
+use crate::model::{Command, DecoderHint};
 use crate::{model::Query, response::ViewResponse};
-use gpui::{AnyElement, App, Context, div, prelude::*, px, rgb};
-use session::{MetadataDraft, MetadataValues};
+use gpui::{AnyElement, App, Context, Div, SharedString, Window, div, prelude::*, px, rgb};
+use session::{MetadataAvailability, MetadataDraft, MetadataReadState, MetadataValues};
 use std::time::{Duration, Instant};
 
 #[derive(Default)]
@@ -611,6 +616,650 @@ impl GuiApp {
     }
 }
 
+fn metadata_copy(
+    label: SharedString,
+    value: SharedString,
+    hint: Option<SharedString>,
+    cx: &mut Context<GuiApp>,
+) -> Option<gpui::Stateful<Div>> {
+    let hint = hint.filter(|_| !value.is_empty() && value.as_ref() != "—")?;
+    let theme = super::theme::palette(cx);
+    Some(
+        super::components::compact_icon_button(
+            theme,
+            icon_button(label, "", hint, cx, move |_, _, cx| {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(value.to_string()));
+            }),
+        )
+        .h(gpui::rems(1.25))
+        .text_size(gpui::rems(0.75))
+        .opacity(0.)
+        .group_hover("metadata-field", |style| style.opacity(1.))
+        .focus(|style| style.opacity(1.)),
+    )
+}
+
+fn metadata_rows(
+    theme: &'static crate::theme::Palette,
+    rows: impl IntoIterator<Item = [(SharedString, SharedString); 2]>,
+    label_widths: [gpui::Pixels; 2],
+    copy_hint: Option<SharedString>,
+    cx: &mut Context<GuiApp>,
+) -> Div {
+    column()
+        .gap_1()
+        .children(rows.into_iter().map(|[first, second]| {
+            metadata_row(
+                metadata_item(
+                    theme,
+                    first.0.clone(),
+                    first.1.clone(),
+                    label_widths[0],
+                    metadata_copy(first.0, first.1, copy_hint.clone(), cx),
+                ),
+                metadata_item(
+                    theme,
+                    second.0.clone(),
+                    second.1.clone(),
+                    label_widths[1],
+                    metadata_copy(second.0, second.1, copy_hint.clone(), cx),
+                ),
+            )
+        }))
+}
+
+fn metadata_row(first: Div, second: Div) -> Div {
+    div()
+        .grid()
+        .grid_cols(2)
+        .gap_4()
+        .items_start()
+        .child(first.min_w_0())
+        .child(second.min_w_0())
+}
+
+fn metadata_group(
+    theme: &'static crate::theme::Palette,
+    title: impl Into<SharedString>,
+    content: impl IntoElement,
+) -> Div {
+    section_group(theme, title, content)
+}
+
+impl GuiApp {
+    pub(super) fn metadata_panel(
+        &mut self,
+        panel_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = crate::gui::theme::palette(cx);
+        let owner = cx.weak_entity();
+        window.defer(cx, move |_, cx| {
+            let _ = owner.update(cx, |this, cx| {
+                this.sync_metadata_query();
+                this.demand_metadata(cx);
+            });
+        });
+        self.sync_metadata_inputs(cx);
+        self.prepare_artwork(cx);
+        let track = self.metadata.track();
+        let id = track.map(|track| track.id);
+        let favorite = track.is_some_and(|track| track.favorite);
+        let editable = self.metadata.editable();
+        let editor_identity = self.metadata.editor_identity();
+        let protected = self.metadata_protected(cx);
+        let can_save = self.metadata.can_save(MetadataDraft {
+            title: self.inputs[&Field::Title].read(cx).text(),
+            artist: self.inputs[&Field::Artist].read(cx).text(),
+            album: self.inputs[&Field::Album].read(cx).text(),
+            decoder_hint: self.metadata_decoder_hint,
+        });
+        let identity = self.metadata.identity();
+        let follow_paused = self.metadata.selected().is_none()
+            && protected
+            && identity != self.state.current_track().map(|track| track.id);
+        let placeholder: SharedString = self.tr("gl-not-loaded");
+        let copy_hint = track.map(|_| self.tr("gl-copy-value"));
+        let presence_status = match self.metadata.availability() {
+            MetadataAvailability::Unknown if identity.is_none() => self.i18n.text("gl-no-track"),
+            MetadataAvailability::Unknown => self.i18n.text("gl-details-not-loaded"),
+            MetadataAvailability::Present(_) => self.i18n.text("gl-ready"),
+            MetadataAvailability::Unavailable(_) => self.i18n.text("gl-track-unavailable"),
+        };
+        let status: SharedString = match self.metadata.read_state() {
+            MetadataReadState::Idle => presence_status.to_owned().into(),
+            MetadataReadState::Pending(_) => self
+                .i18n
+                .format(
+                    "gl-details-loading-status",
+                    &[("status", (presence_status).into())],
+                )
+                .into(),
+            MetadataReadState::Failed(error) => self
+                .i18n
+                .format(
+                    "gl-details-failed-status",
+                    &[
+                        ("status", (presence_status).into()),
+                        ("error", (error.as_str()).into()),
+                    ],
+                )
+                .into(),
+            MetadataReadState::WrongTrack => self
+                .i18n
+                .format(
+                    "gl-details-failed-status",
+                    &[
+                        ("status", presence_status.into()),
+                        ("error", self.i18n.text("gl-metadata-wrong-track").into()),
+                    ],
+                )
+                .into(),
+        };
+        let status: SharedString = if protected {
+            self.i18n
+                .format(
+                    "gl-details-protected-status",
+                    &[
+                        ("status", (status.as_ref()).into()),
+                        (
+                            "draft",
+                            (self.i18n.text(if self.metadata.saving() {
+                                "gl-metadata-saving"
+                            } else {
+                                "gl-unsaved"
+                            }))
+                            .into(),
+                        ),
+                        ("follow", (usize::from(follow_paused)).into()),
+                    ],
+                )
+                .into()
+        } else {
+            status
+        };
+        let heading = self.metadata.selected().or(id).map_or_else(
+            || self.i18n.text("gl-track-details").to_owned(),
+            |id| {
+                self.i18n
+                    .format("gl-track-id", &[("id", (id.to_string()).into())])
+            },
+        );
+        let file: [[(SharedString, SharedString); 2]; 1] = [[
+            (
+                self.tr("gl-file-path"),
+                track.map_or_else(
+                    || placeholder.clone(),
+                    |track| {
+                        if track.missing {
+                            self.tr("gl-missing")
+                        } else {
+                            track.path.to_string_lossy().into_owned().into()
+                        }
+                    },
+                ),
+            ),
+            (
+                self.tr("gl-availability"),
+                track.map_or_else(
+                    || placeholder.clone(),
+                    |track| {
+                        if track.missing {
+                            self.tr("gl-missing")
+                        } else {
+                            self.tr("gl-available")
+                        }
+                    },
+                ),
+            ),
+        ]];
+        let metadata: [[(SharedString, SharedString); 2]; 3] = [
+            [
+                (
+                    self.tr("gl-codec"),
+                    track.map_or_else(
+                        || placeholder.clone(),
+                        |track| {
+                            if track.codec.is_empty() {
+                                "—".into()
+                            } else {
+                                track.codec.to_ascii_lowercase().into()
+                            }
+                        },
+                    ),
+                ),
+                (
+                    self.tr("gl-sample-rate"),
+                    track.map_or_else(
+                        || placeholder.clone(),
+                        |track| {
+                            if track.sample_rate == 0 {
+                                "—".into()
+                            } else {
+                                format!("{} Hz", track.sample_rate).into()
+                            }
+                        },
+                    ),
+                ),
+            ],
+            [
+                (
+                    self.tr("gl-channels"),
+                    track.map_or_else(
+                        || placeholder.clone(),
+                        |track| {
+                            if track.channels == 0 {
+                                "—".into()
+                            } else {
+                                track.channels.to_string().into()
+                            }
+                        },
+                    ),
+                ),
+                (
+                    self.tr("gl-duration"),
+                    track.map_or_else(
+                        || placeholder.clone(),
+                        |track| {
+                            track
+                                .duration
+                                .map_or("—".into(), |value| format_time(value).into())
+                        },
+                    ),
+                ),
+            ],
+            [
+                (
+                    self.tr("gl-bitrate"),
+                    track.map_or_else(
+                        || placeholder.clone(),
+                        |track| {
+                            track.bitrate_bps.map_or("—".into(), |value| {
+                                format!(
+                                    "{}{:.0} kbps",
+                                    if track.bitrate_exact { "" } else { "≈" },
+                                    value as f64 / 1000.0
+                                )
+                                .into()
+                            })
+                        },
+                    ),
+                ),
+                (
+                    self.tr("gl-bits-sample"),
+                    track.map_or_else(
+                        || placeholder.clone(),
+                        |track| {
+                            track
+                                .bits_per_sample
+                                .map_or("—".into(), |value| value.to_string().into())
+                        },
+                    ),
+                ),
+            ],
+        ];
+        let disc: (SharedString, SharedString) = (
+            self.tr("gl-disc"),
+            track.map_or_else(
+                || placeholder.clone(),
+                |track| {
+                    track
+                        .disc_number
+                        .map_or("—".into(), |value| value.to_string().into())
+                },
+            ),
+        );
+        let tags: [[(SharedString, SharedString); 2]; 2] = [
+            [
+                (
+                    self.tr("gl-track"),
+                    track.map_or_else(
+                        || placeholder.clone(),
+                        |track| {
+                            track
+                                .track_number
+                                .map_or("—".into(), |value| value.to_string().into())
+                        },
+                    ),
+                ),
+                (
+                    self.tr("gl-release"),
+                    track.map_or_else(
+                        || placeholder.clone(),
+                        |track| {
+                            track
+                                .release_date
+                                .as_deref()
+                                .unwrap_or("—")
+                                .to_owned()
+                                .into()
+                        },
+                    ),
+                ),
+            ],
+            [
+                (
+                    self.tr("gl-play-count"),
+                    track.map_or_else(
+                        || placeholder.clone(),
+                        |track| track.play_count.to_string().into(),
+                    ),
+                ),
+                (
+                    self.tr("gl-last-played"),
+                    track.map_or_else(
+                        || placeholder.clone(),
+                        |track| self.last_played_text(track.id, track.last_played).into(),
+                    ),
+                ),
+            ],
+        ];
+        // Static labels are measured even before values load, using the caption font.
+        // Every card shares the same two column widths.
+        let label_widths = std::array::from_fn(|index| {
+            file.iter()
+                .chain(&metadata)
+                .chain(&tags)
+                .map(|fields| &fields[index].0)
+                .chain((index == 1).then_some(&disc.0))
+                .map(|label| {
+                    let run = gpui::TextRun {
+                        len: label.len(),
+                        font: self.ui_font.clone(),
+                        color: rgb(theme.muted).into(),
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    };
+                    window
+                        .text_system()
+                        .shape_line(label.clone(), window.rem_size() * 0.75, &[run], None)
+                        .width()
+                        .ceil()
+                })
+                .fold(px(0.), gpui::Pixels::max)
+        });
+        let path_tooltip: SharedString = track
+            .filter(|track| track.missing)
+            .map(|track| track.path.to_string_lossy().into_owned().into())
+            .unwrap_or_else(|| file[0][0].1.clone());
+        let scroll = self.scroll_views.content(("metadata", panel_id));
+        let details = div()
+            .id(("metadata-details", panel_id))
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .track_scroll(&scroll)
+            .child(
+                column()
+                    .flex_shrink_0()
+                    .p(px(UI_INSET))
+                    .gap_3()
+                    .child(
+                        column()
+                            .gap_1()
+                            .child(
+                                row()
+                                    .justify_between()
+                                    .items_center()
+                                    .child(
+                                        caption(theme, heading)
+                                            .text_lg()
+                                            .text_color(rgb(theme.text)),
+                                    )
+                                    .child(
+                                        row()
+                                            .gap_2()
+                                            .child(disabled_control(
+                                                theme,
+                                                icon_button(
+                                                    ("metadata-favorite", panel_id),
+                                                    if favorite { "󰓎" } else { "󰓐" },
+                                                    if favorite {
+                                                        self.tr("gl-unfavorite")
+                                                    } else {
+                                                        self.tr("gl-favorite")
+                                                    },
+                                                    cx,
+                                                    move |this, _, cx| {
+                                                        if this.metadata.editor_identity()
+                                                            != editor_identity
+                                                        {
+                                                            return;
+                                                        }
+                                                        let Some((track_id, favorite)) =
+                                                            this.metadata.track().map(|track| {
+                                                                (track.id, track.favorite)
+                                                            })
+                                                        else {
+                                                            return;
+                                                        };
+                                                        this.send(
+                                                            Command::SetFavorite {
+                                                                track_ids: vec![track_id],
+                                                                favorite: !favorite,
+                                                            },
+                                                            cx,
+                                                        );
+                                                    },
+                                                )
+                                                .text_color(rgb(if favorite {
+                                                    theme.accent
+                                                } else {
+                                                    theme.text
+                                                })),
+                                                !editable,
+                                            ))
+                                            .child(disabled_control(
+                                                theme,
+                                                icon_button(
+                                                    ("metadata-save", panel_id),
+                                                    "󰆓",
+                                                    self.tr("gl-save-metadata"),
+                                                    cx,
+                                                    move |this, _, cx| {
+                                                        if this.metadata.editor_identity()
+                                                            == editor_identity
+                                                        {
+                                                            this.save_metadata(cx);
+                                                        }
+                                                    },
+                                                ),
+                                                !can_save,
+                                            ))
+                                            .child(icon_button(
+                                                ("metadata-retry", panel_id),
+                                                "󰑐",
+                                                self.tr("gl-reload-playback"),
+                                                cx,
+                                                move |this, _, cx| {
+                                                    if this.metadata.editor_identity()
+                                                        == editor_identity
+                                                    {
+                                                        this.reload_playback_metadata(cx);
+                                                    }
+                                                },
+                                            )),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .id(("metadata-status", panel_id))
+                                    .min_w_0()
+                                    .h(gpui::rems(1.25))
+                                    .child(
+                                        caption(theme, status.clone())
+                                            .text_xs()
+                                            .text_color(rgb(theme.muted))
+                                            .truncate(),
+                                    )
+                                    .tooltip(move |_, cx| {
+                                        cx.new(|_| super::ButtonTooltip {
+                                            text: status.clone(),
+                                        })
+                                        .into()
+                                    }),
+                            ),
+                    )
+                    .child(metadata_group(
+                        theme,
+                        self.tr("gl-file"),
+                        metadata_row(
+                            div().flex_1().min_w_0().child(
+                                metadata_item(
+                                    theme,
+                                    file[0][0].0.clone(),
+                                    file[0][0].1.clone(),
+                                    label_widths[0],
+                                    metadata_copy(
+                                        file[0][0].0.clone(),
+                                        path_tooltip.clone(),
+                                        copy_hint.clone(),
+                                        cx,
+                                    ),
+                                )
+                                .id(("metadata-path", panel_id))
+                                .tooltip(move |_, cx| {
+                                    cx.new(|_| super::ButtonTooltip {
+                                        text: path_tooltip.clone(),
+                                    })
+                                    .into()
+                                }),
+                            ),
+                            metadata_item(
+                                theme,
+                                file[0][1].0.clone(),
+                                file[0][1].1.clone(),
+                                label_widths[1],
+                                metadata_copy(
+                                    file[0][1].0.clone(),
+                                    file[0][1].1.clone(),
+                                    copy_hint.clone(),
+                                    cx,
+                                ),
+                            ),
+                        ),
+                    ))
+                    .child(metadata_group(
+                        theme,
+                        self.tr("gl-metadata"),
+                        metadata_rows(theme, metadata, label_widths, copy_hint.clone(), cx),
+                    ))
+                    .child(metadata_group(
+                        theme,
+                        self.tr("gl-decoder-hint"),
+                        column()
+                            .gap_2()
+                            .child(
+                                row().flex_wrap().children(
+                                    [
+                                        (
+                                            "metadata-decoder-auto",
+                                            self.tr("gl-auto"),
+                                            DecoderHint::Auto,
+                                        ),
+                                        (
+                                            "metadata-decoder-native",
+                                            self.tr("gl-native"),
+                                            DecoderHint::Native,
+                                        ),
+                                        (
+                                            "metadata-decoder-ffmpeg",
+                                            SharedString::from("FFmpeg"),
+                                            DecoderHint::Ffmpeg,
+                                        ),
+                                    ]
+                                    .into_iter()
+                                    .map(
+                                        |(key, label, decoder_hint)| {
+                                            disabled_control(
+                                                theme,
+                                                active_control(
+                                                    theme,
+                                                    button(
+                                                        (key, panel_id),
+                                                        label,
+                                                        cx,
+                                                        move |this, _, cx| {
+                                                            if this.metadata.editor_identity()
+                                                                == editor_identity
+                                                                && this.metadata.editable()
+                                                            {
+                                                                this.metadata_decoder_hint =
+                                                                    decoder_hint;
+                                                                cx.notify();
+                                                            }
+                                                        },
+                                                    ),
+                                                    editable
+                                                        && self.metadata_decoder_hint
+                                                            == decoder_hint,
+                                                ),
+                                                !editable,
+                                            )
+                                        },
+                                    ),
+                                ),
+                            )
+                            .child(
+                                caption(theme, self.tr("gl-decoder-save-note"))
+                                    .text_xs()
+                                    .text_color(rgb(theme.muted)),
+                            )
+                            .child(
+                                caption(theme, self.tr("gl-decoder-warning"))
+                                    .text_xs()
+                                    .text_color(rgb(theme.muted)),
+                            ),
+                    ))
+                    .child(metadata_group(
+                        theme,
+                        self.tr("gl-tags"),
+                        column()
+                            .gap_2()
+                            .child(metadata_row(
+                                self.panel_field(theme, Field::Title, self.tr("gl-title")),
+                                self.panel_field(theme, Field::Artist, self.tr("gl-artist")),
+                            ))
+                            .child(metadata_row(
+                                self.panel_field(theme, Field::Album, self.tr("gl-album")),
+                                metadata_item(
+                                    theme,
+                                    disc.0.clone(),
+                                    disc.1.clone(),
+                                    label_widths[1],
+                                    metadata_copy(disc.0, disc.1, copy_hint.clone(), cx),
+                                ),
+                            ))
+                            .child(metadata_rows(theme, tags, label_widths, copy_hint, cx).gap_2())
+                            .when(track.is_some(), |tags| {
+                                tags.child(match self.artwork_view.image(cx) {
+                                    Some(image) => artwork_preview(
+                                        theme,
+                                        self.tr("shell-panel-album-artwork"),
+                                        image.size_full(),
+                                        self.artwork_view.aspect_ratio(cx),
+                                    ),
+                                    None => artwork_preview(
+                                        theme,
+                                        self.tr("shell-panel-album-artwork"),
+                                        self.default_album
+                                            .clone()
+                                            .cached(gpui::StyleRefinement::default().size_full()),
+                                        Some(1.0),
+                                    ),
+                                })
+                            }),
+                    )),
+            );
+        panel_surface(("metadata-panel", panel_id))
+            .child(details)
+            .into_any_element()
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::{ManualAction, ManualIntents, MetadataLoadState};

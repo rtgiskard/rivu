@@ -362,3 +362,72 @@ impl GuiApp {
             .into_any_element()
     }
 }
+
+impl GuiApp {
+    pub(in crate::gui) fn queue_layout_save(&self) -> u64 {
+        self.layout_save.submit(&self.layouts)
+    }
+
+    pub(in crate::gui) fn sync_layout_save(&mut self, cx: &mut Context<Self>) {
+        let Some(completion) = self.layout_save.completion() else {
+            return;
+        };
+        if completion.revision <= self.layout_save_seen {
+            return;
+        }
+        self.layout_save_seen = completion.revision;
+        let result = completion.result.map_err(|error| {
+            self.i18n
+                .format("shell-save-layout-error", &[("error", error.into())])
+        });
+        match &result {
+            Ok(()) => {
+                if self
+                    .layout_save_error
+                    .as_ref()
+                    .is_some_and(|error| self.error.as_ref() == Some(error))
+                {
+                    self.error = None;
+                }
+                self.layout_save_error = None;
+            }
+            Err(error) => {
+                self.layout_save_error = Some(error.clone());
+                self.error = Some(error.clone());
+            }
+        }
+        if self
+            .layout_apply
+            .as_ref()
+            .is_some_and(|(revision, _)| *revision <= completion.revision)
+        {
+            let (_, apply) = self.layout_apply.take().expect("checked panel apply");
+            self.settings.update(cx, |settings, cx| match apply {
+                LayoutApply::Visualizer(session) => {
+                    settings.complete_visualizer_apply(session, result, cx)
+                }
+                LayoutApply::Artwork(session) => {
+                    settings.complete_artwork_apply(session, result, cx)
+                }
+            });
+        }
+        cx.notify();
+    }
+
+    pub(in crate::gui) fn persist_layout(&mut self, cx: &mut Context<Self>) {
+        self.interaction.clear_docking_preview();
+        self.layouts
+            .current_mut()
+            .initialize_audio_visualizers(AudioVisualizerOptions::from(
+                self.state.system.config.as_ref(),
+            ));
+        self.layouts.current_mut().initialize_album_artworks(
+            crate::config::AlbumArtworkOptions::from(self.state.system.config.as_ref()),
+        );
+        self.interaction
+            .retain_layout(self.layouts.current().root.as_ref());
+        self.queue_layout_save();
+        self.sync_analysis(cx);
+        cx.notify();
+    }
+}

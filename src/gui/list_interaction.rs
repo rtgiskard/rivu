@@ -1,4 +1,5 @@
 use super::*;
+use super::{library::LibraryDrag, panels::PlaylistDrag, queue::QueueDrag};
 use crate::response::ViewResponse;
 
 #[derive(Clone)]
@@ -700,6 +701,155 @@ impl GuiApp {
     }
 }
 
+impl GuiApp {
+    pub(super) fn can_transfer_content(
+        &self,
+        value: &dyn std::any::Any,
+        destination: super::DragDestination,
+    ) -> bool {
+        if let super::DragDestination::Playlist(id) = destination
+            && !self
+                .state
+                .library
+                .playlist_entry_revisions
+                .contains_key(&id)
+        {
+            return false;
+        }
+        if let Some(drag) = value.downcast_ref::<super::ContentDrag>() {
+            return self.can_drop_content(drag);
+        }
+        if let Some(drag) = value.downcast_ref::<LibraryDrag>() {
+            return self.can_resolve_library_drag(drag);
+        }
+        if let Some(drag) = value.downcast_ref::<QueueDrag>() {
+            return drag.can_transfer(self, destination);
+        }
+        if let Some(drag) = value.downcast_ref::<PlaylistDrag>() {
+            return drag.can_transfer(self, destination);
+        }
+        false
+    }
+
+    pub(super) fn transfer_queue_drag(
+        &mut self,
+        drag: &QueueDrag,
+        destination: super::DragDestination,
+        cx: &mut Context<Self>,
+    ) {
+        self.refresh(cx);
+        if !self.can_transfer_content(drag, destination) {
+            return;
+        }
+        let ids = drag.track_ids();
+        self.send_content_tracks(ids, destination, cx);
+    }
+
+    pub(super) fn transfer_playlist_drag(
+        &mut self,
+        drag: &PlaylistDrag,
+        destination: super::DragDestination,
+        cx: &mut Context<Self>,
+    ) {
+        self.refresh(cx);
+        if !self.can_transfer_content(drag, destination) {
+            return;
+        }
+        if drag.targets_source(destination) {
+            self.move_playlist_entries(drag, None, cx);
+        } else {
+            self.send_content_tracks(drag.track_ids(), destination, cx);
+        }
+    }
+
+    pub(super) fn append_playlist_to_queue(&mut self, playlist_id: i64, cx: &mut Context<Self>) {
+        self.refresh(cx);
+        if self.content_resolution {
+            self.error = Some(self.i18n.text("li-source-busy").to_owned());
+            cx.notify();
+            return;
+        }
+        if !self
+            .state
+            .library
+            .playlist_entry_revisions
+            .contains_key(&playlist_id)
+        {
+            return;
+        }
+        self.content_resolution = true;
+        let generation = self.content_generation;
+        let revision = self.playlist_revision(playlist_id);
+        let revisions = self.state.query_revisions(Some(playlist_id));
+        let handle = self.handle.clone();
+        cx.spawn(async move |this, cx| {
+            let result: anyhow::Result<Vec<i64>> = cx
+                .background_executor()
+                .spawn(async move {
+                    let mut after = None;
+                    let mut ids = Vec::new();
+                    loop {
+                        let query = crate::model::Query::PlaylistEntryBatch {
+                            query: None,
+                            playlist_id,
+                            after,
+                            limit: crate::model::MAX_QUERY_ROWS,
+                            expected: Some(revisions),
+                        };
+                        let response = handle.query(query.clone());
+                        anyhow::ensure!(
+                            query.stamp(response.revisions) == query.stamp(revisions),
+                            "playlist changed"
+                        );
+                        let crate::response::ViewResponse::PlaylistEntryBatch(batch) = response
+                            .result
+                            .map_err(|error| anyhow::anyhow!(error.to_string()))?
+                        else {
+                            anyhow::bail!("unexpected playlist response");
+                        };
+                        anyhow::ensure!(
+                            batch.rows.len() <= crate::model::MAX_QUERY_ROWS
+                                && (batch.next.is_none()
+                                    || (!batch.rows.is_empty() && batch.next != after)),
+                            "incomplete playlist response"
+                        );
+                        ids.extend(batch.rows.into_iter().map(|row| row.track_id));
+                        let Some(next) = batch.next else {
+                            return Ok(ids);
+                        };
+                        after = Some(next);
+                    }
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.content_resolution = false;
+                this.refresh(cx);
+                if this.content_generation != generation
+                    || !this.window_visible
+                    || this.state.system.shutting_down
+                {
+                    return;
+                }
+                match result {
+                    Ok(ids)
+                        if this
+                            .state
+                            .library
+                            .playlist_entry_revisions
+                            .get(&playlist_id)
+                            == Some(&revision) =>
+                    {
+                        this.send_content_tracks(ids, super::DragDestination::Queue, cx)
+                    }
+                    Ok(_) => this.error = Some(this.i18n.text("li-source-changed").to_owned()),
+                    Err(error) => this.error = Some(error.to_string()),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::{ContentDrag, TrackSource, resolve_album, valid_page};

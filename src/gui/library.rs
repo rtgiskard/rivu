@@ -1,14 +1,18 @@
 mod locate;
 pub(super) mod tree;
 
+use super::components::{disabled_control, quiet_icon_button};
 use super::{
-    GuiApp, ListFocus, browser::selection::LibraryRowRequest, icon_button, list_viewport, row,
+    GuiApp, ListFocus, active_control, browser::selection::LibraryRowRequest, button, caption,
+    column, icon_button, list_viewport, panel_header, panel_surface, panel_toolbar, row,
 };
 use crate::{
     config::{LibraryColumn, LibraryColumns},
     model::{Command, DirectoryRow, LibraryRow},
 };
-use gpui::{AnyElement, Context, Render, Window, div, prelude::*, px, uniform_list};
+use gpui::{
+    AnyElement, Context, Div, Render, SharedString, Window, div, prelude::*, px, rgb, uniform_list,
+};
 use std::{path::Path, sync::Arc};
 
 use tree::TreeItem;
@@ -751,7 +755,7 @@ impl GuiApp {
                                     },
                                     |view, (track_id, favorite)| {
                                         view.child(
-                                            super::panels::hover_actions(theme, "library-track-row", selected).child(this.track_favorite_toggle(
+                                            super::components::hover_actions(theme, "library-track-row", selected).child(this.track_favorite_toggle(
                                                 gpui::ElementId::named_usize("library-tree-favorite", index),
                                                 "library-track-row",
                                                 track_id,
@@ -865,5 +869,474 @@ impl GuiApp {
             ),
         );
         view.into_any_element()
+    }
+}
+
+impl GuiApp {
+    fn library_scan_status(&self, panel_id: u64, cx: &mut Context<Self>) -> Div {
+        let theme = crate::gui::theme::palette(cx);
+        use crate::model::ScanPhase;
+        let progress = self.state.system.scan_progress.as_ref();
+        let header_text = progress.map_or_else(
+            || self.i18n.text("gl-scanning").to_owned(),
+            |progress| {
+                let phase = match progress.phase {
+                    ScanPhase::Discovering => self.i18n.text("gl-scan-discovering"),
+                    ScanPhase::ReadingMetadata => self.i18n.text("gl-scan-metadata"),
+                    ScanPhase::Saving => self.i18n.text("gl-scan-saving"),
+                    ScanPhase::Completed => self.i18n.text("gl-scan-completed"),
+                    ScanPhase::Failed => self.i18n.text("gl-scan-failed"),
+                    ScanPhase::Cancelled => self.i18n.text("gl-scan-cancelled"),
+                };
+                match progress.total {
+                    Some(total) => self.i18n.format(
+                        "gl-scan-progress",
+                        &[
+                            ("phase", (phase).into()),
+                            ("processed", (progress.processed).into()),
+                            ("total", (total).into()),
+                            ("errors", (progress.errors).into()),
+                        ],
+                    ),
+                    None => self.i18n.format(
+                        "gl-scan-found",
+                        &[
+                            ("phase", (phase).into()),
+                            ("processed", (progress.processed).into()),
+                            ("errors", (progress.errors).into()),
+                        ],
+                    ),
+                }
+            },
+        );
+        let dismissible = !self.state.system.scanning
+            && progress.is_some_and(|progress| {
+                matches!(
+                    progress.phase,
+                    ScanPhase::Completed | ScanPhase::Failed | ScanPhase::Cancelled
+                )
+            });
+        let dismiss = div()
+            .size(gpui::rems(2.))
+            .flex_shrink_0()
+            .when(dismissible, |slot| {
+                slot.child(quiet_icon_button(
+                    theme,
+                    icon_button(
+                        ("dismiss-scan-result", panel_id),
+                        "",
+                        self.tr("gl-dismiss-scan"),
+                        cx,
+                        |this, _, cx| this.send(Command::DismissScanResult, cx),
+                    ),
+                ))
+            });
+        let mut bar = div()
+            .w_full()
+            .h(px(3.))
+            .flex_shrink_0()
+            .bg(rgb(theme.border));
+        if let Some(progress) = progress
+            && let Some(total) = progress.total.filter(|total| *total > 0)
+        {
+            let fraction = (progress.processed as f32 / total as f32).clamp(0., 1.);
+            bar = bar.child(div().h_full().w(gpui::relative(fraction)).bg(rgb(
+                if progress.phase == ScanPhase::Failed {
+                    theme.error
+                } else {
+                    theme.accent
+                },
+            )));
+        }
+        let path: SharedString = progress
+            .and_then(|progress| progress.path.as_ref())
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default()
+            .into();
+        let message: SharedString = self.state.system.scan_message.clone().into();
+        // Keep every scan phase in the same cells; only dismissal removes the surface.
+        column()
+            .gap_1()
+            .min_w_0()
+            .flex_shrink_0()
+            .child(
+                row()
+                    .h(gpui::rems(2.))
+                    .flex_shrink_0()
+                    .child(caption(theme, header_text).flex_1().min_w_0().truncate())
+                    .child(dismiss),
+            )
+            .child(bar)
+            .child(
+                caption(theme, path.clone())
+                    .id(("scan-path", panel_id))
+                    .h(gpui::rems(1.25))
+                    .flex_shrink_0()
+                    .min_w_0()
+                    .truncate()
+                    .tooltip(move |_, cx| {
+                        cx.new(|_| super::ButtonTooltip { text: path.clone() })
+                            .into()
+                    }),
+            )
+            .child(
+                caption(theme, message.clone())
+                    .id(("scan-message", panel_id))
+                    .h(gpui::rems(1.25))
+                    .flex_shrink_0()
+                    .min_w_0()
+                    .truncate()
+                    .tooltip(move |_, cx| {
+                        cx.new(|_| super::ButtonTooltip {
+                            text: message.clone(),
+                        })
+                        .into()
+                    }),
+            )
+    }
+
+    pub(super) fn library_panel(
+        &mut self,
+        panel_id: u64,
+        _tab_bar_visible: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = crate::gui::theme::palette(cx);
+        self.finish_library_locate_render(window, cx);
+        let total = self.browser.library.tree().root_total();
+        let range_pending = self.library_range_pending();
+        let selected_directories = self
+            .browser
+            .library
+            .selected_nodes()
+            .iter()
+            .filter(|node| matches!(node, super::library::LibraryNode::Directory(_)))
+            .count();
+        let selection_label = if range_pending {
+            self.i18n.text("gl-selecting").to_owned()
+        } else if selected_directories > 0 && self.browser.library.selected().is_empty() {
+            self.i18n.format(
+                "gl-folders-selected",
+                &[("count", (selected_directories).into())],
+            )
+        } else if selected_directories > 0 {
+            self.i18n.format(
+                "gl-mixed-selected",
+                &[
+                    ("tracks", (self.browser.library.selected().len()).into()),
+                    ("folders", (selected_directories).into()),
+                ],
+            )
+        } else if !self.browser.library.selected().is_empty() {
+            self.i18n.format(
+                "gl-tracks-selected",
+                &[("count", (self.browser.library.selected().len()).into())],
+            )
+        } else {
+            self.i18n
+                .format("gl-entry-count", &[("count", (total).into())])
+        };
+        let heading = panel_header(theme, self.tr("gl-library"), selection_label.clone())
+            .flex_1()
+            .min_w_0()
+            .id(("library-selection-count", panel_id))
+            .tooltip(move |_, cx| {
+                cx.new(|_| super::ButtonTooltip {
+                    text: selection_label.clone().into(),
+                })
+                .into()
+            });
+        let tools = panel_toolbar()
+            .min_w_0()
+            .flex_shrink(1.)
+            .child(self.library_search.clone())
+            .child(disabled_control(
+                theme,
+                icon_button(
+                    ("library-locate-playing", panel_id),
+                    "",
+                    self.tr("gl-locate-library"),
+                    cx,
+                    |this, window, cx| this.locate_playing_library(window, cx),
+                ),
+                self.state.current_track().is_none() || self.browser.library.locate.pending,
+            ))
+            .child(icon_button(
+                ("library-view", panel_id),
+                if self.browser.library.tree_active() {
+                    "󰉋"
+                } else {
+                    "󰉢"
+                },
+                if self.browser.library.tree_active() {
+                    self.tr("gl-flat-view")
+                } else {
+                    self.tr("gl-tree-view")
+                },
+                cx,
+                |this, _, cx| this.toggle_library_view(cx),
+            ))
+            .child(active_control(
+                theme,
+                icon_button(
+                    ("library-filter-favorites", panel_id),
+                    "󰓎",
+                    self.tr("gl-filter-favorites"),
+                    cx,
+                    |this, _, cx| {
+                        this.refresh_favorite_filter(cx);
+                    },
+                ),
+                self.browser.library.favorites_only(),
+            ))
+            .child(active_control(
+                theme,
+                icon_button(
+                    ("library-filter-missing", panel_id),
+                    "󰌶",
+                    self.tr("gl-filter-missing"),
+                    cx,
+                    |this, _, cx| {
+                        this.browser.library.toggle_missing();
+                        this.refresh_filter(cx);
+                    },
+                ),
+                self.browser.library.missing_only(),
+            ))
+            .child(active_control(
+                theme,
+                icon_button(
+                    ("library-force-scan", panel_id),
+                    "󰑐",
+                    if self.browser.library.force_scan() {
+                        self.tr("gl-force-on")
+                    } else {
+                        self.tr("gl-force-off")
+                    },
+                    cx,
+                    |this, _, cx| {
+                        this.browser.library.toggle_force_scan();
+                        cx.notify();
+                    },
+                ),
+                self.browser.library.force_scan(),
+            ))
+            .child(icon_button(
+                ("library-add-root", panel_id),
+                "󰐕",
+                self.tr("gl-add-root"),
+                cx,
+                |this, _, cx| this.choose_library_root(cx),
+            ));
+        let mut panel = panel_surface(("library-panel", panel_id))
+            .child(row().items_end().child(heading).child(tools));
+        if let Some((track_id, result)) = &self.browser.library.locate.notice
+            && self
+                .state
+                .current_track()
+                .is_some_and(|track| track.id == *track_id)
+        {
+            use crate::model::LibraryLocateResult;
+            let message = match result {
+                LibraryLocateResult::Filtered => Some("gl-locate-library-filtered"),
+                LibraryLocateResult::OutsideRoot => Some("gl-locate-library-outside"),
+                LibraryLocateResult::Unavailable => Some("gl-locate-library-unavailable"),
+                LibraryLocateResult::Located(_) => None,
+            };
+            if let Some(message) = message {
+                panel = panel.child(
+                    row()
+                        .flex_shrink_0()
+                        .flex_wrap()
+                        .child(caption(theme, self.tr(message)))
+                        .when(matches!(result, LibraryLocateResult::Filtered), |view| {
+                            view.child(button(
+                                ("library-clear-filters-locate", panel_id),
+                                self.tr("gl-locate-clear-filters"),
+                                cx,
+                                |this, window, cx| {
+                                    this.clear_filters_and_locate_library(window, cx)
+                                },
+                            ))
+                        }),
+                );
+            }
+        }
+        if self.state.system.scan_progress.is_some() || self.state.system.scanning {
+            panel = panel.child(self.library_scan_status(panel_id, cx));
+        }
+        self.scroll_views.register_list(
+            ("library-projection", panel_id),
+            &self.browser.library.tree().scroll,
+        );
+        // Track counts describe contents, not the configured root projection.
+        // Keep its viewport mounted so root changes can demand a fresh forest.
+        if let Some((0, total)) = self.browser.library.search_counts
+            && (total != 0 || self.browser.library.tree().row_count() == 0)
+        {
+            panel = panel.child(caption(
+                theme,
+                self.i18n
+                    .text(if total == 0 {
+                        "search-empty"
+                    } else {
+                        "search-no-matches"
+                    })
+                    .to_owned(),
+            ));
+        }
+        panel
+            .child(self.library_directory_list(panel_id, cx))
+            .into_any_element()
+    }
+}
+#[cfg(test)]
+mod library_root_tests {
+    use super::GuiApp;
+    use crate::{
+        config::Config,
+        core::{CoreHandle, GuiConfigChange, Runtime},
+        gui::{
+            layout::{Node, Panel, save_owner::LayoutSaveOwner},
+            library::tree::TreeItem,
+        },
+        i18n::Localizer,
+        model::{DirectoryRow, Query},
+    };
+    use gpui::{AppContext, Entity, IntoElement, VisualTestContext, point, px, size};
+    use std::{path::PathBuf, sync::Arc};
+
+    fn settle_config(handle: &CoreHandle) {
+        // Core dispatch is FIFO: this response follows config publication.
+        assert!(
+            handle
+                .query(Query::LibraryRootCounts { roots: Vec::new() })
+                .result
+                .is_ok()
+        );
+    }
+
+    fn draw_library(window: &mut VisualTestContext, app: &Entity<GuiApp>) {
+        // The first draw demands the forest; the second renders accepted roots
+        // after the independently completed zero-track count.
+        for _ in 0..2 {
+            app.update(&mut window.cx, |this, cx| this.refresh(cx));
+            window.draw(point(px(0.), px(0.)), size(px(900.), px(600.)), |_, _| {
+                app.clone().into_any_element()
+            });
+            window.run_until_parked();
+        }
+    }
+
+    fn assert_roots(window: &mut VisualTestContext, app: &Entity<GuiApp>, roots: &[PathBuf]) {
+        app.update(&mut window.cx, |this, _| {
+            let tree = this.browser.library.tree();
+            let rendered = (0..tree.row_count())
+                .map(|index| match tree.item(index) {
+                    Some(TreeItem::Entry(row)) if row.depth == 0 => match row.row {
+                        DirectoryRow::Directory { path } => path,
+                        DirectoryRow::Track(_) => panic!("forest contains a track"),
+                    },
+                    _ => panic!("configured root was not projected by viewport demand"),
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(rendered, roots);
+            assert_eq!(this.browser.library.search_counts, Some((0, 0)));
+            assert_eq!(this.state.library.track_total, 0);
+            assert!(!this.state.system.scanning);
+            assert!(this.state.system.scan_progress.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn empty_library_projects_first_added_appended_and_removed_roots(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        Config {
+            volume: 0.0,
+            ffmpeg_enabled: false,
+            mpris_enabled: false,
+            ..Config::default()
+        }
+        .save(&config_path)
+        .unwrap();
+        let runtime = Runtime::start(directory.path(), &config_path).unwrap();
+        settle_config(&runtime.handle);
+        let layouts = LayoutSaveOwner::new(directory.path().join("layouts.toml"));
+        // Finish constructor-time layout migration before installing GUI wakers.
+        let (mut initial_layouts, _) = layouts.handle().snapshot();
+        let config = runtime.handle.config_snapshot();
+        initial_layouts
+            .current_mut()
+            .initialize_audio_visualizers(config.as_ref().into());
+        initial_layouts
+            .current_mut()
+            .initialize_album_artworks(config.as_ref().into());
+        layouts.handle().submit(&initial_layouts);
+        layouts.flush().unwrap();
+        let artwork = Arc::new(crate::artwork::ArtworkManager::new(directory.path()));
+        let window = cx.add_empty_window();
+        let app = window.update(|window, cx| {
+            cx.new(|cx| {
+                GuiApp::new(
+                    runtime.handle.clone(),
+                    layouts.handle(),
+                    artwork,
+                    std::rc::Weak::new(),
+                    Arc::new(Localizer::new("en-US")),
+                    window,
+                    cx,
+                )
+            })
+        });
+        // Native worker threads cannot wake GPUI's deterministic scheduler.
+        // FIFO Core barriers and draw_library's refresh own test synchronization.
+        runtime.handle.set_wakeup(|| {});
+        layouts.handle().set_wakeup(|| {});
+        app.update(&mut window.cx, |this, _| {
+            this.window_visible = true;
+            this.layouts.current_mut().root = Some(Node::Tabs {
+                id: 1,
+                active: 2,
+                panels: vec![Panel {
+                    id: 2,
+                    kind: "library".into(),
+                    show_tab_bar: false,
+                    audio_visualizer: None,
+                    album_artwork: None,
+                }],
+            });
+            this.browser.library.search_counts = Some((0, 0));
+        });
+        draw_library(window, &app);
+        assert_roots(window, &app, &[]);
+
+        let first = directory.path().join("first");
+        let second = directory.path().join("second");
+        std::fs::create_dir(&first).unwrap();
+        std::fs::create_dir(&second).unwrap();
+        for (change, expected) in [
+            (
+                GuiConfigChange::AddLibraryRoot(first.clone()),
+                vec![first.clone()],
+            ),
+            (
+                GuiConfigChange::AddLibraryRoot(second.clone()),
+                vec![first.clone(), second.clone()],
+            ),
+            (
+                GuiConfigChange::RemoveLibraryRoot(first),
+                vec![second.clone()],
+            ),
+            (GuiConfigChange::RemoveLibraryRoot(second), Vec::new()),
+        ] {
+            runtime.handle.update_gui_config(change).unwrap();
+            settle_config(&runtime.handle);
+            draw_library(window, &app);
+            assert_roots(window, &app, &expected);
+        }
     }
 }

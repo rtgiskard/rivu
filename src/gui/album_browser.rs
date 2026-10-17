@@ -13,12 +13,11 @@ use crate::{
 use super::{
     artwork::{Artwork, ArtworkImages, ArtworkLoader, ArtworkView},
     caption, column,
+    components::compact_icon_button,
     components::{LIST_ROW_REMS, scrollable_list, track_list_row},
     format_time, icon_button,
     list_interaction::{ContentDrag, ContentMenuRequest, TrackSource},
-    paged, panel_surface,
-    panels::compact_icon_button,
-    row,
+    paged, panel_surface, row,
     search::{ListSearch, SearchEvent},
 };
 
@@ -1273,7 +1272,7 @@ impl Render for AlbumBrowser {
                                         .text_right(),
                                     )
                                     .child(
-                                        super::panels::hover_actions(
+                                        super::components::hover_actions(
                                             theme,
                                             "album-track-row",
                                             false,

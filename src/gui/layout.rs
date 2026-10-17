@@ -15,6 +15,7 @@ pub(super) mod interaction;
 pub(super) mod layout_geometry;
 pub(super) mod layout_manager;
 pub(super) mod save_owner;
+mod view;
 
 use std::{
     collections::{BTreeMap, HashSet},

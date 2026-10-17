@@ -430,7 +430,7 @@ impl Render for GuiApp {
                             .flex_shrink_0()
                             .gap_0()
                             .child(
-                                super::panels::compact_icon_button(
+                                super::components::compact_icon_button(
                                     theme,
                                     icon_button(
                                         "copy-error",
@@ -449,7 +449,7 @@ impl Render for GuiApp {
                                 }),
                             )
                             .child(
-                                super::panels::compact_icon_button(
+                                super::components::compact_icon_button(
                                     theme,
                                     icon_button(
                                         "dismiss-error",

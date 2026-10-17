@@ -1042,3 +1042,27 @@ fn track_row_text(
         .child(caption(theme, detail.clone()).truncate());
     row_tooltip(view, title, detail)
 }
+
+pub(super) fn compact_icon_button(
+    theme: &'static crate::theme::Palette,
+    control: gpui::Stateful<Div>,
+) -> gpui::Stateful<Div> {
+    quiet_icon_button(theme, control).w(gpui::rems(1.4))
+}
+
+// Out-of-flow actions leave the full text width available until the row is hovered.
+pub(super) fn hover_actions(
+    theme: &'static crate::theme::Palette,
+    group: &'static str,
+    selected: bool,
+) -> Div {
+    super::row()
+        .absolute()
+        .right_0()
+        .top_0()
+        .h_full()
+        .gap_0()
+        .bg(super::components::row_background(theme, selected, true))
+        .invisible()
+        .group_hover(group, |style| style.visible())
+}
