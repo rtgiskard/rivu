@@ -1488,14 +1488,6 @@ impl LayoutSet {
         Ok(())
     }
 
-    pub fn create_from_template(&mut self, template: LayoutTemplate, name: &str) -> Result<()> {
-        let name = self.unused_name(name)?.to_owned();
-        let layout = Arc::new(template.layout());
-        Arc::make_mut(&mut self.layouts).insert(name.clone(), layout);
-        self.active = name.into();
-        Ok(())
-    }
-
     pub fn duplicate(&mut self, name: &str) -> Result<()> {
         let name = self.unused_name(name)?.to_owned();
         let copy = Arc::clone(
@@ -2389,35 +2381,6 @@ mod tests {
             vec![600.0, 97.5, 97.5, 200.0]
         );
         layout.validate().unwrap();
-    }
-
-    #[test]
-    fn template_creation_is_independent_and_name_failures_are_atomic() {
-        for template in LayoutTemplate::ALL {
-            let mut set = LayoutSet::default();
-            set.select(template.name()).unwrap();
-            let original = set.current().clone();
-            set.current_mut().add("custom", None);
-            let modified = set.current().clone();
-            let before = set.clone();
-            for invalid in ["", "  ", template.name()] {
-                assert!(set.create_from_template(template, invalid).is_err());
-                assert_eq!(set, before);
-            }
-            set.create_from_template(template, "  Fresh  ").unwrap();
-            assert_eq!(set.active_name(), "Fresh");
-            assert_eq!(set.current(), &original);
-            set.current().validate().unwrap();
-            for panel in set.current().panels() {
-                assert!(
-                    super::super::PANELS
-                        .iter()
-                        .any(|spec| spec.kind == panel.kind)
-                );
-            }
-            set.select(template.name()).unwrap();
-            assert_eq!(set.current(), &modified);
-        }
     }
 
     #[test]

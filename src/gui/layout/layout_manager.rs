@@ -1,5 +1,4 @@
 use super::super::*;
-use super::LayoutTemplate;
 use crate::gui::components::{
     button, caption, column, copyable_message, form_field, icon_button, menu_item, row,
 };
@@ -7,7 +6,6 @@ use crate::gui::components::{
 #[derive(Clone)]
 pub(in crate::gui) enum Action {
     Duplicate,
-    Create(LayoutTemplate),
     Rename,
     Delete(String),
 }
@@ -101,14 +99,6 @@ impl GuiApp {
                 let result = self.layouts.duplicate(&name);
                 (result, true)
             }
-            Action::Create(template) => {
-                let result = self.layouts.create_from_template(template, &name);
-                if result.is_ok() {
-                    let cancellation = self.interaction.cancel();
-                    self.apply_interaction_cancellation(cancellation, cx);
-                }
-                (result, true)
-            }
             Action::Rename => (self.layouts.rename(&name), false),
             Action::Delete(name) => (self.layouts.remove(&name), false),
         };
@@ -173,15 +163,6 @@ impl GuiApp {
                 Action::Duplicate => (
                     self.tr("shell-layout-duplicate-title"),
                     self.tr("shell-duplicate"),
-                ),
-                Action::Create(template) => (
-                    self.i18n
-                        .format(
-                            "shell-layout-create-title",
-                            &[("template", template.name().into())],
-                        )
-                        .into(),
-                    self.tr("shell-create"),
                 ),
                 Action::Rename => (
                     self.tr("shell-layout-rename-title"),
@@ -291,17 +272,6 @@ impl GuiApp {
                 }
                 choices = choices.child(choice);
             }
-            let mut templates = row().flex_wrap();
-            for (index, template) in LayoutTemplate::ALL.into_iter().enumerate() {
-                templates = templates.child(button(
-                    ("layout-template", index),
-                    template.name(),
-                    cx,
-                    move |this, window, cx| {
-                        this.begin_layout_action(Action::Create(template), window, cx)
-                    },
-                ));
-            }
             content = content
                 .child(
                     div()
@@ -329,9 +299,6 @@ impl GuiApp {
                             |this, window, cx| this.begin_layout_action(Action::Rename, window, cx),
                         )),
                 );
-            content = content
-                .child(caption(theme, self.tr("shell-layout-new-from-template")))
-                .child(templates);
         }
         if let Some(error) = &self.error {
             content = content.child(

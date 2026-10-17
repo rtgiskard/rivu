@@ -451,13 +451,10 @@ plots share tabs rather than all running visibly at once. The initial selection
 is Library and Spectrum in Default, Albums in Album, and Audio Visualizer in
 Visual. Built-in layouts start locked and use the same global configuration.
 
-Existing layout collections are loaded unchanged. To add one of these layouts,
-open `Menu > Layouts`, choose a template under `New from built-in template`,
-enter a unique name, and choose Create or press Enter. The new layout becomes
-active and is saved as an ordinary editable layout. Renaming or deleting a
-built-in layout does not cause it to be restored on restart; new templates do
-not overwrite existing layouts or change initialized panel options. For initial
-proportions, see link:24_layout.adoc#_scope_and_ownership[Layout design].
+Existing layout collections are loaded unchanged. To make another layout,
+duplicate an existing layout and edit the copy. Renaming or deleting an initial
+layout does not cause it to be restored on restart. For initial proportions, see
+link:24_layout.adoc#_scope_and_ownership[Layout design].
 
 The layout list places `Default` first when present, followed by other names in
 name order. This does not change the active layout.

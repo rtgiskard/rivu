@@ -331,8 +331,8 @@ Shuffle, Repeat, and Quit. Repeat follows the cycle described under
 
 The built-in *Default* layout includes Album artwork for the current playback
 track. Existing saved layouts are not overwritten: add *Album artwork* from the
-panel catalog, or create a layout from a built-in template. Unlike Track details,
-browsing or selecting a different library track does not change this panel.
+panel catalog. Unlike Track details, browsing or selecting a different library
+track does not change this panel.
 
 Use the panel's right-click Style or Rotation actions for immediate changes, or
 Artwork settings to edit its options with Apply and Discard. These choices are
