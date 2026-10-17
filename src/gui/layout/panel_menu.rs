@@ -4,7 +4,7 @@ use super::super::*;
 use crate::config::AudioVisualizerStyle;
 use crate::gui::components::{button, caption, column, context_menu_container, menu_item, row};
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(in crate::gui) enum PanelMenuPage {
     Main,
     AudioVisualizerStyle,

@@ -7,9 +7,31 @@ use crate::gui::components::{
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum KeyboardSurface {
-    Menu(u8, u8),
-    Dialog(u8),
+    Menu(MenuSurface),
+    Dialog(DialogSurface),
     Settings,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum MenuSurface {
+    Playlist,
+    Content(list_interaction::ContentMenuPage),
+    Panel(PanelMenuPage),
+    App,
+    PanelCatalog,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum DialogSurface {
+    KeyboardHelp,
+    MetadataConfirmation,
+    About,
+    DuplicateReview,
+    PlaylistEditor,
+    PlaylistDelete,
+    QueueReplacement,
+    LayoutManager,
+    LayoutAction,
 }
 
 impl GuiApp {
@@ -34,51 +56,53 @@ impl GuiApp {
 
     fn current_keyboard_surface(&self) -> Option<KeyboardSurface> {
         if self.keyboard_help.is_some() {
-            return Some(KeyboardSurface::Dialog(7));
+            return Some(KeyboardSurface::Dialog(DialogSurface::KeyboardHelp));
         }
         if self.manual_confirmation_open() {
-            return Some(KeyboardSurface::Dialog(0));
+            return Some(KeyboardSurface::Dialog(DialogSurface::MetadataConfirmation));
         }
         if self.about_open {
-            return Some(KeyboardSurface::Dialog(1));
+            return Some(KeyboardSurface::Dialog(DialogSurface::About));
         }
         if self.duplicate_review.open {
-            return Some(KeyboardSurface::Dialog(2));
+            return Some(KeyboardSurface::Dialog(DialogSurface::DuplicateReview));
         }
         if self.settings_open {
             return Some(KeyboardSurface::Settings);
         }
         if self.playlist_editor.is_some() {
-            return Some(KeyboardSurface::Dialog(3));
+            return Some(KeyboardSurface::Dialog(DialogSurface::PlaylistEditor));
         }
         if let Some(action) = &self.playlist_action {
             return Some(if matches!(action, playlists::PlaylistAction::Menu(..)) {
-                KeyboardSurface::Menu(0, 0)
+                KeyboardSurface::Menu(MenuSurface::Playlist)
             } else {
-                KeyboardSurface::Dialog(4)
+                KeyboardSurface::Dialog(DialogSurface::PlaylistDelete)
             });
         }
         if self.queue_replace.is_some() {
-            return Some(KeyboardSurface::Dialog(8));
+            return Some(KeyboardSurface::Dialog(DialogSurface::QueueReplacement));
         }
         if self.layouts_open {
             return Some(KeyboardSurface::Dialog(if self.layout_action.is_some() {
-                6
+                DialogSurface::LayoutAction
             } else {
-                5
+                DialogSurface::LayoutManager
             }));
         }
         if let Some(menu) = &self.content_menu {
-            return Some(KeyboardSurface::Menu(1, menu.keyboard_page()));
+            return Some(KeyboardSurface::Menu(MenuSurface::Content(
+                menu.keyboard_page(),
+            )));
         }
         if let Some(menu) = &self.panel_menu {
-            return Some(KeyboardSurface::Menu(3, menu.page as u8));
+            return Some(KeyboardSurface::Menu(MenuSurface::Panel(menu.page)));
         }
         if self.app_menu_open {
-            return Some(KeyboardSurface::Menu(4, 0));
+            return Some(KeyboardSurface::Menu(MenuSurface::App));
         }
         if self.catalog_open {
-            return Some(KeyboardSurface::Menu(5, 0));
+            return Some(KeyboardSurface::Menu(MenuSurface::PanelCatalog));
         }
         None
     }

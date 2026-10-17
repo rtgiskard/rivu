@@ -85,11 +85,21 @@ pub(super) struct ContentMenu {
     pub(super) playlists: bool,
 }
 
+// Preserve every page-state transition used to invalidate deferred menu focus.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) struct ContentMenuPage {
+    loading: bool,
+    playlists: bool,
+    confirming_remove: bool,
+}
+
 impl ContentMenu {
-    pub(super) fn keyboard_page(&self) -> u8 {
-        u8::from(self.loading)
-            | (u8::from(self.playlists) << 1)
-            | (u8::from(self.confirm_remove.is_some()) << 2)
+    pub(super) fn keyboard_page(&self) -> ContentMenuPage {
+        ContentMenuPage {
+            loading: self.loading,
+            playlists: self.playlists,
+            confirming_remove: self.confirm_remove.is_some(),
+        }
     }
 }
 
