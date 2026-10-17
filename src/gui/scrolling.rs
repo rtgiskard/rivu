@@ -1,3 +1,4 @@
+use super::layout::Layout;
 use gpui::{Pixels, Point, ScrollHandle, UniformListScrollHandle, px};
 use std::collections::HashMap;
 
@@ -44,8 +45,8 @@ struct Region {
     visible: bool,
 }
 
-/// Only rendered viewports participate. A click selects the keyboard target;
-/// with no clicked target, the viewport under the pointer receives page keys.
+/// Viewport state lives with its panel in the current layout, even behind a tab.
+/// Only rendered viewports participate in pointer and keyboard input.
 #[derive(Default)]
 pub(super) struct ScrollViews {
     regions: HashMap<Target, Region>,
@@ -53,6 +54,12 @@ pub(super) struct ScrollViews {
 }
 
 impl ScrollViews {
+    pub(super) fn retain_layout(&mut self, layout: &Layout) {
+        self.regions
+            .retain(|(_, panel_id), _| layout.contains_panel(*panel_id));
+        self.active = None;
+    }
+
     pub(super) fn begin_frame(&mut self) {
         for region in self.regions.values_mut() {
             region.visible = false;
@@ -60,11 +67,12 @@ impl ScrollViews {
     }
 
     pub(super) fn finish_frame(&mut self) {
-        self.regions.retain(|_, region| region.visible);
-        if self
-            .active
-            .is_some_and(|target| !self.regions.contains_key(&target))
-        {
+        if self.active.is_some_and(|target| {
+            !self
+                .regions
+                .get(&target)
+                .is_some_and(|region| region.visible)
+        }) {
             self.active = None;
         }
     }
@@ -116,12 +124,7 @@ impl ScrollViews {
 
     fn under_pointer(&self, position: Point<Pixels>) -> Option<Target> {
         self.regions.iter().find_map(|(&target, region)| {
-            region
-                .handle
-                .base()
-                .bounds()
-                .contains(&position)
-                .then_some(target)
+            (region.visible && region.handle.base().bounds().contains(&position)).then_some(target)
         })
     }
 
@@ -135,7 +138,10 @@ impl ScrollViews {
 
     pub(super) fn page(&self, down: bool, position: Point<Pixels>) -> bool {
         let target = self.active.or_else(|| self.under_pointer(position));
-        let Some(region) = target.and_then(|target| self.regions.get(&target)) else {
+        let Some(region) = target
+            .and_then(|target| self.regions.get(&target))
+            .filter(|region| region.visible)
+        else {
             return false;
         };
         region.handle.page(down);
@@ -146,6 +152,110 @@ impl ScrollViews {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn layout() -> Layout {
+        Layout {
+            root: None,
+            next_id: 1,
+            locked: false,
+        }
+    }
+
+    #[test]
+    fn hidden_viewports_keep_independent_offsets_without_receiving_input() {
+        let mut layout = layout();
+        let queue = layout.add("queue", None);
+        let history = layout.add("history", None);
+        let metadata = layout.add("metadata", None);
+        let mut views = ScrollViews::default();
+        let queue_scroll = views.list(("queue", queue));
+        queue_scroll
+            .0
+            .borrow()
+            .base_handle
+            .set_offset(gpui::point(px(0.), px(-420.)));
+        views
+            .list(("history", history))
+            .0
+            .borrow()
+            .base_handle
+            .set_offset(gpui::point(px(0.), px(-840.)));
+        views
+            .content(("metadata", metadata))
+            .set_offset(gpui::point(px(0.), px(-160.)));
+        views.active = Some(("queue", queue));
+        views.begin_frame();
+        views.finish_frame();
+        assert!(views.active.is_none());
+        assert!(!views.page(true, gpui::point(px(0.), px(0.))));
+        assert!(views.under_pointer(gpui::point(px(0.), px(0.))).is_none());
+        views.scroll_list_to("queue", 80);
+        assert!(queue_scroll.0.borrow().deferred_scroll_to_item.is_none());
+        assert_eq!(
+            views
+                .list(("queue", queue))
+                .0
+                .borrow()
+                .base_handle
+                .offset()
+                .y,
+            px(-420.)
+        );
+        assert_eq!(
+            views
+                .list(("history", history))
+                .0
+                .borrow()
+                .base_handle
+                .offset()
+                .y,
+            px(-840.)
+        );
+        assert_eq!(views.content(("metadata", metadata)).offset().y, px(-160.));
+    }
+
+    #[test]
+    fn removing_a_panel_releases_scroll_state_but_not_hidden_siblings() {
+        let mut layout = layout();
+        let removed = layout.add("queue", None);
+        let retained = layout.add("queue", None);
+        let mut views = ScrollViews::default();
+        let handle = views.list(("queue", removed));
+        let retired = std::rc::Rc::downgrade(&handle.0);
+        drop(handle);
+        views
+            .list(("queue", retained))
+            .0
+            .borrow()
+            .base_handle
+            .set_offset(gpui::point(px(0.), px(-420.)));
+        views.begin_frame();
+        views.finish_frame();
+        assert!(layout.remove(removed));
+        views.retain_layout(&layout);
+        assert!(retired.upgrade().is_none());
+        assert_eq!(
+            views
+                .list(("queue", retained))
+                .0
+                .borrow()
+                .base_handle
+                .offset()
+                .y,
+            px(-420.)
+        );
+        let added = layout.add("queue", None);
+        assert_eq!(
+            views
+                .list(("queue", added))
+                .0
+                .borrow()
+                .base_handle
+                .offset()
+                .y,
+            px(0.)
+        );
+    }
 
     #[test]
     fn page_steps_by_viewport_and_clamps_both_edges() {

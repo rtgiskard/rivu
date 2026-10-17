@@ -76,6 +76,12 @@ link:22_cache.adoc#_query_projection_retention[Query projection retention].
 Keyboard list actions target only a visible active panel; see
 link:02_library.adoc#_paged_views[Paged views].
 
+Scroll offsets belong to panel instances in the current tree, not to their
+visibility in a frame. Inactive tabs retain their viewport state but cannot
+receive pointer or page-key input. Structural edits release state for removed
+panels; switching or duplicating a named layout starts new view-local scroll
+state. No per-layout scroll snapshots are kept.
+
 == Normalized trees and resource boundaries
 
 Leaves are nonempty tab groups with a valid active panel. Splits have two or more

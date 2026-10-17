@@ -1336,6 +1336,12 @@ impl Layout {
         true
     }
 
+    pub fn contains_panel(&self, panel_id: u64) -> bool {
+        self.root
+            .as_ref()
+            .is_some_and(|root| root.panel_group(panel_id).is_some())
+    }
+
     pub fn active_panels(&self) -> Vec<&Panel> {
         let mut panels = Vec::new();
         if let Some(root) = &self.root {

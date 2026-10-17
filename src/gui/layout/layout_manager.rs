@@ -24,6 +24,7 @@ impl GuiApp {
     fn finish_layout_switch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // Layouts only replace the panel tree. Keep the window/editor and its
         // in-flight metadata save alive even when Details is no longer visible.
+        self.scroll_views = scrolling::ScrollViews::default();
         self.layouts
             .current_mut()
             .initialize_audio_visualizers(AudioVisualizerOptions::from(

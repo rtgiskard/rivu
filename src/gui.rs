@@ -1442,6 +1442,7 @@ impl GuiApp {
     }
 
     fn layout_changed(&mut self, cx: &mut Context<Self>) {
+        self.scroll_views.retain_layout(self.layouts.current());
         let cancellation = self
             .interaction
             .layout_changed(self.layouts.current().root.as_ref());
