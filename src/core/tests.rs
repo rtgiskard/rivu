@@ -145,10 +145,10 @@ fn no_op_apply_and_change_back_exit_do_not_replace_saved_config() {
         config: baseline.clone(),
     })
     .unwrap();
-    assert!(
-        !audio.is_empty(),
-        "No-op Apply still reapplies audio settings"
-    );
+    // Configure enqueues synchronously, but the recorder forwards on another thread.
+    audio
+        .recv_timeout(Duration::from_secs(2))
+        .expect("No-op Apply still reapplies audio settings");
     assert_eq!(std::fs::read(&path).unwrap(), original);
     assert_eq!(std::fs::metadata(&path).unwrap().ino(), inode);
     core.command(Command::Volume { value: 0.25 }).unwrap();
