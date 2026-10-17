@@ -2024,6 +2024,7 @@ impl GuiApp {
                 div()
                     .w_full()
                     .h(px(4.))
+                    .flex_shrink_0()
                     .rounded_full()
                     .bg(rgb(theme.border))
                     .child(
@@ -2039,16 +2040,18 @@ impl GuiApp {
                     .absolute()
                     .inset_0()
                     .mx(px(5.))
+                    .flex()
+                    .items_center()
                     .opacity(0.)
                     .group_hover("playback-slider", |style| style.opacity(1.))
                     .when(is_dragging, |view| view.opacity(1.))
                     .child(
                         div()
-                            .absolute()
-                            .top(px(5.))
+                            .relative()
                             .left(relative(value))
                             .ml(px(-5.))
                             .size(px(10.))
+                            .flex_shrink_0()
                             .rounded_full()
                             .bg(rgb(theme.text)),
                     ),

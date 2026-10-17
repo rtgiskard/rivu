@@ -4,8 +4,8 @@ use super::{
         LIST_ROW_REMS, StatusKind, active_control, caption, column, compact_icon_button,
         danger_control, disabled_control, form_field, hover_actions, icon_button, list_row,
         list_row_height, list_viewport, panel_header, panel_surface, panel_toolbar,
-        primary_control, quiet_icon_button, row, row_text, scrollable_list, sortable_header,
-        status_message, track_list_row,
+        quiet_icon_button, row, row_text, scrollable_list, sortable_header, status_message,
+        track_list_row,
     },
     fonts::tabular_numbers,
     format_time,
@@ -231,7 +231,7 @@ impl GuiApp {
                 .text_lg(),
             )
             .child(
-                primary_control(
+                quiet_icon_button(
                     theme,
                     icon_button(
                         ("toggle", panel_id),
@@ -249,6 +249,8 @@ impl GuiApp {
                         |this, _, cx| this.send(Command::Toggle, cx),
                     ),
                 )
+                .bg(rgb(theme.control))
+                .text_color(rgb(theme.text))
                 .size(gpui::rems(2.5))
                 .rounded_full()
                 .text_xl(),
@@ -299,9 +301,16 @@ impl GuiApp {
                 self.state.playback.repeat != RepeatMode::Off,
             ));
         let volume_control = row()
-            .w(gpui::rems(8.6))
+            .gap_1()
+            .w(gpui::rems(9.))
             .max_w(gpui::relative(1.))
             .flex_shrink_0()
+            .child(
+                caption(theme, format!("{:.0}%", self.state.playback.volume * 100.))
+                    .font_features(tabular_numbers())
+                    .whitespace_nowrap()
+                    .flex_shrink_0(),
+            )
             .child(
                 div()
                     .id(("volume-label", panel_id))
@@ -318,14 +327,7 @@ impl GuiApp {
                         }
                     }),
             )
-            .child(div().flex_1().min_w_0().child(volume))
-            .child(
-                caption(theme, format!("{:.0}%", self.state.playback.volume * 100.))
-                    .font_features(tabular_numbers())
-                    .w(gpui::rems(3.5))
-                    .whitespace_nowrap()
-                    .flex_shrink_0(),
-            );
+            .child(div().flex_1().min_w_0().child(volume));
         let scroll = self.scroll_views.content(("transport", panel_id));
         column()
             .id(("transport-panel", panel_id))
@@ -349,61 +351,74 @@ impl GuiApp {
                             .truncate()
                             .child(title),
                     )
-                    .child(disabled_control(
-                        theme,
-                        quiet_icon_button(
-                            theme,
-                            icon_button(
-                                ("playback-locate", panel_id),
-                                "",
-                                self.tr("gl-locate-playing-entry"),
-                                cx,
-                                |this, window, cx| {
-                                    if this.state.queue.current_id.is_some()
-                                        && this.reveal_queue_panel(window, cx)
-                                    {
-                                        this.locate_playing_queue(window, cx);
-                                    }
-                                },
-                            ),
-                        ),
-                        self.state.queue.current_id.is_none(),
-                    ))
-                    .child(caption(theme, status).flex_shrink_0()),
+                    .child(
+                        row()
+                            .gap_0()
+                            .flex_shrink_0()
+                            .child(disabled_control(
+                                theme,
+                                quiet_icon_button(
+                                    theme,
+                                    icon_button(
+                                        ("playback-locate", panel_id),
+                                        "",
+                                        self.tr("gl-locate-playing-entry"),
+                                        cx,
+                                        |this, window, cx| {
+                                            if this.state.queue.current_id.is_some()
+                                                && this.reveal_queue_panel(window, cx)
+                                            {
+                                                this.locate_playing_queue(window, cx);
+                                            }
+                                        },
+                                    ),
+                                )
+                                .text_color(rgb(theme.muted).alpha(0.4))
+                                .when(
+                                    self.state.queue.current_id.is_some(),
+                                    |control| {
+                                        control
+                                            .group_hover("control", |style| {
+                                                style.text_color(rgb(theme.text))
+                                            })
+                                            .focus(|style| style.text_color(rgb(theme.text)))
+                                    },
+                                ),
+                                self.state.queue.current_id.is_none(),
+                            ))
+                            .child(caption(theme, status)),
+                    ),
             )
             .child(
                 row()
                     .w_full()
                     .min_w_0()
                     .flex_shrink_0()
-                    .when(has_artist, |view| {
-                        view.child(
-                            caption(theme, artist)
-                                .text_sm()
-                                .text_color(rgb(theme.text))
-                                .min_w_0()
-                                .truncate(),
-                        )
-                    })
-                    .when(has_artist && has_album, |view| {
-                        view.child(caption(theme, "·").flex_shrink_0())
-                    })
-                    .when(has_album, |view| {
-                        view.child(
-                            caption(theme, album)
-                                .text_color(rgb(theme.secondary))
-                                .min_w_0()
-                                .truncate(),
-                        )
-                    }),
-            )
-            .child(
-                row()
-                    .w_full()
-                    .min_w_0()
-                    .flex_shrink_0()
-                    .flex_wrap()
-                    .child(div().flex_1().min_w(gpui::rems(4.)).child(seek))
+                    .child(
+                        row()
+                            .flex_1()
+                            .min_w_0()
+                            .when(has_artist, |view| {
+                                view.child(
+                                    caption(theme, artist)
+                                        .text_sm()
+                                        .text_color(rgb(theme.text))
+                                        .min_w_0()
+                                        .truncate(),
+                                )
+                            })
+                            .when(has_artist && has_album, |view| {
+                                view.child(caption(theme, "·").flex_shrink_0())
+                            })
+                            .when(has_album, |view| {
+                                view.child(
+                                    caption(theme, album)
+                                        .text_color(rgb(theme.secondary))
+                                        .min_w_0()
+                                        .truncate(),
+                                )
+                            }),
+                    )
                     .child(
                         caption(
                             theme,
@@ -418,6 +433,7 @@ impl GuiApp {
                         .flex_shrink_0(),
                     ),
             )
+            .child(seek)
             .child(
                 row()
                     .w_full()

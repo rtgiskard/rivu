@@ -395,20 +395,6 @@ fn control_surface(
         .group_hover("control", |style| style.bg(rgb(theme.highlight)))
 }
 
-/// The transport's primary action keeps its accent fill on hover and focus.
-pub(crate) fn primary_control(
-    theme: &'static crate::theme::Palette,
-    control: Stateful<Div>,
-) -> Stateful<Div> {
-    control
-        .border_2()
-        .border_color(rgb(theme.accent))
-        .bg(rgb(theme.accent))
-        .text_color(rgb(theme.on_accent))
-        .group_hover("control", |style| style.bg(rgb(theme.accent_hover)))
-        .focus(|style| style.border_color(rgb(theme.text)))
-}
-
 /// Reusable visual button primitive. It has no application-specific behavior.
 pub(crate) fn button_style(
     theme: &'static crate::theme::Palette,
