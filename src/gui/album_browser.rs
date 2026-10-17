@@ -153,6 +153,7 @@ pub(super) struct AlbumBrowser {
     loading_text: super::loading::LoadingText<()>,
     error: Option<String>,
     selected: Option<AlbumKey>,
+    dismissed_actions: Option<AlbumKey>,
     albums: paged::PagedRows<AlbumSummary>,
     tracks: paged::PagedRows<LibraryRow>,
     covers: BTreeMap<usize, AlbumCover>,
@@ -246,6 +247,7 @@ impl AlbumBrowser {
             loading_text: super::loading::LoadingText::default(),
             error: None,
             selected: None,
+            dismissed_actions: None,
             albums: paged::PagedRows::default(),
             tracks: paged::PagedRows::default(),
             covers: BTreeMap::new(),
@@ -324,6 +326,9 @@ impl AlbumBrowser {
             self.cancel(cx);
         }
         self.visible = visible;
+        if !visible {
+            self.dismissed_actions = None;
+        }
         if visible && (visibility_changed || data_changed || demand_changed) {
             if visibility_changed && self.selected.is_none() {
                 self.restore_grid_anchor();
@@ -663,6 +668,7 @@ impl AlbumBrowser {
     }
 
     fn reset_grid(&mut self) {
+        self.dismissed_actions = None;
         self.albums.clear();
         self.reset_grid_scroll();
     }
@@ -843,6 +849,7 @@ impl AlbumBrowser {
         let enqueue_key = key.clone();
         let menu_key = key.clone();
         let drag_key = key.clone();
+        let hover_key = key.clone();
         let image = self
             .covers
             .get(&index)
@@ -863,6 +870,9 @@ impl AlbumBrowser {
             .right(rems(0.5))
             .bottom(rems(0.5))
             .gap_0()
+            .when(self.dismissed_actions.as_ref() == Some(&key), |view| {
+                view.invisible()
+            })
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(|_, _, cx| cx.stop_propagation())
             .child(card_icon_button(
@@ -870,7 +880,10 @@ impl AlbumBrowser {
                 "",
                 self.tr("gl-play-album"),
                 cx,
-                move |this, _, cx| {
+                move |this, window, cx| {
+                    this.dismissed_actions = Some(play_key.clone());
+                    cx.notify();
+                    window.blur(cx);
                     this.send(
                         Command::PlayAlbum {
                             key: play_key.clone(),
@@ -884,7 +897,10 @@ impl AlbumBrowser {
                 "󰐕",
                 self.tr("gl-enqueue-album"),
                 cx,
-                move |this, _, cx| {
+                move |this, window, cx| {
+                    this.dismissed_actions = Some(enqueue_key.clone());
+                    cx.notify();
+                    window.blur(cx);
                     this.send(
                         Command::EnqueueAlbum {
                             key: enqueue_key.clone(),
@@ -903,6 +919,12 @@ impl AlbumBrowser {
             .p_2()
             .gap_0()
             .cursor_pointer()
+            .on_hover(cx.listener(move |this, hovered, _, cx| {
+                if !hovered && this.dismissed_actions.as_ref() == Some(&hover_key) {
+                    this.dismissed_actions = None;
+                    cx.notify();
+                }
+            }))
             .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
                 if event.click_count() == 2 {
                     this.open(key.clone(), cx);
