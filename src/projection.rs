@@ -249,22 +249,13 @@ impl GuiLibrarySnapshot {
             playlist: self.playlist_revision,
             duplicate_groups: self.duplicate_groups_revision,
             duplicate_members: self.duplicate_members_revision,
-            playlist_metadata: playlist_id
-                .filter(|id| self.playlist_entry_revisions.contains_key(id))
-                .map(|id| crate::response::PlaylistEntryRevision {
-                    playlist_id: id,
-                    revision: self.metadata_revisions.playlist_revision(id, self.revision),
-                }),
-            playlist_entries: playlist_id.and_then(|id| {
-                self.playlist_entry_revisions.get(&id).map(|revision| {
-                    crate::response::PlaylistEntryRevision {
-                        playlist_id: id,
-                        revision: *revision,
-                    }
-                })
-            }),
             ..Default::default()
         }
+        .with_playlist_scope(
+            playlist_id,
+            &self.playlist_entry_revisions,
+            &self.metadata_revisions,
+        )
     }
 }
 
@@ -282,24 +273,11 @@ impl GuiSnapshot {
         &self,
         query: &crate::model::Query,
     ) -> crate::response::QueryRevisions {
-        use crate::model::Query;
-        let playlist_id = match query {
-            Query::PlaylistEntries { playlist_id, .. }
-            | Query::PlaylistEntryBatch { playlist_id, .. }
-            | Query::PlaylistEntryLocations { playlist_id, .. } => Some(*playlist_id),
-            _ => None,
-        };
-        let mut revisions = self.query_revisions(playlist_id);
-        if let Query::Track { track_id } = query {
-            revisions.track = Some(crate::response::TrackRevision {
-                track_id: *track_id,
-                revision: self
-                    .library
-                    .metadata_revisions
-                    .track_revision(*track_id, self.library.revision),
-            });
-        }
-        revisions
+        self.query_revisions(None).for_query(
+            query,
+            &self.library.playlist_entry_revisions,
+            &self.library.metadata_revisions,
+        )
     }
 }
 
@@ -315,26 +293,13 @@ impl TuiSnapshot {
             queue: self.queue.revision,
             duplicate_groups: self.library.duplicate_groups_revision,
             duplicate_members: self.library.duplicate_members_revision,
-            track: None,
-            playlist_metadata: playlist_id
-                .filter(|id| self.library.playlist_entry_revisions.contains_key(id))
-                .map(|id| crate::response::PlaylistEntryRevision {
-                    playlist_id: id,
-                    revision: self
-                        .library
-                        .metadata_revisions
-                        .playlist_revision(id, self.library.revision),
-                }),
-            playlist_entries: playlist_id.and_then(|id| {
-                self.library
-                    .playlist_entry_revisions
-                    .get(&id)
-                    .map(|revision| crate::response::PlaylistEntryRevision {
-                        playlist_id: id,
-                        revision: *revision,
-                    })
-            }),
+            ..Default::default()
         }
+        .with_playlist_scope(
+            playlist_id,
+            &self.library.playlist_entry_revisions,
+            &self.library.metadata_revisions,
+        )
     }
 }
 

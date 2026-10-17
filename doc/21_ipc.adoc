@@ -531,6 +531,11 @@ bulk effects or index overflow conservatively invalidate all metadata scopes;
 there is no whole-library track-to-playlist reverse cache. Missing targeted
 metadata scopes use the global library token conservatively. A non-scoped
 baseline can bootstrap an entry traversal only while its library token is current.
+Core and GUI/TUI snapshots use one pure response-layer policy to select these
+scopes. Playlist presence is authoritative: retained metadata cannot resurrect a
+deleted collection's scope. If the retained metadata index does not match the
+current library token, selection falls back to that library token rather than
+reusing an unrelated scoped revision.
 
 Entry pages/batches and scoped `PlaylistEntryLocations` (including empty results)
 attach `revisions.playlist_entries = {playlist_id, revision}` when the collection

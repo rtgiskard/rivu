@@ -941,22 +941,13 @@ impl LibrarySnapshot {
             queue: queue_revision,
             duplicate_groups: self.duplicate_groups_revision,
             duplicate_members: self.duplicate_members_revision,
-            track: None,
-            playlist_metadata: playlist_id
-                .filter(|id| self.playlist_entry_revisions.contains_key(id))
-                .map(|id| crate::response::PlaylistEntryRevision {
-                    playlist_id: id,
-                    revision: self.metadata_revisions.playlist_revision(id, self.revision),
-                }),
-            playlist_entries: playlist_id.and_then(|id| {
-                self.playlist_entry_revisions.get(&id).map(|revision| {
-                    crate::response::PlaylistEntryRevision {
-                        playlist_id: id,
-                        revision: *revision,
-                    }
-                })
-            }),
+            ..Default::default()
         }
+        .with_playlist_scope(
+            playlist_id,
+            &self.playlist_entry_revisions,
+            &self.metadata_revisions,
+        )
     }
 
     pub(crate) fn change_metadata(&mut self, tracks: Option<&[i64]>, playlists: Option<&[i64]>) {
@@ -975,22 +966,11 @@ impl LibrarySnapshot {
         query: &Query,
         queue_revision: u64,
     ) -> crate::response::QueryRevisions {
-        let playlist_id = match query {
-            Query::PlaylistEntries { playlist_id, .. }
-            | Query::PlaylistEntryBatch { playlist_id, .. }
-            | Query::PlaylistEntryLocations { playlist_id, .. } => Some(*playlist_id),
-            _ => None,
-        };
-        let mut revisions = self.query_revisions(queue_revision, playlist_id);
-        if let Query::Track { track_id } = query {
-            revisions.track = Some(crate::response::TrackRevision {
-                track_id: *track_id,
-                revision: self
-                    .metadata_revisions
-                    .track_revision(*track_id, self.revision),
-            });
-        }
-        revisions
+        self.query_revisions(queue_revision, None).for_query(
+            query,
+            &self.playlist_entry_revisions,
+            &self.metadata_revisions,
+        )
     }
 }
 
@@ -1319,6 +1299,39 @@ mod tests {
                 query.is_none()
             );
         }
+    }
+
+    #[test]
+    fn query_scopes_require_playlist_presence_and_fall_back_to_library_metadata() {
+        let mut library = LibrarySnapshot::default();
+        Arc::make_mut(&mut library.playlist_entry_revisions).insert(7, 12);
+        library.change_metadata(Some(&[3]), Some(&[7]));
+        let query = Query::PlaylistEntryLocations {
+            playlist_id: 7,
+            query: None,
+            entry_ids: vec![1],
+        };
+        let present = library.query_revisions_for(&query, 9);
+        assert_eq!(present.playlist_entries.unwrap().revision, 12);
+        assert_eq!(present.playlist_metadata.unwrap().revision, 1);
+        assert_eq!(present.queue, 9);
+        assert_eq!(present.track, None);
+
+        Arc::make_mut(&mut library.playlist_entry_revisions).remove(&7);
+        let deleted = library.query_revisions_for(&query, 9);
+        assert_eq!(deleted.playlist_entries, None);
+        assert_eq!(deleted.playlist_metadata, None);
+
+        Arc::make_mut(&mut library.playlist_entry_revisions).insert(7, 13);
+        // A snapshot without matching metadata history uses the global revision.
+        library.revision = 20;
+        let restored = library.query_revisions_for(&query, 9);
+        assert_eq!(restored.playlist_entries.unwrap().revision, 13);
+        assert_eq!(restored.playlist_metadata.unwrap().revision, 20);
+        let track = library.query_revisions_for(&Query::Track { track_id: 3 }, 9);
+        assert_eq!(track.track.unwrap().revision, 20);
+        assert_eq!(track.playlist_entries, None);
+        assert_eq!(track.playlist_metadata, None);
     }
 
     #[test]

@@ -89,6 +89,56 @@ pub struct QueryRevisions {
     pub duplicate_members: u64,
 }
 
+impl QueryRevisions {
+    /// Playlist presence is authoritative in the content/lifetime map; metadata
+    /// alone must never revive a deleted playlist's scope.
+    pub(crate) fn with_playlist_scope(
+        mut self,
+        playlist_id: Option<i64>,
+        entries: &std::collections::BTreeMap<i64, u64>,
+        metadata: &crate::model::MetadataRevisions,
+    ) -> Self {
+        self.playlist_entries = playlist_id.and_then(|playlist_id| {
+            entries
+                .get(&playlist_id)
+                .map(|&revision| PlaylistEntryRevision {
+                    playlist_id,
+                    revision,
+                })
+        });
+        self.playlist_metadata = self.playlist_entries.map(|scope| PlaylistEntryRevision {
+            playlist_id: scope.playlist_id,
+            revision: metadata.playlist_revision(scope.playlist_id, self.library),
+        });
+        self
+    }
+
+    /// Select data scopes without changing query identity or stamp semantics.
+    pub(crate) fn for_query(
+        self,
+        query: &crate::model::Query,
+        entries: &std::collections::BTreeMap<i64, u64>,
+        metadata: &crate::model::MetadataRevisions,
+    ) -> Self {
+        use crate::model::Query;
+        let playlist_id = match query {
+            Query::PlaylistEntries { playlist_id, .. }
+            | Query::PlaylistEntryBatch { playlist_id, .. }
+            | Query::PlaylistEntryLocations { playlist_id, .. } => Some(*playlist_id),
+            _ => None,
+        };
+        let mut revisions = self.with_playlist_scope(playlist_id, entries, metadata);
+        revisions.track = match query {
+            Query::Track { track_id } => Some(TrackRevision {
+                track_id: *track_id,
+                revision: metadata.track_revision(*track_id, self.library),
+            }),
+            _ => None,
+        };
+        revisions
+    }
+}
+
 #[expect(
     clippy::large_enum_variant,
     reason = "Single-track query results stay inline without an extra allocation on read and decode"
