@@ -201,12 +201,12 @@ preferences, layout, album artwork, desktop integration, and diagnostic logging.
 Interface presents these sections together on one scrollable page, without
 separate sidebar subpages. Panel-specific artwork settings remain a focused editor.
 Logging is application-wide, including headless operation, and remains in `[logging]`.
-Visualizations contains shared settings and the four audio-data views.
+Visualizations contains General and the four audio-data views.
 Dropdown keys: <<_desktop_keyboard_navigation,Desktop keyboard navigation>>.
 The system tray switch takes effect after restarting the graphical host, not
 merely reopening its window. Media read buffering applies to future source opens,
 including full waveform scans; it does not reopen the current track.
-Pause visualizations (Still Mode) is under Visualizations → Shared settings →
+Pause visualizations (Still Mode) is under Visualizations → General →
 Processing and cache and takes effect when settings are applied, without
 restarting playback. The application menu also offers a Visualizations toggle below
 Layouts; On enables visualizations and Off pauses them, saving immediately.
@@ -260,7 +260,7 @@ Shared visualization settings apply as follows:
   <<_still_mode,Still Mode>>. `visualizations.cache` controls rendering reuse,
   separately from media read buffering; see link:22_cache.adoc[Caching and Resource Lifecycles].
 
-Each frequency view has a range override; leave it empty to inherit Shared settings,
+Each frequency view has a range override; leave it empty to inherit General,
 or clear an explicit value to restore inheritance. See
 <<_visualization_db_ranges,Visualization dB ranges>> for the configuration contract.
 
@@ -603,7 +603,7 @@ are errors.
 `visualizations.spectrogram.db_range`, and `visualizations.audio_visualizer.db_range` override it only for their
 named view. Every supplied range must be finite and between `1` and `160` dB,
 inclusive. An explicit override remains an override even if it equals the shared
-default; changing Shared settings later affects only views without overrides.
+default; changing General later affects only views without overrides.
 
 In TOML, omit a view's override key to inherit the shared default. Do not write an empty
 string or a blank assignment: overrides are numeric when present. Saving an

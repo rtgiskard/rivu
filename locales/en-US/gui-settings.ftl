@@ -132,7 +132,7 @@ settings-pipewire-channel-remix = PipeWire channel remix
 settings-interface = Interface
 settings-layout-snapping = Layout snapping
 settings-system-tray = System tray
-settings-shared-settings = Shared settings
+settings-shared-settings = General
 settings-album-artwork = Album artwork
 settings-spectrogram = Spectrogram
 settings-spectrum = Spectrum
@@ -194,7 +194,7 @@ settings-language-restart = Restart to apply
 settings-theme = Theme
 settings-theme-hint = Applies to desktop and terminal after Apply; visualization colors stay independent
 settings-use-font = Use “{ $font }”
-settings-inherited-range = 1–160 dB; empty = Shared settings ({ $range } dB).
+settings-inherited-range = 1–160 dB; empty = General ({ $range } dB).
 settings-invalid = Invalid settings: { $error }
 settings-cache-days = Enter a positive whole number of days (1–{ $max }), then try again.
 settings-cache-error = Could not read the artwork cache: { $error }. Check directory access and try again.
