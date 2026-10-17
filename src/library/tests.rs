@@ -640,6 +640,281 @@ fn in_place_source_changes_fail_scans_instead_of_mixing_versions() -> Result<()>
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn nonregular_audio_is_a_local_error_preserving_only_its_existing_identity() -> Result<()> {
+    for enabled in [false, true] {
+        for replacement in ["fifo", "linked-fifo", "linked-device"] {
+            for explicit in [false, true] {
+                for replace_after_discovery in [false, true] {
+                    let directory = tempfile::tempdir()?;
+                    let root = directory.path().to_path_buf();
+                    let audio = root.join("audio.wav");
+                    let deleted = root.join("deleted.wav");
+                    let good = root.join("good.wav");
+                    wav(&audio, 150)?;
+                    wav(&deleted, 100)?;
+                    let baseline = scan_paths(std::slice::from_ref(&root), &[], enabled)?;
+                    let mut known = known_records(&baseline.records);
+                    let store = crate::store::Store::open(Path::new(":memory:"))?;
+                    store.apply_scan(&baseline)?;
+                    let id = store.track_id_for_source(&audio, None)?.unwrap();
+                    let deleted_id = store.track_id_for_source(&deleted, None)?.unwrap();
+                    store.set_favorite(&[id], true)?;
+                    store.edit_track(id, Some("Kept title"), None, None, None)?;
+                    fs::remove_file(&deleted)?;
+                    wav(&good, 75)?;
+                    let replace = move |path: &Path| {
+                        fs::remove_file(path).unwrap();
+                        if replacement == "linked-device" {
+                            std::os::unix::fs::symlink("/dev/null", path).unwrap();
+                        } else {
+                            let fifo = if replacement == "fifo" {
+                                path.to_path_buf()
+                            } else {
+                                path.with_file_name("pipe")
+                            };
+                            let name = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes())
+                                .unwrap();
+                            // SAFETY: name is a live NUL-terminated path; mkfifo retains no pointer.
+                            assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+                            if replacement == "linked-fifo" {
+                                std::os::unix::fs::symlink(fifo, path).unwrap();
+                            }
+                        }
+                    };
+                    if !replace_after_discovery {
+                        replace(&audio);
+                        // A matching cache entry cannot authorize nonregular input.
+                        let metadata = fs::metadata(&audio)?;
+                        let cached = known.iter_mut().find(|file| file.path == audio).unwrap();
+                        cached.size = metadata.len();
+                        cached.modified_ns = cache_modified_ns(metadata.modified().ok());
+                    }
+                    let requested = if explicit {
+                        vec![audio.clone(), good.clone(), deleted.clone()]
+                    } else {
+                        vec![root]
+                    };
+                    let worker_audio = audio.clone();
+                    let (completed, receive) = std::sync::mpsc::channel();
+                    let worker = std::thread::spawn(move || {
+                        let mut terminal = false;
+                        let result = scan_paths_at_depth(
+                            &requested,
+                            &known,
+                            enabled,
+                            1,
+                            |phase, processed, total, _, path| {
+                                if replace_after_discovery
+                                    && phase == ScanPhase::ReadingMetadata
+                                    && processed == 0
+                                {
+                                    replace(&worker_audio);
+                                }
+                                terminal |= phase == ScanPhase::ReadingMetadata
+                                    && total == Some(processed)
+                                    && path.is_none();
+                            },
+                        );
+                        completed
+                            .send(result.map(|result| (result, terminal)))
+                            .unwrap();
+                    });
+                    // A nonregular source must fail, never wait for a FIFO writer.
+                    let (result, terminal) = receive.recv_timeout(Duration::from_secs(5))??;
+                    worker.join().unwrap();
+                    assert!(terminal);
+                    assert_eq!(result.errors.len(), if explicit { 2 } else { 1 });
+                    assert!(
+                        result
+                            .errors
+                            .iter()
+                            .any(|error| error.contains("not an ordinary file"))
+                    );
+                    assert_eq!(result.uncertainties, [ScanUncertainty::File(audio.clone())]);
+                    assert!(!result.scan_incomplete);
+                    assert_eq!(result.records.len(), 1);
+                    assert_eq!(result.records[0].path, good);
+                    store.apply_scan(&result)?;
+                    assert!(!store.track(id)?.unwrap().missing);
+                    assert!(store.track(deleted_id)?.unwrap().missing);
+                    assert!(store.track_id_for_source(&good, None)?.is_some());
+                    store.remove_missing_tracks()?;
+                    let preserved = store.track(id)?.unwrap();
+                    assert!(preserved.favorite);
+                    assert_eq!(preserved.title, "Kept title");
+                    assert!(store.track(deleted_id)?.is_none());
+                    fs::remove_file(&audio)?;
+                    let absent = scan_paths(&[audio], &[], enabled)?;
+                    assert!(absent.uncertainties.is_empty());
+                    store.apply_scan(&absent)?;
+                    assert!(store.track(id)?.unwrap().missing);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn explicit_non_utf8_scopes_do_not_abort_valid_scan_reconciliation() -> Result<()> {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    for force in [false, true] {
+        for good_first in [false, true] {
+            let directory = tempfile::tempdir()?;
+            let root = directory.path().to_path_buf();
+            let good_root = root.join("good");
+            fs::create_dir(&good_root)?;
+            let deleted = good_root.join("deleted.wav");
+            wav(&deleted, 150)?;
+            let store = crate::store::Store::open(Path::new(":memory:"))?;
+            store.apply_scan(&scan_paths(std::slice::from_ref(&good_root), &[], false)?)?;
+            let deleted_id = store.track_id_for_source(&deleted, None)?.unwrap();
+            fs::remove_file(&deleted)?;
+            let good = good_root.join("good.wav");
+            wav(&good, 75)?;
+            let bad_audio = root.join(OsStr::from_bytes(b"bad-\xff.wav"));
+            let bad_directory = root.join(OsStr::from_bytes(b"bad-\xff"));
+            let bad_sheet = root.join(OsStr::from_bytes(b"bad-\xff.cue"));
+            let bad_absent = root.join(OsStr::from_bytes(b"absent-\xff.wav"));
+            wav(&bad_audio, 75)?;
+            fs::create_dir(&bad_directory)?;
+            wav(&bad_directory.join("audio.wav"), 75)?;
+            fs::write(&bad_sheet, b"invalid CUE")?;
+            let invalid = [bad_audio.clone(), bad_directory, bad_sheet, bad_absent];
+            let mut requested = invalid.to_vec();
+            // Duplicate invalid scopes are normalized and reported only once.
+            requested.push(root.join("unused/..").join(bad_audio.file_name().unwrap()));
+            let normalized_good = good_root.join("unused/..");
+            if good_first {
+                requested.insert(0, normalized_good);
+            } else {
+                requested.push(normalized_good);
+            }
+            let mut events = Vec::new();
+            let result = super::scan_paths(
+                &requested,
+                |path| {
+                    assert!(path.starts_with(&good_root));
+                    if force {
+                        Ok(None)
+                    } else {
+                        store.known_source(path)
+                    }
+                },
+                false,
+                std::slice::from_ref(&root),
+                1,
+                &ScanCancellation::default(),
+                |phase, processed, total, errors, path| {
+                    events.push((phase, processed, total, errors, path.map(Path::to_path_buf)));
+                },
+            )?;
+            assert_eq!(result.roots, [good_root]);
+            assert_eq!(result.errors.len(), invalid.len());
+            assert!(
+                result
+                    .errors
+                    .iter()
+                    .all(|error| error.contains("not UTF-8"))
+            );
+            assert!(result.uncertainties.is_empty());
+            assert!(!result.scan_incomplete);
+            assert_eq!(result.records.len(), 1);
+            assert_eq!(result.records[0].path, good);
+            for bad in &invalid {
+                let reports: Vec<_> = events
+                    .iter()
+                    .filter(|event| event.4.as_ref() == Some(bad))
+                    .collect();
+                assert_eq!(reports.len(), 1);
+                assert_eq!(reports[0].0, ScanPhase::Discovering);
+            }
+            assert_eq!(
+                events.last().unwrap(),
+                &(ScanPhase::ReadingMetadata, 1, Some(1), invalid.len(), None)
+            );
+            assert!(events.windows(2).all(|pair| pair[0].3 <= pair[1].3));
+            store.apply_scan(&result)?;
+            assert!(store.track(deleted_id)?.unwrap().missing);
+            let good_id = store.track_id_for_source(&good, None)?.unwrap();
+            assert!(!store.track(good_id)?.unwrap().missing);
+            store.remove_missing_tracks()?;
+            assert_eq!(store.track_count()?, 1);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn invalid_only_scopes_finish_without_coverage_and_honor_cancellation() -> Result<()> {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let directory = tempfile::tempdir()?;
+    let root = directory.path().to_path_buf();
+    let good = root.join("good.wav");
+    let bad = root.join(OsStr::from_bytes(b"bad-\xff.wav"));
+    wav(&good, 75)?;
+    let store = crate::store::Store::open(Path::new(":memory:"))?;
+    store.apply_scan(&scan_paths(std::slice::from_ref(&root), &[], false)?)?;
+    let id = store.track_id_for_source(&good, None)?.unwrap();
+    let mut events = Vec::new();
+    let result = super::scan_paths(
+        std::slice::from_ref(&bad),
+        |_| panic!("invalid scope must not look up sources"),
+        false,
+        std::slice::from_ref(&root),
+        1,
+        &ScanCancellation::default(),
+        |phase, processed, total, errors, path| {
+            events.push((phase, processed, total, errors, path.map(Path::to_path_buf)));
+        },
+    )?;
+    assert!(result.roots.is_empty());
+    assert!(result.records.is_empty());
+    assert!(result.uncertainties.is_empty());
+    assert_eq!(result.errors.len(), 1);
+    assert_eq!(
+        events.first().unwrap(),
+        &(ScanPhase::Discovering, 0, None, 1, Some(bad.clone()))
+    );
+    assert_eq!(
+        events.last().unwrap(),
+        &(ScanPhase::ReadingMetadata, 0, Some(0), 1, None)
+    );
+    assert!(!store.apply_scan(&result)?.changed);
+    assert!(!store.track(id)?.unwrap().missing);
+    for requested in [vec![bad.clone()], vec![bad.clone(), good]] {
+        let cancellation = ScanCancellation::default();
+        let mut events = 0;
+        let cancelled = super::scan_paths(
+            &requested,
+            |_| panic!("cancellation must prevent source lookups"),
+            false,
+            std::slice::from_ref(&root),
+            1,
+            &cancellation,
+            |phase, processed, _, errors, path| {
+                assert_eq!(phase, ScanPhase::Discovering);
+                assert_eq!(processed, 0);
+                assert_eq!(errors, 1);
+                assert_eq!(path, Some(bad.as_path()));
+                events += 1;
+                cancellation.cancel();
+            },
+        );
+        assert!(cancelled.unwrap_err().to_string().contains("cancelled"));
+        assert_eq!(events, 1);
+    }
+    Ok(())
+}
+
 #[test]
 fn failed_audio_probe_is_not_missing_or_cleanable_but_true_deletion_is() -> Result<()> {
     let directory = tempfile::tempdir()?;

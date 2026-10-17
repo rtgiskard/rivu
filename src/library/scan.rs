@@ -138,6 +138,7 @@ pub enum ScanUncertainty {
 
 #[derive(Clone, Debug, Default)]
 pub struct ScanResult {
+    /// Normalized, absolute UTF-8 scopes accepted for reconciliation coverage.
     pub roots: Vec<PathBuf>,
     pub records: Vec<ScanRecord>,
     pub errors: Vec<String>,
@@ -264,6 +265,19 @@ pub(crate) fn scan_paths_with_cues(
         if !seen_requests.insert(root.clone()) {
             continue;
         }
+        // Only persistable scopes may authorize reconciliation. Descendants of a
+        // valid scope are still handled as local source/sheet errors below.
+        if root.to_str().is_none() {
+            result.push_error(|| format!("{}: Scan scope path is not UTF-8", root.display()));
+            progress(
+                ScanPhase::Discovering,
+                files.len(),
+                None,
+                result.errors.len(),
+                Some(root.as_path()),
+            );
+            continue;
+        }
         if !library_roots
             .iter()
             .any(|allowed| root.starts_with(allowed))
@@ -301,7 +315,7 @@ pub(crate) fn scan_paths_with_cues(
             }
         };
         cancellation.check()?;
-        if metadata.is_file() || (!metadata.is_dir() && is_cue_path(&root)) {
+        if !metadata.is_dir() {
             if is_audio_path(&root) {
                 explicit_audio.insert(root.clone());
                 if files.insert(root.clone()) {
@@ -377,9 +391,10 @@ pub(crate) fn scan_paths_with_cues(
                             Some(entry.path()),
                         );
                     }
+                    // Admission checks the opened object, not a discovery-time type hint.
                     Ok(entry)
-                        if (entry.file_type().is_file() && is_audio_path(entry.path()))
-                            || (!entry.file_type().is_dir() && is_cue_path(entry.path())) =>
+                        if !entry.file_type().is_dir()
+                            && (is_audio_path(entry.path()) || is_cue_path(entry.path())) =>
                     {
                         if files.insert(entry.path().to_path_buf()) {
                             progress(

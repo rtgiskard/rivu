@@ -78,6 +78,11 @@ as a local CUE error without suppressing its readable source audio or preventing
 other valid tracks from being saved.
 Audio source identities must also be UTF-8 paths. Unrepresentable audio paths
 are per-file errors, including during forced scans; valid tracks are still saved.
+Explicit requested scopes must also be UTF-8 after logical normalization. An
+unrepresentable scope is reported locally and excluded from reconciliation
+coverage, before any traversal or source lookup; valid scopes in the same request
+still save their results. A valid UTF-8 parent directory keeps its coverage when
+an unrepresentable child fails locally.
 A requested path whose initial metadata lookup reports `NotFound` is confirmed
 absent and can mark its tracks missing; a path disappearing during traversal or
 reading is uncertain until a later scan establishes absence. An explicit nested
@@ -95,11 +100,14 @@ readable audio is saved.
 Audio sources, including CUE references, must also be ordinary files. Playback,
 waveform loading, metadata probes, and fingerprint reads check the object actually
 opened with a nonblocking open; normal symlinks to ordinary files remain supported.
-FIFOs without writers are rejected rather than waiting for a producer. FFmpeg
-decodes the checked file object instead of reopening its original pathname, so
-replacing that name cannot bypass the check. A failed CUE source is a local scan
-error: readable sources are still saved, the scan reaches completion, and later
-scans remain available.
+FIFOs without writers are rejected rather than waiting for a producer. Discovery
+does not silently discard audio-named FIFOs, devices, or symlinks to such objects:
+both direct requests and directory scans report a local source error and protect
+that source's existing identities, without protecting unrelated deleted tracks.
+FFmpeg decodes the checked file object instead of reopening its original pathname,
+so replacing that name cannot bypass the check. Failed sources, including CUE
+references, are local scan errors: readable sources are still saved, the scan
+reaches completion, and later scans remain available.
 Fresh metadata probes and fingerprint reads for a scan use the same opened source
 object, even if its pathname is replaced or a symlink is retargeted. Changes to
 the opened object's size or modification/change timestamps during analysis cause
