@@ -91,6 +91,7 @@ impl Playback {
             waveform.set_still_mode(still_mode);
             waveform.select_source(&path, range, decoder_hint, &source);
         }
+        let waveform_coverage = WaveformCoverage::new(start, source.waveform_timestamp_tolerance());
         Ok(Self {
             source,
             output,
@@ -104,7 +105,7 @@ impl Playback {
             waveform,
             waveform_accumulator: None,
             waveform_weights,
-            waveform_coverage: WaveformCoverage::new(start),
+            waveform_coverage,
             still_mode,
         })
     }
@@ -146,7 +147,8 @@ impl Playback {
         self.base_position = position;
         self.prior_heard = heard;
         self.eof = false;
-        self.waveform_coverage = WaveformCoverage::new(position);
+        self.waveform_coverage =
+            WaveformCoverage::new(position, self.source.waveform_timestamp_tolerance());
         Ok(())
     }
 
@@ -255,16 +257,18 @@ impl Playback {
                     if !frames.len().is_multiple_of(channels) {
                         bail!("Decoded audio ends in an incomplete interleaved frame");
                     }
-                    if self.still_mode {
-                        if !frames.is_empty() {
-                            self.waveform_coverage.skip();
-                        }
-                    } else if !frames.is_empty() {
+                    if !frames.is_empty() {
                         self.waveform_coverage.record(
                             start_seconds,
                             frames.len() / channels,
                             sample_rate,
                         );
+                    }
+                    if self.still_mode {
+                        if !frames.is_empty() {
+                            self.waveform_coverage.skip();
+                        }
+                    } else if !frames.is_empty() {
                         let accumulator = self.waveform_accumulator.get_or_insert_with(|| {
                             let mut waveform = self.waveform.write();
                             waveform.prepare_bins(sample_rate);
@@ -370,6 +374,7 @@ mod tests {
             .select_source(path, range, DecoderHint::Auto, &source);
         let (output, render) = super::super::output::test_backend(8_000, false, source.layout());
         let waveform_weights = super::super::output::analysis_weights(source.layout());
+        let waveform_coverage = WaveformCoverage::new(0.0, source.waveform_timestamp_tolerance());
         let playback = Playback {
             source,
             output,
@@ -383,7 +388,7 @@ mod tests {
             waveform,
             waveform_accumulator: None,
             waveform_weights,
-            waveform_coverage: WaveformCoverage::new(0.0),
+            waveform_coverage,
             still_mode: false,
         };
         (playback, render)

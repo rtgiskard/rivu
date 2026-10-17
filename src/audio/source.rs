@@ -909,6 +909,17 @@ impl Source {
         matches!(self.decode, Decode::Ffmpeg(_))
     }
 
+    /// Adjacent quantized packet timestamps can differ by one container tick.
+    /// Sample-accurate timelines retain the half-sample coverage threshold.
+    pub(super) fn waveform_timestamp_tolerance(&self) -> f64 {
+        let tick = f64::from(self.time_base.numer.get()) / f64::from(self.time_base.denom.get());
+        if tick > f64::from(self.info.sample_rate).recip() {
+            tick
+        } else {
+            0.0
+        }
+    }
+
     pub(super) fn waveform(
         path: &Path,
         range: Option<super::PlaybackRange>,
@@ -2637,7 +2648,10 @@ mod tests {
                     source.info.duration,
                     rate,
                 );
-                let mut coverage = super::super::waveform::WaveformCoverage::new(0.0);
+                let mut coverage = super::super::waveform::WaveformCoverage::new(
+                    0.0,
+                    source.waveform_timestamp_tolerance(),
+                );
                 while let Some((samples, timestamp)) = source.next_frames().unwrap() {
                     coverage.record(timestamp, samples.len() / channels, rate);
                     frame.push(timestamp, samples, rate, channels);
@@ -2671,17 +2685,18 @@ mod tests {
         let first_peak = frame.peaks[0];
         assert!(first_peak.is_some());
         source.seek(1.0).unwrap();
-        let mut coverage = super::super::waveform::WaveformCoverage::new(1.0);
+        let mut coverage = super::super::waveform::WaveformCoverage::new(
+            1.0,
+            source.waveform_timestamp_tolerance(),
+        );
         while let Some((samples, timestamp)) = source.next_frames().unwrap() {
             coverage.record(timestamp, samples.len() / channels, rate);
             frame.push(timestamp, samples, rate, channels);
         }
-        let revision = frame.revision;
         coverage.finish(&mut frame);
         assert!(!frame.complete);
-        assert_eq!(frame.duration, None);
-        assert_eq!(frame.span_seconds, 60.0);
-        assert_eq!(frame.revision, revision);
+        assert_eq!(frame.duration, Some(2.0));
+        assert!(frame.span_seconds >= 2.0 && frame.span_seconds < 2.04);
         assert_eq!(frame.peaks[0], first_peak);
         assert!(frame.peaks[1..26].iter().all(Option::is_none));
         assert!(frame.peaks[26].is_some());

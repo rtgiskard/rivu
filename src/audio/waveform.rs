@@ -21,13 +21,15 @@ const INITIAL_UNKNOWN_SPAN: f64 = 60.0;
 pub(super) struct WaveformCoverage {
     continuous: bool,
     end_seconds: f64,
+    timestamp_tolerance: f64,
 }
 
 impl WaveformCoverage {
-    pub(super) fn new(start_seconds: f64) -> Self {
+    pub(super) fn new(start_seconds: f64, timestamp_tolerance: f64) -> Self {
         Self {
             continuous: start_seconds == 0.0,
             end_seconds: 0.0,
+            timestamp_tolerance,
         }
     }
 
@@ -37,7 +39,7 @@ impl WaveformCoverage {
             return;
         }
         let rate = f64::from(sample_rate);
-        if start_seconds > self.end_seconds + 0.5 / rate {
+        if start_seconds > self.end_seconds + self.timestamp_tolerance.max(0.5 / rate) {
             self.continuous = false;
         }
         self.end_seconds = self
@@ -51,9 +53,7 @@ impl WaveformCoverage {
     }
 
     pub(super) fn finish(&self, frame: &mut WaveformFrame) {
-        if self.continuous && self.end_seconds > 0.0 {
-            frame.finish_scan(self.end_seconds);
-        }
+        frame.finish_at_eof(self.end_seconds, self.continuous);
     }
 }
 
@@ -92,6 +92,10 @@ pub struct WaveformFrame {
     pub decoder_hint: DecoderHint,
     pub duration: Option<f64>,
     pub span_seconds: f64,
+    // Sample width is bin_frames / bin_count, independent of EOF array truncation.
+    // Widen the numerator so coarsening cannot overflow the u64 sample domain.
+    pub(crate) bin_frames: u128,
+    pub(crate) bin_count: u64,
     pub max_peak: f32,
     /// `None` is not yet decoded; `Some(0.0)` is decoded silence.
     pub peaks: Vec<Option<f32>>,
@@ -124,6 +128,8 @@ impl Default for WaveformFrame {
             decoder_hint: DecoderHint::Auto,
             duration: None,
             span_seconds: 0.0,
+            bin_frames: 0,
+            bin_count: 0,
             max_peak: 1.0,
             peaks: Vec::new(),
             rms: Vec::new(),
@@ -288,6 +294,8 @@ impl WaveformAccumulator {
         shared.complete = self.frame.complete;
         shared.duration = self.frame.duration;
         shared.span_seconds = self.frame.span_seconds;
+        shared.bin_frames = self.frame.bin_frames;
+        shared.bin_count = self.frame.bin_count;
         shared.max_peak = self.frame.max_peak;
         if shared.channel_weights != self.frame.channel_weights {
             shared
@@ -474,6 +482,8 @@ impl WaveformFrame {
         self.decoder_hint = decoder_hint;
         self.duration = duration.filter(|value| value.is_finite() && *value > 0.0);
         self.span_seconds = self.duration.unwrap_or(INITIAL_UNKNOWN_SPAN);
+        self.bin_frames = 0;
+        self.bin_count = 0;
         self.complete = false;
         self.peaks.clear();
         self.rms.clear();
@@ -520,6 +530,10 @@ impl WaveformFrame {
         let bins = self.duration.map_or(MAX_BINS, |duration| {
             ((duration * f64::from(sample_rate)).round().max(1.0) as usize).min(MAX_BINS)
         });
+        self.bin_frames = (self.span_seconds * f64::from(sample_rate))
+            .round()
+            .max(1.0) as u64 as u128;
+        self.bin_count = bins as u64;
         self.peaks.resize(bins, None);
         self.rms.resize(bins, None);
         self.rms_counts.resize(bins, 0);
@@ -534,28 +548,34 @@ impl WaveformFrame {
     }
 
     pub(super) fn finish_scan(&mut self, end_seconds: f64) {
-        if self.suspended || self.complete {
+        self.finish_at_eof(end_seconds, true);
+    }
+
+    fn finish_at_eof(&mut self, end_seconds: f64, complete: bool) {
+        if self.suspended || self.complete || !end_seconds.is_finite() || end_seconds <= 0.0 {
             return;
         }
-        if end_seconds.is_finite() && end_seconds > 0.0 {
-            self.duration = Some(end_seconds);
-            if let Some(last) = self.peaks.iter().rposition(Option::is_some) {
-                let bins = last + 1;
-                self.span_seconds *= bins as f64 / self.peaks.len() as f64;
-                self.peaks.truncate(bins);
-                self.rms.truncate(bins);
-                self.rms_counts.truncate(bins);
-                self.left_peaks.truncate(bins);
-                self.right_peaks.truncate(bins);
-                self.left_rms.truncate(bins);
-                self.right_rms.truncate(bins);
-                self.left_rms_counts.truncate(bins);
-                self.right_rms_counts.truncate(bins);
-                self.rms_spans.truncate(bins);
-                self.rms_prefixes.truncate(bins);
-            }
+        self.duration = Some(end_seconds);
+        if !self.peaks.is_empty() && self.span_seconds > 0.0 {
+            // EOF proves the timeline end independently of PCM coverage.
+            // Keep unknown bins inside that endpoint, including a skipped tail.
+            let bins = ((end_seconds / self.span_seconds * self.peaks.len() as f64).ceil()
+                as usize)
+                .clamp(1, self.peaks.len());
+            self.span_seconds *= bins as f64 / self.peaks.len() as f64;
+            self.peaks.truncate(bins);
+            self.rms.truncate(bins);
+            self.rms_counts.truncate(bins);
+            self.left_peaks.truncate(bins);
+            self.right_peaks.truncate(bins);
+            self.left_rms.truncate(bins);
+            self.right_rms.truncate(bins);
+            self.left_rms_counts.truncate(bins);
+            self.right_rms_counts.truncate(bins);
+            self.rms_spans.truncate(bins);
+            self.rms_prefixes.truncate(bins);
         }
-        self.complete = true;
+        self.complete = complete;
         self.revision = self.revision.wrapping_add(1);
     }
 
@@ -618,12 +638,13 @@ impl WaveformFrame {
                 self.rms_spans[retained..].fill(None);
                 self.rms_prefixes[retained..].fill(None);
                 self.span_seconds *= 2.0;
+                self.bin_frames = self.bin_frames.saturating_mul(2);
                 changed = true;
                 *dirty = Some(0..self.peaks.len());
             }
         }
-        let total_frames = (self.span_seconds * rate).round().max(1.0) as u64;
-        let bins = self.peaks.len() as u128;
+        let total_frames = self.bin_frames;
+        let bins = u128::from(self.bin_count);
         // Work in sample indices so fractional packet/CUE timestamps cannot
         // put a boundary sample into the previous bin through floating error.
         let first_frame = (start_seconds.max(0.0) * rate).round() as u64;
@@ -635,11 +656,16 @@ impl WaveformFrame {
         let initial_offset = offset;
         while offset < count {
             let frame = first_frame.saturating_add((offset - initial_offset) as u64);
-            if frame >= total_frames {
+            if frame == u64::MAX {
                 break;
             }
-            let bin = (u128::from(frame) * bins / u128::from(total_frames)) as usize;
-            let boundary = ((bin as u128 + 1) * u128::from(total_frames)).div_ceil(bins) as u64;
+            let bin = (u128::from(frame) * bins / total_frames) as usize;
+            if bin >= self.peaks.len() {
+                break;
+            }
+            let boundary = ((bin as u128 + 1) * total_frames)
+                .div_ceil(bins)
+                .min(u128::from(u64::MAX)) as u64;
             let mut take = (boundary - frame).min((count - offset) as u64) as usize;
             let primary = self.rms_spans[bin].as_ref();
             let prefix = self.rms_prefixes[bin].as_ref();
@@ -1076,7 +1102,7 @@ mod tests {
         accumulator.push(4.0 / f64::from(rate), &samples[4..5], rate, 1);
         accumulator.publish(&mut shared);
         assert_eq!(shared.rms_counts[0], 1);
-        let mut coverage = WaveformCoverage::new(0.0);
+        let mut coverage = WaveformCoverage::new(0.0, 0.0);
         for start in (0..16).step_by(2) {
             // Reopening retains both displayed RMS and the earlier candidate;
             // no PCM is needed to recover candidate energy after publication.
@@ -1138,7 +1164,7 @@ mod tests {
             let mut expected = frame(None, 100);
             expected.push(0.0, &samples, 100, 1);
             assert_statistics(&actual, &expected);
-            let mut coverage = WaveformCoverage::new(0.0);
+            let mut coverage = WaveformCoverage::new(0.0, 0.0);
             coverage.record(0.0, samples.len(), 100);
             coverage.finish(&mut actual);
             coverage.finish(&mut expected);
@@ -1167,7 +1193,7 @@ mod tests {
         expected.push(0.0, &samples, 100, 1);
         assert_eq!(actual.span_seconds, 120.0);
         assert_statistics(&actual, &expected);
-        let mut coverage = WaveformCoverage::new(0.0);
+        let mut coverage = WaveformCoverage::new(0.0, 0.0);
         coverage.record(0.0, samples.len(), 100);
         coverage.finish(&mut actual);
         coverage.finish(&mut expected);
@@ -1179,7 +1205,7 @@ mod tests {
     fn a_continuous_complete_scan_has_exact_bin_counts_and_rms() {
         let samples: Vec<f32> = (0..3200).map(|index| (index % 2) as f32).collect();
         let mut actual = frame(Some(1.0), 3200);
-        let mut coverage = WaveformCoverage::new(0.0);
+        let mut coverage = WaveformCoverage::new(0.0, 0.0);
         for start in (0..samples.len()).step_by(7) {
             let end = (start + 7).min(samples.len());
             let timestamp = start as f64 / 3200.0;
@@ -1196,17 +1222,149 @@ mod tests {
     #[test]
     fn packet_timestamp_gap_cannot_be_finalized_as_continuous_playback() {
         let mut frame = frame(None, 100);
-        let mut coverage = WaveformCoverage::new(0.0);
+        let mut coverage = WaveformCoverage::new(0.0, 0.0);
         coverage.record(0.0, 1, 100);
         frame.push(0.0, &[0.5], 100, 1);
         coverage.record(1.0, 1, 100);
         frame.push(1.0, &[0.75], 100, 1);
-        let revision = frame.revision;
         coverage.finish(&mut frame);
         assert!(!frame.complete);
-        assert_eq!(frame.duration, None);
-        assert_eq!(frame.revision, revision);
+        assert_eq!(frame.duration, Some(1.01));
+        assert!(frame.span_seconds >= 1.01 && frame.span_seconds < 1.05);
         assert!(frame.peaks[1..26].iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn eof_corrects_expanded_timeline_despite_a_sample_gap_across_replays() {
+        let rate = 8_000;
+        let mut shared = frame(Some(10.0), rate);
+        for _ in 0..3 {
+            let mut accumulator = WaveformAccumulator::new(shared.clone());
+            let mut coverage = WaveformCoverage::new(0.0, 0.0);
+            for packet in 0..100 {
+                let start = f64::from(packet * 800 + 1) / f64::from(rate);
+                coverage.record(start, 800, rate);
+                accumulator.push(start, &[0.5; 800], rate, 1);
+                accumulator.publish(&mut shared);
+            }
+            accumulator.finish(&coverage);
+            accumulator.publish(&mut shared);
+            assert!(!shared.complete);
+            assert_eq!(shared.duration, Some(10.0 + 1.0 / f64::from(rate)));
+            assert!(shared.span_seconds >= shared.duration.unwrap());
+            assert!(shared.span_seconds < 10.03);
+            assert!(shared.peaks.iter().all(|peak| *peak == Some(0.5)));
+        }
+    }
+
+    #[test]
+    fn quantized_packet_times_complete_but_real_gaps_remain_unknown() {
+        let rate = 48_000;
+        for (tolerance, gap, complete) in
+            [(0.0, 0.0, false), (0.001, 0.0, true), (0.001, 0.01, false)]
+        {
+            let mut actual = frame(Some(2.133), rate);
+            let mut coverage = WaveformCoverage::new(0.0, tolerance);
+            let mut end = 0.0;
+            for packet in 0..100 {
+                let start = (f64::from(packet * 1024) / f64::from(rate) * 1000.0).round() / 1000.0
+                    + if packet >= 50 { gap } else { 0.0 };
+                coverage.record(start, 1024, rate);
+                actual.push(start, &[0.5; 1024], rate, 1);
+                end = start + 1024.0 / f64::from(rate);
+            }
+            coverage.finish(&mut actual);
+            assert_eq!(actual.complete, complete);
+            assert!((actual.duration.unwrap() - end).abs() < 1e-9);
+            assert!(actual.span_seconds >= end && actual.span_seconds < end + 0.01);
+            if gap == 0.0 {
+                assert!(actual.peaks.iter().all(Option::is_some));
+            } else {
+                let middle = actual.peaks.len() / 2;
+                assert!(
+                    actual.peaks[middle - 5..middle + 5]
+                        .iter()
+                        .any(Option::is_none)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn eof_preserves_unknown_tail_and_allows_later_playback_to_fill_it() {
+        let mut shared = frame(Some(10.0), 100);
+        let mut accumulator = WaveformAccumulator::new(shared.clone());
+        let mut coverage = WaveformCoverage::new(0.0, 0.0);
+        coverage.record(0.0, 100, 100);
+        accumulator.push(0.0, &[0.5; 100], 100, 1);
+        coverage.skip();
+        coverage.record(9.0, 100, 100);
+        accumulator.finish(&coverage);
+        accumulator.publish(&mut shared);
+        assert!(!shared.complete);
+        assert_eq!(shared.duration, Some(10.0));
+        assert_eq!(shared.span_seconds, 10.0);
+        assert!(shared.peaks[..100].iter().all(|peak| *peak == Some(0.5)));
+        assert!(shared.peaks[100..].iter().all(Option::is_none));
+        let mut resumed = WaveformAccumulator::new(shared.clone());
+        resumed.push(9.0, &[0.75; 100], 100, 1);
+        resumed.publish(&mut shared);
+        assert!(shared.peaks[100..900].iter().all(Option::is_none));
+        assert!(shared.peaks[900..].iter().all(|peak| *peak == Some(0.75)));
+        assert!(!shared.complete);
+    }
+
+    #[test]
+    fn incomplete_eof_replay_preserves_fractional_bin_boundaries() {
+        let rate = 44_100;
+        let mut shared = frame(Some(60.0), rate);
+        let mut accumulator = WaveformAccumulator::new(shared.clone());
+        let mut coverage = WaveformCoverage::new(0.15, 0.0);
+        for (start, value) in [(0.15, 1.0), (1.98 - 1.0 / f64::from(rate), 0.0)] {
+            coverage.record(start, 1, rate);
+            accumulator.push(start, &[value], rate, 1);
+        }
+        accumulator.publish(&mut shared);
+        let peak_bin = shared
+            .peaks
+            .iter()
+            .position(|peak| *peak == Some(1.0))
+            .unwrap();
+        let bin_seconds = shared.span_seconds / shared.peaks.len() as f64;
+        accumulator.finish(&coverage);
+        accumulator.publish(&mut shared);
+        assert!(!shared.complete);
+        assert_eq!(shared.duration, Some(1.98));
+        assert!(shared.span_seconds >= 1.98 && shared.span_seconds < 1.98 + bin_seconds);
+        for _ in 0..3 {
+            let mut replay = WaveformAccumulator::new(shared.clone());
+            replay.push(0.15, &[1.0], rate, 1);
+            replay.publish(&mut shared);
+            let peaks: Vec<_> = shared
+                .peaks
+                .iter()
+                .enumerate()
+                .filter_map(|(index, peak)| (*peak == Some(1.0)).then_some(index))
+                .collect();
+            assert_eq!(peaks, [peak_bin]);
+            assert_eq!(shared.rms_counts.iter().sum::<u64>(), 2);
+        }
+        let mut extended = WaveformAccumulator::new(shared.clone());
+        extended.push(4.0, &[0.5], rate, 1);
+        extended.publish(&mut shared);
+        let count = shared.rms_counts.iter().sum::<u64>();
+        let mut replay = WaveformAccumulator::new(shared.clone());
+        replay.push(0.15, &[1.0], rate, 1);
+        replay.publish(&mut shared);
+        assert_eq!(shared.rms_counts.iter().sum::<u64>(), count);
+        assert_eq!(
+            shared
+                .peaks
+                .iter()
+                .filter(|peak| **peak == Some(1.0))
+                .count(),
+            1
+        );
     }
 
     #[test]

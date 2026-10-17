@@ -198,11 +198,23 @@ Mode cannot restore that preview or automatically start another full scan.
 == Waveform
 
 Playback builds a progressive waveform from decoded PCM, not from the FFT tap.
-It retains at most 1600 bins rather than whole-track PCM. Unknown-duration
+It retains at most 1600 bins rather than whole-track PCM. Unknown or underestimated
 timelines expand by coarsening existing bins, preserving bounded memory at the
-cost of preview resolution. An undecoded interval is distinct from decoded
-silence. Peaks can survive disjoint visits, but RMS represents a contiguous
-sample interval rather than repeatedly counting seeked or replayed samples.
+cost of preview resolution. Normal decoder EOF corrects the timeline end even
+when coverage is incomplete; only capacity beyond that endpoint is removed.
+Unknown intervals inside the timeline remain blank and eligible for later
+playback updates. Complete coverage requires a traversal from zero without seeks
+or discarded PCM. Its timestamp-continuity check allows the opened container's
+timestamp quantization; sample-accurate sources retain a half-sample threshold.
+An undecoded interval is distinct from decoded silence. Peaks can survive
+disjoint visits, but RMS represents a contiguous sample interval rather than
+repeatedly counting seeked or replayed samples.
+
+Sample-to-bin mapping uses a retained integer ratio, not the rounded display
+span. EOF can truncate trailing bins and normalize the display timeline without
+moving cached samples between bins. Pairwise coarsening doubles the sample width;
+source changes or discarded bins reset the geometry. The accumulator publishes
+this geometry with its statistics so later playback uses the same coordinates.
 
 Each native or FFmpeg decode call uses one work budget across packet skipping,
 seek discards, and codec buffering. Exhausting the budget yields control, not EOF;
