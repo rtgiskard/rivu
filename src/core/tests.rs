@@ -3,6 +3,63 @@ use crate::library::ScanRecord;
 use std::sync::atomic::Ordering;
 
 #[test]
+fn runtime_rejects_non_utf8_config_paths_before_creating_storage() {
+    use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+
+    let directory = tempfile::tempdir().unwrap();
+    let invalid = OsString::from_vec(b"invalid-\xff".to_vec());
+    let explicit_config = directory.path().join(&invalid).with_extension("toml");
+    let derived_data_dir = directory.path().join(&invalid);
+    for (data_dir, config_path) in [
+        (directory.path().join("explicit-data"), explicit_config),
+        (
+            derived_data_dir.clone(),
+            derived_data_dir.join("config.toml"),
+        ),
+    ] {
+        let error = Runtime::start(&data_dir, &config_path).err().unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("Configuration path is not valid UTF-8")
+        );
+        assert!(!config_path.exists());
+        assert!(!data_dir.exists());
+    }
+}
+
+#[test]
+fn runtime_validates_config_path_before_reading_or_rewriting_config() {
+    use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory
+        .path()
+        .join(OsString::from_vec(b"config-\xff.toml".to_vec()));
+    let original = b"intentionally not valid TOML";
+    std::fs::write(&path, original).unwrap();
+    let error = Runtime::start(directory.path(), &path).err().unwrap();
+    assert!(
+        error
+            .to_string()
+            .contains("Configuration path is not valid UTF-8")
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    assert!(!directory.path().join("library.db").exists());
+}
+
+#[test]
+fn startup_config_accepts_unicode_without_creating_a_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("配置.toml");
+    assert_eq!(
+        Runtime::load_startup_config(&path).unwrap(),
+        Config::default()
+    );
+    assert!(!path.exists());
+}
+
+#[test]
 fn runtime_completion_notifies_on_panic_and_reconciles_late_registration() {
     let (control, _shutdown) = RuntimeControl::new();
     let (wake, wakes) = bounded(1);

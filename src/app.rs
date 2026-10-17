@@ -3,7 +3,6 @@
 
 use crate::{
     artwork::ArtworkManager,
-    config::Config,
     core::{CoreHandle, Runtime, RuntimeControl},
     gui::{self, session::UiSession},
     ipc, logging,
@@ -268,7 +267,7 @@ impl App {
     ) -> Result<Self> {
         let socket_owner = ipc::SocketOwner::acquire(&data_dir)?;
         let signals = Signals::new([SIGINT, SIGTERM]).context("Registering shutdown signals")?;
-        let config = Config::load(&config_path)?;
+        let config = Runtime::load_startup_config(&config_path)?;
         let i18n = Arc::new(crate::i18n::Localizer::new(if graphical {
             &config.ui_language
         } else {
@@ -763,6 +762,55 @@ mod tests {
         .unwrap();
         let runtime = Runtime::start(directory.path(), &config).unwrap();
         (directory, runtime)
+    }
+
+    #[test]
+    fn invalid_host_config_path_fails_before_logging_and_retires_socket() {
+        use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+
+        let directory = tempfile::tempdir().unwrap();
+        let data_dir = directory.path().join("data");
+        let config = directory
+            .path()
+            .join(OsString::from_vec(b"config-\xff.toml".to_vec()));
+        let error = App::start(data_dir.clone(), config.clone(), Vec::new(), false)
+            .err()
+            .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("Configuration path is not valid UTF-8")
+        );
+        assert!(!config.exists());
+        assert!(std::fs::read_dir(&data_dir).unwrap().next().is_none());
+        assert!(ipc::SocketOwner::acquire(&data_dir).is_ok());
+    }
+
+    #[test]
+    fn opening_existing_gui_does_not_validate_unused_config_path() {
+        use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+
+        let (directory, mut runtime) = runtime_fixture();
+        let owner = ipc::SocketOwner::acquire(directory.path()).unwrap();
+        let app = AppHandle::new(&runtime, true);
+        let server = ipc::Server::start(&owner, runtime.handle.clone(), app.clone()).unwrap();
+        let unused_config = directory
+            .path()
+            .join(OsString::from_vec(b"unused-\xff.toml".to_vec()));
+        let original = b"intentionally not valid TOML";
+        std::fs::write(&unused_config, original).unwrap();
+        App::open_gui(
+            directory.path().to_owned(),
+            unused_config.clone(),
+            Vec::new(),
+        )
+        .unwrap();
+        assert!(app.take_raise_request());
+        assert_eq!(std::fs::read(&unused_config).unwrap(), original);
+        app.request_shutdown().unwrap();
+        runtime.join().unwrap();
+        drop(server);
+        drop(owner);
     }
 
     #[test]

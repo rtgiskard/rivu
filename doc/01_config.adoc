@@ -6,6 +6,10 @@ A missing file, group, or field uses the existing defaults. Unreadable files,
 malformed TOML, unknown keys at the root or in any group or nested view table,
 misplaced fields, and invalid values are errors, not a reason to fall back to defaults.
 Paths are literal: `~` and environment variables are not expanded.
+The configuration file path must be valid UTF-8, including a path derived from
+`--data-dir`. A new host rejects an unrepresentable path before reading or saving
+configuration or starting background services. A client controlling an existing
+instance does not validate a configuration path that the instance will not use.
 Configuration symlinks are followed when saving, including relative chains and
 missing targets; saving atomically replaces the target file, not the links.
 Link loops and inaccessible targets are reported as errors without replacing the links.

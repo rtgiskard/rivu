@@ -451,11 +451,25 @@ pub struct Runtime {
     worker: Option<JoinHandle<()>>,
 }
 impl Runtime {
-    /// Start a standalone core without installing or owning process logging.
-    pub fn start(data_dir: &Path, config_path: &Path) -> Result<Self> {
-        Self::start_inner(data_dir, config_path, Config::load(config_path)?, None)
+    /// Load host configuration only when its path can be published over IPC.
+    pub(crate) fn load_startup_config(config_path: &Path) -> Result<Config> {
+        config_path
+            .to_str()
+            .context("Configuration path is not valid UTF-8; IPC requires UTF-8 paths")?;
+        Config::load(config_path)
     }
 
+    /// Start a standalone core without installing or owning process logging.
+    pub fn start(data_dir: &Path, config_path: &Path) -> Result<Self> {
+        Self::start_inner(
+            data_dir,
+            config_path,
+            Self::load_startup_config(config_path)?,
+            None,
+        )
+    }
+
+    // App loads through load_startup_config before starting process logging.
     pub(crate) fn start_with_logging(
         data_dir: &Path,
         config_path: &Path,
