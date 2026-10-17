@@ -1059,6 +1059,9 @@ impl GuiApp {
                 if this
                     .update_in(cx, |this, window, cx| {
                         this.refresh(cx);
+                        if !this.window_visible {
+                            this.artwork_images.release_all_retired(window, cx);
+                        }
                         this.request_frame(window, cx);
                     })
                     .is_err()
@@ -1086,7 +1089,8 @@ impl GuiApp {
         .detach();
         let default_album = cx.new(|cx| artwork::Artwork::new(&i18n, cx));
         let album_default = default_album.read(cx).circular();
-        let artwork_images = artwork::ArtworkImages::default();
+        let artwork_images =
+            artwork::ArtworkImages::new(state.system.config.artwork_decode_budget_mb);
         let mut app = Self {
             i18n: Arc::clone(&i18n),
             localized_text,
@@ -1506,6 +1510,18 @@ impl GuiApp {
                 theme::set_theme(state.system.config.ui_theme, cx);
             }
             self.state = state;
+            if self
+                .artwork_images
+                .set_decode_budget_mb(self.state.system.config.artwork_decode_budget_mb, cx)
+            {
+                // Cached failures no longer render an Img, so notify the
+                // consumer owners as well as the root metadata preview.
+                self.album_artwork.update(cx, |_, cx| cx.notify());
+                for albums in self.album_browsers.values() {
+                    albums.update(cx, |_, cx| cx.notify());
+                }
+                cx.notify();
+            }
             self.sync_duplicate_review(cx);
             if self
                 .browser

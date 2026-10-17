@@ -50,7 +50,7 @@ tempfile = "3.27"
 zbus = "5.19"
 url = "2"
 unicode-segmentation = "1.13.3"
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "gif", "webp"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 pipewire = { version = "0.10.1", features = ["v1_2_0"] }

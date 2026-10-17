@@ -281,6 +281,8 @@ pub struct Config {
     pub log_retention_weeks: u32,
     /// Default number of rows fetched by GUI and TUI paginated views.
     pub page_size: u32,
+    /// Retained decoded real-cover frames per cover, in MiB.
+    pub artwork_decode_budget_mb: u32,
     pub library_columns: LibraryColumns,
     /// Startup presentation language: auto, en-US, or zh-CN.
     pub ui_language: String,
@@ -406,6 +408,7 @@ config_patch! {
     log_to_file: bool,
     log_retention_weeks: u32,
     page_size: u32,
+    artwork_decode_budget_mb: u32,
     library_columns: LibraryColumns,
     ui_language: String,
     ui_theme: Theme,
@@ -489,6 +492,7 @@ impl Default for Config {
             log_to_file: false,
             log_retention_weeks: 4,
             page_size: DEFAULT_PAGE_SIZE,
+            artwork_decode_budget_mb: 64,
             library_columns: LibraryColumns::default(),
             ui_language: "auto".to_owned(),
             ui_theme: Theme::default(),
@@ -652,6 +656,11 @@ impl Config {
             matches!(self.media_read_buffer_mb, 1 | 2 | 4 | 8 | 16),
             "playback.media_read_buffer_mb must be one of 1, 2, 4, 8, or 16 MiB; got {}",
             self.media_read_buffer_mb
+        );
+        ensure!(
+            (1..=1024).contains(&self.artwork_decode_budget_mb),
+            "interface.artwork_decode_budget_mb must be between 1 and 1024 MiB; got {}",
+            self.artwork_decode_budget_mb
         );
         ensure!(
             (1..=520).contains(&self.log_retention_weeks),
@@ -934,6 +943,67 @@ pub fn default_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn artwork_decode_budget_round_trips_and_rejects_out_of_range_values() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        fs::write(&path, "[interface]\n").unwrap();
+        assert_eq!(Config::load(&path).unwrap().artwork_decode_budget_mb, 64);
+        for budget in [1, 64, 257, 1024] {
+            fs::write(
+                &path,
+                format!("[interface]\nartwork_decode_budget_mb = {budget}\n"),
+            )
+            .unwrap();
+            let config = Config::load(&path).unwrap();
+            assert_eq!(config.artwork_decode_budget_mb, budget);
+            config.save(&path).unwrap();
+            let saved: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!(
+                saved["interface"]["artwork_decode_budget_mb"].as_integer(),
+                Some(i64::from(budget))
+            );
+            assert_eq!(Config::load(&path).unwrap(), config);
+        }
+        for budget in [0, 1025, u32::MAX] {
+            let config = Config {
+                artwork_decode_budget_mb: budget,
+                ..Config::default()
+            };
+            assert!(config.validate().is_err());
+            fs::write(
+                &path,
+                format!("[interface]\nartwork_decode_budget_mb = {budget}\n"),
+            )
+            .unwrap();
+            assert!(Config::load(&path).is_err());
+        }
+    }
+
+    #[test]
+    fn artwork_decode_budget_patch_preserves_concurrent_unedited_fields() {
+        let baseline = Config::default();
+        let draft = Config {
+            artwork_decode_budget_mb: 128,
+            ..baseline.clone()
+        };
+        let mut latest = Config {
+            volume: 0.25,
+            album_artwork_fps: 30,
+            ..baseline.clone()
+        };
+        let expected = Config {
+            artwork_decode_budget_mb: 128,
+            ..latest.clone()
+        };
+        ConfigPatch::between(&baseline, &draft).apply_to(&mut latest);
+        assert_eq!(latest, expected);
+
+        latest.artwork_decode_budget_mb = 256;
+        ConfigPatch::between(&baseline, &baseline).apply_to(&mut latest);
+        assert_eq!(latest.artwork_decode_budget_mb, 256);
+    }
 
     #[test]
     fn queue_replace_confirmation_defaults_and_round_trips() {
@@ -1525,6 +1595,7 @@ mod tests {
             album_artwork_period_seconds: 12.5,
             album_artwork_direction: AlbumArtworkDirection::Counterclockwise,
             album_artwork_fps: 120,
+            artwork_decode_budget_mb: 128,
             visualization_cache: false,
             page_size: 32,
         };

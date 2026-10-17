@@ -20,8 +20,11 @@ use gpui::{
 
 use super::GuiApp;
 
+mod decode;
+
 #[derive(Default)]
 struct ArtworkImagesState {
+    budget: decode::Budget,
     entries: HashMap<Arc<Path>, Weak<ArtworkImageOwner>>,
     decorations: [Weak<DecorationImageOwner>; 6],
     retired: Vec<RetiredArtworkImage>,
@@ -35,13 +38,54 @@ struct ArtworkImagesState {
 pub(super) struct ArtworkImages(Rc<RefCell<ArtworkImagesState>>);
 
 impl ArtworkImages {
+    pub(super) fn new(retained_mb: u32) -> Self {
+        Self(Rc::new(RefCell::new(ArtworkImagesState {
+            budget: decode::Budget::new(retained_mb),
+            ..ArtworkImagesState::default()
+        })))
+    }
+
+    pub(super) fn set_decode_budget_mb(&self, retained_mb: u32, cx: &mut App) -> bool {
+        self.set_decode_budget(decode::Budget::new(retained_mb), cx)
+    }
+
+    fn set_decode_budget(&self, budget: decode::Budget, cx: &mut App) -> bool {
+        let mut state = self.0.borrow_mut();
+        if state.budget == budget {
+            return false;
+        }
+        state.budget = budget;
+        let ArtworkImagesState {
+            entries, retired, ..
+        } = &mut *state;
+        for owner in entries.values().filter_map(Weak::upgrade) {
+            if let Some(decoded) = owner.image.update(cx, |image, _| {
+                image.budget = budget;
+                // Taking the item cancels its pending task before a new load
+                // can start. Completed pixels outlive the old scene below.
+                image
+                    .item
+                    .take()
+                    .and_then(|item| item.get())
+                    .and_then(Result::ok)
+            }) {
+                retired.push(RetiredArtworkImage::Decoded(decoded));
+            }
+        }
+        true
+    }
+
     fn acquire(&self, artwork: LoadedArtwork, cx: &mut App) -> Rc<ArtworkImageOwner> {
         let path = artwork.path();
-        if let Some(owner) = self.0.borrow().entries.get(&path).and_then(Weak::upgrade) {
-            return owner;
-        }
+        let budget = {
+            let state = self.0.borrow();
+            if let Some(owner) = state.entries.get(&path).and_then(Weak::upgrade) {
+                return owner;
+            }
+            state.budget
+        };
         let owner = Rc::new(ArtworkImageOwner {
-            image: ArtworkImage::new(artwork, cx),
+            image: ArtworkImage::new(artwork, budget, cx),
             registry: Rc::downgrade(&self.0),
             path: Arc::clone(&path),
         });
@@ -126,6 +170,7 @@ impl ArtworkImages {
 enum RetiredArtworkImage {
     Artwork(ArtworkViewImage),
     Decoration(Rc<DecorationImageOwner>),
+    Decoded(Arc<RenderImage>),
 }
 
 impl RetiredArtworkImage {
@@ -133,6 +178,7 @@ impl RetiredArtworkImage {
         match self {
             Self::Artwork(image) => image.owner.release(window, cx),
             Self::Decoration(owner) => owner.release(window, cx),
+            Self::Decoded(decoded) => cx.drop_image(decoded, Some(window)),
         }
     }
 }
@@ -347,10 +393,27 @@ impl ArtworkView {
         true
     }
 
-    pub(super) fn image(&self, _: &App) -> Option<Img> {
+    pub(super) fn image(&self, cx: &App) -> Option<Img> {
         let state = self.state.borrow();
         let image = state.current.as_ref()?;
-        Some(img(image.artwork.path()).image_cache(&image.owner.image))
+        // All consumers already render their default cover for None. A cached
+        // decode error is terminal for this lease, not a new load each render.
+        if image
+            .owner
+            .image
+            .read(cx)
+            .item
+            .as_ref()
+            .and_then(ImageCacheItem::get)
+            .is_some_and(|result| result.is_err())
+        {
+            return None;
+        }
+        let mut element = img(image.artwork.path()).image_cache(&image.owner.image);
+        // Img needs a stable ID to retain its animation cursor across frames.
+        element.interactivity().element_id =
+            Some(("artwork-cover", image.owner.image.entity_id()).into());
+        Some(element)
     }
 
     pub(super) fn aspect_ratio(&self, cx: &App) -> Option<f32> {
@@ -371,13 +434,15 @@ impl ArtworkView {
 /// One immutable content path and one pending/completed decode per window.
 struct ArtworkImage {
     artwork: LoadedArtwork,
+    budget: decode::Budget,
     item: Option<ImageCacheItem>,
 }
 
 impl ArtworkImage {
-    fn new(artwork: LoadedArtwork, cx: &mut App) -> Entity<Self> {
+    fn new(artwork: LoadedArtwork, budget: decode::Budget, cx: &mut App) -> Entity<Self> {
         let image = cx.new(|_| Self {
             artwork,
+            budget,
             item: None,
         });
         cx.observe_release(&image, |image, cx| {
@@ -409,7 +474,21 @@ impl ImageCache for ArtworkImage {
     ) -> Option<Result<Arc<RenderImage>, ImageCacheError>> {
         debug_assert_eq!(resource, &Resource::from(self.artwork.path()));
         self.item
-            .get_or_insert_with(|| ImageCacheItem::new(resource, cx))
+            .get_or_insert_with(|| {
+                let artwork = self.artwork.clone();
+                let budget = self.budget;
+                ImageCacheItem::from_future(
+                    async move {
+                        // Hold the source lease throughout background I/O/decode.
+                        let result = decode::load(&artwork.path(), budget);
+                        if let Err(error) = &result {
+                            tracing::error!(?error, "artwork_decode_failed");
+                        }
+                        result
+                    },
+                    cx,
+                )
+            })
             .use_image(window)
     }
 }
@@ -788,12 +867,351 @@ mod tests {
 
     const VINYL: &[u8] = include_bytes!("../../assets/album_vinyl.svg");
 
+    fn cover_wave(path: &Path, image: &[u8]) {
+        let mut picture = b"\0image/gif\0\x03\0".to_vec();
+        picture.extend_from_slice(image);
+        let mut frame = b"APIC".to_vec();
+        frame.extend_from_slice(&(picture.len() as u32).to_be_bytes());
+        frame.extend_from_slice(&[0, 0]);
+        frame.extend_from_slice(&picture);
+        let mut bytes = b"ID3\x03\0\0".to_vec();
+        for shift in [21, 14, 7, 0] {
+            bytes.push(((frame.len() >> shift) & 0x7f) as u8);
+        }
+        bytes.extend_from_slice(&frame);
+        bytes.extend_from_slice(b"RIFF\x26\0\0\0WAVEfmt \x10\0\0\0\x01\0\x01\0\x40\x1f\0\0\x80\x3e\0\0\x02\0\x10\0data\x02\0\0\0\0\x40");
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    #[gpui::test]
+    fn artwork_cover_actual_loader_shares_animation_rejects_to_default_and_retires(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        std::fs::create_dir_all(".cache").unwrap();
+        let directory = tempfile::tempdir_in(".cache").unwrap();
+        for reject in [false, true] {
+            let path = directory.path().join(format!("cover-{reject}.wav"));
+            let mut gif = decode::tests::gif();
+            if reject {
+                gif[6..10].copy_from_slice(&[0, 32, 0, 32]); // 8192-square header only
+            }
+            cover_wave(&path, &gif);
+            let manager = crate::artwork::ArtworkManager::new(directory.path());
+            let loaded = manager.load(&crate::artwork::tests::track(path)).unwrap();
+            let images = ArtworkImages::default();
+            let first = ArtworkView::new(images.clone());
+            let second = ArtworkView::new(images.clone());
+            let window = cx.add_empty_window();
+            let cache = window.update(|_, cx| {
+                first.replace(Some(loaded.clone()), cx);
+                second.replace(Some(loaded), cx);
+                assert!(Rc::ptr_eq(
+                    &first.state.borrow().current.as_ref().unwrap().owner,
+                    &second.state.borrow().current.as_ref().unwrap().owner,
+                ));
+                first
+                    .state
+                    .borrow()
+                    .current
+                    .as_ref()
+                    .unwrap()
+                    .owner
+                    .image
+                    .clone()
+            });
+            window.draw(
+                gpui::point(gpui::px(0.), gpui::px(0.)),
+                gpui::size(gpui::px(64.), gpui::px(64.)),
+                |_, cx| {
+                    let image = first.image(cx).unwrap();
+                    cx.new(|_| DecorationScene(Some(image))).into_any_element()
+                },
+            );
+            window.run_until_parked();
+            let pixels = window.update(|_, cx| {
+                let result = cache.read(cx).item.as_ref().unwrap().get().unwrap();
+                if reject {
+                    assert!(result.is_err());
+                    // Every consumer chooses its existing default cover, and
+                    // repeated renders do not restart a rejected load.
+                    for _ in 0..3 {
+                        assert!(first.image(cx).is_none());
+                        assert!(second.image(cx).is_none());
+                        assert!(
+                            cache
+                                .read(cx)
+                                .item
+                                .as_ref()
+                                .unwrap()
+                                .get()
+                                .unwrap()
+                                .is_err()
+                        );
+                    }
+                    None
+                } else {
+                    let decoded = result.unwrap();
+                    assert_eq!(decoded.frame_count(), 2);
+                    assert_eq!(decoded.delay(1).numer_denom_ms(), (130, 1));
+                    Some(Arc::downgrade(&decoded))
+                }
+            });
+            window.update(|window, cx| {
+                first.replace(None, cx);
+                images.release_retired(window);
+                window.simulate_next_frame(cx);
+            });
+            if let Some(pixels) = &pixels {
+                assert!(pixels.upgrade().is_some());
+            }
+            window.update(|window, cx| {
+                second.replace(None, cx);
+                images.release_retired(window);
+                window.simulate_next_frame(cx);
+            });
+            if let Some(pixels) = &pixels {
+                assert!(pixels.upgrade().is_none());
+            }
+            window.update(|_, cx| assert!(cache.read(cx).item.is_none()));
+        }
+    }
+
+    #[gpui::test]
+    fn artwork_budget_changes_retry_shared_covers_and_retire_previous_pixels(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        std::fs::create_dir_all(".cache").unwrap();
+        let directory = tempfile::tempdir_in(".cache").unwrap();
+        let path = directory.path().join("budget.wav");
+        cover_wave(&path, &decode::tests::gif());
+        let manager = crate::artwork::ArtworkManager::new(directory.path());
+        let loaded = manager.load(&crate::artwork::tests::track(path)).unwrap();
+        let images = ArtworkImages::default();
+        let first = ArtworkView::new(images.clone());
+        let second = ArtworkView::new(images.clone());
+        let window = cx.add_empty_window();
+        let cache = window.update(|_, cx| {
+            assert!(images.set_decode_budget(decode::tests::budget(1), cx));
+            first.replace(Some(loaded.clone()), cx);
+            second.replace(Some(loaded), cx);
+            let first = first.state.borrow();
+            let second = second.state.borrow();
+            let first = &first.current.as_ref().unwrap().owner;
+            let second = &second.current.as_ref().unwrap().owner;
+            assert!(Rc::ptr_eq(first, second));
+            first.image.clone()
+        });
+
+        draw_cover(window, &first);
+        window.run_until_parked();
+        window.update(|_, cx| {
+            assert!(first.image(cx).is_none());
+            assert!(second.image(cx).is_none());
+            assert!(!images.set_decode_budget(decode::tests::budget(1), cx));
+            assert!(
+                cache
+                    .read(cx)
+                    .item
+                    .as_ref()
+                    .unwrap()
+                    .get()
+                    .unwrap()
+                    .is_err()
+            );
+
+            assert!(images.set_decode_budget(decode::tests::budget(2), cx));
+            assert!(cache.read(cx).item.is_none());
+            assert!(first.image(cx).is_some());
+            assert!(second.image(cx).is_some());
+        });
+        draw_cover(window, &first);
+        window.run_until_parked();
+        let pixels = window.update(|_, cx| {
+            let decoded = cache
+                .read(cx)
+                .item
+                .as_ref()
+                .unwrap()
+                .get()
+                .unwrap()
+                .unwrap();
+            assert_eq!(decoded.frame_count(), 2);
+            assert!(!images.set_decode_budget(decode::tests::budget(2), cx));
+            let unchanged = cache
+                .read(cx)
+                .item
+                .as_ref()
+                .unwrap()
+                .get()
+                .unwrap()
+                .unwrap();
+            assert!(Arc::ptr_eq(&decoded, &unchanged));
+            assert!(first.image(cx).is_some());
+            assert!(second.image(cx).is_some());
+            Arc::downgrade(&decoded)
+        });
+
+        window.update(|_, cx| {
+            assert!(images.set_decode_budget(decode::tests::budget(1), cx));
+            assert!(cache.read(cx).item.is_none());
+            assert!(
+                pixels.upgrade().is_some(),
+                "old scene keeps its pixels until retirement"
+            );
+            assert_eq!(
+                cache,
+                second.state.borrow().current.as_ref().unwrap().owner.image,
+            );
+        });
+        draw_cover(window, &second);
+        window.run_until_parked();
+        window.update(|window, cx| {
+            assert!(first.image(cx).is_none());
+            assert!(second.image(cx).is_none());
+            assert!(
+                cache
+                    .read(cx)
+                    .item
+                    .as_ref()
+                    .unwrap()
+                    .get()
+                    .unwrap()
+                    .is_err()
+            );
+            images.release_retired(window);
+            assert!(pixels.upgrade().is_some());
+            window.simulate_next_frame(cx);
+        });
+        assert!(pixels.upgrade().is_none());
+        window.update(|window, cx| {
+            first.release_all_images(window, cx);
+            second.release_all_images(window, cx);
+            images.release_all_retired(window, cx);
+        });
+    }
+
+    #[gpui::test]
+    fn artwork_budget_change_cancels_pending_completion_before_it_can_publish(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        std::fs::create_dir_all(".cache").unwrap();
+        let directory = tempfile::tempdir_in(".cache").unwrap();
+        let path = directory.path().join("pending-budget.wav");
+        cover_wave(&path, &decode::tests::gif());
+        let manager = crate::artwork::ArtworkManager::new(directory.path());
+        let loaded = manager.load(&crate::artwork::tests::track(path)).unwrap();
+        for worker_finished in [false, true] {
+            let images = ArtworkImages::default();
+            let view = ArtworkView::new(images.clone());
+            let window = cx.add_empty_window();
+            let cache = window.update(|_, cx| {
+                assert!(images.set_decode_budget(decode::tests::budget(2), cx));
+                view.replace(Some(loaded.clone()), cx);
+                view.state
+                    .borrow()
+                    .current
+                    .as_ref()
+                    .unwrap()
+                    .owner
+                    .image
+                    .clone()
+            });
+            let old_scene = window.update(|_, cx| view.image(cx).unwrap());
+            let (sender, receiver) = futures::channel::oneshot::channel();
+            let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            window.update(|_, cx| {
+                let finished = finished.clone();
+                cache.update(cx, |image, cx| {
+                    image.item = Some(ImageCacheItem::from_future(
+                        async move {
+                            let result = receiver.await.expect("controlled decode sender is held");
+                            finished.store(true, std::sync::atomic::Ordering::SeqCst);
+                            result
+                        },
+                        cx,
+                    ));
+                });
+                assert!(!images.set_decode_budget(decode::tests::budget(2), cx));
+            });
+            window.run_until_parked();
+            assert!(
+                !sender.is_canceled(),
+                "unchanged budget must keep pending work"
+            );
+
+            let decoded = Arc::new(RenderImage::new([image::Frame::new(
+                image::RgbaImage::new(1, 1),
+            )]));
+            let stale_pixels = Arc::downgrade(&decoded);
+            let mut sender = Some(sender);
+            if worker_finished {
+                sender.take().unwrap().send(Ok(decoded)).unwrap();
+                while !finished.load(std::sync::atomic::Ordering::SeqCst) {
+                    assert!(window.background_executor.tick());
+                }
+            } else {
+                drop(decoded);
+            }
+            window.update(|_, cx| {
+                assert!(images.set_decode_budget(decode::tests::budget(1), cx));
+                assert!(cache.read(cx).item.is_none());
+            });
+            window.run_until_parked();
+            if let Some(sender) = sender {
+                assert!(
+                    sender
+                        .send(Ok(Arc::new(RenderImage::new([image::Frame::new(
+                            image::RgbaImage::new(1, 1)
+                        ),]))))
+                        .is_err()
+                );
+            }
+            assert!(stale_pixels.upgrade().is_none());
+            // Even a scene built under the old policy now uses the new budget.
+            window.draw(
+                gpui::point(gpui::px(0.), gpui::px(0.)),
+                gpui::size(gpui::px(64.), gpui::px(64.)),
+                |_, cx| {
+                    cx.new(|_| DecorationScene(Some(old_scene.size_full())))
+                        .into_any_element()
+                },
+            );
+            window.run_until_parked();
+            window.update(|window, cx| {
+                assert!(
+                    cache
+                        .read(cx)
+                        .item
+                        .as_ref()
+                        .unwrap()
+                        .get()
+                        .unwrap()
+                        .is_err()
+                );
+                assert!(view.image(cx).is_none());
+                view.release_all_images(window, cx);
+                images.release_all_retired(window, cx);
+            });
+        }
+    }
+
     struct DecorationScene(Option<Img>);
 
     impl Render for DecorationScene {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             self.0.take().expect("single-use test scene").size_full()
         }
+    }
+
+    fn draw_cover(window: &mut gpui::VisualTestContext, cover: &ArtworkView) {
+        window.draw(
+            gpui::point(gpui::px(0.), gpui::px(0.)),
+            gpui::size(gpui::px(64.), gpui::px(64.)),
+            |_, cx| {
+                let image = cover.image(cx).unwrap();
+                cx.new(|_| DecorationScene(Some(image))).into_any_element()
+            },
+        );
     }
 
     fn draw_decoration(window: &mut gpui::VisualTestContext, decoration: &ArtworkDecoration) {

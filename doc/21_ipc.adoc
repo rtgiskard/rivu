@@ -298,12 +298,15 @@ The frame header is six bytes. `body_length` excludes the four-byte length field
 and includes the version, message type, and serialized body.
 
 Bodies use Postcard serialization without COBS framing. The current protocol
-version is `30`; clients and servers must use matching wire schemas. The four-byte
+version is `31`; clients and servers must use matching wire schemas. The four-byte
 frame length remains little-endian; body integers follow Postcard's encoding.
 Configuration state and Configure commands include the presentation language
 (`ui_language`: `auto`, `en-US`, or `zh-CN`). Language selection does not translate
 wire identifiers or machine-readable data. Restart older clients and hosts together
 after upgrading; incompatible versions are rejected before decoding the body.
+Configuration state and Configure commands include `artwork_decode_budget_mb`;
+its integer value limits retained decoded real-cover frames per window-local
+image, independently of workspace and dimension admission.
 Version 23 adds exact Library now-playing location queries and responses; the
 Postcard enum schema is incompatible with earlier versions.
 Version 27 replaces queue/playlist batch `after` and `next` with scoped matching-rank

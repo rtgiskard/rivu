@@ -87,6 +87,7 @@ enum Field {
     PlayCountThreshold,
     LogRetentionWeeks,
     MediaReadBuffer,
+    ArtworkDecodeBudget,
     Font,
     Scale,
     LayoutSnapGrid,
@@ -132,6 +133,7 @@ impl Field {
             Self::PlayCountThreshold => "settings-play-count-threshold",
             Self::LogRetentionWeeks => "settings-log-retention-weeks",
             Self::MediaReadBuffer => "settings-media-read-buffer-mib",
+            Self::ArtworkDecodeBudget => "settings-artwork-decode-budget-mib",
             Self::Font => "settings-font-family",
             Self::Scale => "settings-interface-scale",
             Self::LayoutSnapGrid => "settings-layout-grid-spacing-px",
@@ -201,6 +203,7 @@ impl Field {
             Self::PlayCountThreshold => settings.tr("settings-play-count-threshold-hint"),
             Self::LogRetentionWeeks => "1–520.".into(),
             Self::MediaReadBuffer => settings.tr("settings-media-buffer-hint"),
+            Self::ArtworkDecodeBudget => settings.tr("settings-artwork-decode-budget-hint"),
             Self::Font => "".into(),
             Self::Scale => "0.75–2.".into(),
             Self::LayoutSnapGrid => settings.tr("settings-layout-grid-hint"),
@@ -712,6 +715,7 @@ impl Settings {
             Field::PlayCountThreshold,
             Field::LogRetentionWeeks,
             Field::MediaReadBuffer,
+            Field::ArtworkDecodeBudget,
             Field::Font,
             Field::Scale,
             Field::LayoutSnapGrid,
@@ -982,6 +986,12 @@ impl Settings {
             unchanged,
             cx,
         );
+        self.set_value(
+            Field::ArtworkDecodeBudget,
+            self.draft.artwork_decode_budget_mb.to_string(),
+            unchanged,
+            cx,
+        );
         self.font_value = self.draft.ui_font.clone();
         self.set_value(Field::Font, self.draft.ui_font.clone(), unchanged, cx);
         self.set_value(Field::Scale, self.draft.ui_scale.to_string(), unchanged, cx);
@@ -1211,6 +1221,7 @@ impl Settings {
         config.play_count_threshold_percent = self.number(Field::PlayCountThreshold, cx)?;
         config.log_retention_weeks = self.number(Field::LogRetentionWeeks, cx)?;
         config.media_read_buffer_mb = self.number(Field::MediaReadBuffer, cx)?;
+        config.artwork_decode_budget_mb = self.number(Field::ArtworkDecodeBudget, cx)?;
         config.ui_font = self.value(Field::Font, cx).trim().to_owned();
         if config.ui_font.is_empty() {
             config.ui_font = "sans-serif".to_owned();
@@ -1818,6 +1829,12 @@ impl Settings {
                         )),
                 ),
         ));
+        content = column()
+            .gap_2()
+            .child(self.field(Field::ArtworkDecodeBudget, cx))
+            .child(caption(colors, self.tr("settings-artwork-memory-help")))
+            .child(caption(colors, self.tr("settings-artwork-disk-help")))
+            .child(content);
         if let Some((days, clean)) = self.artwork_cache_busy {
             content = content.child(status_message(
                 colors,

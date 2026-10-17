@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-pub(super) const PROTOCOL_VERSION: u8 = 30;
+pub(super) const PROTOCOL_VERSION: u8 = 31;
 pub(super) const MAX_REQUEST: usize = 4 * 1024 * 1024;
 pub(super) const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 pub(super) const MAX_CLIENTS: usize = 16;
@@ -1248,6 +1248,7 @@ pub(super) struct WireConfig {
     album_artwork_period_seconds: f32,
     album_artwork_direction: crate::config::AlbumArtworkDirection,
     album_artwork_fps: u16,
+    artwork_decode_budget_mb: u32,
     spectrogram_labels: bool,
     spectrogram_interpolate: bool,
     spectrogram_sampling_points_scale: f32,
@@ -1337,6 +1338,7 @@ impl From<&crate::config::Config> for WireConfig {
             album_artwork_period_seconds: value.album_artwork_period_seconds,
             album_artwork_direction: value.album_artwork_direction,
             album_artwork_fps: value.album_artwork_fps,
+            artwork_decode_budget_mb: value.artwork_decode_budget_mb,
             spectrogram_labels: value.spectrogram_labels,
             spectrogram_interpolate: value.spectrogram_interpolate,
             spectrogram_sampling_points_scale: value.spectrogram_sampling_points_scale,
@@ -1428,6 +1430,7 @@ impl From<WireConfig> for crate::config::Config {
             album_artwork_period_seconds: value.album_artwork_period_seconds,
             album_artwork_direction: value.album_artwork_direction,
             album_artwork_fps: value.album_artwork_fps,
+            artwork_decode_budget_mb: value.artwork_decode_budget_mb,
             spectrogram_labels: value.spectrogram_labels,
             spectrogram_interpolate: value.spectrogram_interpolate,
             spectrogram_sampling_points_scale: value.spectrogram_sampling_points_scale,

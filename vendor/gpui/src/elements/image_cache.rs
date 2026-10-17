@@ -178,6 +178,15 @@ impl ImageCacheItem {
     /// Starts loading an image into a new cache entry.
     pub fn new(source: &Resource, cx: &mut App) -> Self {
         let future = AssetLogger::<ImageAssetLoader>::load(source.clone(), cx);
+        Self::from_future(future, cx)
+    }
+
+    /// Starts a custom background load with the same cancellation and view
+    /// notifications as resource-backed entries. This does not cache globally.
+    pub fn from_future(
+        future: impl Future<Output = Result<Arc<RenderImage>, ImageCacheError>> + Send + 'static,
+        cx: &App,
+    ) -> Self {
         Self(CachedLoad::new(future, cx))
     }
 

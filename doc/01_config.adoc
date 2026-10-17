@@ -213,8 +213,8 @@ shortened in the middle; hover to see the full path. The list scrolls within the
 editor. Paths retain semicolons and trailing spaces; they are not entered as
 delimited text. Removals take effect only on Apply; Discard drops them.
 The sidebar has four groups: Library, Playback & Audio, Interface, and
-Visualizations. Library includes scan settings and maintenance; Playback & Audio
-contains playback, output, decoding, and read buffering. Interface contains basic
+Visualizations. Library includes scan settings, Covers & cache, and maintenance;
+Playback & Audio contains playback, output, decoding, and read buffering. Interface contains basic
 preferences, layout, album artwork, desktop integration, and diagnostic logging.
 Interface presents these sections together on one scrollable page, without
 separate sidebar subpages. Panel-specific artwork settings remain a focused editor.
@@ -250,6 +250,17 @@ cannot replace the draft or feedback of a reopened editor.
 Interface → Layout includes Layout snapping and Layout grid spacing. These save
 `interface.layout_snap_enabled` (default `true`) and `interface.layout_snap_grid_px` (default `16`,
 integer `1`–`64` logical pixels before interface scaling) in `config.toml`.
+
+Library → Covers & cache includes Cover decode budget (MiB per cover).
+It saves `interface.artwork_decode_budget_mb`: an integer from `1` to `1024`,
+default `64`. The limit includes all retained decoded frames and frame overhead
+for one cover; identical covers share a decode within a window, while different
+covers and windows add their own costs. Apply re-evaluates open covers, including
+previously rejected images; Discard leaves the active budget unchanged.
+Exceeding the budget shows the default cover rather than a partial animation.
+Increasing it does not relax the fixed workspace admission estimate or dimension
+limits, and is not a process/GPU memory cap. See
+link:22_cache.adoc#_artwork_lookup_retention[Artwork resource boundaries].
 
 Hover settings fields for accepted ranges and input syntax; inactive fields explain
 which setting enables them. Apply errors retain the specific cause; hover to read
@@ -390,8 +401,8 @@ See link:../readme.adoc[README] for application lifecycle and host behavior.
 
 === Artwork cache maintenance
 
-Settings → Library → Artwork cache provides manual maintenance of embedded
-cover files. Enter a positive whole number in `Expire files older than (days)`
+Settings → Library → Covers & cache also provides manual maintenance of encoded
+cover files on disk. Enter a positive whole number in `Expire files older than (days)`
 (initially 30), then choose `Calculate usage` or `Clean expired`. Neither opening
 Settings nor starting Rivu scans this directory. These actions run immediately
 in the background, do not require Apply, and are not undone by Discard.

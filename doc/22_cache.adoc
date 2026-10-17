@@ -338,7 +338,8 @@ Within one window, metadata previews, album cards, and the large artwork panel
 share one pending load or completed decode per immutable content path, even
 when different tracks reference the same bytes. Each consumer retains its own
 lookup identity and source-file protection. Loading starts only when a preview
-requests the image and uses GPUI's background loader, not render-time file I/O.
+requests the image and runs the artwork-specific bounded decoder on GPUI's
+background executor, not render-time file I/O.
 
 Replaced or hidden consumers retire through a window-owned queue after scene
 replacement; removed panels need not paint again. Releasing one consumer cannot
@@ -380,12 +381,41 @@ media-cover/MPRIS disk paths and encoded-file maintenance are unchanged.
 
 Revisiting an image after its last consumer retires decodes it again; there is
 no idle decoded-image cache across selections or windows. A still-live consumer
-can supply the shared decode. GPUI still handles display scaling; all animation
-frames are retained and preview playback behavior is unchanged.
-Rivu does not generate thumbnails or resize decoded real-cover pixel buffers:
-a single large image or multi-frame animation can still consume substantial
-memory. Encoded-file maintenance does not measure or reclaim decoded images,
-and the encoded 8 MiB admission limit is not a decoded-pixel memory limit.
+can supply the shared decode. Each real-cover decode uses
+`interface.artwork_decode_budget_mb` (default `64`, range `1`–`1024` MiB),
+including cumulative BGRA pixels and conservative frame/vector overhead. The
+budget includes every composited GIF/WebP animation frame; even tiny frames
+incur an overhead charge. It applies per immutable content path per window, not
+across all active/retired images or windows. Settings operation is described in
+link:01_config.adoc#_desktop_settings[Desktop settings].
+
+A committed budget change invalidates shared cover loads and completed failures,
+retires completed pixels at the existing scene boundary, and refreshes all cover
+consumers. Unchanged budgets retain their decodes. Pending old items are cancelled;
+already-running synchronous decode work may finish, but cannot publish its old
+result. Hidden windows flush retirement without waiting for another frame.
+Re-decoding and scene retirement can temporarily overlap allocations; lowering
+the budget is not instantaneous RSS reclamation. Settings drafts do not change
+the active policy.
+
+Before pixel decoding, dimensions must be nonzero and at most 4096 per side.
+A separate 64 MiB workspace admission estimate charges four RGBA canvases
+(at most 16 MiB per canvas), with additional checks for native static-pixel
+conversion costs. GIF receives decoder allocation limits; WebP canvas, frame
+rectangle and embedded VP8/VP8L dimensions are checked before pixel decode.
+This estimate is not a hard codec-scratch, process-RSS or GPU-resource cap:
+encoded input, codec state, transient buffers and renderer textures have separate
+costs. Simultaneously live/retired owners and other windows add their own costs.
+
+An over-budget or corrupt cover is rejected as a whole, logged, and replaced
+with the existing default cover in metadata previews, album cards and the artwork
+panel. No partial animation or silent first-frame fallback is published. Accepted
+GIF/WebP animations retain all frames and original delays. Stable element IDs
+retain their playback cursors; multiple artwork panels share decoded pixels but
+not cursor state. GPUI still handles display scaling; Rivu does not resize
+real-cover buffers or generate thumbnails. Trusted decorations and generated
+default artwork keep their separate policies. Encoded-file maintenance does not
+measure or reclaim decoded images; the encoded 8 MiB limit is not a pixel budget.
 
 == Font and rendering resources
 

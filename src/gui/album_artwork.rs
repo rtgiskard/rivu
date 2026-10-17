@@ -513,7 +513,11 @@ impl AlbumArtwork {
     ) -> impl IntoElement {
         let theme = crate::gui::theme::palette(cx);
         self.request_frame(window, cx);
-        let image = self.view.image(cx);
+        let image = self.view.image(cx).map(|mut image| {
+            // Multiple panels share a decode, not their playback cursor.
+            image.interactivity().element_id = Some(("album-artwork-cover", id).into());
+            image
+        });
         let default_album = self.default_album.clone();
         let instance = self
             .instances
