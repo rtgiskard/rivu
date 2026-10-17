@@ -962,7 +962,8 @@ impl GuiApp {
         // Static labels are measured even before values load, using the caption font.
         // Every card shares the same two column widths.
         let label_widths = std::array::from_fn(|index| {
-            file.iter()
+            let width = file
+                .iter()
                 .chain(&metadata)
                 .chain(&tags)
                 .map(|fields| &fields[index].0)
@@ -982,7 +983,10 @@ impl GuiApp {
                         .width()
                         .ceil()
                 })
-                .fold(px(0.), gpui::Pixels::max)
+                .fold(px(0.), gpui::Pixels::max);
+            // Layout rounds fixed widths to device pixels; never round a measured label down.
+            let scale = window.scale_factor();
+            px((f32::from(width) * scale).ceil() / scale)
         });
         let path_tooltip: SharedString = track
             .filter(|track| track.missing)

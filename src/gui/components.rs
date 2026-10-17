@@ -586,11 +586,10 @@ pub(crate) fn metadata_item(
     label_width: gpui::Pixels,
     copy: Option<Stateful<Div>>,
 ) -> Div {
-    // Captions use 0.75rem, so 1.5rem is a 2em label/value gap.
     row()
         .items_baseline()
         .group("metadata-field")
-        .gap(gpui::rems(1.5))
+        .gap(gpui::rems(1.))
         .flex_1()
         .min_w_0()
         .child(caption(theme, label).w(label_width).flex_shrink_0())

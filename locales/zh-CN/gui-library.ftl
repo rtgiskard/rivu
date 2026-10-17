@@ -166,7 +166,7 @@ gl-unsaved = 有未保存的更改
 gl-track-details = 曲目详情
 gl-copy-value = 复制值
 
-gl-file-path = 文件路径
+gl-file-path = 路径
 
 gl-missing = 缺失
 

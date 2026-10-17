@@ -166,7 +166,7 @@ gl-unsaved = Unsaved changes
 gl-track-details = Track details
 gl-copy-value = Copy value
 
-gl-file-path = File path
+gl-file-path = Path
 
 gl-missing = Missing
 
