@@ -490,7 +490,7 @@ impl GuiApp {
                         cx.notify();
                     },
                 ))
-                .child(components::danger_control(
+                .child(components::danger_menu_item(
                     theme,
                     menu_item(
                         "content-confirm-remove",
@@ -628,7 +628,7 @@ impl GuiApp {
             }
             if state.remove.is_some() {
                 menu = menu.child(components::menu_separator(theme)).child(
-                    components::danger_control(
+                    components::danger_menu_item(
                         theme,
                         menu_item(
                             "content-remove",

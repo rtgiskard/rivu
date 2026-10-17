@@ -985,7 +985,7 @@ impl Render for GuiApp {
                                 cx,
                                 |this, window, cx| this.save_queue_as_playlist(window, cx),
                             ))
-                            .child(components::danger_control(
+                            .child(components::danger_menu_item(
                                 theme,
                                 menu_item(
                                     "clear-queue",
@@ -1239,7 +1239,7 @@ impl Render for GuiApp {
                                         cx.notify();
                                     },
                                 ))
-                                .child(components::danger_control(
+                                .child(components::danger_menu_item(
                                     theme,
                                     menu_item(
                                         "confirm-clear-queue",

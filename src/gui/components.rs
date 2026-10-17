@@ -704,6 +704,14 @@ pub(crate) fn context_menu_container(
         .rounded_md()
 }
 
+/// Destructive menu rows use text, not a button border, to identify the action.
+pub(crate) fn danger_menu_item(
+    theme: &'static crate::theme::Palette,
+    control: Stateful<Div>,
+) -> Stateful<Div> {
+    control.text_color(rgb(theme.error))
+}
+
 /// Standard menu item shell; pages only provide the action callback.
 pub(crate) fn menu_item_style(
     theme: &'static crate::theme::Palette,
@@ -713,7 +721,7 @@ pub(crate) fn menu_item_style(
     div()
         .id(id)
         .tab_index(0)
-        .focus(|style| style.border_color(rgb(theme.accent)))
+        .focus(|style| style.bg(rgb(theme.selected)))
         .w_full()
         .min_h(gpui::rems(2.0))
         .px(gpui::px(UI_INSET))
@@ -727,7 +735,7 @@ pub(crate) fn menu_item_style(
         .border_color(gpui::transparent_black())
         .bg(rgb(theme.panel).alpha(0.0))
         .rounded_sm()
-        .hover(|style| style.bg(rgb(theme.highlight)))
+        .hover(|style| style.bg(rgb(theme.selected_hover)))
         .child(div().flex_1().min_w_0().whitespace_normal().child(label))
 }
 

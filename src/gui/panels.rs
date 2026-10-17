@@ -1720,7 +1720,7 @@ impl GuiApp {
                         );
                     },
                 ))
-                .child(danger_control(
+                .child(super::components::danger_menu_item(
                     theme,
                     super::menu_item(
                         "playlist-row-delete",
