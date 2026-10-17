@@ -2045,6 +2045,52 @@ fn maintenance_retries_after_reader_releases_and_keeps_records() {
 }
 
 #[test]
+fn playlist_name_conflicts_preserve_catalog_entries_and_queue() {
+    let (_directory, store) = search_store();
+    let (mix, _) = store.create_playlist_from_queue("Mix").unwrap();
+    let other = store.create_playlist("Other").unwrap();
+    let catalog = store.playlist_summary_page(None, 0, 20).unwrap();
+    let entries = playlist_entries(&store, mix);
+    let queue = store.queue_page(None, 0, 20).unwrap();
+
+    assert!(store.create_playlist("Mix").is_err());
+    assert!(store.create_playlist_with_tracks("Mix", &[1]).is_err());
+    assert!(store.create_playlist_from_queue("Mix").is_err());
+    assert!(store.rename_playlist(other, "Mix").is_err());
+    assert!(!store.rename_playlist(mix, "Mix").unwrap());
+    assert_eq!(store.playlist_summary_page(None, 0, 20).unwrap(), catalog);
+    assert_eq!(playlist_entries(&store, mix), entries);
+    assert_eq!(store.queue_page(None, 0, 20).unwrap(), queue);
+
+    store.create_playlist("mix").unwrap();
+    store.create_playlist(" Mix ").unwrap();
+    assert!(store.rename_playlist(mix, "Renamed").unwrap());
+    let reused = store.create_playlist("Mix").unwrap();
+    store.delete_playlist(reused).unwrap();
+    assert!(store.rename_playlist(other, "Mix").unwrap());
+}
+
+#[test]
+fn legacy_duplicate_playlist_names_remain_readable_and_can_be_resolved() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("library.db");
+    let store = Store::open(&path).unwrap();
+    store
+        .conn
+        .execute_batch("INSERT INTO playlists(id,name) VALUES(1,'Mix'),(2,'Mix')")
+        .unwrap();
+    drop(store);
+    let store = Store::open(&path).unwrap();
+    assert_eq!(store.playlist_ids().unwrap(), [1, 2]);
+    assert!(!store.rename_playlist(1, "Mix").unwrap());
+    assert!(store.create_playlist("Mix").is_err());
+    assert!(store.rename_playlist(2, "Other").unwrap());
+    assert!(store.rename_playlist(2, "Mix").is_err());
+    store.delete_playlist(1).unwrap();
+    assert!(store.rename_playlist(2, "Mix").unwrap());
+}
+
+#[test]
 fn playlist_addition_with_missing_track_rolls_back_new_entries() {
     let store = Store::open(Path::new(":memory:")).unwrap();
     store

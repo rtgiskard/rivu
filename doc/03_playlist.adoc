@@ -18,8 +18,12 @@ Creating a playlist from a queue commits the name and entries together. If an
 entry cannot be saved, no empty playlist is left behind.
 
 Playlist names must contain a non-whitespace character and must not contain
-control characters. Creating, renaming, saving a queue, and importing use the
-same rule. Accepted names retain their leading and trailing whitespace.
+control characters. Creating, renaming, saving a queue, and importing reject a
+name already used by another playlist. Names are compared exactly, including
+case and whitespace; accepted names retain their leading and trailing whitespace.
+Renaming to the playlist's current name leaves it unchanged. Existing duplicate
+names remain accessible by ID and can be resolved by renaming or deleting;
+they are not automatically changed.
 
 [source,sh]
 ----

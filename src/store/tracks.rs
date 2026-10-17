@@ -1380,7 +1380,7 @@ mod request_tests {
                     .collect::<Vec<_>>(),
                 [included]
             );
-            let playlist = store.create_playlist("Literal range")?;
+            let playlist = store.create_playlist(root)?;
             store.add_playlist_sources(playlist, &[path.to_path_buf()], &[included])?;
             assert_eq!(store.playlist_track_ids(playlist, 10)?, [included]);
         }

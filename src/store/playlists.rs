@@ -401,6 +401,7 @@ impl Store {
     pub fn create_playlist_with_tracks(&self, name: &str, tracks: &[i64]) -> Result<i64> {
         Self::validate_playlist_name(name)?;
         let tx = self.conn.unchecked_transaction()?;
+        available_playlist_name(&tx, name)?;
         tx.execute("INSERT INTO playlists(name)VALUES(?)", [name])?;
         let id = tx.last_insert_rowid();
         append_tracks(&tx, id, tracks)?;
@@ -411,6 +412,7 @@ impl Store {
     pub fn create_playlist_from_queue(&self, name: &str) -> Result<(i64, bool)> {
         Self::validate_playlist_name(name)?;
         let tx = self.conn.unchecked_transaction()?;
+        available_playlist_name(&tx, name)?;
         tx.execute("INSERT INTO playlists(name) VALUES(?1)", [name])?;
         let id = tx.last_insert_rowid();
         let inserted = tx.execute("WITH first AS (SELECT track_id,MIN(position) AS position FROM queue_entries GROUP BY track_id) INSERT INTO playlist_entries(playlist_id,track_id,position) SELECT ?1,track_id,row_number() OVER (ORDER BY position,track_id)-1 FROM first ORDER BY position,track_id", [id])?;
@@ -420,7 +422,18 @@ impl Store {
     pub fn rename_playlist(&self, id: i64, name: &str) -> Result<bool> {
         Self::validate_playlist_name(name)?;
         let tx = self.conn.unchecked_transaction()?;
-        exists_playlist(&tx, id)?;
+        let unchanged: bool = tx
+            .query_row(
+                "SELECT name=?2 FROM playlists WHERE id=?1",
+                params![id, name],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| anyhow!("playlist {id} does not exist"))?;
+        if unchanged {
+            return Ok(false);
+        }
+        available_playlist_name(&tx, name)?;
         let updated = tx.execute(
             "UPDATE playlists SET name=?1 WHERE id=?2 AND name IS NOT ?1",
             params![name, id],
@@ -600,6 +613,18 @@ fn append_tracks(tx: &Transaction<'_>, id: i64, tracks: &[i64]) -> Result<usize>
     Ok(tx.execute("WITH selected AS (SELECT value AS track_id,MIN(CAST(key AS INTEGER)) AS ordinal FROM json_each(?2) GROUP BY value), additions AS (SELECT track_id,ordinal FROM selected WHERE NOT EXISTS(SELECT 1 FROM playlist_entries WHERE playlist_id=?1 AND playlist_entries.track_id=selected.track_id)) INSERT INTO playlist_entries(playlist_id,track_id,position) SELECT ?1,track_id,(SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries WHERE playlist_id=?1)+row_number() OVER (ORDER BY ordinal)-1 FROM additions ORDER BY ordinal", params![id, tracks])?)
 }
 
+fn available_playlist_name(tx: &Transaction<'_>, name: &str) -> Result<()> {
+    let taken: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM playlists WHERE name=?1)",
+        [name],
+        |row| row.get(0),
+    )?;
+    if taken {
+        bail!("A playlist named {name:?} already exists");
+    }
+    Ok(())
+}
+
 fn exists_playlist(tx: &Transaction<'_>, id: i64) -> Result<()> {
     if !tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM playlists WHERE id=?)",
@@ -756,17 +781,29 @@ mod request_tests {
             assert_eq!(store.playlist_entries_page(original, None, 0, 10)?, entries);
         }
         for name in ["  Mix \u{2003} ", "混音", "Mix\u{200b}"] {
-            let plain = store.create_playlist(name)?;
-            let with_tracks = store.create_playlist_with_tracks(name, &[1])?;
-            let (from_queue, _) = store.create_playlist_from_queue(name)?;
-            assert!(store.rename_playlist(original, name)?);
-            let summaries = store.playlist_summary_page(None, 0, 100)?.rows;
-            for id in [plain, with_tracks, from_queue, original] {
+            for kind in 0..3 {
+                let id = match kind {
+                    0 => store.create_playlist(name)?,
+                    1 => store.create_playlist_with_tracks(name, &[1])?,
+                    _ => store.create_playlist_from_queue(name)?.0,
+                };
+                let summaries = store.playlist_summary_page(None, 0, 100)?.rows;
                 assert_eq!(
                     summaries.iter().find(|row| row.id == id).unwrap().name,
                     name
                 );
+                store.delete_playlist(id)?;
             }
+            assert!(store.rename_playlist(original, name)?);
+            let summaries = store.playlist_summary_page(None, 0, 100)?.rows;
+            assert_eq!(
+                summaries
+                    .iter()
+                    .find(|row| row.id == original)
+                    .unwrap()
+                    .name,
+                name
+            );
         }
         Ok(())
     }
