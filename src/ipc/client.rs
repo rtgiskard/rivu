@@ -1,6 +1,8 @@
-use super::{
-    SessionState, WireCommand, WireQuery, WireRequest, WireResponse, read_response_frame,
-    state_response, unpack_error, unpack_hello, write_request_frame_buffered,
+use super::protocol::{
+    SessionState, WireCommand, WireQuery, WireRequest, WireResponse, state_response,
+};
+use super::transport::{
+    read_response_frame, unpack_error, unpack_hello, write_request_frame_buffered,
 };
 use crate::{
     app::AppCommand,

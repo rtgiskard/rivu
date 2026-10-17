@@ -4,9 +4,6 @@ mod protocol;
 mod server;
 mod transport;
 
-use protocol::*;
-use transport::*;
-
 pub use client::{
     ClientSession, InstanceChanged, client_session, client_session_with_cancel, get_state, query,
     request_ack,

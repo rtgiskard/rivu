@@ -1,8 +1,8 @@
-use super::{
+use super::protocol::{
     HELLO_TIMEOUT, HelloResponse, MAX_CLIENTS, MAX_REQUEST, SessionState, UNKNOWN_INSTANCE,
-    WireRequest, WireResponse, decode_request_frame, read_frame, wire_state, write_error_frame,
-    write_frame_buffered,
+    WireRequest, WireResponse, wire_state,
 };
+use super::transport::{decode_request_frame, read_frame, write_error_frame, write_frame_buffered};
 use crate::core::CoreHandle;
 use crate::{
     app::{AppCommand, AppHandle},

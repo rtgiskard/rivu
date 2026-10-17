@@ -1,4 +1,4 @@
-use super::{
+use super::protocol::{
     HelloResponse, MAX_REQUEST, MAX_RESPONSE, PROTOCOL_VERSION, RequestType, ResponseType,
     UNKNOWN_INSTANCE, WireRequest, WireResponse,
 };

@@ -1,4 +1,5 @@
 use super::*;
+use super::{protocol::*, transport::*};
 use crate::{
     app::{AppCommand, AppHandle},
     model::{Command, Query},
