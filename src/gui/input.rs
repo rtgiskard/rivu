@@ -29,6 +29,8 @@ actions!(
         SelectAll,
         Home,
         End,
+        SelectHome,
+        SelectEnd,
         Paste,
         Cut,
         Copy,
@@ -126,6 +128,8 @@ impl Input {
             KeyBinding::new("shift-right", SelectRight, Some("Input")),
             KeyBinding::new("home", Home, Some("Input")),
             KeyBinding::new("end", End, Some("Input")),
+            KeyBinding::new("shift-home", SelectHome, Some("Input")),
+            KeyBinding::new("shift-end", SelectEnd, Some("Input")),
             KeyBinding::new("enter", SubmitInput, Some("Input")),
             KeyBinding::new("ctrl-a", SelectAll, Some("Input")),
             KeyBinding::new("ctrl-c", Copy, Some("Input")),
@@ -239,6 +243,14 @@ impl Input {
 
     fn end(&mut self, _: &End, _: &mut Window, cx: &mut Context<Self>) {
         self.move_to(self.content.len(), cx);
+    }
+
+    fn select_home(&mut self, _: &SelectHome, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(0, cx);
+    }
+
+    fn select_end(&mut self, _: &SelectEnd, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.content.len(), cx);
     }
 
     fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
@@ -834,6 +846,8 @@ impl Render for Input {
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::home))
             .on_action(cx.listener(Self::end))
+            .on_action(cx.listener(Self::select_home))
+            .on_action(cx.listener(Self::select_end))
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::copy))
@@ -918,6 +932,71 @@ mod tests {
                     }
                 })
         }
+    }
+
+    #[test]
+    fn endpoint_selection_preserves_anchor_across_direction_changes() {
+        let mut cx = gpui::TestAppContext::single();
+        cx.update(Input::init);
+        let input = cx.update(|cx| cx.new(|cx| Input::new("a中😀z", "", cx)));
+        let window = cx.add_window({
+            let input = input.clone();
+            move |_, _| InputDialog {
+                input,
+                escapes: Default::default(),
+            }
+        });
+        let handle = window.into();
+        cx.update_window(handle, |_, window, cx| {
+            input.update(cx, |this, cx| {
+                this.focus_handle.focus(window, cx);
+                this.move_to(4, cx);
+            });
+        })
+        .unwrap();
+
+        for (key, range, reversed) in [
+            ("shift-home", 0..4, true),
+            ("shift-home", 0..4, true),
+            ("shift-end", 4..9, false),
+            ("shift-home", 0..4, true),
+            ("end", 9..9, false),
+            ("shift-home", 0..9, true),
+            ("home", 0..0, false),
+            ("shift-end", 0..9, false),
+            ("shift-home", 0..0, false),
+        ] {
+            cx.update_window(handle, |_, window, cx| {
+                window.draw(cx).clear(cx);
+                window.dispatch_event(
+                    gpui::KeyDownEvent {
+                        keystroke: gpui::Keystroke::parse(key).unwrap(),
+                        is_held: false,
+                        prefer_character_input: false,
+                    }
+                    .to_platform_input(),
+                    cx,
+                );
+                let field = input.read(cx);
+                assert_eq!(field.selected_range, range, "{key}");
+                assert_eq!(field.selection_reversed, reversed, "{key}");
+                assert_eq!(field.content.as_ref(), "a中😀z");
+            })
+            .unwrap();
+        }
+        cx.update_window(handle, |_, window, cx| {
+            input.update(cx, |this, cx| {
+                this.set_text("", cx);
+                this.select_end(&SelectEnd, window, cx);
+                this.select_home(&SelectHome, window, cx);
+                assert_eq!(this.selected_range, 0..0);
+                this.set_text("locked", cx);
+                this.set_enabled(false, cx);
+                this.select_home(&SelectHome, window, cx);
+                assert_eq!(this.selected_range, 6..6);
+            });
+        })
+        .unwrap();
     }
 
     #[test]

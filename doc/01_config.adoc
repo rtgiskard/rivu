@@ -237,8 +237,9 @@ Hover settings fields for accepted ranges and input syntax; inactive fields expl
 which setting enables them. Apply errors retain the specific cause; hover to read
 the full message or use Copy to copy it.
 Single-line desktop text fields scroll horizontally to keep the caret visible.
-Use Left/Right to navigate long values, Home/End to reach either end, or
-Shift+Left/Right to extend a selection beyond the visible text.
+Use Left/Right to navigate long values or Home/End to reach either end.
+Shift+Left/Right extends a selection beyond the visible text; Shift+Home/End
+selects to the beginning/end while preserving the selection anchor.
 
 Shared visualization settings apply as follows:
 
