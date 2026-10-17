@@ -8,8 +8,19 @@ impl Core {
         shutdown: Receiver<()>,
         control: &RuntimeControl,
     ) {
-        let ffmpeg_status_ticks = crossbeam_channel::tick(Duration::from_millis(100));
+        let not_polling = crossbeam_channel::never();
+        let mut ffmpeg_status_ticks = None;
         loop {
+            // Only an unresolved one-time load needs polling, including loads
+            // initiated by GUI waveform work outside the audio engine. Preserve
+            // the timer across unrelated requests, and drop it once resolved.
+            if self.state.system.ffmpeg_status == "not loaded" {
+                ffmpeg_status_ticks
+                    .get_or_insert_with(|| crossbeam_channel::tick(Duration::from_millis(100)));
+            } else {
+                ffmpeg_status_ticks = None;
+            }
+            let ffmpeg_status_tick = ffmpeg_status_ticks.as_ref().unwrap_or(&not_polling);
             select! {
                 recv(shutdown) -> _ => {
                     self.state.system.shutting_down = true;
@@ -93,12 +104,8 @@ impl Core {
                         self.relocation_event(event);
                     }
                 }
-                recv(ffmpeg_status_ticks) -> _ => {
-                    // Publish the one-time decoder load result, including loads
-                    // from GUI waveform work outside the engine.
-                    if self.state.system.ffmpeg_status == "not loaded"
-                        && audio::ffmpeg_load_attempted()
-                    {
+                recv(ffmpeg_status_tick) -> _ => {
+                    if audio::ffmpeg_load_attempted() {
                         self.state.system.ffmpeg_status = audio::ffmpeg_status()
                             .unwrap_or_else(|error| format!("unavailable: {error:#}"));
                         self.publish();

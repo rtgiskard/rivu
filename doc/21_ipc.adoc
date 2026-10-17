@@ -238,6 +238,14 @@ opener callback. Shutdown uses a bounded lifecycle signal independent of the
 business queue. IPC shutdown acknowledgements are drained before transport and
 socket retirement, and service joins occur outside GPUI quit callbacks.
 
+Core owns a 100 ms FFmpeg status poll only while the enabled decoder status is
+`not loaded`. It observes the nonblocking one-time load result, including loads
+initiated by GUI waveform work outside the audio engine; status checks never
+start or wait for a load. Unrelated requests retain the same pending timer.
+Disabling FFmpeg or publishing its success/failure result drops the timer;
+configuration changes re-evaluate demand before Core waits again. Disabled,
+resolved, and native-only builds retain no FFmpeg status polling wakeups.
+
 App's media manager owns MPRIS registration and the resulting publisher. Each
 enable attempt uses one temporary registration worker; the manager remains
 responsive to core changes and shutdown. Disabling or stopping cancels the

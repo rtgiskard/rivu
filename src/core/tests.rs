@@ -7668,3 +7668,45 @@ fn accepted_import_allows_dispatch_and_cancellation_before_commit() {
         0
     );
 }
+
+#[test]
+fn ffmpeg_external_load_result_survives_runtime_disable_and_reenable() {
+    let (directory, mut core) = fixture();
+    let _audio = recording_audio(&mut core);
+    Arc::make_mut(&mut core.state.system.config).ffmpeg_enabled = false;
+    core.state.system.ffmpeg_status = "disabled".into();
+    let (handle, control, worker, _publications) = navigation_runtime(core);
+    let changes = handle.subscribe();
+    let configure = |enabled| {
+        let mut config = handle.config_snapshot().as_ref().clone();
+        config.ffmpeg_enabled = enabled;
+        let ack = handle.operation_ack(
+            Operation::Command(Command::Configure {
+                config: Arc::new(config),
+            }),
+            Duration::from_secs(5),
+        );
+        assert!(ack.ok, "{:?}", ack.error);
+    };
+
+    configure(true);
+    // An enhanced probe attempts the same process-wide load as GUI waveform
+    // work, without an audio-engine event. A missing file avoids decoder I/O;
+    // both successful and failed library loads must become terminal status.
+    assert!(audio::probe_details(&directory.path().join("missing.wav"), true, true).is_err());
+    let expected = audio::ffmpeg_status().unwrap_or_else(|error| format!("unavailable: {error:#}"));
+    assert_ne!(expected, "not loaded");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while handle.state.read().system.ffmpeg_status != expected {
+        changes
+            .recv_deadline(deadline)
+            .expect("external decoder load result must reach core state");
+    }
+
+    configure(false);
+    assert_eq!(handle.state.read().system.ffmpeg_status, "disabled");
+    configure(true);
+    assert_eq!(handle.state.read().system.ffmpeg_status, expected);
+    control.request_shutdown().unwrap();
+    worker.join().unwrap();
+}
