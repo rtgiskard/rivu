@@ -321,6 +321,11 @@ impl GuiApp {
                                     },
                                 ),
                             )
+                            .focus(|style| {
+                                style
+                                    .border_color(gpui::transparent_black())
+                                    .text_color(rgb(theme.accent))
+                            })
                             .ml_auto(),
                         ),
                     )
@@ -330,6 +335,7 @@ impl GuiApp {
                             .h(rems(row_count as f32 * 1.75 - 0.5))
                             .flex_shrink_1()
                             .min_h_0()
+                            .px_4()
                             .child(components::scrollable_area(
                                 "keyboard-help-scrollbar",
                                 column()
@@ -344,7 +350,7 @@ impl GuiApp {
                     )
                     .child(caption(theme, self.tr("shell-keyboard-help-navigation")))
                     .child(
-                        row().flex_wrap().gap_2().children(
+                        row().px_4().flex_wrap().gap_2().children(
                             keyboard::help_rows(&[KeyContext::GuiHelp])
                                 .map(|binding| caption(theme, binding.label())),
                         ),

@@ -154,7 +154,6 @@ impl GuiApp {
                     .focus(|style| {
                         style
                             .border_color(gpui::transparent_black())
-                            .bg(rgb(theme.highlight))
                             .text_color(rgb(theme.accent))
                     }),
                 ),
