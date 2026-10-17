@@ -390,6 +390,7 @@ impl Render for GuiApp {
             .or_else(|| self.state.system.last_error.clone());
         let footer_height = window.rem_size() * 2.25 + px(UI_INSET);
         let mut footer = row()
+            .gap_0()
             .h(footer_height)
             .flex_shrink_0()
             .px(gpui::px(UI_INSET))
@@ -398,27 +399,79 @@ impl Render for GuiApp {
             .text_xs()
             .text_color(rgb(theme.muted));
         if let Some(error) = error {
+            let message: SharedString = error.clone().into();
+            let copied_message = message.clone();
             footer = footer.child(
                 row()
                     .flex_initial()
                     .min_w_0()
+                    .gap_3()
                     .px_2()
                     .bg(rgb(theme.error_bg))
                     .text_color(rgb(theme.text))
-                    .child(copyable_message("copy-error", error, cx).flex_initial())
-                    .child(components::quiet_icon_button(
-                        theme,
-                        icon_button(
-                            "dismiss-error",
-                            "",
-                            self.tr("shell-dismiss-message"),
-                            cx,
-                            |this, _, cx| {
-                                this.error = None;
-                                this.send(Command::DismissError, cx);
-                            },
-                        ),
-                    )),
+                    .child(
+                        div()
+                            .id("error-message-text")
+                            .flex_initial()
+                            .min_w_0()
+                            .truncate()
+                            .cursor_pointer()
+                            .child(message.clone())
+                            .tooltip(move |_, cx| {
+                                cx.new(|_| ButtonTooltip {
+                                    text: message.clone(),
+                                })
+                                .into()
+                            })
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(
+                                    copied_message.to_string(),
+                                ));
+                                cx.stop_propagation();
+                            })),
+                    )
+                    .child(
+                        row()
+                            .flex_shrink_0()
+                            .gap_0()
+                            .child(
+                                super::panels::compact_icon_button(
+                                    theme,
+                                    icon_button(
+                                        "copy-error",
+                                        "",
+                                        self.tr("shell-copy-message"),
+                                        cx,
+                                        move |_, _, cx| {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                                error.clone(),
+                                            ));
+                                        },
+                                    ),
+                                )
+                                .group_hover("control", |style| {
+                                    style.bg(rgb(theme.text).alpha(0.08))
+                                }),
+                            )
+                            .child(
+                                super::panels::compact_icon_button(
+                                    theme,
+                                    icon_button(
+                                        "dismiss-error",
+                                        "",
+                                        self.tr("shell-dismiss-message"),
+                                        cx,
+                                        |this, _, cx| {
+                                            this.error = None;
+                                            this.send(Command::DismissError, cx);
+                                        },
+                                    ),
+                                )
+                                .group_hover("control", |style| {
+                                    style.bg(rgb(theme.text).alpha(0.08))
+                                }),
+                            ),
+                    ),
             );
         } else if self.state.system.scanning {
             footer = footer.child(
@@ -431,7 +484,7 @@ impl Render for GuiApp {
             );
         }
         footer = footer
-            .child(div().flex_1())
+            .child(div().flex_1().min_w(gpui::rems(4.)))
             .child(
                 icon_button(
                     "layout",
@@ -455,7 +508,7 @@ impl Render for GuiApp {
                         cx.notify();
                     },
                 )
-                .ml_4()
+                .mr_2()
                 .on_mouse_down(
                     MouseButton::Right,
                     cx.listener(|this, _, window, cx| {

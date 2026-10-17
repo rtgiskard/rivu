@@ -1,5 +1,6 @@
 shell-empty-layout = 添加面板，开始布局
 shell-dismiss-message = 关闭消息
+shell-copy-message = 复制消息
 shell-layout-locked-hint = 布局已锁定
     右键解锁
 shell-layout-unlocked-hint = 左键添加面板

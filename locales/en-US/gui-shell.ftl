@@ -1,5 +1,6 @@
 shell-empty-layout = Add a panel to build your layout
 shell-dismiss-message = Dismiss message
+shell-copy-message = Copy message
 shell-layout-locked-hint = Layout locked
     Right-click to unlock
 shell-layout-unlocked-hint = Left-click: add panel

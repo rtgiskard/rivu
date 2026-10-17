@@ -540,8 +540,9 @@ the old file intact; the next layout edit or instance-settings Apply retries the
 latest collection. Closing and reopening the window retains pending changes
 without waiting for disk I/O. Orderly application exit waits for the final save
 and reports a remaining failure.
-Errors and scan progress appear in the footer. Click a message or its copy icon
-to copy the complete text.
+Errors and scan progress appear in the footer. Click a message or its copy action
+to copy the complete text. Error copy and dismiss actions remain visible
+without hovering.
 
 See link:24_layout.adoc[Desktop Layout Design] for geometry, ownership, and
 editing invariants.
