@@ -4,7 +4,7 @@ use super::{
         ButtonTooltip, DROPDOWN_ROW_REMS, DropdownItem, DropdownState, FocusScope,
         POPOVER_MAX_REMS, StatusKind, activate_control, active_control, button, caption, column,
         copyable_message, disabled_control, dropdown_container, dropdown_key, dropdown_row,
-        dropdown_trigger, form_field, icon_button,
+        dropdown_trigger, form_field, icon_button as common_icon_button,
         input::{Input, InputEvent},
         row, section_group, status_message, toggle_button, two_column,
     },
@@ -255,20 +255,40 @@ impl Field {
     }
 }
 
+// Match Input's 20px line plus 7px vertical padding and its unscaled border.
+// Keeping the border outside rem sizing also aligns controls at fractional scales.
+fn settings_control(control: Stateful<Div>) -> Stateful<Div> {
+    control
+        .h_auto()
+        .min_h_0()
+        .line_height(rems(20. / 16.))
+        .py(rems(7. / 16.))
+}
+
+fn icon_button(
+    id: impl Into<ElementId>,
+    icon: impl Into<SharedString>,
+    hint: impl Into<SharedString>,
+    cx: &mut Context<Settings>,
+    action: impl Fn(&mut Settings, &mut Window, &mut Context<Settings>) + 'static,
+) -> Stateful<Div> {
+    settings_control(common_icon_button(id, icon, hint, cx, action))
+}
+
 fn dropdown_button(
     id: &'static str,
     label: impl Into<SharedString>,
     cx: &mut Context<Settings>,
     action: impl Fn(&mut Settings, &mut Window, &mut Context<Settings>) + 'static,
 ) -> Stateful<Div> {
-    activate_control(
+    settings_control(activate_control(
         dropdown_trigger(palette(cx), id, label),
         cx,
         move |this, window, cx| {
             action(this, window, cx);
             cx.notify();
         },
-    )
+    ))
 }
 fn visual_switch(
     i18n: &Localizer,
@@ -293,9 +313,17 @@ fn visual_switch(
     } else {
         format!("{label} ({hint})").into()
     };
-    toggle_button(i18n, id, icon, label, enabled, cx, move |this, _| {
-        toggle(&mut this.draft);
-    })
+    settings_control(toggle_button(
+        i18n,
+        id,
+        icon,
+        label,
+        enabled,
+        cx,
+        move |this, _| {
+            toggle(&mut this.draft);
+        },
+    ))
 }
 
 fn settings_group(
@@ -1970,7 +1998,7 @@ impl Settings {
             column()
                 .gap_2()
                 .child(self.library_roots(cx))
-                .child(self.field(Field::ScanMaxDepth, cx)),
+                .child(self.single(Field::ScanMaxDepth, cx)),
         );
         column()
             .gap_3()
