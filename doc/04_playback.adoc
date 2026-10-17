@@ -240,7 +240,7 @@ Undeclared Ctrl/Alt/Shift/Super combinations do not inherit bare-key actions.
 Application shortcuts and text editing use Ctrl, not Cmd/Super aliases.
 
 In the TUI, F1 or `?` opens context-sensitive help outside text editors.
-In the GUI, help opens only through *Keyboard shortcuts* in the application menu.
+In the GUI, help opens only through *Shortcuts* in the application menu.
 Equivalent keys and paired operations share a help row; paired descriptions follow
 the displayed key order. Help can be scrolled with Up/Down, PageUp/PageDown and
 Home/End. Escape closes GUI help; F1, `?` or Escape closes TUI help, without

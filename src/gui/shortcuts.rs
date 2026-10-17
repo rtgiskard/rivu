@@ -260,18 +260,24 @@ impl GuiApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = crate::gui::theme::palette(cx);
-        let rows = keyboard::help_rows(&[context]).map(|binding| {
-            row()
-                .gap_4()
-                .child(
-                    div()
-                        .w(rems(12.))
-                        .flex_shrink_0()
-                        .text_color(rgb(theme.accent))
-                        .child(binding.label()),
-                )
-                .child(div().flex_1().child(self.tr(binding.description)))
-        });
+        let mut rows = column().flex_shrink_0().gap_2();
+        let mut row_count = 0;
+        for binding in keyboard::help_rows(&[context]) {
+            rows = rows.child(
+                row()
+                    .gap_4()
+                    .line_height(rems(1.25))
+                    .child(
+                        div()
+                            .w(rems(12.))
+                            .flex_shrink_0()
+                            .text_color(rgb(theme.accent))
+                            .child(binding.label()),
+                    )
+                    .child(div().flex_1().child(self.tr(binding.description))),
+            );
+            row_count += 1;
+        }
         div()
             .id("keyboard-help-modal")
             .map(|surface| self.dialog_surface(surface))
@@ -291,7 +297,7 @@ impl GuiApp {
                     .id("keyboard-help-card")
                     .w(rems(42.))
                     .max_w(relative(0.9))
-                    .h(relative(0.85))
+                    .max_h(relative(0.85))
                     .min_h_0()
                     .p_4()
                     .gap_3()
@@ -319,17 +325,21 @@ impl GuiApp {
                     )
                     .child(caption(theme, self.tr("shell-keyboard-scope")))
                     .child(
-                        div().flex_1().min_h_0().child(components::scrollable_area(
-                            "keyboard-help-scrollbar",
-                            column()
-                                .id("keyboard-help-scroll")
-                                .size_full()
-                                .min_h_0()
-                                .overflow_y_scroll()
-                                .track_scroll(&self.help_scroll)
-                                .child(column().flex_shrink_0().gap_2().children(rows)),
-                            &self.help_scroll,
-                        )),
+                        div()
+                            .h(rems(row_count as f32 * 1.75 - 0.5))
+                            .flex_shrink_1()
+                            .min_h_0()
+                            .child(components::scrollable_area(
+                                "keyboard-help-scrollbar",
+                                column()
+                                    .id("keyboard-help-scroll")
+                                    .size_full()
+                                    .min_h_0()
+                                    .overflow_y_scroll()
+                                    .track_scroll(&self.help_scroll)
+                                    .child(rows),
+                                &self.help_scroll,
+                            )),
                     )
                     .child(caption(theme, self.tr("shell-keyboard-help-navigation")))
                     .child(

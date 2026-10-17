@@ -141,21 +141,29 @@ impl GuiApp {
         let mut content = column().gap_2().child(
             row()
                 .child(div().flex_1().text_lg().child(self.tr("shell-layouts")))
-                .child(components::quiet_icon_button(
-                    theme,
-                    icon_button(
-                        "layouts-close",
-                        "",
-                        self.tr("shell-close-layouts"),
-                        cx,
-                        |this, window, cx| {
-                            this.layouts_open = false;
-                            this.layout_action = None;
-                            this.focus_layout(window, cx);
-                            cx.notify();
-                        },
-                    ),
-                )),
+                .child(
+                    components::quiet_icon_button(
+                        theme,
+                        icon_button(
+                            "layouts-close",
+                            "",
+                            self.tr("shell-close-layouts"),
+                            cx,
+                            |this, window, cx| {
+                                this.layouts_open = false;
+                                this.layout_action = None;
+                                this.focus_layout(window, cx);
+                                cx.notify();
+                            },
+                        ),
+                    )
+                    .focus(|style| {
+                        style
+                            .border_color(gpui::transparent_black())
+                            .bg(rgb(theme.highlight))
+                            .text_color(rgb(theme.accent))
+                    }),
+                ),
         );
         if let Some(action) = self.layout_action.clone() {
             let (title, submit) = match &action {
@@ -226,21 +234,25 @@ impl GuiApp {
             );
         } else {
             let mut choices = column().gap_1();
-            for (index, name) in self.layouts.names().enumerate() {
+            let names = self
+                .layouts
+                .names()
+                .filter(|name| *name == "Default")
+                .chain(self.layouts.names().filter(|name| *name != "Default"));
+            for (index, name) in names.enumerate() {
                 let current = name == self.layouts.active_name();
                 let target = name.to_owned();
                 let mut choice = row().group("layout-choice-row").child(
                     menu_item(
                         ("layout-select", index),
-                        if current {
-                            format!("✓ {name}")
-                        } else {
-                            name.to_owned()
-                        },
+                        name.to_owned(),
                         cx,
                         move |this, window, cx| this.select_layout(&target, window, cx),
                     )
-                    .flex_1(),
+                    .flex_1()
+                    .when(current, |choice| {
+                        choice.child(div().ml_auto().text_color(rgb(theme.accent)).child("✓"))
+                    }),
                 );
                 if !current {
                     let name = name.to_owned();

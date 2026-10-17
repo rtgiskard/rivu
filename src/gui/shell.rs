@@ -576,7 +576,7 @@ impl Render for GuiApp {
                     .child(components::menu_separator(theme))
                     .child(menu_item(
                         "app-keyboard-help",
-                        self.tr("shell-keyboard-help"),
+                        self.tr("shell-shortcuts"),
                         cx,
                         |this, window, cx| {
                             this.app_menu_open = false;

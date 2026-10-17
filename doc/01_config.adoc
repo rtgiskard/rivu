@@ -75,7 +75,7 @@ Open menus use `Up` and `Down` to move between available actions (wrapping at
 the ends), and `Enter` to choose one. `Escape` or `Left` returns from a submenu;
 at the top level it closes the menu without triggering a playback shortcut.
 
-Open Keyboard shortcuts from the application menu to view desktop bindings;
+Open Shortcuts from the application menu to view desktop bindings;
 `Escape` or the close button dismisses the list. `F1` and `?` do not open or close it.
 
 Dialogs keep `Tab` traversal inside their controls. In Settings, tab to a page
@@ -458,6 +458,9 @@ active and is saved as an ordinary editable layout. Renaming or deleting a
 built-in layout does not cause it to be restored on restart; new templates do
 not overwrite existing layouts or change initialized panel options. For initial
 proportions, see link:24_layout.adoc#_scope_and_ownership[Layout design].
+
+The layout list places `Default` first when present, followed by other names in
+name order. This does not change the active layout.
 
 Open `Menu > Layouts` to switch layouts, duplicate the current layout under a new
 name, rename it, or delete another layout after confirmation. Hover the layout's

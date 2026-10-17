@@ -8,6 +8,7 @@ shell-menu = 菜单
 shell-about = 关于
 shell-settings = 设置
 shell-layouts = 布局
+shell-shortcuts = 快捷键
 shell-keyboard-help = 键盘快捷键
 shell-close-keyboard-help = 关闭键盘快捷键
 shell-keyboard-scope = 当前面板的快捷键。编辑器、按钮、菜单和对话框优先处理自己的按键。

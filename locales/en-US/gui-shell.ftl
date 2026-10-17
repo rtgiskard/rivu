@@ -8,6 +8,7 @@ shell-menu = Menu
 shell-about = About
 shell-settings = Settings
 shell-layouts = Layouts
+shell-shortcuts = Shortcuts
 shell-keyboard-help = Keyboard shortcuts
 shell-close-keyboard-help = Close keyboard shortcuts
 shell-keyboard-scope = Shortcuts for the current panel. Editors, buttons, menus and dialogs own their keys.
