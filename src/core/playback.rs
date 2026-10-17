@@ -163,7 +163,7 @@ impl Core {
         if record_history {
             self.record_queue_history(queue_id);
         }
-        self.save(false)
+        self.save_queue()
     }
     pub(in crate::core) fn count_play(&mut self) -> Result<()> {
         let Some(duration) = self

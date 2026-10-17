@@ -60,6 +60,168 @@ fn startup_config_accepts_unicode_without_creating_a_file() {
 }
 
 #[test]
+fn startup_and_unchanged_exit_preserve_config_bytes_and_comments() {
+    use std::os::unix::fs::MetadataExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    let original = format!(
+        "# Keep user comments and formatting\n[playback]\nvolume_percent = 75 # chosen volume\n[library]\nroots = [\"{}/unused/..\"]\n",
+        directory.path().display(),
+    ).into_bytes();
+    std::fs::write(&path, &original).unwrap();
+    let inode = std::fs::metadata(&path).unwrap().ino();
+    let mut runtime = Runtime::start(directory.path(), &path).unwrap();
+    assert_eq!(
+        runtime.handle.config_snapshot().library_roots,
+        [directory.path().to_path_buf()]
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    assert_eq!(std::fs::metadata(&path).unwrap().ino(), inode);
+    runtime.control.request_shutdown().unwrap();
+    runtime.join().unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    assert_eq!(std::fs::metadata(&path).unwrap().ino(), inode);
+}
+
+#[test]
+fn missing_config_is_created_only_at_apply_or_orderly_exit() {
+    for apply in [false, true] {
+        let (_directory, mut core) = fixture();
+        let _audio = recording_audio(&mut core);
+        let path = core.state.system.config_path.clone();
+        assert!(!path.exists());
+        core.command(Command::Volume { value: 0.25 }).unwrap();
+        core.update_gui_config(GuiConfigChange::ToggleWaveformSeek)
+            .unwrap();
+        core.publish();
+        assert!(!path.exists());
+        if apply {
+            let baseline = core.state.system.config.clone();
+            core.update_gui_config(GuiConfigChange::Settings(Box::new(ConfigPatch::between(
+                &baseline, &baseline,
+            ))))
+            .unwrap();
+        } else {
+            let (sender, receiver) = bounded(1);
+            drop(sender);
+            run_until_disconnected(&mut core, receiver);
+        }
+        let saved = Config::load(&path).unwrap();
+        assert_eq!(saved.volume, 0.25);
+        assert_eq!(
+            saved.waveform_seek_enabled,
+            core.state.system.config.waveform_seek_enabled
+        );
+    }
+}
+
+#[test]
+fn runtime_start_with_missing_config_waits_until_exit_to_create_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    let mut runtime = Runtime::start(directory.path(), &path).unwrap();
+    assert!(!path.exists());
+    runtime.control.request_shutdown().unwrap();
+    runtime.join().unwrap();
+    assert_eq!(Config::load(&path).unwrap(), Config::default());
+    assert!(path.is_file());
+}
+
+#[test]
+fn no_op_apply_and_change_back_exit_do_not_replace_saved_config() {
+    use std::os::unix::fs::MetadataExt;
+
+    let (_directory, mut core) = fixture();
+    let audio = recording_audio(&mut core);
+    core.flush_config().unwrap();
+    let path = core.state.system.config_path.clone();
+    let mut original = std::fs::read(&path).unwrap();
+    original.extend_from_slice(b"\n# Preserve this comment on no-op saves\n");
+    std::fs::write(&path, &original).unwrap();
+    let inode = std::fs::metadata(&path).unwrap().ino();
+    let baseline = core.state.system.config.clone();
+    core.command(Command::Configure {
+        config: baseline.clone(),
+    })
+    .unwrap();
+    assert!(
+        !audio.is_empty(),
+        "No-op Apply still reapplies audio settings"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    assert_eq!(std::fs::metadata(&path).unwrap().ino(), inode);
+    core.command(Command::Volume { value: 0.25 }).unwrap();
+    core.command(Command::Shuffle {
+        enabled: !baseline.shuffle,
+    })
+    .unwrap();
+    core.update_gui_config(GuiConfigChange::ToggleWaveformSeek)
+        .unwrap();
+    core.update_gui_config(GuiConfigChange::ToggleLibraryColumn(LibraryColumn::Artist))
+        .unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    core.command(Command::Volume {
+        value: baseline.volume,
+    })
+    .unwrap();
+    core.command(Command::Shuffle {
+        enabled: baseline.shuffle,
+    })
+    .unwrap();
+    core.update_gui_config(GuiConfigChange::ToggleWaveformSeek)
+        .unwrap();
+    core.update_gui_config(GuiConfigChange::ToggleLibraryColumn(LibraryColumn::Artist))
+        .unwrap();
+    core.update_gui_config(GuiConfigChange::Settings(Box::new(ConfigPatch::between(
+        &baseline, &baseline,
+    ))))
+    .unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    assert_eq!(std::fs::metadata(&path).unwrap().ino(), inode);
+    let (sender, receiver) = bounded(1);
+    drop(sender);
+    run_until_disconnected(&mut core, receiver);
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    assert_eq!(std::fs::metadata(&path).unwrap().ino(), inode);
+}
+
+#[test]
+fn queue_save_failure_does_not_prevent_final_config_save() {
+    let (directory, mut core) = fixture_with_database(Some(10.0), true);
+    let _audio = recording_audio(&mut core);
+    core.command(Command::Volume { value: 0.25 }).unwrap();
+    core.update_gui_config(GuiConfigChange::ToggleWaveformSeek)
+        .unwrap();
+    core.state.queue.current_id = Some(core.queue_ids[0]);
+    let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER fail_final_queue_save BEFORE UPDATE ON queue_meta
+         BEGIN SELECT RAISE(FAIL, 'queue save blocked'); END;",
+        )
+        .unwrap();
+    let (sender, receiver) = bounded(1);
+    drop(sender);
+    run_until_disconnected(&mut core, receiver);
+    assert!(
+        core.shared
+            .read()
+            .system
+            .last_error
+            .as_deref()
+            .unwrap()
+            .contains("queue save blocked")
+    );
+    let saved = Config::load(&core.state.system.config_path).unwrap();
+    assert_eq!(saved.volume, 0.25);
+    assert_eq!(
+        saved.waveform_seek_enabled,
+        core.state.system.config.waveform_seek_enabled
+    );
+}
+
+#[test]
 fn runtime_completion_notifies_on_panic_and_reconciles_late_registration() {
     let (control, _shutdown) = RuntimeControl::new();
     let (wake, wakes) = bounded(1);
@@ -185,7 +347,7 @@ fn fixture_with_database(duration: Option<f64>, persistent: bool) -> (tempfile::
         next_relocation_id: 1,
         played: Vec::new(),
         played_cursor: 0,
-        config_last_attempt: Instant::now(),
+        saved_config: None,
         config_save_error: None,
     };
     core.enqueue(&[1, 2, 2, 3, 4]).unwrap();
@@ -197,7 +359,7 @@ fn committed_track_edit_invalidates_before_failed_refresh_and_same_edit_is_noop(
     let (directory, mut core) = fixture_with_database(Some(10.0), true);
     core.state.queue.current_id = Some(1);
     core.state.current_track = Some(Arc::new(core.track(1).unwrap()));
-    core.save(false).unwrap();
+    core.save_queue().unwrap();
     let current = Arc::clone(core.state.current_track.as_ref().unwrap());
     let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
     // SQLite accepts text in this INTEGER-affinity column; Track decoding does not.
@@ -327,7 +489,7 @@ fn committed_track_deletions_invalidate_before_failed_refresh() {
         core.store.set_track_cache_page_size(0);
         core.state.queue.current_id = Some(1);
         core.state.current_track = Some(Arc::new(core.track(1).unwrap()));
-        core.save(false).unwrap();
+        core.save_queue().unwrap();
         let current = Arc::clone(core.state.current_track.as_ref().unwrap());
         let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
         connection
@@ -383,7 +545,7 @@ fn committed_scan_invalidates_before_failed_refresh() {
     let path = track.path.clone();
     core.state.queue.current_id = Some(1);
     core.state.current_track = Some(Arc::new(track));
-    core.save(false).unwrap();
+    core.save_queue().unwrap();
     let current = Arc::clone(core.state.current_track.as_ref().unwrap());
     core.command(Command::CreatePlaylistWithTracks {
         name: "Retained".into(),
@@ -920,7 +1082,7 @@ fn saturated_audio_admission_preserves_state_requests_events_and_command_order()
         name: Some("accepted-output".into()),
     })
     .unwrap();
-    core.save(true).unwrap();
+    core.flush_config().unwrap();
     for index in 1..64 {
         commands.send(AudioCommand::Volume(index as f32)).unwrap();
     }
@@ -2103,7 +2265,7 @@ fn startup_and_catalog_refresh_retain_the_same_recent_history() {
 fn sql_queue_restores_order_duplicates_current_and_clear_does_not_reuse_ids() {
     let (_directory, mut core) = fixture();
     core.state.queue.current_id = Some(3);
-    core.save(false).unwrap();
+    core.save_queue().unwrap();
     core.queue_ids.clear();
     core.state.queue = QueueState::default();
     core.load_initial_state().unwrap();
@@ -2602,17 +2764,16 @@ fn failed_cue_import_never_reuses_old_entries_but_keeps_readable_items() {
 }
 
 #[test]
-fn deferred_config_failure_retains_values_and_recovers_without_clearing_other_errors() {
+fn config_failure_retains_values_and_recovers_without_clearing_other_errors() {
     for unrelated in [false, true] {
         let (directory, mut core) = fixture();
         let path = core.state.system.config_path.clone();
-        core.state.system.config.save(&path).unwrap();
+        core.flush_config().unwrap();
         let backup = directory.path().join("config.good");
         std::fs::rename(&path, &backup).unwrap();
         std::fs::create_dir(&path).unwrap();
         core.command(Command::Volume { value: 0.25 }).unwrap();
-        core.config_last_attempt -= Duration::from_millis(250);
-        assert!(core.flush_config(false).is_err());
+        assert!(core.flush_config().is_err());
         core.publish();
         assert!(core.shared.read().system.last_error.is_some());
         assert_eq!(core.state.playback.volume, 0.25);
@@ -2625,14 +2786,14 @@ fn deferred_config_failure_retains_values_and_recovers_without_clearing_other_er
         }
         // Retrying the same failure must not replace another error or a dismissal.
         let expected = core.state.system.last_error.clone();
-        assert!(core.flush_config(true).is_err());
+        assert!(core.flush_config().is_err());
         assert_eq!(core.state.system.last_error, expected);
         std::fs::remove_dir(&path).unwrap();
         std::fs::rename(&backup, &path).unwrap();
-        assert!(core.flush_config(true).unwrap());
+        assert!(core.flush_config().unwrap());
         assert_eq!(Config::load(&path).unwrap().volume, 0.25);
         assert_eq!(core.state.system.last_error, expected);
-        assert!(!core.flush_config(true).unwrap());
+        assert!(!core.flush_config().unwrap());
     }
 }
 
@@ -2642,16 +2803,16 @@ fn successful_config_retry_clears_only_its_own_failure() {
     let path = core.state.system.config_path.clone();
     std::fs::create_dir(&path).unwrap();
     core.command(Command::Shuffle { enabled: true }).unwrap();
-    assert!(core.flush_config(true).is_err());
+    assert!(core.flush_config().is_err());
     assert!(core.state.system.last_error.is_some());
     std::fs::remove_dir(&path).unwrap();
-    assert!(core.flush_config(true).unwrap());
+    assert!(core.flush_config().unwrap());
     assert!(core.state.system.last_error.is_none());
     assert!(Config::load(&path).unwrap().shuffle);
 }
 
 #[test]
-fn shutdown_flush_reports_failure_and_does_not_wait_for_debounce() {
+fn shutdown_flush_reports_failure_and_retains_live_settings() {
     let (_directory, mut core) = fixture();
     let path = core.state.system.config_path.clone();
     std::fs::create_dir(&path).unwrap();
@@ -2670,7 +2831,7 @@ fn shutdown_flush_reports_failure_and_does_not_wait_for_debounce() {
 }
 
 #[test]
-fn still_mode_toggle_preserves_debounced_playback_and_device_settings() {
+fn still_mode_toggle_preserves_unsaved_playback_and_device_settings() {
     let (_directory, mut core) = fixture();
     core.command(Command::Volume { value: 0.25 }).unwrap();
     core.command(Command::Shuffle { enabled: true }).unwrap();
@@ -2678,7 +2839,7 @@ fn still_mode_toggle_preserves_debounced_playback_and_device_settings() {
         mode: RepeatMode::All,
     })
     .unwrap();
-    // Model a selected output whose persisted snapshot is still debounced.
+    // A live output selection must survive unrelated quick changes.
     core.state.system.selected_device = Some("pending-output".into());
     for enabled in [true, false] {
         core.update_gui_config(GuiConfigChange::ToggleStillMode)
@@ -2691,12 +2852,7 @@ fn still_mode_toggle_preserves_debounced_playback_and_device_settings() {
             core.state.system.selected_device.as_deref(),
             Some("pending-output")
         );
-        let saved = Config::load(&core.state.system.config_path).unwrap();
-        assert_eq!(saved.volume, 0.25);
-        assert!(saved.shuffle);
-        assert_eq!(saved.repeat, RepeatMode::All);
-        assert_eq!(saved.output_device.as_deref(), Some("pending-output"));
-        assert_eq!(saved.still_mode, enabled);
+        assert!(!core.state.system.config_path.exists());
     }
 }
 
@@ -2792,15 +2948,11 @@ fn library_column_toggles_merge_latest_config_without_audio_side_effects() {
             .unwrap();
         expected.library_columns = columns;
         assert_eq!(*core.state.system.config, expected);
-        assert_eq!(
-            Config::load(&core.state.system.config_path).unwrap(),
-            expected
-        );
+        assert!(!core.state.system.config_path.exists());
         assert_eq!(core.state.playback.volume, expected.volume);
         assert_eq!(core.state.playback.shuffle, expected.shuffle);
         assert_eq!(core.state.playback.repeat, expected.repeat);
         assert_eq!(core.state.system.selected_device, expected.output_device);
-        assert!(!core.flush_config(true).unwrap());
         core.publish();
         assert_eq!(*core.shared.read().system.config, expected);
         assert!(matches!(
@@ -2811,36 +2963,22 @@ fn library_column_toggles_merge_latest_config_without_audio_side_effects() {
 }
 
 #[test]
-fn library_column_failed_save_does_not_publish_selection_or_deliver_audio() {
+fn library_column_toggle_commits_without_accessing_unwritable_config_path() {
     let (_directory, mut core) = fixture();
     let audio = recording_audio(&mut core);
     Arc::make_mut(&mut core.state.system.config)
         .library_columns
         .duration = true;
-    let previous = core.state.system.config.clone();
     std::fs::create_dir(&core.state.system.config_path).unwrap();
     core.update_gui_config(GuiConfigChange::ToggleLibraryColumn(
         LibraryColumn::Duration,
     ))
-    .unwrap_err();
-    assert_eq!(*core.state.system.config, *previous);
-    core.publish();
-    assert_eq!(*core.shared.read().system.config, *previous);
-    assert!(core.state.system.last_error.is_some());
-    assert!(matches!(
-        audio.try_recv(),
-        Err(crossbeam_channel::TryRecvError::Empty)
-    ));
-    std::fs::remove_dir(&core.state.system.config_path).unwrap();
-    core.update_gui_config(GuiConfigChange::ToggleLibraryColumn(
-        LibraryColumn::Duration,
-    ))
     .unwrap();
-    assert!(!core.state.system.config.library_columns.duration);
-    assert_eq!(
-        Config::load(&core.state.system.config_path).unwrap(),
-        *core.state.system.config
-    );
+    core.publish();
+    assert!(!core.shared.read().system.config.library_columns.duration);
+    assert!(core.state.system.last_error.is_none());
+    assert!(audio.try_recv().is_err());
+    assert!(core.state.system.config_path.is_dir());
 }
 
 #[test]
@@ -2903,6 +3041,8 @@ fn desktop_config_edits_preserve_live_playback_and_merge_roots() {
         core.state.system.selected_device.as_deref(),
         Some("pending-output")
     );
+    assert!(!core.state.system.config_path.exists());
+    assert!(core.flush_config().unwrap());
     let saved = Config::load(&core.state.system.config_path).unwrap();
     assert_eq!(saved.volume, 0.25);
     assert!(saved.shuffle);
@@ -2944,7 +3084,7 @@ fn settings_apply_merges_every_unedited_field_at_execution() {
     }
     let mut expected = core.state.system.config.as_ref().clone();
     expected.scan_max_depth = 7;
-    // These playback changes are still newer than the persisted snapshot.
+    // These playback changes are still newer than the in-memory config snapshot.
     core.command(Command::Volume { value: 0.3 }).unwrap();
     core.command(Command::Device {
         name: Some("pending-output".into()),
@@ -2952,6 +3092,7 @@ fn settings_apply_merges_every_unedited_field_at_execution() {
     .unwrap();
     expected.volume = 0.3;
     expected.output_device = Some("pending-output".into());
+    assert!(!core.state.system.config_path.exists());
     core.update_gui_config(GuiConfigChange::Settings(Box::new(patch)))
         .unwrap();
     core.publish();
@@ -2977,7 +3118,7 @@ fn settings_apply_explicit_fields_override_newer_conflicting_values() {
         name: Some("original-output".into()),
     })
     .unwrap();
-    core.flush_config(true).unwrap();
+    core.flush_config().unwrap();
     let baseline = core.state.system.config.clone();
     let mut draft = baseline.as_ref().clone();
     draft.volume = 0.4;
@@ -6237,7 +6378,7 @@ fn assert_queue_saved(core: &Core) {
 fn single_queue_removal_survives_restore() {
     let (_directory, mut core) = fixture();
     core.state.queue.current_id = Some(2);
-    core.save(false).unwrap();
+    core.save_queue().unwrap();
     core.command(Command::RemoveQueue { queue_id: 2 }).unwrap();
     core.load_initial_state().unwrap();
     assert_eq!(queue_entries(&core), [(1, 1), (3, 2), (4, 3), (5, 4)]);
@@ -6330,7 +6471,7 @@ fn failed_track_deletion_retains_persisted_current_occurrence_and_fences_audio()
                 PlaybackStatus::Paused => core.command(Command::Pause).unwrap(),
                 PlaybackStatus::Playing => {}
             }
-            core.save(false).unwrap();
+            core.save_queue().unwrap();
             let playlist = core
                 .store
                 .create_playlist_with_tracks("Keep", &[1, 2])
@@ -6859,7 +7000,7 @@ fn queue_batch_revisions_ignore_current_only_changes_and_reject_metadata_edits()
     let (_directory, mut core) = fixture();
     let expected = core.state.query_revisions();
     core.state.queue.current_id = Some(3);
-    core.save(false).unwrap();
+    core.save_queue().unwrap();
     let query = Query::QueueBatch {
         query: None,
         after: None,
@@ -6948,7 +7089,7 @@ fn filtered_queue_continuations_bind_rank_query_and_revision_without_expected() 
     }
     // Playback selection alone preserves the matching continuation.
     core.state.queue.current_id = Some(rows[2].id);
-    core.save(false).unwrap();
+    core.save_queue().unwrap();
     assert!(core.view(&batch(Some("NEEDLE"), first)).is_ok());
     let mut overflow = first.unwrap();
     overflow.offset = usize::MAX;
@@ -7274,7 +7415,7 @@ fn unavailable_output_targets_remain_desired_and_persist_across_entry_points() {
         name: Some("PipeWire: unavailable-replacement-sink".into()),
     })
     .unwrap();
-    core.flush_config(true).unwrap();
+    core.flush_config().unwrap();
     assert_eq!(
         Config::load(&core.state.system.config_path)
             .unwrap()
@@ -7320,35 +7461,30 @@ fn configure_saved_but_disconnected_audio_retains_desired_settings() {
         Config::load(&core.state.system.config_path).unwrap(),
         expected
     );
-    assert!(!core.flush_config(true).unwrap());
+    assert!(!core.flush_config().unwrap());
     core.publish();
     assert_eq!(*core.shared.read().system.config, expected);
 }
 
 #[test]
-fn still_mode_failed_save_keeps_desired_settings_and_does_not_deliver_audio() {
+fn still_mode_toggle_commits_without_accessing_unwritable_config_path() {
     let (_directory, mut core) = fixture();
-    let audio = recording_audio(&mut core);
-    let previous = core.state.system.config.clone();
+    let _audio = recording_audio(&mut core);
+    let previous = core.state.system.config.still_mode;
     std::fs::create_dir(&core.state.system.config_path).unwrap();
-
     core.update_gui_config(GuiConfigChange::ToggleStillMode)
-        .unwrap_err();
-
-    assert_eq!(*core.state.system.config, *previous);
-    assert!(matches!(
-        audio.recv_timeout(Duration::from_millis(50)),
-        Err(crossbeam_channel::RecvTimeoutError::Timeout)
-    ));
+        .unwrap();
+    assert_eq!(core.state.system.config.still_mode, !previous);
+    assert!(core.state.system.config_path.is_dir());
 }
 
 #[test]
-fn still_mode_saved_but_disconnected_audio_retains_desired_settings() {
+fn still_mode_applied_but_disconnected_audio_retains_unsaved_settings() {
     let (_directory, mut core) = fixture();
     let (commands, receiver) = bounded(1);
     drop(receiver);
     core.engine.replace_commands(commands);
-    // Pending playback settings must be incorporated in the same saved snapshot.
+    // Pending playback settings must be incorporated in the same memory snapshot.
     core.state.playback.volume = 0.25;
     core.state.playback.shuffle = true;
     core.state.playback.repeat = RepeatMode::All;
@@ -7369,11 +7505,7 @@ fn still_mode_saved_but_disconnected_audio_retains_desired_settings() {
         assert_eq!(core.state.playback.shuffle, expected.shuffle);
         assert_eq!(core.state.playback.repeat, expected.repeat);
         assert_eq!(core.state.system.selected_device, expected.output_device);
-        assert_eq!(
-            Config::load(&core.state.system.config_path).unwrap(),
-            expected
-        );
-        assert!(!core.flush_config(true).unwrap());
+        assert!(!core.state.system.config_path.exists());
         core.publish();
         assert_eq!(*core.shared.read().system.config, expected);
     }

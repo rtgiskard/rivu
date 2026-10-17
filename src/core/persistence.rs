@@ -46,39 +46,35 @@ impl Core {
         config
             .output_device
             .clone_from(&self.state.system.selected_device);
+        config.validate()?;
         if still_mode {
             self.engine.ensure_command_capacity(1)?;
         }
-        self.write_config(&config)?;
-        // A saved change remains the desired configuration even if audio is gone.
+        // Quick controls change desired memory state; Apply or shutdown persists it.
         self.state.system.config = Arc::new(config);
         if still_mode {
             self.audio(AudioCommand::StillMode(self.state.system.config.still_mode))
-                .context("Configuration saved, but audio application failed")?;
+                .context("Configuration applied, but audio application failed")?;
         }
         Ok(())
     }
 
-    fn save_queue(&mut self) -> Result<()> {
+    pub(in crate::core) fn save_queue(&mut self) -> Result<()> {
         self.store.set_queue_current(self.state.queue.current_id)?;
         self.state.queue = self.store.queue_projection(self.queue_ids.len())?;
         Ok(())
     }
 
-    pub(in crate::core) fn save(&mut self, force_config: bool) -> Result<()> {
-        // Independent persistence domains both get a final attempt even if one fails.
-        let queue = self.save_queue();
-        let config = self.flush_config(force_config).map(|_| ());
-        queue.and(config)
-    }
-
     pub(in crate::core) fn write_config(&mut self, config: &Config) -> Result<()> {
-        self.config_last_attempt = Instant::now();
+        if self.saved_config.as_ref() == Some(config) {
+            return Ok(());
+        }
         let result = config
             .save(&self.state.system.config_path)
             .context("Saving configuration");
         match &result {
             Ok(()) => {
+                self.saved_config = Some(config.clone());
                 if let Some(previous) = self.config_save_error.take()
                     && self.state.system.last_error.as_ref() == Some(&previous)
                 {
@@ -97,15 +93,9 @@ impl Core {
         result
     }
 
-    pub(in crate::core) fn flush_config(&mut self, force: bool) -> Result<bool> {
-        // The saved configuration is the baseline; no command whitelist owns dirty state.
-        let changed = self.state.system.config.volume != self.state.playback.volume
-            || self.state.system.config.shuffle != self.state.playback.shuffle
-            || self.state.system.config.repeat != self.state.playback.repeat
-            || self.state.system.config.output_device != self.state.system.selected_device;
-        if !changed || (!force && self.config_last_attempt.elapsed() < Duration::from_millis(250)) {
-            return Ok(false);
-        }
+    pub(in crate::core) fn flush_config(&mut self) -> Result<bool> {
+        // Compare the complete desired config, including quick controls, to the
+        // last successful save rather than only checking playback fields.
         let mut config = self.state.system.config.as_ref().clone();
         config.volume = self.state.playback.volume;
         config.shuffle = self.state.playback.shuffle;
@@ -113,6 +103,9 @@ impl Core {
         config
             .output_device
             .clone_from(&self.state.system.selected_device);
+        if self.saved_config.as_ref() == Some(&config) {
+            return Ok(false);
+        }
         self.write_config(&config)?;
         self.state.system.config = Arc::new(config);
         Ok(true)

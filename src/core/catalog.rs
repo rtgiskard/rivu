@@ -83,8 +83,8 @@ impl Core {
                 );
             }
         }
-        // Flush before accepting a task, never fail its acknowledgement afterward.
-        self.save(false)?;
+        // Flush the queue before accepting a task, never fail its acknowledgement afterward.
+        self.save_queue()?;
         let ffmpeg_enabled = config.ffmpeg_enabled;
         tracing::info!(
             input = ?input,

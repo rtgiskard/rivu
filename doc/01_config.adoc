@@ -169,20 +169,31 @@ actions that replace a non-empty queue ask for confirmation. Disable it in deskt
 settings under Playback & Audio → Playback to replace the queue without prompting.
 This preference does not change TUI, CLI, or IPC behavior.
 
-=== Saving playback settings
+=== Saving configuration
 
-Playback-control changes are saved automatically. If saving fails, the running
-values remain active and pending for retry; the error is logged and exposed in
-library status and the desktop error notice. Repeated identical failures do not
-produce repeated notices. A successful retry clears its own error, not an unrelated
-error reported later. Shutdown makes a final save attempt and logs any failure;
-unsaved changes may be lost on restart. Desktop Settings Apply and immediate
-configuration controls reject a candidate that cannot be saved.
-After a successful save, status and settings reflect the persisted desired
-configuration. If subsequent audio-command delivery fails, Apply or a Still Mode
-toggle reports `Configuration saved, but audio application failed`; the saved
-configuration remains committed rather than rolling back partially delivered
-audio commands. Resolve the audio failure before retrying or restarting.
+Rivu writes `config.toml` only on desktop Settings Apply (or an explicit IPC
+Configure command), or during an orderly application exit. A save is
+skipped when the effective configuration matches the last successful save or
+the configuration loaded at startup. Starting Rivu does not rewrite an existing
+file; a missing file is created on the first Apply or orderly exit.
+
+Playback controls and desktop shortcuts, including output selection, Still Mode,
+Library columns, and library-folder changes, take effect in memory without
+writing the configuration file. Apply saves these current values together with
+the explicitly edited settings. Closing the desktop window is not application
+exit: the core keeps running. A crash or forced termination can lose changes
+since the last successful save. Database and layout persistence are independent.
+
+Apply rejects a candidate that cannot be saved and retains the settings draft;
+earlier runtime changes remain active. Saving errors are logged and exposed in
+library status and the desktop error notice. A successful retry clears its own
+error, not an unrelated error reported later. Exit makes one final save attempt;
+a failure is reported but does not prevent exit. Writes atomically replace the
+file without forcing a storage flush, so success is not a power-loss guarantee.
+
+After Apply saves successfully, an audio-command delivery failure does not roll
+back the committed configuration. Resolve the audio failure before retrying or
+restarting.
 
 === Output and desktop integration
 
@@ -235,7 +246,7 @@ including full waveform scans; it does not reopen the current track.
 Pause visualizations (Still Mode) is under Visualizations → General →
 Processing and cache and takes effect when settings are applied, without
 restarting playback. The application menu also offers a Visualizations toggle below
-Layouts; On enables visualizations and Off pauses them, saving immediately.
+Layouts; On enables visualizations and Off pauses them without writing `config.toml`.
 Both controls use `visualizations.still_mode`; neither affects artwork or animation.
 
 Settings keeps an independent draft based on the configuration at opening or the

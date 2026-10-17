@@ -159,7 +159,7 @@ impl Core {
             "A relocation verification is already running"
         );
         self.require_relocation_playback_idle(source_id, target_id)?;
-        self.save(false)?;
+        self.save_queue()?;
         let prepared = self.store.prepare_relocation(source_id, target_id)?;
         let id = self.next_relocation_id;
         let next_id = id.checked_add(1).context("Relocation task IDs exhausted")?;

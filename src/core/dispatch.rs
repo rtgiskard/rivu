@@ -8,7 +8,7 @@ impl Core {
         shutdown: Receiver<()>,
         control: &RuntimeControl,
     ) {
-        let config_ticks = crossbeam_channel::tick(Duration::from_millis(100));
+        let ffmpeg_status_ticks = crossbeam_channel::tick(Duration::from_millis(100));
         loop {
             select! {
                 recv(shutdown) -> _ => {
@@ -93,9 +93,9 @@ impl Core {
                         self.relocation_event(event);
                     }
                 }
-                recv(config_ticks) -> _ => {
-                    // Reuse the save tick to publish the one-time load result,
-                    // including loads from GUI waveform work outside the engine.
+                recv(ffmpeg_status_ticks) -> _ => {
+                    // Publish the one-time decoder load result, including loads
+                    // from GUI waveform work outside the engine.
                     if self.state.system.ffmpeg_status == "not loaded"
                         && audio::ffmpeg_load_attempted()
                     {
@@ -103,22 +103,17 @@ impl Core {
                             .unwrap_or_else(|error| format!("unavailable: {error:#}"));
                         self.publish();
                     }
-                    match self.flush_config(false) {
-                        Ok(true) => self.publish(),
-                        Err(_) => {
-                            let changed = self.state.system.last_error != self.shared.read().system.last_error;
-                            if changed { self.publish(); }
-                        }
-                        Ok(false) => {}
-                    }
-            }
                 }
+            }
         }
 
         if let Err(error) = self.stop() {
             self.state.system.last_error = Some(format!("Saving play count: {error:#}"));
         }
-        if let Err(error) = self.save(true) {
+        // Independent persistence domains both get a final attempt even if one fails.
+        let queue = self.save_queue();
+        let config = self.flush_config().map(|_| ());
+        if let Err(error) = queue.and(config) {
             tracing::error!(error = %error, "shutdown_persistence_failed");
             self.state.system.last_error = Some(format!("Final save failed: {error:#}"));
         }

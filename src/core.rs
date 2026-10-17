@@ -490,7 +490,10 @@ impl Runtime {
             .iter()
             .map(|root| library::logical_path(root))
             .collect::<Result<_>>()?;
-        config.save(config_path)?;
+        config.validate()?;
+        // An existing file establishes an effective, normalized baseline without
+        // rewriting user formatting or materializing omitted defaults at startup.
+        let saved_config = config_path.try_exists()?.then(|| config.clone());
         std::fs::create_dir_all(data_dir)?;
         tracing::info!(path = %config_path.display(), "configuration_loaded");
         // Keep the handle usable with a config-only snapshot. Database views,
@@ -557,7 +560,7 @@ impl Runtime {
                     next_relocation_id: 1,
                     played: Vec::new(),
                     played_cursor: 0,
-                    config_last_attempt: Instant::now(),
+                    saved_config,
                     config_save_error: None,
                 };
                 tracing::debug!("core_worker_started");
@@ -713,7 +716,7 @@ struct Core {
     played: Vec<u64>,
     // Number of history entries through the current (or just removed) entry.
     played_cursor: usize,
-    config_last_attempt: Instant,
+    saved_config: Option<Config>,
     config_save_error: Option<String>,
 }
 impl Core {

@@ -14,7 +14,7 @@ impl Core {
         // Queue edits commit within their SQL operation; persist the current
         // occurrence even if a later audio load fails after replacing the queue.
         let result = self.apply_command(command);
-        let saved = self.save(false);
+        let saved = self.save_queue();
         result.and(saved)
     }
 
@@ -462,7 +462,7 @@ impl Core {
                 {
                     bail!("Database optimization requires stopped playback and no active scan");
                 }
-                self.save(false)?;
+                self.save_queue()?;
                 self.state.system.database_optimization = Some(self.store.optimize()?);
                 // Current state is already persisted; finalization does not rewrite queue rows.
                 return Ok(());
