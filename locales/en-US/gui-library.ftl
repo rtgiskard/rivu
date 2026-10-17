@@ -210,9 +210,9 @@ gl-auto = Auto
 
 gl-native = Native
 
-gl-decoder-save-note = Use Save to apply metadata and decoder hint changes together. The saved hint applies on the next track open or full waveform request.
+gl-decoder-save-note = Save to apply on the next track open or full waveform request.
 
-gl-decoder-warning = FFmpeg requires the extension to be enabled. Native may play DTS-WAV as noise.
+gl-decoder-warning = FFmpeg requires the extension; native DTS-WAV decoding may produce noise.
 
 gl-tags = Tags
 

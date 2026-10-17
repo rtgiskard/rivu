@@ -210,9 +210,9 @@ gl-auto = 自动
 
 gl-native = 原生
 
-gl-decoder-save-note = 点击保存，一并应用元数据和解码器偏好。偏好将在下次打开曲目或请求完整波形时生效。
+gl-decoder-save-note = 保存后，下次打开曲目或请求完整波形时生效。
 
-gl-decoder-warning = FFmpeg 需启用扩展。原生解码可能将 DTS-WAV 播放为噪声。
+gl-decoder-warning = FFmpeg 需启用扩展；原生解码 DTS-WAV 可能产生噪声。
 
 gl-tags = 标签
 
