@@ -546,21 +546,30 @@ pub(crate) fn metadata_item(
     label: impl Into<SharedString>,
     value: impl Into<SharedString>,
     label_width: gpui::Pixels,
+    copy: Option<Stateful<Div>>,
 ) -> Div {
     // Captions use 0.75rem, so 1.5rem is a 2em label/value gap.
     super::row()
         .items_start()
+        .group("metadata-field")
         .gap(gpui::rems(1.5))
         .flex_1()
         .min_w_0()
         .child(caption(theme, label).w(label_width).flex_shrink_0())
         .child(
-            div()
+            super::row()
                 .flex_1()
                 .min_w_0()
-                .text_sm()
-                .truncate()
-                .child(value.into()),
+                .gap_1()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_sm()
+                        .truncate()
+                        .child(value.into()),
+                )
+                .child(div().w(gpui::rems(1.4)).flex_shrink_0().children(copy)),
         )
 }
 

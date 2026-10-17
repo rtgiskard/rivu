@@ -164,6 +164,7 @@ gl-metadata-saving = Saving metadata…
 gl-unsaved = Unsaved changes
 
 gl-track-details = Track details
+gl-copy-value = Copy value
 
 gl-file-path = File path
 

@@ -164,6 +164,7 @@ gl-metadata-saving = 正在保存元数据…
 gl-unsaved = 有未保存的更改
 
 gl-track-details = 曲目详情
+gl-copy-value = 复制值
 
 gl-file-path = 文件路径
 

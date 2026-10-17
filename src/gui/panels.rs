@@ -57,17 +57,54 @@ pub(super) fn hover_actions(
         .group_hover(group, |style| style.visible())
 }
 
+fn metadata_copy(
+    label: SharedString,
+    value: SharedString,
+    hint: Option<SharedString>,
+    cx: &mut Context<GuiApp>,
+) -> Option<gpui::Stateful<Div>> {
+    let hint = hint.filter(|_| !value.is_empty() && value.as_ref() != "—")?;
+    let theme = super::theme::palette(cx);
+    Some(
+        compact_icon_button(
+            theme,
+            icon_button(label, "", hint, cx, move |_, _, cx| {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(value.to_string()));
+            }),
+        )
+        .h(gpui::rems(1.25))
+        .text_size(gpui::rems(0.75))
+        .opacity(0.)
+        .group_hover("metadata-field", |style| style.opacity(1.))
+        .focus(|style| style.opacity(1.)),
+    )
+}
+
 fn metadata_rows(
     theme: &'static crate::theme::Palette,
     rows: impl IntoIterator<Item = [(SharedString, SharedString); 2]>,
     label_widths: [gpui::Pixels; 2],
+    copy_hint: Option<SharedString>,
+    cx: &mut Context<GuiApp>,
 ) -> Div {
     column()
         .gap_1()
         .children(rows.into_iter().map(|[first, second]| {
             metadata_row(
-                metadata_item(theme, first.0, first.1, label_widths[0]),
-                metadata_item(theme, second.0, second.1, label_widths[1]),
+                metadata_item(
+                    theme,
+                    first.0.clone(),
+                    first.1.clone(),
+                    label_widths[0],
+                    metadata_copy(first.0, first.1, copy_hint.clone(), cx),
+                ),
+                metadata_item(
+                    theme,
+                    second.0.clone(),
+                    second.1.clone(),
+                    label_widths[1],
+                    metadata_copy(second.0, second.1, copy_hint.clone(), cx),
+                ),
             )
         }))
 }
@@ -2845,6 +2882,7 @@ impl GuiApp {
             && protected
             && identity != self.state.current_track().map(|track| track.id);
         let placeholder: SharedString = self.tr("gl-not-loaded");
+        let copy_hint = track.map(|_| self.tr("gl-copy-value"));
         let presence_status = match self.metadata.availability() {
             MetadataAvailability::Unknown if identity.is_none() => self.i18n.text("gl-no-track"),
             MetadataAvailability::Unknown => self.i18n.text("gl-details-not-loaded"),
@@ -3238,6 +3276,12 @@ impl GuiApp {
                                     file[0][0].0.clone(),
                                     file[0][0].1.clone(),
                                     label_widths[0],
+                                    metadata_copy(
+                                        file[0][0].0.clone(),
+                                        path_tooltip.clone(),
+                                        copy_hint.clone(),
+                                        cx,
+                                    ),
                                 )
                                 .id(("metadata-path", panel_id))
                                 .tooltip(move |_, cx| {
@@ -3252,13 +3296,19 @@ impl GuiApp {
                                 file[0][1].0.clone(),
                                 file[0][1].1.clone(),
                                 label_widths[1],
+                                metadata_copy(
+                                    file[0][1].0.clone(),
+                                    file[0][1].1.clone(),
+                                    copy_hint.clone(),
+                                    cx,
+                                ),
                             ),
                         ),
                     ))
                     .child(metadata_group(
                         theme,
                         self.tr("gl-metadata"),
-                        metadata_rows(theme, metadata, label_widths),
+                        metadata_rows(theme, metadata, label_widths, copy_hint.clone(), cx),
                     ))
                     .child(metadata_group(
                         theme,
@@ -3338,9 +3388,15 @@ impl GuiApp {
                             ))
                             .child(metadata_row(
                                 self.panel_field(theme, Field::Album, self.tr("gl-album")),
-                                metadata_item(theme, disc.0, disc.1, label_widths[1]),
+                                metadata_item(
+                                    theme,
+                                    disc.0.clone(),
+                                    disc.1.clone(),
+                                    label_widths[1],
+                                    metadata_copy(disc.0, disc.1, copy_hint.clone(), cx),
+                                ),
                             ))
-                            .child(metadata_rows(theme, tags, label_widths).gap_2())
+                            .child(metadata_rows(theme, tags, label_widths, copy_hint, cx).gap_2())
                             .when(track.is_some(), |tags| {
                                 tags.child(match self.artwork_view.image(cx) {
                                     Some(image) => artwork_preview(

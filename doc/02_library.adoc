@@ -254,6 +254,11 @@ GUI/TUI lists show compact display metadata. Track details and
 and statistics. Unknown values appear as `—` in human output or `null` for
 nullable JSON fields.
 
+In GUI Track details, hover a read-only field to reveal Copy value, or reach
+the action with keyboard focus. It copies the complete value even when the
+display is truncated; File path copies the original path even for a missing
+file. Empty, unknown, and unloaded values have no copy action.
+
 `bitrate_bps` describes the encoded audio stream, not decoded PCM or the entire
 container file. `bitrate_exact` marks a reliable fixed-encoding calculation or a
 complete-playback measured average, rather than a scan estimate. Human output
