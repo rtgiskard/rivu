@@ -484,6 +484,13 @@ the data directory. Each layout has its own panel tree, relative sizes, tab
 order and selection, tab-bar visibility, and instance options. Edit locks are
 window-local, not saved; every newly opened window starts locked.
 
+All layout state, including the active layout, stays in memory until manual sync
+or an orderly application exit writes it to `layout.json`. Closing and reopening
+the desktop window keeps the latest in-memory layouts; it does not write them.
+An abnormal exit loses changes made since the last successful write. Panel
+settings Apply takes effect immediately for this session only; it does not write
+the layout file.
+
 Without a saved layout collection, Rivu starts in `Default` and also provides
 `Album` and `Visual`. Default keeps artwork, playback, browsing, queue, and a
 frequency view visible; Album emphasizes the cover and album browser; Visual
@@ -505,6 +512,11 @@ name, rename it, or delete another layout after confirmation. Hover the layout's
 row or focus its Delete button with Tab to reveal Delete. Names must be
 nonempty and unique after trimming surrounding whitespace. To delete the current
 layout, switch to another one first; the collection always retains a layout.
+Use the Sync layouts to file icon beside Rename to write the current collection.
+Sync cancels any active layout interaction before capturing the collection, so
+drag and resize previews are not saved. A write failure leaves the session's
+layouts unchanged and is reported in the footer. Press Sync again to retry;
+further layout edits do not automatically retry a failed write.
 
 Switching or duplicating updates the panel tree inside the same window. Playback,
 queue, global configuration, window placement, and the active Track details draft
@@ -570,14 +582,14 @@ not add to this depth. Docking that would exceed this limit leaves the layout
 unchanged. This is not a limit on the number of sibling regions or tabs.
 
 If `layout.json` cannot be read or validated at session startup, Rivu reports the
-load error and opens the default collection. Layout saves run in one background
-worker, coalescing rapid edits to the latest collection. Invalid layout names or
-operations leave the UI unchanged. An asynchronous save failure leaves panel
-edits and valid layout-management changes visible, reports the error, and keeps
-the old file intact; the next layout edit or instance-settings Apply retries the
-latest collection. Closing and reopening the window retains pending changes
-without waiting for disk I/O. Orderly application exit waits for the final save
-and reports a remaining failure.
+load error and opens the default collection. Invalid layout names or operations
+leave the UI unchanged. Explicit sync requests use one background worker and
+coalesce pending requests, not ordinary edits. Each request captures the current
+collection; later edits cannot change that write or suppress its feedback. A
+failed write preserves the old file and all session edits. Retry with manual
+sync, not another layout edit or instance-settings Apply. Orderly application
+exit writes the latest dirty collection, waits for completion, and reports a
+remaining failure.
 Errors and scan progress appear in the footer. Click a message or its copy action
 to copy the complete text. Error copy and dismiss actions remain visible
 without hovering.

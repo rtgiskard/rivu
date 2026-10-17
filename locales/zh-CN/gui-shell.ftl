@@ -54,6 +54,7 @@ shell-name = 名称
 shell-cancel-layout-action = 取消布局操作
 shell-duplicate-layout-as = 当前布局另存为…
 shell-rename-layout = 重命名当前布局…
+shell-sync-layouts = 同步布局到文件
 shell-layout-duplicate-title = 复制当前布局
 shell-duplicate = 复制
 shell-layout-rename-title = 重命名当前布局

@@ -224,45 +224,46 @@ duplicate layout names, invalid boundaries, malformed trees, and excess depth
 are errors. Runtime IDs and edit locking are omitted.
 
 One save owner belongs to the desktop session, not to an individual window. All
-runtime save paths, including selected tabs, docking, named-layout operations,
-and panel preferences, submit cheap immutable snapshots to that owner. The GUI
-does not validate the whole collection, encode JSON, or perform save I/O. Named
-layouts share immutable trees until an edit copies the affected tree; rendering
-borrows a snapshot rather than temporarily mutating a shared tree.
+layout changes, including selected tabs, docking, the active layout, named-layout
+operations, and panel preferences, publish cheap immutable snapshots to that
+owner in memory only. The GUI does not validate the whole collection, encode
+JSON, or perform save I/O. Named layouts share immutable trees until an edit
+copies the affected tree; rendering borrows a snapshot rather than temporarily
+mutating a shared tree.
+
+Only manual sync or an orderly application exit writes layout state to disk.
+The Sync layouts to file icon beside Rename in `Menu > Layouts` first cancels
+active interactions and applies their rollback, then publishes the committed
+collection and requests an asynchronous write. Drag and separator previews are
+never included. Panel-settings Apply completes immediately after publishing its
+session-only change; it does not wait for or request a file write.
 
 The worker writes serially, retaining at most one in-flight snapshot and one
-replaceable pending latest snapshot. New submissions replace pending work, not
-the running write. A slow old write cannot finish after a newer write and
-overwrite it. After submissions stop, the latest snapshot is the final attempted
-replacement; there is no unbounded task or request queue.
+replaceable pending sync snapshot. A sync captures the latest published
+collection at the time of the request. Subsequent in-memory edits neither change
+that captured snapshot nor suppress its success or failure feedback. New sync
+requests replace pending work, not the running write; a slow old write cannot
+overwrite a newer completed write. There is no unbounded task or request queue.
 
 The worker validates before writing a unique sibling temporary file and renaming
 it over the destination. Failed validation, encoding, or I/O preserves the
 existing destination; this is atomic replacement, not a claim of power-loss
-durability. Only the current revision can publish visible save success or
-failure. Superseded failures are logged instead of overwriting newer feedback.
-A successful current save clears only its own earlier save error, not an
-unrelated GUI error. Panel-settings Apply receives the actual save result for
-the submitted or a later coalesced revision, with the editor-session identity
-checked before publishing feedback.
-
-Named operations validate their names and preserve a valid selected layout
-immediately. Like panel edits, successful switch, duplicate, rename, and delete
-operations remain visible if their asynchronous save fails; they do not roll
-back later user intent. The failure is reported, the old file remains intact,
-and the next layout modification or panel-settings Apply resubmits the complete
-latest collection. There is no automatic retry loop on a persistently failing
-destination.
+durability. The latest sync request publishes visible save success or failure.
+A successful sync clears only its own earlier save error, not an unrelated GUI
+error. Named operations validate their names and preserve a valid selected layout
+immediately. A failed sync does not roll back any session changes. The failure
+is reported in the footer; manual sync retries the latest collection, while
+further layout modifications do not retry automatically. There is no automatic
+retry loop on a persistently failing destination.
 
 The session reads the file once at initialization. Closing a window neither
-waits for the writer nor destroys its pending state. Reopening uses the latest
-in-memory snapshot, even while an older snapshot is still being written, and
-resets transient edit mode to locked. Normal Quit and other orderly shutdowns
-flush the latest submitted revision after the GPUI event loop returns, outside
-its deadline-limited quit observer, and propagate a final save failure. Final
-session destruction drains pending work and joins its one worker; this one
-application-teardown boundary can wait for filesystem I/O. It is not a wait on
-each interaction, layout switch, window close, or reopen.
+writes layouts nor destroys their in-memory state. Reopening uses the latest
+in-memory snapshot and resets transient edit mode to locked. Normal Quit and
+other orderly shutdowns flush the latest dirty in-memory collection and wait
+for the writer after the GPUI event loop returns, outside its deadline-limited
+quit observer, and propagate a final save failure. This application-teardown
+boundary can wait for filesystem I/O; individual interactions, layout switches,
+window closes, and reopens do not. An abnormal exit loses unsynced changes.
 
 == Rationale and alternatives
 

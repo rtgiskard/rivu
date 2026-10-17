@@ -54,6 +54,7 @@ shell-name = Name
 shell-cancel-layout-action = Cancel layout action
 shell-duplicate-layout-as = Duplicate current layout as…
 shell-rename-layout = Rename current layout…
+shell-sync-layouts = Sync layouts to file
 shell-layout-duplicate-title = Duplicate current layout
 shell-duplicate = Duplicate
 shell-layout-rename-title = Rename current layout

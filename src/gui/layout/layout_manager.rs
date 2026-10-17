@@ -307,6 +307,18 @@ impl GuiApp {
                             self.tr("shell-rename-layout"),
                             cx,
                             |this, window, cx| this.begin_layout_action(Action::Rename, window, cx),
+                        ))
+                        .child(icon_button(
+                            "layout-sync",
+                            "󱈖",
+                            self.tr("shell-sync-layouts"),
+                            cx,
+                            |this, window, cx| {
+                                this.cancel_interaction(window, cx);
+                                this.queue_layout_save();
+                                this.layout_save.sync();
+                                cx.notify();
+                            },
                         )),
                 );
         }
@@ -375,21 +387,6 @@ impl GuiApp {
                 self.layout_save_error = Some(error.clone());
                 self.error = Some(error.clone());
             }
-        }
-        if self
-            .layout_apply
-            .as_ref()
-            .is_some_and(|(revision, _)| *revision <= completion.revision)
-        {
-            let (_, apply) = self.layout_apply.take().expect("checked panel apply");
-            self.settings.update(cx, |settings, cx| match apply {
-                LayoutApply::Visualizer(session) => {
-                    settings.complete_visualizer_apply(session, result, cx)
-                }
-                LayoutApply::Artwork(session) => {
-                    settings.complete_artwork_apply(session, result, cx)
-                }
-            });
         }
         cx.notify();
     }

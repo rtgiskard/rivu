@@ -399,11 +399,6 @@ fn stage_analysis_frame(
     true
 }
 
-enum LayoutApply {
-    Visualizer(u64),
-    Artwork(u64),
-}
-
 pub(super) struct GuiApp {
     pub(super) i18n: Arc<Localizer>,
     localized_text: HashMap<String, SharedString>,
@@ -414,7 +409,6 @@ pub(super) struct GuiApp {
     layout_save: LayoutSaveHandle,
     layout_save_seen: u64,
     layout_save_error: Option<String>,
-    layout_apply: Option<(u64, LayoutApply)>,
     inputs: HashMap<Field, Entity<Input>>,
     queue_search: Entity<ListSearch>,
     playlist_search: Entity<ListSearch>,
@@ -896,8 +890,10 @@ impl GuiApp {
                         .current_mut()
                         .set_audio_visualizer_options(*panel_id, *options)
                     {
-                        let revision = this.queue_layout_save();
-                        this.layout_apply = Some((revision, LayoutApply::Visualizer(*session)));
+                        this.queue_layout_save();
+                        settings.update(cx, |settings, cx| {
+                            settings.complete_visualizer_apply(*session, Ok(()), cx)
+                        });
                     } else {
                         settings.update(cx, |settings, cx| {
                             settings.complete_visualizer_apply(
@@ -920,8 +916,10 @@ impl GuiApp {
                         .current_mut()
                         .set_album_artwork_options(*panel_id, *options)
                     {
-                        let revision = this.queue_layout_save();
-                        this.layout_apply = Some((revision, LayoutApply::Artwork(*session)));
+                        this.queue_layout_save();
+                        settings.update(cx, |settings, cx| {
+                            settings.complete_artwork_apply(*session, Ok(()), cx)
+                        });
                     } else {
                         settings.update(cx, |settings, cx| {
                             settings.complete_artwork_apply(
@@ -1102,7 +1100,6 @@ impl GuiApp {
             layout_save,
             layout_save_seen: 0,
             layout_save_error: error.clone(),
-            layout_apply: None,
             inputs,
             queue_search,
             playlist_search,
