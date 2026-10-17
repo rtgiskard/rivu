@@ -155,14 +155,14 @@ impl GuiApp {
         let id = self.begin_manual_intent();
         self.ready_manual_action(
             id,
-            super::metadata::ManualAction::Close(window.window_handle()),
+            super::manual_actions::ManualAction::Close(window.window_handle()),
             cx,
         );
     }
 
     pub(super) fn request_quit(&mut self, cx: &mut Context<Self>) {
         let id = self.begin_manual_intent();
-        self.ready_manual_action(id, super::metadata::ManualAction::Quit, cx);
+        self.ready_manual_action(id, super::manual_actions::ManualAction::Quit, cx);
     }
 
     pub(super) fn finish_quit(&self) {

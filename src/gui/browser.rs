@@ -15,7 +15,7 @@ use super::{
     BrowserFocus, HistorySort, ListFocus,
     browser::requests::{ViewRequestKind, ViewRequests},
     library::{DirectoryTree, LibraryNode, TreeBranch},
-    metadata::ManualIntentId,
+    manual_actions::ManualIntentId,
 };
 use crate::model::{DirectoryRow, HistoryEntry, LibrarySort, Page, PlaylistSummary, Query};
 use crate::{projection::QueryProjection, response::QueryRevisions};

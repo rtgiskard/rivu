@@ -23,6 +23,11 @@ changes preserve the latest navigation target and modifiers; an already
 dispatched full-row read drains before retrying against current metadata.
 Duplicate source/target choices retain track identity across reference-only
 refreshes; command eligibility is checked against current targeted member facts.
+The duplicate-review owner applies start, cancellation, acknowledgement, and
+completion transitions together with its query gates. The window runs the returned
+effects; Core owns relocation execution. Dismissal and window destruction request
+cancellation without joining a worker. An acknowledgement arriving after dismissal
+must cancel its accepted task rather than reopen or overwrite a newer review.
 
 The Library browser owns search-count identity, accepted totals, per-root counts,
 failure retention, and its single physical worker slot. Preparation reconciles
@@ -102,6 +107,15 @@ retain the slot until completion. The edit session remains authoritative for
 drafts and read/save acceptance, independently of query generations. Panel
 activation also drives demand, so revealing Details can resume reads without a
 new Core snapshot.
+
+The window owns the latest explicit action and its confirmation barrier, separate
+from the Details edit session and read coordinator. New input or cancellation
+retires the previous action; a late range result or save acknowledgement cannot
+restore it. Confirmation validates the frozen target again before changing the
+selection or discarding the original draft. Queue and Playlist selection owners
+perform their own synchronous transitions; the window dispatches reads and applies
+accepted effects. Cancellation preserves a submitted worker's gate until its
+completion, even when a newer selection is already waiting.
 
 Root-count batches run one at a time. Tree reads share at most four physical
 workers and four coalesced latest pending branch demands; unscheduled demand

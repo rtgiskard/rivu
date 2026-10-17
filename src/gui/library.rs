@@ -331,7 +331,7 @@ impl GuiApp {
 
     fn prepare_tree_row(
         &mut self,
-        id: super::metadata::ManualIntentId,
+        id: super::manual_actions::ManualIntentId,
         index: usize,
         cx: &mut Context<Self>,
     ) {

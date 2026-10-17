@@ -1,7 +1,9 @@
 //! Playlist occurrence selection is independent of bounded metadata pages.
 //! Jobs retain compact identities and publish atomically for their original token.
 //! Metadata-only changes retry pending navigation without invalidating occurrence identities.
-use crate::gui::metadata::{ManualAction, ManualIntentId};
+//! The owner stages selection/range/navigation transitions; window-wide intent,
+//! metadata confirmation, focus and scrolling stay in GuiApp.
+use crate::gui::manual_actions::{ManualAction, ManualIntentId};
 use crate::gui::*;
 use crate::{
     model::{Page, PlaylistEntryLocation, PlaylistEntryRow, Query},
@@ -192,6 +194,74 @@ impl EntrySelection {
         self.active = Some(row);
         self.anchor = Some(row);
     }
+    fn begin_selection(
+        &mut self,
+        intent: ManualIntentId,
+        scope: EntryNavigationScope,
+        row: EntryIdentity,
+        shift: bool,
+        multi: bool,
+    ) -> Option<EntryCommit> {
+        self.intent = Some(intent);
+        let commit = EntryCommit {
+            scope,
+            generation: self.generation,
+            target: row,
+            anchor: self.anchor,
+            rows: None,
+            multi,
+            scroll: false,
+        };
+        if shift && let Some(anchor) = self.anchor {
+            self.queue_range(
+                intent,
+                commit,
+                anchor.offset.min(row.offset),
+                anchor.offset.max(row.offset) + 1,
+            );
+            None
+        } else {
+            Some(commit)
+        }
+    }
+
+    fn queue_range(
+        &mut self,
+        intent: ManualIntentId,
+        commit: EntryCommit,
+        start: usize,
+        end: usize,
+    ) {
+        self.busy = true;
+        self.intent = Some(intent);
+        self.range_request = Some(EntryRangeRequest {
+            intent,
+            commit,
+            start,
+            end,
+        });
+    }
+
+    fn finish_read(&mut self, intent: ManualIntentId, generation: u64) -> bool {
+        if self.intent != Some(intent) || !self.current(generation) {
+            return false;
+        }
+        self.busy = false;
+        true
+    }
+
+    fn begin_navigation(
+        &mut self,
+        intent: ManualIntentId,
+        scope: EntryNavigationScope,
+        offset: usize,
+        shift: bool,
+        multi: bool,
+        all: bool,
+    ) {
+        self.navigate_to(scope, offset, shift, multi, all);
+        self.intent = Some(intent);
+    }
     pub(in crate::gui) fn ids(&self) -> Vec<i64> {
         let mut ids: Vec<_> = self.selected.keys().copied().collect();
         for owner in [self.active, self.anchor].into_iter().flatten() {
@@ -277,16 +347,18 @@ impl EntrySelection {
         self.navigation = None;
         true
     }
-    fn navigate(
-        &mut self,
+    fn can_select_all(&self, total: usize) -> bool {
+        total > 0 && self.ready()
+    }
+
+    fn navigation_offset(
+        &self,
         scope: EntryNavigationScope,
         total: usize,
         down: bool,
-        shift: bool,
-        multi: bool,
-    ) -> bool {
+    ) -> Option<usize> {
         if total == 0 || (!self.ready() && self.navigation.is_none()) {
-            return false;
+            return None;
         }
         let current = self
             .navigation
@@ -299,18 +371,7 @@ impl EntrySelection {
             None if down => 0,
             None => total - 1,
         };
-        if current == Some(offset) {
-            return false;
-        }
-        self.navigate_to(scope, offset, shift, multi, false);
-        true
-    }
-    fn navigate_all(&mut self, scope: EntryNavigationScope, total: usize) -> bool {
-        if total == 0 || !self.ready() {
-            return false;
-        }
-        self.navigate_to(scope, 0, false, false, true);
-        true
+        (current != Some(offset)).then_some(offset)
     }
     fn navigate_to(
         &mut self,
@@ -412,8 +473,11 @@ impl EntrySelection {
                 } else {
                     None
                 };
+                self.busy = range.is_some();
                 EntryNavigationEffect::Selected { target, range }
             }
+            // A stale payload cannot make retained identities ready. The window
+            // must first accept the reload effect for this manual intent.
             Ok(None) => EntryNavigationEffect::Reload,
             result => {
                 let message = match result {
@@ -781,29 +845,15 @@ impl GuiApp {
         let Some(scope) = self.playlist_navigation_scope() else {
             return;
         };
-        let anchor = self.browser.playlists().track_selection.anchor;
         let intent = self.begin_manual_intent();
-        self.browser.playlist_selection_mut().intent = Some(intent);
-        let generation = self.browser.playlists().track_selection.generation;
-        let commit = EntryCommit {
-            scope,
-            generation,
-            target: row,
-            anchor,
-            rows: None,
-            multi,
-            scroll: false,
-        };
-        if shift && let Some(anchor) = anchor {
-            self.queue_playlist_range(
-                intent,
-                commit,
-                anchor.offset.min(index),
-                anchor.offset.max(index) + 1,
-                cx,
-            );
-        } else {
+        if let Some(commit) = self
+            .browser
+            .playlist_selection_mut()
+            .begin_selection(intent, scope, row, shift, multi)
+        {
             self.ready_manual_action(intent, ManualAction::Playlist(commit), cx);
+        } else {
+            self.dispatch_playlist_range(cx);
         }
     }
 
@@ -852,15 +902,9 @@ impl GuiApp {
         end: usize,
         cx: &mut Context<Self>,
     ) {
-        let selection = self.browser.playlist_selection_mut();
-        selection.busy = true;
-        selection.intent = Some(intent);
-        selection.range_request = Some(EntryRangeRequest {
-            intent,
-            commit,
-            start,
-            end,
-        });
+        self.browser
+            .playlist_selection_mut()
+            .queue_range(intent, commit, start, end);
         self.dispatch_playlist_range(cx);
     }
 
@@ -932,8 +976,13 @@ impl GuiApp {
                     .playlist_selection_mut()
                     .release_range_worker(generation);
                 this.refresh(cx);
-                if this.manual_intent_current(job.intent) && this.entry_commit_valid(&job.commit) {
-                    this.browser.playlist_selection_mut().busy = false;
+                if this.manual_intent_current(job.intent)
+                    && this.entry_commit_valid(&job.commit)
+                    && this
+                        .browser
+                        .playlist_selection_mut()
+                        .finish_read(job.intent, generation)
+                {
                     match result {
                         Ok(Some(rows)) => {
                             job.commit.rows = Some(rows);
@@ -988,15 +1037,16 @@ impl GuiApp {
         };
         if !self
             .browser
-            .playlist_selection_mut()
-            .navigate_all(scope, total)
+            .playlists()
+            .track_selection
+            .can_select_all(total)
         {
             return;
         }
         let intent = self.begin_manual_intent();
-        let selection = self.browser.playlist_selection_mut();
-        selection.navigate_to(scope, 0, false, false, true);
-        selection.intent = Some(intent);
+        self.browser
+            .playlist_selection_mut()
+            .begin_navigation(intent, scope, 0, false, false, true);
         self.dispatch_playlist_navigation(cx);
         cx.notify();
     }
@@ -1015,24 +1065,18 @@ impl GuiApp {
         let Some(total) = self.browser.playlists().entries().rows.total() else {
             return;
         };
-        if !self
-            .browser
-            .playlist_selection_mut()
-            .navigate(scope, total, down, shift, multi)
-        {
-            return;
-        }
-        let offset = self
+        let Some(offset) = self
             .browser
             .playlists()
             .track_selection
-            .navigation
-            .unwrap()
-            .offset;
+            .navigation_offset(scope, total, down)
+        else {
+            return;
+        };
         let intent = self.begin_manual_intent();
-        let selection = self.browser.playlist_selection_mut();
-        selection.navigate_to(scope, offset, shift, multi, false);
-        selection.intent = Some(intent);
+        self.browser
+            .playlist_selection_mut()
+            .begin_navigation(intent, scope, offset, shift, multi, false);
         self.dispatch_playlist_navigation(cx);
         cx.notify();
     }
@@ -1050,9 +1094,14 @@ impl GuiApp {
             return;
         }
         let intent = self.begin_manual_intent();
-        let selection = self.browser.playlist_selection_mut();
-        selection.navigate_to(scope, if last { total - 1 } else { 0 }, false, false, false);
-        selection.intent = Some(intent);
+        self.browser.playlist_selection_mut().begin_navigation(
+            intent,
+            scope,
+            if last { total - 1 } else { 0 },
+            false,
+            false,
+            false,
+        );
         self.dispatch_playlist_navigation(cx);
         cx.notify();
     }
@@ -1102,8 +1151,10 @@ impl GuiApp {
                     match effect {
                         EntryNavigationEffect::None => {}
                         EntryNavigationEffect::Reload => {
+                            this.browser
+                                .playlist_selection_mut()
+                                .finish_read(intent, job.generation);
                             this.fail_manual_intent(intent);
-                            this.browser.playlist_selection_mut().busy = false;
                             this.error = Some(this.i18n.text("gl-playlist-changed-select").into());
                         }
                         EntryNavigationEffect::Failed(message) => {
@@ -1129,7 +1180,6 @@ impl GuiApp {
                                     cx,
                                 );
                             } else {
-                                this.browser.playlist_selection_mut().busy = false;
                                 this.ready_manual_action(
                                     intent,
                                     ManualAction::Playlist(commit),
@@ -1177,6 +1227,47 @@ mod tests {
         model::{MAX_QUERY_ROWS, Page, PlaylistEntryRow},
         response::{QueryError, QueryResponse, QueryRevisions, ViewResponse},
     };
+
+    fn navigate(
+        selection: &mut EntrySelection,
+        scope: EntryNavigationScope,
+        total: usize,
+        down: bool,
+        shift: bool,
+        multi: bool,
+    ) -> bool {
+        let Some(offset) = selection.navigation_offset(scope, total, down) else {
+            return false;
+        };
+        let mut intents = crate::gui::manual_actions::ManualIntents::default();
+        selection.begin_navigation(intents.begin(), scope, offset, shift, multi, false);
+        true
+    }
+
+    #[test]
+    fn superseded_range_cannot_finish_latest_selection_or_release_its_gate() {
+        let mut selection = EntrySelection::default();
+        let mut intents = crate::gui::manual_actions::ManualIntents::default();
+        let scope = navigation_scope();
+        selection.select(identity(1, 0), false);
+        let old = intents.begin();
+        assert!(
+            selection
+                .begin_selection(old, scope, identity(2, 1), true, false)
+                .is_none()
+        );
+        let running = selection.take_range().unwrap();
+        selection.cancel();
+        let latest = intents.begin();
+        selection.begin_navigation(latest, scope, 2, false, false, false);
+        assert!(selection.take_navigation().is_none());
+        assert!(!selection.finish_read(old, running.commit.generation));
+        assert!(selection.busy);
+        assert!(selection.contains(1));
+        assert_eq!(selection.intent, Some(latest));
+        selection.release_range_worker(running.commit.generation);
+        assert_eq!(selection.take_navigation().unwrap().offset, 2);
+    }
 
     fn identity(id: i64, position: usize) -> EntryIdentity {
         EntryIdentity {
@@ -1260,13 +1351,13 @@ mod tests {
             },
             false,
         );
-        assert!(selection.navigate(scope, 3, true, false, false));
+        assert!(navigate(&mut selection, scope, 3, true, false, false));
         assert_eq!(selection.navigation.unwrap().offset, 2);
     }
 
     #[test]
     fn metadata_only_navigation_change_retries_without_losing_selection_or_readiness() {
-        use crate::gui::metadata::ManualIntents;
+        use crate::gui::manual_actions::ManualIntents;
         let scope = navigation_scope();
         let changed = EntryNavigationScope {
             metadata: scope.metadata + 1,
@@ -1277,7 +1368,7 @@ mod tests {
             let mut intents = ManualIntents::default();
             selection.select(identity(9, 9), false);
             selection.select(identity(0, 0), true);
-            assert!(selection.navigate(scope, 20, true, shift, multi));
+            assert!(navigate(&mut selection, scope, 20, true, shift, multi));
             let intent = intents.begin();
             selection.intent = Some(intent);
             let stale = selection.take_navigation().unwrap();
@@ -1346,14 +1437,14 @@ mod tests {
             );
             assert_eq!(selection.active, Some(target));
             assert!(selection.ready());
-            assert!(selection.navigate(changed, 20, true, false, false));
+            assert!(navigate(&mut selection, changed, 20, true, false, false));
             assert_eq!(selection.take_navigation().unwrap().offset, 2);
         }
     }
 
     #[test]
     fn metadata_only_change_preserves_newer_navigation_target_intent_and_worker_gate() {
-        use crate::gui::metadata::ManualIntents;
+        use crate::gui::manual_actions::ManualIntents;
         let scope = navigation_scope();
         let changed = EntryNavigationScope {
             metadata: scope.metadata + 1,
@@ -1362,10 +1453,10 @@ mod tests {
         let mut selection = EntrySelection::default();
         let mut intents = ManualIntents::default();
         selection.select(identity(0, 0), false);
-        assert!(selection.navigate(scope, 20, true, false, false));
+        assert!(navigate(&mut selection, scope, 20, true, false, false));
         selection.intent = Some(intents.begin());
         let stale = selection.take_navigation().unwrap();
-        assert!(selection.navigate(changed, 20, true, true, true));
+        assert!(navigate(&mut selection, changed, 20, true, true, true));
         let intent = intents.begin();
         selection.intent = Some(intent);
         let generation = selection.generation;
@@ -1412,11 +1503,11 @@ mod tests {
         let scope = navigation_scope();
         let mut selection = EntrySelection::default();
         selection.select(identity(0, 0), false);
-        assert!(selection.navigate(scope, 1_000, true, false, false));
+        assert!(navigate(&mut selection, scope, 1_000, true, false, false));
         let first = selection.take_navigation().unwrap();
         assert_eq!(first.offset, 1);
         for _ in 0..254 {
-            assert!(selection.navigate(scope, 1_000, true, false, false));
+            assert!(navigate(&mut selection, scope, 1_000, true, false, false));
             assert!(selection.take_navigation().is_none());
         }
         assert_eq!(selection.active, Some(identity(0, 0)));
@@ -1466,9 +1557,9 @@ mod tests {
     fn navigation_boundaries_do_not_dispatch_duplicate_queries() {
         let scope = navigation_scope();
         let mut selection = EntrySelection::default();
-        assert!(!selection.navigate(scope, 0, true, false, false));
+        assert!(!navigate(&mut selection, scope, 0, true, false, false));
         assert!(selection.take_navigation().is_none());
-        assert!(selection.navigate(scope, 3, true, false, false));
+        assert!(navigate(&mut selection, scope, 3, true, false, false));
         let first = selection.take_navigation().unwrap();
         assert_eq!(first.offset, 0);
         selection.finish_navigation(
@@ -1480,16 +1571,16 @@ mod tests {
         selection.select(identity(0, 0), false);
         let generation = selection.generation;
         for _ in 0..100 {
-            assert!(!selection.navigate(scope, 3, false, true, true));
+            assert!(!navigate(&mut selection, scope, 3, false, true, true));
             assert!(selection.take_navigation().is_none());
         }
         assert_eq!(selection.generation, generation);
         assert_eq!(selection.ordered_ids(), vec![0]);
-        assert!(selection.navigate(scope, 3, true, false, false));
+        assert!(navigate(&mut selection, scope, 3, true, false, false));
         let first = selection.take_navigation().unwrap();
-        assert!(selection.navigate(scope, 3, true, false, false));
+        assert!(navigate(&mut selection, scope, 3, true, false, false));
         for _ in 0..100 {
-            assert!(!selection.navigate(scope, 3, true, true, true));
+            assert!(!navigate(&mut selection, scope, 3, true, true, true));
             assert!(selection.take_navigation().is_none());
         }
         assert_eq!(
@@ -1504,7 +1595,7 @@ mod tests {
         let last = selection.take_navigation().unwrap();
         assert_eq!(last.offset, 2);
         for _ in 0..100 {
-            assert!(!selection.navigate(scope, 3, true, false, false));
+            assert!(!navigate(&mut selection, scope, 3, true, false, false));
             assert!(selection.take_navigation().is_none());
         }
         selection.finish_navigation(
@@ -1515,10 +1606,10 @@ mod tests {
         );
         selection.select(identity(2, 2), false);
         assert_eq!(selection.ordered_ids(), vec![2]);
-        assert!(!selection.navigate(scope, 3, true, false, false));
+        assert!(!navigate(&mut selection, scope, 3, true, false, false));
         assert!(selection.take_navigation().is_none());
         selection.clear();
-        assert!(selection.navigate(scope, 3, false, false, false));
+        assert!(navigate(&mut selection, scope, 3, false, false, false));
         assert_eq!(selection.take_navigation().unwrap().offset, 2);
     }
 
@@ -1529,9 +1620,9 @@ mod tests {
             let mut selection = EntrySelection::default();
             selection.select(identity(9, 9), false);
             selection.select(identity(2, 2), true);
-            assert!(selection.navigate(scope, 20, true, !shift, !multi));
+            assert!(navigate(&mut selection, scope, 20, true, !shift, !multi));
             let first = selection.take_navigation().unwrap();
-            assert!(selection.navigate(scope, 20, true, shift, multi));
+            assert!(navigate(&mut selection, scope, 20, true, shift, multi));
             assert_eq!(
                 selection.finish_navigation(
                     "Unexpected playlist navigation response",
@@ -1607,10 +1698,10 @@ mod tests {
         let scope = navigation_scope();
         let mut selection = EntrySelection::default();
         selection.select(identity(0, 0), false);
-        assert!(selection.navigate(scope, 10, true, false, false));
+        assert!(navigate(&mut selection, scope, 10, true, false, false));
         let old = selection.take_navigation().unwrap();
         selection.cancel();
-        assert!(selection.navigate(scope, 10, true, true, true));
+        assert!(navigate(&mut selection, scope, 10, true, true, true));
         let generation = selection.generation;
         assert!(selection.take_navigation().is_none());
         assert_eq!(
@@ -1632,12 +1723,12 @@ mod tests {
     #[test]
     fn range_and_navigation_share_one_worker_even_after_cancellation() {
         use super::{EntryCommit, EntryRangeRequest};
-        use crate::gui::metadata::ManualIntents;
+        use crate::gui::manual_actions::ManualIntents;
         let scope = navigation_scope();
         let mut intents = ManualIntents::default();
         let mut selection = EntrySelection::default();
         selection.select(identity(0, 0), false);
-        assert!(selection.navigate(scope, 10, true, false, false));
+        assert!(navigate(&mut selection, scope, 10, true, false, false));
         let old = selection.take_navigation().unwrap();
         selection.cancel();
         let intent = intents.begin();
@@ -1669,7 +1760,7 @@ mod tests {
         let range = selection.take_range().unwrap();
         assert_eq!(range.commit.target, identity(4, 4));
         selection.cancel();
-        assert!(selection.navigate(scope, 10, true, false, false));
+        assert!(navigate(&mut selection, scope, 10, true, false, false));
         assert!(selection.take_navigation().is_none());
         assert_eq!(selection.active, Some(identity(0, 0)));
         selection.release_range_worker(generation);
@@ -1681,9 +1772,11 @@ mod tests {
     fn select_all_navigation_establishes_first_occurrence_before_atomic_range_publication() {
         let scope = navigation_scope();
         let mut selection = EntrySelection::default();
-        assert!(!selection.navigate_all(scope, 0));
-        assert!(selection.navigate_all(scope, 5));
-        assert!(!selection.navigate_all(scope, 5));
+        let mut intents = crate::gui::manual_actions::ManualIntents::default();
+        assert!(!selection.can_select_all(0));
+        assert!(selection.can_select_all(5));
+        selection.begin_navigation(intents.begin(), scope, 0, false, false, true);
+        assert!(!selection.can_select_all(5));
         let job = selection.take_navigation().unwrap();
         assert_eq!(job.offset, 0);
         assert_eq!(
@@ -1724,9 +1817,9 @@ mod tests {
             let mut scope = navigation_scope();
             let mut selection = EntrySelection::default();
             selection.select(identity(0, 0), false);
-            assert!(selection.navigate(scope, 10, true, false, false));
+            assert!(navigate(&mut selection, scope, 10, true, false, false));
             let old = selection.take_navigation().unwrap();
-            assert!(selection.navigate(scope, 10, true, false, false));
+            assert!(navigate(&mut selection, scope, 10, true, false, false));
             let base = match transition {
                 0 => {
                     selection.cancel();
@@ -1739,7 +1832,7 @@ mod tests {
                         playlist_id: 10,
                         ..scope
                     };
-                    assert!(selection.navigate(other, 10, true, false, false));
+                    assert!(navigate(&mut selection, other, 10, true, false, false));
                     assert!(selection.take_navigation().is_none());
                     selection.clear();
                     selection.select(identity(4, 4), false);
@@ -1764,7 +1857,7 @@ mod tests {
             };
             assert!(selection.navigation.is_none());
             assert_eq!(selection.navigation_in_flight, Some(old));
-            assert!(selection.navigate(scope, 10, true, false, false));
+            assert!(navigate(&mut selection, scope, 10, true, false, false));
             assert!(selection.take_navigation().is_none());
             assert_eq!(
                 selection.finish_navigation(
@@ -1802,7 +1895,7 @@ mod tests {
         let scope = navigation_scope();
         let mut selection = EntrySelection::default();
         selection.select(identity(0, 0), false);
-        assert!(selection.navigate(scope, 10, true, false, false));
+        assert!(navigate(&mut selection, scope, 10, true, false, false));
         let job = selection.take_navigation().unwrap();
         let changed = EntryNavigationScope {
             revision: scope.revision + 1,
@@ -1834,7 +1927,7 @@ mod tests {
         selection.select(identity(8, 19), true);
         selection.select(identity(8, 19), true);
         for scoped in [false, true, false] {
-            assert!(selection.navigate(scope, 30, true, false, false));
+            assert!(navigate(&mut selection, scope, 30, true, false, false));
             let job = selection.take_navigation().unwrap();
             let mut response = if scoped {
                 navigation_response(job, 30)
@@ -1862,7 +1955,7 @@ mod tests {
             assert!(selection.ordered_ids().is_empty());
             assert!(selection.drag_ids(7).is_empty());
             for _ in 0..100 {
-                assert!(!selection.navigate(scope, 30, true, false, false));
+                assert!(!navigate(&mut selection, scope, 30, true, false, false));
                 assert!(selection.take_navigation().is_none());
             }
             let mut ids = selection.ids();
@@ -1874,7 +1967,7 @@ mod tests {
             assert!(selection.ready());
             assert_eq!(selection.ordered_ids(), vec![7]);
         }
-        assert!(selection.navigate(scope, 30, true, false, false));
+        assert!(navigate(&mut selection, scope, 30, true, false, false));
         let job = selection.take_navigation().unwrap();
         selection.finish_navigation(
             "Unexpected playlist navigation response",
@@ -1891,7 +1984,7 @@ mod tests {
     fn failed_navigation_without_identities_retries_to_ready_empty_and_can_navigate_again() {
         let scope = navigation_scope();
         let mut selection = EntrySelection::default();
-        assert!(selection.navigate(scope, 3, true, false, false));
+        assert!(navigate(&mut selection, scope, 3, true, false, false));
         let job = selection.take_navigation().unwrap();
         assert_eq!(
             selection.finish_navigation(
@@ -1905,7 +1998,7 @@ mod tests {
         selection.invalidate();
         assert!(selection.ids().is_empty());
         assert!(selection.ready());
-        assert!(selection.navigate(scope, 3, true, false, false));
+        assert!(navigate(&mut selection, scope, 3, true, false, false));
         let job = selection.take_navigation().unwrap();
         selection.finish_navigation(
             "Unexpected playlist navigation response",
@@ -1919,12 +2012,28 @@ mod tests {
     }
 
     #[test]
+    fn rejected_navigation_read_settles_only_its_current_intent() {
+        let mut selection = EntrySelection::default();
+        let mut intents = crate::gui::manual_actions::ManualIntents::default();
+        let scope = navigation_scope();
+        let old = intents.begin();
+        selection.begin_navigation(old, scope, 0, false, false, false);
+        let generation = selection.generation;
+        let latest = intents.begin();
+        selection.begin_navigation(latest, scope, 1, false, false, false);
+        assert!(!selection.finish_read(old, generation));
+        assert!(selection.busy);
+        assert!(selection.finish_read(latest, selection.generation));
+        assert!(!selection.busy);
+    }
+
+    #[test]
     fn navigation_success_with_stale_revisions_never_publishes_target() {
         let scope = navigation_scope();
         for stale_domain in 0..6 {
             let mut selection = EntrySelection::default();
             selection.select(identity(0, 0), false);
-            assert!(selection.navigate(scope, 10, true, false, false));
+            assert!(navigate(&mut selection, scope, 10, true, false, false));
             let job = selection.take_navigation().unwrap();
             let mut response = navigation_response(job, 10);
             match stale_domain {
@@ -1990,7 +2099,7 @@ mod tests {
         for unexpected_payload in [false, true] {
             let mut selection = EntrySelection::default();
             selection.select(identity(0, 0), false);
-            assert!(selection.navigate(scope, 10, true, false, false));
+            assert!(navigate(&mut selection, scope, 10, true, false, false));
             let job = selection.take_navigation().unwrap();
             let mut response = navigation_response(job, 10);
             let message = if unexpected_payload {
@@ -2014,7 +2123,7 @@ mod tests {
             assert!(!selection.busy);
             assert!(selection.navigation.is_none());
             assert_eq!(selection.active, Some(identity(0, 0)));
-            assert!(!selection.navigate(scope, 10, true, false, false));
+            assert!(!navigate(&mut selection, scope, 10, true, false, false));
             assert!(selection.take_navigation().is_none());
         }
     }
@@ -2237,7 +2346,14 @@ mod tests {
     fn superseded_range_navigation_revision_and_switch_results_never_publish() {
         let mut selection = EntrySelection::default();
         selection.select(identity(7, 20), false);
-        assert!(selection.navigate(navigation_scope(), 100, true, false, false));
+        assert!(navigate(
+            &mut selection,
+            navigation_scope(),
+            100,
+            true,
+            false,
+            false
+        ));
         let old = selection.generation;
         selection.select(identity(8, 21), false);
         assert!(!selection.complete_range(

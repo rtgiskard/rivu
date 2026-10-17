@@ -5,8 +5,10 @@
 //! selected occurrence. Hidden state sync does not demand metadata pages; failures
 //! remain parked until explicit retry. Now-playing locate never enters selection
 //! or metadata intent handling.
+//! Selection starts and completions belong to QueueSelection; window-wide intent,
+//! metadata confirmation, focus and scrolling remain with GuiApp.
 
-use super::metadata::{ManualAction, ManualIntentId};
+use super::manual_actions::{ManualAction, ManualIntentId};
 use super::*;
 use super::{
     components::{
@@ -289,6 +291,80 @@ impl QueueSelection {
         self.active = Some(row);
         self.rows.pin(Some(row.offset));
     }
+    fn begin_selection(
+        &mut self,
+        intent: ManualIntentId,
+        revisions: QueryRevisions,
+        row: QueueIdentity,
+        shift: bool,
+        multi: bool,
+    ) -> Option<QueueCommit> {
+        self.manual = Some(intent);
+        let stamp = self.query().stamp(revisions);
+        let generation = self.projection.generation();
+        if shift && self.anchor.is_some() {
+            self.busy = true;
+            self.pending = Some(QueueJob {
+                intent,
+                generation,
+                stamp,
+                target: QueueTarget::Row(row),
+                anchor: self.anchor,
+                shift,
+                all: false,
+                multi,
+                scroll: false,
+                total: self.rows.len(),
+                query: self.query.clone(),
+            });
+            None
+        } else {
+            Some(QueueCommit {
+                stamp,
+                generation,
+                target: row,
+                anchor: row,
+                rows: None,
+                multi,
+                scroll: false,
+            })
+        }
+    }
+
+    fn begin_navigation(
+        &mut self,
+        intent: ManualIntentId,
+        revisions: QueryRevisions,
+        offset: usize,
+        all: bool,
+    ) {
+        self.manual = Some(intent);
+        self.navigation = Some(offset);
+        self.busy = true;
+        self.pending = Some(QueueJob {
+            intent,
+            generation: self.projection.generation(),
+            stamp: self.query().stamp(revisions),
+            target: QueueTarget::Offset(offset),
+            anchor: self.anchor,
+            shift: false,
+            all,
+            multi: false,
+            scroll: true,
+            total: self.rows.len(),
+            query: self.query.clone(),
+        });
+    }
+
+    fn finish_selection(&mut self, job: &QueueJob, error: Option<&String>) -> bool {
+        if self.manual != Some(job.intent) || !self.current(job.generation, job.stamp) {
+            return false;
+        }
+        self.busy = false;
+        self.navigation = None;
+        self.selection_error = error.cloned();
+        true
+    }
     fn query(&self) -> Query {
         Query::QueuePage {
             query: self.query.clone(),
@@ -451,6 +527,7 @@ impl QueueSelection {
         self.anchor = Some(anchor);
         self.active = Some(target);
         self.busy = false;
+        self.navigation = None;
         self.rows.pin(Some(target.offset));
         true
     }
@@ -799,45 +876,16 @@ impl GuiApp {
         else {
             return;
         };
-        let anchor = self.browser.queue.anchor;
         let intent = self.begin_manual_intent();
-        self.browser.queue.manual = Some(intent);
-        let generation = self.browser.queue.projection.generation();
-        let stamp = self
+        let revisions = self.state.query_revisions(None);
+        if let Some(commit) = self
             .browser
             .queue
-            .query()
-            .stamp(self.state.query_revisions(None));
-        if shift && anchor.is_some() {
-            self.browser.queue.pending = Some(QueueJob {
-                intent,
-                generation,
-                stamp,
-                target: QueueTarget::Row(row),
-                anchor,
-                shift,
-                all: false,
-                multi,
-                scroll: false,
-                total: self.browser.queue.rows.len(),
-                query: self.browser.queue.query.clone(),
-            });
-            self.browser.queue.busy = true;
-            self.dispatch_queue_selection(cx);
+            .begin_selection(intent, revisions, row, shift, multi)
+        {
+            self.ready_manual_action(intent, ManualAction::Queue(commit), cx);
         } else {
-            self.ready_manual_action(
-                intent,
-                ManualAction::Queue(QueueCommit {
-                    stamp,
-                    generation,
-                    target: row,
-                    anchor: row,
-                    rows: None,
-                    multi,
-                    scroll: false,
-                }),
-                cx,
-            );
+            self.dispatch_queue_selection(cx);
         }
     }
 
@@ -871,7 +919,6 @@ impl GuiApp {
         } else {
             queue.select(commit.target, commit.multi);
         }
-        queue.navigation = None;
         self.browser.focus_list(ListFocus::Queue);
         self.request_track(commit.target.track_id, cx);
         if commit.scroll {
@@ -929,30 +976,11 @@ impl GuiApp {
     }
 
     fn start_queue_navigation(&mut self, offset: usize, all: bool, cx: &mut Context<Self>) {
-        let anchor = self.browser.queue.anchor;
         let intent = self.begin_manual_intent();
-        let stamp = self
-            .browser
+        let revisions = self.state.query_revisions(None);
+        self.browser
             .queue
-            .query()
-            .stamp(self.state.query_revisions(None));
-        let queue = &mut self.browser.queue;
-        queue.manual = Some(intent);
-        queue.navigation = Some(offset);
-        queue.busy = true;
-        queue.pending = Some(QueueJob {
-            intent,
-            generation: queue.projection.generation(),
-            stamp,
-            target: QueueTarget::Offset(offset),
-            anchor,
-            shift: false,
-            all,
-            multi: false,
-            scroll: true,
-            total: queue.rows.len(),
-            query: queue.query.clone(),
-        });
+            .begin_navigation(intent, revisions, offset, all);
         self.dispatch_queue_selection(cx);
         cx.notify();
     }
@@ -1117,16 +1145,18 @@ impl GuiApp {
             let _ = this.update(cx, |this, cx| {
                 this.browser.queue.release_worker(job.generation);
                 this.refresh(cx);
-                if this.queue_job_current(&job) {
-                    this.browser.queue.busy = false;
-                    this.browser.queue.navigation = None;
+                if this.queue_job_current(&job)
+                    && this
+                        .browser
+                        .queue
+                        .finish_selection(&job, result.as_ref().err())
+                {
                     match result {
                         Ok(Some(commit)) => {
                             this.ready_manual_action(job.intent, ManualAction::Queue(commit), cx)
                         }
                         Err(message) => {
                             this.fail_manual_intent(job.intent);
-                            this.browser.queue.selection_error = Some(message.clone());
                             this.error = Some(message);
                         }
                         Ok(None) => {}
@@ -1335,49 +1365,29 @@ mod tests {
 
     #[test]
     fn cancelled_worker_retains_gate_and_selection_until_latest_job_can_start() {
-        use super::{QueueJob, QueueTarget};
-        use crate::gui::metadata::ManualIntents;
+        use super::QueueTarget;
+        use crate::gui::manual_actions::ManualIntents;
         let mut intents = ManualIntents::default();
         let mut queue = queue(0);
         queue.select(identity(1, 0), false);
         let old = intents.begin();
-        queue.pending = Some(QueueJob {
-            intent: old,
-            generation: queue.projection.generation(),
-            stamp: queue.query().stamp(revisions(0)),
-            target: QueueTarget::Offset(1),
-            anchor: queue.anchor,
-            shift: false,
-            all: false,
-            query: None,
-            multi: false,
-            scroll: true,
-            total: 10,
-        });
+        queue.begin_navigation(old, revisions(0), 1, false);
         let running = queue.take_job().unwrap();
         queue.cancel();
         let latest = intents.begin();
-        queue.pending = Some(QueueJob {
-            intent: latest,
-            generation: queue.projection.generation(),
-            stamp: queue.query().stamp(revisions(0)),
-            target: QueueTarget::Offset(8),
-            anchor: queue.anchor,
-            shift: false,
-            all: false,
-            query: None,
-            multi: false,
-            scroll: true,
-            total: 10,
-        });
+        queue.begin_navigation(latest, revisions(0), 8, false);
         assert!(queue.take_job().is_none());
         assert!(!queue.current(running.generation, running.stamp));
-        assert_eq!(queue.ordered_ids(), vec![1]);
+        assert!(!queue.finish_selection(&running, Some(&"obsolete".to_owned())));
+        assert!(queue.busy);
+        assert!(queue.selection_error.is_none());
+        assert!(queue.contains(&1));
         queue.release_worker(running.generation);
         let next = queue.take_job().unwrap();
         assert_eq!(next.intent, latest);
         assert!(matches!(next.target, QueueTarget::Offset(8)));
         assert!(queue.take_job().is_none());
+        assert!(queue.finish_selection(&next, None));
         assert_eq!(queue.active(), Some(identity(1, 0)));
     }
     #[test]

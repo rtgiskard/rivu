@@ -9,6 +9,7 @@ mod layout;
 mod library;
 mod list_interaction;
 mod loading;
+mod manual_actions;
 mod metadata;
 mod paged;
 mod panels;
@@ -421,7 +422,7 @@ pub(super) struct GuiApp {
     loading_text: loading::LoadingText<loading::LoadingOwner>,
     metadata: MetadataSession,
     metadata_read: metadata::MetadataReadCoordinator,
-    manual_intents: metadata::ManualIntents,
+    manual_intents: manual_actions::ManualIntents,
     duplicate_review: duplicates::DuplicateReview,
     metadata_decoder_hint: crate::model::DecoderHint,
     layout_focus: FocusHandle,
@@ -472,6 +473,13 @@ pub(super) struct GuiApp {
     history_column_widths: Option<panels::HistoryColumnWidths>,
     _subscriptions: Vec<Subscription>,
 }
+
+impl Drop for GuiApp {
+    fn drop(&mut self) {
+        self.cancel_duplicate_task();
+    }
+}
+
 impl GuiApp {
     fn panel_demand(&self, kind: &str) -> bool {
         self.window_visible
@@ -1110,7 +1118,7 @@ impl GuiApp {
             loading_text: loading::LoadingText::default(),
             metadata: MetadataSession::default(),
             metadata_read: Default::default(),
-            manual_intents: metadata::ManualIntents::default(),
+            manual_intents: manual_actions::ManualIntents::default(),
             duplicate_review: duplicates::DuplicateReview::default(),
             metadata_decoder_hint: Default::default(),
             layout_focus: cx.focus_handle(),
@@ -1383,7 +1391,7 @@ impl GuiApp {
         let intent = self.begin_manual_intent();
         self.ready_manual_action(
             intent,
-            metadata::ManualAction::History {
+            manual_actions::ManualAction::History {
                 commit,
                 structure_revision: self.state.library.structure_revision,
             },

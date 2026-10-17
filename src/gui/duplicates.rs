@@ -1,4 +1,5 @@
-//! Bounded ordinary-file review. Projections own data validity; Core owns task IDs.
+//! DuplicateReview owns synchronous transitions and physical query gates; GuiApp
+//! runs effects, and Core retains relocation workers and task IDs (never UI joins).
 
 use super::*;
 use crate::gui::components::{
@@ -8,7 +9,7 @@ use crate::gui::components::{
 use crate::{
     model::{Page, RelocationPhase, RelocationTaskStatus},
     projection::QueryProjection,
-    response::{QueryResponse, QueryRevisions, ViewResponse},
+    response::{Ack, QueryResponse, QueryRevisions, ViewResponse},
     store::{DuplicateGroup, DuplicateMember},
 };
 
@@ -28,6 +29,27 @@ enum Busy {
     Cancelling(u64),
     Keeping,
 }
+
+enum ReviewFeedback {
+    Text(String, StatusKind),
+    Localized(&'static str, StatusKind),
+    ReadFailed(String),
+}
+
+enum TaskReadOutcome {
+    Ignored,
+    Finished,
+    Failed,
+}
+
+struct ReviewRead {
+    epoch: u64,
+    query: Query,
+    generation: u64,
+    ticket: crate::core::QueryTicket,
+}
+
+type SelectedMembers = Option<(QueryResponse, Vec<Option<bool>>)>;
 
 #[derive(Default)]
 pub(super) struct DuplicateReview {
@@ -53,10 +75,401 @@ pub(super) struct DuplicateReview {
     confirming: bool,
     busy: Option<Busy>,
     task_query_pending: bool,
-    feedback: Option<(String, StatusKind)>,
+    feedback: Option<ReviewFeedback>,
 }
 
 impl DuplicateReview {
+    fn open(&mut self, revisions: QueryRevisions) -> Option<u64> {
+        let cancel = self.task_id();
+        self.busy = None;
+        self.epoch = self.epoch.wrapping_add(1);
+        self.open = true;
+        self.reset(revisions);
+        cancel
+    }
+
+    fn close(&mut self) -> Option<u64> {
+        let cancel = self.task_id();
+        self.open = false;
+        self.epoch = self.epoch.wrapping_add(1);
+        self.invalidate();
+        self.busy = None;
+        cancel
+    }
+
+    fn reset(&mut self, revisions: QueryRevisions) -> bool {
+        if self.busy.is_some() {
+            return false;
+        }
+        self.invalidate();
+        self.fingerprint = None;
+        self.members_dirty = false;
+        self.feedback = None;
+        self.request_groups(0, revisions);
+        true
+    }
+
+    fn task_id(&self) -> Option<u64> {
+        match self.busy {
+            Some(Busy::Relocating(id) | Busy::Cancelling(id)) => Some(id),
+            _ => None,
+        }
+    }
+
+    fn submit(&mut self, independent: bool) -> Option<(u64, Command)> {
+        if !self.open || self.busy.is_some() || !self.members_current {
+            return None;
+        }
+        let target = self.target.as_ref()?;
+        let command = if independent {
+            Command::KeepTrackIndependent {
+                track_id: target.track.id,
+            }
+        } else {
+            if !self.confirming || !self.can_relocate() {
+                return None;
+            }
+            Command::RelocateTrack {
+                source_id: self.source.as_ref()?.track.id,
+                target_id: target.track.id,
+            }
+        };
+        self.busy = Some(if independent {
+            Busy::Keeping
+        } else {
+            Busy::Starting
+        });
+        self.confirming = false;
+        self.feedback = None;
+        Some((self.epoch, command))
+    }
+
+    // False leaves the caller responsible for cancelling a late relocation ack,
+    // including when the window entity itself no longer exists.
+    fn accept_ack(&mut self, epoch: u64, independent: bool, ack: Ack) -> bool {
+        if !self.open || self.epoch != epoch {
+            return false;
+        }
+        if !ack.ok {
+            self.busy = None;
+            self.feedback = Some(match ack.error {
+                Some(error) => ReviewFeedback::Text(error, StatusKind::Error),
+                None => ReviewFeedback::Localized("gl-review-action-failed", StatusKind::Error),
+            });
+        } else if independent {
+            // Keep the gate until the host refreshes the post-command snapshot.
+            self.feedback = Some(ReviewFeedback::Localized(
+                "gl-kept-independent",
+                StatusKind::Success,
+            ));
+        } else if let Some(id) = ack.relocation_id {
+            self.busy = Some(Busy::Relocating(id));
+        } else {
+            self.busy = None;
+            self.feedback = Some(ReviewFeedback::Localized(
+                "gl-relocation-no-task",
+                StatusKind::Error,
+            ));
+        }
+        true
+    }
+
+    fn finish_ack_refresh(&mut self) {
+        if self.busy == Some(Busy::Keeping) {
+            self.busy = None;
+        }
+    }
+
+    fn accept_task(&mut self, task: &RelocationTaskStatus) -> bool {
+        if !self.open || self.task_id() != Some(task.id) || task.phase == RelocationPhase::Verifying
+        {
+            return false;
+        }
+        self.feedback = Some(match task.phase {
+            RelocationPhase::Completed => {
+                ReviewFeedback::Localized("gl-relocation-completed", StatusKind::Success)
+            }
+            RelocationPhase::Cancelled => {
+                ReviewFeedback::Localized("gl-verification-cancelled", StatusKind::Info)
+            }
+            RelocationPhase::Failed => match &task.error {
+                Some(error) => ReviewFeedback::Text(error.clone(), StatusKind::Error),
+                None => ReviewFeedback::Localized("gl-relocation-failed", StatusKind::Error),
+            },
+            RelocationPhase::Verifying => unreachable!(),
+        });
+        self.busy = None;
+        true
+    }
+
+    fn begin_task_read(&mut self, id: u64) -> Option<u64> {
+        if !self.open || self.task_id() != Some(id) || self.task_query_pending {
+            return None;
+        }
+        self.task_query_pending = true;
+        Some(self.epoch)
+    }
+
+    fn accept_task_read(
+        &mut self,
+        epoch: u64,
+        id: u64,
+        response: QueryResponse,
+    ) -> TaskReadOutcome {
+        self.task_query_pending = false;
+        if !self.open || self.epoch != epoch || self.task_id() != Some(id) {
+            return TaskReadOutcome::Ignored;
+        }
+        match response.result {
+            Ok(ViewResponse::RelocationTask(task)) if task.id == id => {
+                if self.accept_task(&task) {
+                    TaskReadOutcome::Finished
+                } else {
+                    TaskReadOutcome::Ignored
+                }
+            }
+            result => {
+                self.busy = None;
+                self.feedback = Some(match result {
+                    Err(error) => ReviewFeedback::ReadFailed(error.to_string()),
+                    _ => ReviewFeedback::Localized("gl-verification-response", StatusKind::Error),
+                });
+                TaskReadOutcome::Failed
+            }
+        }
+    }
+
+    fn cancellable_task(&self) -> Option<u64> {
+        match self.busy {
+            Some(Busy::Relocating(id)) => Some(id),
+            _ => None,
+        }
+    }
+
+    fn accept_cancel(&mut self, id: u64, result: anyhow::Result<()>) {
+        if self.cancellable_task() != Some(id) {
+            return;
+        }
+        match result {
+            Ok(()) => self.busy = Some(Busy::Cancelling(id)),
+            Err(error) => {
+                self.feedback = Some(ReviewFeedback::Text(
+                    format!("{error:#}"),
+                    StatusKind::Error,
+                ))
+            }
+        }
+    }
+
+    fn select_member(&mut self, id: i64, source: bool) -> bool {
+        if self.busy.is_some() || !self.members_current || self.confirming {
+            return false;
+        }
+        let value = self
+            .members
+            .iter()
+            .find(|row| row.value.track.id == id)
+            .map(|row| row.value.clone());
+        if source {
+            self.source = value;
+        } else {
+            self.target = value;
+        }
+        true
+    }
+
+    fn confirm(&mut self, confirming: bool) -> bool {
+        if confirming && !self.can_relocate() {
+            return false;
+        }
+        self.confirming = confirming;
+        true
+    }
+
+    fn select_group(&mut self, fingerprint: &str, revisions: QueryRevisions) -> bool {
+        if self.busy.is_some() || self.confirming {
+            return false;
+        }
+        self.feedback = None;
+        self.request_members(fingerprint.into(), 0, revisions);
+        true
+    }
+
+    fn request_groups(&mut self, offset: usize, revisions: QueryRevisions) {
+        if self.groups_offset != offset {
+            self.groups = None;
+        }
+        self.groups_offset = offset;
+        self.sync_queries(revisions);
+        self.groups_projection.cancel();
+        self.groups_dirty = true;
+        self.groups_failed = false;
+    }
+
+    fn request_members(&mut self, fingerprint: String, offset: usize, revisions: QueryRevisions) {
+        if self.fingerprint.as_ref() != Some(&fingerprint) {
+            self.clear_selection();
+            self.members_total = 0;
+        }
+        self.fingerprint = Some(fingerprint);
+        self.members_offset = offset;
+        self.sync_queries(revisions);
+        self.members_projection.cancel();
+        self.members.clear();
+        self.members_current = false;
+        self.members_dirty = true;
+        self.members_failed = false;
+        self.confirming = false;
+    }
+
+    fn begin_groups(&mut self) -> Option<ReviewRead> {
+        if !self.open || self.busy.is_some() || self.groups_loading || !self.groups_dirty {
+            return None;
+        }
+        self.groups_dirty = false;
+        self.groups_loading = true;
+        Some(ReviewRead {
+            epoch: self.epoch,
+            query: self.groups_query(),
+            generation: self.groups_projection.generation(),
+            ticket: self.groups_projection.ticket(),
+        })
+    }
+
+    fn begin_members(&mut self) -> Option<(ReviewRead, Vec<i64>)> {
+        if !self.open || self.busy.is_some() || self.members_loading || !self.members_dirty {
+            return None;
+        }
+        let query = self.members_query()?;
+        self.members_dirty = false;
+        self.members_loading = true;
+        let selected = self
+            .source
+            .iter()
+            .chain(self.target.iter())
+            .map(|member| member.track.id)
+            .collect();
+        Some((
+            ReviewRead {
+                epoch: self.epoch,
+                query,
+                generation: self.members_projection.generation(),
+                ticket: self.members_projection.ticket(),
+            },
+            selected,
+        ))
+    }
+
+    fn groups_worker_finished(&mut self) {
+        self.groups_loading = false;
+    }
+
+    fn members_worker_finished(&mut self) {
+        self.members_loading = false;
+    }
+
+    fn accept_groups(
+        &mut self,
+        epoch: u64,
+        query: &Query,
+        generation: u64,
+        response: QueryResponse,
+        revisions: QueryRevisions,
+    ) -> bool {
+        if !self.accepts_groups(epoch, query, generation, response.revisions) {
+            if self.groups_projection.generation() == generation {
+                self.groups_dirty = true;
+            }
+            return false;
+        }
+        match response.result {
+            Ok(ViewResponse::DuplicateGroups(page)) => {
+                if self.groups_offset > 0 && self.groups_offset >= page.total {
+                    self.request_groups(0, revisions);
+                    return false;
+                }
+                self.groups = Some(page);
+            }
+            result => {
+                self.groups_failed = true;
+                self.feedback = Some(match result {
+                    Err(error) => ReviewFeedback::Text(error.to_string(), StatusKind::Error),
+                    _ => ReviewFeedback::Localized("gl-duplicate-response", StatusKind::Error),
+                });
+            }
+        }
+        true
+    }
+
+    fn accept_members(
+        &mut self,
+        epoch: u64,
+        query: &Query,
+        generation: u64,
+        result: (QueryResponse, Vec<Option<bool>>, SelectedMembers),
+        revisions: QueryRevisions,
+    ) -> bool {
+        let (response, existence, selected) = result;
+        let selected_current = selected.as_ref().is_none_or(|(selected, _)| {
+            query.stamp(selected.revisions) == query.stamp(response.revisions)
+        });
+        if !selected_current || !self.accepts_members(epoch, query, generation, response.revisions)
+        {
+            if self.members_projection.generation() == generation {
+                self.members_dirty = true;
+            }
+            return false;
+        }
+        let selected = match selected {
+            Some((
+                QueryResponse {
+                    result: Ok(ViewResponse::DuplicateMembers(page)),
+                    ..
+                },
+                exists,
+            )) => page
+                .rows
+                .into_iter()
+                .zip(exists)
+                .map(|(value, exists)| Member { value, exists })
+                .collect(),
+            Some((response, _)) => {
+                self.fail_members(response.result.err().map(|error| error.to_string()));
+                return true;
+            }
+            None => Vec::new(),
+        };
+        match response.result {
+            Ok(ViewResponse::DuplicateMembers(page)) => {
+                if self.members_offset > 0 && self.members_offset >= page.total {
+                    if let Some(hash) = self.fingerprint.clone() {
+                        self.request_members(hash, 0, revisions);
+                    }
+                    return false;
+                }
+                self.members_total = page.total;
+                self.members = page
+                    .rows
+                    .into_iter()
+                    .zip(existence)
+                    .map(|(value, exists)| Member { value, exists })
+                    .collect();
+                self.reconcile_selection(&selected);
+            }
+            result => self.fail_members(result.err().map(|error| error.to_string())),
+        }
+        true
+    }
+
+    fn fail_members(&mut self, message: Option<String>) {
+        self.members_failed = true;
+        self.members_current = false;
+        self.feedback = Some(match message {
+            Some(message) => ReviewFeedback::Text(message, StatusKind::Error),
+            None => ReviewFeedback::Localized("gl-member-response", StatusKind::Error),
+        });
+    }
+
     fn groups_query(&self) -> Query {
         Query::DuplicateGroups {
             offset: self.groups_offset,
@@ -180,27 +593,20 @@ impl DuplicateReview {
 impl GuiApp {
     pub(super) fn open_duplicate_review(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.cancel_interaction(window, cx);
-        self.cancel_duplicate_task();
-        self.duplicate_review.busy = None;
+        if let Some(id) = self.duplicate_review.open(self.state.query_revisions(None)) {
+            let _ = self.handle.send(Command::CancelRelocation { id });
+        }
         self.panel_menu = None;
         self.app_menu_open = false;
         self.catalog_open = false;
-        self.duplicate_review.epoch = self.duplicate_review.epoch.wrapping_add(1);
-        self.duplicate_review.invalidate();
-        self.duplicate_review.open = true;
-        self.duplicate_review.fingerprint = None;
-        self.duplicate_review.members_dirty = false;
-        self.duplicate_review.feedback = None;
-        self.request_duplicate_groups(0, cx);
+        self.start_duplicate_groups(cx);
         cx.notify();
     }
 
     pub(super) fn close_duplicate_review(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.cancel_duplicate_task();
-        self.duplicate_review.open = false;
-        self.duplicate_review.epoch = self.duplicate_review.epoch.wrapping_add(1);
-        self.duplicate_review.invalidate();
-        self.duplicate_review.busy = None;
+        if let Some(id) = self.duplicate_review.close() {
+            let _ = self.handle.send(Command::CancelRelocation { id });
+        }
         if self.settings_open {
             self.settings.focus_handle(cx).focus(window, cx);
         } else {
@@ -210,35 +616,27 @@ impl GuiApp {
     }
 
     pub(super) fn cancel_duplicate_task(&self) {
-        if let Some(Busy::Relocating(id) | Busy::Cancelling(id)) = self.duplicate_review.busy {
+        if let Some(id) = self.duplicate_review.task_id() {
             let _ = self.handle.send(Command::CancelRelocation { id });
         }
     }
 
     fn request_duplicate_groups(&mut self, offset: usize, cx: &mut Context<Self>) {
-        let revisions = self.state.query_revisions(None);
-        let review = &mut self.duplicate_review;
-        if review.groups_offset != offset {
-            review.groups = None;
-        }
-        review.groups_offset = offset;
-        review.sync_queries(revisions);
-        review.groups_projection.cancel();
-        review.groups_dirty = true;
-        review.groups_failed = false;
+        self.duplicate_review
+            .request_groups(offset, self.state.query_revisions(None));
         self.start_duplicate_groups(cx);
     }
 
     fn start_duplicate_groups(&mut self, cx: &mut Context<Self>) {
-        let review = &mut self.duplicate_review;
-        if !review.open || review.busy.is_some() || review.groups_loading || !review.groups_dirty {
+        let Some(ReviewRead {
+            epoch,
+            query,
+            generation,
+            ticket,
+        }) = self.duplicate_review.begin_groups()
+        else {
             return;
-        }
-        review.groups_dirty = false;
-        review.groups_loading = true;
-        let query = review.groups_query();
-        let (epoch, generation) = (review.epoch, review.groups_projection.generation());
-        let ticket = review.groups_projection.ticket();
+        };
         let handle = self.handle.clone();
         cx.spawn(async move |this, cx| {
             cx.background_executor()
@@ -253,7 +651,7 @@ impl GuiApp {
                         this.state.query_revisions(None),
                     );
                     if !current {
-                        this.duplicate_review.groups_loading = false;
+                        this.duplicate_review.groups_worker_finished();
                         this.start_duplicate_groups(cx);
                     }
                     current
@@ -268,42 +666,17 @@ impl GuiApp {
                 .spawn(async move { handle.query_if_current(worker_query, ticket) })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.duplicate_review.groups_loading = false;
+                this.duplicate_review.groups_worker_finished();
                 this.refresh(cx);
-                if !this.duplicate_review.accepts_groups(
+                if !this.duplicate_review.accept_groups(
                     epoch,
                     &query,
                     generation,
-                    response.revisions,
+                    response,
+                    this.state.query_revisions(None),
                 ) {
-                    if this.duplicate_review.groups_projection.generation() == generation {
-                        this.duplicate_review.groups_dirty = true;
-                    }
                     this.start_duplicate_groups(cx);
                     return;
-                }
-                match response.result {
-                    Ok(ViewResponse::DuplicateGroups(page)) => {
-                        if this.duplicate_review.groups_offset > 0
-                            && this.duplicate_review.groups_offset >= page.total
-                        {
-                            this.request_duplicate_groups(0, cx);
-                            return;
-                        }
-                        this.duplicate_review.groups = Some(page);
-                    }
-                    Err(error) => {
-                        this.duplicate_review.groups_failed = true;
-                        this.duplicate_review.feedback =
-                            Some((error.to_string(), StatusKind::Error));
-                    }
-                    _ => {
-                        this.duplicate_review.groups_failed = true;
-                        this.duplicate_review.feedback = Some((
-                            this.i18n.text("gl-duplicate-response").into(),
-                            StatusKind::Error,
-                        ));
-                    }
                 }
                 cx.notify();
             });
@@ -317,43 +690,27 @@ impl GuiApp {
         offset: usize,
         cx: &mut Context<Self>,
     ) {
-        let revisions = self.state.query_revisions(None);
-        let review = &mut self.duplicate_review;
-        if review.fingerprint.as_ref() != Some(&fingerprint) {
-            review.clear_selection();
-            review.members_total = 0;
-        }
-        review.fingerprint = Some(fingerprint);
-        review.members_offset = offset;
-        review.sync_queries(revisions);
-        review.members_projection.cancel();
-        review.members.clear();
-        review.members_current = false;
-        review.members_dirty = true;
-        review.members_failed = false;
-        review.confirming = false;
+        self.duplicate_review.request_members(
+            fingerprint,
+            offset,
+            self.state.query_revisions(None),
+        );
         self.start_duplicate_members(cx);
     }
 
     fn start_duplicate_members(&mut self, cx: &mut Context<Self>) {
-        let review = &mut self.duplicate_review;
-        if !review.open || review.busy.is_some() || review.members_loading || !review.members_dirty
-        {
-            return;
-        }
-        let Some(query) = review.members_query() else {
+        let Some((
+            ReviewRead {
+                epoch,
+                query,
+                generation,
+                ticket,
+            },
+            selected_ids,
+        )) = self.duplicate_review.begin_members()
+        else {
             return;
         };
-        review.members_dirty = false;
-        review.members_loading = true;
-        let selected_ids = review
-            .source
-            .iter()
-            .chain(review.target.iter())
-            .map(|member| member.track.id)
-            .collect::<Vec<_>>();
-        let (epoch, generation) = (review.epoch, review.members_projection.generation());
-        let ticket = review.members_projection.ticket();
         let handle = self.handle.clone();
         cx.spawn(async move |this, cx| {
             cx.background_executor()
@@ -368,7 +725,7 @@ impl GuiApp {
                         this.state.query_revisions(None),
                     );
                     if !current {
-                        this.duplicate_review.members_loading = false;
+                        this.duplicate_review.members_worker_finished();
                         this.start_duplicate_members(cx);
                     }
                     current
@@ -412,91 +769,22 @@ impl GuiApp {
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.duplicate_review.members_loading = false;
+                this.duplicate_review.members_worker_finished();
                 this.refresh(cx);
-                let selected_current = selected.as_ref().is_none_or(|(selected, _)| {
-                    query.stamp(selected.revisions) == query.stamp(response.revisions)
-                });
-                if !selected_current
-                    || !this.duplicate_review.accepts_members(
-                        epoch,
-                        &query,
-                        generation,
-                        response.revisions,
-                    )
-                {
-                    if this.duplicate_review.members_projection.generation() == generation {
-                        this.duplicate_review.members_dirty = true;
-                    }
+                if !this.duplicate_review.accept_members(
+                    epoch,
+                    &query,
+                    generation,
+                    (response, existence, selected),
+                    this.state.query_revisions(None),
+                ) {
                     this.start_duplicate_members(cx);
                     return;
-                }
-                let selected = match selected {
-                    Some((
-                        QueryResponse {
-                            result: Ok(ViewResponse::DuplicateMembers(page)),
-                            ..
-                        },
-                        exists,
-                    )) => page
-                        .rows
-                        .into_iter()
-                        .zip(exists)
-                        .map(|(value, exists)| Member { value, exists })
-                        .collect(),
-                    Some((
-                        QueryResponse {
-                            result: Err(error), ..
-                        },
-                        _,
-                    )) => {
-                        this.fail_duplicate_members(error.to_string(), cx);
-                        return;
-                    }
-                    Some(_) => {
-                        this.fail_duplicate_members(
-                            this.i18n.text("gl-member-response").into(),
-                            cx,
-                        );
-                        return;
-                    }
-                    None => Vec::new(),
-                };
-                match response.result {
-                    Ok(ViewResponse::DuplicateMembers(page)) => {
-                        if this.duplicate_review.members_offset > 0
-                            && this.duplicate_review.members_offset >= page.total
-                        {
-                            if let Some(hash) = this.duplicate_review.fingerprint.clone() {
-                                this.request_duplicate_members(hash, 0, cx);
-                            }
-                            return;
-                        }
-                        this.duplicate_review.members_total = page.total;
-                        this.duplicate_review.members = page
-                            .rows
-                            .into_iter()
-                            .zip(existence)
-                            .map(|(value, exists)| Member { value, exists })
-                            .collect();
-                        this.duplicate_review.reconcile_selection(&selected);
-                    }
-                    Err(error) => this.fail_duplicate_members(error.to_string(), cx),
-                    _ => {
-                        this.fail_duplicate_members(this.i18n.text("gl-member-response").into(), cx)
-                    }
                 }
                 cx.notify();
             });
         })
         .detach();
-    }
-
-    fn fail_duplicate_members(&mut self, message: String, cx: &mut Context<Self>) {
-        self.duplicate_review.members_failed = true;
-        self.duplicate_review.members_current = false;
-        self.duplicate_review.feedback = Some((message, StatusKind::Error));
-        cx.notify();
     }
 
     pub(super) fn sync_duplicate_review(&mut self, cx: &mut Context<Self>) {
@@ -506,22 +794,15 @@ impl GuiApp {
         if !self.duplicate_review.open {
             return;
         }
-        let task_id = match self.duplicate_review.busy {
-            Some(Busy::Relocating(id) | Busy::Cancelling(id)) => Some(id),
-            _ => None,
-        };
-        let task = task_id
-            .and_then(|id| {
-                self.state
-                    .system
-                    .relocation_task
-                    .as_ref()
-                    .filter(|task| task.id == id)
-            })
-            .cloned();
-        let finished = task
-            .as_ref()
-            .is_some_and(|task| self.accept_duplicate_task(task));
+        let task_id = self.duplicate_review.task_id();
+        let task = task_id.and_then(|id| {
+            self.state
+                .system
+                .relocation_task
+                .as_ref()
+                .filter(|task| task.id == id)
+        });
+        let finished = task.is_some_and(|task| self.duplicate_review.accept_task(task));
         if task.is_none()
             && let Some(id) = task_id
         {
@@ -534,101 +815,36 @@ impl GuiApp {
         }
     }
 
-    fn accept_duplicate_task(&mut self, task: &RelocationTaskStatus) -> bool {
-        if task.phase == RelocationPhase::Verifying {
-            return false;
-        }
-        self.duplicate_review.feedback = Some(match task.phase {
-            RelocationPhase::Completed => (
-                self.i18n.text("gl-relocation-completed").into(),
-                StatusKind::Success,
-            ),
-            RelocationPhase::Cancelled => (
-                self.i18n.text("gl-verification-cancelled").into(),
-                StatusKind::Info,
-            ),
-            RelocationPhase::Failed => (
-                task.error
-                    .clone()
-                    .unwrap_or_else(|| self.i18n.text("gl-relocation-failed").into()),
-                StatusKind::Error,
-            ),
-            RelocationPhase::Verifying => unreachable!(),
-        });
-        self.duplicate_review.busy = None;
-        true
-    }
-
     fn request_retained_relocation(&mut self, id: u64, cx: &mut Context<Self>) {
-        if self.duplicate_review.task_query_pending {
+        let Some(epoch) = self.duplicate_review.begin_task_read(id) else {
             return;
-        }
-        self.duplicate_review.task_query_pending = true;
-        let epoch = self.duplicate_review.epoch;
+        };
         let handle = self.handle.clone();
         cx.spawn(async move |this, cx| {
-            let response = cx.background_executor().spawn(async move {
-                handle.query(Query::RelocationTask { id })
-            }).await;
+            let response = cx
+                .background_executor()
+                .spawn(async move { handle.query(Query::RelocationTask { id }) })
+                .await;
             let _ = this.update(cx, |this, cx| {
-                this.duplicate_review.task_query_pending = false;
-                if !this.duplicate_review.open || this.duplicate_review.epoch != epoch { return; }
-                if !matches!(this.duplicate_review.busy, Some(Busy::Relocating(current) | Busy::Cancelling(current)) if current == id) { return; }
-                match response.result {
-                    Ok(ViewResponse::RelocationTask(task)) if task.id == id => {
-                        if this.accept_duplicate_task(&task) {
-                            this.refresh(cx);
-                            this.sync_duplicate_review(cx);
-                        }
-                    }
-                    Err(error) => {
-                        this.duplicate_review.busy = None;
-                        this.duplicate_review.feedback = Some((this.i18n.format("gl-verification-read-failed", &[("error", (error.to_string()).into())]), StatusKind::Error));
+                match this.duplicate_review.accept_task_read(epoch, id, response) {
+                    TaskReadOutcome::Finished => {
+                        this.refresh(cx);
                         this.sync_duplicate_review(cx);
                     }
-                    _ => {
-                        this.duplicate_review.busy = None;
-                        this.duplicate_review.feedback = Some((this.i18n.text("gl-verification-response").into(), StatusKind::Error));
-                        this.sync_duplicate_review(cx);
-                    }
+                    TaskReadOutcome::Failed => this.sync_duplicate_review(cx),
+                    TaskReadOutcome::Ignored => return,
                 }
                 cx.notify();
             });
-        }).detach();
+        })
+        .detach();
     }
 
     fn submit_duplicate_action(&mut self, independent: bool, cx: &mut Context<Self>) {
         self.refresh(cx);
-        if self.duplicate_review.busy.is_some() || !self.duplicate_review.members_current {
-            return;
-        }
-        let Some(target) = self.duplicate_review.target.as_ref() else {
+        let Some((epoch, command)) = self.duplicate_review.submit(independent) else {
             return;
         };
-        let command = if independent {
-            Command::KeepTrackIndependent {
-                track_id: target.track.id,
-            }
-        } else {
-            if !self.duplicate_review.confirming || !self.duplicate_review.can_relocate() {
-                return;
-            }
-            let Some(source) = self.duplicate_review.source.as_ref() else {
-                return;
-            };
-            Command::RelocateTrack {
-                source_id: source.track.id,
-                target_id: target.track.id,
-            }
-        };
-        let epoch = self.duplicate_review.epoch;
-        self.duplicate_review.busy = Some(if independent {
-            Busy::Keeping
-        } else {
-            Busy::Starting
-        });
-        self.duplicate_review.confirming = false;
-        self.duplicate_review.feedback = None;
         let handle = self.handle.clone();
         cx.spawn(async move |this, cx| {
             let ack_handle = handle.clone();
@@ -639,35 +855,11 @@ impl GuiApp {
             let relocation_id = ack.relocation_id;
             let accepted = this
                 .update(cx, |this, cx| {
-                    if !this.duplicate_review.open || this.duplicate_review.epoch != epoch {
+                    if !this.duplicate_review.accept_ack(epoch, independent, ack) {
                         return false;
                     }
-                    if !ack.ok {
-                        this.duplicate_review.busy = None;
-                        this.duplicate_review.feedback = Some((
-                            ack.error.unwrap_or_else(|| {
-                                this.i18n.text("gl-review-action-failed").into()
-                            }),
-                            StatusKind::Error,
-                        ));
-                    } else if independent {
-                        this.duplicate_review.feedback = Some((
-                            this.i18n.text("gl-kept-independent").into(),
-                            StatusKind::Success,
-                        ));
-                    } else if let Some(id) = relocation_id {
-                        this.duplicate_review.busy = Some(Busy::Relocating(id));
-                    } else {
-                        this.duplicate_review.busy = None;
-                        this.duplicate_review.feedback = Some((
-                            this.i18n.text("gl-relocation-no-task").into(),
-                            StatusKind::Error,
-                        ));
-                    }
                     this.refresh(cx);
-                    if independent && ack.ok {
-                        this.duplicate_review.busy = None;
-                    }
+                    this.duplicate_review.finish_ack_refresh();
                     this.sync_duplicate_review(cx);
                     cx.notify();
                     true
@@ -683,15 +875,11 @@ impl GuiApp {
     }
 
     fn cancel_review_verification(&mut self, cx: &mut Context<Self>) {
-        let Some(Busy::Relocating(id)) = self.duplicate_review.busy else {
+        let Some(id) = self.duplicate_review.cancellable_task() else {
             return;
         };
-        match self.handle.send(Command::CancelRelocation { id }) {
-            Ok(()) => self.duplicate_review.busy = Some(Busy::Cancelling(id)),
-            Err(error) => {
-                self.duplicate_review.feedback = Some((format!("{error:#}"), StatusKind::Error))
-            }
-        }
+        let result = self.handle.send(Command::CancelRelocation { id });
+        self.duplicate_review.accept_cancel(id, result);
         cx.notify();
     }
 
@@ -718,11 +906,11 @@ impl GuiApp {
                     components::disabled_control(
                         theme,
                         button(("duplicate-group", index), "", cx, move |this, _, cx| {
-                            if this.duplicate_review.busy.is_none()
-                                && !this.duplicate_review.confirming
+                            if this
+                                .duplicate_review
+                                .select_group(&hash, this.state.query_revisions(None))
                             {
-                                this.duplicate_review.feedback = None;
-                                this.request_duplicate_members(hash.clone(), 0, cx);
+                                this.start_duplicate_members(cx);
                                 cx.notify();
                             }
                         })
@@ -1026,16 +1214,7 @@ impl GuiApp {
                             self.tr("gl-use-source"),
                             cx,
                             move |this, _, cx| {
-                                if this.duplicate_review.busy.is_none()
-                                    && this.duplicate_review.members_current
-                                    && !this.duplicate_review.confirming
-                                {
-                                    this.duplicate_review.source = this
-                                        .duplicate_review
-                                        .members
-                                        .iter()
-                                        .find(|row| row.value.track.id == id)
-                                        .map(|row| row.value.clone());
+                                if this.duplicate_review.select_member(id, true) {
                                     cx.notify();
                                 }
                             },
@@ -1055,16 +1234,7 @@ impl GuiApp {
                             self.tr("gl-use-target"),
                             cx,
                             move |this, _, cx| {
-                                if this.duplicate_review.busy.is_none()
-                                    && this.duplicate_review.members_current
-                                    && !this.duplicate_review.confirming
-                                {
-                                    this.duplicate_review.target = this
-                                        .duplicate_review
-                                        .members
-                                        .iter()
-                                        .find(|row| row.value.track.id == id)
-                                        .map(|row| row.value.clone());
+                                if this.duplicate_review.select_member(id, false) {
                                     cx.notify();
                                 }
                             },
@@ -1136,7 +1306,7 @@ impl GuiApp {
                             self.tr("gl-back-selection"),
                             cx,
                             |this, _, cx| {
-                                this.duplicate_review.confirming = false;
+                                this.duplicate_review.confirm(false);
                                 cx.notify();
                             },
                         )),
@@ -1153,8 +1323,7 @@ impl GuiApp {
                             self.tr("gl-review-relocation"),
                             cx,
                             |this, _, cx| {
-                                if this.duplicate_review.can_relocate() {
-                                    this.duplicate_review.confirming = true;
+                                if this.duplicate_review.confirm(true) {
                                     cx.notify();
                                 }
                             },
@@ -1191,8 +1360,19 @@ impl GuiApp {
                 ));
             }
         }
-        if let Some((message, kind)) = &review.feedback {
-            decisions = decisions.child(status_message(theme, message.clone(), *kind));
+        if let Some(feedback) = &review.feedback {
+            let (message, kind) = match feedback {
+                ReviewFeedback::Text(message, kind) => (message.clone(), *kind),
+                ReviewFeedback::Localized(key, kind) => (self.i18n.text(key).into(), *kind),
+                ReviewFeedback::ReadFailed(error) => (
+                    self.i18n.format(
+                        "gl-verification-read-failed",
+                        &[("error", error.as_str().into())],
+                    ),
+                    StatusKind::Error,
+                ),
+            };
+            decisions = decisions.child(status_message(theme, message, kind));
         }
         crate::gui::components::modal_backdrop("duplicate-review-modal")
             .map(|surface| self.dialog_surface(surface))
@@ -1228,12 +1408,11 @@ impl GuiApp {
                                         self.tr("gl-refresh-groups"),
                                         cx,
                                         |this, _, cx| {
-                                            if this.duplicate_review.busy.is_none() {
-                                                this.duplicate_review.invalidate();
-                                                this.duplicate_review.fingerprint = None;
-                                                this.duplicate_review.members_dirty = false;
-                                                this.duplicate_review.feedback = None;
-                                                this.request_duplicate_groups(0, cx);
+                                            if this
+                                                .duplicate_review
+                                                .reset(this.state.query_revisions(None))
+                                            {
+                                                this.start_duplicate_groups(cx);
                                                 cx.notify();
                                             }
                                         },
@@ -1386,12 +1565,6 @@ impl GuiApp {
     }
 }
 
-impl Drop for GuiApp {
-    fn drop(&mut self) {
-        self.cancel_duplicate_task();
-    }
-}
-
 fn selectable_source(member: &Member) -> bool {
     member.value.track.missing && member.exists == Some(false) && !member.value.independent
 }
@@ -1427,10 +1600,10 @@ fn has_target_state(member: &DuplicateMember) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{DuplicateReview, Member};
+    use super::{Busy, DuplicateReview, Member, ReviewFeedback, TaskReadOutcome};
     use crate::{
-        model::{Page, Track},
-        response::QueryRevisions,
+        model::{Command, Page, RelocationPhase, RelocationTaskStatus, Track},
+        response::{Ack, QueryResponse, QueryRevisions, ViewResponse},
         store::DuplicateMember,
     };
 
@@ -1489,34 +1662,48 @@ mod tests {
     fn refresh_and_close_reopen_reject_old_results_without_releasing_workers() {
         let mut review = review();
         let revisions = QueryRevisions::default();
-        let groups = review.groups_query();
-        let members = review.members_query().unwrap();
-        let groups_generation = review.groups_projection.generation();
-        let members_generation = review.members_projection.generation();
-        review.groups_loading = true;
-        review.members_loading = true;
-        assert!(review.accepts_groups(4, &groups, groups_generation, revisions));
-        assert!(review.accepts_members(4, &members, members_generation, revisions));
-        review.invalidate();
+        review.request_groups(0, revisions);
+        review.request_members("fingerprint".into(), 0, revisions);
+        let groups = review.begin_groups().unwrap();
+        let (members, _) = review.begin_members().unwrap();
+        assert!(review.accepts_groups(groups.epoch, &groups.query, groups.generation, revisions));
+        assert!(review.accepts_members(
+            members.epoch,
+            &members.query,
+            members.generation,
+            revisions
+        ));
+        assert!(review.reset(revisions));
         assert!(review.groups_loading);
         assert!(review.members_loading);
-        assert!(!review.accepts_groups(4, &groups, groups_generation, revisions));
-        assert!(!review.accepts_members(4, &members, members_generation, revisions));
-        review.open = false;
-        review.epoch += 1;
-        review.open = true;
+        assert!(!review.accepts_groups(groups.epoch, &groups.query, groups.generation, revisions));
+        assert!(!review.accepts_members(
+            members.epoch,
+            &members.query,
+            members.generation,
+            revisions
+        ));
+        assert_eq!(review.close(), None);
+        assert_eq!(review.open(revisions), None);
+        review.request_members("fingerprint".into(), 0, revisions);
         assert!(!review.accepts_groups(
-            4,
-            &groups,
+            groups.epoch,
+            &groups.query,
             review.groups_projection.generation(),
             revisions
         ));
         assert!(!review.accepts_members(
-            4,
-            &members,
+            members.epoch,
+            &members.query,
             review.members_projection.generation(),
             revisions
         ));
+        assert!(review.begin_groups().is_none());
+        assert!(review.begin_members().is_none());
+        review.groups_worker_finished();
+        review.members_worker_finished();
+        assert!(review.begin_groups().is_some());
+        assert!(review.begin_members().is_some());
     }
 
     #[test]
@@ -1659,5 +1846,342 @@ mod tests {
         assert!(review.members_failed);
         assert!(!review.groups_dirty);
         assert!(!review.members_dirty);
+    }
+
+    fn ready_review() -> DuplicateReview {
+        let mut review = review();
+        review.members = vec![member(1, true), member(2, false)];
+        review.members_current = true;
+        assert!(review.select_member(1, true));
+        assert!(review.select_member(2, false));
+        review
+    }
+
+    fn ack(ok: bool, relocation_id: Option<u64>) -> Ack {
+        Ack {
+            ok,
+            error: None,
+            revision: 0,
+            scan_id: None,
+            relocation_id,
+        }
+    }
+
+    fn task(id: u64, phase: RelocationPhase) -> RelocationTaskStatus {
+        RelocationTaskStatus {
+            id,
+            source_id: 1,
+            target_id: 2,
+            phase,
+            error: None,
+        }
+    }
+
+    fn task_response(id: u64, phase: RelocationPhase) -> QueryResponse {
+        QueryResponse {
+            revisions: QueryRevisions::default(),
+            result: Ok(ViewResponse::RelocationTask(task(id, phase))),
+        }
+    }
+
+    #[test]
+    fn submission_requires_current_confirmed_choices_and_serializes_actions() {
+        let mut review = ready_review();
+        assert!(review.submit(false).is_none());
+        assert!(review.confirm(true));
+        review.sync_queries(QueryRevisions {
+            duplicate_members: 1,
+            ..Default::default()
+        });
+        assert!(review.submit(false).is_none());
+        assert!(review.submit(true).is_none());
+        review.members = vec![member(1, true), member(2, false)];
+        review.reconcile_selection(&[]);
+        assert!(review.confirm(true));
+        let (epoch, command) = review.submit(false).unwrap();
+        assert_eq!(epoch, review.epoch);
+        assert!(matches!(
+            command,
+            Command::RelocateTrack {
+                source_id: 1,
+                target_id: 2
+            }
+        ));
+        assert!(review.busy == Some(Busy::Starting));
+        assert!(!review.confirming);
+        assert!(review.submit(true).is_none());
+        assert!(!review.select_member(2, false));
+        assert!(!review.reset(QueryRevisions::default()));
+    }
+
+    #[test]
+    fn late_start_ack_is_rejected_without_touching_the_reopened_review() {
+        let mut review = ready_review();
+        review.confirm(true);
+        let (epoch, _) = review.submit(false).unwrap();
+        // Starting has no Core task ID yet: the async host must cancel the ID
+        // from an acknowledgement rejected below, even if the entity was dropped.
+        assert_eq!(review.close(), None);
+        review.open(QueryRevisions::default());
+        let late_ack = ack(true, Some(7));
+        let cancellation = late_ack.relocation_id;
+        assert!(!review.accept_ack(epoch, false, late_ack));
+        assert_eq!(cancellation, Some(7));
+        assert!(review.busy.is_none());
+        assert!(review.feedback.is_none());
+        assert!(!review.accept_task(&task(7, RelocationPhase::Completed)));
+    }
+
+    #[test]
+    fn accepted_ack_cancellation_and_terminal_status_keep_core_task_identity() {
+        let mut review = ready_review();
+        review.confirm(true);
+        let (epoch, _) = review.submit(false).unwrap();
+        assert!(review.accept_ack(epoch, false, ack(true, Some(7))));
+        assert_eq!(review.cancellable_task(), Some(7));
+        review.accept_cancel(7, Err(anyhow::anyhow!("send failed")));
+        assert_eq!(review.cancellable_task(), Some(7));
+        assert!(
+            matches!(&review.feedback, Some(ReviewFeedback::Text(error, _)) if error == "send failed")
+        );
+        review.accept_cancel(7, Ok(()));
+        assert!(review.busy == Some(Busy::Cancelling(7)));
+        assert_eq!(review.cancellable_task(), None);
+        assert!(!review.accept_task(&task(8, RelocationPhase::Completed)));
+        assert!(!review.accept_task(&task(7, RelocationPhase::Verifying)));
+        // Cancellation is an intent, not a terminal fact: Core may finish first.
+        assert!(review.accept_task(&task(7, RelocationPhase::Completed)));
+        assert!(review.busy.is_none());
+        assert!(matches!(
+            review.feedback,
+            Some(ReviewFeedback::Localized("gl-relocation-completed", _))
+        ));
+        assert!(!review.accept_task(&task(7, RelocationPhase::Cancelled)));
+    }
+
+    #[test]
+    fn close_and_replace_return_only_known_core_tasks_for_cancellation() {
+        for replacing in [false, true] {
+            for cancelling in [false, true] {
+                let mut review = ready_review();
+                review.confirm(true);
+                let (epoch, _) = review.submit(false).unwrap();
+                review.accept_ack(epoch, false, ack(true, Some(7)));
+                if cancelling {
+                    review.accept_cancel(7, Ok(()));
+                }
+                let cancel = if replacing {
+                    review.open(QueryRevisions::default())
+                } else {
+                    review.close()
+                };
+                assert_eq!(cancel, Some(7));
+                assert_ne!(review.epoch, epoch);
+                assert!(review.busy.is_none());
+                assert_eq!(review.open, replacing);
+            }
+        }
+    }
+
+    #[test]
+    fn ack_failure_missing_task_and_keep_refresh_release_only_their_gates() {
+        for (ok, message) in [
+            (false, "gl-review-action-failed"),
+            (true, "gl-relocation-no-task"),
+        ] {
+            let mut review = ready_review();
+            review.confirm(true);
+            let (epoch, _) = review.submit(false).unwrap();
+            assert!(review.accept_ack(epoch, false, ack(ok, None)));
+            assert!(review.busy.is_none());
+            assert!(
+                matches!(review.feedback, Some(ReviewFeedback::Localized(key, _)) if key == message)
+            );
+        }
+        let mut review = ready_review();
+        let (epoch, command) = review.submit(true).unwrap();
+        assert!(matches!(
+            command,
+            Command::KeepTrackIndependent { track_id: 2 }
+        ));
+        assert!(review.accept_ack(epoch, true, ack(true, None)));
+        assert!(review.busy == Some(Busy::Keeping));
+        review.request_groups(0, QueryRevisions::default());
+        assert!(review.begin_groups().is_none());
+        review.finish_ack_refresh();
+        assert!(review.busy.is_none());
+        assert!(review.begin_groups().is_some());
+    }
+
+    #[test]
+    fn retained_read_gate_survives_reopen_and_old_result_cannot_finish_new_task() {
+        let mut review = ready_review();
+        review.confirm(true);
+        let (epoch, _) = review.submit(false).unwrap();
+        review.accept_ack(epoch, false, ack(true, Some(7)));
+        assert_eq!(review.begin_task_read(7), Some(epoch));
+        assert!(review.begin_task_read(7).is_none());
+        review.close();
+        review.open(QueryRevisions::default());
+        review.members = vec![member(1, true), member(2, false)];
+        review.members_current = true;
+        review.select_member(1, true);
+        review.select_member(2, false);
+        review.confirm(true);
+        let (new_epoch, _) = review.submit(false).unwrap();
+        review.accept_ack(new_epoch, false, ack(true, Some(8)));
+        assert!(review.begin_task_read(8).is_none());
+        assert!(matches!(
+            review.accept_task_read(epoch, 7, task_response(7, RelocationPhase::Completed)),
+            TaskReadOutcome::Ignored
+        ));
+        assert_eq!(review.task_id(), Some(8));
+        assert_eq!(review.begin_task_read(8), Some(new_epoch));
+        assert!(matches!(
+            review.accept_task_read(new_epoch, 8, task_response(8, RelocationPhase::Cancelled)),
+            TaskReadOutcome::Finished
+        ));
+        assert!(review.busy.is_none());
+        assert!(!review.task_query_pending);
+    }
+
+    #[test]
+    fn failed_and_mismatched_retained_status_release_busy_with_feedback() {
+        let mut review = ready_review();
+        review.confirm(true);
+        let (epoch, _) = review.submit(false).unwrap();
+        review.accept_ack(epoch, false, ack(true, Some(7)));
+        review.begin_task_read(7);
+        assert!(matches!(
+            review.accept_task_read(epoch, 7, task_response(8, RelocationPhase::Completed)),
+            TaskReadOutcome::Failed
+        ));
+        assert!(review.busy.is_none());
+        assert!(!review.task_query_pending);
+        assert!(matches!(
+            review.feedback,
+            Some(ReviewFeedback::Localized("gl-verification-response", _))
+        ));
+        review.confirm(true);
+        let (epoch, _) = review.submit(false).unwrap();
+        review.accept_ack(epoch, false, ack(true, Some(8)));
+        let mut failed = task(8, RelocationPhase::Failed);
+        failed.error = Some("verification failed".into());
+        assert!(review.accept_task(&failed));
+        assert!(
+            matches!(&review.feedback, Some(ReviewFeedback::Text(error, _)) if error == "verification failed")
+        );
+    }
+
+    #[test]
+    fn member_selection_read_must_share_page_revision_before_acceptance() {
+        let mut review = ready_review();
+        let revisions = QueryRevisions::default();
+        review.request_members("fingerprint".into(), 0, revisions);
+        let (read, selected_ids) = review.begin_members().unwrap();
+        assert_eq!(selected_ids, vec![1, 2]);
+        review.members_worker_finished();
+        let response = QueryResponse {
+            revisions,
+            result: Ok(ViewResponse::DuplicateMembers(Page {
+                total: 2,
+                rows: vec![member(1, true).value],
+            })),
+        };
+        let selected = QueryResponse {
+            revisions: QueryRevisions {
+                duplicate_members: 1,
+                ..revisions
+            },
+            result: Ok(ViewResponse::DuplicateMembers(Page {
+                total: 1,
+                rows: vec![member(2, false).value],
+            })),
+        };
+        assert!(!review.accept_members(
+            read.epoch,
+            &read.query,
+            read.generation,
+            (
+                response,
+                vec![Some(false)],
+                Some((selected, vec![Some(true)]))
+            ),
+            revisions
+        ));
+        assert!(!review.members_current);
+        assert!(review.members.is_empty());
+        assert!(review.members_dirty);
+        assert!(review.begin_members().is_some());
+    }
+
+    #[test]
+    fn accepted_pages_rewind_empty_offsets_and_reconcile_member_choices() {
+        let mut review = ready_review();
+        let revisions = QueryRevisions::default();
+        review.request_groups(12, revisions);
+        let read = review.begin_groups().unwrap();
+        review.groups_worker_finished();
+        let response = QueryResponse {
+            revisions,
+            result: Ok(ViewResponse::DuplicateGroups(Page {
+                total: 1,
+                rows: Vec::new(),
+            })),
+        };
+        assert!(!review.accept_groups(
+            read.epoch,
+            &read.query,
+            read.generation,
+            response,
+            revisions
+        ));
+        assert_eq!(review.groups_offset, 0);
+        assert!(review.begin_groups().is_some());
+        review.request_members("fingerprint".into(), 0, revisions);
+        let (read, _) = review.begin_members().unwrap();
+        review.members_worker_finished();
+        let response = QueryResponse {
+            revisions,
+            result: Ok(ViewResponse::DuplicateMembers(Page {
+                total: 2,
+                rows: vec![member(1, true).value, member(2, false).value],
+            })),
+        };
+        assert!(review.accept_members(
+            read.epoch,
+            &read.query,
+            read.generation,
+            (response, vec![Some(false), Some(true)], None),
+            revisions
+        ));
+        assert_eq!(review.members_total, 2);
+        assert!(review.can_relocate());
+        assert!(!review.members_loading);
+    }
+
+    #[test]
+    fn retained_read_error_is_terminal_for_review_but_does_not_release_page_workers() {
+        let mut review = ready_review();
+        review.request_groups(0, QueryRevisions::default());
+        assert!(review.begin_groups().is_some());
+        review.confirm(true);
+        let (epoch, _) = review.submit(false).unwrap();
+        review.accept_ack(epoch, false, ack(true, Some(7)));
+        review.begin_task_read(7);
+        let response = QueryResponse {
+            revisions: QueryRevisions::default(),
+            result: Err(crate::response::QueryError::Message("read failed".into())),
+        };
+        assert!(matches!(
+            review.accept_task_read(epoch, 7, response),
+            TaskReadOutcome::Failed
+        ));
+        assert!(review.busy.is_none());
+        assert!(!review.task_query_pending);
+        assert!(review.groups_loading);
+        assert!(
+            matches!(&review.feedback, Some(ReviewFeedback::ReadFailed(error)) if error == "read failed")
+        );
     }
 }
