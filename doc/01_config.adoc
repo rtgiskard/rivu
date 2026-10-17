@@ -28,7 +28,7 @@ volume_percent = 70
 
 [interface]
 font = "sans-serif"
-theme = "rivu_night"
+theme = "rivu_dark"
 
 [logging]
 level = "warning"
@@ -288,20 +288,21 @@ effect when starting the core; the running core does not watch the file.
 [cols="1,2"]
 |===
 |Theme |Accepted value
-|Rivu Night (default) |`rivu_night`
+|Rivu Dark (default) |`rivu_dark`
 |Tokyo Night |`tokyo_night`
 |Tokyo Night Day |`tokyo_night_day`
-|Catppuccin Mocha |`catppuccin_mocha`
-|Catppuccin Latte |`catppuccin_latte`
 |===
 
-Rivu Night is Rivu's own preset, distinct from the upstream-named themes.
-Tokyo Night Day and Catppuccin Latte are light themes. The other presets map
-colors from https://github.com/folke/tokyonight.nvim[Tokyo Night] and
-https://github.com/catppuccin/palette[Catppuccin] to Rivu's interface roles;
-their other applications' theme-file formats are not imported. Unknown theme
+Rivu Dark is Rivu's own preset, distinct from the upstream-named themes.
+Tokyo Night Day is a light theme. The Tokyo Night presets map colors from
+https://github.com/folke/tokyonight.nvim[Tokyo Night] to Rivu's interface roles;
+other applications' theme-file formats are not imported. Unknown theme
 names are configuration errors. The selected theme does not change visualization
 backgrounds, signal palettes, canvas labels, cursor colors, or album artwork.
+
+Existing configurations using `rivu_night` must change it to `rivu_dark`.
+The removed `catppuccin_mocha` and `catppuccin_latte` values must be replaced
+with one of the themes above; obsolete values are configuration errors.
 
 Font: type to search installed families, or use the arrow to browse them and
 `serif`, `sans-serif`, and `monospace`. Enter or a click selects a choice; Space

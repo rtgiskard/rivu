@@ -1175,7 +1175,7 @@ fn system_config_wire_adapter_preserves_optional_fields_and_library_columns() {
         let config = Arc::new(crate::config::Config {
             output_device,
             library_columns,
-            ui_theme: crate::theme::Theme::CatppuccinMocha,
+            ui_theme: crate::theme::Theme::TokyoNight,
             album_artwork_style: crate::config::AlbumArtworkStyle::Metal,
             album_artwork_mode: crate::config::AlbumArtworkMode::Rotating,
             album_artwork_period_seconds: 12.5,

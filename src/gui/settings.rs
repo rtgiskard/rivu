@@ -3521,7 +3521,7 @@ mod tests {
     ) {
         let (_directory, runtime, settings) = fixture(cx);
         settings.update(cx, |this, cx| {
-            this.draft.ui_theme = Theme::CatppuccinLatte;
+            this.draft.ui_theme = Theme::TokyoNightDay;
             this.set_value(Field::ScanMaxDepth, "7", None, cx);
         });
         let (patch, submission) = submit(&settings, cx);
@@ -3537,12 +3537,12 @@ mod tests {
         settings.update(cx, |this, cx| {
             this.set_value(Field::ScanMaxDepth, "1e", None, cx);
             this.draft.still_mode = true;
-            this.draft.ui_theme = Theme::CatppuccinMocha;
+            this.draft.ui_theme = Theme::TokyoNight;
             this.complete_settings_apply(submission, committed, result, cx);
             assert_eq!(this.baseline.scan_max_depth, 7);
             assert_eq!(this.baseline.volume, 0.2);
-            assert_eq!(this.baseline.ui_theme, Theme::CatppuccinLatte);
-            assert_eq!(this.draft.ui_theme, Theme::CatppuccinMocha);
+            assert_eq!(this.baseline.ui_theme, Theme::TokyoNightDay);
+            assert_eq!(this.draft.ui_theme, Theme::TokyoNight);
             assert_eq!(this.value(Field::Volume, cx), "20");
             assert_eq!(this.value(Field::ScanMaxDepth, cx), "1e");
             assert!(this.draft.still_mode);
@@ -3564,7 +3564,7 @@ mod tests {
             assert_eq!(visible.scan_max_depth, 9);
             assert_eq!(visible.volume, 0.3);
             assert!(visible.still_mode);
-            assert_eq!(visible.ui_theme, Theme::CatppuccinMocha);
+            assert_eq!(visible.ui_theme, Theme::TokyoNight);
             assert_eq!(visible, *this.baseline);
         });
     }
@@ -3577,7 +3577,7 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         std::fs::create_dir(&path).unwrap();
         settings.update(cx, |this, cx| {
-            this.draft.ui_theme = Theme::CatppuccinLatte;
+            this.draft.ui_theme = Theme::TokyoNightDay;
             this.set_value(Field::ScanMaxDepth, "7", None, cx);
         });
         let (patch, submission) = submit(&settings, cx);
@@ -3594,7 +3594,7 @@ mod tests {
             assert_eq!(this.value(Field::ScanMaxDepth, cx), "9");
             assert!(this.draft.still_mode);
             assert_eq!(this.baseline.ui_theme, baseline_theme);
-            assert_eq!(this.draft.ui_theme, Theme::CatppuccinLatte);
+            assert_eq!(this.draft.ui_theme, Theme::TokyoNightDay);
             assert!(!this.applying);
             assert!(matches!(&this.feedback, Some(Err(_))));
         });
@@ -3613,7 +3613,7 @@ mod tests {
             assert_eq!(this.baseline.scan_max_depth, 9);
             assert_eq!(this.baseline.volume, 0.2);
             assert!(this.baseline.still_mode);
-            assert_eq!(this.baseline.ui_theme, Theme::CatppuccinLatte);
+            assert_eq!(this.baseline.ui_theme, Theme::TokyoNightDay);
             assert_eq!(this.parse(cx).unwrap(), *this.baseline);
         });
     }

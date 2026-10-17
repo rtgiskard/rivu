@@ -2,7 +2,6 @@
 //!
 //! Tokyo Night colors: https://github.com/folke/tokyonight.nvim/tree/main/lua/tokyonight/colors
 //! Day uses the upstream generated extras/lua/tokyonight_day.lua palette.
-//! Catppuccin colors: https://github.com/catppuccin/palette/blob/main/palette.json
 
 use serde::{Deserialize, Serialize};
 
@@ -10,39 +9,27 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub enum Theme {
     #[default]
-    RivuNight,
+    RivuDark,
     TokyoNight,
     TokyoNightDay,
-    CatppuccinMocha,
-    CatppuccinLatte,
 }
 
 impl Theme {
-    pub const ALL: [Self; 5] = [
-        Self::RivuNight,
-        Self::TokyoNight,
-        Self::TokyoNightDay,
-        Self::CatppuccinMocha,
-        Self::CatppuccinLatte,
-    ];
+    pub const ALL: [Self; 3] = [Self::RivuDark, Self::TokyoNight, Self::TokyoNightDay];
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::RivuNight => "Rivu Night",
+            Self::RivuDark => "Rivu Dark",
             Self::TokyoNight => "Tokyo Night",
             Self::TokyoNightDay => "Tokyo Night Day",
-            Self::CatppuccinLatte => "Catppuccin Latte",
-            Self::CatppuccinMocha => "Catppuccin Mocha",
         }
     }
 
     pub fn palette(self) -> &'static Palette {
         match self {
-            Self::RivuNight => &RIVU_NIGHT,
+            Self::RivuDark => &RIVU_DARK,
             Self::TokyoNight => &TOKYO_NIGHT,
             Self::TokyoNightDay => &TOKYO_NIGHT_DAY,
-            Self::CatppuccinLatte => &CATPPUCCIN_LATTE,
-            Self::CatppuccinMocha => &CATPPUCCIN_MOCHA,
         }
     }
 }
@@ -90,7 +77,7 @@ const fn surfaces(mut palette: Palette, hover_tint: u32) -> Palette {
 
 // Rivu's original Tokyo Night surfaces and blue-purple text remain the default.
 // Lift only the old comment color for readable muted text; reserve it for disabled controls.
-static RIVU_NIGHT: Palette = Palette {
+static RIVU_DARK: Palette = Palette {
     bg: 0x1a1b26,
     panel: 0x16161e,
     control: 0x1f2231,
@@ -161,56 +148,6 @@ static TOKYO_NIGHT_DAY: Palette = surfaces(
     0x000000,
 );
 
-// Catppuccin: mantle / base / surface0 are surfaces; surface0 / surface2
-// are borders, text / subtext1 / subtext0 are readable foreground roles.
-// Blue is the accent, red the error, yellow the warning (Latte darkens yellow).
-static CATPPUCCIN_LATTE: Palette = surfaces(
-    Palette {
-        bg: 0xe6e9ef,
-        panel: 0xeff1f5,
-        control: 0xccd0da,
-        structure_border: 0xccd0da,
-        border: 0xacb0be,
-        text: 0x4c4f69,
-        secondary: 0x5c5f77,
-        muted: 0x6c6f85,
-        disabled: 0x9ca0b0,
-        accent: 0x1e66f5,
-        accent_hover: 0,
-        on_accent: 0xffffff,
-        highlight: 0xccd0da,
-        selected: 0,
-        selected_hover: 0,
-        error: 0xd20f39,
-        error_bg: 0,
-        warning: blend(0xdf8e1d, 0x4c4f69, 40),
-    },
-    0x000000,
-);
-static CATPPUCCIN_MOCHA: Palette = surfaces(
-    Palette {
-        bg: 0x181825,
-        panel: 0x1e1e2e,
-        control: 0x313244,
-        structure_border: 0x313244,
-        border: 0x585b70,
-        text: 0xcdd6f4,
-        secondary: 0xbac2de,
-        muted: 0xa6adc8,
-        disabled: 0x6c7086,
-        accent: 0x89b4fa,
-        accent_hover: 0,
-        on_accent: 0x11111b,
-        highlight: 0x313244,
-        selected: 0,
-        selected_hover: 0,
-        error: 0xf38ba8,
-        error_bg: 0,
-        warning: 0xf9e2af,
-    },
-    0xffffff,
-);
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -269,7 +206,7 @@ mod tests {
                     "{theme:?} accent label"
                 );
             }
-            let light = matches!(theme, Theme::TokyoNightDay | Theme::CatppuccinLatte);
+            let light = matches!(theme, Theme::TokyoNightDay);
             assert_eq!(luminance(palette.bg) > luminance(palette.text), light);
         }
     }

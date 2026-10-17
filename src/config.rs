@@ -935,16 +935,10 @@ mod tests {
     fn interface_theme_names_round_trip_strictly() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.toml");
-        assert_eq!(Config::load(&path).unwrap().ui_theme, Theme::RivuNight);
+        assert_eq!(Config::load(&path).unwrap().ui_theme, Theme::RivuDark);
         fs::write(&path, "[interface]\nfont = 'sans-serif'\n").unwrap();
-        assert_eq!(Config::load(&path).unwrap().ui_theme, Theme::RivuNight);
-        let names = [
-            "rivu_night",
-            "tokyo_night",
-            "tokyo_night_day",
-            "catppuccin_mocha",
-            "catppuccin_latte",
-        ];
+        assert_eq!(Config::load(&path).unwrap().ui_theme, Theme::RivuDark);
+        let names = ["rivu_dark", "tokyo_night", "tokyo_night_day"];
         for (name, theme) in names.into_iter().zip(Theme::ALL) {
             fs::write(&path, format!("[interface]\ntheme = '{name}'\n")).unwrap();
             let config = Config::load(&path).unwrap();
@@ -957,8 +951,8 @@ mod tests {
         for invalid in [
             "[interface]\ntheme = 'unknown'\n",
             "[interface]\ntheme = 'TokyoNight'\n",
-            "[interface]\nui_theme = 'rivu_night'\n",
-            "theme = 'rivu_night'\n",
+            "[interface]\nui_theme = 'rivu_dark'\n",
+            "theme = 'rivu_dark'\n",
         ] {
             fs::write(&path, invalid).unwrap();
             assert!(Config::load(&path).is_err(), "{invalid}");
@@ -969,7 +963,7 @@ mod tests {
     fn theme_patch_preserves_unrelated_concurrent_changes() {
         let baseline = Config::default();
         let draft = Config {
-            ui_theme: Theme::CatppuccinLatte,
+            ui_theme: Theme::TokyoNightDay,
             ..baseline.clone()
         };
         let mut latest = Config {
@@ -980,7 +974,7 @@ mod tests {
             ..baseline.clone()
         };
         let expected = Config {
-            ui_theme: Theme::CatppuccinLatte,
+            ui_theme: Theme::TokyoNightDay,
             ..latest.clone()
         };
         ConfigPatch::between(&baseline, &draft).apply_to(&mut latest);
@@ -1441,7 +1435,7 @@ mod tests {
             },
             ui_font: "Noto Sans".to_owned(),
             ui_language: "zh-CN".to_owned(),
-            ui_theme: Theme::CatppuccinMocha,
+            ui_theme: Theme::TokyoNight,
             ui_scale: 1.5,
             layout_snap_enabled: false,
             layout_snap_grid_px: 12,
