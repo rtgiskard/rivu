@@ -98,6 +98,9 @@ an open dropdown, leaves the focused editor, then closes the dialog on successiv
 presses. Closing a dialog restores its invoking control if present, otherwise the
 layout receives focus. Playback shortcuts apply to the layout, not focused
 editors or buttons.
+Text selection started inside an editor follows the pointer outside its bounds
+until the left button is released. Leaving the window or moving focus away ends
+the selection gesture.
 Playback keys: link:04_playback.adoc#keyboard-controls[Keyboard controls].
 
 

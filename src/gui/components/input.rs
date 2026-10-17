@@ -4,16 +4,20 @@
 //! <https://github.com/zed-industries/zed/blob/a84689073d296dfd39987bc7dd478e43ef76d83a/crates/gpui/examples/input.rs>.
 //! That example and this adaptation are distributed under the Apache License,
 //! Version 2.0.
+//!
+//! Mouse selection remains owned by its originating input outside the textbox
+//! until release, window exit, focus loss, or disabling the input.
 
 use std::ops::Range;
 
 use gpui::prelude::*;
 use gpui::{
-    App, ClipboardItem, Context, CursorStyle, Element, ElementId, ElementInputHandler, Entity,
-    EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, IntoElement,
-    KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad,
-    Pixels, Point, ShapedLine, SharedString, Style, TextRun, UTF16Selection, UnderlineStyle,
-    Window, actions, div, fill, point, px, relative, rgb, size,
+    App, ClipboardItem, Context, CursorStyle, DispatchPhase, Element, ElementId,
+    ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
+    GlobalElementId, IntoElement, KeyBinding, LayoutId, MouseButton, MouseDownEvent,
+    MouseExitEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ShapedLine,
+    SharedString, Style, Subscription, TextRun, UTF16Selection, UnderlineStyle, Window, actions,
+    div, fill, point, px, relative, rgb, size,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -66,7 +70,7 @@ pub struct Input {
     marked_range: Option<Range<usize>>,
     last_layout: Option<ShapedLine>,
     last_bounds: Option<gpui::Bounds<Pixels>>,
-    is_selecting: bool,
+    selection_subscriptions: Option<[Subscription; 2]>,
 }
 
 impl EventEmitter<InputEvent> for Input {}
@@ -94,7 +98,7 @@ impl Input {
             marked_range: None,
             last_layout: None,
             last_bounds: None,
-            is_selecting: false,
+            selection_subscriptions: None,
         }
     }
 
@@ -145,7 +149,7 @@ impl Input {
         }
         self.enabled = enabled;
         self.focus_handle = self.focus_handle.clone().tab_stop(enabled);
-        self.is_selecting = false;
+        self.selection_subscriptions = None;
         self.marked_range = None;
         cx.notify();
     }
@@ -303,7 +307,16 @@ impl Input {
             return;
         }
         self.focus_handle.focus(window, cx);
-        self.is_selecting = true;
+        self.selection_subscriptions = Some([
+            cx.on_blur(&self.focus_handle, window, |this, _, _| {
+                this.selection_subscriptions = None;
+            }),
+            cx.observe_window_activation(window, |this, window, _| {
+                if !window.is_window_active() {
+                    this.selection_subscriptions = None;
+                }
+            }),
+        ]);
         let offset = self.index_for_mouse_position(event.position);
         if event.modifiers.shift {
             self.select_to(offset, cx);
@@ -312,14 +325,32 @@ impl Input {
         }
     }
 
-    fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
-        self.is_selecting = false;
+    fn on_mouse_up(&mut self, event: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if event.button != MouseButton::Left || self.selection_subscriptions.is_none() {
+            return;
+        }
+        self.selection_subscriptions = None;
+        if self.enabled && self.is_focused(window) {
+            self.select_to(self.index_for_mouse_position(event.position), cx);
+            cx.stop_propagation();
+        }
     }
 
-    fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if self.is_selecting {
-            self.select_to(self.index_for_mouse_position(event.position), cx);
+    fn on_mouse_move(
+        &mut self,
+        event: &MouseMoveEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selection_subscriptions.is_none() {
+            return;
         }
+        if !self.enabled || !self.is_focused(window) || !event.dragging() {
+            self.selection_subscriptions = None;
+            return;
+        }
+        self.select_to(self.index_for_mouse_position(event.position), cx);
+        cx.stop_propagation();
     }
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
@@ -823,6 +854,29 @@ impl Element for InputElement {
             input.last_bounds = Some(bounds);
             input.scroll_offset = prepaint.scroll_offset;
         });
+        if !enabled {
+            return;
+        }
+
+        // Selection belongs to the input where the press began, not the hovered field.
+        let input = self.input.downgrade();
+        window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
+            if phase == DispatchPhase::Capture {
+                let _ = input.update(cx, |input, cx| input.on_mouse_move(event, window, cx));
+            }
+        });
+        let input = self.input.downgrade();
+        window.on_mouse_event(move |event: &MouseUpEvent, phase, window, cx| {
+            if phase == DispatchPhase::Capture {
+                let _ = input.update(cx, |input, cx| input.on_mouse_up(event, window, cx));
+            }
+        });
+        let input = self.input.downgrade();
+        window.on_mouse_event(move |_: &MouseExitEvent, phase, _, cx| {
+            if phase == DispatchPhase::Capture {
+                let _ = input.update(cx, |input, _| input.selection_subscriptions = None);
+            }
+        });
     }
 }
 
@@ -865,9 +919,6 @@ impl Render for Input {
                 }
             }))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
-            .on_mouse_move(cx.listener(Self::on_mouse_move))
-            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
-            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .when(!self.embedded, |view| {
                 view.bg(rgb(theme.control))
                     .border_1()
@@ -935,6 +986,244 @@ mod tests {
                         escapes.set(escapes.get() + 1);
                     }
                 })
+        }
+    }
+
+    struct SelectionInputs {
+        input: Entity<Input>,
+        other: Entity<Input>,
+    }
+
+    impl Render for SelectionInputs {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .items_start()
+                .child(div().w(px(160.)).child(self.input.clone()))
+                .child(div().w(px(160.)).child(self.other.clone()))
+        }
+    }
+
+    fn selection_fixture(
+        cx: &mut gpui::TestAppContext,
+    ) -> (Entity<Input>, Entity<Input>, gpui::AnyWindowHandle) {
+        let input = cx.update(|cx| cx.new(|cx| Input::new("a中😀z", "", cx)));
+        let other = cx.update(|cx| cx.new(|cx| Input::new("untouched", "", cx)));
+        let window = cx.add_window({
+            let input = input.clone();
+            let other = other.clone();
+            move |_, _| SelectionInputs { input, other }
+        });
+        let handle = window.into();
+        // GPUI test windows start inactive; blur notifications need an active frame.
+        cx.update_window(handle, |_, window, _| window.activate_window())
+            .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            assert!(window.is_window_active());
+            window.draw(cx).clear(cx);
+        })
+        .unwrap();
+        (input, other, handle)
+    }
+
+    fn dispatch_pointer(
+        cx: &mut gpui::TestAppContext,
+        handle: gpui::AnyWindowHandle,
+        event: impl gpui::InputEvent,
+    ) {
+        cx.update_window(handle, |_, window, cx| {
+            window.draw(cx).clear(cx);
+            window.dispatch_event(event.to_platform_input(), cx);
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn mouse_selection_tracks_outside_motion_and_final_release_without_touching_other_inputs() {
+        let mut cx = gpui::TestAppContext::single();
+        let (input, other, handle) = selection_fixture(&mut cx);
+        let (start, outside, over_other) = cx.update(|cx| {
+            let field = input.read(cx);
+            let bounds = field.last_bounds.unwrap();
+            let other_bounds = other.read(cx).last_bounds.unwrap();
+            (
+                point(bounds.left(), bounds.center().y),
+                point(bounds.right() + px(80.), bounds.center().y),
+                other_bounds.center(),
+            )
+        });
+        dispatch_pointer(
+            &mut cx,
+            handle,
+            MouseDownEvent {
+                button: MouseButton::Left,
+                position: start,
+                ..Default::default()
+            },
+        );
+        dispatch_pointer(
+            &mut cx,
+            handle,
+            MouseMoveEvent {
+                position: outside,
+                pressed_button: Some(MouseButton::Left),
+                ..Default::default()
+            },
+        );
+        cx.update(|cx| {
+            assert_eq!(input.read(cx).selected_range, 0..9);
+            assert!(input.read(cx).selection_subscriptions.is_some());
+            assert_eq!(other.read(cx).selected_range, 9..9);
+        });
+        dispatch_pointer(
+            &mut cx,
+            handle,
+            MouseMoveEvent {
+                position: over_other,
+                pressed_button: Some(MouseButton::Left),
+                ..Default::default()
+            },
+        );
+        dispatch_pointer(
+            &mut cx,
+            handle,
+            MouseUpEvent {
+                button: MouseButton::Right,
+                position: outside,
+                ..Default::default()
+            },
+        );
+        cx.update(|cx| assert!(input.read(cx).selection_subscriptions.is_some()));
+        // No intervening move: the release position itself must update the endpoint.
+        let release = point(start.x - px(80.), start.y);
+        dispatch_pointer(
+            &mut cx,
+            handle,
+            MouseUpEvent {
+                button: MouseButton::Left,
+                position: release,
+                ..Default::default()
+            },
+        );
+        dispatch_pointer(
+            &mut cx,
+            handle,
+            MouseMoveEvent {
+                position: outside,
+                pressed_button: Some(MouseButton::Left),
+                ..Default::default()
+            },
+        );
+        cx.update(|cx| {
+            assert_eq!(input.read(cx).selected_range, 0..0);
+            assert!(input.read(cx).selection_subscriptions.is_none());
+            assert_eq!(other.read(cx).selected_range, 9..9);
+            assert!(other.read(cx).selection_subscriptions.is_none());
+        });
+    }
+
+    #[test]
+    fn mouse_selection_cancels_on_missing_button_window_exit_blur_and_disable() {
+        let mut cx = gpui::TestAppContext::single();
+        let (input, other, handle) = selection_fixture(&mut cx);
+        let (start, outside) = cx.update(|cx| {
+            let bounds = input.read(cx).last_bounds.unwrap();
+            (
+                point(bounds.left(), bounds.center().y),
+                point(bounds.right() + px(80.), bounds.center().y),
+            )
+        });
+        for cancellation in [
+            "missing-button",
+            "right-only",
+            "window-exit",
+            "blur",
+            "disable",
+        ] {
+            dispatch_pointer(
+                &mut cx,
+                handle,
+                MouseDownEvent {
+                    button: MouseButton::Left,
+                    position: start,
+                    ..Default::default()
+                },
+            );
+            cx.update(|cx| assert!(input.read(cx).selection_subscriptions.is_some()));
+            match cancellation {
+                "missing-button" | "right-only" => dispatch_pointer(
+                    &mut cx,
+                    handle,
+                    MouseMoveEvent {
+                        position: outside,
+                        pressed_button: (cancellation == "right-only")
+                            .then_some(MouseButton::Right),
+                        ..Default::default()
+                    },
+                ),
+                "window-exit" => dispatch_pointer(
+                    &mut cx,
+                    handle,
+                    MouseExitEvent {
+                        position: outside,
+                        pressed_button: Some(MouseButton::Left),
+                        ..Default::default()
+                    },
+                ),
+                "blur" => {
+                    cx.update_window(handle, |_, window, cx| {
+                        let focus = other.read(cx).focus_handle.clone();
+                        focus.focus(window, cx);
+                        // GPUI dispatches focus observers when a frame commits its focus path.
+                        window.draw(cx).clear(cx);
+                    })
+                    .unwrap();
+                }
+                "disable" => {
+                    input.update(&mut cx, |this, cx| this.set_enabled(false, cx));
+                }
+                _ => unreachable!(),
+            }
+            cx.update(|cx| {
+                assert!(
+                    input.read(cx).selection_subscriptions.is_none(),
+                    "{cancellation}"
+                );
+            });
+            cx.update_window(handle, |_, window, cx| {
+                input.update(cx, |this, cx| {
+                    this.set_enabled(true, cx);
+                    this.focus_handle.focus(window, cx);
+                });
+            })
+            .unwrap();
+            // Regaining focus/enabled state cannot revive the cancelled press.
+            dispatch_pointer(
+                &mut cx,
+                handle,
+                MouseMoveEvent {
+                    position: outside,
+                    pressed_button: Some(MouseButton::Left),
+                    ..Default::default()
+                },
+            );
+            dispatch_pointer(
+                &mut cx,
+                handle,
+                MouseUpEvent {
+                    button: MouseButton::Left,
+                    position: outside,
+                    ..Default::default()
+                },
+            );
+            cx.update(|cx| {
+                assert_eq!(input.read(cx).selected_range, 0..0, "{cancellation}");
+                assert!(input.read(cx).selection_subscriptions.is_none());
+                assert_eq!(other.read(cx).selected_range, 9..9);
+            });
         }
     }
 
