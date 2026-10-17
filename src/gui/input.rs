@@ -7,7 +7,6 @@
 
 use std::ops::Range;
 
-use super::{ACCENT, BORDER, MUTED, PANEL, TEXT};
 use gpui::prelude::*;
 use gpui::{
     App, ClipboardItem, Context, CursorStyle, Element, ElementId, ElementInputHandler, Entity,
@@ -664,13 +663,14 @@ impl Element for InputElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
+        let theme = crate::gui::theme::palette(cx);
         let input = self.input.read(cx);
         let content = input.content.clone();
         let selected_range = input.selected_range.clone();
         let cursor_offset = input.cursor_offset();
         let style = window.text_style();
         let (display_text, text_color) = if content.is_empty() {
-            (input.placeholder.clone(), rgb(MUTED).alpha(0.7).into())
+            (input.placeholder.clone(), rgb(theme.muted).into())
         } else {
             (content, style.color)
         };
@@ -732,7 +732,7 @@ impl Element for InputElement {
                         point(origin + cursor_pos, bounds.top()),
                         size(px(CARET_WIDTH), bounds.bottom() - bounds.top()),
                     ),
-                    rgb(ACCENT),
+                    rgb(theme.accent),
                 )),
             )
         } else {
@@ -748,7 +748,7 @@ impl Element for InputElement {
                             bounds.bottom(),
                         ),
                     ),
-                    rgb(ACCENT).alpha(0.28),
+                    rgb(theme.accent).alpha(0.28),
                 )),
                 None,
             )
@@ -812,6 +812,7 @@ impl Element for InputElement {
 
 impl Render for Input {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = crate::gui::theme::palette(cx);
         let focused = self.enabled && self.focus_handle.is_focused(window);
         let scale = window.rem_size() / px(16.);
         div()
@@ -850,13 +851,17 @@ impl Render for Input {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .when(!self.embedded, |view| {
-                view.bg(rgb(PANEL))
+                view.bg(rgb(theme.control))
                     .border_1()
-                    .border_color(if focused { rgb(ACCENT) } else { rgb(BORDER) })
-                    .rounded(px(5.) * scale)
+                    .border_color(if focused {
+                        rgb(theme.accent)
+                    } else {
+                        rgb(theme.border)
+                    })
+                    .rounded(px(4.) * scale)
             })
-            .text_color(rgb(TEXT))
-            .when(!self.enabled, |view| view.opacity(0.4))
+            .text_color(rgb(theme.text))
+            .when(!self.enabled, |view| view.text_color(rgb(theme.disabled)))
             .line_height(px(20.) * scale)
             .text_size(px(14.) * scale)
             .child(
@@ -877,7 +882,7 @@ impl Render for Input {
                         .flex_shrink_0()
                         .pr(px(7.) * scale)
                         .text_size(px(12.) * scale)
-                        .text_color(rgb(MUTED))
+                        .text_color(rgb(theme.muted))
                         .whitespace_nowrap()
                         .child(text),
                 )

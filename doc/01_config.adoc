@@ -28,6 +28,7 @@ volume_percent = 70
 
 [interface]
 font = "sans-serif"
+theme = "rivu_night"
 
 [logging]
 level = "warning"
@@ -64,8 +65,10 @@ the corresponding fade clears when that end is reached.
 
 ==== Desktop keyboard navigation
 
-Use `Tab` and `Shift+Tab` to move between controls; the focused control has an
-accent highlight. `Enter` or `Space` activates a focused button or switch.
+Use `Tab` and `Shift+Tab` to move between controls; a border marks the focused
+control independently of its enabled or selected state. `Enter` or `Space`
+activates a focused button or switch.
+Unavailable controls cannot be activated and are skipped by keyboard navigation.
 Panel tabs are also tab stops: activate a tab with `Enter`/`Space`, or press
 `Shift+F10` (the Menu key also works) to open its panel menu.
 Open menus use `Up` and `Down` to move between available actions (wrapping at
@@ -234,7 +237,9 @@ Interface → Layout includes Layout snapping and Layout grid spacing. These sav
 `interface.layout_snap_enabled` (default `true`) and `interface.layout_snap_grid_px` (default `16`,
 integer `1`–`64` logical pixels before interface scaling) in `config.toml`.
 
-Hover settings fields for accepted ranges and input syntax.
+Hover settings fields for accepted ranges and input syntax; inactive fields explain
+which setting enables them. Apply errors retain the specific cause; hover to read
+the full message or use Copy to copy it.
 Single-line desktop text fields scroll horizontally to keep the caret visible.
 Use Left/Right to navigate long values, Home/End to reach either end, or
 Shift+Left/Right to extend a selection beyond the visible text.
@@ -275,6 +280,31 @@ Artwork settings entry to edit that instance. Static mode retains rotation param
 
 === Appearance and library display
 
+`interface.theme` in `config.toml` selects the shared desktop and terminal theme.
+Presets are built in; no separate theme files are needed. Choose Theme in
+Settings → Interface → Appearance & layout, then Apply to save and update open
+clients without restarting. Choosing a theme only edits the settings draft;
+Discard leaves the active theme unchanged. Editing the configuration file takes
+effect when starting the core; the running core does not watch the file.
+
+[cols="1,2"]
+|===
+|Theme |Accepted value
+|Rivu Night (default) |`rivu_night`
+|Tokyo Night |`tokyo_night`
+|Tokyo Night Day |`tokyo_night_day`
+|Catppuccin Mocha |`catppuccin_mocha`
+|Catppuccin Latte |`catppuccin_latte`
+|===
+
+Rivu Night is Rivu's own preset, distinct from the upstream-named themes.
+Tokyo Night Day and Catppuccin Latte are light themes. The other presets map
+colors from https://github.com/folke/tokyonight.nvim[Tokyo Night] and
+https://github.com/catppuccin/palette[Catppuccin] to Rivu's interface roles;
+their other applications' theme-file formats are not imported. Unknown theme
+names are configuration errors. The selected theme does not change visualization
+backgrounds, signal palettes, canvas labels, cursor colors, or album artwork.
+
 Font: type to search installed families, or use the arrow to browse them and
 `serif`, `sans-serif`, and `monospace`. Enter or a click selects a choice; Space
 remains text. Custom family names are accepted.
@@ -300,9 +330,9 @@ see link:../readme.adoc[build instructions] for requirements and licensing.
 The TUI requires a Nerd Font or Nerd Symbols fallback in the displaying terminal.
 For SSH, configure the local client terminal; installing fonts on the server
 does not supply terminal glyphs. Missing glyphs can appear as boxes or blanks.
-Use the Mono variant of Symbols Nerd Font for single-cell icons. TUI colors and
-width-dependent information columns are built in; desktop font, scale, and Library
-column settings do not configure the terminal client. See
+Use the Mono variant of Symbols Nerd Font for single-cell icons. The TUI shares
+`interface.theme`, but its width-dependent information columns are built in;
+desktop font, scale, and Library column settings do not configure the terminal client. See
 link:04_playback.adoc#_terminal_client[Terminal client] for browsing and full details.
 
 `interface.library_columns` selects desktop Library information columns. Its

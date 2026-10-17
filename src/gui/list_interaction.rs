@@ -462,10 +462,11 @@ impl GuiApp {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let theme = crate::gui::theme::palette(cx);
         let Some(state) = self.content_menu.as_ref() else {
             return div().into_any_element();
         };
-        let mut menu = context_menu_container("content-menu")
+        let mut menu = context_menu_container(theme, "content-menu")
             .map(|surface| self.menu_surface(surface))
             .max_w((window.viewport_size().width - px(UI_INSET * 2.)).max(px(0.)))
             .max_h((window.viewport_size().height - px(UI_INSET * 2.)).max(px(0.)))
@@ -476,10 +477,10 @@ impl GuiApp {
                 cx.notify();
             }));
         if state.loading {
-            menu = menu.child(caption(self.tr("gl-loading")));
+            menu = menu.child(caption(theme, self.tr("gl-loading")));
         } else if state.confirm_remove {
             menu = menu
-                .child(caption(self.tr("li-confirm-remove")))
+                .child(caption(theme, self.tr("li-confirm-remove")))
                 .child(menu_item(
                     "content-cancel-remove",
                     self.tr("gl-cancel"),
@@ -489,14 +490,17 @@ impl GuiApp {
                         cx.notify();
                     },
                 ))
-                .child(components::danger_control(menu_item(
-                    "content-confirm-remove",
-                    self.tr(state.remove_label),
-                    cx,
-                    |this, _, cx| this.content_action(ContentAction::Remove, cx),
-                )));
+                .child(components::danger_control(
+                    theme,
+                    menu_item(
+                        "content-confirm-remove",
+                        self.tr(state.remove_label),
+                        cx,
+                        |this, _, cx| this.content_action(ContentAction::Remove, cx),
+                    ),
+                ));
         } else if state.playlists {
-            menu = menu.child(components::menu_title(self.tr("li-playlist")));
+            menu = menu.child(components::menu_title(theme, self.tr("li-playlist")));
             if state.tracks_only {
                 menu = menu.child(menu_item(
                     "content-new-playlist",
@@ -608,7 +612,7 @@ impl GuiApp {
                 ));
             if state.tracks_only {
                 menu = menu
-                    .child(components::menu_separator())
+                    .child(components::menu_separator(theme))
                     .child(menu_item(
                         "content-favorite",
                         self.tr("li-favorite"),
@@ -623,35 +627,40 @@ impl GuiApp {
                     ));
             }
             if state.remove.is_some() {
-                menu = menu
-                    .child(components::menu_separator())
-                    .child(components::danger_control(menu_item(
-                        "content-remove",
-                        self.tr(state.remove_label),
-                        cx,
-                        |this, _, cx| {
-                            if let Some(menu) = &mut this.content_menu {
-                                menu.confirm_remove = true;
-                            }
-                            cx.notify();
-                        },
-                    )));
+                menu = menu.child(components::menu_separator(theme)).child(
+                    components::danger_control(
+                        theme,
+                        menu_item(
+                            "content-remove",
+                            self.tr(state.remove_label),
+                            cx,
+                            |this, _, cx| {
+                                if let Some(menu) = &mut this.content_menu {
+                                    menu.confirm_remove = true;
+                                }
+                                cx.notify();
+                            },
+                        ),
+                    ),
+                );
             }
             if let Some(root) = state.root.clone() {
-                menu = menu.child(components::menu_separator()).child(menu_item(
-                    "content-root",
-                    self.tr("li-folder"),
-                    cx,
-                    move |this, _, cx| {
-                        let position = this
-                            .content_menu
-                            .take()
-                            .map(|menu| menu.position)
-                            .unwrap_or_default();
-                        this.library_root_menu = Some((root.clone(), position));
-                        cx.notify();
-                    },
-                ));
+                menu = menu
+                    .child(components::menu_separator(theme))
+                    .child(menu_item(
+                        "content-root",
+                        self.tr("li-folder"),
+                        cx,
+                        move |this, _, cx| {
+                            let position = this
+                                .content_menu
+                                .take()
+                                .map(|menu| menu.position)
+                                .unwrap_or_default();
+                            this.library_root_menu = Some((root.clone(), position));
+                            cx.notify();
+                        },
+                    ));
             }
         }
         anchored()

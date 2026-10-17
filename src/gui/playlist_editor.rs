@@ -117,6 +117,7 @@ impl GuiApp {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let theme = crate::gui::theme::palette(cx);
         let editor = self.playlist_editor.as_ref().expect("playlist editor open");
         let (title, submit) = match editor.action {
             PlaylistNameAction::Create { .. } => (
@@ -137,21 +138,27 @@ impl GuiApp {
             && !track_ids.is_empty()
         {
             content = content.child(caption(
+                theme,
                 self.i18n
                     .format("gl-tracks-selected", &[("count", track_ids.len().into())]),
             ));
         }
         if editor.pending {
             content = content
-                .child(caption(self.value(Field::PlaylistName, cx)))
-                .child(status_message(self.tr("gl-saving"), StatusKind::Info));
+                .child(caption(theme, self.value(Field::PlaylistName, cx)))
+                .child(status_message(
+                    theme,
+                    self.tr("gl-saving"),
+                    StatusKind::Info,
+                ));
         } else {
             content = content.child(form_field(
+                theme,
                 self.tr("gl-name"),
                 self.input(Field::PlaylistName),
             ));
             if let Some(error) = &editor.error {
-                content = content.child(status_message(error.clone(), StatusKind::Error));
+                content = content.child(status_message(theme, error.clone(), StatusKind::Error));
             }
             content = content.child(
                 row()
@@ -203,9 +210,9 @@ impl GuiApp {
                     .max_h(window.viewport_size().height * 0.9)
                     .overflow_y_scroll()
                     .p(px(UI_INSET))
-                    .bg(rgb(PANEL))
+                    .bg(rgb(theme.panel))
                     .border_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(theme.border))
                     .rounded_md()
                     .child(content.flex_shrink_0()),
             )

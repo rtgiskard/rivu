@@ -1,10 +1,12 @@
 use super::{
-    BORDER, ButtonTooltip, DropdownItem, DropdownState, ERROR, POPOVER_MAX_REMS, StatusKind,
-    UI_INSET, active_control, button, caption, column,
+    ButtonTooltip, DropdownItem, DropdownState, POPOVER_MAX_REMS, StatusKind, UI_INSET,
+    active_control, button, caption, column,
     components::{DROPDOWN_ROW_REMS, FocusScope, activate_control, disabled_control, dropdown_key},
     copyable_message, dropdown_container, dropdown_row, dropdown_trigger, form_field, icon_button,
     input::{Input, InputEvent},
-    row, section_group, status_message, toggle_button, two_column,
+    row, section_group, status_message,
+    theme::palette,
+    toggle_button, two_column,
 };
 use crate::{
     artwork::{ArtworkCacheReport, ArtworkManager},
@@ -15,6 +17,7 @@ use crate::{
     },
     core::CoreHandle,
     i18n::Localizer,
+    theme::{Palette, Theme},
 };
 use anyhow::{Context as _, Result};
 use gpui::{prelude::*, *};
@@ -26,6 +29,7 @@ use std::{
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SettingChoice {
     Language(usize),
+    Theme(Theme),
     Device(usize),
     Font(usize),
     CustomFont,
@@ -44,6 +48,7 @@ impl SettingChoice {
     fn label(self, i18n: &Localizer) -> String {
         match self {
             Self::Language(_) | Self::Device(_) | Self::Font(_) | Self::CustomFont => String::new(),
+            Self::Theme(value) => value.label().to_owned(),
             Self::AlbumArtworkStyle(value) => album_artwork_style_label(i18n, value).to_owned(),
             Self::AlbumArtworkMode(AlbumArtworkMode::Static) => {
                 i18n.text("settings-static").to_owned()
@@ -174,6 +179,19 @@ impl Field {
 
     fn hint(self, settings: &Settings) -> SharedString {
         match self {
+            Self::AlbumArtworkPeriod
+                if settings.draft.album_artwork_mode == AlbumArtworkMode::Static =>
+            {
+                settings.tr("settings-artwork-recovery")
+            }
+            Self::SpectrumBars | Self::SpectrumBarWidth | Self::SpectrumGap
+                if settings.draft.spectrum_style == SpectrumStyle::Solid =>
+            {
+                settings.tr("settings-spectrum-style-recovery")
+            }
+            Self::SpectrumHold | Self::SpectrumGravity if !settings.draft.spectrum_peaks => {
+                settings.tr("settings-spectrum-peaks-recovery")
+            }
             Self::Roots => settings.tr("settings-library-roots-hint"),
             Self::AlbumArtworkPeriod => settings.tr("settings-artwork-period-hint"),
             Self::AlbumArtworkFps => format!(
@@ -227,7 +245,7 @@ impl Field {
         }
     }
 
-    fn form(self, settings: &Settings, control: impl IntoElement) -> Div {
+    fn form(self, theme: &'static Palette, settings: &Settings, control: impl IntoElement) -> Div {
         let hint = self.hint(settings);
         let control = div()
             .id(("settings-field-help", self as usize))
@@ -237,7 +255,7 @@ impl Field {
                 control
                     .tooltip(move |_, cx| cx.new(|_| ButtonTooltip { text: hint.clone() }).into())
             });
-        form_field(settings.tr(self.label_id()), control)
+        form_field(theme, settings.tr(self.label_id()), control)
     }
 }
 
@@ -247,10 +265,14 @@ fn dropdown_button(
     cx: &mut Context<Settings>,
     action: impl Fn(&mut Settings, &mut Window, &mut Context<Settings>) + 'static,
 ) -> Stateful<Div> {
-    activate_control(dropdown_trigger(id, label), cx, move |this, window, cx| {
-        action(this, window, cx);
-        cx.notify();
-    })
+    activate_control(
+        dropdown_trigger(palette(cx), id, label),
+        cx,
+        move |this, window, cx| {
+            action(this, window, cx);
+            cx.notify();
+        },
+    )
 }
 fn visual_switch(
     i18n: &Localizer,
@@ -280,14 +302,22 @@ fn visual_switch(
     })
 }
 
-fn settings_group(title: impl Into<SharedString>, content: impl IntoElement) -> Div {
-    section_group(title, content)
+fn settings_group(
+    theme: &'static Palette,
+    title: impl Into<SharedString>,
+    content: impl IntoElement,
+) -> Div {
+    section_group(theme, title, content)
 }
 
-fn settings_card(title: impl Into<SharedString>, content: impl IntoElement) -> Div {
-    settings_group(title, content)
+fn settings_card(
+    theme: &'static Palette,
+    title: impl Into<SharedString>,
+    content: impl IntoElement,
+) -> Div {
+    settings_group(theme, title, content)
         .border_1()
-        .border_color(rgb(BORDER))
+        .border_color(rgb(theme.structure_border))
         .rounded(rems(5. / 16.))
 }
 
@@ -410,6 +440,7 @@ impl FontOption {
 #[derive(Clone, Copy, Hash, PartialEq, Eq)]
 enum Measured {
     Language,
+    Theme,
     Device,
     SettingsFont,
     SettingsStyle,
@@ -753,7 +784,7 @@ impl Settings {
         items
     }
 
-    fn field(&self, field: Field) -> Div {
+    fn field(&self, field: Field, cx: &App) -> Div {
         let input = self.inputs[&field].clone();
         if matches!(
             field,
@@ -763,6 +794,7 @@ impl Settings {
             let fallback = self.draft.visualization_db_range;
             let i18n = Arc::clone(&self.i18n);
             return field.form(
+                palette(cx),
                 self,
                 div()
                     .id(("settings-range-help", field as usize))
@@ -786,19 +818,19 @@ impl Settings {
                     }),
             );
         }
-        field.form(self, input)
+        field.form(palette(cx), self, input)
     }
 
-    fn pair(&self, first: Field, second: Field) -> Div {
+    fn pair(&self, first: Field, second: Field, cx: &App) -> Div {
         two_column(
-            self.field(first).min_w(rems(180. / 16.)),
-            self.field(second).min_w(rems(180. / 16.)),
+            self.field(first, cx).min_w(rems(180. / 16.)),
+            self.field(second, cx).min_w(rems(180. / 16.)),
         )
     }
 
-    fn single(&self, field: Field) -> Div {
+    fn single(&self, field: Field, cx: &App) -> Div {
         row().child(
-            self.field(field)
+            self.field(field, cx)
                 .w(relative(0.5))
                 .min_w(rems(180. / 16.))
                 .pr_2(),
@@ -807,17 +839,19 @@ impl Settings {
 
     fn field_state(&self, field: Field, enabled: bool, cx: &App) -> Div {
         if enabled {
-            return self.field(field).min_w(rems(180. / 16.));
+            return self.field(field, cx).min_w(rems(180. / 16.));
         }
+        let colors = palette(cx);
         // Keep the draft value, but unmount the editor so disabled fields cannot take focus or edits.
         let control = div()
             .id(("inactive-setting", field as usize))
             .line_height(rems(20. / 16.))
             .text_size(rems(14. / 16.))
-            .bg(rgb(super::PANEL))
+            .bg(rgb(colors.control))
+            .text_color(rgb(colors.disabled))
             .border_1()
-            .border_color(rgb(BORDER))
-            .rounded(rems(5. / 16.))
+            .border_color(rgb(colors.structure_border))
+            .rounded(rems(4. / 16.))
             .cursor_default()
             .child(
                 div()
@@ -827,10 +861,7 @@ impl Settings {
                     .overflow_hidden()
                     .child(self.value(field, cx)),
             );
-        field
-            .form(self, control)
-            .opacity(0.45)
-            .min_w(rems(180. / 16.))
+        field.form(colors, self, control).min_w(rems(180. / 16.))
     }
 
     fn value(&self, field: Field, cx: &App) -> String {
@@ -1250,6 +1281,7 @@ impl Settings {
         select: impl Fn(&mut Settings) + 'static,
     ) -> Stateful<Div> {
         active_control(
+            palette(cx),
             button(id, label, cx, move |this, _, cx| {
                 this.dropdown.close();
                 select(this);
@@ -1380,7 +1412,7 @@ impl Settings {
                     ),
             )
             .child(self.measurement(Measured::SettingsFont, cx));
-        Field::Font.form(self, control)
+        Field::Font.form(palette(cx), self, control)
     }
 
     pub(super) fn open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1479,34 +1511,9 @@ impl Settings {
         let config = match self.parse(cx) {
             Ok(config) => config,
             Err(error) => {
-                let mut recovery = String::new();
-                for (inactive, key) in [
-                    (
-                        self.draft.spectrum_style == SpectrumStyle::Solid,
-                        "settings-spectrum-style-recovery",
-                    ),
-                    (
-                        !self.draft.spectrum_peaks,
-                        "settings-spectrum-peaks-recovery",
-                    ),
-                    (
-                        self.draft.album_artwork_mode == AlbumArtworkMode::Static,
-                        "settings-artwork-recovery",
-                    ),
-                ] {
-                    if inactive {
-                        if !recovery.is_empty() {
-                            recovery.push(' ');
-                        }
-                        recovery.push_str(self.i18n.text(key));
-                    }
-                }
                 self.feedback = Some(Err(self.i18n.format(
                     "settings-invalid",
-                    &[
-                        ("error", format!("{error:#}").into()),
-                        ("recovery", recovery.as_str().into()),
-                    ],
+                    &[("error", format!("{error:#}").into())],
                 )));
                 cx.notify();
                 return;
@@ -1597,6 +1604,7 @@ impl Settings {
             return;
         };
         match item.value {
+            SettingChoice::Theme(value) => self.draft.ui_theme = value,
             SettingChoice::Language(index) => {
                 self.draft.ui_language = ["auto", "en-US", "zh-CN"][index].to_owned()
             }
@@ -1638,6 +1646,7 @@ impl Settings {
         if let Some(item) = items.first() {
             self.dropdown_anchor = match item.value {
                 SettingChoice::Language(_) => Measured::Language,
+                SettingChoice::Theme(_) => Measured::Theme,
                 SettingChoice::Font(_) | SettingChoice::CustomFont => Measured::SettingsFont,
                 SettingChoice::SpectrumStyle(_) => Measured::SettingsStyle,
                 SettingChoice::Fft(_) => Measured::SettingsFft,
@@ -1759,6 +1768,7 @@ impl Settings {
     }
 
     fn artwork_cache_settings(&self, cx: &mut Context<Self>) -> Div {
+        let colors = palette(cx);
         let busy = self.artwork_cache_busy.is_some();
         let mut content = column().gap_2().child(
             row()
@@ -1766,6 +1776,7 @@ impl Settings {
                 .gap_2()
                 .child(
                     form_field(
+                        colors,
                         self.tr("settings-expire-files-older-than-days"),
                         div()
                             .id("settings-artwork-cache-age")
@@ -1775,6 +1786,7 @@ impl Settings {
                     .flex_1(),
                 )
                 .child(disabled_control(
+                    colors,
                     icon_button(
                         "settings-artwork-cache-calculate",
                         "󰃬",
@@ -1785,6 +1797,7 @@ impl Settings {
                     busy,
                 ))
                 .child(disabled_control(
+                    colors,
                     icon_button(
                         "settings-artwork-cache-clean",
                         "󰆴",
@@ -1797,6 +1810,7 @@ impl Settings {
         );
         if let Some((days, clean)) = self.artwork_cache_busy {
             content = content.child(status_message(
+                colors,
                 self.i18n.format(
                     if clean {
                         "settings-cache-cleaning"
@@ -1811,6 +1825,7 @@ impl Settings {
         if let Some((days, clean, report)) = &self.artwork_cache_report {
             content = content
                 .child(status_message(
+                    colors,
                     self.i18n.format(
                         if *clean {
                             "settings-cache-cleaned"
@@ -1825,35 +1840,48 @@ impl Settings {
                         StatusKind::Error
                     },
                 ))
-                .child(caption(self.i18n.format(
-                    "settings-cache-total",
-                    &[
-                        ("files", report.files.to_string().into()),
-                        ("bytes", report.bytes.to_string().into()),
-                    ],
-                )))
-                .child(caption(self.i18n.format(
-                    "settings-cache-expired",
-                    &[
-                        ("files", report.expired_files.to_string().into()),
-                        ("bytes", report.expired_bytes.to_string().into()),
-                    ],
-                )))
-                .child(caption(self.i18n.format(
-                    "settings-cache-protected",
-                    &[
-                        ("files", report.protected_files.to_string().into()),
-                        ("bytes", report.protected_bytes.to_string().into()),
-                    ],
-                )))
-                .child(caption(self.i18n.format(
-                    "settings-cache-removed",
-                    &[
-                        ("files", report.removed_files.to_string().into()),
-                        ("bytes", report.removed_bytes.to_string().into()),
-                    ],
-                )))
+                .child(caption(
+                    colors,
+                    self.i18n.format(
+                        "settings-cache-total",
+                        &[
+                            ("files", report.files.to_string().into()),
+                            ("bytes", report.bytes.to_string().into()),
+                        ],
+                    ),
+                ))
+                .child(caption(
+                    colors,
+                    self.i18n.format(
+                        "settings-cache-expired",
+                        &[
+                            ("files", report.expired_files.to_string().into()),
+                            ("bytes", report.expired_bytes.to_string().into()),
+                        ],
+                    ),
+                ))
+                .child(caption(
+                    colors,
+                    self.i18n.format(
+                        "settings-cache-protected",
+                        &[
+                            ("files", report.protected_files.to_string().into()),
+                            ("bytes", report.protected_bytes.to_string().into()),
+                        ],
+                    ),
+                ))
+                .child(caption(
+                    colors,
+                    self.i18n.format(
+                        "settings-cache-removed",
+                        &[
+                            ("files", report.removed_files.to_string().into()),
+                            ("bytes", report.removed_bytes.to_string().into()),
+                        ],
+                    ),
+                ))
                 .child(status_message(
+                    colors,
                     self.i18n.format(
                         "settings-cache-failures",
                         &[("count", report.failed_files.to_string().into())],
@@ -1867,24 +1895,26 @@ impl Settings {
             if let Some(error) = &report.first_error {
                 content = content.child(
                     copyable_message("copy-artwork-cache-file-error", error.clone(), cx)
-                        .text_color(rgb(ERROR)),
+                        .text_color(rgb(colors.error)),
                 );
             }
             if report.failed_files > 0 {
-                content = content.child(caption(self.tr("settings-cache-permissions-help")));
+                content =
+                    content.child(caption(colors, self.tr("settings-cache-permissions-help")));
             }
         }
         if let Some(error) = &self.artwork_cache_error {
             content = content.child(
                 copyable_message("copy-artwork-cache-error", error.clone(), cx)
-                    .text_color(rgb(ERROR)),
+                    .text_color(rgb(colors.error)),
             );
         }
-        settings_group(self.tr("settings-artwork-cache"), content)
+        settings_group(colors, self.tr("settings-artwork-cache"), content)
     }
 
     fn library_settings(&mut self, cx: &mut Context<Self>) -> Div {
         let library = settings_card(
+            palette(cx),
             self.tr("settings-library"),
             column()
                 .gap_2()
@@ -1893,19 +1923,24 @@ impl Settings {
                         .items_start()
                         .flex_wrap()
                         .gap_3()
-                        .child(self.field(Field::Roots).flex_1().min_w(rems(260. / 16.)))
                         .child(
-                            self.field(Field::ScanMaxDepth)
+                            self.field(Field::Roots, cx)
+                                .flex_1()
+                                .min_w(rems(260. / 16.)),
+                        )
+                        .child(
+                            self.field(Field::ScanMaxDepth, cx)
                                 .flex_1()
                                 .min_w(rems(220. / 16.)),
                         ),
                 )
                 .child(two_column(
                     settings_group(
+                        palette(cx),
                         self.tr("settings-relocation"),
                         column()
                             .gap_2()
-                            .child(caption(self.tr("settings-relocation-help")))
+                            .child(caption(palette(cx), self.tr("settings-relocation-help")))
                             .child(button(
                                 "settings-same-files",
                                 self.tr("settings-review-candidates"),
@@ -1932,7 +1967,7 @@ impl Settings {
         let device = column()
             .flex_shrink_0()
             .gap_1()
-            .child(caption(self.tr("settings-output-device")))
+            .child(caption(palette(cx), self.tr("settings-output-device")))
             .child(
                 dropdown_button(
                     "output-device-selector",
@@ -1988,12 +2023,14 @@ impl Settings {
         let ffmpeg = self.draft.ffmpeg_enabled;
         let remix = self.draft.pipewire_auto_mix;
         let playback = settings_card(
+            palette(cx),
             self.tr("settings-playback"),
             column()
                 .gap_2()
-                .child(self.pair(Field::Volume, Field::PlayCountThreshold)),
+                .child(self.pair(Field::Volume, Field::PlayCountThreshold, cx)),
         );
         let audio = settings_card(
+            palette(cx),
             self.tr("settings-audio"),
             column()
                 .gap_2()
@@ -2004,7 +2041,7 @@ impl Settings {
                         .gap_3()
                         .child(device.flex_1().min_w(rems(260. / 16.)))
                         .child(
-                            self.field(Field::MediaReadBuffer)
+                            self.field(Field::MediaReadBuffer, cx)
                                 .flex_1()
                                 .min_w(rems(240. / 16.)),
                         ),
@@ -2014,6 +2051,7 @@ impl Settings {
                         .flex_wrap()
                         .gap_2()
                         .child(active_control(
+                            palette(cx),
                             icon_button(
                                 "settings-ffmpeg",
                                 "\u{f384}",
@@ -2061,6 +2099,7 @@ impl Settings {
     }
 
     fn basic_settings(&mut self, cx: &mut Context<Self>) -> Div {
+        let colors = palette(cx);
         let draft = &self.draft;
         let language = dropdown_button(
             "settings-language",
@@ -2093,10 +2132,31 @@ impl Settings {
         )
         .relative()
         .child(self.measurement(Measured::Language, cx));
+        let theme = dropdown_button(
+            "settings-theme",
+            draft.ui_theme.label(),
+            cx,
+            |this, _, _| {
+                let selected = Theme::ALL
+                    .iter()
+                    .position(|value| *value == this.draft.ui_theme)
+                    .unwrap_or(0);
+                let items = Theme::ALL
+                    .into_iter()
+                    .map(|value| DropdownItem::new(SettingChoice::Theme(value), value.label()))
+                    .collect();
+                this.open_setting_dropdown(items, selected);
+            },
+        )
+        .relative()
+        .child(self.measurement(Measured::Theme, cx));
         settings_card(
+            colors,
             self.tr("settings-appearance-layout"),
             column()
                 .gap_2()
+                .child(form_field(colors, self.tr("settings-theme"), theme))
+                .child(caption(colors, self.tr("settings-theme-hint")))
                 .child(
                     column()
                         .gap_1()
@@ -2104,14 +2164,14 @@ impl Settings {
                             row()
                                 .flex_wrap()
                                 .gap_2()
-                                .child(caption(self.tr("settings-language")))
-                                .child(caption(self.tr("settings-language-restart"))),
+                                .child(caption(colors, self.tr("settings-language")))
+                                .child(caption(colors, self.tr("settings-language-restart"))),
                         )
                         .child(language),
                 )
                 .child(two_column(
                     self.font_control(cx).min_w(rems(180. / 16.)),
-                    self.field(Field::Scale).min_w(rems(180. / 16.)),
+                    self.field(Field::Scale, cx).min_w(rems(180. / 16.)),
                 ))
                 .child(self.layout_settings(cx)),
         )
@@ -2120,6 +2180,7 @@ impl Settings {
     fn layout_settings(&mut self, cx: &mut Context<Self>) -> Div {
         column().child(two_column(
             Field::LayoutSnapGrid.form(
+                palette(cx),
                 self,
                 row()
                     .gap_2()
@@ -2151,6 +2212,7 @@ impl Settings {
                 .flex_wrap()
                 .gap_2()
                 .child(active_control(
+                    palette(cx),
                     icon_button(
                         "settings-mpris",
                         "󰐹",
@@ -2220,6 +2282,7 @@ impl Settings {
         .relative()
         .child(self.measurement(Measured::SettingsLogLevel, cx));
         settings_card(
+            palette(cx),
             self.tr("settings-logging"),
             column()
                 .gap_2()
@@ -2233,11 +2296,11 @@ impl Settings {
                                 .flex_1()
                                 .min_w(rems(180. / 16.))
                                 .gap_1()
-                                .child(caption(self.tr("settings-log-level")))
+                                .child(caption(palette(cx), self.tr("settings-log-level")))
                                 .child(log_level_dropdown),
                         )
                         .child(
-                            self.field(Field::LogRetentionWeeks)
+                            self.field(Field::LogRetentionWeeks, cx)
                                 .flex_1()
                                 .min_w(rems(180. / 16.)),
                         ),
@@ -2263,7 +2326,7 @@ impl Settings {
             .flex_shrink_0()
             .p(gpui::px(UI_INSET))
             .border_r_1()
-            .border_color(rgb(BORDER));
+            .border_color(rgb(palette(cx).border));
         sidebar = sidebar.child(self.tab_button(
             "nav-library",
             self.tr("settings-library"),
@@ -2335,6 +2398,7 @@ impl Settings {
     }
 
     fn artwork_settings(&mut self, cx: &mut Context<Self>) -> Div {
+        let colors = palette(cx);
         let settings = &*self;
         let draft = &settings.draft;
         let style = dropdown_button(
@@ -2416,23 +2480,27 @@ impl Settings {
         column()
             .gap_3()
             .child(settings_group(
+                colors,
                 settings.tr(if settings.artwork_panel.is_some() {
                     "settings-this-instance"
                 } else {
                     "settings-new-instance-defaults"
                 }),
-                form_field(settings.tr("settings-style"), style),
+                form_field(colors, settings.tr("settings-style"), style),
             ))
             .child(settings_group(
+                colors,
                 settings.tr("settings-animation"),
                 column()
                     .gap_2()
                     .child(two_column(
-                        form_field(settings.tr("settings-mode"), mode).min_w(rems(180. / 16.)),
+                        form_field(colors, settings.tr("settings-mode"), mode)
+                            .min_w(rems(180. / 16.)),
                         div().min_w(rems(180. / 16.)).child(
                             form_field(
+                                colors,
                                 settings.tr("settings-direction"),
-                                disabled_control(direction, !rotating),
+                                disabled_control(colors, direction, !rotating),
                             )
                             .id("settings-artwork-direction-field"),
                         ),
@@ -2454,7 +2522,7 @@ impl Settings {
         let draft = &settings.draft;
         match settings.visual_page {
             VisualPage::Common => {
-                let palette = dropdown_button(
+                let palette_control = dropdown_button(
                     "visual-palette",
                     visualization_palette_label(&self.i18n, draft.visual_palette),
                     cx,
@@ -2539,36 +2607,50 @@ impl Settings {
                 column()
                     .gap_3()
                     .child(settings_card(
+                        palette(cx),
                         settings.tr("settings-appearance"),
                         column()
                             .gap_2()
                             .child(two_column(
-                                settings.field(Field::Background).min_w(rems(180. / 16.)),
-                                form_field(settings.tr("settings-color-scheme"), palette)
+                                settings
+                                    .field(Field::Background, cx)
                                     .min_w(rems(180. / 16.)),
+                                form_field(
+                                    palette(cx),
+                                    settings.tr("settings-color-scheme"),
+                                    palette_control,
+                                )
+                                .min_w(rems(180. / 16.)),
                             ))
                             .id("settings-appearance-help")
                             .tooltip(settings_tooltip(settings.tr("settings-appearance-help"))),
                     ))
                     .child(settings_card(
+                        palette(cx),
                         settings.tr("settings-display-range"),
-                        settings.single(Field::VisualizationDb),
+                        settings.single(Field::VisualizationDb, cx),
                     ))
                     .child(settings_card(
+                        palette(cx),
                         settings.tr("settings-frequency-analysis"),
                         column()
                             .gap_2()
                             .child(two_column(
-                                form_field(settings.tr("settings-fft-size-samples"), fft)
-                                    .min_w(rems(180. / 16.)),
-                                form_field(settings.tr("settings-fft-window"), window)
+                                form_field(
+                                    palette(cx),
+                                    settings.tr("settings-fft-size-samples"),
+                                    fft,
+                                )
+                                .min_w(rems(180. / 16.)),
+                                form_field(palette(cx), settings.tr("settings-fft-window"), window)
                                     .min_w(rems(180. / 16.)),
                             ))
-                            .child(settings.single(Field::Fps))
+                            .child(settings.single(Field::Fps, cx))
                             .id("settings-analysis-help")
                             .tooltip(settings_tooltip(settings.tr("settings-analysis-help"))),
                     ))
                     .child(settings_card(
+                        palette(cx),
                         settings.tr("settings-processing-cache"),
                         row()
                             .gap_2()
@@ -2629,11 +2711,12 @@ impl Settings {
                 column()
                     .gap_3()
                     .child(settings_card(
+                        palette(cx),
                         settings.tr("settings-appearance"),
                         column()
                             .gap_2()
                             .child(two_column(
-                                form_field(settings.tr("settings-style"), style)
+                                form_field(palette(cx), settings.tr("settings-style"), style)
                                     .min_w(rems(180. / 16.)),
                                 settings.field_state(Field::SpectrumBars, !solid, cx),
                             ))
@@ -2641,7 +2724,7 @@ impl Settings {
                                 settings.field_state(Field::SpectrumBarWidth, !solid, cx),
                                 settings.field_state(Field::SpectrumGap, !solid, cx),
                             ))
-                            .child(settings.single(Field::SpectrumDb))
+                            .child(settings.single(Field::SpectrumDb, cx))
                             .child(
                                 row()
                                     .flex_wrap()
@@ -2678,13 +2761,19 @@ impl Settings {
                             ),
                     ))
                     .child(settings_card(
+                        palette(cx),
                         settings.tr("settings-bar-motion"),
                         column()
                             .gap_2()
-                            .child(settings.pair(Field::SpectrumBarHold, Field::SpectrumBarGravity))
-                            .child(settings.single(Field::SpectrumSmoothing)),
+                            .child(settings.pair(
+                                Field::SpectrumBarHold,
+                                Field::SpectrumBarGravity,
+                                cx,
+                            ))
+                            .child(settings.single(Field::SpectrumSmoothing, cx)),
                     ))
                     .child(settings_card(
+                        palette(cx),
                         settings.tr("settings-peak-markers"),
                         column()
                             .gap_2()
@@ -2710,10 +2799,11 @@ impl Settings {
             VisualPage::Spectrogram => column()
                 .gap_3()
                 .child(settings_card(
+                    palette(cx),
                     settings.tr("settings-display"),
                     column()
                         .gap_2()
-                        .child(settings.pair(Field::SpectrogramDb, Field::SpectrogramHistory))
+                        .child(settings.pair(Field::SpectrogramDb, Field::SpectrogramHistory, cx))
                         .child(row().child(visual_switch(
                             &self.i18n,
                             "spectrogram-labels",
@@ -2725,12 +2815,14 @@ impl Settings {
                         ))),
                 ))
                 .child(settings_card(
+                    palette(cx),
                     settings.tr("settings-frequency-sampling"),
                     column()
                         .gap_2()
                         .child(settings.pair(
                             Field::SpectrogramSamplingPointsScale,
                             Field::SpectrogramInterpolationPoints,
+                            cx,
                         ))
                         .child(row().child(visual_switch(
                             &self.i18n,
@@ -2788,6 +2880,7 @@ impl Settings {
                 };
                 let instance = settings.visualizer_panel.is_some();
                 let display = settings_card(
+                    palette(cx),
                     if instance {
                         settings.tr("settings-this-instance")
                     } else {
@@ -2796,6 +2889,7 @@ impl Settings {
                     column()
                         .gap_2()
                         .child(form_field(
+                            palette(cx),
                             settings.tr("settings-style"),
                             style.when(!hint.is_empty(), |control| {
                                 control.tooltip(settings_tooltip(hint))
@@ -2843,17 +2937,20 @@ impl Settings {
                     .gap_3()
                     .child(display)
                     .child(settings_card(
+                        palette(cx),
                         settings.tr("settings-response-motion"),
                         column()
                             .gap_2()
-                            .child(settings.single(Field::AudioVisualizerDb))
+                            .child(settings.single(Field::AudioVisualizerDb, cx))
                             .child(settings.pair(
                                 Field::AudioVisualizerSensitivity,
                                 Field::AudioVisualizerBloomIntensity,
+                                cx,
                             ))
                             .child(settings.pair(
                                 Field::AudioVisualizerInnerDiameter,
                                 Field::AudioVisualizerRotationSpeed,
+                                cx,
                             ))
                             .child(row().child(visual_switch(
                                 &self.i18n,
@@ -2873,34 +2970,39 @@ impl Settings {
                             )),
                     ))
                     .child(settings_card(
+                        palette(cx),
                         settings.tr("settings-bars-rings-section"),
                         column()
                             .gap_2()
                             .child(settings.pair(
                                 Field::AudioVisualizerBarWidth,
                                 Field::AudioVisualizerBarGlowLayers,
+                                cx,
                             ))
-                            .child(settings.single(Field::AudioVisualizerRingOpacity))
+                            .child(settings.single(Field::AudioVisualizerRingOpacity, cx))
                             .id("settings-bars-rings-help")
                             .tooltip(settings_tooltip(
                                 settings.tr("settings-visualizer-bars-rings-help"),
                             )),
                     ));
                 content.child(settings_card(
+                    palette(cx),
                     settings.tr("settings-colors"),
                     column().gap_2().child(settings.pair(
                         Field::AudioVisualizerPrimaryColor,
                         Field::AudioVisualizerSecondaryColor,
+                        cx,
                     )),
                 ))
             }
             VisualPage::Waveform => column()
                 .gap_3()
                 .child(settings_card(
+                    palette(cx),
                     settings.tr("settings-appearance-interaction"),
                     column()
                         .gap_2()
-                        .child(settings.pair(Field::CursorColor, Field::Glow))
+                        .child(settings.pair(Field::CursorColor, Field::Glow, cx))
                         .child(
                             row()
                                 .flex_wrap()
@@ -2928,11 +3030,12 @@ impl Settings {
                         ),
                 ))
                 .child(settings_card(
+                    palette(cx),
                     settings.tr("settings-amplitude-display"),
                     column()
                         .gap_2()
-                        .child(settings.pair(Field::WaveformRmsGain, Field::WaveformPeakGain))
-                        .child(settings.single(Field::WaveformPeakGamma))
+                        .child(settings.pair(Field::WaveformRmsGain, Field::WaveformPeakGain, cx))
+                        .child(settings.single(Field::WaveformPeakGamma, cx))
                         .id("settings-amplitude-help")
                         .tooltip(settings_tooltip(
                             settings.tr("settings-waveform-amplitude-help"),
@@ -2942,6 +3045,7 @@ impl Settings {
     }
 
     fn panel(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let colors = palette(cx);
         let panel_id = u64::MAX;
         let mut panel = column()
             .id(("settings-panel", panel_id))
@@ -2962,10 +3066,12 @@ impl Settings {
                     .gap_3()
                     .child(self.basic_settings(cx))
                     .child(settings_card(
+                        colors,
                         self.tr("settings-album-artwork"),
                         self.artwork_settings(cx),
                     ))
                     .child(settings_card(
+                        colors,
                         self.tr("settings-desktop-integration"),
                         self.desktop_settings(cx),
                     ))
@@ -3020,18 +3126,21 @@ impl Settings {
             )),
         );
         let feedback = if self.applying {
-            status_message(self.tr("settings-applying-settings"), StatusKind::Info)
-                .into_any_element()
+            status_message(
+                colors,
+                self.tr("settings-applying-settings"),
+                StatusKind::Info,
+            )
+            .into_any_element()
         } else {
             match &self.feedback {
                 Some(Err(error)) => copyable_message("copy-settings-error", error.clone(), cx)
-                    .text_color(rgb(ERROR))
+                    .text_color(rgb(colors.error))
                     .into_any_element(),
-                Some(Ok(())) => status_message(
-                    self.tr("settings-last-apply-succeeded"),
-                    StatusKind::Success,
-                )
-                .into_any_element(),
+                Some(Ok(())) => {
+                    status_message(colors, self.tr("settings-applied"), StatusKind::Success)
+                        .into_any_element()
+                }
                 None => div().into_any_element(),
             }
         };
@@ -3043,7 +3152,7 @@ impl Settings {
                 .py(gpui::px(UI_INSET))
                 .min_h(rems(3.))
                 .border_t_1()
-                .border_color(rgb(BORDER))
+                .border_color(rgb(colors.border))
                 .child(
                     div()
                         .flex_1()
@@ -3053,6 +3162,7 @@ impl Settings {
                         .child(feedback),
                 )
                 .child(disabled_control(
+                    colors,
                     icon_button(
                         "settings-apply",
                         "",
@@ -3090,6 +3200,7 @@ impl Settings {
                                 let hint = label.clone();
                                 Some(
                                     dropdown_row(
+                                        palette(cx),
                                         ("settings-choice", item_index),
                                         item_index == selected,
                                         label,
@@ -3114,7 +3225,7 @@ impl Settings {
                             .position(bounds.bottom_left())
                             .snap_to_window()
                             .child(
-                                dropdown_container("settings-dropdown", bounds.size.width)
+                                dropdown_container(colors, "settings-dropdown", bounds.size.width)
                                     .on_mouse_down_out(cx.listener(
                                         |this, event: &MouseDownEvent, _, cx| {
                                             if this.dropdown_anchor == Measured::SettingsFont
@@ -3152,6 +3263,7 @@ impl Settings {
 
 impl Render for Settings {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = palette(cx);
         let panel = self.panel(window, cx);
         self.scope.surface(
             div()
@@ -3236,9 +3348,9 @@ impl Render for Settings {
                             .min(window.rem_size() * (640. / 16.)))
                         .gap_0()
                         .overflow_hidden()
-                        .bg(rgb(super::PANEL))
+                        .bg(rgb(colors.panel))
                         .border_1()
-                        .border_color(rgb(BORDER))
+                        .border_color(rgb(colors.border))
                         .rounded_md()
                         .child(
                             row()
@@ -3405,7 +3517,8 @@ mod tests {
     ) {
         let (_directory, runtime, settings) = fixture(cx);
         settings.update(cx, |this, cx| {
-            this.set_value(Field::ScanMaxDepth, "7", None, cx)
+            this.draft.ui_theme = Theme::CatppuccinLatte;
+            this.set_value(Field::ScanMaxDepth, "7", None, cx);
         });
         let (patch, submission) = submit(&settings, cx);
         assert!(
@@ -3420,9 +3533,12 @@ mod tests {
         settings.update(cx, |this, cx| {
             this.set_value(Field::ScanMaxDepth, "1e", None, cx);
             this.draft.still_mode = true;
+            this.draft.ui_theme = Theme::CatppuccinMocha;
             this.complete_settings_apply(submission, committed, result, cx);
             assert_eq!(this.baseline.scan_max_depth, 7);
             assert_eq!(this.baseline.volume, 0.2);
+            assert_eq!(this.baseline.ui_theme, Theme::CatppuccinLatte);
+            assert_eq!(this.draft.ui_theme, Theme::CatppuccinMocha);
             assert_eq!(this.value(Field::Volume, cx), "20");
             assert_eq!(this.value(Field::ScanMaxDepth, cx), "1e");
             assert!(this.draft.still_mode);
@@ -3444,6 +3560,7 @@ mod tests {
             assert_eq!(visible.scan_max_depth, 9);
             assert_eq!(visible.volume, 0.3);
             assert!(visible.still_mode);
+            assert_eq!(visible.ui_theme, Theme::CatppuccinMocha);
             assert_eq!(visible, *this.baseline);
         });
     }
@@ -3451,11 +3568,13 @@ mod tests {
     #[gpui::test]
     fn failed_settings_apply_retains_edits_and_baseline_for_retry(cx: &mut TestAppContext) {
         let (directory, runtime, settings) = fixture(cx);
+        let baseline_theme = runtime.handle.config_snapshot().ui_theme;
         let path = directory.path().join("config.toml");
         std::fs::remove_file(&path).unwrap();
         std::fs::create_dir(&path).unwrap();
         settings.update(cx, |this, cx| {
-            this.set_value(Field::ScanMaxDepth, "7", None, cx)
+            this.draft.ui_theme = Theme::CatppuccinLatte;
+            this.set_value(Field::ScanMaxDepth, "7", None, cx);
         });
         let (patch, submission) = submit(&settings, cx);
         let (committed, result) = execute(&runtime, patch);
@@ -3470,6 +3589,8 @@ mod tests {
             );
             assert_eq!(this.value(Field::ScanMaxDepth, cx), "9");
             assert!(this.draft.still_mode);
+            assert_eq!(this.baseline.ui_theme, baseline_theme);
+            assert_eq!(this.draft.ui_theme, Theme::CatppuccinLatte);
             assert!(!this.applying);
             assert!(matches!(&this.feedback, Some(Err(_))));
         });
@@ -3488,6 +3609,7 @@ mod tests {
             assert_eq!(this.baseline.scan_max_depth, 9);
             assert_eq!(this.baseline.volume, 0.2);
             assert!(this.baseline.still_mode);
+            assert_eq!(this.baseline.ui_theme, Theme::CatppuccinLatte);
             assert_eq!(this.parse(cx).unwrap(), *this.baseline);
         });
     }

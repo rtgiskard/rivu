@@ -59,7 +59,11 @@ pub(super) fn track_detail(
     detail
 }
 
-fn track_columns(track: &LibraryRow, columns: LibraryColumns) -> Option<gpui::Div> {
+fn track_columns(
+    theme: &'static crate::theme::Palette,
+    track: &LibraryRow,
+    columns: LibraryColumns,
+) -> Option<gpui::Div> {
     if !LibraryColumn::ALL
         .into_iter()
         .any(|column| columns.enabled(column))
@@ -110,14 +114,15 @@ fn track_columns(track: &LibraryRow, columns: LibraryColumns) -> Option<gpui::Di
                 },
             ),
         };
-        let cell = super::caption(value).truncate();
+        let cell = super::caption(theme, value).truncate();
         cells = cells.child(match column {
             LibraryColumn::Artist | LibraryColumn::Album => {
                 cell.max_w(gpui::rems(6.0)).flex_initial().min_w_0()
             }
-            LibraryColumn::Duration | LibraryColumn::Codec | LibraryColumn::Bitrate => {
-                cell.flex_shrink_0()
-            }
+            LibraryColumn::Duration | LibraryColumn::Bitrate => cell
+                .font_features(super::fonts::tabular_numbers())
+                .flex_shrink_0(),
+            LibraryColumn::Codec => cell.flex_shrink_0(),
         });
     }
     Some(cells)
@@ -209,7 +214,11 @@ impl Render for LibraryDragPreview {
     }
 }
 
-fn tree_guides(tree: &DirectoryTree, index: usize) -> gpui::Div {
+fn tree_guides(
+    theme: &'static crate::theme::Palette,
+    tree: &DirectoryTree,
+    index: usize,
+) -> gpui::Div {
     let mut guides = div().absolute().inset_0();
     tree.visit_guides(index, |column, continues, current| {
         let left = gpui::rems(0.5 + column as f32 * 1.25);
@@ -221,7 +230,7 @@ fn tree_guides(tree: &DirectoryTree, index: usize) -> gpui::Div {
                     .top_0()
                     .w(px(1.0))
                     .h(gpui::relative(if continues { 1.0 } else { 0.5 }))
-                    .bg(gpui::rgb(super::MUTED).alpha(0.35)),
+                    .bg(gpui::rgb(theme.muted).alpha(0.35)),
             );
         }
         if current {
@@ -232,7 +241,7 @@ fn tree_guides(tree: &DirectoryTree, index: usize) -> gpui::Div {
                     .top(gpui::relative(0.5))
                     .w(gpui::rems(0.5))
                     .h(px(1.0))
-                    .bg(gpui::rgb(super::MUTED).alpha(0.35)),
+                    .bg(gpui::rgb(theme.muted).alpha(0.35)),
             );
         }
     });
@@ -444,6 +453,7 @@ impl GuiApp {
         panel_id: u64,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let theme = crate::gui::theme::palette(cx);
         let row_count = self.browser.library.tree().row_count();
         let scroll = &self.browser.library.tree().scroll;
         // Local forest acceptance must notify after prepaint to redraw the loaded rows.
@@ -454,7 +464,14 @@ impl GuiApp {
             uniform_list(
                 ("library-directory-tree", panel_id),
                 row_count,
-                cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
+                cx.processor(move |this, range: std::ops::Range<usize>, window, cx| {
+                    let playing_track = this.state.current_track()
+                        .filter(|_| this.state.playback.status == crate::model::PlaybackStatus::Playing)
+                        .map(|track| track.id);
+                    let focused_index = (this.layout_focus.is_focused(window)
+                        && this.browser.focus() == Some(super::BrowserFocus::List(ListFocus::Library)))
+                        .then(|| this.browser.library.tree().selected_index())
+                        .flatten();
                     range
                         .filter_map(|index| {
                             let item = this.browser.library.tree().item(index)?;
@@ -468,6 +485,7 @@ impl GuiApp {
                                 } => {
                                     let failed = status == BranchStatus::Error;
                                     let placeholder = super::tree_row(
+                                        theme,
                                         gpui::ElementId::named_usize("library-loading", index),
                                         0,
                                         false,
@@ -481,20 +499,20 @@ impl GuiApp {
                                             .min_w_0()
                                             .h_full()
                                             .overflow_hidden()
-                                            .child(tree_guides(this.browser.library.tree(), index))
+                                            .child(tree_guides(theme, this.browser.library.tree(), index))
                                             .child(
                                                 row()
                                                     .h_full()
                                                     .pl(gpui::rems(depth as f32 * 1.25))
                                                     .child(
-                                                        super::caption(this.tr(if failed { "gl-unavailable" } else { "gl-loading" }))
+                                                        super::caption(theme, this.tr(if failed { "gl-unavailable" } else { "gl-loading" }))
                                                             .when(!this.loading_text.show_branch(&branch, failed), |text| text.invisible())
                                                             .min_w_0()
                                                             .truncate(),
                                                     )
                                                     .when(failed, |view| {
                                                         view.child(
-                                                            super::components::quiet_icon_button(icon_button(
+                                                            super::components::quiet_icon_button(theme, icon_button(
                                                                 gpui::ElementId::named_usize("library-retry", index),
                                                                 "󰑐",
                                                                 this.tr("gl-retry-folder"),
@@ -557,7 +575,7 @@ impl GuiApp {
                                 } else {
                                     this.i18n.format("gl-rescan-path", &[("path", scan_path.display().to_string().into())])
                                 };
-                                super::components::quiet_icon_button(icon_button(
+                                super::components::quiet_icon_button(theme, icon_button(
                                     gpui::ElementId::named_usize("library-scan", index),
                                     "󰑐",
                                     hint,
@@ -577,7 +595,7 @@ impl GuiApp {
                                         }
                                     },
                                 ))
-                                .when(retry_counts, |view| view.text_color(gpui::rgb(super::ERROR)))
+                                .when(retry_counts, |view| view.text_color(gpui::rgb(theme.error)))
                             });
                             let title = gpui::SharedString::from(title);
                             let tooltip_title = path.as_ref().map_or_else(
@@ -615,12 +633,16 @@ impl GuiApp {
                                                 .min_w_0()
                                                 .text_sm()
                                                 .truncate()
+                                                .when(matches!(entry, DirectoryRow::Track(track)
+                                                    if playing_track == Some(track.id)), |view| {
+                                                    view.text_color(gpui::rgb(theme.accent))
+                                                })
                                                 .text_overflow(gpui::TextOverflow::Truncate("..".into()))
                                                 .child(title.clone())
                                                 .when(path.is_none(), |view| view.flex_1()),
                                         )
                                         .when(path.is_some() && !detail.is_empty(), |view| {
-                                            view.child(super::caption(detail.clone()).min_w_0().truncate()
+                                            view.child(super::caption(theme, detail.clone()).min_w_0().truncate()
                                                 .when(visible.status == BranchStatus::Loading && !visible.branch.as_ref().is_some_and(|branch| this.loading_text.show_branch(branch, false)), |text| text.invisible())
                                                 .text_overflow(gpui::TextOverflow::Truncate("..".into())))
                                         })
@@ -630,7 +652,7 @@ impl GuiApp {
                                                     .flex_shrink_0()
                                                     .text_sm()
                                                     .font_family(super::fonts::SYMBOLS_FAMILY)
-                                                    .text_color(gpui::rgb(super::ERROR))
+                                                    .text_color(gpui::rgb(theme.error))
                                                     .child("󰌶"),
                                             )
                                         }),
@@ -641,8 +663,9 @@ impl GuiApp {
                                         row()
                                             .gap_1()
                                             .flex_shrink_0()
-                                            .child(super::caption("󰎇").font_family(super::fonts::SYMBOLS_FAMILY))
-                                            .child(super::caption(count.map_or_else(|| "—".to_owned(), |total| total.to_string()))),
+                                            .child(super::caption(theme, "󰎇").font_family(super::fonts::SYMBOLS_FAMILY))
+                                            .child(super::caption(theme, count.map_or_else(|| "—".to_owned(), |total| total.to_string()))
+                                                .font_features(super::fonts::tabular_numbers())),
                                     )
                                 });
                             let name_cell = div()
@@ -652,7 +675,7 @@ impl GuiApp {
                                 .h_full()
                                 .relative()
                                 .overflow_hidden()
-                                .child(tree_guides(this.browser.library.tree(), index))
+                                .child(tree_guides(theme, this.browser.library.tree(), index))
                                 .child(name_content)
                                 .when_some(scan, |view, scan| {
                                     view.child(
@@ -662,10 +685,10 @@ impl GuiApp {
                                             .right_0()
                                             .top_0()
                                             .h_full()
-                                            .bg(super::components::row_background(selected, false))
+                                            .bg(super::components::row_background(theme, selected, false))
                                             .when(!retry_counts, |view| view.invisible())
                                             .group_hover("library-track-row", move |style| {
-                                                style.visible().bg(super::components::row_background(selected, true))
+                                                style.visible().bg(super::components::row_background(theme, selected, true))
                                             })
                                             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                                             .on_click(|_, _, cx| cx.stop_propagation())
@@ -676,6 +699,7 @@ impl GuiApp {
                             let menu_root = path.clone().filter(|path| this.state.system.config.library_roots.contains(path));
                             let row_view = super::components::lazy_row_tooltip(
                                 super::tree_row(
+                                    theme,
                                     gpui::ElementId::named_usize("library-node", index),
                                     0,
                                     selected,
@@ -684,10 +708,13 @@ impl GuiApp {
                                 .overflow_hidden()
                                 .group("library-track-row")
                                 .relative()
+                                .when(focused_index == Some(index), |view| {
+                                    view.border_color(gpui::rgb(theme.accent))
+                                })
                                 .when(matches!(entry, DirectoryRow::Track(track)
                                     if this.browser.library.locate.highlight.is_some_and(|(id, started)|
                                         id == track.id && started.elapsed() < std::time::Duration::from_secs(2))), |view| {
-                                    view.bg(gpui::rgb(super::HIGHLIGHT)).border_l_2().border_color(gpui::rgb(super::ACCENT))
+                                    view.bg(gpui::rgb(theme.highlight)).border_color(gpui::rgb(theme.accent))
                                 })
                                 .on_mouse_down(gpui::MouseButton::Right, cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
                                     this.focus_layout(window, cx);
@@ -712,7 +739,7 @@ impl GuiApp {
                                 .child(name_cell)
                                 .when_some(
                                     match entry {
-                                        DirectoryRow::Track(track) => track_columns(track, this.state.system.config.library_columns),
+                                        DirectoryRow::Track(track) => track_columns(theme, track, this.state.system.config.library_columns),
                                         DirectoryRow::Directory { .. } => None,
                                     },
                                     |view, columns| view.child(columns),
@@ -724,7 +751,7 @@ impl GuiApp {
                                     },
                                     |view, (track_id, favorite)| {
                                         view.child(
-                                            super::panels::hover_actions("library-track-row", selected).child(this.track_favorite_toggle(
+                                            super::panels::hover_actions(theme, "library-track-row", selected).child(this.track_favorite_toggle(
                                                 gpui::ElementId::named_usize("library-tree-favorite", index),
                                                 "library-track-row",
                                                 track_id,

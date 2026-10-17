@@ -9,8 +9,10 @@ struct KeyboardControls {
 
 impl Render for KeyboardControls {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = crate::gui::theme::palette(cx);
         let first = button("first", "First", cx, |this, _, _| this.counts[0] += 1);
         let middle = disabled_control(
+            theme,
             button("middle", "Unavailable", cx, |this, _, _| {
                 this.counts[1] += 1
             }),
@@ -24,7 +26,7 @@ impl Render for KeyboardControls {
             self.scope
                 .menu_surface(div().id("menu").flex().flex_col())
                 .child(first)
-                .child(form_field("Direction", middle))
+                .child(form_field(theme, "Direction", middle))
                 .child(toggle),
         )
     }

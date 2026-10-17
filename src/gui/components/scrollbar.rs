@@ -7,8 +7,6 @@ use gpui::{
     linear_color_stop, linear_gradient, point, prelude::*, px, relative, rgb, size,
 };
 
-use super::{ACCENT, MUTED, PANEL};
-
 const SLOT_WIDTH: f32 = 12.;
 const THUMB_WIDTH: f32 = 6.;
 const IDLE_THUMB_WIDTH: f32 = 2.;
@@ -144,7 +142,12 @@ impl Geometry {
 
 // Paint after the list has resolved scrolling, without a hitbox or an offscreen
 // content texture. The solid surface color deliberately matches docked panels.
-fn paint_scroll_edges(geometry: Geometry, offset: Pixels, window: &mut Window) {
+fn paint_scroll_edges(
+    theme: &'static crate::theme::Palette,
+    geometry: Geometry,
+    offset: Pixels,
+    window: &mut Window,
+) {
     let viewport = geometry.viewport;
     let height = (window.rem_size() * 0.75).min(viewport.size.height / 4.);
     if geometry.max_offset <= px(0.) || height <= px(0.) || viewport.size.width <= px(0.) {
@@ -161,7 +164,7 @@ fn paint_scroll_edges(geometry: Geometry, offset: Pixels, window: &mut Window) {
     ] {
         let opacity = (distance / height).clamp(0., 1.);
         if opacity > 0. {
-            let color = rgb(PANEL);
+            let color = rgb(theme.panel);
             window.paint_quad(fill(
                 Bounds::new(point(viewport.left(), y), size(viewport.size.width, height)),
                 linear_gradient(
@@ -337,13 +340,14 @@ impl Element for Scrollbar {
         _: &mut (),
         frame: &mut FrameState,
         window: &mut Window,
-        _: &mut App,
+        cx: &mut App,
     ) {
+        let theme = crate::gui::theme::palette(cx);
         {
             let mut state = frame.state.borrow_mut();
             state.hovered = frame.hitbox.is_hovered(window);
             let offset = self.scroll.handle().offset().y;
-            paint_scroll_edges(state.geometry, offset, window);
+            paint_scroll_edges(theme, state.geometry, offset, window);
             if let Some(mut thumb) = state.geometry.thumb(offset) {
                 let expanded = state.gesture.is_some() || state.hovered;
                 let width = px(if expanded {
@@ -354,9 +358,9 @@ impl Element for Scrollbar {
                 thumb.origin.x += (thumb.size.width - width) / 2.;
                 thumb.size.width = width;
                 let color = if expanded {
-                    rgb(ACCENT).alpha(0.85)
+                    rgb(theme.accent).alpha(0.85)
                 } else {
-                    rgb(MUTED).alpha(0.22)
+                    rgb(theme.muted).alpha(0.22)
                 };
                 window.paint_quad(fill(thumb, color).corner_radii(width / 2.));
             }

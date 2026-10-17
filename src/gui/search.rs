@@ -1,6 +1,6 @@
 //! Shared interaction state for optional list-local search.
 
-use super::{ACCENT, BORDER, Input, InputEvent, Localizer, PANEL, icon_button, row};
+use super::{Input, InputEvent, Localizer, icon_button, row};
 use gpui::{prelude::*, *};
 use std::sync::Arc;
 
@@ -151,6 +151,7 @@ impl ListSearch {
 
 impl Render for ListSearch {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = crate::gui::theme::palette(cx);
         let visible =
             self.expanded || !self.input.read(cx).text().is_empty() || self.query.is_some();
         let focused = self.input_focused(window, cx);
@@ -173,9 +174,13 @@ impl Render for ListSearch {
             .max_w_full()
             .overflow_hidden()
             .rounded_md()
-            .bg(rgb(PANEL))
+            .bg(rgb(theme.panel))
             .border_1()
-            .border_color(if focused { rgb(ACCENT) } else { rgb(BORDER) })
+            .border_color(if focused {
+                rgb(theme.accent)
+            } else {
+                rgb(theme.border)
+            })
             .child(
                 icon_button(
                     "search-toggle",

@@ -11,7 +11,6 @@ use crate::{
 };
 
 use super::{
-    HIGHLIGHT, TEXT,
     artwork::{Artwork, ArtworkImages, ArtworkLoader, ArtworkView},
     caption, column,
     components::{LIST_ROW_REMS, scrollable_list, track_list_row},
@@ -30,6 +29,7 @@ fn card_icon_button(
     cx: &mut Context<AlbumBrowser>,
     action: impl Fn(&mut AlbumBrowser, &mut Window, &mut Context<AlbumBrowser>) + 'static,
 ) -> Stateful<Div> {
+    let theme = crate::gui::theme::palette(cx);
     let hint = hint.into();
     div()
         .id(id)
@@ -41,9 +41,9 @@ fn card_icon_button(
         .flex_shrink_0()
         .font_family(super::fonts::SYMBOLS_FAMILY)
         .text_size(rems(1.))
-        .text_color(rgb(super::MUTED))
+        .text_color(rgb(theme.muted))
         .cursor_pointer()
-        .hover(|style| style.text_color(rgb(TEXT)))
+        .hover(|style| style.text_color(rgb(theme.text)))
         .child(icon)
         .on_click(cx.listener(move |this, _, window, cx| {
             action(this, window, cx);
@@ -615,6 +615,7 @@ impl AlbumBrowser {
     }
 
     fn loading_row(&self, index: usize, cx: &mut Context<Self>) -> Div {
+        let theme = crate::gui::theme::palette(cx);
         let error = if self.selected.is_some() {
             self.tracks.error(index)
         } else {
@@ -623,10 +624,13 @@ impl AlbumBrowser {
         column()
             .overflow_hidden()
             .child(
-                caption(error.unwrap_or(self.i18n.text("gl-loading")).to_owned())
-                    .when(!self.loading_text.show(&(), error.is_some()), |text| {
-                        text.invisible()
-                    }),
+                caption(
+                    theme,
+                    error.unwrap_or(self.i18n.text("gl-loading")).to_owned(),
+                )
+                .when(!self.loading_text.show(&(), error.is_some()), |text| {
+                    text.invisible()
+                }),
             )
             .when(error.is_some(), |view| {
                 view.child(icon_button(
@@ -827,6 +831,7 @@ impl AlbumBrowser {
     }
 
     fn card(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
+        let theme = crate::gui::theme::palette(cx);
         let Some(album) = self.albums.get(index) else {
             return self
                 .loading_row(index, cx)
@@ -931,7 +936,7 @@ impl AlbumBrowser {
                 },
             )
             .rounded_md()
-            .hover(|style| style.bg(rgb(HIGHLIGHT)))
+            .hover(|style| style.bg(rgb(theme.highlight)))
             .overflow_hidden()
             .child(
                 div()
@@ -951,9 +956,9 @@ impl AlbumBrowser {
                             .bottom_0()
                             .w_full()
                             .h(self.grid_layout.artwork_size / std::f32::consts::E)
-                            .bg(cover_fade(super::PANEL))
+                            .bg(cover_fade(theme.panel))
                             .group_hover("album-card", move |style| {
-                                style.bg(cover_fade(HIGHLIGHT))
+                                style.bg(cover_fade(theme.highlight))
                             }),
                     ),
             )
@@ -967,7 +972,7 @@ impl AlbumBrowser {
                     .line_height(rems(1.25))
                     .flex_shrink_0()
                     .text_sm()
-                    .text_color(rgb(TEXT))
+                    .text_color(rgb(theme.text))
                     .text_center()
                     .truncate()
                     .child(title.clone())
@@ -979,11 +984,14 @@ impl AlbumBrowser {
                     }),
             )
             .child(
-                caption(if album.artist.trim().is_empty() {
-                    "-".into()
-                } else {
-                    album.artist.clone()
-                })
+                caption(
+                    theme,
+                    if album.artist.trim().is_empty() {
+                        "-".into()
+                    } else {
+                        album.artist.clone()
+                    },
+                )
                 .w_full()
                 .text_center()
                 .truncate()
@@ -993,6 +1001,7 @@ impl AlbumBrowser {
             )
             .child(
                 caption(
+                    theme,
                     self.i18n
                         .format("gl-track-count", &[("count", album.track_count.into())]),
                 )
@@ -1049,6 +1058,7 @@ fn track_marker(current: Option<i64>, status: PlaybackStatus, id: i64) -> Option
 
 impl Render for AlbumBrowser {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = crate::gui::theme::palette(cx);
         let total = if self.selected.is_some() {
             self.tracks_total
         } else {
@@ -1056,7 +1066,7 @@ impl Render for AlbumBrowser {
         }
         .filter(|(stamp, _)| Some(*stamp) == self.active_projection().stamp())
         .map(|(_, total)| total);
-        let mut header = row().items_end().flex_shrink_0().min_w_0();
+        let mut header = row().items_end().flex_shrink_0().min_w_0().px_2();
         if let Some(key) = &self.selected {
             let play_key = key.clone();
             let enqueue_key = key.clone();
@@ -1091,7 +1101,7 @@ impl Render for AlbumBrowser {
                         .flex_1()
                         .min_w_0()
                         .truncate()
-                        .text_color(rgb(TEXT))
+                        .text_color(rgb(theme.text))
                         .child(key.title.clone()),
                 )
                 .child(self.tracks_search.clone())
@@ -1127,6 +1137,7 @@ impl Render for AlbumBrowser {
             header = header
                 .child(
                     super::panel_header(
+                        theme,
                         self.tr("gl-albums"),
                         total.map_or_else(
                             || "—".to_owned(),
@@ -1166,13 +1177,15 @@ impl Render for AlbumBrowser {
         let content = if self.selected.is_some() {
             if self.tracks.is_empty() {
                 column()
-                    .child(caption(self.tr(
-                        if self.tracks_query.is_some() && total != Some(0) {
+                    .px_2()
+                    .child(caption(
+                        theme,
+                        self.tr(if self.tracks_query.is_some() && total != Some(0) {
                             "gl-album-tracks-no-matches"
                         } else {
                             "gl-album-no-tracks"
-                        },
-                    )))
+                        }),
+                    ))
                     .into_any_element()
             } else {
                 scrollable_list(
@@ -1196,14 +1209,17 @@ impl Render for AlbumBrowser {
                                     let marker =
                                         track_marker(this.current_track, this.playback_status, id);
                                     track_list_row(
+                                        theme,
                                         ("album-track", id as u64),
                                         ("album-track-text", id as u64),
-                                        track.title.clone(),
-                                        if track.artist.trim().is_empty() {
-                                            "-".to_owned()
-                                        } else {
-                                            track.artist.clone()
-                                        },
+                                        (
+                                            track.title.clone(),
+                                            if track.artist.trim().is_empty() {
+                                                "-".to_owned()
+                                            } else {
+                                                track.artist.clone()
+                                            },
+                                        ),
                                         index,
                                         marker.is_some()
                                             && this.playback_status == PlaybackStatus::Playing,
@@ -1241,27 +1257,35 @@ impl Render for AlbumBrowser {
                                         },
                                     )
                                     .when(track.missing, |row| {
-                                        row.child(caption(this.tr("gl-missing")))
+                                        row.child(caption(theme, this.tr("gl-missing")))
                                     })
                                     .when_some(marker, |row, marker| {
-                                        row.child(caption(this.tr(marker)))
+                                        row.child(caption(theme, this.tr(marker)))
                                     })
                                     .child(
                                         caption(
+                                            theme,
                                             track.duration.map_or_else(|| "—".into(), format_time),
                                         )
+                                        .font_features(super::fonts::tabular_numbers())
                                         .w(rems(4.))
                                         .flex_shrink_0()
                                         .text_right(),
                                     )
                                     .child(
-                                        super::panels::hover_actions("album-track-row", false)
-                                            .id(("album-track-actions", id as u64))
-                                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                                cx.stop_propagation()
-                                            })
-                                            .on_click(|_, _, cx| cx.stop_propagation())
-                                            .child(compact_icon_button(icon_button(
+                                        super::panels::hover_actions(
+                                            theme,
+                                            "album-track-row",
+                                            false,
+                                        )
+                                        .id(("album-track-actions", id as u64))
+                                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                            cx.stop_propagation()
+                                        })
+                                        .on_click(|_, _, cx| cx.stop_propagation())
+                                        .child(compact_icon_button(
+                                            theme,
+                                            icon_button(
                                                 ("album-track-play", id as u64),
                                                 "",
                                                 this.tr("gl-play-track"),
@@ -1269,21 +1293,27 @@ impl Render for AlbumBrowser {
                                                 move |this, _, cx| {
                                                     this.send(Command::Play { track_id: id }, cx)
                                                 },
-                                            )))
-                                            .child(compact_icon_button(icon_button(
-                                                ("album-track-add", id as u64),
-                                                "󰐕",
-                                                this.tr("gl-enqueue-track"),
-                                                cx,
-                                                move |this, _, cx| {
-                                                    this.send(
-                                                        Command::Enqueue {
-                                                            track_ids: vec![id],
-                                                        },
-                                                        cx,
-                                                    )
-                                                },
-                                            ))),
+                                            ),
+                                        ))
+                                        .child(
+                                            compact_icon_button(
+                                                theme,
+                                                icon_button(
+                                                    ("album-track-add", id as u64),
+                                                    "󰐕",
+                                                    this.tr("gl-enqueue-track"),
+                                                    cx,
+                                                    move |this, _, cx| {
+                                                        this.send(
+                                                            Command::Enqueue {
+                                                                track_ids: vec![id],
+                                                            },
+                                                            cx,
+                                                        )
+                                                    },
+                                                ),
+                                            ),
+                                        ),
                                     )
                                     .into_any_element()
                                 })
@@ -1312,11 +1342,15 @@ impl Render for AlbumBrowser {
             }
         } else if self.albums.is_empty() {
             column()
-                .child(caption(if self.query.is_some() && total != Some(0) {
-                    self.tr("gl-albums-no-matches")
-                } else {
-                    self.tr("gl-albums-empty")
-                }))
+                .px_2()
+                .child(caption(
+                    theme,
+                    if self.query.is_some() && total != Some(0) {
+                        self.tr("gl-albums-no-matches")
+                    } else {
+                        self.tr("gl-albums-empty")
+                    },
+                ))
                 .into_any_element()
         } else {
             let layout = self.grid_layout;
@@ -1400,7 +1434,9 @@ impl Render for AlbumBrowser {
         panel_surface("albums-browser")
             .p_2()
             .child(header)
-            .when_some(self.error.clone(), |view, error| view.child(caption(error)))
+            .when_some(self.error.clone(), |view, error| {
+                view.child(caption(theme, error).px_2())
+            })
             .child(div().flex_1().min_h_0().min_w_0().child(content))
     }
 }

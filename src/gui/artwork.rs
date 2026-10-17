@@ -18,7 +18,7 @@ use gpui::{
     div, img, prelude::*, rgb,
 };
 
-use super::{BG, GuiApp};
+use super::GuiApp;
 
 #[derive(Default)]
 struct ArtworkImagesState {
@@ -724,19 +724,25 @@ impl Artwork {
         }
     }
 
-    pub(super) fn image(&self, side: Pixels, window: &Window) -> Img {
+    pub(super) fn image(
+        &self,
+        theme: &'static crate::theme::Palette,
+        side: Pixels,
+        window: &Window,
+    ) -> Img {
         let side = default_artwork_side(side, window.scale_factor());
         let cache = self.cache.clone();
         let fallback = self.fallback.clone();
         img(move |window: &mut Window, cx: &mut App| {
             cache.update(cx, |cache, cx| cache.load(side, window, cx))
         })
-        .with_fallback(move || super::caption(fallback.clone()).into_any_element())
+        .with_fallback(move || super::caption(theme, fallback.clone()).into_any_element())
     }
 }
 
 impl Render for Artwork {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = crate::gui::theme::palette(cx);
         let cache = self.cache.clone();
         let fallback = self.fallback.clone();
         div()
@@ -744,7 +750,7 @@ impl Render for Artwork {
             .rounded_md()
             .when(self.circular, |view| view.rounded_full())
             .overflow_hidden()
-            .bg(rgb(BG))
+            .bg(rgb(theme.bg))
             .child(
                 canvas(
                     move |bounds, window, cx| {
@@ -754,7 +760,7 @@ impl Render for Artwork {
                             circular: false,
                         };
                         let mut image = artwork
-                            .image(bounds.size.width, window)
+                            .image(theme, bounds.size.width, window)
                             .size(bounds.size.width)
                             .into_any_element();
                         let _ = image.prepaint_as_root(

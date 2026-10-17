@@ -12,7 +12,7 @@
 
 pub(in crate::gui) mod session;
 
-use super::{BORDER, Field, GuiApp, PANEL, UI_INSET, column, icon_button, panel_header, row};
+use super::{Field, GuiApp, UI_INSET, column, icon_button, panel_header, row};
 use crate::{model::Query, response::ViewResponse};
 use gpui::{AnyElement, App, Context, div, prelude::*, px, rgb};
 use session::{MetadataDraft, MetadataValues};
@@ -266,6 +266,7 @@ impl GuiApp {
         &mut self,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
+        let theme = crate::gui::theme::palette(cx);
         self.manual_intents.pending.as_ref()?;
         let detail = if self.metadata.saving() {
             self.i18n.text("gl-metadata-discard-saving")
@@ -293,11 +294,12 @@ impl GuiApp {
                         .w(gpui::rems(26.25))
                         .max_w(gpui::relative(0.9))
                         .p(px(UI_INSET))
-                        .bg(rgb(PANEL))
+                        .bg(rgb(theme.panel))
                         .border_1()
-                        .border_color(rgb(BORDER))
+                        .border_color(rgb(theme.border))
                         .rounded_md()
                         .child(panel_header(
+                            theme,
                             self.tr("gl-metadata-discard-title"),
                             detail.to_owned(),
                         ))
@@ -311,13 +313,16 @@ impl GuiApp {
                                     cx,
                                     |this, _, cx| this.cancel_manual_action(cx),
                                 ))
-                                .child(super::components::danger_control(icon_button(
-                                    "metadata-confirmation-discard",
-                                    "󰆴",
-                                    self.tr("gl-metadata-discard"),
-                                    cx,
-                                    |this, _, cx| this.discard_metadata_and_continue(cx),
-                                ))),
+                                .child(super::components::danger_control(
+                                    theme,
+                                    icon_button(
+                                        "metadata-confirmation-discard",
+                                        "󰆴",
+                                        self.tr("gl-metadata-discard"),
+                                        cx,
+                                        |this, _, cx| this.discard_metadata_and_continue(cx),
+                                    ),
+                                )),
                         ),
                 )
                 .into_any_element(),

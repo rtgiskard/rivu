@@ -23,6 +23,7 @@ pub(crate) mod session;
 mod settings;
 mod shell;
 mod shortcuts;
+mod theme;
 mod visualization;
 use crate::{
     config::{AudioVisualizerOptions, AudioVisualizerStyle},
@@ -75,18 +76,6 @@ pub(crate) fn init(cx: &mut App) -> Result<()> {
     Ok(())
 }
 
-const BG: u32 = 0x1a1b26;
-const PANEL: u32 = 0x16161e;
-const CONTROL: u32 = 0x1f2231;
-const STRUCTURE_BORDER: u32 = 0x292e42;
-const BORDER: u32 = 0x3b4261;
-const TEXT: u32 = 0xc0caf5;
-const SECONDARY: u32 = 0x9aa5ce;
-const MUTED: u32 = 0x565f89;
-const ACCENT: u32 = 0x7aa2f7;
-const HIGHLIGHT: u32 = 0x292e42;
-const ERROR: u32 = 0xf7768e;
-const ERROR_BG: u32 = 0x3b2330;
 const UI_INSET: f32 = 8.0;
 const SPLIT_GUTTER: f32 = 4.0;
 
@@ -873,6 +862,7 @@ impl GuiApp {
         cx: &mut Context<Self>,
     ) -> Self {
         let state = handle.gui_snapshot();
+        theme::set_theme(state.system.config.ui_theme, cx);
         let localized_text = i18n
             .fixed_texts()
             .map(|(id, text)| (id.to_owned(), SharedString::from(text.to_owned())))
@@ -1414,19 +1404,23 @@ impl GuiApp {
         index: usize,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
+        let theme = crate::gui::theme::palette(cx);
         let error = match kind {
             ViewRequestKind::Summaries => self.browser.playlists.summaries().rows.error(index),
             ViewRequestKind::Entries => self.browser.playlists.entries().rows.error(index),
             ViewRequestKind::Queue => self.browser.queue.rows.error(index),
             _ => None,
         };
-        list_row(("loading-row", index), false)
+        list_row(theme, ("loading-row", index), false)
             .child(
-                caption(if error.is_some() {
-                    self.tr("shell-loading-failed")
-                } else {
-                    self.tr("shell-loading")
-                })
+                caption(
+                    theme,
+                    if error.is_some() {
+                        self.tr("shell-loading-failed")
+                    } else {
+                        self.tr("shell-loading")
+                    },
+                )
                 .when(
                     !self
                         .loading_text
@@ -1577,6 +1571,9 @@ impl GuiApp {
                 self.state.system.config.still_mode != state.system.config.still_mode;
             if self.state.system.config.ui_font != state.system.config.ui_font {
                 self.ui_font = fonts::resolve(&state.system.config.ui_font, cx);
+            }
+            if self.state.system.config.ui_theme != state.system.config.ui_theme {
+                theme::set_theme(state.system.config.ui_theme, cx);
             }
             self.state = state;
             self.sync_duplicate_review(cx);
@@ -2045,8 +2042,9 @@ impl GuiApp {
         self.sync_analysis(cx);
         cx.notify();
     }
-    fn spectrum_panel(&mut self, id: u64, _: &mut Window, _: &mut Context<Self>) -> AnyElement {
-        self.visuals.spectrum(&self.i18n, id)
+    fn spectrum_panel(&mut self, id: u64, _: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let theme = crate::gui::theme::palette(cx);
+        self.visuals.spectrum(theme, &self.i18n, id)
     }
     fn audio_visualizer_panel(
         &mut self,
@@ -2064,8 +2062,9 @@ impl GuiApp {
             options,
         )
     }
-    fn spectrogram_panel(&mut self, id: u64, _: &mut Window, _: &mut Context<Self>) -> AnyElement {
-        self.visuals.spectrogram(&self.i18n, id)
+    fn spectrogram_panel(&mut self, id: u64, _: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let theme = crate::gui::theme::palette(cx);
+        self.visuals.spectrogram(theme, &self.i18n, id)
     }
     fn waveform_panel(&mut self, id: u64, _: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let current = self.state.current_track();
@@ -2249,6 +2248,7 @@ impl GuiApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let theme = crate::gui::theme::palette(cx);
         match node {
             Node::Split {
                 id,
@@ -2266,9 +2266,9 @@ impl GuiApp {
                         div()
                             .id(("split", index))
                             .absolute()
-                            .bg(rgb(BG))
+                            .bg(rgb(theme.bg))
                             .when(!self.layouts.current().locked, |view| {
-                                view.hover(|style| style.bg(rgb(ACCENT)))
+                                view.hover(|style| style.bg(rgb(theme.accent)))
                                     .when(axis == Axis::Horizontal, |view| view.cursor_col_resize())
                                     .when(axis == Axis::Vertical, |view| view.cursor_row_resize())
                             })
@@ -2362,7 +2362,7 @@ impl GuiApp {
                     .py(px(1.))
                     .gap_1()
                     .border_b_1()
-                    .border_color(rgb(STRUCTURE_BORDER));
+                    .border_color(rgb(theme.structure_border));
                 for panel in panels.iter().filter(|_| show_tab_bar) {
                     let panel_id = panel.id;
                     let title = panel_spec(&panel.kind).map_or_else(
@@ -2378,7 +2378,7 @@ impl GuiApp {
                         div()
                             .id(("tab", panel_id))
                             .tab_index(0)
-                            .focus(|style| style.bg(rgb(HIGHLIGHT)).text_color(rgb(ACCENT)))
+                            .focus(|style| style.border_color(rgb(theme.accent)))
                             .relative()
                             .flex()
                             .h_full()
@@ -2387,10 +2387,21 @@ impl GuiApp {
                             .px_2()
                             .py_0()
                             .rounded_sm()
+                            .border_1()
+                            .border_color(gpui::transparent_black())
                             .text_xs()
                             .when(!self.layouts.current().locked, |view| view.cursor_move())
-                            .bg(rgb(if active == panel_id { HIGHLIGHT } else { PANEL }))
-                            .text_color(rgb(if active == panel_id { TEXT } else { SECONDARY }))
+                            .bg(rgb(if active == panel_id {
+                                theme.highlight
+                            } else {
+                                theme.panel
+                            }))
+                            .hover(|style| style.bg(rgb(theme.highlight)))
+                            .text_color(rgb(if active == panel_id {
+                                theme.text
+                            } else {
+                                theme.secondary
+                            }))
                             .on_click(cx.listener(move |this, event, window, cx| {
                                 this.layouts.current_mut().activate(panel_id);
                                 this.search_panel = Some(panel_id);
@@ -2444,18 +2455,21 @@ impl GuiApp {
                             .child(self.measurement(Measured::Tab(panel_id)))
                             .when(!self.layouts.current().locked, |view| {
                                 view.child(
-                                    components::quiet_icon_button(icon_button(
-                                        ("close", panel_id),
-                                        "",
-                                        self.tr("shell-remove-panel"),
-                                        cx,
-                                        move |this, _, cx| {
-                                            if this.layouts.current().locked {
-                                                return;
-                                            }
-                                            this.remove_layout_panel(panel_id, cx);
-                                        },
-                                    ))
+                                    components::quiet_icon_button(
+                                        theme,
+                                        icon_button(
+                                            ("close", panel_id),
+                                            "",
+                                            self.tr("shell-remove-panel"),
+                                            cx,
+                                            move |this, _, cx| {
+                                                if this.layouts.current().locked {
+                                                    return;
+                                                }
+                                                this.remove_layout_panel(panel_id, cx);
+                                            },
+                                        ),
+                                    )
                                     .size(gpui::rems(1.))
                                     .min_h_0(),
                                 )
@@ -2477,7 +2491,7 @@ impl GuiApp {
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .text_color(rgb(MUTED))
+                                .text_color(rgb(theme.muted))
                                 .child(self.tr("shell-visualizations-paused"))
                                 .into_any_element();
                         }
@@ -2526,10 +2540,10 @@ impl GuiApp {
                     .relative()
                     .size_full()
                     .gap_0()
-                    .bg(rgb(PANEL))
+                    .bg(rgb(theme.panel))
                     .border_1()
-                    .border_color(rgb(STRUCTURE_BORDER))
-                    .rounded_md()
+                    .border_color(rgb(theme.structure_border))
+                    .rounded_sm()
                     .overflow_hidden();
                 if show_tab_bar {
                     panel = panel.child(tabs);
@@ -2626,6 +2640,7 @@ impl GuiApp {
         key: Measured,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let theme = crate::gui::theme::palette(cx);
         let value = value.clamp(0., 1.);
         let is_dragging = match (self.interaction.dragging(), dragging) {
             (Some(Dragging::Seek(active)), Dragging::Seek(id))
@@ -2647,13 +2662,13 @@ impl GuiApp {
                     .w_full()
                     .h(px(4.))
                     .rounded_full()
-                    .bg(rgb(BORDER))
+                    .bg(rgb(theme.border))
                     .child(
                         div()
                             .h_full()
                             .w(relative(value))
                             .rounded_full()
-                            .bg(rgb(ACCENT)),
+                            .bg(rgb(theme.accent)),
                     ),
             )
             .child(
@@ -2672,7 +2687,7 @@ impl GuiApp {
                             .ml(px(-5.))
                             .size(px(10.))
                             .rounded_full()
-                            .bg(rgb(TEXT)),
+                            .bg(rgb(theme.text)),
                     ),
             )
             .child(self.measurement(key))

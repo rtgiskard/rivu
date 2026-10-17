@@ -14,7 +14,6 @@
 //! the visible source frequency points, and remain capped by configuration.
 use crate::i18n::Localizer;
 
-use super::super::{ERROR, ERROR_BG};
 use gpui::{
     AnyElement, App, Bounds, Path, PathBuilder, Pixels, Point, RenderImage, SharedString,
     TextAlign, Window, canvas, div, fill, point, prelude::*, px, rgb, size,
@@ -615,12 +614,22 @@ impl Visuals {
         }
     }
 
-    pub(in crate::gui) fn spectrum(&self, i18n: &Arc<Localizer>, panel_id: u64) -> AnyElement {
-        self.view(i18n, panel_id, VisualMode::Spectrum)
+    pub(in crate::gui) fn spectrum(
+        &self,
+        theme: &'static crate::theme::Palette,
+        i18n: &Arc<Localizer>,
+        panel_id: u64,
+    ) -> AnyElement {
+        self.view(theme, i18n, panel_id, VisualMode::Spectrum)
     }
 
-    pub(in crate::gui) fn spectrogram(&self, i18n: &Arc<Localizer>, panel_id: u64) -> AnyElement {
-        self.view(i18n, panel_id, VisualMode::Spectrogram)
+    pub(in crate::gui) fn spectrogram(
+        &self,
+        theme: &'static crate::theme::Palette,
+        i18n: &Arc<Localizer>,
+        panel_id: u64,
+    ) -> AnyElement {
+        self.view(theme, i18n, panel_id, VisualMode::Spectrogram)
     }
     pub(in crate::gui) fn retain_spectrogram_panels(&mut self, panel_ids: &[u64]) {
         let mut data = self.data.borrow_mut();
@@ -706,7 +715,13 @@ impl Visuals {
         }
     }
 
-    fn view(&self, i18n: &Arc<Localizer>, panel_id: u64, mode: VisualMode) -> AnyElement {
+    fn view(
+        &self,
+        theme: &'static crate::theme::Palette,
+        i18n: &Arc<Localizer>,
+        panel_id: u64,
+        mode: VisualMode,
+    ) -> AnyElement {
         let data = Rc::clone(&self.data);
         let message: Option<SharedString> = {
             let data = self.data.borrow();
@@ -744,8 +759,8 @@ impl Visuals {
                     .min_w_0()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .bg(rgb(super::super::PANEL))
-                    .text_color(rgb(super::super::SECONDARY))
+                    .bg(rgb(theme.panel))
+                    .text_color(rgb(theme.secondary))
                     .text_size(px(10.0))
                     .line_height(px(12.0))
                     .tooltip(move |_, cx| {
@@ -806,7 +821,7 @@ impl Visuals {
                             if let Some(error) = &data.error {
                                 window.paint_quad(fill(
                                     Bounds::new(bounds.origin, size(bounds.size.width, px(22.0))),
-                                    rgb(ERROR_BG),
+                                    rgb(theme.error_bg),
                                 ));
                                 paint_label(
                                     i18n.format(
@@ -815,7 +830,7 @@ impl Visuals {
                                     )
                                     .into(),
                                     point(bounds.left() + px(6.0), bounds.top() + px(3.0)),
-                                    ERROR,
+                                    theme.error,
                                     window,
                                     cx,
                                 );

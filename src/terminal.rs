@@ -1889,18 +1889,35 @@ fn help_bindings(context: KeyboardContext) -> impl Iterator<Item = keyboard::Hel
     keyboard::help_rows(&[context, KeyboardContext::TuiHelp])
 }
 
-mod theme {
-    use ratatui::style::Color;
+#[derive(Clone, Copy)]
+struct TerminalColors {
+    bg: ratatui::style::Color,
+    text: ratatui::style::Color,
+    secondary: ratatui::style::Color,
+    border: ratatui::style::Color,
+    accent: ratatui::style::Color,
+    selected: ratatui::style::Color,
+    warning: ratatui::style::Color,
+    error: ratatui::style::Color,
+}
 
-    pub const BACKGROUND: Color = Color::Rgb(26, 27, 38);
-    pub const TEXT: Color = Color::Rgb(192, 202, 245);
-    pub const SECONDARY: Color = Color::Rgb(154, 165, 206);
-    pub const BORDER: Color = Color::Rgb(65, 72, 104);
-    pub const PLAYING: Color = Color::Rgb(122, 162, 247);
-    pub const FOCUS: Color = Color::Rgb(125, 207, 255);
-    pub const SELECTION: Color = Color::Rgb(36, 44, 66);
-    pub const WARNING: Color = Color::Rgb(224, 175, 104);
-    pub const ERROR: Color = Color::Rgb(247, 118, 142);
+impl TerminalColors {
+    fn new(theme: crate::theme::Theme) -> Self {
+        let palette = theme.palette();
+        let rgb = |color: u32| {
+            ratatui::style::Color::Rgb((color >> 16) as u8, (color >> 8) as u8, color as u8)
+        };
+        Self {
+            bg: rgb(palette.bg),
+            text: rgb(palette.text),
+            secondary: rgb(palette.secondary),
+            border: rgb(palette.border),
+            accent: rgb(palette.accent),
+            selected: rgb(palette.selected),
+            warning: rgb(palette.warning),
+            error: rgb(palette.error),
+        }
+    }
 }
 
 fn playback_symbol(status: PlaybackStatus) -> &'static str {
@@ -1911,13 +1928,14 @@ fn playback_symbol(status: PlaybackStatus) -> &'static str {
     }
 }
 
-fn list_selection_style() -> Style {
+fn list_selection_style(colors: TerminalColors) -> Style {
     Style::default()
-        .bg(theme::SELECTION)
+        .bg(colors.selected)
         .add_modifier(Modifier::BOLD)
 }
 
 fn draw_loading(frame: &mut ratatui::Frame<'_>, i18n: &Localizer) {
+    let colors = TerminalColors::new(crate::theme::Theme::default());
     let close = keyboard::bindings(KeyboardContext::TuiQueue)
         .find(|binding| binding.action == Action::Close)
         .expect("Terminal exit binding");
@@ -1928,7 +1946,7 @@ fn draw_loading(frame: &mut ratatui::Frame<'_>, i18n: &Localizer) {
             close.label,
             i18n.text(close.description),
         ))
-        .style(Style::default().fg(theme::TEXT).bg(theme::BACKGROUND)),
+        .style(Style::default().fg(colors.text).bg(colors.bg)),
         frame.area(),
     );
 }
@@ -1957,9 +1975,10 @@ fn wrap_details(text: &str, width: usize) -> Vec<String> {
 }
 
 fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut UiState) {
+    let colors = TerminalColors::new(state.system.ui_theme);
     let area = frame.area();
     frame.render_widget(
-        Block::default().style(Style::default().fg(theme::TEXT).bg(theme::BACKGROUND)),
+        Block::default().style(Style::default().fg(colors.text).bg(colors.bg)),
         area,
     );
     if let Some(details) = &mut ui.details {
@@ -1967,8 +1986,8 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut UiState) {
             .title(ui.i18n.text("terminal-details"))
             .title_bottom(ui.i18n.text("terminal-details-help"))
             .borders(Borders::TOP | Borders::BOTTOM)
-            .border_style(Style::default().fg(theme::BORDER))
-            .title_style(Style::default().fg(theme::FOCUS));
+            .border_style(Style::default().fg(colors.border))
+            .title_style(Style::default().fg(colors.accent));
         let inner = block.inner(area);
         frame.render_widget(block, area);
         if details.width != inner.width {
@@ -1994,7 +2013,7 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut UiState) {
             ListItem::new(Line::from(vec![
                 Span::styled(
                     format!("{:<22}", binding.label()),
-                    Style::default().fg(theme::FOCUS),
+                    Style::default().fg(colors.accent),
                 ),
                 Span::raw(ui.i18n.text(binding.description)),
             ]))
@@ -2002,15 +2021,15 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut UiState) {
         ui.page_size = area.height.saturating_sub(2).max(1) as usize;
         let mut block = Block::default()
             .title(ui.i18n.text("terminal-keys"))
-            .title_style(Style::default().fg(theme::PLAYING))
-            .border_style(Style::default().fg(theme::BORDER))
+            .title_style(Style::default().fg(colors.accent))
+            .border_style(Style::default().fg(colors.border))
             .borders(Borders::TOP | Borders::BOTTOM);
         if context == KeyboardContext::TuiSearchQuery {
             block = block.title_bottom(ui.i18n.text("keyboard-query-input"));
         }
         let list = List::new(items)
             .block(block)
-            .highlight_style(list_selection_style());
+            .highlight_style(list_selection_style(colors));
         frame.render_stateful_widget(list, area, &mut ui.help_selection);
         return;
     }
@@ -2037,7 +2056,7 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut UiState) {
     let mut header = vec![Span::styled(
         " RIVU  ",
         Style::default()
-            .fg(theme::PLAYING)
+            .fg(colors.accent)
             .add_modifier(Modifier::BOLD),
     )];
     for (index, (symbol, label, key)) in navigation.into_iter().enumerate() {
@@ -2047,9 +2066,9 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut UiState) {
         header.push(Span::styled(
             format!(" {symbol} {}{key}  ", i18n.text(label)),
             Style::default().fg(if index == active {
-                theme::FOCUS
+                colors.accent
             } else {
-                theme::SECONDARY
+                colors.secondary
             }),
         ));
     }
@@ -2057,7 +2076,7 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut UiState) {
         Paragraph::new(Line::from(header)).block(
             Block::default()
                 .borders(Borders::BOTTOM)
-                .border_style(Style::default().fg(theme::BORDER)),
+                .border_style(Style::default().fg(colors.border)),
         ),
         outer[0],
     );
@@ -2070,15 +2089,17 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut UiState) {
         })
         .max(1) as usize;
     match &mut ui.view {
-        View::Search(search) => draw_search(frame, outer[1], search, i18n),
-        View::Tree(tree) => draw_tree(frame, outer[1], tree, i18n),
-        View::PlaylistDetail { detail, .. } => draw_playlist_detail(frame, outer[1], detail, i18n),
-        View::Playlists(playlists) => draw_playlists(frame, outer[1], playlists, i18n),
-        View::Queue => draw_queue(frame, outer[1], state, &mut ui.queue, i18n),
+        View::Search(search) => draw_search(frame, outer[1], search, i18n, colors),
+        View::Tree(tree) => draw_tree(frame, outer[1], tree, i18n, colors),
+        View::PlaylistDetail { detail, .. } => {
+            draw_playlist_detail(frame, outer[1], detail, i18n, colors)
+        }
+        View::Playlists(playlists) => draw_playlists(frame, outer[1], playlists, i18n, colors),
+        View::Queue => draw_queue(frame, outer[1], state, &mut ui.queue, i18n, colors),
     }
     let playback = Block::default()
         .borders(Borders::TOP)
-        .border_style(Style::default().fg(theme::BORDER));
+        .border_style(Style::default().fg(colors.border));
     let playback_area = playback.inner(outer[2]);
     frame.render_widget(playback, outer[2]);
     let rows =
@@ -2091,9 +2112,9 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut UiState) {
     let mut now = vec![
         Span::styled(
             format!(" {} ", playback_symbol(state.playback.status)),
-            Style::default().fg(theme::PLAYING),
+            Style::default().fg(colors.accent),
         ),
-        Span::styled(i18n.text(status), Style::default().fg(theme::SECONDARY)),
+        Span::styled(i18n.text(status), Style::default().fg(colors.secondary)),
         Span::raw("  "),
     ];
     if let Some(track) = state.current_track() {
@@ -2105,7 +2126,7 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut UiState) {
                     if track.title.is_empty() { "" } else { " — " },
                     track.artist
                 ),
-                Style::default().fg(theme::SECONDARY),
+                Style::default().fg(colors.secondary),
             ));
         }
     } else {
@@ -2138,7 +2159,7 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut UiState) {
     .split(rows[0]);
     frame.render_widget(Paragraph::new(Line::from(now)), now_columns[0]);
     frame.render_widget(
-        Paragraph::new(metadata).style(Style::default().fg(theme::SECONDARY)),
+        Paragraph::new(metadata).style(Style::default().fg(colors.secondary)),
         now_columns[1],
     );
     let position = state.playback.position.max(0.0);
@@ -2160,19 +2181,25 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut UiState) {
     frame.render_widget(
         LineGauge::default()
             .label("")
-            .filled_style(Style::default().fg(theme::PLAYING))
-            .unfilled_style(Style::default().fg(theme::BORDER))
+            .filled_style(Style::default().fg(colors.accent))
+            .unfilled_style(Style::default().fg(colors.border))
             .ratio(ratio),
         progress[0],
     );
     frame.render_widget(
-        Paragraph::new(time).style(Style::default().fg(theme::SECONDARY)),
+        Paragraph::new(time).style(Style::default().fg(colors.secondary)),
         progress[1],
     );
-    draw_status(frame, outer[3], ui, state);
+    draw_status(frame, outer[3], ui, state, colors);
 }
 
-fn draw_status(frame: &mut ratatui::Frame<'_>, area: Rect, ui: &UiState, state: &TuiSnapshot) {
+fn draw_status(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    ui: &UiState,
+    state: &TuiSnapshot,
+    colors: TerminalColors,
+) {
     let i18n = &ui.i18n;
     let volume = format!(" 󰕾 {}% ", (state.playback.volume * 100.0).round() as u8);
     let modes = if area.width >= 85 {
@@ -2207,7 +2234,7 @@ fn draw_status(frame: &mut ratatui::Frame<'_>, area: Rect, ui: &UiState, state: 
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::raw(volume),
-            Span::styled(modes, Style::default().fg(theme::SECONDARY)),
+            Span::styled(modes, Style::default().fg(colors.secondary)),
         ])),
         columns[0],
     );
@@ -2248,11 +2275,11 @@ fn draw_status(frame: &mut ratatui::Frame<'_>, area: Rect, ui: &UiState, state: 
     let (prompt, color) = ui
         .message
         .as_ref()
-        .map_or((prompt, theme::SECONDARY), |notice| {
+        .map_or((prompt, colors.secondary), |notice| {
             let (symbol, color) = match notice.kind {
-                NoticeKind::Information => ("", theme::SECONDARY),
-                NoticeKind::Warning => ("", theme::WARNING),
-                NoticeKind::Error => ("", theme::ERROR),
+                NoticeKind::Information => ("", colors.secondary),
+                NoticeKind::Warning => ("", colors.warning),
+                NoticeKind::Error => ("", colors.error),
             };
             (format!("{symbol} {}", notice.text), color)
         });
@@ -2351,16 +2378,16 @@ impl BrowserColumns {
         }
     }
 
-    fn line(self, row: RowContent<'_>, selected: bool) -> Line<'static> {
+    fn line(self, row: RowContent<'_>, selected: bool, colors: TerminalColors) -> Line<'static> {
         let mut spans = Vec::with_capacity(9);
         spans.push(Span::styled(
             if selected { "▎ " } else { "  " },
-            Style::default().fg(theme::FOCUS),
+            Style::default().fg(colors.accent),
         ));
         for (index, (symbol, color)) in [
-            (row.marker, theme::PLAYING),
-            (if row.favorite { "" } else { " " }, theme::SECONDARY),
-            (if row.missing { "" } else { " " }, theme::WARNING),
+            (row.marker, colors.accent),
+            (if row.favorite { "" } else { " " }, colors.secondary),
+            (if row.missing { "" } else { " " }, colors.warning),
         ]
         .into_iter()
         .enumerate()
@@ -2387,7 +2414,7 @@ impl BrowserColumns {
             if width != 0 {
                 spans.push(Span::styled(
                     column_text(text, width),
-                    Style::default().fg(theme::SECONDARY),
+                    Style::default().fg(colors.secondary),
                 ));
             }
         }
@@ -2399,13 +2426,13 @@ impl BrowserColumns {
             };
             spans.push(Span::styled(
                 cell_text(&duration, self.duration, true),
-                Style::default().fg(theme::SECONDARY),
+                Style::default().fg(colors.secondary),
             ));
         }
         Line::from(spans)
     }
 
-    fn header(self, i18n: &Localizer) -> Line<'static> {
+    fn header(self, i18n: &Localizer, colors: TerminalColors) -> Line<'static> {
         let mut text = " ".repeat(self.markers + 2);
         for (label, width, right) in [
             ("gl-title", self.title, false),
@@ -2422,7 +2449,7 @@ impl BrowserColumns {
                 });
             }
         }
-        Line::styled(text, Style::default().fg(theme::SECONDARY))
+        Line::styled(text, Style::default().fg(colors.secondary))
     }
 }
 
@@ -2482,6 +2509,7 @@ fn draw_queue(
     state: &TuiSnapshot,
     queue: &mut PagedList<QueueRow>,
     i18n: &Localizer,
+    colors: TerminalColors,
 ) {
     draw_paged_list(
         frame,
@@ -2496,7 +2524,10 @@ fn draw_queue(
             content
         },
         i18n,
-        BrowserMode::Tracks,
+        BrowserStyle {
+            mode: BrowserMode::Tracks,
+            colors,
+        },
     );
 }
 
@@ -2507,6 +2538,12 @@ enum BrowserMode {
     Labels,
 }
 
+#[derive(Clone, Copy)]
+struct BrowserStyle {
+    mode: BrowserMode,
+    colors: TerminalColors,
+}
+
 fn draw_paged_list<T>(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
@@ -2514,8 +2551,9 @@ fn draw_paged_list<T>(
     page: &mut PagedList<T>,
     row: impl for<'a> Fn(&'a T) -> RowContent<'a>,
     i18n: &Localizer,
-    mode: BrowserMode,
+    style: BrowserStyle,
 ) {
+    let BrowserStyle { mode, colors } = style;
     let tracks = !matches!(mode, BrowserMode::Labels);
     let focused = !matches!(mode, BrowserMode::UnfocusedTracks);
     let header_height = if tracks { 2 } else { 1 };
@@ -2546,16 +2584,16 @@ fn draw_paged_list<T>(
         Span::styled(
             cell_text(&title, area.width as usize - count_width, false),
             Style::default().fg(if focused {
-                theme::FOCUS
+                colors.accent
             } else {
-                theme::SECONDARY
+                colors.secondary
             }),
         ),
-        Span::styled(count, Style::default().fg(theme::SECONDARY)),
+        Span::styled(count, Style::default().fg(colors.secondary)),
     ]);
     let mut header = vec![title_line];
     if tracks {
-        header.push(columns.header(i18n));
+        header.push(columns.header(i18n, colors));
     }
     frame.render_widget(Paragraph::new(header), rows[0]);
     let items = (page.selection.offset()..page.visible_end()).map(|index| {
@@ -2565,6 +2603,7 @@ fn draw_paged_list<T>(
                 columns.line(
                     row(item),
                     focused && page.selection.selected() == Some(index),
+                    colors,
                 )
             },
         ))
@@ -2576,9 +2615,9 @@ fn draw_paged_list<T>(
     );
     frame.render_stateful_widget(
         List::new(items).highlight_style(if focused {
-            list_selection_style()
+            list_selection_style(colors)
         } else {
-            Style::default().bg(theme::SELECTION)
+            Style::default().bg(colors.selected)
         }),
         rows[1],
         &mut selection,
@@ -2590,6 +2629,7 @@ fn draw_playlist_detail(
     area: Rect,
     detail: &mut PlaylistDetail,
     i18n: &Localizer,
+    colors: TerminalColors,
 ) {
     draw_paged_list(
         frame,
@@ -2598,7 +2638,10 @@ fn draw_playlist_detail(
         &mut detail.entries,
         |entry| RowContent::playlist(entry),
         i18n,
-        BrowserMode::Tracks,
+        BrowserStyle {
+            mode: BrowserMode::Tracks,
+            colors,
+        },
     );
 }
 
@@ -2607,6 +2650,7 @@ fn draw_playlists(
     area: Rect,
     playlists: &mut PagedList<PlaylistSummary>,
     i18n: &Localizer,
+    colors: TerminalColors,
 ) {
     draw_paged_list(
         frame,
@@ -2626,7 +2670,10 @@ fn draw_playlists(
             )
         },
         i18n,
-        BrowserMode::Labels,
+        BrowserStyle {
+            mode: BrowserMode::Labels,
+            colors,
+        },
     );
 }
 
@@ -2649,6 +2696,7 @@ fn draw_search(
     area: Rect,
     search: &mut LibrarySearch,
     i18n: &Localizer,
+    colors: TerminalColors,
 ) {
     let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(area);
     let focused = search.focus == SearchFocus::Query;
@@ -2663,16 +2711,16 @@ fn draw_search(
         Span::styled(
             prefix,
             Style::default().fg(if focused {
-                theme::FOCUS
+                colors.accent
             } else {
-                theme::SECONDARY
+                colors.secondary
             }),
         ),
         Span::raw(tail),
     ]);
     frame.render_widget(
         Paragraph::new(line).style(if focused {
-            Style::default().bg(theme::SELECTION)
+            Style::default().bg(colors.selected)
         } else {
             Style::default()
         }),
@@ -2688,15 +2736,24 @@ fn draw_search(
         &mut search.results,
         |track| RowContent::track(track),
         i18n,
-        if focused {
-            BrowserMode::UnfocusedTracks
-        } else {
-            BrowserMode::Tracks
+        BrowserStyle {
+            mode: if focused {
+                BrowserMode::UnfocusedTracks
+            } else {
+                BrowserMode::Tracks
+            },
+            colors,
         },
     );
 }
 
-fn draw_tree(frame: &mut ratatui::Frame<'_>, area: Rect, tree: &mut LibraryTree, i18n: &Localizer) {
+fn draw_tree(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    tree: &mut LibraryTree,
+    i18n: &Localizer,
+    colors: TerminalColors,
+) {
     let title = if tree.directory.as_os_str().is_empty() {
         i18n.text("terminal-library-tree").into()
     } else {
@@ -2717,7 +2774,10 @@ fn draw_tree(frame: &mut ratatui::Frame<'_>, area: Rect, tree: &mut LibraryTree,
             DirectoryRow::Track(track) => RowContent::track(track),
         },
         i18n,
-        BrowserMode::Tracks,
+        BrowserStyle {
+            mode: BrowserMode::Tracks,
+            colors,
+        },
     );
 }
 
@@ -2757,6 +2817,44 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_theme_changes_recolor_main_help_and_details_without_changing_content() {
+        for overlay in 0..3 {
+            let mut tui = TuiState::new(TuiSnapshot::default(), Arc::new(Localizer::new("en-US")));
+            tui.ui.show_help = overlay == 1;
+            if overlay == 2 {
+                tui.ui.details = Some(Details {
+                    text: "Track details".into(),
+                    wrapped: Vec::new(),
+                    width: 0,
+                    scroll: 0,
+                    max_scroll: 0,
+                });
+            }
+            let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
+            terminal
+                .draw(|frame| draw(frame, &tui.snapshot, &mut tui.ui))
+                .unwrap();
+            let content = terminal_text(&terminal);
+            for theme in crate::theme::Theme::ALL {
+                let mut next = tui.snapshot.clone();
+                next.system.ui_theme = theme;
+                next.system.revision += 1;
+                tui.apply_snapshot(next);
+                terminal
+                    .draw(|frame| draw(frame, &tui.snapshot, &mut tui.ui))
+                    .unwrap();
+                assert_eq!(terminal_text(&terminal), content);
+                let colors = TerminalColors::new(theme);
+                let cell = &terminal.backend().buffer()[(79, 11)];
+                assert_eq!(cell.bg, colors.bg);
+                if overlay == 2 {
+                    assert_eq!(terminal.backend().buffer()[(0, 1)].fg, colors.text);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn query_tail_preserves_graphemes_and_keeps_input_cursor_visible() {
         let query = "春风e\u{301}夜航";
         for language in ["en-US", "zh-CN"] {
@@ -2768,7 +2866,15 @@ mod tests {
             for width in [1, 8, 18, 24, 60] {
                 let mut terminal = Terminal::new(TestBackend::new(width, 8)).unwrap();
                 terminal
-                    .draw(|frame| draw_search(frame, frame.area(), &mut search, &i18n))
+                    .draw(|frame| {
+                        draw_search(
+                            frame,
+                            frame.area(),
+                            &mut search,
+                            &i18n,
+                            TerminalColors::new(crate::theme::Theme::default()),
+                        )
+                    })
                     .unwrap();
                 let prefix = format!("  {} › ", i18n.text("terminal-search"));
                 if width as usize > Span::raw(prefix.as_str()).width() {
@@ -2782,7 +2888,15 @@ mod tests {
             search.focus = SearchFocus::Results;
             let mut terminal = Terminal::new(TestBackend::new(60, 8)).unwrap();
             terminal
-                .draw(|frame| draw_search(frame, frame.area(), &mut search, &i18n))
+                .draw(|frame| {
+                    draw_search(
+                        frame,
+                        frame.area(),
+                        &mut search,
+                        &i18n,
+                        TerminalColors::new(crate::theme::Theme::default()),
+                    )
+                })
                 .unwrap();
             assert!(!terminal.backend().cursor_visible());
         }
@@ -2799,7 +2913,11 @@ mod tests {
         track.favorite = true;
         track.missing = true;
         for width in [30, 60, 80, 110, 140] {
-            let line = BrowserColumns::new(width, true).line(RowContent::track(&track), true);
+            let line = BrowserColumns::new(width, true).line(
+                RowContent::track(&track),
+                true,
+                TerminalColors::new(crate::theme::Theme::default()),
+            );
             assert_eq!(line.width(), width as usize);
             let text = line
                 .spans
@@ -2858,6 +2976,7 @@ mod tests {
                         &state,
                         &mut page,
                         &Localizer::new("en-US"),
+                        TerminalColors::new(state.system.ui_theme),
                     )
                 })
                 .unwrap();
@@ -2865,9 +2984,18 @@ mod tests {
             assert_eq!(buffer[(2, 2)].symbol(), symbol);
             assert_eq!(buffer[(2, 3)].symbol(), " ");
             assert_eq!(buffer[(0, 3)].symbol(), "▎");
-            assert_eq!(buffer[(2, 2)].fg, theme::PLAYING);
-            assert_eq!(buffer[(0, 3)].fg, theme::FOCUS);
-            assert_eq!(buffer[(0, 3)].bg, theme::SELECTION);
+            assert_eq!(
+                buffer[(2, 2)].fg,
+                TerminalColors::new(state.system.ui_theme).accent
+            );
+            assert_eq!(
+                buffer[(0, 3)].fg,
+                TerminalColors::new(state.system.ui_theme).accent
+            );
+            assert_eq!(
+                buffer[(0, 3)].bg,
+                TerminalColors::new(state.system.ui_theme).selected
+            );
             assert_eq!(page.selected().unwrap().id, 18);
         }
     }
@@ -2971,7 +3099,13 @@ mod tests {
             let mut terminal = Terminal::new(TestBackend::new(80, 8)).unwrap();
             terminal
                 .draw(|frame| {
-                    draw_playlist_detail(frame, frame.area(), &mut detail, &i18n);
+                    draw_playlist_detail(
+                        frame,
+                        frame.area(),
+                        &mut detail,
+                        &i18n,
+                        TerminalColors::new(crate::theme::Theme::default()),
+                    );
                 })
                 .unwrap();
             let text = terminal_text(&terminal);
@@ -3123,7 +3257,16 @@ mod tests {
         ));
         let mut terminal = Terminal::new(TestBackend::new(60, 6)).unwrap();
         terminal
-            .draw(|frame| draw_queue(frame, frame.area(), &state, &mut tui.ui.queue, &tui.ui.i18n))
+            .draw(|frame| {
+                draw_queue(
+                    frame,
+                    frame.area(),
+                    &state,
+                    &mut tui.ui.queue,
+                    &tui.ui.i18n,
+                    TerminalColors::new(state.system.ui_theme),
+                )
+            })
             .unwrap();
     }
 
@@ -3342,12 +3485,34 @@ mod tests {
             .draw(|frame| {
                 let area = frame.area();
                 match &mut ui.view {
-                    View::Search(search) => draw_search(frame, area, search, &ui.i18n),
-                    View::Tree(tree) => draw_tree(frame, area, tree, &ui.i18n),
-                    View::Playlists(playlists) => draw_playlists(frame, area, playlists, &ui.i18n),
-                    View::PlaylistDetail { detail, .. } => {
-                        draw_playlist_detail(frame, area, detail, &ui.i18n)
-                    }
+                    View::Search(search) => draw_search(
+                        frame,
+                        area,
+                        search,
+                        &ui.i18n,
+                        TerminalColors::new(crate::theme::Theme::default()),
+                    ),
+                    View::Tree(tree) => draw_tree(
+                        frame,
+                        area,
+                        tree,
+                        &ui.i18n,
+                        TerminalColors::new(crate::theme::Theme::default()),
+                    ),
+                    View::Playlists(playlists) => draw_playlists(
+                        frame,
+                        area,
+                        playlists,
+                        &ui.i18n,
+                        TerminalColors::new(crate::theme::Theme::default()),
+                    ),
+                    View::PlaylistDetail { detail, .. } => draw_playlist_detail(
+                        frame,
+                        area,
+                        detail,
+                        &ui.i18n,
+                        TerminalColors::new(crate::theme::Theme::default()),
+                    ),
                     View::Queue => panic!("expected a queried view"),
                 }
             })

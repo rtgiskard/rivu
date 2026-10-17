@@ -1318,10 +1318,12 @@ impl Waveform {
                         .w_full()
                         .px_2()
                         .justify_between()
-                        .child(super::super::panels::caption("0:00"))
-                        .child(super::super::panels::caption(
+                        .text_xs()
+                        .text_color(rgb(0xb1bbc5))
+                        .child("0:00")
+                        .child(
                             label_duration.map_or_else(|| "—".into(), super::super::format_time),
-                        )),
+                        ),
                 )
             })
             .children(status.map(|message| {

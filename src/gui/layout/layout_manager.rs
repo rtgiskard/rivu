@@ -137,21 +137,25 @@ impl GuiApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let theme = crate::gui::theme::palette(cx);
         let mut content = column().gap_2().child(
             row()
                 .child(div().flex_1().text_lg().child(self.tr("shell-layouts")))
-                .child(components::quiet_icon_button(icon_button(
-                    "layouts-close",
-                    "",
-                    self.tr("shell-close-layouts"),
-                    cx,
-                    |this, window, cx| {
-                        this.layouts_open = false;
-                        this.layout_action = None;
-                        this.focus_layout(window, cx);
-                        cx.notify();
-                    },
-                ))),
+                .child(components::quiet_icon_button(
+                    theme,
+                    icon_button(
+                        "layouts-close",
+                        "",
+                        self.tr("shell-close-layouts"),
+                        cx,
+                        |this, window, cx| {
+                            this.layouts_open = false;
+                            this.layout_action = None;
+                            this.focus_layout(window, cx);
+                            cx.notify();
+                        },
+                    ),
+                )),
         );
         if let Some(action) = self.layout_action.clone() {
             let (title, submit) = match &action {
@@ -177,7 +181,7 @@ impl GuiApp {
                     self.tr("shell-delete"),
                 ),
             };
-            content = content.child(caption(title));
+            content = content.child(caption(theme, title));
             if let Action::Delete(name) = &action {
                 content = content.child(div().text_sm().child(self.i18n.format(
                     "shell-delete-layout-confirm",
@@ -185,6 +189,7 @@ impl GuiApp {
                 )));
             } else {
                 content = content.child(form_field(
+                    theme,
                     self.tr("shell-name"),
                     self.input(Field::LayoutName),
                 ));
@@ -203,12 +208,12 @@ impl GuiApp {
                         },
                     ))
                     .child(if matches!(action, Action::Delete(_)) {
-                        components::danger_control(button(
-                            "layout-action-submit",
-                            submit,
-                            cx,
-                            |this, window, cx| this.finish_layout_action(window, cx),
-                        ))
+                        components::danger_control(
+                            theme,
+                            button("layout-action-submit", submit, cx, |this, window, cx| {
+                                this.finish_layout_action(window, cx)
+                            }),
+                        )
                     } else {
                         icon_button(
                             "layout-action-submit",
@@ -240,18 +245,25 @@ impl GuiApp {
                 if !current {
                     let name = name.to_owned();
                     choice = choice.child(
-                        components::quiet_icon_button(icon_button(
-                            ("layout-delete", index),
-                            "󰆴",
-                            self.i18n.format(
-                                "shell-delete-layout-hint",
-                                &[("name", name.as_str().into())],
+                        components::quiet_icon_button(
+                            theme,
+                            icon_button(
+                                ("layout-delete", index),
+                                "󰆴",
+                                self.i18n.format(
+                                    "shell-delete-layout-hint",
+                                    &[("name", name.as_str().into())],
+                                ),
+                                cx,
+                                move |this, window, cx| {
+                                    this.begin_layout_action(
+                                        Action::Delete(name.clone()),
+                                        window,
+                                        cx,
+                                    )
+                                },
                             ),
-                            cx,
-                            move |this, window, cx| {
-                                this.begin_layout_action(Action::Delete(name.clone()), window, cx)
-                            },
-                        ))
+                        )
                         .opacity(0.)
                         .group_hover("layout-choice-row", |style| style.opacity(1.))
                         .on_mouse_down(
@@ -303,13 +315,13 @@ impl GuiApp {
                         )),
                 );
             content = content
-                .child(caption(self.tr("shell-layout-new-from-template")))
+                .child(caption(theme, self.tr("shell-layout-new-from-template")))
                 .child(templates);
         }
         if let Some(error) = &self.error {
             content = content.child(
                 copyable_message("layout-management-error", error.clone(), cx)
-                    .text_color(rgb(ERROR)),
+                    .text_color(rgb(theme.error)),
             );
         }
         div()
@@ -330,9 +342,9 @@ impl GuiApp {
                     .max_h(window.viewport_size().height * 0.9)
                     .overflow_y_scroll()
                     .p(px(UI_INSET))
-                    .bg(rgb(PANEL))
+                    .bg(rgb(theme.panel))
                     .border_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(theme.border))
                     .rounded_md(),
             )
             .into_any_element()

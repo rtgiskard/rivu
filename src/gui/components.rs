@@ -3,7 +3,7 @@ mod dropdown;
 mod keyboard_tests;
 mod scrollbar;
 
-use super::{ACCENT, BORDER, CONTROL, GuiApp, HIGHLIGHT, MUTED, PANEL, SECONDARY, TEXT, UI_INSET};
+use super::{GuiApp, UI_INSET};
 
 use gpui::{
     Context, Div, ElementId, Render, SharedString, Stateful, Window, div, prelude::*, px, rgb,
@@ -13,9 +13,6 @@ pub(crate) const MENU_WIDTH: f32 = 260.0;
 pub(crate) const POPOVER_MAX_REMS: f32 = 15.0;
 pub(crate) const DROPDOWN_ROW_REMS: f32 = 2.0;
 
-const ROW_HOVER: u32 = 0x202330;
-const ROW_SELECTED: u32 = 0x2b3752;
-const ROW_SELECTED_HOVER: u32 = 0x34415e;
 pub(crate) use dropdown::{DropdownItem, DropdownState};
 
 /// Native tab order bounded to a transient menu or dialog.
@@ -153,12 +150,16 @@ pub(crate) fn activate_control<T: 'static>(
     }))
 }
 
-pub(crate) fn row_background(selected: bool, hovered: bool) -> gpui::Rgba {
+pub(crate) fn row_background(
+    theme: &'static crate::theme::Palette,
+    selected: bool,
+    hovered: bool,
+) -> gpui::Rgba {
     rgb(match (selected, hovered) {
-        (true, true) => ROW_SELECTED_HOVER,
-        (true, false) => ROW_SELECTED,
-        (false, true) => ROW_HOVER,
-        (false, false) => PANEL,
+        (true, true) => theme.selected_hover,
+        (true, false) => theme.selected,
+        (false, true) => theme.highlight,
+        (false, false) => theme.panel,
     })
 }
 
@@ -167,7 +168,7 @@ pub(super) fn visualization_status(message: impl Into<SharedString>) -> Div {
         .w_full()
         .p(gpui::px(UI_INSET))
         .text_sm()
-        .text_color(rgb(SECONDARY))
+        .text_color(rgb(0xb1bbc5))
         .child(message.into())
 }
 
@@ -179,13 +180,17 @@ pub(crate) enum StatusKind {
 }
 
 /// Shared inline status text for asynchronous panel and settings actions.
-pub(crate) fn status_message(message: impl Into<SharedString>, kind: StatusKind) -> Div {
+pub(crate) fn status_message(
+    theme: &'static crate::theme::Palette,
+    message: impl Into<SharedString>,
+    kind: StatusKind,
+) -> Div {
     let color = match kind {
-        StatusKind::Info => SECONDARY,
-        StatusKind::Success => ACCENT,
-        StatusKind::Error => super::ERROR,
+        StatusKind::Info => theme.secondary,
+        StatusKind::Success => theme.accent,
+        StatusKind::Error => theme.error,
     };
-    caption(message).text_color(rgb(color))
+    caption(theme, message).text_color(rgb(color))
 }
 
 /// Shared wrapping toolbar shell for panel actions.
@@ -209,14 +214,20 @@ pub(crate) fn panel_surface(id: impl Into<ElementId>) -> Stateful<Div> {
 
 /// Shared heading block for content panels.
 pub(crate) fn panel_header(
+    theme: &'static crate::theme::Palette,
     title: impl Into<SharedString>,
     subtitle: impl Into<SharedString>,
 ) -> Div {
     super::column()
         .gap_1()
         .flex_shrink_0()
-        .child(div().text_lg().text_color(rgb(TEXT)).child(title.into()))
-        .child(caption(subtitle))
+        .child(
+            div()
+                .text_lg()
+                .text_color(rgb(theme.text))
+                .child(title.into()),
+        )
+        .child(caption(theme, subtitle))
 }
 
 /// Shared viewport shell for virtualized lists.
@@ -265,22 +276,20 @@ fn overlay_font(window: &Window, cx: &gpui::App) -> gpui::Font {
         .clone()
 }
 
-const FLOATING_BACKGROUND: u32 = 0x20212d;
-const FLOATING_BORDER: u32 = 0x34394f;
-
 /// Opaque elevated material for menus, dropdowns, and tooltips only.
-pub(crate) fn floating_surface() -> Div {
+pub(crate) fn floating_surface(theme: &'static crate::theme::Palette) -> Div {
     div()
-        .bg(rgb(FLOATING_BACKGROUND))
+        .bg(rgb(theme.control))
         .border_1()
-        .border_color(rgb(FLOATING_BORDER))
+        .border_color(rgb(theme.border))
         .shadow_sm()
 }
 
 /// Compact floating surface shared by action and row tooltips.
 fn tooltip_surface(window: &Window, cx: &gpui::App, max_width_rems: f32) -> Div {
+    let theme = crate::gui::theme::palette(cx);
     let available = (window.viewport_size().width - px(UI_INSET * 2.)).max(px(0.));
-    floating_surface()
+    floating_surface(theme)
         .min_w_0()
         .max_w((window.rem_size() * max_width_rems).min(available))
         .px(px(UI_INSET))
@@ -288,7 +297,7 @@ fn tooltip_surface(window: &Window, cx: &gpui::App, max_width_rems: f32) -> Div 
         .rounded_md()
         .font(overlay_font(window, cx))
         .text_sm()
-        .text_color(rgb(TEXT))
+        .text_color(rgb(theme.text))
         .whitespace_normal()
 }
 
@@ -304,43 +313,68 @@ impl Render for ButtonTooltip {
 }
 
 /// Applies the shared selected state to any control with a selectable meaning.
-pub(crate) fn active_control(control: Stateful<Div>, active: bool) -> Stateful<Div> {
+pub(crate) fn active_control(
+    theme: &'static crate::theme::Palette,
+    control: Stateful<Div>,
+    active: bool,
+) -> Stateful<Div> {
     control.when(active, |view| {
-        view.bg(rgb(HIGHLIGHT))
-            .border_color(rgb(ACCENT))
-            .text_color(rgb(ACCENT))
+        view.bg(rgb(theme.selected))
+            .text_color(rgb(theme.accent))
+            .group_hover("control", |style| style.bg(rgb(theme.selected_hover)))
     })
 }
 
 /// Shared geometry and interaction surface for buttons and select triggers.
-/// Owns the hover style; callers must not register a second GPUI hover style.
-fn control_surface(id: impl Into<ElementId>) -> Stateful<Div> {
+/// Variants replace the shared group's hover material; focus retains its own border.
+fn control_surface(
+    theme: &'static crate::theme::Palette,
+    id: impl Into<ElementId>,
+) -> Stateful<Div> {
     div()
         .id(id)
+        .group("control")
         .tab_index(0)
-        .focus(|style| style.border_color(rgb(ACCENT)).bg(rgb(HIGHLIGHT)))
+        .focus(|style| style.border_color(rgb(theme.accent)))
         .flex()
         .items_center()
         .min_w_0()
         .px(gpui::px(UI_INSET))
         .py_1()
-        .rounded_md()
+        .rounded_sm()
         .min_h(gpui::rems(2.0))
         .text_sm()
-        .text_color(rgb(TEXT))
+        .text_color(rgb(theme.text))
         .cursor_pointer()
-        .bg(rgb(CONTROL))
+        .bg(rgb(theme.control))
         .border_1()
-        .border_color(rgb(BORDER))
-        .hover(|style| style.bg(rgb(HIGHLIGHT)).border_color(rgb(ACCENT)))
+        .border_color(rgb(theme.border))
+        .group_hover("control", |style| style.bg(rgb(theme.highlight)))
+}
+
+/// The transport's primary action keeps its accent fill on hover and focus.
+pub(crate) fn primary_control(
+    theme: &'static crate::theme::Palette,
+    control: Stateful<Div>,
+) -> Stateful<Div> {
+    control
+        .border_2()
+        .border_color(rgb(theme.accent))
+        .bg(rgb(theme.accent))
+        .text_color(rgb(theme.on_accent))
+        .group_hover("control", |style| style.bg(rgb(theme.accent_hover)))
+        .focus(|style| style.border_color(rgb(theme.text)))
 }
 
 /// Reusable visual button primitive. It has no application-specific behavior.
 pub(crate) fn button_style(
+    theme: &'static crate::theme::Palette,
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
 ) -> Stateful<Div> {
-    control_surface(id).justify_center().child(label.into())
+    control_surface(theme, id)
+        .justify_center()
+        .child(label.into())
 }
 
 /// Text button with shared application event handling.
@@ -350,7 +384,8 @@ pub(crate) fn button<T: 'static>(
     cx: &mut Context<T>,
     action: impl Fn(&mut T, &mut Window, &mut Context<T>) + 'static,
 ) -> Stateful<Div> {
-    activate_control(button_style(id, label), cx, action)
+    let theme = crate::gui::theme::palette(cx);
+    activate_control(button_style(theme, id, label), cx, action)
 }
 
 /// Sortable list header control with shared active-direction styling.
@@ -363,20 +398,23 @@ pub(crate) fn sortable_header(
     cx: &mut Context<GuiApp>,
     action: impl Fn(&mut GuiApp, &mut Window, &mut Context<GuiApp>) + 'static,
 ) -> Stateful<Div> {
+    let theme = crate::gui::theme::palette(cx);
     let mut control = div()
         .id(id)
         .tab_index(0)
-        .focus(|style| style.bg(rgb(HIGHLIGHT)).text_color(rgb(ACCENT)))
+        .focus(|style| style.border_color(rgb(theme.accent)))
         .flex()
         .items_center()
         .gap_1()
         .h_full()
         .min_w_0()
         .overflow_hidden()
+        .border_1()
+        .border_color(gpui::transparent_black())
         .text_xs()
-        .text_color(rgb(if active { ACCENT } else { super::MUTED }))
+        .text_color(rgb(if active { theme.accent } else { theme.muted }))
         .cursor_pointer()
-        .hover(|style| style.bg(rgb(HIGHLIGHT)).text_color(rgb(TEXT)))
+        .hover(|style| style.bg(rgb(theme.highlight)).text_color(rgb(theme.text)))
         .on_click(cx.listener(move |this, _, window, cx| {
             action(this, window, cx);
             cx.stop_propagation();
@@ -420,17 +458,26 @@ pub(crate) fn icon_button<T: 'static>(
 }
 
 /// Low-emphasis inline action; preserve the shared icon hit area and tooltip.
-pub(crate) fn quiet_icon_button(control: Stateful<Div>) -> Stateful<Div> {
+pub(crate) fn quiet_icon_button(
+    theme: &'static crate::theme::Palette,
+    control: Stateful<Div>,
+) -> Stateful<Div> {
     control
-        .border_0()
-        .bg(rgb(PANEL).alpha(0.0))
-        .text_color(rgb(super::MUTED))
+        .border_color(gpui::transparent_black())
+        .bg(rgb(theme.panel).alpha(0.0))
+        .text_color(rgb(theme.secondary))
 }
 
 /// Shared unavailable-action appearance; the action owner retains its guard.
-pub(crate) fn disabled_control(control: Stateful<Div>, disabled: bool) -> Stateful<Div> {
+pub(crate) fn disabled_control(
+    theme: &'static crate::theme::Palette,
+    control: Stateful<Div>,
+    disabled: bool,
+) -> Stateful<Div> {
     control.when(disabled, |view| {
-        view.opacity(0.4)
+        view.text_color(rgb(theme.disabled))
+            .border_color(rgb(theme.structure_border))
+            .group_hover("control", |style| style.bg(rgb(theme.control)))
             .cursor_default()
             .tab_stop(false)
             .capture_key_down(|event, window, cx| {
@@ -457,10 +504,13 @@ pub(crate) fn disabled_control(control: Stateful<Div>, disabled: bool) -> Statef
 }
 
 /// Destructive text remains visible on hover; keep the shared focus treatment.
-pub(crate) fn danger_control(control: Stateful<Div>) -> Stateful<Div> {
+pub(crate) fn danger_control(
+    theme: &'static crate::theme::Palette,
+    control: Stateful<Div>,
+) -> Stateful<Div> {
     control
-        .text_color(rgb(super::ERROR))
-        .border_color(rgb(super::ERROR))
+        .text_color(rgb(theme.error))
+        .border_color(rgb(theme.error))
 }
 
 /// Compact toggle button used by visual and system settings.
@@ -472,8 +522,10 @@ pub(crate) fn toggle_button<T: 'static>(
     cx: &mut Context<T>,
     action: impl Fn(&mut T, &mut Context<T>) + 'static,
 ) -> Stateful<Div> {
+    let theme = crate::gui::theme::palette(cx);
     let label = label.into();
     active_control(
+        theme,
         icon_button(
             id,
             icon,
@@ -490,6 +542,7 @@ pub(crate) fn toggle_button<T: 'static>(
 
 /// Label/value row with a label width shared by its metadata column.
 pub(crate) fn metadata_item(
+    theme: &'static crate::theme::Palette,
     label: impl Into<SharedString>,
     value: impl Into<SharedString>,
     label_width: gpui::Pixels,
@@ -500,7 +553,7 @@ pub(crate) fn metadata_item(
         .gap(gpui::rems(1.5))
         .flex_1()
         .min_w_0()
-        .child(caption(label).w(label_width).flex_shrink_0())
+        .child(caption(theme, label).w(label_width).flex_shrink_0())
         .child(
             div()
                 .flex_1()
@@ -513,6 +566,7 @@ pub(crate) fn metadata_item(
 
 /// Full-row artwork with a centered preview occupying 70% of the card content.
 pub(crate) fn artwork_preview(
+    theme: &'static crate::theme::Palette,
     label: impl Into<SharedString>,
     image: impl IntoElement,
     aspect_ratio: Option<f32>,
@@ -520,7 +574,7 @@ pub(crate) fn artwork_preview(
     super::column()
         .w_full()
         .gap_2()
-        .child(caption(label))
+        .child(caption(theme, label))
         .child(
             div().flex().justify_center().child(
                 div()
@@ -540,19 +594,23 @@ pub(crate) fn menu_item(
     cx: &mut Context<GuiApp>,
     action: impl Fn(&mut GuiApp, &mut Window, &mut Context<GuiApp>) + 'static,
 ) -> Stateful<Div> {
-    activate_control(menu_item_style(id, label), cx, action)
+    let theme = crate::gui::theme::palette(cx);
+    activate_control(menu_item_style(theme, id, label), cx, action)
 }
 
-pub(crate) fn menu_separator() -> Div {
-    div().h(gpui::px(1.)).mx_2().my_1().bg(rgb(BORDER))
+pub(crate) fn menu_separator(theme: &'static crate::theme::Palette) -> Div {
+    div().h(gpui::px(1.)).mx_2().my_1().bg(rgb(theme.border))
 }
 
-pub(crate) fn menu_title(title: impl Into<SharedString>) -> Div {
+pub(crate) fn menu_title(
+    theme: &'static crate::theme::Palette,
+    title: impl Into<SharedString>,
+) -> Div {
     div()
         .px(gpui::px(UI_INSET))
         .py_1()
         .text_xs()
-        .text_color(rgb(MUTED))
+        .text_color(rgb(theme.muted))
         .child(title.into())
 }
 
@@ -574,14 +632,18 @@ pub(crate) fn menu_back(
 }
 
 /// Shared heading and spacing for settings and metadata sections.
-pub(crate) fn section_group(title: impl Into<SharedString>, content: impl IntoElement) -> Div {
+pub(crate) fn section_group(
+    theme: &'static crate::theme::Palette,
+    title: impl Into<SharedString>,
+    content: impl IntoElement,
+) -> Div {
     super::column()
         .gap_2()
         .p_2()
         // Retain the established content inset without painting a nested frame.
         .border_1()
         .border_color(gpui::transparent_black())
-        .child(caption(title))
+        .child(caption(theme, title))
         .child(content)
 }
 
@@ -596,27 +658,32 @@ pub(crate) fn two_column(first: Div, second: Div) -> Div {
 }
 
 /// Shared label-and-control form field layout.
-pub(crate) fn form_field(label: impl Into<SharedString>, control: impl IntoElement) -> Div {
+pub(crate) fn form_field(
+    theme: &'static crate::theme::Palette,
+    label: impl Into<SharedString>,
+    control: impl IntoElement,
+) -> Div {
     super::column()
         .w_full()
         .flex_shrink_0()
         .gap_1()
-        .child(caption(label))
+        .child(caption(theme, label))
         .child(control)
 }
 /// Shared trigger for settings and other anchored dropdowns.
 pub(crate) fn dropdown_trigger(
+    theme: &'static crate::theme::Palette,
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
 ) -> Stateful<Div> {
-    control_surface(id)
+    control_surface(theme, id)
         .w_full()
         .gap_2()
         .child(div().flex_1().min_w_0().truncate().child(label.into()))
         .child(
             div()
                 .flex_shrink_0()
-                .text_color(rgb(super::MUTED))
+                .text_color(rgb(theme.muted))
                 .font_family(super::fonts::SYMBOLS_FAMILY)
                 .child("󰅀"),
         )
@@ -624,8 +691,11 @@ pub(crate) fn dropdown_trigger(
 
 /// Shared shell for application context menus. The caller supplies menu rows
 /// and owns dismissal and action dispatch.
-pub(crate) fn context_menu_container(id: impl Into<ElementId>) -> Stateful<Div> {
-    floating_surface()
+pub(crate) fn context_menu_container(
+    theme: &'static crate::theme::Palette,
+    id: impl Into<ElementId>,
+) -> Stateful<Div> {
+    floating_surface(theme)
         .id(id)
         .w(gpui::rems(MENU_WIDTH / 16.))
         .occlude()
@@ -635,11 +705,15 @@ pub(crate) fn context_menu_container(id: impl Into<ElementId>) -> Stateful<Div> 
 }
 
 /// Standard menu item shell; pages only provide the action callback.
-pub(crate) fn menu_item_style(id: impl Into<ElementId>, label: impl IntoElement) -> Stateful<Div> {
+pub(crate) fn menu_item_style(
+    theme: &'static crate::theme::Palette,
+    id: impl Into<ElementId>,
+    label: impl IntoElement,
+) -> Stateful<Div> {
     div()
         .id(id)
         .tab_index(0)
-        .focus(|style| style.bg(rgb(HIGHLIGHT)).text_color(rgb(ACCENT)))
+        .focus(|style| style.border_color(rgb(theme.accent)))
         .w_full()
         .min_h(gpui::rems(2.0))
         .px(gpui::px(UI_INSET))
@@ -649,16 +723,21 @@ pub(crate) fn menu_item_style(id: impl Into<ElementId>, label: impl IntoElement)
         .items_center()
         .text_sm()
         .cursor_pointer()
-        .border_0()
-        .bg(rgb(PANEL).alpha(0.0))
+        .border_1()
+        .border_color(gpui::transparent_black())
+        .bg(rgb(theme.panel).alpha(0.0))
         .rounded_sm()
-        .hover(|style| style.bg(rgb(HIGHLIGHT)))
+        .hover(|style| style.bg(rgb(theme.highlight)))
         .child(div().flex_1().min_w_0().whitespace_normal().child(label))
 }
 
 /// Shared shell for anchored dropdowns.
-pub(crate) fn dropdown_container(id: impl Into<ElementId>, width: gpui::Pixels) -> Stateful<Div> {
-    floating_surface()
+pub(crate) fn dropdown_container(
+    theme: &'static crate::theme::Palette,
+    id: impl Into<ElementId>,
+    width: gpui::Pixels,
+) -> Stateful<Div> {
+    floating_surface(theme)
         .id(id)
         .w(width)
         .gap_0()
@@ -669,6 +748,7 @@ pub(crate) fn dropdown_container(id: impl Into<ElementId>, width: gpui::Pixels) 
 
 /// Shared compact surface for independent drag previews.
 pub(crate) fn drag_preview_surface(window: &Window, cx: &gpui::App) -> Div {
+    let theme = crate::gui::theme::palette(cx);
     let available = (window.viewport_size().width - px(UI_INSET * 2.)).max(px(0.));
     div()
         .flex()
@@ -678,11 +758,11 @@ pub(crate) fn drag_preview_surface(window: &Window, cx: &gpui::App) -> Div {
         .overflow_hidden()
         .px_2()
         .py_1()
-        .bg(rgb(PANEL))
+        .bg(rgb(theme.panel))
         .rounded_sm()
         .font(overlay_font(window, cx))
         .text_sm()
-        .text_color(rgb(TEXT))
+        .text_color(rgb(theme.text))
 }
 
 pub(crate) fn drag_preview(label: impl Into<SharedString>, window: &Window, cx: &gpui::App) -> Div {
@@ -725,7 +805,12 @@ impl Render for ListDragPreview {
     }
 }
 
-pub(crate) fn tree_row(id: impl Into<ElementId>, depth: usize, selected: bool) -> Stateful<Div> {
+pub(crate) fn tree_row(
+    theme: &'static crate::theme::Palette,
+    id: impl Into<ElementId>,
+    depth: usize,
+    selected: bool,
+) -> Stateful<Div> {
     div()
         .id(id)
         .w_full()
@@ -738,24 +823,27 @@ pub(crate) fn tree_row(id: impl Into<ElementId>, depth: usize, selected: bool) -
         .items_center()
         .gap_1()
         .rounded_sm()
+        .border_1()
+        .border_color(gpui::transparent_black())
         .cursor_pointer()
-        .bg(row_background(selected, false))
-        .hover(move |style| style.bg(row_background(selected, true)))
+        .bg(row_background(theme, selected, false))
+        .hover(move |style| style.bg(row_background(theme, selected, true)))
 }
 
 /// Standard compact option row used by anchored dropdowns.
 pub(crate) fn dropdown_row(
+    theme: &'static crate::theme::Palette,
     id: impl Into<ElementId>,
     selected: bool,
     label: impl Into<SharedString>,
 ) -> Stateful<Div> {
-    list_row_surface(id, selected)
-        .when(!selected, |row| row.bg(rgb(PANEL).alpha(0.0)))
+    list_row_surface(theme, id, selected)
+        .when(!selected, |row| row.bg(rgb(theme.panel).alpha(0.0)))
         .hover(move |style| {
             style.bg(rgb(if selected {
-                ROW_SELECTED_HOVER
+                theme.selected_hover
             } else {
-                HIGHLIGHT
+                theme.highlight
             }))
         })
         .h(gpui::rems(DROPDOWN_ROW_REMS))
@@ -768,22 +856,27 @@ pub(crate) fn list_row_height(window: &Window) -> gpui::Pixels {
 
 /// Numbered track row shared by album, playlist, and queue views.
 pub(crate) fn track_list_row(
+    theme: &'static crate::theme::Palette,
     id: impl Into<gpui::ElementId>,
     text_id: impl Into<gpui::ElementId>,
-    title: String,
-    detail: String,
+    (title, detail): (String, String),
     index: usize,
     playing: bool,
     selected: bool,
 ) -> gpui::Stateful<Div> {
-    list_row(id, selected)
+    list_row(theme, id, selected)
         .child(
             div()
                 .w(gpui::rems(2.))
                 .flex_shrink_0()
                 .text_xs()
                 .whitespace_nowrap()
-                .text_color(rgb(if playing { ACCENT } else { MUTED }))
+                .font_features(super::fonts::tabular_numbers())
+                .text_color(rgb(if playing {
+                    theme.accent
+                } else {
+                    theme.secondary
+                }))
                 .when(playing, |view| {
                     view.font_family(super::fonts::SYMBOLS_FAMILY)
                 })
@@ -793,19 +886,23 @@ pub(crate) fn track_list_row(
                     (index + 1).to_string()
                 }),
         )
-        .child(row_text(text_id, title, detail))
+        .child(track_row_text(theme, text_id, title, detail, playing))
 }
 
 /// Secondary text used throughout panels and controls.
-pub(crate) fn caption(text: impl Into<SharedString>) -> Div {
+pub(crate) fn caption(theme: &'static crate::theme::Palette, text: impl Into<SharedString>) -> Div {
     div()
         .text_xs()
-        .text_color(rgb(SECONDARY))
+        .text_color(rgb(theme.secondary))
         .child(text.into())
 }
 
 /// Shared row geometry and idle background; each caller owns its single hover style.
-fn list_row_surface(id: impl Into<ElementId>, selected: bool) -> Stateful<Div> {
+fn list_row_surface(
+    theme: &'static crate::theme::Palette,
+    id: impl Into<ElementId>,
+    selected: bool,
+) -> Stateful<Div> {
     div()
         .id(id)
         .w_full()
@@ -817,14 +914,21 @@ fn list_row_surface(id: impl Into<ElementId>, selected: bool) -> Stateful<Div> {
         .min_w_0()
         .px_2()
         .rounded_sm()
+        .border_1()
+        .border_color(gpui::transparent_black())
         .overflow_hidden()
         .cursor_pointer()
-        .bg(row_background(selected, false))
+        .bg(row_background(theme, selected, false))
 }
 
 /// Standard selectable row shared by library, queue, playlist, and history.
-pub(crate) fn list_row(id: impl Into<ElementId>, selected: bool) -> Stateful<Div> {
-    list_row_surface(id, selected).hover(move |style| style.bg(row_background(selected, true)))
+pub(crate) fn list_row(
+    theme: &'static crate::theme::Palette,
+    id: impl Into<ElementId>,
+    selected: bool,
+) -> Stateful<Div> {
+    list_row_surface(theme, id, selected)
+        .hover(move |style| style.bg(row_background(theme, selected, true)))
 }
 
 struct TrackTooltip {
@@ -834,6 +938,7 @@ struct TrackTooltip {
 
 impl Render for TrackTooltip {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = crate::gui::theme::palette(cx);
         tooltip_surface(window, cx, 35.)
             .child(
                 div()
@@ -844,7 +949,7 @@ impl Render for TrackTooltip {
             )
             .when(!self.detail.is_empty(), |view| {
                 view.child(
-                    caption(self.detail.clone())
+                    caption(theme, self.detail.clone())
                         .min_w_0()
                         .flex_shrink_0()
                         .whitespace_normal(),
@@ -888,9 +993,20 @@ pub(crate) fn lazy_row_tooltip(
 
 /// Standard two-line row text with an overflow tooltip.
 pub(crate) fn row_text(
+    theme: &'static crate::theme::Palette,
     id: impl Into<ElementId>,
     title: impl Into<SharedString>,
     detail: impl Into<SharedString>,
+) -> Stateful<Div> {
+    track_row_text(theme, id, title, detail, false)
+}
+
+fn track_row_text(
+    theme: &'static crate::theme::Palette,
+    id: impl Into<ElementId>,
+    title: impl Into<SharedString>,
+    detail: impl Into<SharedString>,
+    playing: bool,
 ) -> Stateful<Div> {
     let title = title.into();
     let detail = detail.into();
@@ -902,10 +1018,10 @@ pub(crate) fn row_text(
         .child(
             div()
                 .text_sm()
-                .text_color(rgb(TEXT))
+                .text_color(rgb(if playing { theme.accent } else { theme.text }))
                 .truncate()
                 .child(title.clone()),
         )
-        .child(caption(detail.clone()).truncate());
+        .child(caption(theme, detail.clone()).truncate());
     row_tooltip(view, title, detail)
 }

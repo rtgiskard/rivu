@@ -259,6 +259,7 @@ impl GuiApp {
         context: KeyContext,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let theme = crate::gui::theme::palette(cx);
         let rows = keyboard::help_rows(&[context]).map(|binding| {
             row()
                 .gap_4()
@@ -266,7 +267,7 @@ impl GuiApp {
                     div()
                         .w(rems(12.))
                         .flex_shrink_0()
-                        .text_color(rgb(ACCENT))
+                        .text_color(rgb(theme.accent))
                         .child(binding.label()),
                 )
                 .child(div().flex_1().child(self.tr(binding.description)))
@@ -294,26 +295,29 @@ impl GuiApp {
                     .min_h_0()
                     .p_4()
                     .gap_3()
-                    .bg(rgb(PANEL))
+                    .bg(rgb(theme.panel))
                     .border_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(theme.border))
                     .rounded_md()
                     .child(
                         row().child(self.tr("shell-keyboard-help")).child(
-                            components::quiet_icon_button(icon_button(
-                                "keyboard-help-close",
-                                "",
-                                self.tr("shell-close-keyboard-help"),
-                                cx,
-                                |this, _, cx| {
-                                    this.keyboard_help = None;
-                                    cx.notify();
-                                },
-                            ))
+                            components::quiet_icon_button(
+                                theme,
+                                icon_button(
+                                    "keyboard-help-close",
+                                    "",
+                                    self.tr("shell-close-keyboard-help"),
+                                    cx,
+                                    |this, _, cx| {
+                                        this.keyboard_help = None;
+                                        cx.notify();
+                                    },
+                                ),
+                            )
                             .ml_auto(),
                         ),
                     )
-                    .child(caption(self.tr("shell-keyboard-scope")))
+                    .child(caption(theme, self.tr("shell-keyboard-scope")))
                     .child(
                         div().flex_1().min_h_0().child(components::scrollable_area(
                             "keyboard-help-scrollbar",
@@ -327,11 +331,11 @@ impl GuiApp {
                             &self.help_scroll,
                         )),
                     )
-                    .child(caption(self.tr("shell-keyboard-help-navigation")))
+                    .child(caption(theme, self.tr("shell-keyboard-help-navigation")))
                     .child(
                         row().flex_wrap().gap_2().children(
                             keyboard::help_rows(&[KeyContext::GuiHelp])
-                                .map(|binding| caption(binding.label())),
+                                .map(|binding| caption(theme, binding.label())),
                         ),
                     ),
             )

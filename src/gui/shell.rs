@@ -187,6 +187,7 @@ impl GuiApp {
 
 impl Render for GuiApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = crate::gui::theme::palette(cx);
         self.sync_loading_text(cx);
         if self.analysis_frame_interval().is_some()
             && !self.frame_pending
@@ -221,7 +222,7 @@ impl Render for GuiApp {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .text_color(rgb(MUTED))
+                    .text_color(rgb(theme.muted))
                     .child(self.tr("shell-empty-layout"))
                     .into_any_element()
             });
@@ -230,8 +231,8 @@ impl Render for GuiApp {
             .relative()
             .size_full()
             .gap_0()
-            .bg(rgb(BG))
-            .text_color(rgb(TEXT))
+            .bg(rgb(theme.bg))
+            .text_color(rgb(theme.text))
             .text_size(px(14. * self.state.system.config.ui_scale))
             .font(self.ui_font.clone())
             .track_focus(&self.layout_focus)
@@ -395,26 +396,29 @@ impl Render for GuiApp {
             .pt_1()
             .pb(gpui::px(UI_INSET))
             .text_xs()
-            .text_color(rgb(MUTED));
+            .text_color(rgb(theme.muted));
         if let Some(error) = error {
             footer = footer.child(
                 row()
                     .flex_initial()
                     .min_w_0()
                     .px_2()
-                    .bg(rgb(ERROR_BG))
-                    .text_color(rgb(TEXT))
+                    .bg(rgb(theme.error_bg))
+                    .text_color(rgb(theme.text))
                     .child(copyable_message("copy-error", error, cx).flex_initial())
-                    .child(components::quiet_icon_button(icon_button(
-                        "dismiss-error",
-                        "",
-                        self.tr("shell-dismiss-message"),
-                        cx,
-                        |this, _, cx| {
-                            this.error = None;
-                            this.send(Command::DismissError, cx);
-                        },
-                    ))),
+                    .child(components::quiet_icon_button(
+                        theme,
+                        icon_button(
+                            "dismiss-error",
+                            "",
+                            self.tr("shell-dismiss-message"),
+                            cx,
+                            |this, _, cx| {
+                                this.error = None;
+                                this.send(Command::DismissError, cx);
+                            },
+                        ),
+                    )),
             );
         } else if self.state.system.scanning {
             footer = footer.child(
@@ -423,7 +427,7 @@ impl Render for GuiApp {
                     self.state.system.scan_message.clone(),
                     cx,
                 )
-                .text_color(rgb(TEXT)),
+                .text_color(rgb(theme.text)),
             );
         }
         footer = footer
@@ -487,7 +491,7 @@ impl Render for GuiApp {
                 cx.notify();
             });
             app = app.child(
-                components::floating_surface()
+                components::floating_surface(theme)
                     .flex()
                     .flex_col()
                     .min_w_0()
@@ -558,9 +562,9 @@ impl Render for GuiApp {
                             div()
                                 .ml_auto()
                                 .text_color(rgb(if !self.state.system.config.still_mode {
-                                    ACCENT
+                                    theme.accent
                                 } else {
-                                    MUTED
+                                    theme.muted
                                 }))
                                 .child(if !self.state.system.config.still_mode {
                                     "✓"
@@ -569,7 +573,7 @@ impl Render for GuiApp {
                                 }),
                         ),
                     )
-                    .child(components::menu_separator())
+                    .child(components::menu_separator(theme))
                     .child(menu_item(
                         "app-keyboard-help",
                         self.tr("shell-keyboard-help"),
@@ -580,7 +584,7 @@ impl Render for GuiApp {
                         },
                     ))
                     .child(about)
-                    .child(components::menu_separator())
+                    .child(components::menu_separator(theme))
                     .child(menu_item(
                         "app-close-window",
                         self.tr("shell-close-window"),
@@ -605,7 +609,7 @@ impl Render for GuiApp {
 
         app = app.child(footer);
         if self.interaction.docking().is_some() {
-            app = app.child(self.docking_overlay());
+            app = app.child(self.docking_overlay(theme));
         }
 
         if self.catalog_open && !self.layouts.current().locked {
@@ -636,7 +640,7 @@ impl Render for GuiApp {
                 }
             }
             app = app.child(
-                components::floating_surface()
+                components::floating_surface(theme)
                     .flex()
                     .flex_col()
                     .min_w_0()
@@ -658,10 +662,10 @@ impl Render for GuiApp {
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(MUTED))
+                            .text_color(rgb(theme.muted))
                             .child(self.tr("shell-add-panel")),
                     )
-                    .child(components::menu_separator())
+                    .child(components::menu_separator(theme))
                     .child(choices)
                     .child(visualizations),
             );
@@ -680,7 +684,7 @@ impl Render for GuiApp {
             let is_waveform = panel_kind == Some("waveform");
             let is_audio_visualizer = panel_kind == Some("audio_visualizer");
             let is_album_artwork = panel_kind == Some("album_artwork");
-            let mut menu = context_menu_container("panel-context-menu")
+            let mut menu = context_menu_container(theme, "panel-context-menu")
                 .map(|surface| self.menu_surface(surface))
                 .max_w((window.viewport_size().width - px(UI_INSET * 2.)).max(px(0.)))
                 .max_h((window.viewport_size().height - px(UI_INSET * 2.)).max(px(0.)))
@@ -794,7 +798,7 @@ impl Render for GuiApp {
                                     },
                                 )
                                 .child(
-                                    div().ml_auto().text_color(rgb(ACCENT)).child(
+                                    div().ml_auto().text_color(rgb(theme.accent)).child(
                                         if options.mode == crate::config::AlbumArtworkMode::Rotating
                                         {
                                             "✓"
@@ -826,7 +830,7 @@ impl Render for GuiApp {
                                     }
                                 },
                             ))
-                            .child(components::menu_separator());
+                            .child(components::menu_separator(theme));
                     }
                     if is_audio_visualizer
                         && let Some(options) = self
@@ -857,7 +861,7 @@ impl Render for GuiApp {
                                     cx.notify();
                                 },
                             ))
-                            .child(div().h(px(1.)).mx_2().my_1().bg(rgb(BORDER)));
+                            .child(div().h(px(1.)).mx_2().my_1().bg(rgb(theme.border)));
                         menu = menu
                             .child(
                                 menu_item(
@@ -886,9 +890,9 @@ impl Render for GuiApp {
                                     div()
                                         .ml_auto()
                                         .text_color(rgb(if options.reference_lines {
-                                            ACCENT
+                                            theme.accent
                                         } else {
-                                            MUTED
+                                            theme.muted
                                         }))
                                         .child(if options.reference_lines { "✓" } else { "" }),
                                 ),
@@ -920,14 +924,14 @@ impl Render for GuiApp {
                                     div()
                                         .ml_auto()
                                         .text_color(rgb(if options.labels {
-                                            ACCENT
+                                            theme.accent
                                         } else {
-                                            MUTED
+                                            theme.muted
                                         }))
                                         .child(if options.labels { "✓" } else { "" }),
                                 ),
                             )
-                            .child(div().h(px(1.)).mx_2().my_1().bg(rgb(BORDER)))
+                            .child(div().h(px(1.)).mx_2().my_1().bg(rgb(theme.border)))
                             .child(menu_item(
                                 "audio-visualizer-settings",
                                 self.tr("shell-visualizer-settings"),
@@ -981,23 +985,26 @@ impl Render for GuiApp {
                                 cx,
                                 |this, window, cx| this.save_queue_as_playlist(window, cx),
                             ))
-                            .child(components::danger_control(menu_item(
-                                "clear-queue",
-                                self.tr("shell-clear-queue"),
-                                cx,
-                                move |this, _, cx| {
-                                    this.panel_menu = Some(PanelMenu {
-                                        page: PanelMenuPage::ConfirmClearQueue,
-                                        ..state
-                                    });
-                                    cx.notify();
-                                },
-                            )));
+                            .child(components::danger_control(
+                                theme,
+                                menu_item(
+                                    "clear-queue",
+                                    self.tr("shell-clear-queue"),
+                                    cx,
+                                    move |this, _, cx| {
+                                        this.panel_menu = Some(PanelMenu {
+                                            page: PanelMenuPage::ConfirmClearQueue,
+                                            ..state
+                                        });
+                                        cx.notify();
+                                    },
+                                ),
+                            ));
                     }
                     menu = menu
                         .when(
                             is_library || is_queue || is_waveform || is_audio_visualizer,
-                            |view| view.child(div().h(px(1.)).mx_2().my_1().bg(rgb(BORDER))),
+                            |view| view.child(div().h(px(1.)).mx_2().my_1().bg(rgb(theme.border))),
                         )
                         .child(menu_item(
                             "toggle-tab-bar",
@@ -1018,8 +1025,11 @@ impl Render for GuiApp {
                 }
                 PanelMenuPage::LibraryColumns => {
                     menu = menu
-                        .child(components::menu_title(self.tr("shell-track-information")))
-                        .child(components::menu_separator());
+                        .child(components::menu_title(
+                            theme,
+                            self.tr("shell-track-information"),
+                        ))
+                        .child(components::menu_separator(theme));
                     for column in crate::config::LibraryColumn::ALL {
                         let enabled = self.state.system.config.library_columns.enabled(column);
                         menu = menu.child(
@@ -1045,30 +1055,37 @@ impl Render for GuiApp {
                             .child(
                                 div()
                                     .ml_auto()
-                                    .text_color(rgb(if enabled { ACCENT } else { MUTED }))
+                                    .text_color(rgb(if enabled {
+                                        theme.accent
+                                    } else {
+                                        theme.muted
+                                    }))
                                     .child(if enabled { "✓" } else { "" }),
                             ),
                         );
                     }
-                    menu = menu
-                        .child(components::menu_separator())
-                        .child(components::menu_back(
-                            "library-columns-back",
-                            self.tr("shell-back"),
-                            cx,
-                            move |this, _, cx| {
-                                this.panel_menu = Some(PanelMenu {
-                                    page: PanelMenuPage::Main,
-                                    ..state
-                                });
-                                cx.notify();
-                            },
-                        ));
+                    menu =
+                        menu.child(components::menu_separator(theme))
+                            .child(components::menu_back(
+                                "library-columns-back",
+                                self.tr("shell-back"),
+                                cx,
+                                move |this, _, cx| {
+                                    this.panel_menu = Some(PanelMenu {
+                                        page: PanelMenuPage::Main,
+                                        ..state
+                                    });
+                                    cx.notify();
+                                },
+                            ));
                 }
                 PanelMenuPage::AlbumArtworkStyle => {
                     menu = menu
-                        .child(components::menu_title(self.tr("shell-artwork-style")))
-                        .child(components::menu_separator());
+                        .child(components::menu_title(
+                            theme,
+                            self.tr("shell-artwork-style"),
+                        ))
+                        .child(components::menu_separator(theme));
                     for style in settings::ALBUM_ARTWORK_STYLES {
                         let selected = self
                             .layouts
@@ -1101,30 +1118,37 @@ impl Render for GuiApp {
                             .child(
                                 div()
                                     .ml_auto()
-                                    .text_color(rgb(if selected { ACCENT } else { MUTED }))
+                                    .text_color(rgb(if selected {
+                                        theme.accent
+                                    } else {
+                                        theme.muted
+                                    }))
                                     .child(if selected { "●" } else { "○" }),
                             ),
                         );
                     }
-                    menu = menu
-                        .child(components::menu_separator())
-                        .child(components::menu_back(
-                            "album-artwork-style-back",
-                            self.tr("shell-back"),
-                            cx,
-                            move |this, _, cx| {
-                                this.panel_menu = Some(PanelMenu {
-                                    page: PanelMenuPage::Main,
-                                    ..state
-                                });
-                                cx.notify();
-                            },
-                        ));
+                    menu =
+                        menu.child(components::menu_separator(theme))
+                            .child(components::menu_back(
+                                "album-artwork-style-back",
+                                self.tr("shell-back"),
+                                cx,
+                                move |this, _, cx| {
+                                    this.panel_menu = Some(PanelMenu {
+                                        page: PanelMenuPage::Main,
+                                        ..state
+                                    });
+                                    cx.notify();
+                                },
+                            ));
                 }
                 PanelMenuPage::AudioVisualizerStyle => {
                     menu = menu
-                        .child(components::menu_title(self.tr("shell-visualizer-style")))
-                        .child(components::menu_separator());
+                        .child(components::menu_title(
+                            theme,
+                            self.tr("shell-visualizer-style"),
+                        ))
+                        .child(components::menu_separator(theme));
                     if let Some(options) = self
                         .layouts
                         .current()
@@ -1166,26 +1190,30 @@ impl Render for GuiApp {
                                 .child(
                                     div()
                                         .ml_auto()
-                                        .text_color(rgb(if selected { ACCENT } else { MUTED }))
+                                        .text_color(rgb(if selected {
+                                            theme.accent
+                                        } else {
+                                            theme.muted
+                                        }))
                                         .child(if selected { "●" } else { "○" }),
                                 ),
                             );
                         }
                     }
-                    menu = menu
-                        .child(components::menu_separator())
-                        .child(components::menu_back(
-                            "audio-visualizer-style-back",
-                            self.tr("shell-back"),
-                            cx,
-                            move |this, _, cx| {
-                                this.panel_menu = Some(PanelMenu {
-                                    page: PanelMenuPage::Main,
-                                    ..state
-                                });
-                                cx.notify();
-                            },
-                        ));
+                    menu =
+                        menu.child(components::menu_separator(theme))
+                            .child(components::menu_back(
+                                "audio-visualizer-style-back",
+                                self.tr("shell-back"),
+                                cx,
+                                move |this, _, cx| {
+                                    this.panel_menu = Some(PanelMenu {
+                                        page: PanelMenuPage::Main,
+                                        ..state
+                                    });
+                                    cx.notify();
+                                },
+                            ));
                 }
                 PanelMenuPage::ConfirmClearQueue => {
                     menu = menu
@@ -1196,7 +1224,7 @@ impl Render for GuiApp {
                             ),
                         ))
                         .child(
-                            panels::caption(self.tr("shell-clear-stops-playback"))
+                            panels::caption(theme, self.tr("shell-clear-stops-playback"))
                                 .px(gpui::px(UI_INSET))
                                 .pb_2(),
                         )
@@ -1211,18 +1239,21 @@ impl Render for GuiApp {
                                         cx.notify();
                                     },
                                 ))
-                                .child(components::danger_control(menu_item(
-                                    "confirm-clear-queue",
-                                    self.tr("shell-clear-queue"),
-                                    cx,
-                                    |this, _, cx| {
-                                        this.panel_menu = None;
-                                        this.browser.queue.clear();
+                                .child(components::danger_control(
+                                    theme,
+                                    menu_item(
+                                        "confirm-clear-queue",
+                                        self.tr("shell-clear-queue"),
+                                        cx,
+                                        |this, _, cx| {
+                                            this.panel_menu = None;
+                                            this.browser.queue.clear();
 
-                                        this.send(Command::ClearQueue, cx);
-                                        cx.notify();
-                                    },
-                                ))),
+                                            this.send(Command::ClearQueue, cx);
+                                            cx.notify();
+                                        },
+                                    ),
+                                )),
                         );
                 }
             }
@@ -1236,7 +1267,7 @@ impl Render for GuiApp {
         app = app.child(self.content_menu_overlay(window, cx));
 
         if let Some((root, position)) = self.library_root_menu.clone() {
-            let menu = context_menu_container("library-root-menu")
+            let menu = context_menu_container(theme, "library-root-menu")
                 .map(|surface| self.menu_surface(surface))
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                     this.library_root_menu = None;
@@ -1337,9 +1368,9 @@ impl Render for GuiApp {
                             .items_center()
                             .gap_6()
                             .p_12()
-                            .bg(rgb(PANEL))
+                            .bg(rgb(theme.panel))
                             .border_1()
-                            .border_color(rgb(BORDER))
+                            .border_color(rgb(theme.border))
                             .rounded_md()
                             .on_mouse_down_out(cx.listener(|this, _, window, cx| {
                                 this.about_open = false;
@@ -1361,7 +1392,7 @@ impl Render for GuiApp {
                                     .child(
                                         column()
                                             .gap(rems(1.))
-                                            .child(caption(self.tr("shell-tagline")))
+                                            .child(caption(theme, self.tr("shell-tagline")))
                                             .children(
                                                 [
                                                     (
@@ -1395,25 +1426,28 @@ impl Render for GuiApp {
                                                             div()
                                                                 .w(rems(4.))
                                                                 .flex_shrink_0()
-                                                                .child(caption(label)),
+                                                                .child(caption(theme, label)),
                                                         )
-                                                        .child(caption(value))
+                                                        .child(caption(theme, value))
                                                 }),
                                             ),
                                     ),
                             )
                             .child(
-                                components::quiet_icon_button(icon_button(
-                                    "about-close",
-                                    "",
-                                    self.tr("shell-close-about"),
-                                    cx,
-                                    |this, window, cx| {
-                                        this.about_open = false;
-                                        this.focus_layout(window, cx);
-                                        cx.notify();
-                                    },
-                                ))
+                                components::quiet_icon_button(
+                                    theme,
+                                    icon_button(
+                                        "about-close",
+                                        "",
+                                        self.tr("shell-close-about"),
+                                        cx,
+                                        |this, window, cx| {
+                                            this.about_open = false;
+                                            this.focus_layout(window, cx);
+                                            cx.notify();
+                                        },
+                                    ),
+                                )
                                 .absolute()
                                 .top(px(8.))
                                 .right(px(8.)),

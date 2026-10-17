@@ -1,10 +1,11 @@
 use super::{
-    ACCENT, BORDER, Dragging, Field, GuiApp, HIGHLIGHT, HistorySort, ListFocus, MUTED, Measured,
-    StatusKind, TEXT, UI_INSET, ViewRequestKind, active_control, artwork_preview, button, column,
+    Dragging, Field, GuiApp, HistorySort, ListFocus, Measured, StatusKind, UI_INSET,
+    ViewRequestKind, active_control, artwork_preview, button, column,
     components::{
-        LIST_ROW_REMS, danger_control, disabled_control, list_row_height, quiet_icon_button,
-        scrollable_list, track_list_row,
+        LIST_ROW_REMS, danger_control, disabled_control, list_row_height, primary_control,
+        quiet_icon_button, scrollable_list, track_list_row,
     },
+    fonts::tabular_numbers,
     form_field, format_time, icon_button,
     library::LibraryDrag,
     list_viewport,
@@ -32,24 +33,32 @@ pub(super) struct HistoryColumnWidths {
     widths: [gpui::Pixels; 3],
 }
 
-pub(super) fn compact_icon_button(control: gpui::Stateful<Div>) -> gpui::Stateful<Div> {
-    quiet_icon_button(control).w(gpui::rems(1.4))
+pub(super) fn compact_icon_button(
+    theme: &'static crate::theme::Palette,
+    control: gpui::Stateful<Div>,
+) -> gpui::Stateful<Div> {
+    quiet_icon_button(theme, control).w(gpui::rems(1.4))
 }
 
 // Out-of-flow actions leave the full text width available until the row is hovered.
-pub(super) fn hover_actions(group: &'static str, selected: bool) -> Div {
+pub(super) fn hover_actions(
+    theme: &'static crate::theme::Palette,
+    group: &'static str,
+    selected: bool,
+) -> Div {
     row()
         .absolute()
         .right_0()
         .top_0()
         .h_full()
         .gap_0()
-        .bg(super::components::row_background(selected, true))
+        .bg(super::components::row_background(theme, selected, true))
         .invisible()
         .group_hover(group, |style| style.visible())
 }
 
 fn metadata_rows(
+    theme: &'static crate::theme::Palette,
     rows: impl IntoIterator<Item = [(SharedString, SharedString); 2]>,
     label_widths: [gpui::Pixels; 2],
 ) -> Div {
@@ -57,8 +66,8 @@ fn metadata_rows(
         .gap_1()
         .children(rows.into_iter().map(|[first, second]| {
             metadata_row(
-                metadata_item(first.0, first.1, label_widths[0]),
-                metadata_item(second.0, second.1, label_widths[1]),
+                metadata_item(theme, first.0, first.1, label_widths[0]),
+                metadata_item(theme, second.0, second.1, label_widths[1]),
             )
         }))
 }
@@ -73,8 +82,12 @@ fn metadata_row(first: Div, second: Div) -> Div {
         .child(second.min_w_0())
 }
 
-fn metadata_group(title: impl Into<SharedString>, content: impl IntoElement) -> Div {
-    section_group(title, content)
+fn metadata_group(
+    theme: &'static crate::theme::Palette,
+    title: impl Into<SharedString>,
+    content: impl IntoElement,
+) -> Div {
+    section_group(theme, title, content)
 }
 
 pub(super) struct PlaylistDrag {
@@ -337,9 +350,7 @@ impl GuiApp {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        const PLAYBACK_ARTIST_COLOR: u32 = 0x9aadd5;
-        const PLAYBACK_ALBUM_COLOR: u32 = 0xb0a0bf;
-
+        let theme = crate::gui::theme::palette(cx);
         let track = self.state.current_track();
         let title = track
             .map(|track| track.title.clone())
@@ -384,96 +395,110 @@ impl GuiApp {
             .flex_shrink_0()
             .justify_center()
             .child(active_control(
-                quiet_icon_button(icon_button(
-                    ("shuffle", panel_id),
-                    "󰒟",
-                    if self.state.playback.shuffle {
-                        self.tr("gl-shuffle-on")
-                    } else {
-                        self.tr("gl-shuffle-off")
-                    },
-                    cx,
-                    |this, _, cx| {
-                        this.send(
-                            Command::Shuffle {
-                                enabled: !this.state.playback.shuffle,
-                            },
-                            cx,
-                        )
-                    },
-                ))
+                theme,
+                quiet_icon_button(
+                    theme,
+                    icon_button(
+                        ("shuffle", panel_id),
+                        "󰒟",
+                        if self.state.playback.shuffle {
+                            self.tr("gl-shuffle-on")
+                        } else {
+                            self.tr("gl-shuffle-off")
+                        },
+                        cx,
+                        |this, _, cx| {
+                            this.send(
+                                Command::Shuffle {
+                                    enabled: !this.state.playback.shuffle,
+                                },
+                                cx,
+                            )
+                        },
+                    ),
+                )
                 .rounded_full()
                 .text_lg(),
                 self.state.playback.shuffle,
             ))
             .child(
-                quiet_icon_button(icon_button(
-                    ("previous", panel_id),
-                    "󰒮",
-                    self.tr("gl-previous-track"),
-                    cx,
-                    |this, _, cx| this.send(Command::Previous, cx),
-                ))
+                quiet_icon_button(
+                    theme,
+                    icon_button(
+                        ("previous", panel_id),
+                        "󰒮",
+                        self.tr("gl-previous-track"),
+                        cx,
+                        |this, _, cx| this.send(Command::Previous, cx),
+                    ),
+                )
                 .rounded_full()
                 .text_lg(),
             )
             .child(
-                icon_button(
-                    ("toggle", panel_id),
-                    if self.state.playback.status == PlaybackStatus::Playing {
-                        "󰏤"
-                    } else {
-                        ""
-                    },
-                    if self.state.playback.status == PlaybackStatus::Playing {
-                        self.tr("gl-pause")
-                    } else {
-                        self.tr("gl-play")
-                    },
-                    cx,
-                    |this, _, cx| this.send(Command::Toggle, cx),
+                primary_control(
+                    theme,
+                    icon_button(
+                        ("toggle", panel_id),
+                        if self.state.playback.status == PlaybackStatus::Playing {
+                            "󰏤"
+                        } else {
+                            ""
+                        },
+                        if self.state.playback.status == PlaybackStatus::Playing {
+                            self.tr("gl-pause")
+                        } else {
+                            self.tr("gl-play")
+                        },
+                        cx,
+                        |this, _, cx| this.send(Command::Toggle, cx),
+                    ),
                 )
                 .size(gpui::rems(2.5))
                 .rounded_full()
-                .border_0()
-                .text_xl()
-                .bg(rgb(HIGHLIGHT))
-                .text_color(rgb(ACCENT)),
+                .text_xl(),
             )
             .child(
-                quiet_icon_button(icon_button(
-                    ("next", panel_id),
-                    "󰒭",
-                    self.tr("gl-next-track"),
-                    cx,
-                    |this, _, cx| this.send(Command::Next, cx),
-                ))
+                quiet_icon_button(
+                    theme,
+                    icon_button(
+                        ("next", panel_id),
+                        "󰒭",
+                        self.tr("gl-next-track"),
+                        cx,
+                        |this, _, cx| this.send(Command::Next, cx),
+                    ),
+                )
                 .rounded_full()
                 .text_lg(),
             )
             .child(active_control(
-                quiet_icon_button(icon_button(
-                    ("repeat", panel_id),
-                    if self.state.playback.repeat == RepeatMode::One {
-                        "󰑘"
-                    } else {
-                        "󰑖"
-                    },
-                    match self.state.playback.repeat {
-                        RepeatMode::Off => self.tr("gl-repeat-off"),
-                        RepeatMode::All => self.tr("gl-repeat-all"),
-                        RepeatMode::One => self.tr("gl-repeat-one"),
-                    },
-                    cx,
-                    |this, _, cx| {
-                        let mode = match this.state.playback.repeat {
-                            RepeatMode::Off => RepeatMode::All,
-                            RepeatMode::All => RepeatMode::One,
-                            RepeatMode::One => RepeatMode::Off,
-                        };
-                        this.send(Command::Repeat { mode }, cx);
-                    },
-                ))
+                theme,
+                quiet_icon_button(
+                    theme,
+                    icon_button(
+                        ("repeat", panel_id),
+                        if self.state.playback.repeat == RepeatMode::One {
+                            "󰑘"
+                        } else {
+                            "󰑖"
+                        },
+                        match self.state.playback.repeat {
+                            RepeatMode::Off => self.tr("gl-repeat-off"),
+                            RepeatMode::All => self.tr("gl-repeat-all"),
+                            RepeatMode::One => self.tr("gl-repeat-one"),
+                        },
+                        cx,
+                        |this, _, cx| {
+                            let mode = match this.state.playback.repeat {
+                                RepeatMode::Off => RepeatMode::All,
+                                RepeatMode::All => RepeatMode::One,
+                                RepeatMode::One => RepeatMode::Off,
+                            };
+                            this.send(Command::Repeat { mode }, cx);
+                        },
+                    ),
+                )
                 .rounded_full()
                 .text_lg(),
                 self.state.playback.repeat != RepeatMode::Off,
@@ -487,7 +512,7 @@ impl GuiApp {
                     .id(("volume-label", panel_id))
                     .flex_shrink_0()
                     .text_lg()
-                    .text_color(rgb(MUTED))
+                    .text_color(rgb(theme.muted))
                     .font_family(super::fonts::SYMBOLS_FAMILY)
                     .child("󰕾")
                     .tooltip({
@@ -500,7 +525,8 @@ impl GuiApp {
             )
             .child(div().flex_1().min_w_0().child(volume))
             .child(
-                caption(format!("{:.0}%", self.state.playback.volume * 100.))
+                caption(theme, format!("{:.0}%", self.state.playback.volume * 100.))
+                    .font_features(tabular_numbers())
                     .w(gpui::rems(3.5))
                     .whitespace_nowrap()
                     .flex_shrink_0(),
@@ -529,22 +555,26 @@ impl GuiApp {
                             .child(title),
                     )
                     .child(disabled_control(
-                        quiet_icon_button(icon_button(
-                            ("playback-locate", panel_id),
-                            "",
-                            self.tr("gl-locate-playing-entry"),
-                            cx,
-                            |this, window, cx| {
-                                if this.state.queue.current_id.is_some()
-                                    && this.reveal_queue_panel(window, cx)
-                                {
-                                    this.locate_playing_queue(window, cx);
-                                }
-                            },
-                        )),
+                        theme,
+                        quiet_icon_button(
+                            theme,
+                            icon_button(
+                                ("playback-locate", panel_id),
+                                "",
+                                self.tr("gl-locate-playing-entry"),
+                                cx,
+                                |this, window, cx| {
+                                    if this.state.queue.current_id.is_some()
+                                        && this.reveal_queue_panel(window, cx)
+                                    {
+                                        this.locate_playing_queue(window, cx);
+                                    }
+                                },
+                            ),
+                        ),
                         self.state.queue.current_id.is_none(),
                     ))
-                    .child(caption(status).flex_shrink_0()),
+                    .child(caption(theme, status).flex_shrink_0()),
             )
             .child(
                 row()
@@ -553,19 +583,20 @@ impl GuiApp {
                     .flex_shrink_0()
                     .when(has_artist, |view| {
                         view.child(
-                            caption(artist)
-                                .text_color(rgb(PLAYBACK_ARTIST_COLOR))
+                            caption(theme, artist)
+                                .text_sm()
+                                .text_color(rgb(theme.text))
                                 .min_w_0()
                                 .truncate(),
                         )
                     })
                     .when(has_artist && has_album, |view| {
-                        view.child(caption("·").flex_shrink_0())
+                        view.child(caption(theme, "·").flex_shrink_0())
                     })
                     .when(has_album, |view| {
                         view.child(
-                            caption(album)
-                                .text_color(rgb(PLAYBACK_ALBUM_COLOR))
+                            caption(theme, album)
+                                .text_color(rgb(theme.secondary))
                                 .min_w_0()
                                 .truncate(),
                         )
@@ -579,11 +610,15 @@ impl GuiApp {
                     .flex_wrap()
                     .child(div().flex_1().min_w(gpui::rems(4.)).child(seek))
                     .child(
-                        caption(format!(
-                            "{} / {}",
-                            format_time(preview_position),
-                            duration.map_or("—".into(), format_time)
-                        ))
+                        caption(
+                            theme,
+                            format!(
+                                "{} / {}",
+                                format_time(preview_position),
+                                duration.map_or("—".into(), format_time)
+                            ),
+                        )
+                        .font_features(tabular_numbers())
                         .whitespace_nowrap()
                         .flex_shrink_0(),
                     ),
@@ -601,8 +636,13 @@ impl GuiApp {
             )
             .into_any_element()
     }
-    fn panel_field(&self, field: Field, label: impl Into<SharedString>) -> Div {
-        form_field(label, self.input(field))
+    fn panel_field(
+        &self,
+        theme: &'static crate::theme::Palette,
+        field: Field,
+        label: impl Into<SharedString>,
+    ) -> Div {
+        form_field(theme, label, self.input(field))
     }
 
     pub(super) fn panel_track_text(&self, track: &crate::model::LibraryRow) -> (String, String) {
@@ -626,6 +666,7 @@ impl GuiApp {
     }
 
     fn library_scan_status(&self, panel_id: u64, cx: &mut Context<Self>) -> Div {
+        let theme = crate::gui::theme::palette(cx);
         use crate::model::ScanPhase;
         let progress = self.state.system.scan_progress.as_ref();
         let header_text = progress.map_or_else(
@@ -671,24 +712,31 @@ impl GuiApp {
             .size(gpui::rems(2.))
             .flex_shrink_0()
             .when(dismissible, |slot| {
-                slot.child(quiet_icon_button(icon_button(
-                    ("dismiss-scan-result", panel_id),
-                    "",
-                    self.tr("gl-dismiss-scan"),
-                    cx,
-                    |this, _, cx| this.send(Command::DismissScanResult, cx),
-                )))
+                slot.child(quiet_icon_button(
+                    theme,
+                    icon_button(
+                        ("dismiss-scan-result", panel_id),
+                        "",
+                        self.tr("gl-dismiss-scan"),
+                        cx,
+                        |this, _, cx| this.send(Command::DismissScanResult, cx),
+                    ),
+                ))
             });
-        let mut bar = div().w_full().h(px(3.)).flex_shrink_0().bg(rgb(BORDER));
+        let mut bar = div()
+            .w_full()
+            .h(px(3.))
+            .flex_shrink_0()
+            .bg(rgb(theme.border));
         if let Some(progress) = progress
             && let Some(total) = progress.total.filter(|total| *total > 0)
         {
             let fraction = (progress.processed as f32 / total as f32).clamp(0., 1.);
             bar = bar.child(div().h_full().w(gpui::relative(fraction)).bg(rgb(
                 if progress.phase == ScanPhase::Failed {
-                    super::ERROR
+                    theme.error
                 } else {
-                    ACCENT
+                    theme.accent
                 },
             )));
         }
@@ -707,12 +755,12 @@ impl GuiApp {
                 row()
                     .h(gpui::rems(2.))
                     .flex_shrink_0()
-                    .child(caption(header_text).flex_1().min_w_0().truncate())
+                    .child(caption(theme, header_text).flex_1().min_w_0().truncate())
                     .child(dismiss),
             )
             .child(bar)
             .child(
-                caption(path.clone())
+                caption(theme, path.clone())
                     .id(("scan-path", panel_id))
                     .h(gpui::rems(1.25))
                     .flex_shrink_0()
@@ -724,7 +772,7 @@ impl GuiApp {
                     }),
             )
             .child(
-                caption(message.clone())
+                caption(theme, message.clone())
                     .id(("scan-message", panel_id))
                     .h(gpui::rems(1.25))
                     .flex_shrink_0()
@@ -747,26 +795,30 @@ impl GuiApp {
         favorite: bool,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<Div> {
-        compact_icon_button(icon_button(
-            id,
-            if favorite { "󰓎" } else { "󰓐" },
-            if favorite {
-                self.tr("gl-unfavorite")
-            } else {
-                self.tr("gl-favorite")
-            },
-            cx,
-            move |this, _, cx| {
-                this.send(
-                    Command::SetFavorite {
-                        track_ids: vec![track_id],
-                        favorite: !favorite,
-                    },
-                    cx,
-                );
-            },
-        ))
-        .text_color(rgb(if favorite { ACCENT } else { MUTED }))
+        let theme = crate::gui::theme::palette(cx);
+        compact_icon_button(
+            theme,
+            icon_button(
+                id,
+                if favorite { "󰓎" } else { "󰓐" },
+                if favorite {
+                    self.tr("gl-unfavorite")
+                } else {
+                    self.tr("gl-favorite")
+                },
+                cx,
+                move |this, _, cx| {
+                    this.send(
+                        Command::SetFavorite {
+                            track_ids: vec![track_id],
+                            favorite: !favorite,
+                        },
+                        cx,
+                    );
+                },
+            ),
+        )
+        .when(favorite, |view| view.text_color(rgb(theme.accent)))
         .opacity(0.)
         .group_hover(group, |style| style.opacity(1.))
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
@@ -781,6 +833,7 @@ impl GuiApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let theme = crate::gui::theme::palette(cx);
         self.finish_library_locate_render(window, cx);
         let total = self.browser.library.tree().root_total();
         let range_pending = self.library_range_pending();
@@ -815,7 +868,7 @@ impl GuiApp {
             self.i18n
                 .format("gl-entry-count", &[("count", (total).into())])
         };
-        let heading = panel_header(self.tr("gl-library"), selection_label.clone())
+        let heading = panel_header(theme, self.tr("gl-library"), selection_label.clone())
             .flex_1()
             .min_w_0()
             .id(("library-selection-count", panel_id))
@@ -830,6 +883,7 @@ impl GuiApp {
             .flex_shrink(1.)
             .child(self.library_search.clone())
             .child(disabled_control(
+                theme,
                 icon_button(
                     ("library-locate-playing", panel_id),
                     "",
@@ -855,6 +909,7 @@ impl GuiApp {
                 |this, _, cx| this.toggle_library_view(cx),
             ))
             .child(active_control(
+                theme,
                 icon_button(
                     ("library-filter-favorites", panel_id),
                     "󰓎",
@@ -867,6 +922,7 @@ impl GuiApp {
                 self.browser.library.favorites_only(),
             ))
             .child(active_control(
+                theme,
                 icon_button(
                     ("library-filter-missing", panel_id),
                     "󰌶",
@@ -880,6 +936,7 @@ impl GuiApp {
                 self.browser.library.missing_only(),
             ))
             .child(active_control(
+                theme,
                 icon_button(
                     ("library-force-scan", panel_id),
                     "󰑐",
@@ -923,7 +980,7 @@ impl GuiApp {
                     row()
                         .flex_shrink_0()
                         .flex_wrap()
-                        .child(caption(self.tr(message)))
+                        .child(caption(theme, self.tr(message)))
                         .when(matches!(result, LibraryLocateResult::Filtered), |view| {
                             view.child(button(
                                 ("library-clear-filters-locate", panel_id),
@@ -948,6 +1005,7 @@ impl GuiApp {
             .child(
                 if let Some((0, total)) = self.browser.library.search_counts {
                     caption(
+                        theme,
                         self.i18n
                             .text(if total == 0 {
                                 "search-empty"
@@ -1032,6 +1090,7 @@ impl GuiApp {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let theme = crate::gui::theme::palette(cx);
         let matched = self.browser.queue.rows.total();
         let total = self.state.queue.total;
         self.queue_search.update(cx, |search, cx| {
@@ -1043,6 +1102,7 @@ impl GuiApp {
         });
         let selection_count = self.browser.queue.len();
         let header = panel_header(
+            theme,
             self.tr("gl-queue"),
             self.i18n.format(
                 "gl-queue-count",
@@ -1066,6 +1126,7 @@ impl GuiApp {
             .min_h(px(32.))
             .child(self.queue_search.clone())
             .child(disabled_control(
+                theme,
                 icon_button(
                     ("queue-locate-playing", panel_id),
                     "",
@@ -1094,7 +1155,7 @@ impl GuiApp {
             .flex_shrink_0()
             .overflow_hidden()
             .child(
-                status_message(selection_message.clone(), selection_kind)
+                status_message(theme, selection_message.clone(), selection_kind)
                     .id(("queue-selection-status", panel_id))
                     .flex_1()
                     .min_w_0()
@@ -1142,12 +1203,12 @@ impl GuiApp {
                     }
                 })
             })
-            .drag_over::<QueueDrag>(|style, _, _, _| style.border_color(rgb(ACCENT)))
+            .drag_over::<QueueDrag>(|style, _, _, _| style.border_color(rgb(theme.accent)))
             .on_drop(cx.listener(|this, drag: &LibraryDrag, window, cx| {
                 window.prevent_default();
                 this.resolve_library_drag(drag.nodes(), super::DragDestination::Queue, cx);
             }))
-            .drag_over::<LibraryDrag>(|style, _, _, _| style.border_color(rgb(ACCENT)))
+            .drag_over::<LibraryDrag>(|style, _, _, _| style.border_color(rgb(theme.accent)))
             .on_drop(cx.listener(|this, drag: &super::ContentDrag, window, cx| {
                 window.prevent_default();
                 cx.stop_propagation();
@@ -1158,8 +1219,8 @@ impl GuiApp {
                 cx.stop_propagation();
                 this.transfer_playlist_drag(drag, super::DragDestination::Queue, cx);
             }))
-            .drag_over::<super::ContentDrag>(|style, _, _, _| style.border_color(rgb(ACCENT)))
-            .drag_over::<PlaylistDrag>(|style, _, _, _| style.border_color(rgb(ACCENT)))
+            .drag_over::<super::ContentDrag>(|style, _, _, _| style.border_color(rgb(theme.accent)))
+            .drag_over::<PlaylistDrag>(|style, _, _, _| style.border_color(rgb(theme.accent)))
             .child(row().items_end().child(header).child(tools))
             .when(
                 self.browser
@@ -1180,11 +1241,14 @@ impl GuiApp {
                 },
             )
             .when(matched == Some(0), |panel| {
-                panel.child(caption(self.tr(if total == 0 {
-                    "search-empty"
-                } else {
-                    "search-no-matches"
-                })))
+                panel.child(caption(
+                    theme,
+                    self.tr(if total == 0 {
+                        "search-empty"
+                    } else {
+                        "search-no-matches"
+                    }),
+                ))
             })
             .when(
                 self.browser.queue.busy || self.browser.queue.selection_error.is_some(),
@@ -1195,7 +1259,7 @@ impl GuiApp {
                 uniform_list(
                     ("queue-rows", panel_id),
                     self.browser.queue.rows.len(),
-                    cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
+                    cx.processor(move |this, range: std::ops::Range<usize>, window, cx| {
                         range
                             .map(|index| {
                                 let Some(entry) = this.browser.queue.rows.get(index) else {
@@ -1221,41 +1285,58 @@ impl GuiApp {
                                     revision: this.state.queue.revision,
                                 };
                                 track_list_row(
+                                    theme,
                                     ("queue-entry", id),
                                     ("queue-entry-text", id),
-                                    title,
-                                    detail,
+                                    (title, detail),
                                     index,
                                     playing,
                                     this.browser.queue.contains(&id),
                                 )
                                 .when(this.queue_locate_emphasized(id), |row| {
-                                    row.border_1().border_color(rgb(ACCENT)).bg(rgb(HIGHLIGHT))
+                                    row.border_1()
+                                        .border_color(rgb(theme.accent))
+                                        .bg(rgb(theme.highlight))
                                 })
+                                .when(
+                                    this.layout_focus.is_focused(window)
+                                        && this.browser.focus()
+                                            == Some(super::BrowserFocus::List(ListFocus::Queue))
+                                        && this
+                                            .browser
+                                            .queue
+                                            .active()
+                                            .is_some_and(|row| row.id == id),
+                                    |row| row.border_color(rgb(theme.accent)),
+                                )
                                 .group("queue-track-row")
                                 .line_height(gpui::rems(1.125))
                                 .relative()
                                 .child(
                                     hover_actions(
+                                        theme,
                                         "queue-track-row",
                                         this.browser.queue.contains(&id),
                                     )
                                     .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
                                         cx.stop_propagation();
                                     })
-                                    .child(compact_icon_button(icon_button(
-                                        ("queue-entry-play", id),
-                                        "",
-                                        this.tr("gl-play-queue-entry"),
-                                        cx,
-                                        move |this, _, cx| {
-                                            this.send_queue_row_action(
-                                                revision,
-                                                Command::PlayQueue { queue_id: id },
-                                                cx,
-                                            )
-                                        },
-                                    )))
+                                    .child(compact_icon_button(
+                                        theme,
+                                        icon_button(
+                                            ("queue-entry-play", id),
+                                            "",
+                                            this.tr("gl-play-queue-entry"),
+                                            cx,
+                                            move |this, _, cx| {
+                                                this.send_queue_row_action(
+                                                    revision,
+                                                    Command::PlayQueue { queue_id: id },
+                                                    cx,
+                                                )
+                                            },
+                                        ),
+                                    ))
                                     .child(this.track_favorite_toggle(
                                         ("queue-entry-favorite", id),
                                         "queue-track-row",
@@ -1263,61 +1344,72 @@ impl GuiApp {
                                         favorite,
                                         cx,
                                     ))
-                                    .child(compact_icon_button(icon_button(
-                                        ("queue-entry-remove", id),
-                                        "",
-                                        this.tr("gl-remove-queue"),
-                                        cx,
-                                        move |this, _, cx| {
-                                            this.send_queue_row_action(
-                                                revision,
-                                                Command::RemoveQueueEntries {
-                                                    queue_ids: vec![id],
-                                                },
-                                                cx,
-                                            )
-                                        },
-                                    )))
-                                    .child(disabled_control(
-                                        compact_icon_button(icon_button(
-                                            ("queue-entry-up", id),
-                                            "",
-                                            this.tr("gl-entry-up"),
+                                    .child(compact_icon_button(
+                                        theme,
+                                        icon_button(
+                                            ("queue-entry-remove", id),
+                                            "",
+                                            this.tr("gl-remove-queue"),
                                             cx,
                                             move |this, _, cx| {
-                                                if position > 0 {
-                                                    this.send_queue_row_action(
-                                                        revision,
-                                                        Command::MoveQueue {
-                                                            queue_id: id,
-                                                            index: position - 1,
-                                                        },
-                                                        cx,
-                                                    );
-                                                }
+                                                this.send_queue_row_action(
+                                                    revision,
+                                                    Command::RemoveQueueEntries {
+                                                        queue_ids: vec![id],
+                                                    },
+                                                    cx,
+                                                )
                                             },
-                                        )),
+                                        ),
+                                    ))
+                                    .child(disabled_control(
+                                        theme,
+                                        compact_icon_button(
+                                            theme,
+                                            icon_button(
+                                                ("queue-entry-up", id),
+                                                "",
+                                                this.tr("gl-entry-up"),
+                                                cx,
+                                                move |this, _, cx| {
+                                                    if position > 0 {
+                                                        this.send_queue_row_action(
+                                                            revision,
+                                                            Command::MoveQueue {
+                                                                queue_id: id,
+                                                                index: position - 1,
+                                                            },
+                                                            cx,
+                                                        );
+                                                    }
+                                                },
+                                            ),
+                                        ),
                                         position == 0,
                                     ))
                                     .child(disabled_control(
-                                        compact_icon_button(icon_button(
-                                            ("queue-entry-down", id),
-                                            "",
-                                            this.tr("gl-entry-down"),
-                                            cx,
-                                            move |this, _, cx| {
-                                                if can_move_down {
-                                                    this.send_queue_row_action(
-                                                        revision,
-                                                        Command::MoveQueue {
-                                                            queue_id: id,
-                                                            index: position + 1,
-                                                        },
-                                                        cx,
-                                                    );
-                                                }
-                                            },
-                                        )),
+                                        theme,
+                                        compact_icon_button(
+                                            theme,
+                                            icon_button(
+                                                ("queue-entry-down", id),
+                                                "",
+                                                this.tr("gl-entry-down"),
+                                                cx,
+                                                move |this, _, cx| {
+                                                    if can_move_down {
+                                                        this.send_queue_row_action(
+                                                            revision,
+                                                            Command::MoveQueue {
+                                                                queue_id: id,
+                                                                index: position + 1,
+                                                            },
+                                                            cx,
+                                                        );
+                                                    }
+                                                },
+                                            ),
+                                        ),
                                         !can_move_down,
                                     )),
                                 )
@@ -1449,7 +1541,9 @@ impl GuiApp {
                                             .is_some()
                                     })
                                 })
-                                .drag_over::<QueueDrag>(|style, _, _, _| style.bg(rgb(HIGHLIGHT)))
+                                .drag_over::<QueueDrag>(
+                                    |style, _, _, _| style.bg(rgb(theme.highlight)),
+                                )
                             })
                             .collect::<Vec<_>>()
                     }),
@@ -1474,12 +1568,12 @@ impl GuiApp {
                         }
                     })
                 })
-                .drag_over::<QueueDrag>(|style, _, _, _| style.border_color(rgb(ACCENT)))
+                .drag_over::<QueueDrag>(|style, _, _, _| style.border_color(rgb(theme.accent)))
                 .on_drop(cx.listener(|this, drag: &LibraryDrag, window, cx| {
                     window.prevent_default();
                     this.resolve_library_drag(drag.nodes(), super::DragDestination::Queue, cx);
                 }))
-                .drag_over::<LibraryDrag>(|style, _, _, _| style.border_color(rgb(ACCENT)))
+                .drag_over::<LibraryDrag>(|style, _, _, _| style.border_color(rgb(theme.accent)))
                 .on_drop(cx.listener(|this, drag: &super::ContentDrag, window, cx| {
                     window.prevent_default();
                     cx.stop_propagation();
@@ -1490,8 +1584,10 @@ impl GuiApp {
                     cx.stop_propagation();
                     this.transfer_playlist_drag(drag, super::DragDestination::Queue, cx);
                 }))
-                .drag_over::<super::ContentDrag>(|style, _, _, _| style.border_color(rgb(ACCENT)))
-                .drag_over::<PlaylistDrag>(|style, _, _, _| style.border_color(rgb(ACCENT)))
+                .drag_over::<super::ContentDrag>(|style, _, _, _| {
+                    style.border_color(rgb(theme.accent))
+                })
+                .drag_over::<PlaylistDrag>(|style, _, _, _| style.border_color(rgb(theme.accent)))
                 .h_full()
                 .min_h_0()
                 .w_full()
@@ -1537,6 +1633,7 @@ impl GuiApp {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let theme = crate::gui::theme::palette(cx);
         let Some(action) = self.playlist_action.clone() else {
             return div().into_any_element();
         };
@@ -1545,7 +1642,7 @@ impl GuiApp {
             let has_tracks = self.state.current_track().is_some();
             let rename = target.clone();
             let delete = target.clone();
-            let menu = super::context_menu_container("playlist-row-menu")
+            let menu = super::context_menu_container(theme, "playlist-row-menu")
                 .map(|surface| self.menu_surface(surface))
                 .max_w((window.viewport_size().width - px(UI_INSET * 2.)).max(px(0.)))
                 .max_h((window.viewport_size().height - px(UI_INSET * 2.)).max(px(0.)))
@@ -1583,7 +1680,7 @@ impl GuiApp {
                         this.append_playlist_to_queue(id, cx);
                     },
                 ))
-                .child(super::components::menu_separator())
+                .child(super::components::menu_separator(theme))
                 .child(
                     super::menu_item(
                         "playlist-row-add",
@@ -1623,15 +1720,18 @@ impl GuiApp {
                         );
                     },
                 ))
-                .child(danger_control(super::menu_item(
-                    "playlist-row-delete",
-                    self.tr("gl-delete"),
-                    cx,
-                    move |this, _, cx| {
-                        this.playlist_action = Some(PlaylistAction::Delete(delete.clone()));
-                        cx.notify();
-                    },
-                )));
+                .child(danger_control(
+                    theme,
+                    super::menu_item(
+                        "playlist-row-delete",
+                        self.tr("gl-delete"),
+                        cx,
+                        move |this, _, cx| {
+                            this.playlist_action = Some(PlaylistAction::Delete(delete.clone()));
+                            cx.notify();
+                        },
+                    ),
+                ));
             return gpui::anchored()
                 .position(position)
                 .snap_to_window()
@@ -1684,11 +1784,11 @@ impl GuiApp {
                     .max_h(window.viewport_size().height * 0.9)
                     .overflow_y_scroll()
                     .p(px(UI_INSET))
-                    .bg(rgb(super::PANEL))
+                    .bg(rgb(theme.panel))
                     .border_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(theme.border))
                     .rounded_md()
-                    .child(panel_header(title, detail).flex_shrink_0())
+                    .child(panel_header(theme, title, detail).flex_shrink_0())
                     .child(
                         row()
                             .flex_shrink_0()
@@ -1700,37 +1800,41 @@ impl GuiApp {
                                 cx,
                                 |this, window, cx| this.dismiss_playlist_action(window, cx),
                             ))
-                            .child(danger_control(icon_button(
-                                "playlist-action-confirm",
-                                if deleting { "󰆴" } else { "" },
-                                if deleting {
-                                    self.tr("gl-delete-playlist")
-                                } else {
-                                    self.tr("gl-replace-playlist")
-                                },
-                                cx,
-                                move |this, window, cx| {
-                                    this.dismiss_playlist_action(window, cx);
+                            .child(danger_control(
+                                theme,
+                                icon_button(
+                                    "playlist-action-confirm",
+                                    if deleting { "󰆴" } else { "" },
                                     if deleting {
-                                        if this.browser.playlists.selected() == Some(target.id) {
-                                            this.browser.remove_playlist_selection();
-                                        }
-                                        this.send(
-                                            Command::DeletePlaylist {
-                                                playlist_id: target.id,
-                                            },
-                                            cx,
-                                        );
+                                        self.tr("gl-delete-playlist")
                                     } else {
-                                        this.send(
-                                            Command::PlayPlaylist {
-                                                playlist_id: target.id,
-                                            },
-                                            cx,
-                                        );
-                                    }
-                                },
-                            ))),
+                                        self.tr("gl-replace-playlist")
+                                    },
+                                    cx,
+                                    move |this, window, cx| {
+                                        this.dismiss_playlist_action(window, cx);
+                                        if deleting {
+                                            if this.browser.playlists.selected() == Some(target.id)
+                                            {
+                                                this.browser.remove_playlist_selection();
+                                            }
+                                            this.send(
+                                                Command::DeletePlaylist {
+                                                    playlist_id: target.id,
+                                                },
+                                                cx,
+                                            );
+                                        } else {
+                                            this.send(
+                                                Command::PlayPlaylist {
+                                                    playlist_id: target.id,
+                                                },
+                                                cx,
+                                            );
+                                        }
+                                    },
+                                ),
+                            )),
                     ),
             )
             .into_any_element()
@@ -1742,6 +1846,7 @@ impl GuiApp {
         panel_id: u64,
         cx: &mut Context<Self>,
     ) -> Div {
+        let theme = crate::gui::theme::palette(cx);
         let rows_error = if kind == ViewRequestKind::Entries {
             self.browser.playlists.entries().rows.error(0)
         } else {
@@ -1780,6 +1885,7 @@ impl GuiApp {
             .min_h_0()
             .child(
                 status_message(
+                    theme,
                     message.clone(),
                     if rows_error.is_some() {
                         StatusKind::Error
@@ -1851,6 +1957,7 @@ impl GuiApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let theme = crate::gui::theme::palette(cx);
         let owner = cx.weak_entity();
         window.defer(cx, move |_, cx| {
             let _ = owner.update(cx, |this, cx| this.request_playlist_selection(cx));
@@ -1891,7 +1998,7 @@ impl GuiApp {
             .h(gpui::rems(2.))
             .overflow_hidden()
             .child(
-                status_message(selection_message.clone(), StatusKind::Info)
+                status_message(theme, selection_message.clone(), StatusKind::Info)
                     .id(("playlist-selection-status", panel_id))
                     .flex_1()
                     .min_w_0()
@@ -1933,7 +2040,7 @@ impl GuiApp {
         let catalog = uniform_list(
             ("playlist-catalog", panel_id),
             catalog_len,
-            cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
+            cx.processor(move |this, range: std::ops::Range<usize>, window, cx| {
                 range
                     .map(|index| {
                         let Some(p) = this.browser.playlists.summaries().rows.get(index) else {
@@ -1949,41 +2056,55 @@ impl GuiApp {
                         let context_name = name.clone();
                         let playable = p.entry_count > 0;
                         list_row(
+                            theme,
                             ("playlist", id as u64),
                             this.browser.playlists.selected() == Some(id),
+                        )
+                        .when(
+                            this.layout_focus.is_focused(window)
+                                && this.browser.focus() == Some(super::BrowserFocus::Playlists)
+                                && this.browser.playlists.selected() == Some(id),
+                            |row| row.border_color(rgb(theme.accent)),
                         )
                         .group("playlist-catalog-row")
                         .gap_0()
                         .child(row_text(
+                            theme,
                             ("playlist-text", id as u64),
                             name.clone(),
                             this.i18n
                                 .format("gl-track-count", &[("count", (p.entry_count).into())]),
                         ))
                         .child(
-                            compact_icon_button(icon_button(
-                                ("playlist-row-play", id as u64),
-                                "",
-                                this.tr("gl-play-playlist"),
-                                cx,
-                                move |this, window, cx| {
-                                    if !playable {
-                                        return;
-                                    }
-                                    this.refresh(cx);
-                                    if this.state.queue.total == 0 {
-                                        this.send(Command::PlayPlaylist { playlist_id: id }, cx);
-                                    } else {
-                                        this.focus_layout(window, cx);
-                                        this.playlist_action =
-                                            Some(PlaylistAction::Play(PlaylistTarget {
-                                                id,
-                                                name: play_name.to_string(),
-                                            }));
-                                        cx.notify();
-                                    }
-                                },
-                            ))
+                            compact_icon_button(
+                                theme,
+                                icon_button(
+                                    ("playlist-row-play", id as u64),
+                                    "",
+                                    this.tr("gl-play-playlist"),
+                                    cx,
+                                    move |this, window, cx| {
+                                        if !playable {
+                                            return;
+                                        }
+                                        this.refresh(cx);
+                                        if this.state.queue.total == 0 {
+                                            this.send(
+                                                Command::PlayPlaylist { playlist_id: id },
+                                                cx,
+                                            );
+                                        } else {
+                                            this.focus_layout(window, cx);
+                                            this.playlist_action =
+                                                Some(PlaylistAction::Play(PlaylistTarget {
+                                                    id,
+                                                    name: play_name.to_string(),
+                                                }));
+                                            cx.notify();
+                                        }
+                                    },
+                                ),
+                            )
                             .opacity(0.)
                             .group_hover("playlist-catalog-row", move |style| {
                                 style.opacity(if playable { 1. } else { 0.4 })
@@ -1993,25 +2114,28 @@ impl GuiApp {
                             }),
                         )
                         .child(
-                            compact_icon_button(icon_button(
-                                ("playlist-row-menu", id as u64),
-                                "󰇙",
-                                this.tr("gl-playlist-actions"),
-                                cx,
-                                move |this, window, cx| {
-                                    this.focus_layout(window, cx);
-                                    this.content_menu = None;
-                                    this.panel_menu = None;
-                                    this.playlist_action = Some(PlaylistAction::Menu(
-                                        PlaylistTarget {
-                                            id,
-                                            name: menu_name.to_string(),
-                                        },
-                                        window.mouse_position(),
-                                    ));
-                                    cx.notify();
-                                },
-                            ))
+                            compact_icon_button(
+                                theme,
+                                icon_button(
+                                    ("playlist-row-menu", id as u64),
+                                    "󰇙",
+                                    this.tr("gl-playlist-actions"),
+                                    cx,
+                                    move |this, window, cx| {
+                                        this.focus_layout(window, cx);
+                                        this.content_menu = None;
+                                        this.panel_menu = None;
+                                        this.playlist_action = Some(PlaylistAction::Menu(
+                                            PlaylistTarget {
+                                                id,
+                                                name: menu_name.to_string(),
+                                            },
+                                            window.mouse_position(),
+                                        ));
+                                        cx.notify();
+                                    },
+                                ),
+                            )
                             .opacity(0.)
                             .group_hover("playlist-catalog-row", |style| style.opacity(1.))
                             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
@@ -2093,10 +2217,12 @@ impl GuiApp {
                                 })
                             }
                         })
-                        .drag_over::<LibraryDrag>(|style, _, _, _| style.bg(rgb(HIGHLIGHT)))
-                        .drag_over::<super::ContentDrag>(|style, _, _, _| style.bg(rgb(HIGHLIGHT)))
-                        .drag_over::<QueueDrag>(|style, _, _, _| style.bg(rgb(HIGHLIGHT)))
-                        .drag_over::<PlaylistDrag>(|style, _, _, _| style.bg(rgb(HIGHLIGHT)))
+                        .drag_over::<LibraryDrag>(|style, _, _, _| style.bg(rgb(theme.highlight)))
+                        .drag_over::<super::ContentDrag>(|style, _, _, _| {
+                            style.bg(rgb(theme.highlight))
+                        })
+                        .drag_over::<QueueDrag>(|style, _, _, _| style.bg(rgb(theme.highlight)))
+                        .drag_over::<PlaylistDrag>(|style, _, _, _| style.bg(rgb(theme.highlight)))
                         .into_any_element()
                     })
                     .collect::<Vec<_>>()
@@ -2138,13 +2264,16 @@ impl GuiApp {
                             this.browser.focus_list(ListFocus::PlaylistTracks)
                         }),
                     )
-                    .child(div().flex_1().min_w_0().child(caption(total.map_or_else(
-                        || "—".to_owned(),
-                        |count| {
-                            self.i18n
-                                .format("gl-track-count", &[("count", count.into())])
-                        },
-                    ))))
+                    .child(div().flex_1().min_w_0().child(caption(
+                        theme,
+                        total.map_or_else(
+                            || "—".to_owned(),
+                            |count| {
+                                self.i18n
+                                    .format("gl-track-count", &[("count", count.into())])
+                            },
+                        ),
+                    )))
                     .child(self.playlist_entries_search.clone()),
             );
             self.scroll_views.register_list(
@@ -2155,7 +2284,7 @@ impl GuiApp {
             let entries = uniform_list(
                 ("playlist-entries", panel_id),
                 entries_len,
-                cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
+                cx.processor(move |this, range: std::ops::Range<usize>, window, cx| {
                     range
                         .map(|index| {
                             let Some(e) = this.browser.playlists.entries().rows.get(index) else {
@@ -2194,13 +2323,24 @@ impl GuiApp {
                                 e.album
                             );
                             track_list_row(
+                                theme,
                                 ("playlist-entry", id as u64),
                                 ("playlist-entry-text", id as u64),
-                                title,
-                                detail,
+                                (title, detail),
                                 index,
-                                false,
+                                this.state
+                                    .current_track()
+                                    .is_some_and(|track| track.id == track_id),
                                 this.browser.playlists.track_selection.contains(id),
+                            )
+                            .when(
+                                this.layout_focus.is_focused(window)
+                                    && this.browser.focus()
+                                        == Some(super::BrowserFocus::List(
+                                            ListFocus::PlaylistTracks,
+                                        ))
+                                    && this.browser.playlists.selected_entry() == Some(id),
+                                |row| row.border_color(rgb(theme.accent)),
                             )
                             .group("playlist-track-row")
                             .line_height(gpui::rems(1.125))
@@ -2208,19 +2348,23 @@ impl GuiApp {
                             .gap_0()
                             .child(
                                 hover_actions(
+                                    theme,
                                     "playlist-track-row",
                                     this.browser.playlists.track_selection.contains(id),
                                 )
                                 .child(
-                                    compact_icon_button(icon_button(
-                                        ("playlist-entry-play", id as u64),
-                                        "",
-                                        this.tr("gl-play-track"),
-                                        cx,
-                                        move |this, _, cx| {
-                                            this.send(Command::Play { track_id }, cx)
-                                        },
-                                    ))
+                                    compact_icon_button(
+                                        theme,
+                                        icon_button(
+                                            ("playlist-entry-play", id as u64),
+                                            "",
+                                            this.tr("gl-play-track"),
+                                            cx,
+                                            move |this, _, cx| {
+                                                this.send(Command::Play { track_id }, cx)
+                                            },
+                                        ),
+                                    )
                                     .opacity(0.)
                                     .group_hover("playlist-track-row", |style| style.opacity(1.))
                                     .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
@@ -2235,30 +2379,33 @@ impl GuiApp {
                                     cx,
                                 ))
                                 .child(
-                                    compact_icon_button(icon_button(
-                                        ("playlist-entry-remove", id as u64),
-                                        "",
-                                        this.tr("gl-remove-playlist"),
-                                        cx,
-                                        move |this, _, cx| {
-                                            this.refresh(cx);
-                                            if this.browser.playlists.selected()
-                                                != Some(playlist_id)
-                                                || this.playlist_occurrence_stamp(playlist_id)
-                                                    != stamp
-                                            {
-                                                return;
-                                            }
-                                            this.send(
-                                                Command::RemovePlaylistEntries {
-                                                    playlist_id,
-                                                    entry_ids: vec![id],
-                                                    expected_revision: revision,
-                                                },
-                                                cx,
-                                            );
-                                        },
-                                    ))
+                                    compact_icon_button(
+                                        theme,
+                                        icon_button(
+                                            ("playlist-entry-remove", id as u64),
+                                            "",
+                                            this.tr("gl-remove-playlist"),
+                                            cx,
+                                            move |this, _, cx| {
+                                                this.refresh(cx);
+                                                if this.browser.playlists.selected()
+                                                    != Some(playlist_id)
+                                                    || this.playlist_occurrence_stamp(playlist_id)
+                                                        != stamp
+                                                {
+                                                    return;
+                                                }
+                                                this.send(
+                                                    Command::RemovePlaylistEntries {
+                                                        playlist_id,
+                                                        entry_ids: vec![id],
+                                                        expected_revision: revision,
+                                                    },
+                                                    cx,
+                                                );
+                                            },
+                                        ),
+                                    )
                                     .opacity(0.)
                                     .group_hover("playlist-track-row", |style| style.opacity(1.))
                                     .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
@@ -2454,7 +2601,9 @@ impl GuiApp {
                                     })
                                 }
                             })
-                            .drag_over::<PlaylistDrag>(|style, _, _, _| style.bg(rgb(HIGHLIGHT)))
+                            .drag_over::<PlaylistDrag>(|style, _, _, _| {
+                                style.bg(rgb(theme.highlight))
+                            })
                             .into_any_element()
                         })
                         .collect::<Vec<_>>()
@@ -2537,7 +2686,9 @@ impl GuiApp {
                                     })
                                 }
                             })
-                            .drag_over::<PlaylistDrag>(|style, _, _, _| style.bg(rgb(HIGHLIGHT))),
+                            .drag_over::<PlaylistDrag>(|style, _, _, _| {
+                                style.bg(rgb(theme.highlight))
+                            }),
                     ),
             );
         }
@@ -2563,7 +2714,7 @@ impl GuiApp {
                     })
                 }
             })
-            .drag_over::<LibraryDrag>(|style, _, _, _| style.border_color(rgb(ACCENT)))
+            .drag_over::<LibraryDrag>(|style, _, _, _| style.border_color(rgb(theme.accent)))
             .on_drop(cx.listener(|this, drag: &super::ContentDrag, window, cx| {
                 window.prevent_default();
                 cx.stop_propagation();
@@ -2585,9 +2736,9 @@ impl GuiApp {
                     this.transfer_playlist_drag(drag, super::DragDestination::Playlist(id), cx);
                 }
             }))
-            .drag_over::<super::ContentDrag>(|style, _, _, _| style.border_color(rgb(ACCENT)))
-            .drag_over::<QueueDrag>(|style, _, _, _| style.border_color(rgb(ACCENT)))
-            .drag_over::<PlaylistDrag>(|style, _, _, _| style.border_color(rgb(ACCENT)))
+            .drag_over::<super::ContentDrag>(|style, _, _, _| style.border_color(rgb(theme.accent)))
+            .drag_over::<QueueDrag>(|style, _, _, _| style.border_color(rgb(theme.accent)))
+            .drag_over::<PlaylistDrag>(|style, _, _, _| style.border_color(rgb(theme.accent)))
             .child(
                 row()
                     .min_h(gpui::rems(2.))
@@ -2596,6 +2747,7 @@ impl GuiApp {
                     .items_end()
                     .child(
                         panel_header(
+                            theme,
                             self.tr("gl-playlists"),
                             self.i18n.format(
                                 "gl-playlist-count",
@@ -2640,6 +2792,7 @@ impl GuiApp {
                         |this, _, cx| this.choose_playlist_import(cx),
                     ))
                     .child(disabled_control(
+                        theme,
                         icon_button(
                             ("playlist-export", panel_id),
                             "",
@@ -2665,6 +2818,7 @@ impl GuiApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let theme = crate::gui::theme::palette(cx);
         let owner = cx.weak_entity();
         window.defer(cx, move |_, cx| {
             let _ = owner.update(cx, |this, cx| {
@@ -2937,7 +3091,7 @@ impl GuiApp {
                     let run = gpui::TextRun {
                         len: label.len(),
                         font: self.ui_font.clone(),
-                        color: rgb(MUTED).into(),
+                        color: rgb(theme.muted).into(),
                         background_color: None,
                         underline: None,
                         strikethrough: None,
@@ -2975,11 +3129,16 @@ impl GuiApp {
                                 row()
                                     .justify_between()
                                     .items_center()
-                                    .child(caption(heading).text_lg().text_color(rgb(TEXT)))
+                                    .child(
+                                        caption(theme, heading)
+                                            .text_lg()
+                                            .text_color(rgb(theme.text)),
+                                    )
                                     .child(
                                         row()
                                             .gap_2()
                                             .child(disabled_control(
+                                                theme,
                                                 icon_button(
                                                     ("metadata-favorite", panel_id),
                                                     if favorite { "󰓎" } else { "󰓐" },
@@ -3012,13 +3171,14 @@ impl GuiApp {
                                                     },
                                                 )
                                                 .text_color(rgb(if favorite {
-                                                    ACCENT
+                                                    theme.accent
                                                 } else {
-                                                    TEXT
+                                                    theme.text
                                                 })),
                                                 !editable,
                                             ))
                                             .child(disabled_control(
+                                                theme,
                                                 icon_button(
                                                     ("metadata-save", panel_id),
                                                     "󰆓",
@@ -3055,9 +3215,9 @@ impl GuiApp {
                                     .min_w_0()
                                     .h(gpui::rems(1.25))
                                     .child(
-                                        caption(status.clone())
+                                        caption(theme, status.clone())
                                             .text_xs()
-                                            .text_color(rgb(MUTED))
+                                            .text_color(rgb(theme.muted))
                                             .truncate(),
                                     )
                                     .tooltip(move |_, cx| {
@@ -3069,10 +3229,12 @@ impl GuiApp {
                             ),
                     )
                     .child(metadata_group(
+                        theme,
                         self.tr("gl-file"),
                         metadata_row(
                             div().flex_1().min_w_0().child(
                                 metadata_item(
+                                    theme,
                                     file[0][0].0.clone(),
                                     file[0][0].1.clone(),
                                     label_widths[0],
@@ -3086,6 +3248,7 @@ impl GuiApp {
                                 }),
                             ),
                             metadata_item(
+                                theme,
                                 file[0][1].0.clone(),
                                 file[0][1].1.clone(),
                                 label_widths[1],
@@ -3093,10 +3256,12 @@ impl GuiApp {
                         ),
                     ))
                     .child(metadata_group(
+                        theme,
                         self.tr("gl-metadata"),
-                        metadata_rows(metadata, label_widths),
+                        metadata_rows(theme, metadata, label_widths),
                     ))
                     .child(metadata_group(
+                        theme,
                         self.tr("gl-decoder-hint"),
                         column()
                             .gap_2()
@@ -3123,7 +3288,9 @@ impl GuiApp {
                                     .map(
                                         |(key, label, decoder_hint)| {
                                             disabled_control(
+                                                theme,
                                                 active_control(
+                                                    theme,
                                                     button(
                                                         (key, panel_id),
                                                         label,
@@ -3150,37 +3317,40 @@ impl GuiApp {
                                 ),
                             )
                             .child(
-                                caption(self.tr("gl-decoder-save-note"))
+                                caption(theme, self.tr("gl-decoder-save-note"))
                                     .text_xs()
-                                    .text_color(rgb(MUTED)),
+                                    .text_color(rgb(theme.muted)),
                             )
                             .child(
-                                caption(self.tr("gl-decoder-warning"))
+                                caption(theme, self.tr("gl-decoder-warning"))
                                     .text_xs()
-                                    .text_color(rgb(MUTED)),
+                                    .text_color(rgb(theme.muted)),
                             ),
                     ))
                     .child(metadata_group(
+                        theme,
                         self.tr("gl-tags"),
                         column()
                             .gap_2()
                             .child(metadata_row(
-                                self.panel_field(Field::Title, self.tr("gl-title")),
-                                self.panel_field(Field::Artist, self.tr("gl-artist")),
+                                self.panel_field(theme, Field::Title, self.tr("gl-title")),
+                                self.panel_field(theme, Field::Artist, self.tr("gl-artist")),
                             ))
                             .child(metadata_row(
-                                self.panel_field(Field::Album, self.tr("gl-album")),
-                                metadata_item(disc.0, disc.1, label_widths[1]),
+                                self.panel_field(theme, Field::Album, self.tr("gl-album")),
+                                metadata_item(theme, disc.0, disc.1, label_widths[1]),
                             ))
-                            .child(metadata_rows(tags, label_widths).gap_2())
+                            .child(metadata_rows(theme, tags, label_widths).gap_2())
                             .when(track.is_some(), |tags| {
                                 tags.child(match self.artwork_view.image(cx) {
                                     Some(image) => artwork_preview(
+                                        theme,
                                         self.tr("shell-panel-album-artwork"),
                                         image.size_full(),
                                         self.artwork_view.aspect_ratio(cx),
                                     ),
                                     None => artwork_preview(
+                                        theme,
                                         self.tr("shell-panel-album-artwork"),
                                         self.default_album
                                             .clone()
@@ -3233,6 +3403,7 @@ impl GuiApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let theme = crate::gui::theme::palette(cx);
         use super::list_interaction::{ContentDrag, ContentMenuRequest, TrackSource};
 
         let history_len = self.browser.history.len();
@@ -3265,7 +3436,7 @@ impl GuiApp {
                 let run = gpui::TextRun {
                     len: text.len(),
                     font,
-                    color: rgb(MUTED).into(),
+                    color: rgb(theme.muted).into(),
                     background_color: None,
                     underline: None,
                     strikethrough: None,
@@ -3277,6 +3448,11 @@ impl GuiApp {
                     .ceil()
             };
             let text_width = |text: SharedString| measure(text, self.ui_font.clone());
+            let numeric_width = |text: SharedString| {
+                let mut font = self.ui_font.clone();
+                font.features = tabular_numbers();
+                measure(text, font)
+            };
             // Keep space for either sort direction so sorting does not move columns.
             let arrow = measure("󰁅".into(), gpui::font(super::fonts::SYMBOLS_FAMILY)).max(measure(
                 "󰁝".into(),
@@ -3288,8 +3464,8 @@ impl GuiApp {
                 text_width(self.tr("gl-last-played")) + arrow,
             ];
             for (index, item) in source.iter().enumerate() {
-                widths[0] = widths[0].max(text_width((index + 1).to_string().into()));
-                widths[1] = widths[1].max(text_width(item.play_count.to_string().into()));
+                widths[0] = widths[0].max(numeric_width((index + 1).to_string().into()));
+                widths[1] = widths[1].max(numeric_width(item.play_count.to_string().into()));
                 let last_played = self.last_played_text(item.track_id, Some(item.played_at));
                 widths[2] = widths[2].max(text_width(last_played.into()));
             }
@@ -3314,9 +3490,9 @@ impl GuiApp {
             .min_w_0()
             .overflow_hidden()
             .border_b_1()
-            .border_color(rgb(BORDER))
+            .border_color(rgb(theme.border))
             .child(
-                caption("#")
+                caption(theme, "#")
                     .w(widths[0])
                     .flex_shrink_0()
                     .px_2()
@@ -3352,6 +3528,7 @@ impl GuiApp {
                     .items_end()
                     .child(
                         panel_header(
+                            theme,
                             self.tr("gl-recent-tracks"),
                             self.i18n
                                 .format("gl-track-count", &[("count", history_total.into())]),
@@ -3361,7 +3538,7 @@ impl GuiApp {
                     .child(self.history_search.clone()),
             )
             .when(history_len == 0, |panel| {
-                panel.child(caption(self.tr(if history_total == 0 {
+                panel.child(caption(theme, self.tr(if history_total == 0 {
                     "search-empty"
                 } else {
                     "search-no-matches"
@@ -3392,6 +3569,7 @@ impl GuiApp {
                                     let drag_i18n = this.i18n.clone();
                                     Some(
                                         list_row(
+                                            theme,
                                             ("history-entry", id as u64),
                                             selected,
                                         )
@@ -3399,7 +3577,8 @@ impl GuiApp {
                                         .group("history-track-row")
                                         .relative()
                                         .child(
-                                            caption((index + 1).to_string())
+                                            caption(theme, (index + 1).to_string())
+                                                .font_features(tabular_numbers())
                                                 .w(widths[0])
                                                 .flex_shrink_0()
                                                 .px_2()
@@ -3416,7 +3595,8 @@ impl GuiApp {
                                                 .child(title),
                                         )
                                         .child(
-                                            caption(item.play_count.to_string())
+                                            caption(theme, item.play_count.to_string())
+                                                .font_features(tabular_numbers())
                                                 .w(widths[1])
                                                 .flex_shrink_0()
                                                 .px_2()
@@ -3424,7 +3604,7 @@ impl GuiApp {
                                                 .truncate(),
                                         )
                                         .child(
-                                            caption(last_played.to_owned())
+                                            caption(theme, last_played.to_owned())
                                                 .w(widths[2])
                                                 .flex_shrink_0()
                                                 .px_2()
@@ -3433,6 +3613,7 @@ impl GuiApp {
                                         )
                                         .child(
                                             hover_actions(
+                                                theme,
                                                 "history-track-row",
                                                 selected,
                                             )

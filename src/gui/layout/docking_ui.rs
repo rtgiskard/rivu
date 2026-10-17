@@ -229,7 +229,10 @@ impl GuiApp {
         cx.notify();
     }
 
-    pub(in crate::gui) fn docking_overlay(&self) -> AnyElement {
+    pub(in crate::gui) fn docking_overlay(
+        &self,
+        theme: &'static crate::theme::Palette,
+    ) -> AnyElement {
         let Some(session) = self.interaction.docking() else {
             return div().into_any_element();
         };
@@ -239,7 +242,11 @@ impl GuiApp {
         {
             let owner = hover.owner;
             let preview = hover.preview;
-            let color = if preview.is_some() { ACCENT } else { 0xf7768e };
+            let color = if preview.is_some() {
+                theme.accent
+            } else {
+                theme.error
+            };
             overlay = overlay.child(
                 div()
                     .absolute()
@@ -280,10 +287,10 @@ impl GuiApp {
                     .top(owner.origin.y + px(6.))
                     .px_2()
                     .py_1()
-                    .bg(rgb(PANEL))
+                    .bg(rgb(theme.panel))
                     .border_1()
                     .border_color(rgb(color))
-                    .text_color(rgb(TEXT))
+                    .text_color(rgb(theme.text))
                     .text_xs()
                     .child(text),
             );

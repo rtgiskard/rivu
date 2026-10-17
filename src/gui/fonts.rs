@@ -1,4 +1,11 @@
-use gpui::{App, Font, font};
+use gpui::{App, Font, FontFeatures, font};
+use std::sync::{Arc, LazyLock};
+
+pub(super) fn tabular_numbers() -> FontFeatures {
+    static FEATURES: LazyLock<FontFeatures> =
+        LazyLock::new(|| FontFeatures(Arc::new(vec![("tnum".into(), 1)])));
+    FEATURES.clone()
+}
 
 #[cfg(not(feature = "embed-nerd-font"))]
 pub(super) const SYMBOLS_FAMILY: &str = "Symbols Nerd Font Mono";

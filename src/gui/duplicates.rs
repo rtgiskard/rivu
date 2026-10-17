@@ -696,20 +696,23 @@ impl GuiApp {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let theme = crate::gui::theme::palette(cx);
         let review = &self.duplicate_review;
         let busy = review.busy.is_some();
         let mut groups = column().gap_2();
         if review.groups_loading {
-            groups = groups.child(caption(self.tr("gl-groups-loading")));
+            groups = groups.child(caption(theme, self.tr("gl-groups-loading")));
         } else if let Some(page) = &review.groups {
             if page.total == 0 {
-                groups = groups.child(caption(self.tr("gl-groups-empty")));
+                groups = groups.child(caption(theme, self.tr("gl-groups-empty")));
             }
             for (index, group) in page.rows.iter().enumerate() {
                 let hash = group.fingerprint.clone();
                 let selected = review.fingerprint.as_ref() == Some(&hash);
                 groups = groups.child(active_control(
+                    theme,
                     components::disabled_control(
+                        theme,
                         button(("duplicate-group", index), "", cx, move |this, _, cx| {
                             if this.duplicate_review.busy.is_none()
                                 && !this.duplicate_review.confirming
@@ -743,13 +746,16 @@ impl GuiApp {
                                     ),
                                 )
                                 .child(
-                                    caption(self.i18n.format(
-                                        "gl-duplicate-presence-count",
-                                        &[
-                                            ("missing", (group.missing_members).into()),
-                                            ("present", (group.present_members).into()),
-                                        ],
-                                    ))
+                                    caption(
+                                        theme,
+                                        self.i18n.format(
+                                            "gl-duplicate-presence-count",
+                                            &[
+                                                ("missing", (group.missing_members).into()),
+                                                ("present", (group.present_members).into()),
+                                            ],
+                                        ),
+                                    )
                                     .whitespace_normal(),
                                 ),
                         ),
@@ -789,10 +795,13 @@ impl GuiApp {
         if let Some(fingerprint) = &review.fingerprint {
             let fingerprint = fingerprint.clone();
             members = members.child(
-                caption(self.i18n.format(
-                    "gl-cached-fingerprint",
-                    &[("fingerprint", (fingerprint.as_str()).into())],
-                ))
+                caption(
+                    theme,
+                    self.i18n.format(
+                        "gl-cached-fingerprint",
+                        &[("fingerprint", (fingerprint.as_str()).into())],
+                    ),
+                )
                 .id("review-fingerprint")
                 .truncate()
                 .tooltip({
@@ -808,11 +817,11 @@ impl GuiApp {
             );
         }
         if review.members_loading {
-            members = members.child(caption(self.tr("gl-members-loading")));
+            members = members.child(caption(theme, self.tr("gl-members-loading")));
         } else if review.fingerprint.is_none() {
-            members = members.child(caption(self.tr("gl-select-relocation")));
+            members = members.child(caption(theme, self.tr("gl-select-relocation")));
         } else if !review.members_failed && review.members.is_empty() {
-            members = members.child(caption(self.tr("gl-members-empty")));
+            members = members.child(caption(theme, self.tr("gl-members-empty")));
         }
         if review.members_failed && !review.members_loading {
             members = members.child(icon_button(
@@ -867,9 +876,9 @@ impl GuiApp {
                 .border_1()
                 .rounded_md()
                 .border_color(rgb(if source_selected || target_selected {
-                    ACCENT
+                    theme.accent
                 } else {
-                    BORDER
+                    theme.border
                 }))
                 .child(
                     div()
@@ -888,6 +897,7 @@ impl GuiApp {
                         }),
                 )
                 .child(caption(
+                    theme,
                     self.i18n.format(
                         "gl-member-presence",
                         &[
@@ -905,18 +915,25 @@ impl GuiApp {
                         ],
                     ),
                 ))
-                .child(caption(self.i18n.format(
-                    "gl-member-file-data",
-                    &[
-                        ("size", (value.file_size.to_string()).into()),
-                        ("mtime", (value.modified_ns.to_string()).into()),
-                    ],
-                )))
-                .child(caption(self.i18n.format(
-                    "gl-member-title",
-                    &[("title", (track.title.as_str()).into())],
-                )))
                 .child(caption(
+                    theme,
+                    self.i18n.format(
+                        "gl-member-file-data",
+                        &[
+                            ("size", (value.file_size.to_string()).into()),
+                            ("mtime", (value.modified_ns.to_string()).into()),
+                        ],
+                    ),
+                ))
+                .child(caption(
+                    theme,
+                    self.i18n.format(
+                        "gl-member-title",
+                        &[("title", (track.title.as_str()).into())],
+                    ),
+                ))
+                .child(caption(
+                    theme,
                     self.i18n.format(
                         "gl-member-metadata",
                         &[
@@ -950,6 +967,7 @@ impl GuiApp {
                     ),
                 ))
                 .child(caption(
+                    theme,
                     self.i18n.format(
                         "gl-member-user-state",
                         &[
@@ -975,6 +993,7 @@ impl GuiApp {
                     ),
                 ))
                 .child(caption(
+                    theme,
                     self.i18n.format(
                         "gl-member-references",
                         &[
@@ -995,7 +1014,9 @@ impl GuiApp {
             let mut actions = panel_toolbar().flex_wrap();
             if selectable_source {
                 actions = actions.child(active_control(
+                    theme,
                     components::disabled_control(
+                        theme,
                         button(
                             ("review-source", id as u64),
                             self.tr("gl-use-source"),
@@ -1022,7 +1043,9 @@ impl GuiApp {
             }
             if selectable_target {
                 actions = actions.child(active_control(
+                    theme,
                     components::disabled_control(
+                        theme,
                         button(
                             ("review-target", id as u64),
                             self.tr("gl-use-target"),
@@ -1049,6 +1072,7 @@ impl GuiApp {
             }
             if selectable_target && has_target_state(value) {
                 card = card.child(status_message(
+                    theme,
                     self.tr("gl-target-state-warning"),
                     StatusKind::Error,
                 ));
@@ -1060,38 +1084,48 @@ impl GuiApp {
         }
         let mut decisions = column().gap_2();
         if let Some(source) = &review.source {
-            decisions = decisions.child(caption(self.i18n.format(
-                "gl-source-identity",
-                &[
-                    ("id", (source.track.id.to_string()).into()),
-                    ("path", (source.track.path.display().to_string()).into()),
-                ],
-            )));
+            decisions = decisions.child(caption(
+                theme,
+                self.i18n.format(
+                    "gl-source-identity",
+                    &[
+                        ("id", (source.track.id.to_string()).into()),
+                        ("path", (source.track.path.display().to_string()).into()),
+                    ],
+                ),
+            ));
         }
         if let Some(target) = &review.target {
-            decisions = decisions.child(caption(self.i18n.format(
-                "gl-target-identity",
-                &[
-                    ("id", (target.track.id.to_string()).into()),
-                    ("path", (target.track.path.display().to_string()).into()),
-                ],
-            )));
+            decisions = decisions.child(caption(
+                theme,
+                self.i18n.format(
+                    "gl-target-identity",
+                    &[
+                        ("id", (target.track.id.to_string()).into()),
+                        ("path", (target.track.path.display().to_string()).into()),
+                    ],
+                ),
+            ));
         }
         if review.confirming {
             decisions = decisions
                 .child(status_message(
+                    theme,
                     self.tr("gl-confirm-relocation-note"),
                     StatusKind::Info,
                 ))
                 .child(
                     panel_toolbar()
                         .flex_wrap()
-                        .child(components::danger_control(button(
-                            "review-confirm",
-                            self.tr("gl-confirm-relocation"),
-                            cx,
-                            |this, _, cx| this.submit_duplicate_action(false, cx),
-                        )))
+                        .child(components::danger_control(
+                            theme,
+                            button(
+                                "review-confirm",
+                                self.tr("gl-confirm-relocation"),
+                                cx,
+                                |this, _, cx| this.submit_duplicate_action(false, cx),
+                            ),
+                        ))
                         .child(icon_button(
                             "review-back",
                             "",
@@ -1134,6 +1168,7 @@ impl GuiApp {
         }
         if let Some(task) = review.busy {
             decisions = decisions.child(status_message(
+                theme,
                 match task {
                     Busy::Starting => self.tr("gl-verification-starting"),
                     Busy::Relocating(_) => self.tr("gl-verification-running"),
@@ -1153,7 +1188,7 @@ impl GuiApp {
             }
         }
         if let Some((message, kind)) = &review.feedback {
-            decisions = decisions.child(status_message(message.clone(), *kind));
+            decisions = decisions.child(status_message(theme, message.clone(), *kind));
         }
         div()
             .id("duplicate-review-modal")
@@ -1188,43 +1223,51 @@ impl GuiApp {
                     .p_3()
                     .gap_2()
                     .overflow_y_scroll()
-                    .bg(rgb(PANEL))
+                    .bg(rgb(theme.panel))
                     .border_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(theme.border))
                     .rounded_md()
                     .child(
                         row()
                             .flex_shrink_0()
                             .child(div().flex_1().min_w_0().child(panel_header(
+                                theme,
                                 self.tr("gl-same-files-title"),
                                 self.tr("gl-same-files-note"),
                             )))
                             .child(components::disabled_control(
-                                components::quiet_icon_button(icon_button(
-                                    "review-refresh",
-                                    "󰑐",
-                                    self.tr("gl-refresh-groups"),
-                                    cx,
-                                    |this, _, cx| {
-                                        if this.duplicate_review.busy.is_none() {
-                                            this.duplicate_review.invalidate();
-                                            this.duplicate_review.fingerprint = None;
-                                            this.duplicate_review.members_dirty = false;
-                                            this.duplicate_review.feedback = None;
-                                            this.request_duplicate_groups(0, cx);
-                                            cx.notify();
-                                        }
-                                    },
-                                )),
+                                theme,
+                                components::quiet_icon_button(
+                                    theme,
+                                    icon_button(
+                                        "review-refresh",
+                                        "󰑐",
+                                        self.tr("gl-refresh-groups"),
+                                        cx,
+                                        |this, _, cx| {
+                                            if this.duplicate_review.busy.is_none() {
+                                                this.duplicate_review.invalidate();
+                                                this.duplicate_review.fingerprint = None;
+                                                this.duplicate_review.members_dirty = false;
+                                                this.duplicate_review.feedback = None;
+                                                this.request_duplicate_groups(0, cx);
+                                                cx.notify();
+                                            }
+                                        },
+                                    ),
+                                ),
                                 busy,
                             ))
-                            .child(components::quiet_icon_button(icon_button(
-                                "review-close",
-                                "",
-                                self.tr("gl-close-review"),
-                                cx,
-                                |this, window, cx| this.close_duplicate_review(window, cx),
-                            ))),
+                            .child(components::quiet_icon_button(
+                                theme,
+                                icon_button(
+                                    "review-close",
+                                    "",
+                                    self.tr("gl-close-review"),
+                                    cx,
+                                    |this, window, cx| this.close_duplicate_review(window, cx),
+                                ),
+                            )),
                     )
                     .child(
                         row()
@@ -1238,7 +1281,8 @@ impl GuiApp {
                                     .min_h_0()
                                     .gap_2()
                                     .child(
-                                        caption(self.tr("gl-same-content-groups")).flex_shrink_0(),
+                                        caption(theme, self.tr("gl-same-content-groups"))
+                                            .flex_shrink_0(),
                                     )
                                     .child(
                                         column()
@@ -1256,7 +1300,7 @@ impl GuiApp {
                                     .min_w_0()
                                     .min_h_0()
                                     .gap_2()
-                                    .child(caption(self.tr("gl-file-roles")).flex_shrink_0())
+                                    .child(caption(theme, self.tr("gl-file-roles")).flex_shrink_0())
                                     .child(
                                         column()
                                             .id("duplicate-members-scroll")
@@ -1288,7 +1332,7 @@ impl GuiApp {
                             .overflow_y_scroll()
                             .child(decisions.flex_shrink_0()),
                     )
-                    .child(caption(self.tr("gl-cached-hash-note")).flex_shrink_0()),
+                    .child(caption(theme, self.tr("gl-cached-hash-note")).flex_shrink_0()),
             )
     }
 
@@ -1301,16 +1345,18 @@ impl GuiApp {
         disabled: bool,
         cx: &mut Context<Self>,
     ) -> Div {
-        let mut pager = panel_toolbar()
-            .flex_shrink_0()
-            .child(caption(self.i18n.format(
+        let theme = crate::gui::theme::palette(cx);
+        let mut pager = panel_toolbar().flex_shrink_0().child(caption(
+            theme,
+            self.i18n.format(
                 "gl-page-range",
                 &[
                     ("start", (if total == 0 { 0 } else { offset + 1 }).into()),
                     ("end", ((offset + size).min(total)).into()),
                     ("total", (total).into()),
                 ],
-            )));
+            ),
+        ));
         for (next, icon, hint, previous) in [
             (
                 offset.saturating_sub(size),
@@ -1322,6 +1368,7 @@ impl GuiApp {
         ] {
             let enabled = !disabled && (if previous { offset > 0 } else { next < total });
             pager = pager.child(components::disabled_control(
+                theme,
                 icon_button(
                     (
                         if groups {
