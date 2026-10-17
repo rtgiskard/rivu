@@ -147,6 +147,14 @@ static BINDINGS: &[Binding] = &[
         "keyboard-cancel"
     ),
     binding!("q", "q", 0, TUI & !SEARCH, Close, "keyboard-close"),
+    binding!(
+        "c",
+        "Ctrl+C",
+        CONTROL,
+        TUI | (1 << Context::TuiHelp as u16),
+        Close,
+        "keyboard-close"
+    ),
     binding!("f", "Ctrl+F", CONTROL, GUI_LIST, Search, "keyboard-search"),
     binding!(
         "/",

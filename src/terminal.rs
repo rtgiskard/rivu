@@ -21,7 +21,7 @@ use ratatui::{
     Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Layout, Rect},
-    style::{Modifier, Style},
+    style::Style,
     text::{Line, Span},
     widgets::{Block, Borders, LineGauge, List, ListItem, ListState, Paragraph},
 };
@@ -1140,14 +1140,17 @@ impl UiState {
             return;
         };
         let mut text = row.title.into_owned();
-        for (label, value) in [
-            ("gl-artist", row.artist),
-            ("gl-album", row.album),
-            ("gl-codec", row.codec),
-        ] {
+        for (label, value) in [("gl-artist", row.artist), ("gl-album", row.album)] {
             if !value.is_empty() {
                 text.push_str(&format!("\n\n{}\n{value}", self.i18n.text(label)));
             }
+        }
+        if !row.codec.is_empty() {
+            text.push_str(&format!(
+                "\n\n{}\n{}",
+                self.i18n.text("gl-codec"),
+                row.codec.to_ascii_lowercase()
+            ));
         }
         if let Some(duration) = row.duration {
             text.push_str(&format!(
@@ -1259,6 +1262,10 @@ impl UiState {
     }
 
     fn key_action(&mut self, key: KeyEvent, state: &TuiSnapshot) -> KeyAction {
+        // Global terminal exit wins over editors and modal input ownership.
+        if resolve_key(key, KeyboardContext::TuiHelp) == Some(Action::Close) {
+            return KeyAction::Quit;
+        }
         let context = self.keyboard_context();
         if let Some(details) = &mut self.details {
             let action = resolve_key(key, KeyboardContext::TuiHelp);
@@ -1895,6 +1902,7 @@ struct TerminalColors {
     text: ratatui::style::Color,
     secondary: ratatui::style::Color,
     border: ratatui::style::Color,
+    disabled: ratatui::style::Color,
     accent: ratatui::style::Color,
     selected: ratatui::style::Color,
     warning: ratatui::style::Color,
@@ -1912,6 +1920,7 @@ impl TerminalColors {
             text: rgb(palette.text),
             secondary: rgb(palette.secondary),
             border: rgb(palette.border),
+            disabled: rgb(palette.disabled),
             accent: rgb(palette.accent),
             selected: rgb(palette.selected),
             warning: rgb(palette.warning),
@@ -1929,24 +1938,14 @@ fn playback_symbol(status: PlaybackStatus) -> &'static str {
 }
 
 fn list_selection_style(colors: TerminalColors) -> Style {
-    Style::default()
-        .bg(colors.selected)
-        .add_modifier(Modifier::BOLD)
+    Style::default().bg(colors.selected)
 }
 
 fn draw_loading(frame: &mut ratatui::Frame<'_>, i18n: &Localizer) {
     let colors = TerminalColors::new(crate::theme::Theme::default());
-    let close = keyboard::bindings(KeyboardContext::TuiQueue)
-        .find(|binding| binding.action == Action::Close)
-        .expect("Terminal exit binding");
     frame.render_widget(
-        Paragraph::new(format!(
-            " RIVU  {}\n\n {}  {}",
-            i18n.text("terminal-connecting"),
-            close.label,
-            i18n.text(close.description),
-        ))
-        .style(Style::default().fg(colors.text).bg(colors.bg)),
+        Paragraph::new(format!(" RIVU  {}", i18n.text("terminal-connecting")))
+            .style(Style::default().fg(colors.text).bg(colors.bg)),
         frame.area(),
     );
 }
@@ -1984,7 +1983,6 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut UiState) {
     if let Some(details) = &mut ui.details {
         let block = Block::default()
             .title(ui.i18n.text("terminal-details"))
-            .title_bottom(ui.i18n.text("terminal-details-help"))
             .borders(Borders::TOP | Borders::BOTTOM)
             .border_style(Style::default().fg(colors.border))
             .title_style(Style::default().fg(colors.accent));
@@ -2034,58 +2032,32 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut UiState) {
         return;
     }
     let outer = Layout::vertical([
-        Constraint::Length(2),
+        Constraint::Length(1),
         Constraint::Min(1),
-        Constraint::Length(3),
+        Constraint::Length(2),
         Constraint::Length(1),
     ])
     .split(area);
     let i18n = &ui.i18n;
-    let active = match &ui.view {
-        View::Queue => 0,
-        View::Search(_) => 1,
-        View::Tree(_) => 2,
-        View::Playlists(_) | View::PlaylistDetail { .. } => 3,
+    let current_view = match &ui.view {
+        View::Queue => "terminal-queue",
+        View::Search(_) => "terminal-search",
+        View::Tree(_) => "terminal-folders",
+        View::Playlists(_) | View::PlaylistDetail { .. } => "terminal-playlists",
     };
-    let navigation = [
-        ("󰎆", "terminal-queue", ""),
-        ("", "terminal-search", " /"),
-        ("", "terminal-folders", " t"),
-        ("󰲋", "terminal-playlists", " P"),
-    ];
-    let mut header = vec![Span::styled(
-        " RIVU  ",
-        Style::default()
-            .fg(colors.accent)
-            .add_modifier(Modifier::BOLD),
-    )];
-    for (index, (symbol, label, key)) in navigation.into_iter().enumerate() {
-        if area.width < 90 && index != active {
-            continue;
-        }
-        header.push(Span::styled(
-            format!(" {symbol} {}{key}  ", i18n.text(label)),
-            Style::default().fg(if index == active {
-                colors.accent
-            } else {
-                colors.secondary
-            }),
-        ));
-    }
     frame.render_widget(
-        Paragraph::new(Line::from(header)).block(
-            Block::default()
-                .borders(Borders::BOTTOM)
-                .border_style(Style::default().fg(colors.border)),
-        ),
+        Paragraph::new(Line::from(vec![
+            Span::styled(" RIVU", Style::default().fg(colors.accent)),
+            Span::styled(" / ", Style::default().fg(colors.secondary)),
+            Span::styled(i18n.text(current_view), Style::default().fg(colors.accent)),
+        ])),
         outer[0],
     );
     ui.page_size = outer[1]
         .height
         .saturating_sub(match ui.view {
-            View::Search(_) => 3,
-            View::Playlists(_) => 1,
-            _ => 2,
+            View::Search(_) => 2,
+            _ => 1,
         })
         .max(1) as usize;
     match &mut ui.view {
@@ -2097,26 +2069,11 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut UiState) {
         View::Playlists(playlists) => draw_playlists(frame, outer[1], playlists, i18n, colors),
         View::Queue => draw_queue(frame, outer[1], state, &mut ui.queue, i18n, colors),
     }
-    let playback = Block::default()
-        .borders(Borders::TOP)
-        .border_style(Style::default().fg(colors.border));
-    let playback_area = playback.inner(outer[2]);
-    frame.render_widget(playback, outer[2]);
-    let rows =
-        Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(playback_area);
-    let status = match state.playback.status {
-        PlaybackStatus::Playing => "terminal-playing",
-        PlaybackStatus::Paused => "terminal-paused",
-        PlaybackStatus::Stopped => "terminal-stopped",
-    };
-    let mut now = vec![
-        Span::styled(
-            format!(" {} ", playback_symbol(state.playback.status)),
-            Style::default().fg(colors.accent),
-        ),
-        Span::styled(i18n.text(status), Style::default().fg(colors.secondary)),
-        Span::raw("  "),
-    ];
+    let rows = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(outer[2]);
+    let mut now = vec![Span::styled(
+        format!(" {}  ", playback_symbol(state.playback.status)),
+        Style::default().fg(colors.accent),
+    )];
     if let Some(track) = state.current_track() {
         now.push(Span::raw(track.title.as_str()));
         if !track.artist.is_empty() {
@@ -2136,7 +2093,7 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut UiState) {
         .current_track()
         .filter(|_| area.width >= 90)
         .map(|track| {
-            let mut metadata = track.codec.clone();
+            let mut metadata = track.codec.to_ascii_lowercase();
             if track.sample_rate != 0 {
                 if !metadata.is_empty() {
                     metadata.push_str(" · ");
@@ -2200,94 +2157,50 @@ fn draw_status(
     state: &TuiSnapshot,
     colors: TerminalColors,
 ) {
-    let i18n = &ui.i18n;
-    let volume = format!(" 󰕾 {}% ", (state.playback.volume * 100.0).round() as u8);
-    let modes = if area.width >= 85 {
-        format!(
-            " 󰒟 {} {}  󰑖 {} {} ",
-            i18n.text("terminal-shuffle"),
-            i18n.text(if state.playback.shuffle {
-                "terminal-on"
-            } else {
-                "terminal-off"
-            }),
-            i18n.text("terminal-repeat"),
-            repeat_label(state.playback.repeat, i18n)
-        )
+    let volume = (state.playback.volume * 100.0).round() as u8;
+    let volume_icon = if state.playback.volume == 0.0 {
+        "󰖁"
     } else {
-        format!(
-            " 󰒟 {}  󰑖 {} ",
-            i18n.text(if state.playback.shuffle {
-                "terminal-on"
-            } else {
-                "terminal-off"
-            }),
-            repeat_label(state.playback.repeat, i18n)
-        )
+        "󰕾"
     };
-    let status_width = Line::from(volume.as_str()).width() + Line::from(modes.as_str()).width();
+    let (repeat_icon, repeat_color) = match state.playback.repeat {
+        RepeatMode::Off => ("󰑖", colors.disabled),
+        RepeatMode::All => ("󰑖", colors.accent),
+        RepeatMode::One => ("󰑘", colors.accent),
+    };
+    let modes = Line::from(vec![
+        Span::raw(format!(" {volume_icon}  {volume}%  ")),
+        Span::styled(
+            "󰒟",
+            Style::default().fg(if state.playback.shuffle {
+                colors.accent
+            } else {
+                colors.disabled
+            }),
+        ),
+        Span::raw("  "),
+        Span::styled(repeat_icon, Style::default().fg(repeat_color)),
+        Span::raw("  "),
+    ]);
     let columns = Layout::horizontal([
-        Constraint::Length(status_width.min(area.width.saturating_sub(8) as usize) as u16),
+        Constraint::Length(modes.width().min(area.width.saturating_sub(8) as usize) as u16),
         Constraint::Min(0),
     ])
     .split(area);
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::raw(volume),
-            Span::styled(modes, Style::default().fg(colors.secondary)),
-        ])),
-        columns[0],
-    );
-    let context = ui.keyboard_context();
-    let hints: &[Action] = match context {
-        KeyboardContext::TuiSearchQuery => &[Action::Help, Action::Traverse],
-        KeyboardContext::TuiQueue | KeyboardContext::TuiPlaylistTracks => &[
-            Action::Help,
-            Action::Details,
-            Action::Activate,
-            Action::Remove,
-        ],
-        _ => &[Action::Help, Action::Details, Action::Activate],
-    };
-    let mut prompt = String::new();
-    for action in hints {
-        if let Some(binding) = keyboard::bindings(context).find(|binding| binding.action == *action)
-        {
-            let label = match action {
-                Action::Activate => "terminal-hint-open",
-                Action::Remove => "terminal-hint-remove",
-                Action::Details => "terminal-details",
-                Action::Traverse => "terminal-hint-focus",
-                _ => "terminal-hint-help",
-            };
-            let hint = format!("{} {}", binding.label, i18n.text(label));
-            let extra = usize::from(!prompt.is_empty()) * 3;
-            if Line::from(prompt.as_str()).width() + Line::from(hint.as_str()).width() + extra
-                <= columns[1].width as usize
-            {
-                if !prompt.is_empty() {
-                    prompt.push_str(" · ");
-                }
-                prompt.push_str(&hint);
-            }
-        }
+    frame.render_widget(Paragraph::new(modes), columns[0]);
+    if let Some(notice) = &ui.message {
+        let (symbol, color) = match notice.kind {
+            NoticeKind::Information => ("", colors.secondary),
+            NoticeKind::Warning => ("", colors.warning),
+            NoticeKind::Error => ("", colors.error),
+        };
+        let text = format!("{symbol} {}", notice.text);
+        frame.render_widget(
+            Paragraph::new(cell_text(&text, columns[1].width as usize, true))
+                .style(Style::default().fg(color)),
+            columns[1],
+        );
     }
-    let (prompt, color) = ui
-        .message
-        .as_ref()
-        .map_or((prompt, colors.secondary), |notice| {
-            let (symbol, color) = match notice.kind {
-                NoticeKind::Information => ("", colors.secondary),
-                NoticeKind::Warning => ("", colors.warning),
-                NoticeKind::Error => ("", colors.error),
-            };
-            (format!("{symbol} {}", notice.text), color)
-        });
-    frame.render_widget(
-        Paragraph::new(cell_text(&prompt, columns[1].width as usize, true))
-            .style(Style::default().fg(color)),
-        columns[1],
-    );
 }
 
 struct RowContent<'a> {
@@ -2357,19 +2270,57 @@ struct BrowserColumns {
 }
 
 impl BrowserColumns {
-    fn new(width: u16, tracks: bool) -> Self {
-        let width = width.saturating_sub(2) as usize;
-        let artist = if tracks && width >= 62 {
-            (width / 4).min(26)
-        } else {
-            0
-        };
-        let album = if tracks && width >= 108 { 22 } else { 0 };
-        let codec = if tracks && width >= 128 { 10 } else { 0 };
-        let duration = if tracks && width >= 28 { 8 } else { 0 };
-        let markers = width.min(6);
+    fn new<'a>(width: u16, tracks: bool, rows: impl Iterator<Item = RowContent<'a>>) -> Self {
+        let width = width as usize;
+        let markers = if width >= 14 { 9 } else { 0 };
+        let mut artist = 0;
+        let mut album = 0;
+        let mut codec = 0;
+        let mut duration = 0;
+        if tracks {
+            // The caller supplies only retained page items, never the full library.
+            for row in rows.filter(|row| row.is_track) {
+                artist = artist.max(Span::raw(row.artist).width().min(24));
+                album = album.max(Span::raw(row.album).width().min(24));
+                codec = codec.max(Span::raw(row.codec).width());
+                let minutes = row.duration.map_or(0, |seconds| {
+                    if seconds.is_finite() && seconds >= 0.0 {
+                        seconds as u64 / 60
+                    } else {
+                        0
+                    }
+                });
+                duration = duration.max(minutes.checked_ilog10().unwrap_or(0) as usize + 4);
+            }
+        }
+        // Widths include a two-cell gap. Reserve readable title space before
+        // admitting intrinsic attributes, then shrink or hide secondary text.
+        for column in [&mut artist, &mut album, &mut codec, &mut duration] {
+            if *column != 0 {
+                *column += 2;
+            }
+        }
+        let title_min = (width / 2).clamp(12, 24);
+        let mut budget = width.saturating_sub(markers + title_min);
+        for column in [&mut duration, &mut codec] {
+            if *column > budget {
+                *column = 0;
+            }
+            budget -= *column;
+        }
+        while artist + album > budget {
+            if album >= artist && album > 6 {
+                album -= 1;
+            } else if artist > 6 {
+                artist -= 1;
+            } else if album != 0 {
+                album = 0;
+            } else {
+                artist = 0;
+            }
+        }
         Self {
-            title: width.saturating_sub(markers + artist + album + codec + duration),
+            title: width - markers - artist - album - codec - duration,
             artist,
             album,
             codec,
@@ -2378,44 +2329,40 @@ impl BrowserColumns {
         }
     }
 
-    fn line(self, row: RowContent<'_>, selected: bool, colors: TerminalColors) -> Line<'static> {
-        let mut spans = Vec::with_capacity(9);
-        spans.push(Span::styled(
-            if selected { "▎ " } else { "  " },
-            Style::default().fg(colors.accent),
-        ));
-        for (index, (symbol, color)) in [
-            (row.marker, colors.accent),
-            (if row.favorite { "" } else { " " }, colors.secondary),
-            (if row.missing { "" } else { " " }, colors.warning),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let width = self.markers.saturating_sub(index * 2).min(2);
-            if width != 0 {
+    fn line(self, row: RowContent<'_>, colors: TerminalColors) -> Line<'static> {
+        let mut spans = Vec::with_capacity(13);
+        if self.markers != 0 {
+            for (symbol, color, width) in [
+                (row.marker, colors.accent, 3),
+                (if row.favorite { "" } else { " " }, colors.secondary, 3),
+                (if row.missing { "" } else { " " }, colors.warning, 2),
+            ] {
                 spans.push(Span::styled(
                     cell_text(symbol, width, false),
                     Style::default().fg(color),
                 ));
             }
+            // Always separate the fixed marker slots from the title.
+            spans.push(Span::raw(" "));
         }
         let title = if self.artist == 0 {
             track_label(&row.title, row.artist)
         } else {
             Cow::Borrowed(row.title.as_ref())
         };
-        spans.push(Span::raw(column_text(&title, self.title)));
-        for (text, width) in [
-            (row.artist, self.artist),
-            (row.album, self.album),
-            (row.codec, self.codec),
+        spans.push(Span::raw(cell_text(&title, self.title, false)));
+        for (text, width, codec) in [
+            (row.artist, self.artist, false),
+            (row.album, self.album, false),
+            (row.codec, self.codec, true),
         ] {
             if width != 0 {
-                spans.push(Span::styled(
-                    column_text(text, width),
-                    Style::default().fg(colors.secondary),
-                ));
+                let mut text = cell_text(text, width - 2, false);
+                if codec {
+                    text.make_ascii_lowercase();
+                }
+                spans.push(Span::raw("  "));
+                spans.push(Span::styled(text, Style::default().fg(colors.secondary)));
             }
         }
         if self.duration != 0 {
@@ -2424,39 +2371,14 @@ impl BrowserColumns {
             } else {
                 String::new()
             };
+            spans.push(Span::raw("  "));
             spans.push(Span::styled(
-                cell_text(&duration, self.duration, true),
+                cell_text(&duration, self.duration - 2, true),
                 Style::default().fg(colors.secondary),
             ));
         }
         Line::from(spans)
     }
-
-    fn header(self, i18n: &Localizer, colors: TerminalColors) -> Line<'static> {
-        let mut text = " ".repeat(self.markers + 2);
-        for (label, width, right) in [
-            ("gl-title", self.title, false),
-            ("gl-artist", self.artist, false),
-            ("gl-album", self.album, false),
-            ("gl-codec", self.codec, false),
-            ("gl-duration", self.duration, true),
-        ] {
-            if width != 0 {
-                text.push_str(&if right {
-                    cell_text(i18n.text(label), width, true)
-                } else {
-                    column_text(i18n.text(label), width)
-                });
-            }
-        }
-        Line::styled(text, Style::default().fg(colors.secondary))
-    }
-}
-
-fn column_text(text: &str, width: usize) -> String {
-    let mut cell = cell_text(text, width.saturating_sub(2), false);
-    cell.extend(std::iter::repeat_n(' ', width.min(2)));
-    cell
 }
 
 // Clip whole graphemes by displayed cells. Embedded line breaks and Fluent's
@@ -2556,8 +2478,7 @@ fn draw_paged_list<T>(
     let BrowserStyle { mode, colors } = style;
     let tracks = !matches!(mode, BrowserMode::Labels);
     let focused = !matches!(mode, BrowserMode::UnfocusedTracks);
-    let header_height = if tracks { 2 } else { 1 };
-    page.set_viewport(area.height.saturating_sub(header_height) as usize);
+    page.set_viewport(area.height.saturating_sub(1) as usize);
     let loading = !page.loaded
         || (page.selection.offset()..page.visible_end()).any(|index| page.get(index).is_none());
     let title = if loading {
@@ -2567,9 +2488,8 @@ fn draw_paged_list<T>(
     } else {
         title
     };
-    let rows =
-        Layout::vertical([Constraint::Length(header_height), Constraint::Min(0)]).split(area);
-    let columns = BrowserColumns::new(area.width, tracks);
+    let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(area);
+    let columns = BrowserColumns::new(area.width, tracks, page.pages.values().flatten().map(&row));
     let count = if page.loaded {
         format!(
             " {}/{} ",
@@ -2589,23 +2509,16 @@ fn draw_paged_list<T>(
                 colors.secondary
             }),
         ),
-        Span::styled(count, Style::default().fg(colors.secondary)),
+        Span::styled(
+            cell_text(&count, count_width, true),
+            Style::default().fg(colors.secondary),
+        ),
     ]);
-    let mut header = vec![title_line];
-    if tracks {
-        header.push(columns.header(i18n, colors));
-    }
-    frame.render_widget(Paragraph::new(header), rows[0]);
+    frame.render_widget(Paragraph::new(title_line), rows[0]);
     let items = (page.selection.offset()..page.visible_end()).map(|index| {
         ListItem::new(page.get(index).map_or_else(
-            || Line::from("      …"),
-            |item| {
-                columns.line(
-                    row(item),
-                    focused && page.selection.selected() == Some(index),
-                    colors,
-                )
-            },
+            || Line::from(cell_text("…", area.width as usize, false)),
+            |item| columns.line(row(item), colors),
         ))
     });
     let mut selection = ListState::default().with_selected(
@@ -2781,13 +2694,6 @@ fn draw_tree(
     );
 }
 
-fn repeat_label(mode: RepeatMode, i18n: &Localizer) -> &str {
-    match mode {
-        RepeatMode::Off => i18n.text("terminal-off"),
-        RepeatMode::All => i18n.text("terminal-repeat-all"),
-        RepeatMode::One => i18n.text("terminal-repeat-one"),
-    }
-}
 fn fmt_time(seconds: f64) -> String {
     if !seconds.is_finite() || seconds < 0.0 {
         return "0:00".into();
@@ -2913,11 +2819,11 @@ mod tests {
         track.favorite = true;
         track.missing = true;
         for width in [30, 60, 80, 110, 140] {
-            let line = BrowserColumns::new(width, true).line(
-                RowContent::track(&track),
-                true,
-                TerminalColors::new(crate::theme::Theme::default()),
-            );
+            let line = BrowserColumns::new(width, true, std::iter::once(RowContent::track(&track)))
+                .line(
+                    RowContent::track(&track),
+                    TerminalColors::new(crate::theme::Theme::default()),
+                );
             assert_eq!(line.width(), width as usize);
             let text = line
                 .spans
@@ -2931,6 +2837,113 @@ mod tests {
         }
         assert_eq!(cell_text("春风", 3, false), "春…");
         assert_eq!(cell_text("e\u{301}夜航", 4, false), "e\u{301}夜…");
+    }
+
+    #[test]
+    fn browser_modes_leave_all_rows_below_the_count_header_for_items() {
+        let i18n = Localizer::new("en-US");
+        for mode in [
+            BrowserMode::Tracks,
+            BrowserMode::UnfocusedTracks,
+            BrowserMode::Labels,
+        ] {
+            let mut page = PagedList::default();
+            page.insert(0, 2, 2, vec![track(0), track(1)]);
+            let mut terminal = Terminal::new(TestBackend::new(80, 3)).unwrap();
+            terminal
+                .draw(|frame| {
+                    draw_paged_list(
+                        frame,
+                        frame.area(),
+                        "Items".into(),
+                        &mut page,
+                        |track| RowContent::track(track),
+                        &i18n,
+                        BrowserStyle {
+                            mode,
+                            colors: TerminalColors::new(crate::theme::Theme::default()),
+                        },
+                    );
+                })
+                .unwrap();
+            let text = terminal_text(&terminal);
+            let lines = text.lines().collect::<Vec<_>>();
+            assert!(lines[1].contains("row-0"), "{text}");
+            assert!(lines[2].contains("row-1"), "{text}");
+        }
+    }
+
+    #[test]
+    fn compact_attributes_align_loaded_rows_and_keep_marker_gutter_stable() {
+        let mut first = track(0);
+        first.title = "first-title".into();
+        first.codec = "FLAC".into();
+        first.duration = Some(243.0);
+        let mut second = track(1);
+        second.artist = "longer artist".into();
+        second.codec = "PCM_S16LE".into();
+        second.duration = Some(6003.0);
+        let columns = BrowserColumns::new(
+            80,
+            true,
+            [&first, &second].into_iter().map(RowContent::track),
+        );
+        let text = |line: Line<'_>| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        };
+        let colors = TerminalColors::new(crate::theme::Theme::default());
+        let first_text = text(columns.line(RowContent::track(&first), colors));
+        let second_text = text(columns.line(RowContent::track(&second), colors));
+        assert!(first_text.contains("flac") && !first_text.contains("FLAC"));
+        assert!(second_text.contains("pcm_s16le"));
+        assert_eq!(first_text.find("flac"), second_text.find("pcm_s16le"));
+        assert!(first_text.ends_with("4:03"));
+        assert!(second_text.ends_with("100:03"));
+        let gutter_width = Span::raw(first_text.split("first-title").next().unwrap()).width();
+        for marked in [false, true] {
+            first.favorite = marked;
+            first.missing = marked;
+            let mut row = RowContent::track(&first);
+            if marked {
+                row.marker = "󰐊";
+            }
+            let line = columns.line(row, colors);
+            assert_eq!(line.width(), 80);
+            let rendered = text(line);
+            let title_start = rendered.find("first-title").unwrap();
+            let gutter = &rendered[..title_start];
+            assert_eq!(Span::raw(gutter).width(), gutter_width);
+            assert!(gutter.ends_with("  "));
+        }
+    }
+
+    #[test]
+    fn tiny_browser_rows_preserve_title_without_horizontal_overflow() {
+        let mut track = track(0);
+        track.title = "tiny".into();
+        track.artist = "artist ".repeat(20);
+        track.album = "album ".repeat(20);
+        track.codec = "PCM_S16LE".into();
+        track.duration = Some(6003.0);
+        for width in 0..=100 {
+            let line = BrowserColumns::new(width, true, std::iter::once(RowContent::track(&track)))
+                .line(
+                    RowContent::track(&track),
+                    TerminalColors::new(crate::theme::Theme::default()),
+                );
+            assert_eq!(line.width(), width as usize);
+            let text = line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>();
+            if width >= 9 {
+                assert!(text.contains("tiny"), "width {width}: {text}");
+            }
+        }
     }
 
     #[test]
@@ -2981,21 +2994,12 @@ mod tests {
                 })
                 .unwrap();
             let buffer = terminal.backend().buffer();
-            assert_eq!(buffer[(2, 2)].symbol(), symbol);
-            assert_eq!(buffer[(2, 3)].symbol(), " ");
-            assert_eq!(buffer[(0, 3)].symbol(), "▎");
-            assert_eq!(
-                buffer[(2, 2)].fg,
-                TerminalColors::new(state.system.ui_theme).accent
-            );
-            assert_eq!(
-                buffer[(0, 3)].fg,
-                TerminalColors::new(state.system.ui_theme).accent
-            );
-            assert_eq!(
-                buffer[(0, 3)].bg,
-                TerminalColors::new(state.system.ui_theme).selected
-            );
+            assert_eq!(buffer[(0, 1)].symbol(), symbol);
+            assert_eq!(buffer[(0, 2)].symbol(), " ");
+            let colors = TerminalColors::new(state.system.ui_theme);
+            assert_eq!(buffer[(0, 1)].fg, colors.accent);
+            assert_ne!(buffer[(0, 1)].bg, colors.selected);
+            assert_eq!(buffer[(0, 2)].bg, colors.selected);
             assert_eq!(page.selected().unwrap().id, 18);
         }
     }
@@ -3476,9 +3480,8 @@ mod tests {
 
     fn render_view(ui: &mut UiState) -> String {
         let height = match ui.view {
-            View::Search(_) => 7,
-            View::Playlists(_) => 5,
-            _ => 6,
+            View::Search(_) => 6,
+            _ => 5,
         };
         let mut terminal = Terminal::new(TestBackend::new(60, height)).unwrap();
         terminal
@@ -4591,6 +4594,61 @@ mod tests {
         playlists.set_viewport(10);
         assert_eq!(playlists.selection.selected(), Some(34));
         assert_eq!(playlists.selection.offset(), 30);
+    }
+
+    #[test]
+    fn interrupt_exits_editors_and_overlays_without_dispatching_core_commands() {
+        let state = TuiSnapshot::default();
+        let mut screens = vec![
+            UiState::default(),
+            UiState {
+                view: View::Search(LibrarySearch::default()),
+                ..UiState::default()
+            },
+            UiState {
+                show_help: true,
+                ..UiState::default()
+            },
+            UiState {
+                details: Some(Details {
+                    text: "metadata".into(),
+                    wrapped: Vec::new(),
+                    width: 0,
+                    scroll: 0,
+                    max_scroll: 0,
+                }),
+                ..UiState::default()
+            },
+        ];
+        let interrupt = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        // The loading screen resolves the same shared binding before UiState exists.
+        assert_eq!(
+            resolve_key(interrupt, KeyboardContext::TuiQueue),
+            Some(Action::Close)
+        );
+        for ui in &mut screens {
+            assert!(matches!(ui.key_action(interrupt, &state), KeyAction::Quit));
+        }
+    }
+
+    #[test]
+    fn question_mark_opens_help_except_when_owned_by_query_input() {
+        let state = TuiSnapshot::default();
+        for modifiers in [KeyModifiers::NONE, KeyModifiers::SHIFT] {
+            let mut ui = UiState::default();
+            let help = KeyEvent::new(KeyCode::Char('?'), modifiers);
+            ui.key_action(help, &state);
+            assert!(ui.show_help);
+            ui.key_action(help, &state);
+            assert!(!ui.show_help);
+            ui.view = View::Search(LibrarySearch::default());
+            ui.key_action(help, &state);
+            assert!(!ui.show_help);
+            assert!(matches!(&ui.view, View::Search(search) if search.query == "?"));
+            ui.key_action(KeyEvent::from(KeyCode::Tab), &state);
+            ui.key_action(help, &state);
+            assert!(ui.show_help);
+        }
     }
 
     #[test]

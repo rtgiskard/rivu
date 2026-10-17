@@ -265,11 +265,12 @@ the selected track. Delete removes the selected Queue occurrence or playlist ent
 never media files. Moving the selection does not change the playing occurrence;
 its marker distinguishes playing, paused, and stopped states.
 
-Track lists share title, artist, album, codec, and duration columns. Secondary
-columns hide as the terminal narrows; the title takes priority, and unknown durations
-are shown as `–:––`. Long values are shortened with an ellipsis without changing
-the underlying metadata. These automatic columns are independent of the desktop
-Library column settings.
+Track lists show titles with compact artist, album, codec, and duration information.
+Artist and album widths adapt to loaded content within bounded widths; secondary
+information hides as the terminal narrows, and titles take priority. Codecs are
+shown in lowercase and unknown durations as `–:––`. Long values are shortened with
+an ellipsis without changing metadata. These automatic widths are independent of
+the desktop Library column settings.
 
 Outside the query editor, `i` opens read-only details for the selected loaded item,
 including full text hidden by the list's width. Details retain that metadata until
@@ -278,17 +279,22 @@ changing the underlying selection. Playback and removal keys do not operate the
 list while details are open.
 
 The bottom area keeps playback position, duration, volume, and playback modes
-available while browsing. Contextual key hints yield to temporary notifications;
-warnings and failures include distinct symbols, and ordinary playback updates do
-not replace a still-visible failure. F1 or `?` opens the complete help for the current view.
+available while browsing. Shuffle and repeat use dim icons when disabled and
+highlighted icons when enabled; single-track repeat has its own icon. Notifications
+retain explanatory text: warnings and failures have distinct symbols, and ordinary
+playback updates do not replace a still-visible failure. Shortcut hints are not
+shown during browsing; `?` or F1 opens help for the current view. In the query editor,
+`?` remains search text; Tab focuses results, where `?` opens help.
 
 Left/Backspace goes to the parent directory; Left/Esc leaves playlist details.
 Esc returns from search, the tree, or the playlist catalog to Queue. `q` exits
 outside Search without stopping the core.
-While initially connecting, `q` also exits the loading screen. `SIGINT` and
-`SIGTERM` close only the terminal client, including during connection setup.
-Connection errors, normal exits, and these signals restore the terminal's input
-mode, screen, and cursor; the core keeps running.
+Ctrl-C exits from every terminal view, including the query editor, help, details,
+and initial connection screen, without stopping the core. While initially connecting,
+`q` also exits the loading screen. `SIGINT` and `SIGTERM` close only the terminal
+client, including during connection setup. Connection errors, normal exits, and
+these signals restore the terminal's input mode, screen, and cursor; the core keeps
+running.
 
 == Desktop tray and window lifecycle
 
