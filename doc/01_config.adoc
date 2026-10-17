@@ -502,6 +502,11 @@ An abnormal exit loses changes made since the last successful write. Panel
 settings Apply takes effect immediately for this session only; it does not write
 the layout file.
 
+Sync and orderly exit skip file writes when the persisted layout content matches
+the last successful save or the valid collection loaded at startup. Reverting
+edits to that content also skips the write. A missing or invalid file is written
+on the next sync or orderly exit, even if no layout edits were made.
+
 Without a saved layout collection, Rivu starts in `Default` and also provides
 `Album` and `Visual`. Default keeps artwork, playback, browsing, queue, and a
 frequency view visible; Album emphasizes the cover and album browser; Visual

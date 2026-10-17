@@ -28,7 +28,7 @@ struct State {
     latest: LayoutSet,
     load_error: Option<String>,
     revision: u64,
-    saved_revision: u64,
+    saved_revision: Option<u64>,
     request_id: u64,
     pending: Option<SaveRequest>,
     saving_revision: Option<u64>,
@@ -66,7 +66,8 @@ impl LayoutSaveOwner {
     pub fn new(path: PathBuf) -> Self {
         // This is the session's only startup read, not an interactive save or a
         // window-reopen read. All runtime validation/encoding/writes are below.
-        let (layouts, error) = if path.exists() {
+        let exists = path.exists();
+        let (layouts, error) = if exists {
             match LayoutSet::load(&path) {
                 Ok(layouts) => (layouts, None),
                 Err(error) => (LayoutSet::default(), Some(format!("{error:#}"))),
@@ -74,7 +75,8 @@ impl LayoutSaveOwner {
         } else {
             (LayoutSet::default(), None)
         };
-        Self::start(layouts, error, move |snapshot| {
+        let saved = exists && error.is_none();
+        Self::start(layouts, error, saved, move |snapshot| {
             snapshot.save(&path).map_err(|error| format!("{error:#}"))
         })
     }
@@ -82,14 +84,16 @@ impl LayoutSaveOwner {
     fn start(
         layouts: LayoutSet,
         load_error: Option<String>,
+        saved: bool,
         mut save: impl FnMut(&LayoutSet) -> SaveResult + Send + 'static,
     ) -> Self {
+        let mut saved_snapshot = saved.then(|| layouts.clone());
         let shared = Arc::new(Shared {
             state: Mutex::new(State {
                 latest: layouts,
                 load_error,
                 revision: 0,
-                saved_revision: 0,
+                saved_revision: saved.then_some(0),
                 request_id: 0,
                 pending: None,
                 saving_revision: None,
@@ -115,7 +119,22 @@ impl LayoutSaveOwner {
                         state.saving_revision = Some(request.revision);
                         request
                     };
-                    let result = save(&request.snapshot);
+                    let result = if saved_snapshot
+                        .as_ref()
+                        .is_some_and(|saved| request.snapshot.persisted_eq(saved))
+                    {
+                        // Runtime-only changes must not bypass validation of the
+                        // request, but require neither encoding nor filesystem I/O.
+                        request
+                            .snapshot
+                            .validate()
+                            .map_err(|error| format!("{error:#}"))
+                    } else {
+                        save(&request.snapshot)
+                    };
+                    if result.is_ok() {
+                        saved_snapshot = Some(request.snapshot);
+                    }
                     if let Err(error) = &result {
                         // Even a superseded failure has a diagnostic; it must
                         // not replace the current operation's UI feedback.
@@ -125,7 +144,7 @@ impl LayoutSaveOwner {
                         let mut state = worker_shared.state.lock();
                         state.saving_revision = None;
                         if result.is_ok() {
-                            state.saved_revision = request.revision;
+                            state.saved_revision = Some(request.revision);
                             state.load_error = None;
                         }
                         if request.id == state.request_id {
@@ -214,7 +233,8 @@ impl LayoutSaveHandle {
                     .is_some_and(|request| request.revision == revision);
             if requested_latest {
                 attempted_revision = Some(revision);
-            } else if state.saved_revision != revision && attempted_revision != Some(revision) {
+            } else if state.saved_revision != Some(revision) && attempted_revision != Some(revision)
+            {
                 // Retry a prior failure once per flush, but never loop on a
                 // failure from this flush. Recheck memory after every write.
                 state.request_save();
@@ -282,9 +302,90 @@ mod tests {
     }
 
     #[test]
+    fn unchanged_sync_and_reverted_edits_do_not_write() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let writes = Arc::clone(&written);
+        let original = named("disk");
+        let owner = LayoutSaveOwner::start(original.clone(), None, true, move |snapshot| {
+            writes.lock().push(snapshot.active_name().to_owned());
+            Ok(())
+        });
+        let handle = owner.handle();
+        for _ in 0..2 {
+            handle.submit(&original);
+            let request = handle.sync();
+            assert!(wait_for_completion(&handle, request).result.is_ok());
+        }
+        handle.submit(&named("changed"));
+        handle.submit(&original);
+        owner.flush().unwrap();
+        assert!(written.lock().is_empty());
+        handle.submit(&named("saved"));
+        let request = handle.sync();
+        assert!(wait_for_completion(&handle, request).result.is_ok());
+        let request = handle.sync();
+        assert!(wait_for_completion(&handle, request).result.is_ok());
+        owner.flush().unwrap();
+        assert_eq!(&*written.lock(), &["saved"]);
+    }
+
+    #[test]
+    fn successful_running_snapshot_not_newer_memory_becomes_baseline() {
+        let (started, starts) = mpsc::channel();
+        let (release, releases) = mpsc::channel();
+        let original = named("disk");
+        let owner = LayoutSaveOwner::start(original.clone(), None, true, move |snapshot| {
+            started.send(snapshot.active_name().to_owned()).unwrap();
+            releases.recv().unwrap();
+            Ok(())
+        });
+        let handle = owner.handle();
+        handle.submit(&named("captured"));
+        let request = handle.sync();
+        assert_eq!(starts.recv().unwrap(), "captured");
+        handle.submit(&original);
+        release.send(()).unwrap();
+        assert!(wait_for_completion(&handle, request).result.is_ok());
+        let request = handle.sync();
+        assert_eq!(starts.recv().unwrap(), "disk");
+        release.send(()).unwrap();
+        assert!(wait_for_completion(&handle, request).result.is_ok());
+        owner.flush().unwrap();
+    }
+
+    #[test]
+    fn missing_or_invalid_file_is_written_even_without_edits() {
+        for invalid in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("layout.json");
+            if invalid {
+                std::fs::write(&path, b"not JSON").unwrap();
+            }
+            let owner = LayoutSaveOwner::new(path.clone());
+            let expected = owner.handle().snapshot().0;
+            owner.flush().unwrap();
+            assert!(LayoutSet::load(&path).unwrap().persisted_eq(&expected));
+        }
+    }
+
+    #[test]
+    fn equal_content_still_rejects_invalid_runtime_state() {
+        let original = named("disk");
+        let owner = LayoutSaveOwner::start(original.clone(), None, true, |_| {
+            panic!("equal persisted content must not reach the file writer")
+        });
+        let mut invalid = original;
+        invalid.current_mut().next_id = 0;
+        let handle = owner.handle();
+        handle.submit(&invalid);
+        let request = handle.sync();
+        assert!(wait_for_completion(&handle, request).result.is_err());
+    }
+
+    #[test]
     fn edits_stay_in_memory_across_window_reopen_and_owner_drop() {
         let (write, writes) = mpsc::channel();
-        let owner = LayoutSaveOwner::start(named("disk"), None, move |snapshot| {
+        let owner = LayoutSaveOwner::start(named("disk"), None, true, move |snapshot| {
             write.send(snapshot.active_name().to_owned()).unwrap();
             Ok(())
         });
@@ -306,7 +407,7 @@ mod tests {
     fn flush_saves_latest_dirty_memory_once_and_skips_clean_state() {
         let written = Arc::new(Mutex::new(Vec::new()));
         let writes = Arc::clone(&written);
-        let owner = LayoutSaveOwner::start(named("disk"), None, move |snapshot| {
+        let owner = LayoutSaveOwner::start(named("disk"), None, true, move |snapshot| {
             writes.lock().push(snapshot.active_name().to_owned());
             Ok(())
         });
@@ -331,7 +432,7 @@ mod tests {
         let written = Arc::new(Mutex::new(Vec::new()));
         let writes = Arc::clone(&written);
         let gui_thread = std::thread::current().id();
-        let owner = LayoutSaveOwner::start(LayoutSet::default(), None, move |snapshot| {
+        let owner = LayoutSaveOwner::start(LayoutSet::default(), None, true, move |snapshot| {
             assert_ne!(std::thread::current().id(), gui_thread);
             started.send(snapshot.active_name().to_owned()).unwrap();
             releases.recv().unwrap();
@@ -363,7 +464,7 @@ mod tests {
     fn flush_waits_for_latest_memory_including_edits_during_a_write() {
         let (started, starts) = mpsc::channel();
         let (release, releases) = mpsc::channel();
-        let owner = LayoutSaveOwner::start(LayoutSet::default(), None, move |snapshot| {
+        let owner = LayoutSaveOwner::start(LayoutSet::default(), None, true, move |snapshot| {
             started.send(snapshot.active_name().to_owned()).unwrap();
             releases.recv().unwrap();
             Ok(())
@@ -406,6 +507,7 @@ mod tests {
         let owner = LayoutSaveOwner::start(
             LayoutSet::default(),
             Some("load failure".into()),
+            false,
             move |snapshot| {
                 attempts += 1;
                 started.send(snapshot.active_name().to_owned()).unwrap();
@@ -445,7 +547,7 @@ mod tests {
         let (release, releases) = mpsc::channel();
         let written = Arc::new(Mutex::new(Vec::new()));
         let writes = Arc::clone(&written);
-        let owner = LayoutSaveOwner::start(LayoutSet::default(), None, move |snapshot| {
+        let owner = LayoutSaveOwner::start(LayoutSet::default(), None, true, move |snapshot| {
             started.send(snapshot.active_name().to_owned()).unwrap();
             releases.recv().unwrap();
             writes.lock().push(snapshot.active_name().to_owned());

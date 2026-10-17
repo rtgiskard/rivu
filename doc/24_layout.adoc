@@ -245,6 +245,17 @@ that captured snapshot nor suppress its success or failure feedback. New sync
 requests replace pending work, not the running write; a slow old write cannot
 overwrite a newer completed write. There is no unbounded task or request queue.
 
+The worker retains one last-successful snapshot, initialized only from a valid
+startup file. Before encoding or writing, it compares persisted content without
+allocating a JSON representation. Names, selection, tree geometry, tab order and
+active indices, and panel options participate; runtime IDs, ID allocation state,
+and edit locks do not. Identical content, including edits reverted to the saved
+state, completes successfully without a file write. Requests are still validated.
+Only a successful write (or equal-content completion) advances the baseline to
+the captured request, never to newer session memory. Failure preserves the old
+baseline; missing and invalid startup files have none and are written on sync or
+exit. The baseline is not a watcher for external file changes.
+
 The worker validates before writing a unique sibling temporary file and renaming
 it over the destination. Failed validation, encoding, or I/O preserves the
 existing destination; this is atomic replacement, not a claim of power-loss

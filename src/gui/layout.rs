@@ -260,7 +260,7 @@ mod persistence {
         },
     }
 
-    #[derive(Serialize)]
+    #[derive(PartialEq, Serialize)]
     struct PanelView<'a> {
         kind: &'a str,
         #[serde(skip_serializing_if = "is_true")]
@@ -273,6 +273,66 @@ mod persistence {
         labels: Option<bool>,
         #[serde(skip_serializing_if = "Option::is_none")]
         album_artwork: Option<AlbumArtworkOptions>,
+    }
+
+    impl<'a> From<&'a Panel> for PanelView<'a> {
+        fn from(panel: &'a Panel) -> Self {
+            Self {
+                kind: &panel.kind,
+                show_tab_bar: panel.show_tab_bar,
+                style: panel.audio_visualizer.map(|options| options.style),
+                reference_lines: panel
+                    .audio_visualizer
+                    .map(|options| options.reference_lines),
+                labels: panel.audio_visualizer.map(|options| options.labels),
+                album_artwork: panel.album_artwork,
+            }
+        }
+    }
+
+    pub(super) fn roots_eq(left: Option<&Node>, right: Option<&Node>) -> bool {
+        match (left, right) {
+            (None, None) => true,
+            (
+                Some(Node::Split {
+                    axis: a,
+                    children: ac,
+                    boundaries: ab,
+                    ..
+                }),
+                Some(Node::Split {
+                    axis: b,
+                    children: bc,
+                    boundaries: bb,
+                    ..
+                }),
+            ) => {
+                a == b
+                    && ab == bb
+                    && ac.len() == bc.len()
+                    && ac.iter().zip(bc).all(|(a, b)| roots_eq(Some(a), Some(b)))
+            }
+            (
+                Some(Node::Tabs {
+                    panels: a,
+                    active: aa,
+                    ..
+                }),
+                Some(Node::Tabs {
+                    panels: b,
+                    active: ba,
+                    ..
+                }),
+            ) => {
+                a.len() == b.len()
+                    && a.iter().position(|panel| panel.id == *aa)
+                        == b.iter().position(|panel| panel.id == *ba)
+                    && a.iter()
+                        .zip(b)
+                        .all(|(a, b)| PanelView::from(a) == PanelView::from(b))
+            }
+            _ => false,
+        }
     }
 
     fn is_true(value: &bool) -> bool {
@@ -344,16 +404,7 @@ mod persistence {
         fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
             let mut sequence = serializer.serialize_seq(Some(self.0.len()))?;
             for panel in self.0 {
-                sequence.serialize_element(&PanelView {
-                    kind: &panel.kind,
-                    show_tab_bar: panel.show_tab_bar,
-                    style: panel.audio_visualizer.map(|options| options.style),
-                    reference_lines: panel
-                        .audio_visualizer
-                        .map(|options| options.reference_lines),
-                    labels: panel.audio_visualizer.map(|options| options.labels),
-                    album_artwork: panel.album_artwork,
-                })?;
+                sequence.serialize_element(&PanelView::from(panel))?;
             }
             sequence.end()
         }
@@ -1446,6 +1497,23 @@ impl Default for LayoutSet {
 }
 
 impl LayoutSet {
+    /// Compare only file content; equality does not replace snapshot validation.
+    fn persisted_eq(&self, other: &Self) -> bool {
+        self.active == other.active
+            && (Arc::ptr_eq(&self.layouts, &other.layouts)
+                || (self.layouts.len() == other.layouts.len()
+                    && self.layouts.iter().zip(other.layouts.iter()).all(
+                        |((name, layout), (other_name, other_layout))| {
+                            name == other_name
+                                && (Arc::ptr_eq(layout, other_layout)
+                                    || persistence::roots_eq(
+                                        layout.root.as_ref(),
+                                        other_layout.root.as_ref(),
+                                    ))
+                        },
+                    )))
+    }
+
     pub fn current(&self) -> &Layout {
         self.layouts
             .get(self.active.as_ref())
@@ -1619,6 +1687,146 @@ impl LayoutSet {
 mod tests {
     use super::*;
     use serde_json::{Value, json};
+
+    fn persisted_fixture() -> LayoutSet {
+        let artwork = artwork_options(crate::config::AlbumArtworkStyle::Plain);
+        decoded(one_layout(json!({
+            "type":"split", "axis":"horizontal", "boundaries":[0.4],
+            "children":[
+                {"type":"tabs", "active":1, "panels":[
+                    {"kind":"audio_visualizer", "style":"bars", "reference_lines":true, "labels":false},
+                    {"kind":"album_artwork", "album_artwork":artwork}
+                ]},
+                {"type":"tabs", "panels":[{"kind":"library"}]}
+            ]
+        }))).unwrap()
+    }
+
+    #[test]
+    fn persisted_equality_ignores_runtime_identity_and_edit_state() {
+        fn reidentify(node: &mut Node) {
+            match node {
+                Node::Split { id, children, .. } => {
+                    *id += 100;
+                    for child in children {
+                        reidentify(child);
+                    }
+                }
+                Node::Tabs { id, panels, active } => {
+                    *id += 100;
+                    *active += 100;
+                    for panel in panels {
+                        panel.id += 100;
+                    }
+                }
+            }
+        }
+        let original = persisted_fixture();
+        let mut independent = persisted_fixture();
+        reidentify(independent.current_mut().root.as_mut().unwrap());
+        independent.current_mut().next_id += 1000;
+        independent.current_mut().locked = !original.current().locked;
+        assert_ne!(original, independent);
+        assert!(original.persisted_eq(&independent));
+        assert!(independent.persisted_eq(&original));
+        assert!(original.persisted_eq(&original.clone()));
+    }
+
+    #[test]
+    fn persisted_equality_detects_each_file_content_change() {
+        let original = persisted_fixture();
+        let value = encoded(&original);
+        let root = "/layouts/Work/root";
+        let changes = [
+            (format!("{root}/axis"), json!("vertical")),
+            (format!("{root}/boundaries/0"), json!(0.6)),
+            (format!("{root}/boundaries"), json!([])),
+            (format!("{root}/children/0/active"), json!(0)),
+            (format!("{root}/children/0/panels/0/kind"), json!("custom")),
+            (format!("{root}/children/0/panels/1/show_tab_bar"), json!(false)),
+            (format!("{root}/children/0/panels/0/style"), json!("rings")),
+            (format!("{root}/children/0/panels/0/reference_lines"), json!(false)),
+            (format!("{root}/children/0/panels/0/labels"), json!(true)),
+            (format!("{root}/children/0/panels/1/album_artwork/period_seconds"), json!(value["layouts"]["Work"]["root"]["children"][0]["panels"][1]["album_artwork"]["period_seconds"].as_f64().unwrap() + 1.0)),
+            (format!("{root}/children/0/panels/1/album_artwork/style"), json!("vinyl")),
+            (root.to_owned(), Value::Null),
+        ];
+        for (path, replacement) in changes {
+            let mut changed = value.clone();
+            // The tab-bar flag is omitted when true.
+            if path.ends_with("/show_tab_bar") {
+                changed["layouts"]["Work"]["root"]["children"][0]["panels"][1]["show_tab_bar"] =
+                    replacement;
+            } else {
+                *changed.pointer_mut(&path).unwrap() = replacement;
+            }
+            // Changing the kind also removes options that do not belong to it.
+            if path.ends_with("/kind") {
+                let panel = changed["layouts"]["Work"]["root"]["children"][0]["panels"][0]
+                    .as_object_mut()
+                    .unwrap();
+                for key in ["style", "reference_lines", "labels"] {
+                    panel.remove(key);
+                }
+            }
+            let changed = decoded(changed).unwrap();
+            assert!(!original.persisted_eq(&changed), "{path}");
+            assert!(!changed.persisted_eq(&original), "{path}");
+        }
+        let artwork_path = format!("{root}/children/0/panels/1/album_artwork");
+        for (field, first, second) in [
+            ("mode", "static", "rotating"),
+            ("direction", "clockwise", "counterclockwise"),
+        ] {
+            let path = format!("{artwork_path}/{field}");
+            let mut changed = value.clone();
+            let replacement = if changed.pointer(&path).unwrap() == first {
+                second
+            } else {
+                first
+            };
+            *changed.pointer_mut(&path).unwrap() = json!(replacement);
+            assert!(
+                !original.persisted_eq(&decoded(changed).unwrap()),
+                "{field}"
+            );
+        }
+        for (panel_index, fields) in [
+            (0, &["style", "reference_lines", "labels"][..]),
+            (1, &["album_artwork"][..]),
+        ] {
+            let mut changed = value.clone();
+            let panel = changed["layouts"]["Work"]["root"]["children"][0]["panels"][panel_index]
+                .as_object_mut()
+                .unwrap();
+            for field in fields {
+                panel.remove(*field);
+            }
+            assert!(!original.persisted_eq(&decoded(changed).unwrap()));
+        }
+        for path in [
+            format!("{root}/children"),
+            format!("{root}/children/0/panels"),
+        ] {
+            let mut changed = value.clone();
+            changed
+                .pointer_mut(&path)
+                .unwrap()
+                .as_array_mut()
+                .unwrap()
+                .swap(0, 1);
+            assert!(!original.persisted_eq(&decoded(changed).unwrap()), "{path}");
+        }
+        let mut renamed = original.clone();
+        renamed.rename("Renamed").unwrap();
+        assert!(!original.persisted_eq(&renamed));
+        let mut selected = original.clone();
+        selected.duplicate("Other").unwrap();
+        let mut other_selection = selected.clone();
+        other_selection.select("Work").unwrap();
+        assert!(!selected.persisted_eq(&other_selection));
+        assert!(!original.persisted_eq(&selected));
+    }
 
     fn empty() -> Layout {
         Layout {
