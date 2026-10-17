@@ -273,6 +273,26 @@ pub(crate) fn panel_header(
         .child(caption(theme, subtitle))
 }
 
+/// Two-line list heading whose title and count each truncate without wrapping.
+pub(crate) fn list_panel_header(
+    theme: &'static crate::theme::Palette,
+    title: impl Into<SharedString>,
+    subtitle: impl Into<SharedString>,
+) -> Div {
+    column()
+        .gap_1()
+        .flex_shrink_0()
+        .child(
+            div()
+                .min_w_0()
+                .text_lg()
+                .text_color(rgb(theme.text))
+                .truncate()
+                .child(title.into()),
+        )
+        .child(caption(theme, subtitle).min_w_0().truncate())
+}
+
 /// Shared viewport shell for virtualized lists.
 pub(crate) fn list_viewport(child: impl IntoElement) -> Div {
     div()

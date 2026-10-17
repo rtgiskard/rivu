@@ -1155,7 +1155,7 @@ impl Render for AlbumBrowser {
         } else {
             header = header
                 .child(
-                    crate::gui::components::panel_header(
+                    crate::gui::components::list_panel_header(
                         theme,
                         self.tr("gl-albums"),
                         total.map_or_else(
@@ -1167,7 +1167,7 @@ impl Render for AlbumBrowser {
                         ),
                     )
                     .flex_1()
-                    .min_w_0(),
+                    .min_w(gpui::rems(3.)),
                 )
                 .child(self.album_search.clone())
                 .child(icon_button(

@@ -11,8 +11,8 @@ use super::*;
 use super::{
     components::{
         ButtonTooltip, LIST_ROW_REMS, StatusKind, button, caption, compact_icon_button,
-        disabled_control, hover_actions, icon_button, list_viewport, panel_header, panel_surface,
-        panel_toolbar, row, scrollable_list, status_message, track_list_row,
+        disabled_control, hover_actions, icon_button, list_panel_header, list_viewport,
+        panel_surface, panel_toolbar, row, scrollable_list, status_message, track_list_row,
     },
     library::LibraryDrag,
     playlists::PlaylistDrag,
@@ -1726,7 +1726,7 @@ impl GuiApp {
             }
         });
         let selection_count = self.browser.queue.len();
-        let header = panel_header(
+        let header = list_panel_header(
             theme,
             self.tr("gl-queue"),
             self.i18n.format(
@@ -1738,7 +1738,7 @@ impl GuiApp {
             ),
         )
         .flex_1()
-        .min_w_0()
+        .min_w(gpui::rems(3.))
         .id(("queue-count", panel_id))
         .tooltip({
             let text = self.tr("gl-queue-drag-hint");

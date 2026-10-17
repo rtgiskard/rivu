@@ -6,9 +6,9 @@ use super::{
     GuiApp, ListFocus, UI_INSET, ViewRequestKind,
     components::{
         LIST_ROW_REMS, StatusKind, caption, column, compact_icon_button, context_menu_container,
-        danger_control, disabled_control, hover_actions, icon_button, list_row, list_row_height,
-        list_viewport, panel_header, panel_surface, panel_toolbar, row, row_text, scrollable_list,
-        status_message, track_list_row,
+        danger_control, disabled_control, hover_actions, icon_button, list_panel_header, list_row,
+        list_row_height, list_viewport, panel_header, panel_surface, panel_toolbar, row, row_text,
+        scrollable_list, status_message, track_list_row,
     },
     library::LibraryDrag,
     paged,
@@ -1174,7 +1174,7 @@ impl GuiApp {
                     .flex_shrink_0()
                     .items_end()
                     .child(
-                        panel_header(
+                        list_panel_header(
                             theme,
                             self.tr("gl-playlists"),
                             if let Some(total) = self.browser.playlists().summaries().rows.total() {
@@ -1199,7 +1199,7 @@ impl GuiApp {
                             },
                         )
                         .flex_1()
-                        .min_w_0(),
+                        .min_w(gpui::rems(3.)),
                     )
                     .on_mouse_down(
                         gpui::MouseButton::Left,

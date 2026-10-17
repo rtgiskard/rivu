@@ -53,6 +53,23 @@ space, unlock layout editing and drag its separator, or dock panels into tabs;
 enlarging the window or reducing interface scale also restores plot space.
 No window-size or scale change rewrites saved proportions.
 
+Library, Queue, Albums, Recent tracks, and Playlists use the shared separator
+drag minima: 160 logical pixels for each horizontal neighbor and 100 for each
+vertical neighbor. These constrain adjacent layout regions, including their
+tabs, borders, and content insets; they are not hard minimum sizes on individual
+list widgets or recursive minimum sizes for nested splits. Keeping the same
+geometry rules for all five lists avoids changing separator behavior when a
+different tab becomes active. Saved proportions, docking, and cramped viewports
+can still produce smaller panels. Lists must shrink within those regions rather
+than force overflow into neighboring panels; longer headings do not increase
+the layout minimum. The existing separator minima are therefore retained rather
+than adding panel-specific hard minima that the smallest supported viewport
+cannot always satisfy.
+Each list heading reserves at least 3 rem within its header row. Its title and
+count each stay on one line and truncate independently when space is limited;
+expanding search does not turn either into a multi-line block.
+
+
 Panel instance preferences belong to the layout and survive docking and
 duplication. Missing artwork options initialize from configuration once;
 later global-default changes do not overwrite initialized panels. Artwork

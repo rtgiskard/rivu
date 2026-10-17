@@ -5,8 +5,8 @@ use super::{
     GuiApp, ListFocus,
     browser::selection::LibraryRowRequest,
     components::{
-        active_control, button, caption, column, disabled_control, icon_button, list_viewport,
-        panel_header, panel_surface, panel_toolbar, quiet_icon_button, row,
+        active_control, button, caption, column, disabled_control, icon_button, list_panel_header,
+        list_viewport, panel_surface, panel_toolbar, quiet_icon_button, row,
     },
 };
 use crate::{
@@ -1042,9 +1042,9 @@ impl GuiApp {
         } else {
             self.i18n.text("gl-loading").to_owned()
         };
-        let heading = panel_header(theme, self.tr("gl-library"), selection_label.clone())
+        let heading = list_panel_header(theme, self.tr("gl-library"), selection_label.clone())
             .flex_1()
-            .min_w_0()
+            .min_w(gpui::rems(3.))
             .id(("library-selection-count", panel_id))
             .tooltip(move |_, cx| {
                 cx.new(|_| crate::gui::components::ButtonTooltip {

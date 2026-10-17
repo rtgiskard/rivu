@@ -2,7 +2,7 @@ use super::{
     Dragging, Field, GuiApp, HistorySort, Measured,
     components::{
         active_control, caption, column, compact_icon_button, disabled_control, form_field,
-        hover_actions, icon_button, list_row, list_viewport, panel_header, panel_surface,
+        hover_actions, icon_button, list_panel_header, list_row, list_viewport, panel_surface,
         quiet_icon_button, row, scrollable_list, sortable_header,
     },
     fonts::tabular_numbers,
@@ -603,13 +603,14 @@ impl GuiApp {
                 row()
                     .items_end()
                     .child(
-                        panel_header(
+                        list_panel_header(
                             theme,
                             self.tr("gl-recent-tracks"),
                             self.i18n
                                 .format("gl-track-count", &[("count", history_total.into())]),
                         )
-                        .flex_1(),
+                        .flex_1()
+                        .min_w(gpui::rems(3.)),
                     )
                     .child(self.history_search.clone()),
             )
