@@ -482,7 +482,7 @@ name order. This does not change the active layout.
 
 Open `Menu > Layouts` to switch layouts, duplicate the current layout under a new
 name, rename it, or delete another layout after confirmation. Hover the layout's
-row to reveal Delete. Names must be
+row or focus its Delete button with Tab to reveal Delete. Names must be
 nonempty and unique after trimming surrounding whitespace. To delete the current
 layout, switch to another one first; the collection always retains a layout.
 

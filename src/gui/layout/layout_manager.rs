@@ -234,12 +234,20 @@ impl GuiApp {
                         cx,
                         move |this, window, cx| this.select_layout(&target, window, cx),
                     )
-                    .flex_1()
-                    .when(current, |choice| {
-                        choice.child(div().ml_auto().text_color(rgb(theme.accent)).child("✓"))
-                    }),
+                    .flex_1(),
                 );
-                if !current {
+                if current {
+                    choice = choice.child(
+                        div()
+                            .size(gpui::rems(2.))
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_color(rgb(theme.accent))
+                            .child("✓"),
+                    );
+                } else {
                     let name = name.to_owned();
                     choice = choice.child(
                         components::quiet_icon_button(
@@ -261,8 +269,10 @@ impl GuiApp {
                                 },
                             ),
                         )
+                        .flex_shrink_0()
                         .opacity(0.)
                         .group_hover("layout-choice-row", |style| style.opacity(1.))
+                        .focus(|style| style.opacity(1.))
                         .on_mouse_down(
                             gpui::MouseButton::Left,
                             |_, _, cx| {
