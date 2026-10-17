@@ -99,14 +99,14 @@ mod ffmpeg {
     }
 }
 mod bitrate;
-mod format;
+mod channels;
 mod output;
 mod playback;
 mod source;
 mod waveform;
 mod worker;
 
-use format::Channel;
+use channels::Channel;
 pub use output::devices;
 pub(crate) use source::{SourceIdentity, metadata_budget, open_regular_file, probe_file};
 pub use source::{probe, probe_details};
