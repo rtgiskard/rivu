@@ -225,6 +225,14 @@ opener callback. Shutdown uses a bounded lifecycle signal independent of the
 business queue. IPC shutdown acknowledgements are drained before transport and
 socket retirement, and service joins occur outside GPUI quit callbacks.
 
+App's media manager owns MPRIS registration and the resulting publisher. Each
+enable attempt uses one temporary registration worker; the manager remains
+responsive to core changes and shutdown. Disabling or stopping cancels the
+asynchronous bus build and joins that worker before retiring the attempt. A
+completed connection starts publishing only if MPRIS is still enabled and the
+core is not shutting down. Failed attempts wait for a later off/on transition,
+not a retry timer; registration never blocks the first window.
+
 The same App owns the headless `serve` instance. The process logging subscriber
 is installed once; file-writer lifetime belongs to App, while Core receives only
 a configuration control handle. Logging prepares a candidate writer before
@@ -263,9 +271,13 @@ The TUI builds queue widgets only for visible rows, retaining global occurrence
 selection and scroll position; position-only updates do not rescan the queue.
 Configured TUI roots reuse their immutable storage until the paths change.
 
-The tray subscribes after establishing its published baseline and reconciles
-the latest state before reporting startup readiness. Menu layout and revision
-are read together from that publication; unchanged menus retain their revision.
+The tray starts a background owner without waiting for session-bus setup or
+watcher registration. Its worker subscribes after establishing the published
+baseline, before bus setup, then reconciles the latest state independently of
+registration replies. Menu layout and revision are read together from that
+publication; unchanged menus retain their revision. Shutdown cancels bus setup,
+signal publication, and pending watcher registration. Connection close has a
+bounded deadline rather than waiting for bus replies or outstanding peer calls.
 
 Startup and single-instance operation are documented in
 link:../readme.adoc[README]. Socket clients and the core must use compatible builds.

@@ -1,6 +1,7 @@
-//! Session-bus MPRIS2 adapter. Keep one `Mpris` alive per application runtime;
-//! dropping it wakes the publisher and finishes outstanding replies before closing.
-//! Playback changes come from the core subscription, never a library polling loop.
+//! Session-bus MPRIS2 adapter. Registration is cancellable before the publisher
+//! starts. Keep one `Mpris` alive per application runtime; dropping it wakes the
+//! publisher and finishes outstanding replies before closing. Playback changes
+//! come from the core subscription, never a library polling loop.
 
 use crate::{
     app::{AppCommand, AppHandle},
@@ -10,7 +11,8 @@ use crate::{
     projection::MprisSnapshot,
 };
 use anyhow::{Context, Result};
-use crossbeam_channel::{Sender, bounded, select_biased};
+use crossbeam_channel::{Receiver, Sender, bounded, select_biased};
+use futures::{FutureExt, channel::oneshot};
 use std::{
     collections::HashMap,
     sync::Arc,
@@ -18,7 +20,8 @@ use std::{
     time::Duration,
 };
 use zbus::{
-    blocking::{Connection, connection::Builder},
+    blocking::Connection,
+    connection::Builder,
     fdo,
     object_server::SignalEmitter,
     zvariant::{ObjectPath, OwnedValue, Str, Value},
@@ -31,6 +34,86 @@ const NO_TRACK: &str = "/org/mpris/MediaPlayer2/TrackList/NoTrack";
 const MICROS_PER_SECOND: f64 = 1_000_000.0;
 type Metadata = HashMap<String, OwnedValue>;
 
+/// The media manager owns and joins each attempt, including cancelled builds.
+pub(crate) struct Registration {
+    result: Receiver<Result<Connection>>,
+    stop: Option<oneshot::Sender<()>>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl Registration {
+    pub(crate) fn start(
+        handle: CoreHandle,
+        app: AppHandle,
+        artwork: Arc<ArtworkManager>,
+    ) -> Result<Self> {
+        let (registered, result) = bounded(1);
+        let (stop, stopped) = oneshot::channel();
+        let worker = thread::Builder::new()
+            .name("rivu-mpris-register".into())
+            .spawn(move || {
+                futures::executor::block_on(async move {
+                    // Cancellation covers connect, authentication, and name acquisition.
+                    futures::select_biased! {
+                        _ = stopped.fuse() => {},
+                        result = register(handle, app, artwork).fuse() => {
+                            let _ = registered.try_send(result);
+                        },
+                    }
+                });
+            })
+            .context("Starting MPRIS registration")?;
+        Ok(Self {
+            result,
+            stop: Some(stop),
+            worker: Some(worker),
+        })
+    }
+
+    pub(crate) fn result(&self) -> &Receiver<Result<Connection>> {
+        &self.result
+    }
+}
+
+impl Drop for Registration {
+    fn drop(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+async fn register(
+    handle: CoreHandle,
+    app: AppHandle,
+    artwork: Arc<ArtworkManager>,
+) -> Result<Connection> {
+    // Builder uses DoNotQueue: another Rivu must fail, not silently wait for
+    // the name or replace the running player's controls.
+    Builder::session()
+        .context("Connecting MPRIS to the session bus")?
+        .name(BUS_NAME)?
+        .allow_name_replacements(false)
+        .replace_existing_names(false)
+        .method_timeout(Duration::from_secs(5))
+        .serve_at(OBJECT_PATH, Root { app })?
+        .serve_at(
+            OBJECT_PATH,
+            Player {
+                handle,
+                artwork,
+                artwork_result: parking_lot::Mutex::new(None),
+            },
+        )?
+        .build()
+        .await
+        .map(Connection::from)
+        .context("Registering org.mpris.MediaPlayer2.rivu")
+}
+
 pub struct Mpris {
     connection: Option<Connection>,
     stop: Sender<()>,
@@ -39,6 +122,7 @@ pub struct Mpris {
 
 impl Mpris {
     pub(crate) fn start(
+        connection: Connection,
         handle: CoreHandle,
         app: AppHandle,
         artwork: Arc<ArtworkManager>,
@@ -46,25 +130,6 @@ impl Mpris {
         let updates = handle.subscribe();
         let initial = handle.mpris_snapshot();
         let initial_can_raise = app.can_raise();
-        // Builder uses DoNotQueue: another Rivu must fail, not silently wait for
-        // the name or replace the running player's controls.
-        let connection = Builder::session()
-            .context("Connecting MPRIS to the session bus")?
-            .name(BUS_NAME)?
-            .allow_name_replacements(false)
-            .replace_existing_names(false)
-            .method_timeout(Duration::from_secs(5))
-            .serve_at(OBJECT_PATH, Root { app: app.clone() })?
-            .serve_at(
-                OBJECT_PATH,
-                Player {
-                    handle: handle.clone(),
-                    artwork: artwork.clone(),
-                    artwork_result: parking_lot::Mutex::new(None),
-                },
-            )?
-            .build()
-            .context("Registering org.mpris.MediaPlayer2.rivu")?;
         let (stop, stopped) = bounded(1);
         let bus = connection.clone();
         let publisher = thread::Builder::new()

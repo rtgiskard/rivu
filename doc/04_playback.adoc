@@ -322,9 +322,13 @@ controls; closing only the window does not.
 
 `interface.tray_enabled` controls tray startup and takes effect after restarting the
 graphical host, not merely reopening its window. The tray requires a session
-D-Bus and a StatusNotifier-compatible desktop host. If unavailable, the GUI and
-playback remain usable. Its menu offers Play/Pause, Previous, Next,
-Shuffle, Repeat, and Quit. Repeat follows the cycle described under
+D-Bus and a StatusNotifier-compatible desktop host. Bus connection and watcher
+registration run in the background without delaying the window or playback;
+failures are logged and leave both usable. A watcher that starts or restarts
+later is registered automatically. Quitting cancels pending connection and
+registration work rather than waiting for the desktop host to reply.
+Its menu offers Play/Pause, Previous, Next, Shuffle, Repeat, and Quit.
+Repeat follows the cycle described under
 <<_transport_and_timing,Transport and timing>>.
 
 == Album artwork panel
@@ -351,9 +355,12 @@ but retain independent rotation state. Track details keeps its full, static prev
 == MPRIS and artwork
 
 `interface.mpris_enabled` enables desktop media controls for graphical and headless cores
-and can be changed while running. A session D-Bus is required; unavailable media
-controls are reported in status without preventing playback. If enabling fails,
-disable and re-enable the setting after restoring the session bus.
+and can be changed while running. Registration runs in the background and does
+not delay the first window or playback. Disabling it or quitting cancels an
+unfinished registration without waiting for a session-bus reply. A session D-Bus
+is required; unavailable media controls are reported in status without preventing
+playback. If enabling fails, disable and re-enable the setting after restoring
+the session bus; registration does not retry automatically.
 
 MPRIS and Track details prefer embedded front-cover artwork, then another
 supported image. Without a cover, MPRIS uses the bundled icon; Track details uses

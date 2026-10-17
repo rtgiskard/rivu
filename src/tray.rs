@@ -8,7 +8,7 @@ use crate::{
 };
 use anyhow::Result;
 use crossbeam_channel::{Receiver, Sender, bounded, select_biased};
-use futures::{FutureExt, StreamExt, channel::oneshot};
+use futures::{FutureExt, StreamExt, channel::oneshot, future::Shared};
 use parking_lot::RwLock;
 use serde::Serialize;
 use std::{
@@ -18,10 +18,11 @@ use std::{
         atomic::{AtomicUsize, Ordering},
     },
     thread::{self, JoinHandle},
+    time::Duration,
 };
 use zbus::{
-    AsyncDrop, Proxy,
-    blocking::{Connection, connection::Builder},
+    AsyncDrop, Connection, Proxy,
+    connection::Builder,
     fdo,
     zvariant::{ObjectPath, OwnedValue, StructureBuilder, Type, Value},
 };
@@ -35,6 +36,7 @@ const MENU_PATH: &str = "/Menu";
 const MENU_INTERFACE: &str = "com.canonical.dbusmenu";
 static INSTANCE_COUNTER: AtomicUsize = AtomicUsize::new(1);
 type IconPixmap = (i32, i32, Vec<u8>);
+type Cancellation = Shared<oneshot::Receiver<()>>;
 
 fn sni_status() -> &'static str {
     "Active"
@@ -81,21 +83,17 @@ impl TrayData {
 
 pub(crate) struct TrayController {
     stop: Option<Sender<()>>,
+    cancel: Option<oneshot::Sender<()>>,
     worker: Option<JoinHandle<()>>,
 }
 
 impl TrayController {
     pub(crate) fn start(handle: CoreHandle, app: AppHandle) -> Result<Option<Self>> {
         let (stop, stop_receiver) = bounded(1);
-        let (ready_sender, ready_receiver) = bounded(1);
-        let data = Arc::new(RwLock::new(TrayData {
-            i18n: Localizer::new(&handle.config_snapshot().ui_language),
-            snapshot: handle.tray_snapshot(),
-            menu_revision: 1,
-        }));
+        let (cancel, cancelled) = oneshot::channel();
         let worker = match thread::Builder::new()
             .name("rivu-tray".into())
-            .spawn(move || run_bus(handle, app, data, stop_receiver, ready_sender))
+            .spawn(move || run_bus(handle, app, stop_receiver, cancelled))
         {
             Ok(worker) => worker,
             Err(error) => {
@@ -104,27 +102,19 @@ impl TrayController {
             }
         };
 
-        match ready_receiver.recv() {
-            Ok(Ok(())) => Ok(Some(Self {
-                stop: Some(stop),
-                worker: Some(worker),
-            })),
-            Ok(Err(error)) => {
-                let _ = worker.join();
-                tracing::warn!(error = %error, "tray_unavailable");
-                Ok(None)
-            }
-            Err(error) => {
-                let _ = worker.join();
-                tracing::warn!(error = %error, "tray_unavailable: startup thread stopped");
-                Ok(None)
-            }
-        }
+        Ok(Some(Self {
+            stop: Some(stop),
+            cancel: Some(cancel),
+            worker: Some(worker),
+        }))
     }
 }
 
 impl Drop for TrayController {
     fn drop(&mut self) {
+        if let Some(cancel) = self.cancel.take() {
+            let _ = cancel.send(());
+        }
         if let Some(stop) = self.stop.take() {
             let _ = stop.try_send(());
         }
@@ -137,12 +127,17 @@ impl Drop for TrayController {
 fn run_bus(
     handle: CoreHandle,
     app: AppHandle,
-    data: Arc<RwLock<TrayData>>,
     stop: Receiver<()>,
-    ready: Sender<std::result::Result<(), String>>,
+    cancelled: oneshot::Receiver<()>,
 ) {
-    // The published baseline already exists. Subscribe before bus setup, then
-    // reconcile once even when no later publication wakes this worker.
+    let cancelled = cancelled.shared();
+    let data = Arc::new(RwLock::new(TrayData {
+        i18n: Localizer::new(&handle.config_snapshot().ui_language),
+        snapshot: handle.tray_snapshot(),
+        menu_revision: 1,
+    }));
+    // Subscribe after the published baseline, before bus setup. Reconcile even
+    // when no later publication wakes this worker.
     let updates = handle.subscribe();
     let service_name = format!(
         "org.freedesktop.StatusNotifierItem-{}-{}",
@@ -158,30 +153,32 @@ fn run_bus(
         app,
         data: Arc::clone(&data),
     };
-    let connection = match Builder::session()
-        .and_then(|builder| builder.name(service_name.as_str()))
-        .and_then(|builder| builder.serve_at(SNI_PATH, item))
-        .and_then(|builder| builder.serve_at(MENU_PATH, menu))
-        .and_then(|builder| builder.build())
-        .map_err(|error| format!("Connecting to the session bus: {error}"))
-    {
-        Ok(connection) => connection,
-        Err(error) => {
-            let _ = ready.send(Err(error));
+    let setup = async {
+        Builder::session()?
+            .name(service_name.as_str())?
+            .serve_at(SNI_PATH, item)?
+            .serve_at(MENU_PATH, menu)?
+            .build()
+            .await
+    };
+    let connection = match futures::executor::block_on(async {
+        futures::select_biased! {
+            _ = cancelled.clone().fuse() => None,
+            connection = setup.fuse() => Some(connection),
+        }
+    }) {
+        Some(Ok(connection)) => connection,
+        Some(Err(error)) => {
+            tracing::warn!(error = %error, "tray_unavailable: connecting to the session bus");
             return;
         }
+        None => return,
     };
 
     let item_address = connection
         .unique_name()
         .map(|name| name.as_str().to_owned())
         .unwrap_or_else(|| service_name.clone());
-    if let Err(error) =
-        futures::executor::block_on(register_with_watcher(&connection, &item_address))
-    {
-        tracing::warn!(error = %error, "tray_watcher_unavailable");
-    }
-
     let watcher_connection = connection.clone();
     let (watcher_stop, watcher_stopped) = oneshot::channel();
     let watcher = match thread::Builder::new()
@@ -200,25 +197,61 @@ fn run_bus(
         }
     };
 
-    let shutting_down = apply_update(&data, &connection, handle.tray_snapshot());
-    if ready.send(Ok(())).is_ok() && !shutting_down {
-        update_loop(handle, data, connection.clone(), updates, stop);
+    if !futures::executor::block_on(apply_update(
+        &data,
+        &connection,
+        handle.tray_snapshot(),
+        cancelled.clone(),
+    )) {
+        loop {
+            select_biased! {
+                recv(stop) -> _ => break,
+                recv(updates) -> update => {
+                    if update.is_err()
+                        || futures::executor::block_on(apply_update(
+                            &data,
+                            &connection,
+                            handle.tray_snapshot(),
+                            cancelled.clone(),
+                        ))
+                    {
+                        break;
+                    }
+                }
+            }
+        }
     }
-    // Remove signal subscriptions while the socket is still usable. Closing it
-    // to wake the watcher races zbus's NameLost and RemoveMatch cleanup.
+    // Cancel watcher setup and registration before closing the session socket.
     let _ = watcher_stop.send(());
     if let Some(watcher) = watcher {
         let _ = watcher.join();
     }
-    if let Err(error) = connection.release_name(service_name.as_str()) {
-        tracing::warn!(error = %error, "tray_name_release_failed");
+    // Keep connection setup outside Tokio so zbus uses its independent async-io
+    // executor while this worker blocks on core publications.
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            tracing::warn!(error = %error, "tray_connection_close_failed: could not start deadline timer");
+            return;
+        }
+    };
+    // Disconnecting releases the item and service name. Do not wait for a bus
+    // reply or outstanding peer calls during application shutdown.
+    match runtime
+        .block_on(async { tokio::time::timeout(Duration::from_secs(1), connection.close()).await })
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => tracing::warn!(error = %error, "tray_connection_close_failed"),
+        Err(_) => tracing::warn!("tray_connection_close_timed_out"),
     }
-    connection.graceful_shutdown();
 }
 
 async fn watch_watcher(connection: Connection, service_name: String, stop: oneshot::Receiver<()>) {
     let monitor = async {
-        let proxy = match fdo::DBusProxy::new(connection.inner()).await {
+        let proxy = match fdo::DBusProxy::new(&connection).await {
             Ok(proxy) => proxy,
             Err(error) => {
                 tracing::warn!(error = %error, "tray_watcher_monitor_unavailable");
@@ -236,8 +269,8 @@ async fn watch_watcher(connection: Connection, service_name: String, stop: onesh
             }
         };
 
-        // The watcher may have appeared between initial registration and signal
-        // subscription. Retry once before waiting for future owner changes.
+        // Subscribe before the initial registration so a watcher restart during
+        // setup cannot be missed. Registration is covered by cancellation too.
         if let Err(error) = register_with_watcher(&connection, &service_name).await {
             tracing::warn!(error = %error, "tray_watcher_not_registered");
         }
@@ -262,55 +295,30 @@ async fn watch_watcher(connection: Connection, service_name: String, stop: onesh
 }
 
 async fn register_with_watcher(connection: &Connection, service_name: &str) -> zbus::Result<()> {
-    let watcher = Proxy::new(
-        connection.inner(),
-        WATCHER_SERVICE,
-        WATCHER_PATH,
-        WATCHER_INTERFACE,
-    )
-    .await?;
+    let watcher = Proxy::new(connection, WATCHER_SERVICE, WATCHER_PATH, WATCHER_INTERFACE).await?;
     let _: () = watcher
         .call("RegisterStatusNotifierItem", &(service_name,))
         .await?;
     Ok(())
 }
 
-fn update_loop(
-    handle: CoreHandle,
-    data: Arc<RwLock<TrayData>>,
-    connection: Connection,
-    updates: Receiver<()>,
-    stop: Receiver<()>,
-) {
-    loop {
-        select_biased! {
-            recv(stop) -> _ => return,
-            recv(updates) -> update => {
-                if update.is_err() {
-                    return;
-                }
-                let current = handle.tray_snapshot();
-                if apply_update(&data, &connection, current) {
-                    return;
-                }
-            }
-        }
-    }
-}
-
-fn apply_update(
+async fn apply_update(
     data: &Arc<RwLock<TrayData>>,
     connection: &Connection,
     current: TraySnapshot,
+    cancelled: Cancellation,
 ) -> bool {
     let update = data.write().publish(&current);
     if let Some((previous, revision, menu_changed)) = update {
-        emit_update(connection, &previous, &current, revision, menu_changed);
+        futures::select_biased! {
+            _ = cancelled.fuse() => return true,
+            _ = emit_update(connection, &previous, &current, revision, menu_changed).fuse() => {},
+        }
     }
     current.shutting_down
 }
 
-fn emit_update(
+async fn emit_update(
     connection: &Connection,
     previous: &TraySnapshot,
     current: &TraySnapshot,
@@ -323,16 +331,20 @@ fn emit_update(
         _ => true,
     };
     if previous.current_track_id != current.current_track_id || track_changed {
-        let _ = connection.emit_signal(None::<&str>, SNI_PATH, SNI_INTERFACE, "NewToolTip", &());
+        let _ = connection
+            .emit_signal(None::<&str>, SNI_PATH, SNI_INTERFACE, "NewToolTip", &())
+            .await;
     }
     if menu_changed {
-        let _ = connection.emit_signal(
-            None::<&str>,
-            MENU_PATH,
-            MENU_INTERFACE,
-            "LayoutUpdated",
-            &(menu_revision, 0i32),
-        );
+        let _ = connection
+            .emit_signal(
+                None::<&str>,
+                MENU_PATH,
+                MENU_INTERFACE,
+                "LayoutUpdated",
+                &(menu_revision, 0i32),
+            )
+            .await;
     }
 }
 
@@ -807,7 +819,7 @@ mod tests {
     }
 
     #[test]
-    fn startup_sync_uses_published_baseline_and_layout_revision_stays_paired() {
+    fn background_setup_reconciles_published_baseline_and_layout_revision_stays_paired() {
         let baseline = TraySnapshot {
             current_track: None,
             current_track_id: None,

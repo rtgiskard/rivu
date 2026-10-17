@@ -13,7 +13,7 @@ use crate::{
     tray::TrayController,
 };
 use anyhow::{Context, Result, anyhow, bail};
-use crossbeam_channel::{bounded, select};
+use crossbeam_channel::{bounded, select_biased};
 use futures::{StreamExt, channel::mpsc};
 use gpui::{App as GpuiApp, GraphicalEnvironment, QuitMode, Subscription, Task, WindowingRequest};
 use signal_hook::{
@@ -651,6 +651,8 @@ impl MediaWorker {
             .name("rivu-mpris-manager".into())
             .spawn(move || {
                 let mut service = None;
+                let mut registration = None;
+                let not_registering = crossbeam_channel::never();
                 let mut enabled = false;
                 loop {
                     let state = handle.mpris_service_state();
@@ -659,33 +661,70 @@ impl MediaWorker {
                     }
                     if state.enabled != enabled {
                         enabled = state.enabled;
-                        let status = if enabled {
-                            match mpris::Mpris::start(
+                        registration = None;
+                        service = None;
+                        if enabled {
+                            match mpris::Registration::start(
                                 handle.clone(),
                                 app.clone(),
                                 Arc::clone(&artwork),
                             ) {
-                                Ok(started) => {
-                                    service = Some(started);
-                                    "Connected to desktop media controls".to_owned()
+                                Ok(pending) => registration = Some(pending),
+                                Err(error) => {
+                                    let _ = handle.send(Command::MprisStatus {
+                                        status: format!("MPRIS unavailable: {error:#}"),
+                                    });
                                 }
-                                Err(error) => format!("MPRIS unavailable: {error:#}"),
                             }
                         } else {
-                            service = None;
-                            "Desktop media controls disabled".to_owned()
-                        };
-                        let _ = handle.send(Command::MprisStatus { status });
+                            let _ = handle.send(Command::MprisStatus {
+                                status: "Desktop media controls disabled".to_owned(),
+                            });
+                        }
                     }
-                    select! {
+                    let registered = registration
+                        .as_ref()
+                        .map_or(&not_registering, mpris::Registration::result);
+                    select_biased! {
                         recv(stop_receiver) -> _ => break,
                         recv(changes) -> changed => {
                             if changed.is_err() {
                                 break;
                             }
                         }
+                        recv(registered) -> connection => {
+                            registration = None;
+                            // Never start a publisher for a cancelled enable request.
+                            let state = handle.mpris_service_state();
+                            if state.shutting_down {
+                                break;
+                            }
+                            if !state.enabled {
+                                continue;
+                            }
+                            let status = match connection
+                                .context("MPRIS registration worker stopped")
+                                .and_then(|result| result)
+                                .and_then(|connection| {
+                                    mpris::Mpris::start(
+                                        connection,
+                                        handle.clone(),
+                                        app.clone(),
+                                        Arc::clone(&artwork),
+                                    )
+                                })
+                            {
+                                Ok(started) => {
+                                    service = Some(started);
+                                    "Connected to desktop media controls".to_owned()
+                                }
+                                Err(error) => format!("MPRIS unavailable: {error:#}"),
+                            };
+                            let _ = handle.send(Command::MprisStatus { status });
+                        }
                     }
                 }
+                drop(registration);
                 drop(service);
             })?;
         Ok(Self {
