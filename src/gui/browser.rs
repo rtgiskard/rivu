@@ -148,6 +148,7 @@ pub(super) struct LibraryBrowser {
     pub(super) search_count_failed: bool,
     pub(super) search_count_roots: Vec<std::path::PathBuf>,
     pub(super) search_counts: Option<(usize, usize)>,
+    pub(super) search_root_counts: std::collections::HashMap<std::path::PathBuf, (usize, usize)>,
     buffer: LibraryViewBuffer,
     tree: DirectoryTree,
     range_selection: LibrarySelection,
@@ -171,6 +172,7 @@ impl Default for LibraryBrowser {
             search_count_failed: false,
             search_count_roots: Vec::new(),
             search_counts: None,
+            search_root_counts: Default::default(),
             buffer: LibraryViewBuffer {
                 sort: LibrarySort::Album,
                 ..Default::default()
@@ -265,6 +267,7 @@ impl LibraryBrowser {
     }
 
     pub(super) fn retry_root_counts(&mut self) {
+        self.search_count_failed = false;
         self.counts.failed.clear();
         self.counts.settled = false;
     }
@@ -336,7 +339,28 @@ impl LibraryBrowser {
         self.counts.totals.get(path).copied()
     }
 
+    pub(super) fn root_count_label(&self, path: &std::path::Path) -> String {
+        if self.buffer.query.is_some()
+            || self.buffer.favorite.is_some()
+            || self.buffer.missing.is_some()
+        {
+            self.search_root_counts.get(path).map_or_else(
+                || "—".to_owned(),
+                |(matched, total)| format!("{matched} / {total}"),
+            )
+        } else {
+            self.root_count(path)
+                .map_or_else(|| "—".to_owned(), |total| total.to_string())
+        }
+    }
+
     pub(super) fn root_count_failed(&self, path: &std::path::Path) -> bool {
+        if self.buffer.query.is_some()
+            || self.buffer.favorite.is_some()
+            || self.buffer.missing.is_some()
+        {
+            return self.search_count_failed;
+        }
         self.counts.failed.iter().any(|&offset| {
             self.counts.roots
                 [offset..(offset + crate::model::MAX_QUERY_ROWS).min(self.counts.roots.len())]

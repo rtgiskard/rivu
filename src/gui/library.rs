@@ -665,13 +665,13 @@ impl GuiApp {
                                         }),
                                 )
                                 .when(visible.depth == 0 && path.is_some(), |view| {
-                                    let count = this.browser.library.root_count(path.as_deref().expect("root path"));
+                                    let count = this.browser.library.root_count_label(path.as_deref().expect("root path"));
                                     view.child(
                                         row()
                                             .gap_1()
                                             .flex_shrink_0()
                                             .child(crate::gui::components::caption(theme, "󰎇").font_family(super::fonts::SYMBOLS_FAMILY))
-                                            .child(crate::gui::components::caption(theme, count.map_or_else(|| "—".to_owned(), |total| total.to_string()))
+                                            .child(crate::gui::components::caption(theme, count)
                                                 .font_features(super::fonts::tabular_numbers())),
                                     )
                                 });

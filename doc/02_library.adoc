@@ -184,6 +184,12 @@ queue, and album track lists search track title, artist, album, and file name.
 Recent tracks searches the displayed track titles. Track searches cover the whole
 collection, including unloaded pages, rather than just the rows on screen.
 
+Each Library root shows its recursive track total. While any text, favorite, or
+missing-file filter is active, it shows matching tracks / total tracks instead,
+including tracks in collapsed folders and unloaded pages. Roots with no matches
+remain visible with a zero matching count; a pending or failed count is shown as
+an em dash, not zero. Clear all filters to return to the total alone.
+
 Changing the search clears that list's selection. Select all operates on matching
 rows only. Queue and playlist drag reordering is unavailable while filtered; clear
 the search before dragging to reorder. Playing or appending a whole playlist still uses its
@@ -452,15 +458,15 @@ directories with no status omit the second part. Tooltips retain artist, album,
 duration, codec, bitrate, and missing-file warnings even when those columns are
 disabled. Missing values appear as `-`.
 
-Root headers in both views show the number of scanned library tracks beneath
-that root, including missing files. These counts do not change with search,
-favorites, or the missing filter. `—` means the count is not available yet,
-not zero. If a root's count query fails, its directory action stays available
-without hovering and retries failed counts instead of rescanning. The failure
-state clears when the retry starts and returns if it fails again; once recovered,
-the action resumes normal rescanning. Counts refresh after
-structural library changes such as scans, removals, or path relocation. Editing
-tags, favorites, or playback statistics does not reload them.
+Root headers in both views include missing files in their recursive totals.
+For matching / total counts while filters are active, see
+<<_desktop_list_search,Desktop list search>>. If a root's count query fails, its
+directory action stays available without hovering and retries failed counts
+instead of rescanning. The failure state clears when the retry starts and returns
+if it fails again; once recovered, the action resumes normal rescanning.
+Unfiltered totals refresh after structural library changes such as scans,
+removals, or path relocation; editing tags, favorites, or playback statistics
+does not reload those totals. Filtered counts also follow changes to matching tracks.
 
 Search, favorites, and the missing filter apply to both the flat list and directory
 tree without switching views, and can be combined. Tree filtering shows only

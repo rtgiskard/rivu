@@ -307,6 +307,7 @@ impl GuiApp {
         if !self.panel_demand("library") {
             return;
         }
+        self.request_library_search_counts(cx);
         if !self.browser.requests.root_count_workers.is_empty()
             || self.browser.library.root_counts_settled()
         {
@@ -566,6 +567,7 @@ impl GuiApp {
             }
             library.search_count_roots = roots.clone();
             library.search_counts = None;
+            library.search_root_counts.clear();
             library.search_count_failed = false;
             self.library_search
                 .update(cx, |search, cx| search.clear_counts(cx));
@@ -590,6 +592,7 @@ impl GuiApp {
                     // Nested configured roots describe the same tracks, not extra occurrences.
                     let mut matched = 0;
                     let mut total = 0;
+                    let mut root_counts = std::collections::HashMap::new();
                     for (index, root) in worker_roots.iter().enumerate() {
                         if worker_roots
                             .iter()
@@ -630,34 +633,38 @@ impl GuiApp {
                         let Ok(ViewResponse::LibraryPage(page)) = response.result else {
                             return None;
                         };
-                        matched += page.total;
-                        if query.is_none() && favorite.is_none() && missing.is_none() {
-                            total += page.total;
-                        } else {
-                            let response = handle.query_if_current(
-                                Query::LibraryRootPage {
-                                    path: root.clone(),
-                                    query: None,
-                                    favorite: None,
-                                    missing: None,
-                                    sort: *sort,
-                                    offset: 0,
-                                    limit: 0,
-                                },
-                                ticket.clone(),
-                            );
-                            if worker_query.stamp(response.revisions)
-                                != worker_query.stamp(revisions)
-                            {
-                                return None;
-                            }
-                            let Ok(ViewResponse::LibraryPage(page)) = response.result else {
-                                return None;
+                        let root_matched = page.total;
+                        let root_total =
+                            if query.is_none() && favorite.is_none() && missing.is_none() {
+                                root_matched
+                            } else {
+                                let response = handle.query_if_current(
+                                    Query::LibraryRootPage {
+                                        path: root.clone(),
+                                        query: None,
+                                        favorite: None,
+                                        missing: None,
+                                        sort: *sort,
+                                        offset: 0,
+                                        limit: 0,
+                                    },
+                                    ticket.clone(),
+                                );
+                                if worker_query.stamp(response.revisions)
+                                    != worker_query.stamp(revisions)
+                                {
+                                    return None;
+                                }
+                                let Ok(ViewResponse::LibraryPage(page)) = response.result else {
+                                    return None;
+                                };
+                                page.total
                             };
-                            total += page.total;
-                        }
+                        matched += root_matched;
+                        total += root_total;
+                        root_counts.insert(root.clone(), (root_matched, root_total));
                     }
-                    Some((matched, total))
+                    Some(((matched, total), root_counts))
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
@@ -669,9 +676,10 @@ impl GuiApp {
                     this.state.query_revisions(None),
                 ) && roots == this.state.system.config.library_roots
                 {
-                    this.browser.library.search_counts = counts;
                     this.browser.library.search_count_failed = counts.is_none();
-                    if let Some((matched, total)) = counts {
+                    if let Some(((matched, total), root_counts)) = counts {
+                        this.browser.library.search_counts = Some((matched, total));
+                        this.browser.library.search_root_counts = root_counts;
                         this.library_search
                             .update(cx, |search, cx| search.set_counts(matched, total, cx));
                     }
