@@ -1221,7 +1221,7 @@ impl GuiApp {
                 column()
                     .id("duplicate-review-card")
                     .w(relative(0.94))
-                    .h(relative(0.92))
+                    .max_h(window.viewport_size().height * 0.92)
                     .min_w_0()
                     .min_h_0()
                     .p_3()
@@ -1275,7 +1275,7 @@ impl GuiApp {
                     )
                     .child(
                         row()
-                            .flex_1()
+                            .flex_shrink(1.)
                             .min_h_0()
                             .items_stretch()
                             .child(
