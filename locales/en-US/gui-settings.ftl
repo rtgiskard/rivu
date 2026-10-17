@@ -50,7 +50,9 @@ settings-peak-gain = Peak gain
 settings-peak-gamma = Peak gamma
 settings-seconds-per-circle = Seconds per circle
 settings-animation-rate-fps = Animation rate (FPS)
-settings-library-roots-hint = Separate paths with semicolons.
+settings-library-folders-add-hint = Add folders through the Library component
+settings-remove-library-folder = Remove folder from draft
+settings-library-folders-empty = No folders; add folders in the Library component
 settings-artwork-period-hint = Finite and greater than zero.
 settings-animation-fps-hint = 0–240; 0 follows the display, a cap reduces rendering work.
 settings-scan-depth-hint = Minimum 1; starting folder = depth 0.

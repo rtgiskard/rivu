@@ -23,10 +23,7 @@ use crate::{
 };
 use anyhow::{Context as _, Result};
 use gpui::{prelude::*, *};
-use std::{
-    cell::RefCell, collections::HashMap, path::PathBuf, rc::Rc, str::FromStr, sync::Arc,
-    time::Duration,
-};
+use std::{cell::RefCell, collections::HashMap, rc::Rc, str::FromStr, sync::Arc, time::Duration};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SettingChoice {
@@ -85,7 +82,6 @@ impl SettingChoice {
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Field {
-    Roots,
     ScanMaxDepth,
     Volume,
     PlayCountThreshold,
@@ -131,7 +127,6 @@ enum Field {
 impl Field {
     fn label_id(self) -> &'static str {
         match self {
-            Self::Roots => "settings-library-folders",
             Self::ScanMaxDepth => "settings-maximum-scan-depth",
             Self::Volume => "settings-volume",
             Self::PlayCountThreshold => "settings-play-count-threshold",
@@ -194,7 +189,6 @@ impl Field {
             Self::SpectrumHold | Self::SpectrumGravity if !settings.draft.spectrum_peaks => {
                 settings.tr("settings-spectrum-peaks-recovery")
             }
-            Self::Roots => settings.tr("settings-library-roots-hint"),
             Self::AlbumArtworkPeriod => settings.tr("settings-artwork-period-hint"),
             Self::AlbumArtworkFps => format!(
                 "{} {}",
@@ -685,7 +679,6 @@ impl Settings {
             return;
         }
         self.inputs = [
-            Field::Roots,
             Field::ScanMaxDepth,
             Field::Volume,
             Field::PlayCountThreshold,
@@ -931,17 +924,6 @@ impl Settings {
     }
 
     fn fill_unchanged(&mut self, unchanged: Option<&HashMap<Field, String>>, cx: &mut App) {
-        self.set_value(
-            Field::Roots,
-            self.draft
-                .library_roots
-                .iter()
-                .map(|path| path.to_string_lossy())
-                .collect::<Vec<_>>()
-                .join(";"),
-            unchanged,
-            cx,
-        );
         self.set_value(
             Field::ScanMaxDepth,
             self.draft.scan_max_depth.to_string(),
@@ -1192,13 +1174,6 @@ impl Settings {
 
     fn parse(&self, cx: &App) -> Result<Config> {
         let mut config = self.draft.clone();
-        config.library_roots = self
-            .value(Field::Roots, cx)
-            .split(';')
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-            .collect();
         config.scan_max_depth = self.number(Field::ScanMaxDepth, cx)?;
         let volume_percent = self.number::<f32>(Field::Volume, cx)?;
         // Keep the exact migrated level when the displayed percentage is unchanged.
@@ -1918,26 +1893,84 @@ impl Settings {
         settings_card(colors, self.tr("settings-artwork-cache"), content)
     }
 
+    fn library_roots(&self, cx: &mut Context<Self>) -> Div {
+        let colors = palette(cx);
+        let mut paths = column()
+            .id("settings-library-roots-list")
+            .max_h(rems(10.))
+            .pl_3()
+            .overflow_y_scroll()
+            .gap_1();
+        for (index, path) in self.draft.library_roots.iter().enumerate() {
+            let path: SharedString = path.to_string_lossy().into_owned().into();
+            paths = paths.child(
+                row()
+                    .id(("settings-root-row", index))
+                    .group("settings-root-row")
+                    .gap_1()
+                    .child(
+                        div()
+                            .id(("settings-library-root-path", index))
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis_middle()
+                            .child(path.clone())
+                            .tooltip(settings_tooltip(path)),
+                    )
+                    .child(
+                        super::components::quiet_icon_button(
+                            colors,
+                            icon_button(
+                                ("settings-library-root-remove", index),
+                                "",
+                                self.tr("settings-remove-library-folder"),
+                                cx,
+                                move |this, _, cx| {
+                                    this.draft.library_roots.remove(index);
+                                    cx.notify();
+                                },
+                            ),
+                        )
+                        .opacity(0.)
+                        .group_hover("settings-root-row", |style| style.opacity(1.))
+                        .focus(|style| style.opacity(1.)),
+                    ),
+            );
+        }
+        if self.draft.library_roots.is_empty() {
+            paths = paths.child(caption(colors, self.tr("settings-library-folders-empty")));
+        }
+        column()
+            .gap_2()
+            .child(
+                row()
+                    .gap_2()
+                    .child(caption(colors, self.tr("settings-library-folders")))
+                    .child(
+                        div()
+                            .id("settings-library-folders-help")
+                            .child(
+                                caption(colors, "")
+                                    .opacity(0.6)
+                                    .hover(|style| style.opacity(1.)),
+                            )
+                            .tooltip(settings_tooltip(
+                                self.tr("settings-library-folders-add-hint"),
+                            )),
+                    ),
+            )
+            .child(paths)
+    }
+
     fn library_settings(&mut self, cx: &mut Context<Self>) -> Div {
         let library = settings_card(
             palette(cx),
             self.tr("settings-library"),
-            column().gap_2().child(
-                row()
-                    .items_start()
-                    .flex_wrap()
-                    .gap_3()
-                    .child(
-                        self.field(Field::Roots, cx)
-                            .flex_1()
-                            .min_w(rems(260. / 16.)),
-                    )
-                    .child(
-                        self.field(Field::ScanMaxDepth, cx)
-                            .flex_1()
-                            .min_w(rems(220. / 16.)),
-                    ),
-            ),
+            column()
+                .gap_2()
+                .child(self.library_roots(cx))
+                .child(self.field(Field::ScanMaxDepth, cx)),
         );
         column()
             .gap_3()
@@ -3566,6 +3599,75 @@ mod tests {
             assert!(visible.still_mode);
             assert_eq!(visible.ui_theme, Theme::TokyoNight);
             assert_eq!(visible, *this.baseline);
+        });
+    }
+
+    #[gpui::test]
+    fn root_paths_preserve_semicolons_and_trailing_spaces_across_apply(cx: &mut TestAppContext) {
+        let (directory, runtime, settings) = fixture(cx);
+        let roots = vec![
+            directory.path().join("music;live"),
+            directory.path().join("music "),
+        ];
+        for root in &roots {
+            std::fs::create_dir(root).unwrap();
+        }
+        settings.update(cx, |this, cx| {
+            this.draft.library_roots = roots.clone();
+            assert_eq!(this.parse(cx).unwrap().library_roots, roots);
+        });
+        let (patch, submission) = submit(&settings, cx);
+        let (committed, result) = execute(&runtime, patch);
+        assert!(result.is_ok());
+        assert_eq!(committed.library_roots, roots);
+        settings.update(cx, |this, cx| {
+            this.complete_settings_apply(submission, committed, result, cx);
+            assert_eq!(this.parse(cx).unwrap().library_roots, roots);
+        });
+        assert_eq!(
+            Config::load(&directory.path().join("config.toml"))
+                .unwrap()
+                .library_roots,
+            roots,
+        );
+    }
+
+    #[gpui::test]
+    fn unedited_roots_rebase_external_changes_and_keep_pending_list_edits(cx: &mut TestAppContext) {
+        let (directory, runtime, settings) = fixture(cx);
+        let external = directory.path().join("external; ");
+        let later = directory.path().join("later ");
+        std::fs::create_dir(&external).unwrap();
+        std::fs::create_dir(&later).unwrap();
+        settings.update(cx, |this, cx| {
+            this.set_value(Field::ScanMaxDepth, "7", None, cx);
+        });
+        let (patch, submission) = submit(&settings, cx);
+        runtime
+            .handle
+            .update_gui_config(crate::core::GuiConfigChange::AddLibraryRoot(
+                external.clone(),
+            ))
+            .unwrap();
+        let (committed, result) = execute(&runtime, patch);
+        assert!(result.is_ok());
+        assert_eq!(committed.library_roots, vec![external.clone()]);
+        settings.update(cx, |this, cx| {
+            this.complete_settings_apply(submission, committed, result, cx);
+            assert_eq!(
+                this.parse(cx).unwrap().library_roots,
+                vec![external.clone()]
+            );
+        });
+        let (patch, submission) = submit(&settings, cx);
+        let (committed, result) = execute(&runtime, patch);
+        assert!(result.is_ok());
+        settings.update(cx, |this, cx| {
+            this.draft.library_roots.clear();
+            this.draft.library_roots.push(later.clone());
+            this.complete_settings_apply(submission, committed, result, cx);
+            assert_eq!(this.baseline.library_roots, vec![external]);
+            assert_eq!(this.parse(cx).unwrap().library_roots, vec![later]);
         });
     }
 

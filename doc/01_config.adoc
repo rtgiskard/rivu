@@ -194,7 +194,11 @@ validation remain in link:../src/config.rs[`Config`].
 
 == Desktop settings
 
-Open Settings from the application menu. Separate library roots with semicolons.
+Add library folders from the Library view. In Settings, folders are listed
+individually; use a row's close icon to remove it from the draft. Long paths are
+shortened in the middle; hover to see the full path. The list scrolls within the
+editor. Paths retain semicolons and trailing spaces; they are not entered as
+delimited text. Removals take effect only on Apply; Discard drops them.
 The sidebar has four groups: Library, Playback & Audio, Interface, and
 Visualizations. Library includes scan settings and maintenance; Playback & Audio
 contains playback, output, decoding, and read buffering. Interface contains basic
@@ -220,7 +224,7 @@ request executes, not when it is queued. Unedited changes from playback controls
 CLI clients, or other desktop controls—including volume, output device, library
 roots, Still Mode, Shuffle, Repeat, and Library columns—are preserved. An explicitly
 changed field takes the draft value even if another control changed it meanwhile;
-editing the roots field replaces the whole roots list.
+editing the folders list replaces the whole roots list.
 
 After successful Apply, the baseline and untouched controls reflect the committed
 configuration. Edits made while Apply was pending remain in the draft, including
