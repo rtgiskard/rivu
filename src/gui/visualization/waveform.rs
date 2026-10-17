@@ -539,11 +539,8 @@ fn cursor_wobble(position: f64) -> f32 {
     (0.68 * smooth_ping_pong(position, 5.0) + 0.32 * smooth_ping_pong(position + 1.4, 8.0)) as f32
 }
 
-fn preview_message(source: &Source, frame: &WaveformFrame) -> Option<&'static str> {
-    if !source.matches_target(frame) || !frame.peaks.iter().any(Option::is_some) {
-        return Some("waveform-play");
-    }
-    None
+fn preview_available(source: &Source, frame: &WaveformFrame) -> bool {
+    source.matches_target(frame) && frame.peaks.iter().any(Option::is_some)
 }
 
 fn timeline(frame: &WaveformFrame, duration: Option<f64>) -> Option<f64> {
@@ -1062,24 +1059,22 @@ impl Waveform {
             return panel.into_any_element();
         };
         let status = self.manual_message(i18n);
-        let (message, label_duration, full) = {
+        let (available, label_duration, full) = {
             let shared = self.shared.read();
             let frame = self.display_frame(&shared);
             let full = self.full_preview(&shared).map(Rc::clone);
             (
-                preview_message(source, frame),
+                preview_available(source, frame),
                 timeline(frame, duration),
                 full,
             )
         };
-        if let Some(message) = message {
+        if !available {
             if let Some(generation) = self.remove_interaction_panel(panel_id) {
                 cx.emit(WaveformEvent::Cancelled { generation });
             }
             return panel
-                .child(super::super::components::visualization_status(
-                    status.unwrap_or_else(|| i18n.text(message).to_owned().into()),
-                ))
+                .children(status.map(super::super::components::visualization_status))
                 .into_any_element();
         }
         let source = full.as_ref().map_or_else(
@@ -1713,7 +1708,7 @@ mod tests {
     }
 
     #[test]
-    fn unavailable_or_different_sources_prompt_playback_instead_of_using_old_peaks() {
+    fn unavailable_or_different_sources_cannot_reuse_old_peaks() {
         let mut frame = frame(vec![Some(0.0)]);
         let source = Source {
             path: PathBuf::from("track.flac"),
@@ -1721,21 +1716,21 @@ mod tests {
             fingerprint: None,
             decoder_hint: DecoderHint::Auto,
         };
-        assert!(preview_message(&source, &frame).is_none());
+        assert!(preview_available(&source, &frame));
         frame.decoder_hint = DecoderHint::Ffmpeg;
-        assert!(preview_message(&source, &frame).is_none());
+        assert!(preview_available(&source, &frame));
         frame.decoder_hint = DecoderHint::Auto;
         frame.path = Some(PathBuf::from("other.flac"));
-        assert!(preview_message(&source, &frame).is_some());
+        assert!(!preview_available(&source, &frame));
         frame.path = Some(source.path.clone());
         frame.range = Some(PlaybackRange {
             start_seconds: 2.0,
             end_seconds: Some(4.0),
         });
-        assert!(preview_message(&source, &frame).is_some());
+        assert!(!preview_available(&source, &frame));
         frame.range = None;
         frame.peaks[0] = None;
-        assert!(preview_message(&source, &frame).is_some());
+        assert!(!preview_available(&source, &frame));
     }
 
     #[test]
@@ -2234,13 +2229,10 @@ mod tests {
             Some(std::path::Path::new("track.flac"))
         );
         assert_eq!(shared.peaks, vec![Some(0.25), None]);
-        assert!(
-            preview_message(
-                waveform.source.as_deref().unwrap(),
-                waveform.display_frame(&shared)
-            )
-            .is_none()
-        );
+        assert!(preview_available(
+            waveform.source.as_deref().unwrap(),
+            waveform.display_frame(&shared)
+        ));
         assert_eq!(
             waveform.display_frame(&shared).peaks,
             vec![Some(0.5), Some(0.75)]
@@ -2288,13 +2280,10 @@ mod tests {
         assert!(waveform.invalidate_saved_hint(&saved));
         assert!(!waveform.sync_source(Some(&saved)));
         let shared = waveform.shared.read();
-        assert!(
-            preview_message(
-                waveform.source.as_deref().unwrap(),
-                waveform.display_frame(&shared)
-            )
-            .is_none()
-        );
+        assert!(preview_available(
+            waveform.source.as_deref().unwrap(),
+            waveform.display_frame(&shared)
+        ));
         assert_eq!(
             waveform.source.as_ref().unwrap().decoder_hint,
             DecoderHint::Auto
@@ -2401,7 +2390,10 @@ mod tests {
         assert!(waveform.invalidate_saved_hint(&edited));
         let shared = waveform.shared.read();
         assert_eq!(shared.decoder_hint, DecoderHint::Auto);
-        assert!(preview_message(waveform.source.as_deref().unwrap(), &shared).is_none());
+        assert!(preview_available(
+            waveform.source.as_deref().unwrap(),
+            &shared
+        ));
         assert!(std::ptr::eq(waveform.display_frame(&shared), &*shared));
     }
 

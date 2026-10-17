@@ -641,6 +641,11 @@ results but rebuilds derived graphics on repaint. It does not affect Radial
 Spectrum. See link:22_cache.adoc[Caching and Resource Lifecycles] for scope and trade-offs,
 and link:23_visuals.adoc[Visualization Rendering Design] for rendering choices.
 
+Before audio data is available, visualization panels show no waiting message;
+their backgrounds and any applicable reference guides remain. Loading, failure,
+Still Mode, and unavailable frequency-data messages remain distinct from this
+normal initial state.
+
 === Still Mode
 
 `visualizations.still_mode` defaults to `false`. Enabling it replaces all four visualization

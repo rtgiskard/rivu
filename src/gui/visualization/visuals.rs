@@ -725,10 +725,8 @@ impl Visuals {
         let data = Rc::clone(&self.data);
         let message: Option<SharedString> = {
             let data = self.data.borrow();
-            if data.error.is_some() {
+            if data.error.is_some() || data.latest_levels.is_empty() {
                 None
-            } else if data.latest_levels.is_empty() {
-                Some(i18n.text("visual-wait").to_owned().into())
             } else {
                 match mode {
                     VisualMode::Spectrum if data.spectrum_range().is_none() => {

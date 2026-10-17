@@ -211,7 +211,6 @@ settings-ffmpeg-status = FFmpeg 解码：{ $state }
     { $detail }
 settings-mpris-status = 媒体控制 (MPRIS)：{ $state }
     { $detail }
-visual-wait = 等待播放后分析
 visual-no-spectrum = 无可听频谱数据
 visual-no-spectrogram = 16 Hz 至奈奎斯特频率内无声谱数据
 visual-too-small = 请扩大面板
@@ -220,7 +219,6 @@ visual-level-zero = 条形电平 0%
 visual-level-half = 条形电平 50%
 visual-level-full = 条形电平 100%
 visual-scene = 场景坐标（归一化）
-waveform-play = 播放或缓冲此曲目以生成波形
 waveform-loading = 正在加载完整波形…
 waveform-error = 无法加载完整波形：{ $error }
 artwork-unavailable = 封面不可用

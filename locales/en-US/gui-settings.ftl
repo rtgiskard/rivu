@@ -211,7 +211,6 @@ settings-ffmpeg-status = FFmpeg decoding: { $state }
     { $detail }
 settings-mpris-status = Media controls (MPRIS): { $state }
     { $detail }
-visual-wait = Analysis waiting for playback
 visual-no-spectrum = No audible spectrum data
 visual-no-spectrogram = No spectrogram data in 16 Hz–Nyquist
 visual-too-small = Enlarge panel
@@ -220,7 +219,6 @@ visual-level-zero = Bar level 0%
 visual-level-half = Bar level 50%
 visual-level-full = Bar level 100%
 visual-scene = Scene coordinates (normalized)
-waveform-play = Play or buffer this track to build its waveform
 waveform-loading = Loading full waveform…
 waveform-error = Cannot load full waveform: { $error }
 artwork-unavailable = Artwork unavailable
