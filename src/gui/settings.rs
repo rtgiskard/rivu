@@ -1770,44 +1770,48 @@ impl Settings {
     fn artwork_cache_settings(&self, cx: &mut Context<Self>) -> Div {
         let colors = palette(cx);
         let busy = self.artwork_cache_busy.is_some();
-        let mut content = column().gap_2().child(
+        let mut content = column().gap_2().child(form_field(
+            colors,
+            self.tr("settings-expire-files-older-than-days"),
             row()
                 .items_end()
+                .flex_wrap()
                 .gap_2()
                 .child(
-                    form_field(
-                        colors,
-                        self.tr("settings-expire-files-older-than-days"),
-                        div()
-                            .id("settings-artwork-cache-age")
-                            .child(self.artwork_cache_age.clone()),
-                    )
-                    .min_w_0()
-                    .flex_1(),
+                    div()
+                        .id("settings-artwork-cache-age")
+                        .w(rems(7.))
+                        .flex_shrink_0()
+                        .child(self.artwork_cache_age.clone()),
                 )
-                .child(disabled_control(
-                    colors,
-                    icon_button(
-                        "settings-artwork-cache-calculate",
-                        "󰃬",
-                        self.tr("settings-calculate-usage"),
-                        cx,
-                        |this, _, cx| this.maintain_artwork_cache(false, cx),
-                    ),
-                    busy,
-                ))
-                .child(disabled_control(
-                    colors,
-                    icon_button(
-                        "settings-artwork-cache-clean",
-                        "󰆴",
-                        self.tr("settings-clean-expired"),
-                        cx,
-                        |this, _, cx| this.maintain_artwork_cache(true, cx),
-                    ),
-                    busy,
-                )),
-        );
+                .child(
+                    row()
+                        .gap_2()
+                        .flex_shrink_0()
+                        .child(disabled_control(
+                            colors,
+                            icon_button(
+                                "settings-artwork-cache-calculate",
+                                "󰃬",
+                                self.tr("settings-calculate-usage"),
+                                cx,
+                                |this, _, cx| this.maintain_artwork_cache(false, cx),
+                            ),
+                            busy,
+                        ))
+                        .child(disabled_control(
+                            colors,
+                            icon_button(
+                                "settings-artwork-cache-clean",
+                                "󰆴",
+                                self.tr("settings-clean-expired"),
+                                cx,
+                                |this, _, cx| this.maintain_artwork_cache(true, cx),
+                            ),
+                            busy,
+                        )),
+                ),
+        ));
         if let Some((days, clean)) = self.artwork_cache_busy {
             content = content.child(status_message(
                 colors,
@@ -1909,52 +1913,50 @@ impl Settings {
                     .text_color(rgb(colors.error)),
             );
         }
-        settings_group(colors, self.tr("settings-artwork-cache"), content)
+        settings_card(colors, self.tr("settings-artwork-cache"), content)
     }
 
     fn library_settings(&mut self, cx: &mut Context<Self>) -> Div {
         let library = settings_card(
             palette(cx),
             self.tr("settings-library"),
-            column()
-                .gap_2()
-                .child(
-                    row()
-                        .items_start()
-                        .flex_wrap()
-                        .gap_3()
-                        .child(
-                            self.field(Field::Roots, cx)
-                                .flex_1()
-                                .min_w(rems(260. / 16.)),
-                        )
-                        .child(
-                            self.field(Field::ScanMaxDepth, cx)
-                                .flex_1()
-                                .min_w(rems(220. / 16.)),
-                        ),
-                )
-                .child(two_column(
-                    settings_group(
-                        palette(cx),
-                        self.tr("settings-relocation"),
-                        column()
-                            .gap_2()
-                            .child(caption(palette(cx), self.tr("settings-relocation-help")))
-                            .child(button(
-                                "settings-same-files",
-                                self.tr("settings-review-candidates"),
-                                cx,
-                                |this, _, cx| {
-                                    this.dropdown.close();
-                                    cx.emit(SettingsEvent::ReviewDuplicates);
-                                },
-                            )),
+            column().gap_2().child(
+                row()
+                    .items_start()
+                    .flex_wrap()
+                    .gap_3()
+                    .child(
+                        self.field(Field::Roots, cx)
+                            .flex_1()
+                            .min_w(rems(260. / 16.)),
+                    )
+                    .child(
+                        self.field(Field::ScanMaxDepth, cx)
+                            .flex_1()
+                            .min_w(rems(220. / 16.)),
                     ),
-                    self.artwork_cache_settings(cx),
-                )),
+            ),
         );
-        column().child(library)
+        column()
+            .gap_3()
+            .child(library)
+            .child(settings_card(
+                palette(cx),
+                self.tr("settings-relocation"),
+                column()
+                    .gap_2()
+                    .child(caption(palette(cx), self.tr("settings-relocation-help")))
+                    .child(row().child(button(
+                        "settings-same-files",
+                        self.tr("settings-review-candidates"),
+                        cx,
+                        |this, _, cx| {
+                            this.dropdown.close();
+                            cx.emit(SettingsEvent::ReviewDuplicates);
+                        },
+                    ))),
+            ))
+            .child(self.artwork_cache_settings(cx))
     }
 
     fn playback_settings(&mut self, cx: &mut Context<Self>) -> Div {
