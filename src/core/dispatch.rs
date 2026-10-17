@@ -1,4 +1,5 @@
 use super::*;
+use crossbeam_channel::select;
 
 impl Core {
     pub(in crate::core) fn run(

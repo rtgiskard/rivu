@@ -1,5 +1,5 @@
 use super::*;
-use anyhow::ensure;
+use anyhow::{bail, ensure};
 
 impl Core {
     pub(in crate::core) fn command(&mut self, command: Command) -> Result<()> {

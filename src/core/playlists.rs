@@ -1,4 +1,5 @@
 use super::*;
+use anyhow::bail;
 
 impl Core {
     pub(in crate::core) fn create_playlist(&mut self, name: String) -> Result<()> {

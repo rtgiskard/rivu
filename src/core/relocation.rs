@@ -1,5 +1,5 @@
 use super::*;
-use anyhow::ensure;
+use anyhow::{bail, ensure};
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::{
