@@ -1,13 +1,14 @@
 //! User-editable TOML settings, separate from the library database and GUI layout.
 //!
 //! The file has library, playback, interface, logging, and visualizations tables;
-//! interface contains album_artwork; visualizations contains the four audio-data views.
+//! interface contains theme and album_artwork; visualizations contains the four audio-data views.
 //! Missing fields use [`Config::default`]; unknown or misplaced fields and invalid
 //! values are errors. `playback.repeat` accepts "off", "all", or "one". Omit
 //! `playback.output_device` to use the system default. Paths are literal filesystem
 //! paths, not shell input: no tilde or environment-variable expansion is performed.
 
 use crate::model::RepeatMode;
+use crate::theme::Theme;
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -281,6 +282,8 @@ pub struct Config {
     pub library_columns: LibraryColumns,
     /// Startup presentation language: auto, en-US, or zh-CN.
     pub ui_language: String,
+    /// Shared GUI and TUI color preset, independent of visualization colors.
+    pub ui_theme: Theme,
     /// UI font family; defaults to sans-serif, including empty saved values.
     pub ui_font: String,
     pub ui_scale: f32,
@@ -402,6 +405,7 @@ config_patch! {
     page_size: u32,
     library_columns: LibraryColumns,
     ui_language: String,
+    ui_theme: Theme,
     ui_font: String,
     ui_scale: f32,
     layout_snap_enabled: bool,
@@ -483,6 +487,7 @@ impl Default for Config {
             page_size: DEFAULT_PAGE_SIZE,
             library_columns: LibraryColumns::default(),
             ui_language: "auto".to_owned(),
+            ui_theme: Theme::default(),
             ui_font: "sans-serif".to_owned(),
             ui_scale: 1.0,
             layout_snap_enabled: true,
@@ -913,6 +918,62 @@ mod tests {
     use super::*;
 
     #[test]
+    fn interface_theme_names_round_trip_strictly() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        assert_eq!(Config::load(&path).unwrap().ui_theme, Theme::RivuNight);
+        fs::write(&path, "[interface]\nfont = 'sans-serif'\n").unwrap();
+        assert_eq!(Config::load(&path).unwrap().ui_theme, Theme::RivuNight);
+        let names = [
+            "rivu_night",
+            "tokyo_night",
+            "tokyo_night_day",
+            "catppuccin_mocha",
+            "catppuccin_latte",
+        ];
+        for (name, theme) in names.into_iter().zip(Theme::ALL) {
+            fs::write(&path, format!("[interface]\ntheme = '{name}'\n")).unwrap();
+            let config = Config::load(&path).unwrap();
+            assert_eq!(config.ui_theme, theme);
+            config.save(&path).unwrap();
+            let saved: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!(saved["interface"]["theme"].as_str(), Some(name));
+            assert_eq!(Config::load(&path).unwrap(), config);
+        }
+        for invalid in [
+            "[interface]\ntheme = 'unknown'\n",
+            "[interface]\ntheme = 'TokyoNight'\n",
+            "[interface]\nui_theme = 'rivu_night'\n",
+            "theme = 'rivu_night'\n",
+        ] {
+            fs::write(&path, invalid).unwrap();
+            assert!(Config::load(&path).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn theme_patch_preserves_unrelated_concurrent_changes() {
+        let baseline = Config::default();
+        let draft = Config {
+            ui_theme: Theme::CatppuccinLatte,
+            ..baseline.clone()
+        };
+        let mut latest = Config {
+            volume: 0.25,
+            output_device: Some("concurrent output".into()),
+            ui_language: "zh-CN".into(),
+            still_mode: true,
+            ..baseline.clone()
+        };
+        let expected = Config {
+            ui_theme: Theme::CatppuccinLatte,
+            ..latest.clone()
+        };
+        ConfigPatch::between(&baseline, &draft).apply_to(&mut latest);
+        assert_eq!(latest, expected);
+    }
+
+    #[test]
     fn interface_language_normalizes_and_round_trips_without_resolving_auto() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.toml");
@@ -1335,6 +1396,7 @@ mod tests {
             },
             ui_font: "Noto Sans".to_owned(),
             ui_language: "zh-CN".to_owned(),
+            ui_theme: Theme::CatppuccinMocha,
             ui_scale: 1.5,
             layout_snap_enabled: false,
             layout_snap_grid_px: 12,

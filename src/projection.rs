@@ -119,6 +119,7 @@ pub struct TuiSystemSnapshot {
     pub shutting_down: bool,
     pub library_roots: Arc<Vec<std::path::PathBuf>>,
     pub page_size: u32,
+    pub ui_theme: crate::theme::Theme,
 }
 
 impl Default for TuiSystemSnapshot {
@@ -130,6 +131,7 @@ impl Default for TuiSystemSnapshot {
             shutting_down: false,
             library_roots: Arc::default(),
             page_size: crate::config::DEFAULT_PAGE_SIZE,
+            ui_theme: crate::theme::Theme::default(),
         }
     }
 }
@@ -161,6 +163,7 @@ impl TuiSnapshot {
                     .map(|previous| Arc::clone(&previous.system.library_roots))
                     .unwrap_or_else(|| Arc::new(state.system.config.library_roots.clone())),
                 page_size: state.system.config.page_size,
+                ui_theme: state.system.config.ui_theme,
             },
         }
     }

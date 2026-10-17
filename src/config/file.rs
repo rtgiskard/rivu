@@ -159,6 +159,7 @@ impl<'a> From<&'a Config> for PlaybackView<'a> {
 
 file_group!(Interface, InterfaceView {
     language => ui_language: String,
+    theme => ui_theme: Theme,
     tray_enabled => tray_enabled: bool,
     mpris_enabled => mpris_enabled: bool,
     page_size => page_size: u32,

@@ -17,5 +17,6 @@ pub mod projection;
 pub mod response;
 pub mod store;
 pub mod terminal;
+pub mod theme;
 pub(crate) mod tray;
 mod volume;

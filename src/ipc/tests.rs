@@ -1174,6 +1174,7 @@ fn system_config_wire_adapter_preserves_optional_fields_and_library_columns() {
         let config = Arc::new(crate::config::Config {
             output_device,
             library_columns,
+            ui_theme: crate::theme::Theme::CatppuccinMocha,
             album_artwork_style: crate::config::AlbumArtworkStyle::Metal,
             album_artwork_mode: crate::config::AlbumArtworkMode::Rotating,
             album_artwork_period_seconds: 12.5,
@@ -1290,6 +1291,7 @@ fn configure_request_round_trip_preserves_optional_config_field_and_library_colu
             audio_visualizer_labels: output_device.is_none(),
             output_device,
             library_columns,
+            ui_theme: crate::theme::Theme::TokyoNightDay,
             album_artwork_style: crate::config::AlbumArtworkStyle::Duotone,
             album_artwork_mode: crate::config::AlbumArtworkMode::Rotating,
             album_artwork_period_seconds: 12.5,
