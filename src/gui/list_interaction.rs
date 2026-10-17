@@ -61,6 +61,12 @@ impl ContentGuard {
     }
 }
 
+#[derive(Clone, Copy)]
+enum RemoveTarget {
+    Selection,
+    LibraryRoot,
+}
+
 pub(super) struct ContentMenu {
     token: u64,
     source: TrackSource,
@@ -73,7 +79,7 @@ pub(super) struct ContentMenu {
     remove_label: &'static str,
     root: Option<PathBuf>,
     loading: bool,
-    confirm_remove: bool,
+    confirm_remove: Option<RemoveTarget>,
     pub(super) playlists: bool,
 }
 
@@ -81,7 +87,7 @@ impl ContentMenu {
     pub(super) fn keyboard_page(&self) -> u8 {
         u8::from(self.loading)
             | (u8::from(self.playlists) << 1)
-            | (u8::from(self.confirm_remove) << 2)
+            | (u8::from(self.confirm_remove.is_some()) << 2)
     }
 }
 
@@ -92,6 +98,7 @@ enum ContentAction {
     Playlist(i64),
     Favorite(bool),
     Remove,
+    RemoveLibraryRoot,
 }
 
 // Each request is bounded; no subset is published before the complete collection succeeds.
@@ -193,7 +200,6 @@ impl GuiApp {
             _ => None,
         };
         self.panel_menu = None;
-        self.library_root_menu = None;
         self.playlist_action = None;
         let tracks_only = nodes.as_ref().is_none_or(|nodes| {
             nodes
@@ -217,7 +223,7 @@ impl GuiApp {
             remove_label,
             root,
             loading,
-            confirm_remove: false,
+            confirm_remove: None,
             playlists: false,
         });
         if let Some(key) = album {
@@ -441,15 +447,26 @@ impl GuiApp {
                     self.send(command, cx);
                 }
             }
+            ContentAction::RemoveLibraryRoot => {
+                if let Some(root) = menu.root {
+                    if let Err(error) = self
+                        .handle
+                        .update_gui_config(crate::core::GuiConfigChange::RemoveLibraryRoot(root))
+                    {
+                        self.error = Some(format!("{error:#}"));
+                    }
+                    self.refresh(cx);
+                }
+            }
         }
         cx.notify();
     }
 
     pub(super) fn back_content_menu(&mut self, cx: &mut Context<Self>) {
         if let Some(menu) = &mut self.content_menu {
-            if menu.playlists || menu.confirm_remove {
+            if menu.playlists || menu.confirm_remove.is_some() {
                 menu.playlists = false;
-                menu.confirm_remove = false;
+                menu.confirm_remove = None;
             } else {
                 self.content_menu = None;
             }
@@ -478,9 +495,21 @@ impl GuiApp {
             }));
         if state.loading {
             menu = menu.child(caption(theme, self.tr("gl-loading")));
-        } else if state.confirm_remove {
+        } else if let Some(target) = state.confirm_remove {
+            let (description, label, action) = match target {
+                RemoveTarget::Selection => (
+                    "li-confirm-remove",
+                    state.remove_label,
+                    ContentAction::Remove,
+                ),
+                RemoveTarget::LibraryRoot => (
+                    "li-confirm-remove-root",
+                    "li-remove-root-confirm",
+                    ContentAction::RemoveLibraryRoot,
+                ),
+            };
             menu = menu
-                .child(caption(theme, self.tr("li-confirm-remove")))
+                .child(caption(theme, self.tr(description)))
                 .child(menu_item(
                     "content-cancel-remove",
                     self.tr("gl-cancel"),
@@ -494,9 +523,9 @@ impl GuiApp {
                     theme,
                     menu_item(
                         "content-confirm-remove",
-                        self.tr(state.remove_label),
+                        self.tr(label),
                         cx,
-                        |this, _, cx| this.content_action(ContentAction::Remove, cx),
+                        move |this, _, cx| this.content_action(action, cx),
                     ),
                 ));
         } else if state.playlists {
@@ -636,7 +665,7 @@ impl GuiApp {
                             cx,
                             |this, _, cx| {
                                 if let Some(menu) = &mut this.content_menu {
-                                    menu.confirm_remove = true;
+                                    menu.confirm_remove = Some(RemoveTarget::Selection);
                                 }
                                 cx.notify();
                             },
@@ -644,23 +673,23 @@ impl GuiApp {
                     ),
                 );
             }
-            if let Some(root) = state.root.clone() {
-                menu = menu
-                    .child(components::menu_separator(theme))
-                    .child(menu_item(
-                        "content-root",
-                        self.tr("li-folder"),
-                        cx,
-                        move |this, _, cx| {
-                            let position = this
-                                .content_menu
-                                .take()
-                                .map(|menu| menu.position)
-                                .unwrap_or_default();
-                            this.library_root_menu = Some((root.clone(), position));
-                            cx.notify();
-                        },
-                    ));
+            if state.root.is_some() {
+                menu = menu.child(components::menu_separator(theme)).child(
+                    components::danger_menu_item(
+                        theme,
+                        menu_item(
+                            "content-remove-root",
+                            self.tr("li-remove-root"),
+                            cx,
+                            |this, _, cx| {
+                                if let Some(menu) = &mut this.content_menu {
+                                    menu.confirm_remove = Some(RemoveTarget::LibraryRoot);
+                                }
+                                cx.notify();
+                            },
+                        ),
+                    ),
+                );
             }
         }
         anchored()

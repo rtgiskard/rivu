@@ -43,7 +43,6 @@ shell-cancel = Cancel
 shell-add-playlist = Add to playlist
 shell-new-playlist = New playlist…
 shell-queue-entry-unavailable = The selected queue entry is no longer available.
-shell-remove-library = Remove library (keep files)
 shell-tagline = A local-first music player
 shell-version = Version
 shell-built = Built

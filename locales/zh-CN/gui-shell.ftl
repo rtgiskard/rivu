@@ -43,7 +43,6 @@ shell-cancel = 取消
 shell-add-playlist = 添加到播放列表
 shell-new-playlist = 新建播放列表…
 shell-queue-entry-unavailable = 所选队列条目已失效。
-shell-remove-library = 移出音乐库（保留文件）
 shell-tagline = 本地优先的音乐播放器
 shell-version = 版本
 shell-built = 构建时间

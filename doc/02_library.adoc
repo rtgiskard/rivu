@@ -24,7 +24,10 @@ conflict, while `/Music` and `/Music2` do not. Symlink targets are not resolved;
 distinct logical aliases remain distinct roots. Existing overlapping configurations
 must be corrected before starting the host or saving settings.
 
-[Showing lines 21-25 of 678. Use :26 to continue]
+To stop managing a root, right-click its header and choose `Remove library folder...`,
+then confirm. This removes only the configured root; indexed tracks, their user
+data, playlist and queue entries, and files on disk are kept. Cancel leaves the
+configuration unchanged.
 
 To scan from the command line, run:
 
@@ -446,10 +449,7 @@ unselected row carries that row alone. The dragged set stays fixed for the
 gesture even if the underlying selection changes. Press Esc to cancel a drag
 without adding tracks to its destination.
 
-Right-click a configured root in the desktop Library panel, open Folder actions,
-and choose `Remove library (keep files)` to remove its configured path. Audio files
-and stored track records are retained; the root no longer appears in this view or
-participates in scans of configured roots. Add the path again to restore access.
+For root removal and its retained data, see <<_roots_and_scanning,Roots and scanning>>.
 
 Configured roots are identified by their paths. Click a directory or group
 header to expand or collapse it. Tree and grouped-list expansion choices are

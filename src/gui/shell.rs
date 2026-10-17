@@ -107,9 +107,6 @@ impl GuiApp {
         if let Some(menu) = &self.content_menu {
             return Some(KeyboardSurface::Menu(1, menu.keyboard_page()));
         }
-        if self.library_root_menu.is_some() {
-            return Some(KeyboardSurface::Menu(2, 0));
-        }
         if let Some(menu) = &self.panel_menu {
             return Some(KeyboardSurface::Menu(3, menu.page as u8));
         }
@@ -170,8 +167,6 @@ impl GuiApp {
                     } else {
                         menu.page = PanelMenuPage::Main;
                     }
-                } else if self.library_root_menu.is_some() {
-                    self.library_root_menu = None;
                 } else if self.playlist_action.is_some() {
                     self.playlist_action = None;
                 } else {
@@ -1318,32 +1313,6 @@ impl Render for GuiApp {
             );
         }
         app = app.child(self.content_menu_overlay(window, cx));
-
-        if let Some((root, position)) = self.library_root_menu.clone() {
-            let menu = context_menu_container(theme, "library-root-menu")
-                .map(|surface| self.menu_surface(surface))
-                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                    this.library_root_menu = None;
-                    cx.stop_propagation();
-                    cx.notify();
-                }))
-                .child(menu_item(
-                    "remove-library-root",
-                    self.tr("shell-remove-library"),
-                    cx,
-                    move |this, _, cx| {
-                        this.library_root_menu = None;
-                        if let Err(error) = this.handle.update_gui_config(
-                            crate::core::GuiConfigChange::RemoveLibraryRoot(root.clone()),
-                        ) {
-                            this.error = Some(format!("{error:#}"));
-                        }
-                        this.refresh(cx);
-                        cx.notify();
-                    },
-                ));
-            app = app.child(anchored().position(position).snap_to_window().child(menu));
-        }
 
         if self.playlist_action.is_some() {
             app = app.child(self.playlist_action_overlay(window, cx));
