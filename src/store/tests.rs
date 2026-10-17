@@ -1231,6 +1231,59 @@ fn album_summaries_follow_artist_counts_transactions_external_commits_and_restar
 }
 
 #[test]
+fn single_member_album_keeps_membership_across_artist_transitions_and_rollback() {
+    let store = Store::open(Path::new(":memory:")).unwrap();
+    store
+        .conn
+        .execute_batch(
+            "INSERT INTO tracks(id,path,raw_album,raw_artist) VALUES
+         (1,'/music/one.flac','Solo','');",
+        )
+        .unwrap();
+    for artist in ["First", "Second", ""] {
+        store.edit_track(1, None, Some(artist), None, None).unwrap();
+        let page = store.albums_page(None, AlbumSort::Artist, 0, 24).unwrap();
+        assert_eq!(page.total, 1);
+        let album = &page.rows[0];
+        assert_eq!(album.key.title, "Solo");
+        assert_eq!(album.track_count, 1);
+        assert_eq!(album.artist, artist);
+        assert_eq!(album.representative.id, 1);
+        assert_eq!(
+            store
+                .albums_page(Some("First"), AlbumSort::Title, 0, 24)
+                .unwrap()
+                .total,
+            usize::from(artist == "First")
+        );
+    }
+    let tx = store.conn.unchecked_transaction().unwrap();
+    tx.execute(
+        "UPDATE tracks SET artist_override='Transient' WHERE id=1",
+        [],
+    )
+    .unwrap();
+    assert_eq!(
+        store
+            .albums_page(Some("Transient"), AlbumSort::Title, 0, 24)
+            .unwrap()
+            .total,
+        1
+    );
+    tx.rollback().unwrap();
+    assert_eq!(
+        store
+            .albums_page(Some("Transient"), AlbumSort::Title, 0, 24)
+            .unwrap()
+            .total,
+        0
+    );
+    let page = store.albums_page(None, AlbumSort::Title, 0, 24).unwrap();
+    assert_eq!(page.rows[0].artist, "");
+    assert_eq!(page.rows[0].track_count, 1);
+}
+
+#[test]
 fn album_summaries_follow_scan_edits_removals_and_relocation_rollback() {
     let store = Store::open(Path::new(":memory:")).unwrap();
     let mut source = rec("/music/old/source.flac", "same", "Source", 10.0);
@@ -1764,6 +1817,10 @@ fn track_cache_invalidates_edits_favorites_statistics_and_deletes() {
     assert_eq!(store.track(id).unwrap().unwrap().last_played, Some(42));
     store.increment_play_count(id).unwrap();
     assert_eq!(store.track(id).unwrap().unwrap().play_count, 1);
+    let stats = store.mark_played(id, 42).unwrap();
+    assert_eq!(stats.play_count, 1);
+    assert_eq!(stats.last_played, Some(42));
+    assert!(store.mark_played(id + 1, 42).is_err());
 
     store.remove_tracks(&[id]).unwrap();
     assert!(store.track(id).unwrap().is_none());

@@ -383,7 +383,7 @@ impl Store {
             return Ok(false);
         }
         // Keep the playing occurrence's identity, but move it to its track's first position.
-        tx.execute_batch("UPDATE queue_entries SET position=(SELECT MIN(other.position) FROM queue_entries other WHERE other.track_id=queue_entries.track_id) WHERE id=(SELECT current_id FROM queue_meta); WITH ranked AS (SELECT id,row_number() OVER (PARTITION BY track_id ORDER BY CASE WHEN id=(SELECT current_id FROM queue_meta) THEN 0 ELSE 1 END,position,id) AS occurrence FROM queue_entries) DELETE FROM queue_entries WHERE id IN (SELECT id FROM ranked WHERE occurrence>1);")?;
+        tx.execute_batch("UPDATE queue_entries SET position=(SELECT MIN(other.position) FROM queue_entries other WHERE other.track_id=queue_entries.track_id) WHERE id=(SELECT current_id FROM queue_meta) AND position<>(SELECT MIN(other.position) FROM queue_entries other WHERE other.track_id=queue_entries.track_id); WITH ranked AS (SELECT id,row_number() OVER (PARTITION BY track_id ORDER BY CASE WHEN id=(SELECT current_id FROM queue_meta) THEN 0 ELSE 1 END,position,id) AS occurrence FROM queue_entries) DELETE FROM queue_entries WHERE id IN (SELECT id FROM ranked WHERE occurrence>1);")?;
         close_gaps(&tx, &positions, PositionScope::Queue)?;
         invalidate_structure(&tx, true)?;
         tx.commit()?;

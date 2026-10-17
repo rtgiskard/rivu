@@ -126,6 +126,7 @@ impl Store {
                     "Unsupported database version {version}; back up the database and WAL before replacing it; rescanning cannot restore user state"
                 );
             }
+            super::albums::ensure_summary_triggers(&c)?;
         }
         // SQLite's built-in lower() is ASCII-only; preserve frontend Unicode search.
         c.create_scalar_function(

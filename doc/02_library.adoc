@@ -707,7 +707,14 @@ For the JSON history shape and `--limit` behavior, see <<_cli_output,CLI output>
 
 Rivu creates and opens only schema version 1 library databases. Other versions
 and unversioned databases are rejected without changing the schema or user data.
-There is no automatic migration, reset, or deletion.
+There is no automatic schema-version migration, reset, or deletion. Within version 1,
+Rivu updates its album-summary trigger definitions transactionally when needed,
+without rebuilding summaries or changing user records. Reopening an up-to-date
+database does not reinstall those triggers.
+
+Unchanged playback timestamps, queue positions during deduplication, and derived
+album artists are not rewritten. Actual listening statistics, queue changes, and
+album membership changes still commit normally; writes are not deferred.
 
 If you choose to rebuild, stop the core and retain a separate backup of
 `library.db` and any `-wal`/`-shm` sidecars before using a fresh database and

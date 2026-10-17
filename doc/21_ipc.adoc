@@ -177,6 +177,10 @@ only to test eligibility, never to normalize keys. Member artist reference count
 preserve search across compilation artists. SQLite triggers maintain both summaries
 in the same transaction as track changes, including rollback and writes from another
 connection; unchanged effective grouping and artist values require no summary update.
+When only the effective artist changes within the same eligible album, triggers
+transfer artist reference counts and refresh the final summary artist once; the
+album row and its member count remain intact. Directory or album-title changes
+still remove the old membership and add the new one.
 Each changed member uses indexed counter operations, not a scan of the album.
 An ordered member index selects representatives by disc, track number, effective
 title, then ID. This trades summary and index storage plus write maintenance for

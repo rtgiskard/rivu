@@ -40,46 +40,63 @@ pub(super) fn create_summary_schema(conn: &Connection) -> Result<()> {
         ) WITHOUT ROWID;
         CREATE INDEX tracks_album_members ON tracks({DIRECTORY},{TITLE},{ORDER});"
     ))?;
+    install_summary_triggers(conn)
+}
+
+fn install_summary_triggers(conn: &Connection) -> Result<()> {
     let directory = |row: &str| DIRECTORY.replace("path", &format!("{row}.path"));
     let title = |row: &str| format!("COALESCE({row}.album_override,{row}.raw_album)");
     let artist = |row: &str| format!("COALESCE({row}.artist_override,{row}.raw_artist)");
     let refresh_artist = |row: &str| {
         let d = directory(row);
         let t = title(row);
+        let value = format!(
+            "CASE WHEN EXISTS(SELECT 1 FROM album_artists
+                WHERE directory={d} AND title={t} LIMIT 1 OFFSET 1)
+             THEN 'Various artists'
+             ELSE (SELECT artist FROM album_artists
+                WHERE directory={d} AND title={t} LIMIT 1) END"
+        );
         format!(
-            "UPDATE albums SET artist=CASE
-                WHEN EXISTS(SELECT 1 FROM album_artists
-                    WHERE directory={d} AND title={t} LIMIT 1 OFFSET 1)
-                THEN 'Various artists'
-                ELSE (SELECT artist FROM album_artists
-                    WHERE directory={d} AND title={t} LIMIT 1) END
-             WHERE directory={d} AND title={t};"
+            "UPDATE albums SET artist={value}
+             WHERE directory={d} AND title={t} AND artist IS NOT ({value});"
         )
     };
-    let add = format!(
-        "INSERT INTO albums(directory,title,track_count) SELECT {d},{t},1 WHERE {eligible}
-            ON CONFLICT(directory,title) DO UPDATE SET track_count=track_count+1;
-         INSERT INTO album_artists(directory,title,artist,track_count)
+    let add_artist = format!(
+        "INSERT INTO album_artists(directory,title,artist,track_count)
             SELECT {d},{t},{a},1 WHERE {eligible} AND {a}<>''
-            ON CONFLICT(directory,title,artist) DO UPDATE SET track_count=track_count+1;
-         {refresh}",
+            ON CONFLICT(directory,title,artist) DO UPDATE SET track_count=track_count+1;",
         d = directory("new"),
         t = title("new"),
         a = artist("new"),
+        eligible = eligible_title(&title("new")),
+    );
+    let remove_artist = format!(
+        "UPDATE album_artists SET track_count=track_count-1
+            WHERE directory={d} AND title={t} AND artist={a};
+         DELETE FROM album_artists WHERE directory={d} AND title={t} AND artist={a}
+            AND track_count=0;",
+        d = directory("old"),
+        t = title("old"),
+        a = artist("old"),
+    );
+    let add = format!(
+        "INSERT INTO albums(directory,title,track_count) SELECT {d},{t},1 WHERE {eligible}
+            ON CONFLICT(directory,title) DO UPDATE SET track_count=track_count+1;
+         {add_artist}
+         {refresh}",
+        d = directory("new"),
+        t = title("new"),
         refresh = refresh_artist("new"),
         eligible = eligible_title(&title("new")),
     );
     let remove = format!(
         "UPDATE albums SET track_count=track_count-1 WHERE directory={d} AND title={t};
-         UPDATE album_artists SET track_count=track_count-1
-            WHERE directory={d} AND title={t} AND artist={a};
-         DELETE FROM album_artists WHERE directory={d} AND title={t} AND artist={a}
-            AND track_count=0;
+         {remove_artist}
          DELETE FROM albums WHERE directory={d} AND title={t} AND track_count=0;
          {refresh}",
         d = directory("old"),
         t = title("old"),
-        a = artist("old"),
         refresh = refresh_artist("old"),
     );
     conn.execute_batch(&format!(
@@ -88,15 +105,46 @@ pub(super) fn create_summary_schema(conn: &Connection) -> Result<()> {
          CREATE TRIGGER albums_update AFTER UPDATE OF path,raw_album,album_override,
             raw_artist,artist_override ON tracks
          WHEN {old_d} IS NOT {new_d} OR {old_t} IS NOT {new_t}
-            OR {old_a} IS NOT {new_a}
-         BEGIN {remove} {add} END;",
+         BEGIN {remove} {add} END;
+         CREATE TRIGGER albums_artist_update AFTER UPDATE OF path,raw_album,album_override,
+            raw_artist,artist_override ON tracks
+         WHEN {old_d} IS {new_d} AND {old_t} IS {new_t}
+            AND {old_a} IS NOT {new_a} AND {eligible}
+         BEGIN {remove_artist} {add_artist} {refresh} END;",
         old_d = directory("old"),
         new_d = directory("new"),
         old_t = title("old"),
         new_t = title("new"),
         old_a = artist("old"),
         new_a = artist("new"),
+        eligible = eligible_title(&title("new")),
+        refresh = refresh_artist("new"),
     ))?;
+    conn.execute(
+        "INSERT INTO schema_meta(key,value) VALUES('album_trigger_revision',2)
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        [],
+    )?;
+    Ok(())
+}
+
+pub(super) fn ensure_summary_triggers(conn: &Connection) -> Result<()> {
+    let current: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM schema_meta WHERE key='album_trigger_revision' AND value=2)",
+        [],
+        |row| row.get(0),
+    )?;
+    if current {
+        return Ok(());
+    }
+    // Only trigger definitions change; existing summary rows remain authoritative.
+    let tx = conn.unchecked_transaction()?;
+    tx.execute_batch(
+        "DROP TRIGGER albums_insert; DROP TRIGGER albums_delete; DROP TRIGGER albums_update;
+         DROP TRIGGER IF EXISTS albums_artist_update;",
+    )?;
+    install_summary_triggers(&tx)?;
+    tx.commit()?;
     Ok(())
 }
 

@@ -938,12 +938,23 @@ impl Store {
         let stats = self
             .conn
             .query_row(
-                "UPDATE tracks SET last_played=?1 WHERE id=?2 RETURNING play_count,last_played",
+                "UPDATE tracks SET last_played=?1 WHERE id=?2 AND last_played IS NOT ?1 RETURNING play_count,last_played",
                 params![at, track],
                 super::TrackStats::from_row,
             )
-            .optional()?
-            .with_context(|| format!("track {track} does not exist"))?;
+            .optional()?;
+        let stats = match stats {
+            Some(stats) => Some(stats),
+            None => self
+                .conn
+                .query_row(
+                    "SELECT play_count,last_played FROM tracks WHERE id=?1",
+                    [track],
+                    super::TrackStats::from_row,
+                )
+                .optional()?,
+        }
+        .with_context(|| format!("track {track} does not exist"))?;
         self.cache_track_stats(track, stats);
         Ok(stats)
     }
