@@ -261,32 +261,6 @@ fn main() {
         std::process::exit(1);
     }
 }
-// Resolve the same configuration before clap renders --help. Only path options
-// are inspected here; clap remains authoritative for syntax and diagnostics.
-fn startup_config_path() -> PathBuf {
-    let mut config_path = None;
-    let mut data_dir = None;
-    let mut args = std::env::args_os().skip(1);
-    while let Some(arg) = args.next() {
-        if arg == "--" {
-            break;
-        }
-        if arg == "--config" {
-            config_path = args.next().map(PathBuf::from);
-        } else if arg == "--data-dir" {
-            data_dir = args.next().map(PathBuf::from);
-        } else if let Some(value) = arg.to_str().and_then(|arg| arg.strip_prefix("--config=")) {
-            config_path = Some(value.into());
-        } else if let Some(value) = arg.to_str().and_then(|arg| arg.strip_prefix("--data-dir=")) {
-            data_dir = Some(PathBuf::from(value));
-        }
-    }
-    config_path.unwrap_or_else(|| {
-        data_dir.map_or_else(config::default_path, |directory| {
-            directory.join("config.toml")
-        })
-    })
-}
 
 fn localize_help(command: &mut clap::Command, i18n: &Localizer, path: &str) {
     let messages = i18n
@@ -371,12 +345,8 @@ fn localize_command_help(
 }
 
 fn run() -> Result<()> {
-    let startup_config = config::Config::load(&startup_config_path());
-    // Client-side localization is best-effort; hosts and probes validate their
-    // configuration when they initialize, not before remote commands dispatch.
-    let language = startup_config
-        .as_ref()
-        .map_or("auto", |config| config.ui_language.as_str());
+    // Command-line surfaces use the process locale, independently of GUI settings.
+    let language = "auto";
     let i18n = Localizer::new(language);
     let mut command = Args::command();
     command.build();
