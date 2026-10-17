@@ -26,24 +26,3 @@ at the time of investigation. Revisit when a compatible published release
 includes it; verify successful selection, cancellation, and absence of this
 warning without suppressing other logs.
 
-=== Popup latency is unresolved
-
-The user reports a roughly 400 ms delay from clicking Add until the chooser
-appears, on every invocation; this is a subjective estimate, not a timed GUI
-measurement. A throwaway probe against the current session bus measured 30
-warmed iterations per variant, alternating their order:
-
-[cols="3,1,1",options="header"]
-|===
-|Request preparation |Median |Min–max
-|Current cache + version read + Response subscription |1.439 ms |1.338–1.556 ms
-|No cache, no version read + Response subscription |0.399 ms |0.353–0.536 ms
-|===
-
-This probe reconstructed request preparation; it did not measure the release
-application's click-to-visible-window path. The measured difference does not
-explain the reported delay. It also removed the version read, whereas the
-upstream warning fix retains that read. GPUI scheduling and portal window
-creation/display remain unmeasured; do not claim the warning fix resolves
-popup latency.
-
