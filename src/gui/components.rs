@@ -579,7 +579,7 @@ pub(crate) fn metadata_item(
 ) -> Div {
     // Captions use 0.75rem, so 1.5rem is a 2em label/value gap.
     row()
-        .items_start()
+        .items_baseline()
         .group("metadata-field")
         .gap(gpui::rems(1.5))
         .flex_1()
@@ -592,7 +592,7 @@ pub(crate) fn metadata_item(
                 .gap_1()
                 .child(
                     div()
-                        .flex_1()
+                        .flex_initial()
                         .min_w_0()
                         .text_sm()
                         .truncate()

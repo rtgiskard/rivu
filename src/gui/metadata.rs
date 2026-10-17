@@ -635,6 +635,7 @@ fn metadata_copy(
             }),
         )
         .h(gpui::rems(1.25))
+        .min_h_0()
         .text_size(gpui::rems(0.75))
         .opacity(0.)
         .group_hover("metadata-field", |style| style.opacity(1.))
