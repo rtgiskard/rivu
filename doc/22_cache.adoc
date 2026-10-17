@@ -26,13 +26,29 @@ refreshes; command eligibility is checked against current targeted member facts.
 
 Owners reconcile keys while hidden, but tree and Details reads require actual
 panel demand. An open Add to playlist chooser also demands playlist summaries,
-independently of the Playlists panel. An unchanged key retains bounded album pages and page failures
-across hiding; covers are released independently. Page-size changes affect demand geometry,
-not query identity. Failed pages stay failed until explicit retry. A current
-transport error consumes its page reservation even without a query stamp; only
-successful payloads are checked for data freshness. Cancelling a generation
-cannot release a physical worker gate: completion owns that release,
-and only the latest queued demand may then run. Metadata drafts/save baselines,
+independently of the Playlists panel. An unchanged key retains bounded album pages
+and page failures across hiding; covers are released independently.
+
+Authoritative result counts are separate from retained scroll geometry. A data
+revision forgets counts and drops obsolete pages, failures, and positional pins,
+but retains nonempty geometry until a current result supplies its real total.
+A previously empty result gains a loading position so later additions are
+discoverable. Flat-list and album query identity changes discard their old
+geometry; tree filter changes preserve expansion choices but invalidate affected
+facts. Count displays and range/navigation operations cannot treat retained
+geometry as current facts;
+tree ranges also require current counts for stale ancestors before validating
+their retained identities. Unfiltered Queue snapshots can supply authoritative
+totals immediately, including zero; filtered queries require their own totals.
+
+Page-size changes clear boundary-dependent pages, failures, and reservations,
+not current counts, viewport geometry, or identity selections. Hiding and logical
+cancellation release only pending reservations, preserving accepted data and
+failures. For unchanged data and page boundaries, failed pages stay failed until
+explicit retry. A current transport error consumes its page reservation even
+without a query stamp; only successful payloads are checked for data freshness.
+Cancelling a generation cannot release a physical worker gate: completion owns
+that release, and only the latest queued demand may then run. Metadata drafts/save baselines,
 occurrence identities, unavailable state, and relocation operations remain
 business-owned rather than being swallowed by a generic payload cache.
 

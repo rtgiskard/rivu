@@ -191,10 +191,7 @@ impl QueryProjection {
         revisions: crate::response::QueryRevisions,
     ) -> bool {
         let stamp = query.stamp(revisions);
-        let identity_changed = !self
-            .identity
-            .as_ref()
-            .is_some_and(|current| current.identity() == query.identity());
+        let identity_changed = !self.matches_identity(query);
         if !identity_changed && self.stamp == Some(stamp) {
             return false;
         }
@@ -214,6 +211,12 @@ impl QueryProjection {
         self.stamp
     }
 
+    pub(crate) fn matches_identity(&self, query: &crate::model::Query) -> bool {
+        self.identity
+            .as_ref()
+            .is_some_and(|current| current.identity() == query.identity())
+    }
+
     /// Retiring submissions does not invalidate a still-current cached payload.
     pub(crate) fn cancel(&mut self) {
         self.generation.cancel();
@@ -230,10 +233,7 @@ impl QueryProjection {
         revisions: crate::response::QueryRevisions,
     ) -> bool {
         self.generation.generation() == generation
-            && self
-                .identity
-                .as_ref()
-                .is_some_and(|current| current.identity() == query.identity())
+            && self.matches_identity(query)
             && self.stamp == Some(query.stamp(revisions))
     }
 }

@@ -984,7 +984,9 @@ impl GuiApp {
         let Some(scope) = self.playlist_navigation_scope() else {
             return;
         };
-        let total = self.browser.playlists.entries().total;
+        let Some(total) = self.browser.playlists.entries().rows.total() else {
+            return;
+        };
         if !self
             .browser
             .playlists
@@ -1012,7 +1014,9 @@ impl GuiApp {
         let Some(scope) = self.playlist_navigation_scope() else {
             return;
         };
-        let total = self.browser.playlists.entries().total;
+        let Some(total) = self.browser.playlists.entries().rows.total() else {
+            return;
+        };
         if !self
             .browser
             .playlists
@@ -1041,7 +1045,9 @@ impl GuiApp {
         let Some(scope) = self.playlist_navigation_scope() else {
             return;
         };
-        let total = self.browser.playlists.entries().total;
+        let Some(total) = self.browser.playlists.entries().rows.total() else {
+            return;
+        };
         let selection = &self.browser.playlists.track_selection;
         if total == 0 || (!selection.ready() && selection.navigation.is_none()) {
             return;

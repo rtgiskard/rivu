@@ -537,7 +537,9 @@ resizing or navigating one panel does not change another panel.
 
 Back preserves the grid's browsing position and visible album; changing grid
 width preserves that album as the scroll anchor. Hiding and reopening the panel
-retains its browsing position. Unloaded positions show a loading placeholder;
+retains its browsing position. Playback and background data refreshes retain the
+grid and track list's scroll offset; refreshed results only clamp it when the
+collection actually becomes shorter. Unloaded positions show a loading placeholder;
 failed loads offer a retry action without replacing the rest of the list.
 Track rows show duration, missing-file status, and the current track's playback
 state.

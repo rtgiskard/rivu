@@ -407,6 +407,7 @@ impl LibraryBrowser {
         let mut slices: VecDeque<_> = self
             .tree
             .range_checks(range)
+            .ok_or(SelectionError::Message("gl-library-folders-loading"))?
             .into_iter()
             .map(|(span, child)| Slice::tree(span, Some(child)))
             .chain(spans.into_iter().map(|span| Slice::tree(span, None)))
@@ -958,6 +959,7 @@ mod tests {
                 }],
             },
         );
+        load_group(&mut library, &branch, 0, 100, 20, 4);
         library
             .start_range_selection(&LibraryNode::Track(50), 51, false, revisions(7, 3), 20)
             .unwrap();

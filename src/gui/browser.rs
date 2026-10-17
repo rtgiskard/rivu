@@ -253,6 +253,7 @@ impl LibraryBrowser {
 
     pub(super) fn cancel_pending_reads(&mut self) {
         self.projection.cancel();
+        self.tree.cancel_pending();
         if self.search_count_pending {
             self.search_count_projection.cancel();
         }
@@ -362,9 +363,8 @@ impl LibraryBrowser {
     }
 
     pub(super) fn refresh_tree(&mut self, page_size: usize) {
-        self.invalidate_projection();
-        if !self.tree.configure_page_size(page_size) {
-            self.tree.invalidate();
+        if self.tree.configure_page_size(page_size) {
+            self.invalidate_projection();
         }
     }
 
@@ -632,7 +632,6 @@ impl LibraryBrowser {
 pub(super) struct PlaylistSummaryBuffer {
     pub(super) query: Option<String>,
     pub(super) offset: usize,
-    pub(super) total: usize,
     pub(super) rows: PagedRows<PlaylistSummary>,
     pub(super) scroll: gpui::UniformListScrollHandle,
 }
@@ -641,7 +640,6 @@ pub(super) struct PlaylistEntriesBuffer {
     pub(super) query: Option<String>,
     pub(super) playlist_id: Option<i64>,
     pub(super) offset: usize,
-    pub(super) total: usize,
     pub(super) rows: PagedRows<PlaylistEntryRow>,
     pub(super) scroll: gpui::UniformListScrollHandle,
 }
@@ -655,7 +653,6 @@ impl Default for PlaylistEntriesBuffer {
             playlist_id: None,
             query: None,
             offset: 0,
-            total: 0,
             rows,
             scroll: Default::default(),
         }
@@ -685,7 +682,6 @@ impl PlaylistBrowser {
     }
     pub(super) fn search_summaries(&mut self, query: Option<String>) {
         self.summaries.query = query;
-        self.summaries.total = 0;
         self.summaries.rows.clear();
         self.summaries.scroll.scroll_to_item(0, ScrollStrategy::Top);
     }
@@ -693,7 +689,6 @@ impl PlaylistBrowser {
         self.track_selection.query = query.clone();
         self.entries.query = query;
         self.track_selection.clear();
-        self.entries.total = 0;
         self.entries.rows.clear();
         self.entries.scroll.scroll_to_item(0, ScrollStrategy::Top);
     }
@@ -732,6 +727,11 @@ impl PlaylistBrowser {
 
     pub(super) fn invalidate_summaries(&mut self) {
         self.summaries.rows.invalidate();
+    }
+
+    pub(super) fn configure_page_size(&mut self, page_size: usize) {
+        self.summaries.rows.configure_page_size(page_size);
+        self.entries.rows.configure_page_size(page_size);
     }
 
     pub(super) fn cancel_page(&mut self, entries: bool) {
@@ -874,7 +874,6 @@ impl PlaylistBrowser {
             self.track_selection.query = None;
             self.track_selection.clear();
             self.entries.rows.clear();
-            self.entries.total = 0;
             self.entries.scroll.scroll_to_item(0, ScrollStrategy::Top);
         } else {
             self.entries.rows.invalidate();
@@ -890,7 +889,6 @@ impl PlaylistBrowser {
     }
 
     pub(super) fn accept_summaries(&mut self, page: Page<PlaylistSummary>) {
-        self.summaries.total = page.total;
         self.summaries.rows.accept(page);
         if let Some(index) = self
             .summaries
@@ -911,7 +909,6 @@ impl PlaylistBrowser {
     }
 
     pub(super) fn accept_entries(&mut self, page: Page<PlaylistEntryRow>) {
-        self.entries.total = page.total;
         self.entries.rows.accept(page);
         if let Some(index) = self
             .entries
@@ -925,7 +922,6 @@ impl PlaylistBrowser {
     pub(super) fn accept_entry_locations(&mut self, mut rows: Vec<PlaylistEntryLocation>) {
         rows.retain(|row| Some(row.playlist_id) == self.entries.playlist_id);
         if let Some(row) = rows.first() {
-            self.entries.total = row.total;
             self.entries.rows.set_total(row.total);
         }
         self.track_selection.reconcile(
@@ -2006,6 +2002,85 @@ mod tests {
             name: format!("playlist {id}"),
             entry_count,
         }
+    }
+
+    #[test]
+    fn empty_playlist_catalog_reloads_after_creation_and_last_deletion() {
+        for query in [None, Some("playlist".into())] {
+            let mut playlists = PlaylistBrowser::default();
+            playlists.search_summaries(query);
+            playlists.prepare_page(false, 0, 20);
+            playlists.accept_summaries(Page {
+                total: 0,
+                rows: vec![],
+            });
+            assert_eq!(playlists.demand_page(false, 0..1, 20), None);
+
+            for id in [1, 2] {
+                playlists.invalidate_summaries();
+                let range = 0..playlists.summaries().rows.len();
+                assert_eq!(playlists.demand_page(false, range, 20), Some(0));
+                playlists.prepare_page(false, 0, 20);
+                playlists.accept_summaries(Page {
+                    total: 1,
+                    rows: vec![summary(id, 0)],
+                });
+                assert_eq!(playlists.summaries().rows.get(0).unwrap().id, id);
+
+                playlists.invalidate_summaries();
+                assert_eq!(playlists.demand_page(false, 0..1, 20), Some(0));
+                playlists.prepare_page(false, 0, 20);
+                playlists.accept_summaries(Page {
+                    total: 0,
+                    rows: vec![],
+                });
+                assert!(playlists.summaries().rows.is_empty());
+                assert_eq!(playlists.demand_page(false, 0..1, 20), None);
+            }
+        }
+    }
+
+    #[test]
+    fn playlist_batch_resize_preserves_counts_selection_and_viewport() {
+        let mut playlists = PlaylistBrowser::default();
+        playlists.select(1, "one".into(), 0);
+        playlists.prepare_entries(1);
+        playlists.prepare_page(false, 0, 20);
+        playlists.accept_summaries(Page {
+            total: 1,
+            rows: vec![summary(1, 100)],
+        });
+        playlists.prepare_page(true, 80, 20);
+        playlists.accept_entries(Page {
+            total: 100,
+            rows: (80..100)
+                .map(|index| PlaylistEntryRow {
+                    id: index as i64,
+                    track_id: index as i64,
+                    position: index,
+                    offset: index,
+                    title: format!("entry {index}"),
+                    artist: String::new(),
+                    album: String::new(),
+                    duration: None,
+                    codec: String::new(),
+                    missing: false,
+                    favorite: false,
+                })
+                .collect(),
+        });
+        playlists.select_entry(83, 83);
+        playlists.demand_page(true, 80..90, 20);
+        playlists.configure_page_size(25);
+        assert_eq!(playlists.summaries().rows.total(), Some(1));
+        assert_eq!(playlists.entries().rows.total(), Some(100));
+        assert_eq!(playlists.entries().rows.visible(), 80..90);
+        assert_eq!(playlists.selected_entry(), Some(83));
+        assert!(playlists.entry_ready());
+        assert_eq!(playlists.demand_page(true, 80..90, 25), Some(75));
+        playlists.prepare_entries(1);
+        assert_eq!(playlists.entries().rows.total(), None);
+        assert_eq!(playlists.entries().rows.len(), 100);
     }
 
     #[test]

@@ -1036,9 +1036,11 @@ impl GuiApp {
                 "gl-tracks-selected",
                 &[("count", (self.browser.library.selected().len()).into())],
             )
-        } else {
+        } else if let Some(total) = total {
             self.i18n
                 .format("gl-entry-count", &[("count", (total).into())])
+        } else {
+            self.i18n.text("gl-loading").to_owned()
         };
         let heading = panel_header(theme, self.tr("gl-library"), selection_label.clone())
             .flex_1()

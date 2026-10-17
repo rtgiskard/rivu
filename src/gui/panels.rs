@@ -1667,16 +1667,22 @@ impl GuiApp {
                         panel_header(
                             theme,
                             self.tr("gl-playlists"),
-                            self.i18n.format(
-                                "gl-playlist-count",
-                                &[
-                                    ("total", self.browser.playlists.summaries().total.into()),
-                                    (
-                                        "selected",
-                                        self.browser.playlists.track_selection.len().into(),
-                                    ),
-                                ],
-                            ),
+                            if let Some(total) = self.browser.playlists.summaries().rows.total() {
+                                self.i18n
+                                    .format(
+                                        "gl-playlist-count",
+                                        &[
+                                            ("total", total.into()),
+                                            (
+                                                "selected",
+                                                self.browser.playlists.track_selection.len().into(),
+                                            ),
+                                        ],
+                                    )
+                                    .into()
+                            } else {
+                                self.tr("gl-loading")
+                            },
                         )
                         .flex_1()
                         .min_w_0(),

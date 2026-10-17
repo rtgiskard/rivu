@@ -314,14 +314,18 @@ impl AlbumBrowser {
         let visibility_changed = self.visible != visible;
         let demand_changed = self.page_size != page_size.max(1);
         self.revisions = revisions;
-        let data_changed = self.sync_data(cx);
+        if demand_changed {
+            self.tracks_projection.cancel();
+            self.tracks.configure_page_size(page_size.max(1));
+        }
         self.page_size = page_size.max(1);
+        let data_changed = self.sync_data(cx);
         if visibility_changed && !visible {
             self.cancel(cx);
         }
         self.visible = visible;
         if visible && (visibility_changed || data_changed || demand_changed) {
-            if self.selected.is_none() {
+            if visibility_changed && self.selected.is_none() {
                 self.restore_grid_anchor();
             }
             self.request_next(cx);
@@ -1017,11 +1021,16 @@ fn sync_pages<T>(
     query: &Query,
     revisions: QueryRevisions,
 ) -> bool {
+    let identity_changed = !projection.matches_identity(query);
     if !projection.sync(query, revisions) {
         return false;
     }
-    // Unknown total bootstraps a new request even after an accepted empty result.
-    pages.clear();
+    if identity_changed {
+        pages.clear();
+    } else {
+        // Keep viewport geometry until the refreshed page supplies its real total.
+        pages.invalidate();
+    }
     true
 }
 
@@ -1631,6 +1640,7 @@ mod tests {
             let generation = projection.generation();
             cancel_pages(&mut projection, &mut pages);
             assert_eq!(pages.len(), 6);
+            assert_eq!(pages.total(), Some(6));
             assert_eq!(pages.get(0), Some(&10));
             assert_eq!(pages.error(2), Some("Unavailable"));
             assert!(!projection.accepts(&query, generation, revisions));
@@ -1640,6 +1650,47 @@ mod tests {
             assert_eq!(pages.demand(2..4, 2), Some(4));
             pages.retry();
             assert_eq!(pages.demand(2..4, 2), Some(2));
+        }
+    }
+
+    #[test]
+    fn data_refresh_preserves_viewport_until_authoritative_total_arrives() {
+        for query in queries() {
+            let mut projection = QueryProjection::default();
+            let mut pages = paged::PagedRows::default();
+            let revisions = QueryRevisions::default();
+            sync_pages(&mut projection, &mut pages, &query, revisions);
+            pages.begin(80, 2);
+            pages.accept(Page {
+                total: 100,
+                rows: vec![80, 81],
+            });
+            pages.demand(80..84, 2);
+            let generation = projection.generation();
+            let refreshed = QueryRevisions {
+                library: 1,
+                ..revisions
+            };
+            assert!(sync_pages(&mut projection, &mut pages, &query, refreshed));
+            assert_eq!(pages.len(), 100);
+            assert_eq!(pages.total(), None);
+            assert_eq!(pages.visible(), 80..84);
+            assert!(pages.get(80).is_none());
+            assert!(!projection.accepts(&query, generation, revisions));
+            assert_eq!(pages.demand(pages.visible(), 2), Some(80));
+            pages.begin(80, 2);
+            pages.accept(Page {
+                total: 4,
+                rows: vec![],
+            });
+            assert_eq!(pages.len(), 4);
+            assert_eq!(pages.demand(pages.visible(), 2), Some(2));
+            pages.begin(2, 2);
+            pages.accept(Page {
+                total: 4,
+                rows: vec![2, 3],
+            });
+            assert_eq!(pages.get(3), Some(&3));
         }
     }
 
@@ -1672,11 +1723,60 @@ mod tests {
                     });
                     cancel_pages(&mut projection, &mut pages);
                     assert!(sync_pages(&mut projection, &mut pages, &query, revisions));
+                    assert_eq!(pages.total(), None);
                     assert!(!pages.is_empty());
                     assert!(pages.get(0).is_none());
                     assert_eq!(pages.demand(pages.visible(), 2), Some(0));
+                    pages.begin(0, 2);
+                    pages.accept(Page {
+                        total: 1,
+                        rows: vec![3],
+                    });
+                    assert_eq!(pages.total(), Some(1));
+                    assert_eq!(pages.get(0), Some(&3));
                 }
             }
+        }
+    }
+
+    #[test]
+    fn filtered_empty_album_results_survive_hide_and_page_boundary_changes() {
+        for mut query in queries() {
+            match &mut query {
+                Query::Albums { query, .. } | Query::AlbumTracks { query, .. } => {
+                    *query = Some("needle".into());
+                }
+                _ => unreachable!(),
+            }
+            let mut projection = QueryProjection::default();
+            let mut pages = paged::PagedRows::<usize>::default();
+            let revisions = QueryRevisions::default();
+            sync_pages(&mut projection, &mut pages, &query, revisions);
+            pages.begin(0, 2);
+            pages.accept(Page {
+                total: 0,
+                rows: vec![],
+            });
+            cancel_pages(&mut projection, &mut pages);
+            let generation = projection.generation();
+            projection.cancel();
+            pages.configure_page_size(4);
+            match &mut query {
+                Query::Albums { limit, .. } | Query::AlbumTracks { limit, .. } => *limit = 4,
+                _ => unreachable!(),
+            }
+            assert!(!sync_pages(&mut projection, &mut pages, &query, revisions));
+            assert!(!projection.accepts(&query, generation, revisions));
+            assert_eq!(pages.total(), Some(0));
+            assert!(pages.demand(pages.visible(), 4).is_none());
+
+            let refreshed = QueryRevisions {
+                library: 1,
+                ..revisions
+            };
+            assert!(sync_pages(&mut projection, &mut pages, &query, refreshed));
+            assert_eq!(pages.total(), None);
+            assert_eq!(pages.demand(pages.visible(), 4), Some(0));
         }
     }
 

@@ -34,6 +34,8 @@ const MAX_PAGES: usize = 8;
 pub(super) struct PagedRows<T> {
     pages: BTreeMap<usize, Vec<T>>,
     total: Option<usize>,
+    // Retained geometry is not an authoritative count after a data revision.
+    layout_len: usize,
     page_size: usize,
     visible: Range<usize>,
     pinned: Option<usize>,
@@ -46,6 +48,7 @@ impl<T> Default for PagedRows<T> {
         Self {
             pages: BTreeMap::new(),
             total: None,
+            layout_len: 1,
             page_size: 1,
             visible: 0..1,
             pending: None,
@@ -60,10 +63,11 @@ impl<T> PagedRows<T> {
         self.total
     }
     pub(super) fn len(&self) -> usize {
-        self.total.unwrap_or(1)
+        self.layout_len
     }
     pub(super) fn set_total(&mut self, total: usize) {
         self.total = Some(total);
+        self.layout_len = total;
     }
     pub(super) fn is_empty(&self) -> bool {
         self.len() == 0
@@ -92,18 +96,24 @@ impl<T> PagedRows<T> {
         *self = Self::default();
     }
     pub(super) fn invalidate(&mut self) {
+        self.total = None;
+        self.layout_len = self.layout_len.max(1);
+        if self.visible.is_empty() {
+            self.visible = 0..1;
+        }
         // A data revision can reorder IDs; a positional pin is no longer authoritative.
         self.pinned = None;
+        self.clear_pages();
+    }
+    fn clear_pages(&mut self) {
         self.pages.clear();
         self.pending = None;
         self.failures.clear();
     }
-    fn configure_page_size(&mut self, page_size: usize) {
+    /// Change batch boundaries without invalidating current counts or selection position.
+    pub(super) fn configure_page_size(&mut self, page_size: usize) {
         if self.page_size != page_size {
-            // Changing query boundaries alone does not reorder the underlying collection.
-            let pinned = self.pinned;
-            self.invalidate();
-            self.pinned = pinned;
+            self.clear_pages();
             self.page_size = page_size;
         }
     }
@@ -120,7 +130,7 @@ impl<T> PagedRows<T> {
         let Some(offset) = self.pending.take() else {
             return;
         };
-        self.total = Some(page.total);
+        self.set_total(page.total);
         self.failures.remove(&offset);
         self.pages.retain(|start, _| *start < page.total);
         if offset < page.total {
@@ -235,6 +245,42 @@ mod tests {
     }
 
     #[test]
+    fn data_revision_forgets_counts_but_keeps_reloadable_viewport_geometry() {
+        for total in [0, 100] {
+            let mut rows = PagedRows::default();
+            fill(&mut rows, 80, total);
+            if total > 0 {
+                rows.demand(80..90, 20);
+            }
+            rows.invalidate();
+            assert_eq!(rows.total(), None);
+            assert_eq!(rows.len(), total.max(1));
+            let offset = if total == 0 { 0 } else { 80 };
+            assert_eq!(rows.demand(rows.visible(), 20), Some(offset));
+            fill(&mut rows, offset, 101);
+            assert_eq!(rows.total(), Some(101));
+            assert_eq!(rows.get(offset), Some(&offset));
+        }
+    }
+
+    #[test]
+    fn batch_resize_retains_confirmed_empty_results_until_data_changes() {
+        let mut rows = PagedRows::default();
+        fill(&mut rows, 0, 0);
+        rows.configure_page_size(25);
+        assert_eq!(rows.total(), Some(0));
+        assert!(rows.is_empty());
+        assert_eq!(rows.demand(0..1, 25), None);
+
+        rows.invalidate();
+        rows.configure_page_size(30);
+        assert_eq!(rows.total(), None);
+        assert_eq!(rows.demand(rows.visible(), 30), Some(0));
+        rows.set_total(0);
+        assert_eq!(rows.demand(0..1, 30), None);
+    }
+
+    #[test]
     fn cancelling_pending_demand_retains_payload_identity_and_explicit_failures() {
         let mut rows = PagedRows::default();
         fill(&mut rows, 0, 100);
@@ -248,6 +294,7 @@ mod tests {
             rows: Vec::new(),
         });
         assert_eq!(rows.len(), 100);
+        assert_eq!(rows.total(), Some(100));
         assert_eq!(rows.get(3), Some(&3));
         assert_eq!(rows.pinned, Some(3));
         assert_eq!(rows.error(20), Some("offline"));
@@ -352,6 +399,7 @@ mod tests {
         fill(&mut rows, 180, 400);
         rows.pin(Some(183));
         rows.begin(0, 25);
+        assert_eq!(rows.total(), Some(400));
         rows.accept(Page {
             total: 400,
             rows: (0..25).collect(),

@@ -302,20 +302,22 @@ impl QueueSelection {
     }
     fn sync(&mut self, revisions: QueryRevisions, total: usize) -> bool {
         let query = self.query();
+        let identity_changed = !self.page_projection.matches_identity(&query);
         let changed = self.page_projection.sync(&query, revisions);
         self.projection.sync(&query, revisions);
-        if self.query.is_none() {
-            self.rows.set_total(total);
-        }
         if changed {
             self.locate.invalidate();
             self.locate_filtered = None;
-            if self.query.is_some() {
+            if identity_changed {
                 self.rows.clear();
             } else {
                 self.rows.invalidate();
             }
             self.cancel();
+        }
+        if self.query.is_none() {
+            // The snapshot count is authoritative even when DATA invalidation retired the pages.
+            self.rows.set_total(total);
         }
         changed
     }
@@ -382,6 +384,7 @@ impl QueueSelection {
         if self.page_size != limit {
             self.page_size = limit;
             self.page_projection.cancel();
+            self.rows.configure_page_size(limit);
         }
         let offset = self.rows.demand(range, limit)?;
         if self.page_worker {
@@ -1141,7 +1144,7 @@ impl GuiApp {
 mod tests {
     use super::{QueueIdentity, QueueSelection};
     use crate::{
-        model::{LibraryRow, Page, QueueRow},
+        model::{LibraryRow, Page, Query, QueueRow},
         response::QueryRevisions,
     };
 
@@ -1411,6 +1414,100 @@ mod tests {
         );
         assert!(queue.locate.current(locate, unrelated, Some(11)));
         assert!(queue.reconcile_pending.is_none());
+    }
+
+    #[test]
+    fn unfiltered_snapshot_total_survives_invalidation_and_boundary_changes() {
+        let mut queue = queue(7);
+        assert!(queue.sync(revisions(8), 0));
+        assert_eq!(queue.rows.total(), Some(0));
+        assert_eq!(queue.rows.len(), 0);
+        assert!(queue.demand_page(0..1, 20).is_none());
+        assert!(!queue.page_worker);
+        assert!(!queue.sync(revisions(8), 0));
+        queue.cancel_page_demand();
+        assert!(queue.demand_page(0..1, 40).is_none());
+        assert_eq!(queue.rows.total(), Some(0));
+        assert!(!queue.page_worker);
+
+        assert!(queue.sync(revisions(9), 1));
+        assert_eq!(queue.rows.total(), Some(1));
+        let (query, _) = queue.demand_page(0..1, 40).unwrap();
+        assert!(matches!(
+            query,
+            Query::QueuePage {
+                query: None,
+                offset: 0,
+                limit: 40
+            }
+        ));
+    }
+
+    #[test]
+    fn filtered_empty_survives_hide_and_resize_without_using_snapshot_total() {
+        let mut queue = queue(7);
+        queue.query = Some("needle".into());
+        queue.sync(revisions(7), 200_000);
+        queue.demand_page(0..1, 20).unwrap();
+        queue.page_worker = false;
+        queue.rows.accept(Page {
+            total: 0,
+            rows: vec![],
+        });
+        queue.cancel_page_demand();
+        assert!(!queue.sync(revisions(7), 200_000));
+        assert!(queue.demand_page(0..1, 40).is_none());
+        assert_eq!(queue.rows.total(), Some(0));
+        assert!(!queue.page_worker);
+    }
+
+    #[test]
+    fn filtered_refresh_preserves_viewport_and_reloads_empty_results() {
+        for refreshed in [
+            QueryRevisions {
+                library: 1,
+                ..revisions(7)
+            },
+            revisions(8),
+        ] {
+            for total in [0, 100] {
+                let mut queue = queue(7);
+                queue.query = Some("Track".into());
+                queue.sync(revisions(7), 200_000);
+                queue.rows.begin(80, 20);
+                queue.rows.accept(Page {
+                    total,
+                    rows: if total == 0 {
+                        vec![]
+                    } else {
+                        (80..100)
+                            .map(|position| row(position as u64, position))
+                            .collect()
+                    },
+                });
+                if total > 0 {
+                    queue.rows.demand(80..90, 20);
+                }
+                assert!(queue.sync(refreshed, 200_000));
+                assert_eq!(queue.rows.total(), None);
+                if total == 0 {
+                    let (query, generation) = queue.demand_page(queue.rows.visible(), 20).unwrap();
+                    assert!(queue.page_projection.accepts(&query, generation, refreshed));
+                    queue.page_worker = false;
+                    queue.rows.accept(Page {
+                        total: 1,
+                        rows: vec![row(10, 0)],
+                    });
+                    assert_eq!(queue.rows.total(), Some(1));
+                    assert_eq!(queue.rows.get(0).unwrap().id, 10);
+                } else {
+                    assert_eq!(queue.rows.len(), 100);
+                    assert_eq!(queue.rows.visible(), 80..90);
+                    assert!(queue.rows.get(80).is_none());
+                    assert_eq!(queue.rows.demand(queue.rows.visible(), 20), Some(80));
+                }
+            }
+        }
     }
 
     #[test]

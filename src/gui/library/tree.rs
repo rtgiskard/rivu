@@ -63,12 +63,13 @@ pub(in crate::gui) enum BranchStatus {
     Error,
 }
 
-#[derive(Default)]
 struct Branch {
     // Bidirectional positional anchor: parent.children[index] == this path.
     // Detached/collapsed roots have no parent; descendant choices retain theirs.
     parent: Option<(TreeBranch, usize)>,
     total: Option<usize>,
+    // Geometry survives DATA invalidation; only total is an authoritative count.
+    layout_len: usize,
     expanded: bool,
     pending: Option<(usize, u64)>,
     // Only expanded children need positional anchors. They remain renderable
@@ -77,6 +78,20 @@ struct Branch {
     // Retain geometry across revisions, but never expose an unverified
     // directory identity from an old positional anchor.
     stale_children: HashSet<usize>,
+}
+
+impl Default for Branch {
+    fn default() -> Self {
+        Self {
+            parent: None,
+            total: None,
+            layout_len: 1,
+            expanded: false,
+            pending: None,
+            children: BTreeMap::new(),
+            stale_children: HashSet::new(),
+        }
+    }
 }
 
 struct CachedPage {
@@ -203,7 +218,9 @@ impl DirectoryTree {
             return false;
         }
         self.page_size = size;
-        self.invalidate();
+        self.pages.clear();
+        self.demanded.clear();
+        self.cancel_pending();
         true
     }
 
@@ -234,6 +251,12 @@ impl DirectoryTree {
         }
     }
 
+    pub(in crate::gui) fn cancel_pending(&mut self) {
+        for branch in self.branches.values_mut() {
+            branch.pending = None;
+        }
+    }
+
     pub(in crate::gui) fn accept(
         &mut self,
         key: &TreeBranch,
@@ -251,6 +274,7 @@ impl DirectoryTree {
         }
         branch.pending = None;
         branch.total = Some(page.total);
+        branch.layout_len = page.total;
         let end = offset.saturating_add(self.page_size);
         let mut children = std::mem::take(&mut branch.children);
         children.retain(|index, child| {
@@ -358,11 +382,10 @@ impl DirectoryTree {
         }
     }
 
-    pub(in crate::gui) fn root_total(&self) -> usize {
+    pub(in crate::gui) fn root_total(&self) -> Option<usize> {
         self.branches
             .get(&TreeBranch::default())
             .and_then(|branch| branch.total)
-            .unwrap_or(0)
     }
 
     pub(in crate::gui) fn clear(&mut self) {
@@ -382,11 +405,8 @@ impl DirectoryTree {
         self.focused = None;
         for branch in self.branches.values_mut() {
             branch.pending = None;
-            // An empty branch has no viewport rows to demand a fresh page.
-            // Restore an unloaded placeholder so newly added children can appear.
-            if branch.total == Some(0) {
-                branch.total = None;
-            }
+            branch.total = None;
+            branch.layout_len = branch.layout_len.max(1);
             branch.stale_children = branch.children.keys().copied().collect();
         }
         self.refresh_visible();
@@ -526,7 +546,7 @@ impl DirectoryTree {
             return;
         }
         let branch = self.branches.get(key);
-        let total = branch.and_then(|branch| branch.total).unwrap_or(1);
+        let total = branch.map_or(1, |branch| branch.layout_len);
         let mut offset = 0;
         if let Some(branch) = branch {
             for (index, child) in &branch.children {
@@ -585,7 +605,7 @@ impl DirectoryTree {
             let Some(branch) = self.branches.get(key) else {
                 break;
             };
-            let continues = offset + 1 < branch.total.unwrap_or(1);
+            let continues = offset + 1 < branch.layout_len;
             visit(depth - 1, continues, depth == segment.depth);
             let Some((parent, position)) = &branch.parent else {
                 break;
@@ -740,7 +760,7 @@ impl DirectoryTree {
     pub(in crate::gui) fn range_checks(
         &self,
         range: Range<usize>,
-    ) -> Vec<(TreeRangeSpan, TreeBranch)> {
+    ) -> Option<Vec<(TreeRangeSpan, TreeBranch)>> {
         let mut checks = BTreeMap::new();
         for segment in &self.segments {
             if range.start >= segment.start + segment.len || range.end <= segment.start {
@@ -757,8 +777,8 @@ impl DirectoryTree {
                 };
                 if let Some(branch) = self.branches.get(parent)
                     && branch.stale_children.contains(index)
-                    && let Some(total) = branch.total
                 {
+                    let total = branch.total?;
                     checks.insert(
                         (parent.clone(), *index),
                         (
@@ -775,7 +795,7 @@ impl DirectoryTree {
                 child = parent;
             }
         }
-        checks.into_values().collect()
+        Some(checks.into_values().collect())
     }
 
     /// Demand viewport pages only, at most one active query per occurrence.
@@ -881,13 +901,16 @@ impl DirectoryTree {
     ) -> Option<(TreeBranch, usize)> {
         let root = roots.get(root_index)?;
         let forest = TreeBranch::default();
-        self.branches.entry(forest.clone()).or_default().total = Some(roots.len());
+        let entry = self.branches.entry(forest.clone()).or_default();
+        entry.total = Some(roots.len());
+        entry.layout_len = roots.len();
         let mut branch = forest.child(root_index, root);
         self.attach(&forest, root_index, &branch);
         for location in locations {
             let entry = self.branches.entry(branch.clone()).or_default();
             entry.expanded = true;
             entry.total = Some(location.total);
+            entry.layout_len = location.total;
             if let Some(path) = &location.child {
                 let child = branch.child(location.offset, path);
                 self.attach(&branch, location.offset, &child);
@@ -1083,7 +1106,62 @@ mod tests {
         tree.cancel_request(&forest, 2);
         assert!(tree.accept(&forest, 3, page(&["/c", "/d"], 4)));
         assert!(tree.requests_for_range(0..4).is_empty());
+
+        tree.begin(forest.clone(), 2, 4);
+        tree.fail(&forest, 4);
+        tree.begin(branch("/a"), 0, 5);
+        let revision = tree.projection_revision();
+        tree.cancel_pending();
+        assert_eq!(tree.root_total(), Some(4));
+        assert_eq!(tree.status(&forest), BranchStatus::Error);
+        assert_eq!(tree.projection_revision(), revision);
+        assert!(tree.requests_for_range(0..4).is_empty());
+        assert!(!tree.accept(&branch("/a"), 5, page(&["/a/stale"], 1)));
     }
+
+    #[test]
+    fn page_resize_preserves_current_counts_ancestry_and_focused_identity() {
+        let mut tree = DirectoryTree::default();
+        tree.configure_page_size(2);
+        let forest = branch("");
+        let root = branch("/a");
+        let nested = branch("/a/nested");
+        let empty = branch("/b");
+        accept(&mut tree, &forest, 0, 1, &["/a", "/b"], 2);
+        tree.expand(&root);
+        accept(&mut tree, &root, 0, 2, &["/a/nested"], 4);
+        tree.expand(&nested);
+        accept(&mut tree, &nested, 0, 3, &["/a/nested/leaf"], 1);
+        tree.expand(&empty);
+        accept(&mut tree, &empty, 0, 4, &[], 0);
+        let selected =
+            super::super::LibraryNode::Directory(std::sync::Arc::from(Path::new("/a/nested/leaf")));
+        tree.focus_selection(&selected, 2);
+        tree.begin(root.clone(), 2, 5);
+        tree.fail(&root, 5);
+        tree.begin(forest.clone(), 0, 6);
+        let revision = tree.projection_revision();
+
+        assert!(tree.configure_page_size(3));
+        assert_eq!(tree.projection_revision(), revision);
+        assert_eq!(tree.root_total(), Some(2));
+        assert_eq!(tree.row_count(), 7);
+        assert_eq!(tree.selected_index(), Some(2));
+        assert!(tree.focused.is_some());
+        assert!(tree.pages.is_empty());
+        assert_eq!(tree.status(&root), BranchStatus::Ready);
+        assert_eq!(tree.status(&empty), BranchStatus::Empty);
+        assert!(tree.expanded(&root));
+        assert!(tree.expanded(&nested));
+        assert!(tree.expanded(&empty));
+        assert_eq!(tree.parent_index(2), Some(1));
+        assert!(matches!(tree.item(0), Some(TreeItem::Entry(_))));
+        assert!(matches!(tree.item(1), Some(TreeItem::Entry(_))));
+        assert_eq!(tree.requests_for_range(2..3), vec![(nested, 0)]);
+        assert!(!tree.accept(&forest, 6, page(&["/stale"], 1)));
+        assert!(!tree.configure_page_size(3));
+    }
+
     #[test]
     fn initial_forest_exposes_viewport_demand_before_any_explicit_request() {
         let mut tree = DirectoryTree::default();
@@ -1151,6 +1229,11 @@ mod tests {
         assert_eq!(tree.row_count(), 0);
         assert_eq!(tree.status(&forest), BranchStatus::Empty);
         assert!(tree.item(0).is_none());
+        assert!(tree.configure_page_size(1));
+        assert_eq!(tree.root_total(), Some(0));
+        assert_eq!(tree.status(&forest), BranchStatus::Empty);
+        assert_eq!(tree.row_count(), 0);
+        assert!(tree.requests_for_range(0..1).is_empty());
 
         let revision = tree.projection_revision();
         tree.begin(forest.clone(), 0, 2);
@@ -1335,6 +1418,11 @@ mod tests {
             if collapsed {
                 tree.collapse(&root);
             }
+
+            assert!(tree.configure_page_size(1));
+            assert_eq!(tree.status(&root), BranchStatus::Empty);
+            assert_eq!(tree.row_count(), 1);
+            assert_eq!(tree.requests_for_range(0..1), vec![(forest.clone(), 0)]);
 
             tree.invalidate();
             accept(&mut tree, &forest, 0, 3, &["/a"], 1);
@@ -1609,6 +1697,11 @@ mod tests {
         assert_eq!(tree.row_count(), 1022);
         assert_eq!(tree.selected_index(), Some(521));
         tree.invalidate();
+        assert_eq!(tree.root_total(), None);
+        for key in [branch(""), branch("/a"), branch("/a/nested")] {
+            assert_eq!(tree.status(&key), BranchStatus::Unloaded);
+        }
+        assert!(tree.range_spans(0..tree.row_count()).is_none());
         assert_eq!(tree.row_count(), 1022);
         assert_eq!(tree.selected_index(), Some(521));
         assert_eq!(
@@ -1705,7 +1798,7 @@ mod tests {
         assert!(tree.accept(&nested, 3, page(&["/music/sub/first"], 1)));
         assert!(tree.accept(&overlap, 4, page(&["/music/sub/second"], 1)));
         accept(&mut tree, &empty, 0, 5, &[], 0);
-        assert_eq!(tree.root_total(), 4);
+        assert_eq!(tree.root_total(), Some(4));
         assert_eq!(tree.row_count(), 7);
         tree.collapse(&root);
         assert_eq!(tree.row_count(), 5);
@@ -1788,12 +1881,30 @@ mod tests {
                 },
             ]
         );
-        assert!(tree.range_checks(0..61).is_empty());
+        assert!(tree.range_checks(0..61).unwrap().is_empty());
         let revision = tree.projection_revision();
         tree.invalidate();
         assert_ne!(tree.projection_revision(), revision);
+        assert_eq!(tree.row_count(), 61);
+        assert!(tree.range_spans(0..61).is_none());
+        assert!(tree.range_checks(0..61).is_none());
+        // A descendant may refresh before its stale ancestors. Its current count
+        // cannot authorize selection through an unverified retained position.
+        accept(
+            &mut tree,
+            &branch("/a/nested"),
+            19,
+            52,
+            &["/a/nested/entry-19"],
+            20,
+        );
+        assert!(tree.range_spans(2..22).is_some());
+        assert!(tree.range_checks(2..22).is_none());
+        // Fresh ancestor counts still require checking the retained identities.
+        accept(&mut tree, &branch(""), 1, 50, &[], 1);
+        accept(&mut tree, &branch("/a"), 39, 51, &["/a/entry-39"], 40);
         assert_eq!(tree.range_spans(0..61).unwrap(), spans);
-        assert_eq!(tree.range_checks(0..61).len(), 2);
+        assert_eq!(tree.range_checks(0..61).unwrap().len(), 2);
         tree.collapse(&branch("/a/nested"));
         assert!(tree.range_spans(0..61).is_none());
     }

@@ -946,7 +946,6 @@ impl GuiApp {
             .requests
             .demands
             .remove(&ViewRequestKind::Summaries);
-        self.browser.playlists.invalidate_summaries();
         self.load_playlist_summaries(offset, cx);
     }
 
@@ -970,7 +969,9 @@ impl GuiApp {
             .requests
             .demands
             .remove(&ViewRequestKind::Entries);
-        self.browser.playlists.prepare_entries(playlist_id);
+        if self.browser.playlists.entries().playlist_id != Some(playlist_id) {
+            self.browser.playlists.prepare_entries(playlist_id);
+        }
         self.load_playlist_entries(playlist_id, offset, cx);
     }
 
@@ -1084,10 +1085,9 @@ impl GuiApp {
         // Invalidate query tokens and payload, not identity, metadata drafts, or scroll position.
         self.browser.requests.invalidate_pages();
         self.browser.library.refresh_tree(self.view_page_size());
-        self.browser.playlists.invalidate_summaries();
-        if let Some(id) = self.browser.playlists.entries().playlist_id {
-            self.browser.playlists.prepare_entries(id);
-        }
+        self.browser
+            .playlists
+            .configure_page_size(self.view_page_size());
     }
 }
 
@@ -1383,7 +1383,8 @@ mod tests {
         assert!(browser.requests.pending(kind));
         assert!(browser.requests.finish(kind, 2));
         browser.playlists.fail_page(true, "unavailable".into());
-        assert!(browser.playlists.entries().rows.is_empty());
+        assert_eq!(browser.playlists.entries().rows.total(), None);
+        assert_eq!(browser.playlists.entries().rows.len(), 1);
         assert!(!browser.requests.pending(kind));
         assert_eq!(
             browser.playlists.entries().rows.error(0),

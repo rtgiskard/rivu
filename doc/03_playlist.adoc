@@ -54,6 +54,8 @@ playback track, not any Library selection. Rename opens the current name; Enter 
 Esc discards the draft. Empty names are rejected. Saving runs in the background
 and prevents repeat submissions; failures keep the dialog and draft available
 for correction. A submitted save cannot be cancelled, including by closing the window.
+Successful saves refresh the catalog without reopening the panel, including when
+creating the first playlist. Active catalog searches still filter the result.
 
 Playing a non-empty playlist starts immediately when the queue is empty. Otherwise
 a confirmation names the playlist and offers Cancel or Replace and play. Cancel
