@@ -189,6 +189,7 @@ impl Render for ListSearch {
                     cx,
                     |this, window, cx| this.toggle(window, cx),
                 )
+                .w(gpui::rems(1.4))
                 .border_0()
                 .bg(gpui::transparent_black())
                 .rounded_none(),
@@ -218,12 +219,13 @@ impl Render for ListSearch {
                                 .update(cx, |input, cx| input.focus_handle(cx).focus(window, cx));
                         },
                     )
+                    .w(gpui::rems(1.4))
                     .border_0()
                     .bg(gpui::transparent_black())
                     .rounded_none(),
                 )
             });
-        let field = field.w(gpui::rems(16.));
+        let field = field.w(gpui::rems(14.));
         let control = row()
             .track_focus(&self.focus_handle)
             .min_w_0()
@@ -236,7 +238,7 @@ impl Render for ListSearch {
                 ("search-expand", self.expansion),
                 Animation::new(std::time::Duration::from_millis(150))
                     .with_easing(|t| 1. - (1. - t).powi(3)),
-                |control, progress| control.max_w(gpui::rems(2. + 14. * progress)),
+                |control, progress| control.max_w(gpui::rems(2. + 12. * progress)),
             )
             .into_any_element()
     }
