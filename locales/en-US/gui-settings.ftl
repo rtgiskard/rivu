@@ -127,6 +127,7 @@ settings-library = Library
 settings-relocation-help = Audio files are never deleted.
 settings-review-candidates = Review candidates…
 settings-playback = Playback
+settings-confirm-queue-replace = Confirm before replacing the queue
 settings-audio = Audio
 settings-on = On
 settings-off = Off

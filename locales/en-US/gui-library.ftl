@@ -119,7 +119,7 @@ gl-cancel = Cancel
 
 gl-delete-playlist = Delete playlist
 
-gl-replace-playlist = Replace queue and play playlist
+gl-replace-playlist = Replace queue and play
 
 gl-loading = Loading…
 
@@ -325,8 +325,9 @@ gl-confirm-delete-playlist = Delete “{ $name }”?
 gl-confirm-remove-library = Remove the selected { $count } tracks from the library? Audio files are not deleted.
 
 gl-confirm-play-playlist = Play “{ $name }”?
+gl-confirm-play-album = Play album “{ $name }”?
 
-gl-replace-queue-confirm = Replace all { $count } queued entries and start from the playlist’s first track?
+gl-replace-queue-confirm = Replace all { $count } queued entries and start from the first track?
 
 gl-playlist-count = { $total } { $total ->
         [one] playlist

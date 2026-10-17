@@ -513,6 +513,10 @@ Use Tab to focus either action and Enter or Space to activate it without hoverin
 After activation, the actions hide until the pointer leaves and re-enters the card.
 `Play album` replaces the queue with the complete album and starts its first
 track. `Add to queue` appends the complete album without changing current playback.
+With the default `interface.confirm_queue_replace = true`, GUI album playback
+asks before replacing a non-empty queue. Cancel or Esc preserves queue and playback.
+The preference is available in Settings under Playback & Audio and also applies
+to playlist playback; adding to the queue does not require this confirmation.
 These buttons do not open album details. Double-click a track row to play that
 track individually; a single click does not start playback. Track rows also
 offer individual playback and queue actions. Album actions include tracks beyond

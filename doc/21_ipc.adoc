@@ -298,7 +298,7 @@ The frame header is six bytes. `body_length` excludes the four-byte length field
 and includes the version, message type, and serialized body.
 
 Bodies use Postcard serialization without COBS framing. The current protocol
-version is `29`; clients and servers must use matching wire schemas. The four-byte
+version is `30`; clients and servers must use matching wire schemas. The four-byte
 frame length remains little-endian; body integers follow Postcard's encoding.
 Configuration state and Configure commands include the presentation language
 (`ui_language`: `auto`, `en-US`, or `zh-CN`). Language selection does not translate
@@ -313,6 +313,9 @@ rows. Duration is optional and retains CUE segment duration rather than source-f
 duration; codec is a string. The changed Postcard row schema is incompatible with
 earlier versions.
 Version 29 adds `ui_theme` to configuration state and Configure commands.
+The changed Postcard configuration schema is incompatible with earlier versions.
+Version 30 adds `confirm_queue_replace` to configuration state and Configure commands.
+The GUI uses this preference for queue replacement confirmation; direct commands remain noninteractive.
 The changed Postcard configuration schema is incompatible with earlier versions.
 
 Request frame content is limited to 4 MiB

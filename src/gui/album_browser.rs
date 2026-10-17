@@ -178,6 +178,9 @@ pub(super) struct AlbumBrowser {
 
 impl EventEmitter<ContentMenuRequest> for AlbumBrowser {}
 
+pub(super) struct AlbumPlayRequest(pub AlbumKey);
+impl EventEmitter<AlbumPlayRequest> for AlbumBrowser {}
+
 impl AlbumBrowser {
     pub(super) fn new(
         i18n: Arc<crate::i18n::Localizer>,
@@ -885,12 +888,7 @@ impl AlbumBrowser {
                     this.dismissed_actions = Some(play_key.clone());
                     cx.notify();
                     window.blur(cx);
-                    this.send(
-                        Command::PlayAlbum {
-                            key: play_key.clone(),
-                        },
-                        cx,
-                    )
+                    cx.emit(AlbumPlayRequest(play_key.clone()));
                 },
             ))
             .child(card_icon_button(
@@ -1136,13 +1134,8 @@ impl Render for AlbumBrowser {
                     "",
                     self.tr("gl-play-album"),
                     cx,
-                    move |this, _, cx| {
-                        this.send(
-                            Command::PlayAlbum {
-                                key: play_key.clone(),
-                            },
-                            cx,
-                        )
+                    move |_, _, cx| {
+                        cx.emit(AlbumPlayRequest(play_key.clone()));
                     },
                 ))
                 .child(icon_button(

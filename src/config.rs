@@ -272,6 +272,8 @@ pub struct Config {
     pub shuffle: bool,
     pub repeat: RepeatMode,
     pub play_count_threshold_percent: f64,
+    /// Confirm GUI album and playlist actions that replace a non-empty queue.
+    pub confirm_queue_replace: bool,
     pub tray_enabled: bool,
     pub mpris_enabled: bool,
     pub log_level: LogLevel,
@@ -397,6 +399,7 @@ config_patch! {
     shuffle: bool,
     repeat: RepeatMode,
     play_count_threshold_percent: f64,
+    confirm_queue_replace: bool,
     tray_enabled: bool,
     mpris_enabled: bool,
     log_level: LogLevel,
@@ -479,6 +482,7 @@ impl Default for Config {
             shuffle: false,
             repeat: RepeatMode::Off,
             play_count_threshold_percent: 20.0,
+            confirm_queue_replace: true,
             tray_enabled: true,
             mpris_enabled: true,
             log_level: LogLevel::Warning,
@@ -930,6 +934,31 @@ pub fn default_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn queue_replace_confirmation_defaults_and_round_trips() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        assert!(Config::load(&path).unwrap().confirm_queue_replace);
+        fs::write(&path, "[interface]\n").unwrap();
+        assert!(Config::load(&path).unwrap().confirm_queue_replace);
+        for enabled in [true, false] {
+            fs::write(
+                &path,
+                format!("[interface]\nconfirm_queue_replace = {enabled}\n"),
+            )
+            .unwrap();
+            let config = Config::load(&path).unwrap();
+            assert_eq!(config.confirm_queue_replace, enabled);
+            config.save(&path).unwrap();
+            let saved: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!(
+                saved["interface"]["confirm_queue_replace"].as_bool(),
+                Some(enabled)
+            );
+            assert_eq!(Config::load(&path).unwrap(), config);
+        }
+    }
 
     #[test]
     fn interface_theme_names_round_trip_strictly() {
@@ -1422,6 +1451,7 @@ mod tests {
             repeat: RepeatMode::All,
             play_count_threshold_percent: 35.5,
             tray_enabled: false,
+            confirm_queue_replace: false,
             mpris_enabled: false,
             log_level: LogLevel::Debug,
             log_to_file: true,

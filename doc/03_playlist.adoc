@@ -57,9 +57,11 @@ for correction. A submitted save cannot be cancelled, including by closing the w
 Successful saves refresh the catalog without reopening the panel, including when
 creating the first playlist. Active catalog searches still filter the result.
 
-Playing a non-empty playlist starts immediately when the queue is empty. Otherwise
-a confirmation names the playlist and offers Cancel or Replace and play. Cancel
-or Esc leaves the queue and playback untouched. An empty playlist cannot replace
+Playing a non-empty playlist starts immediately when the queue is empty. Otherwise,
+with the default `interface.confirm_queue_replace = true`, a confirmation names
+the playlist and offers Cancel or Replace and play. The Playback & Audio settings
+toggle controls this confirmation for both playlists and albums in the GUI.
+Cancel or Esc leaves the queue and playback untouched. An empty playlist cannot replace
 the queue. Deletion also requires confirmation naming the target playlist; it
 removes only the playlist, never music files.
 

@@ -94,10 +94,25 @@ pub(super) struct PlaylistTarget {
 pub(super) enum PlaylistAction {
     Menu(PlaylistTarget, gpui::Point<gpui::Pixels>),
     Play(PlaylistTarget),
+    PlayAlbum(crate::model::AlbumKey),
     Delete(PlaylistTarget),
 }
 
 impl GuiApp {
+    pub(super) fn request_album_play(
+        &mut self,
+        key: crate::model::AlbumKey,
+        cx: &mut Context<Self>,
+    ) {
+        self.refresh(cx);
+        if self.state.system.config.confirm_queue_replace && self.state.queue.total > 0 {
+            self.playlist_action = Some(PlaylistAction::PlayAlbum(key));
+            cx.notify();
+        } else {
+            self.send(Command::PlayAlbum { key }, cx);
+        }
+    }
+
     pub(super) fn last_played_text(&self, track_id: i64, stored_at: Option<i64>) -> String {
         let current = self
             .state
@@ -575,7 +590,9 @@ impl GuiApp {
                     cx,
                     move |this, window, cx| {
                         this.refresh(cx);
-                        if this.state.queue.total == 0 {
+                        if !this.state.system.config.confirm_queue_replace
+                            || this.state.queue.total == 0
+                        {
                             this.dismiss_playlist_action(window, cx);
                             this.send(Command::PlayPlaylist { playlist_id: id }, cx);
                         } else {
@@ -656,22 +673,35 @@ impl GuiApp {
                 .child(menu)
                 .into_any_element();
         }
-        let (target, deleting) = match action {
-            PlaylistAction::Play(target) => (target, false),
-            PlaylistAction::Delete(target) => (target, true),
+        let (name, delete_id, command, title_key) = match action {
+            PlaylistAction::Play(target) => (
+                target.name,
+                None,
+                Command::PlayPlaylist {
+                    playlist_id: target.id,
+                },
+                "gl-confirm-play-playlist",
+            ),
+            PlaylistAction::PlayAlbum(key) => (
+                key.title.clone(),
+                None,
+                Command::PlayAlbum { key },
+                "gl-confirm-play-album",
+            ),
+            PlaylistAction::Delete(target) => (
+                target.name,
+                Some(target.id),
+                Command::DeletePlaylist {
+                    playlist_id: target.id,
+                },
+                "gl-confirm-delete-playlist",
+            ),
             PlaylistAction::Menu(..) => unreachable!(),
         };
-        let title = if deleting {
-            self.i18n.format(
-                "gl-confirm-delete-playlist",
-                &[("name", (target.name.as_str()).into())],
-            )
-        } else {
-            self.i18n.format(
-                "gl-confirm-play-playlist",
-                &[("name", (target.name.as_str()).into())],
-            )
-        };
+        let deleting = delete_id.is_some();
+        let title = self
+            .i18n
+            .format(title_key, &[("name", name.as_str().into())]);
         let detail = if deleting {
             self.i18n.text("gl-delete-playlist-note").to_owned()
         } else {
@@ -731,25 +761,12 @@ impl GuiApp {
                                     cx,
                                     move |this, window, cx| {
                                         this.dismiss_playlist_action(window, cx);
-                                        if deleting {
-                                            if this.browser.playlists.selected() == Some(target.id)
-                                            {
-                                                this.browser.remove_playlist_selection();
-                                            }
-                                            this.send(
-                                                Command::DeletePlaylist {
-                                                    playlist_id: target.id,
-                                                },
-                                                cx,
-                                            );
-                                        } else {
-                                            this.send(
-                                                Command::PlayPlaylist {
-                                                    playlist_id: target.id,
-                                                },
-                                                cx,
-                                            );
+                                        if let Some(id) = delete_id
+                                            && this.browser.playlists.selected() == Some(id)
+                                        {
+                                            this.browser.remove_playlist_selection();
                                         }
+                                        this.send(command.clone(), cx);
                                     },
                                 ),
                             )),
@@ -1006,7 +1023,9 @@ impl GuiApp {
                                             return;
                                         }
                                         this.refresh(cx);
-                                        if this.state.queue.total == 0 {
+                                        if !this.state.system.config.confirm_queue_replace
+                                            || this.state.queue.total == 0
+                                        {
                                             this.send(
                                                 Command::PlayPlaylist { playlist_id: id },
                                                 cx,

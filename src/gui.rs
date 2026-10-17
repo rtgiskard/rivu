@@ -1685,6 +1685,13 @@ impl GuiApp {
                 this.open_content_menu(request.clone(), cx);
             })
             .detach();
+            cx.subscribe(
+                &albums,
+                |this, _, request: &album_browser::AlbumPlayRequest, cx| {
+                    this.request_album_play(request.0.clone(), cx);
+                },
+            )
+            .detach();
             window
                 .observe_release(&albums, cx, |albums, _, cx| {
                     // A live panel removal still leaves the previous scene.

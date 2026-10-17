@@ -119,7 +119,7 @@ gl-cancel = 取消
 
 gl-delete-playlist = 删除播放列表
 
-gl-replace-playlist = 替换队列并播放此列表
+gl-replace-playlist = 替换队列并播放
 
 gl-loading = 正在加载…
 
@@ -289,8 +289,9 @@ gl-confirm-delete-playlist = 删除“{ $name }”？
 gl-confirm-remove-library = 确认从音乐库移除选中的 { $count } 首曲目？不会删除音频文件。
 
 gl-confirm-play-playlist = 播放“{ $name }”？
+gl-confirm-play-album = 播放专辑“{ $name }”？
 
-gl-replace-queue-confirm = 替换队列中的全部 { $count } 项，并从播放列表第一首开始播放？
+gl-replace-queue-confirm = 替换队列中的全部 { $count } 项，并从第一首开始播放？
 
 gl-playlist-count = { $total } 个播放列表 · 已选 { $selected } 首曲目
 

@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-pub(super) const PROTOCOL_VERSION: u8 = 29;
+pub(super) const PROTOCOL_VERSION: u8 = 30;
 pub(super) const MAX_REQUEST: usize = 4 * 1024 * 1024;
 pub(super) const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 pub(super) const MAX_CLIENTS: usize = 16;
@@ -1197,6 +1197,7 @@ pub(super) struct WireConfig {
     repeat: crate::model::RepeatMode,
     play_count_threshold_percent: f64,
     tray_enabled: bool,
+    confirm_queue_replace: bool,
     mpris_enabled: bool,
     log_level: crate::config::LogLevel,
     log_to_file: bool,
@@ -1280,6 +1281,7 @@ impl From<&crate::config::Config> for WireConfig {
             repeat: value.repeat,
             play_count_threshold_percent: value.play_count_threshold_percent,
             tray_enabled: value.tray_enabled,
+            confirm_queue_replace: value.confirm_queue_replace,
             mpris_enabled: value.mpris_enabled,
             log_level: value.log_level,
             log_to_file: value.log_to_file,
@@ -1370,6 +1372,7 @@ impl From<WireConfig> for crate::config::Config {
             repeat: value.repeat,
             play_count_threshold_percent: value.play_count_threshold_percent,
             tray_enabled: value.tray_enabled,
+            confirm_queue_replace: value.confirm_queue_replace,
             mpris_enabled: value.mpris_enabled,
             log_level: value.log_level,
             log_to_file: value.log_to_file,

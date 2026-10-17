@@ -417,7 +417,11 @@ impl GuiApp {
         match action {
             ContentAction::Play => {
                 if let Some(command) = menu.play {
-                    self.send(command, cx);
+                    if let Command::PlayAlbum { key } = command {
+                        self.request_album_play(key, cx);
+                    } else {
+                        self.send(command, cx);
+                    }
                 }
             }
             ContentAction::Queue | ContentAction::Playlist(_) => {

@@ -127,6 +127,7 @@ settings-library = 音乐库
 settings-relocation-help = 不会删除音频文件。
 settings-review-candidates = 查看候选…
 settings-playback = 播放
+settings-confirm-queue-replace = 替换播放队列前确认
 settings-audio = 音频
 settings-on = 开
 settings-off = 关

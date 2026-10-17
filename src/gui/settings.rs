@@ -2092,7 +2092,16 @@ impl Settings {
             self.tr("settings-playback"),
             column()
                 .gap_2()
-                .child(self.pair(Field::Volume, Field::PlayCountThreshold, cx)),
+                .child(self.pair(Field::Volume, Field::PlayCountThreshold, cx))
+                .child(visual_switch(
+                    &self.i18n,
+                    "settings-confirm-queue-replace",
+                    "󰁨",
+                    self.tr("settings-confirm-queue-replace"),
+                    self.draft.confirm_queue_replace,
+                    cx,
+                    |draft| draft.confirm_queue_replace = !draft.confirm_queue_replace,
+                )),
         );
         let audio = settings_card(
             palette(cx),

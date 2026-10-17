@@ -160,6 +160,11 @@ in `[0, 100)`; zero still requires some confirmed heard time. Edit the threshold
 in the configuration file or desktop settings; see
 link:02_library.adoc#_play_counts_and_recent_tracks[Library] for counting semantics.
 
+`interface.confirm_queue_replace` defaults to `true`. In the GUI, album and playlist
+actions that replace a non-empty queue ask for confirmation. Disable it in desktop
+settings under Playback & Audio → Playback to replace the queue without prompting.
+This preference does not change TUI, CLI, or IPC behavior.
+
 === Saving playback settings
 
 Playback-control changes are saved automatically. If saving fails, the running
