@@ -219,6 +219,7 @@ fn scan(records: Vec<ScanRecord>) -> ScanResult {
     ScanResult {
         roots: vec![PathBuf::from("/music")],
         records,
+        min_duration_secs: 0,
         errors: vec![],
         suppressed_sources: Vec::new(),
         skipped_directories: Vec::new(),

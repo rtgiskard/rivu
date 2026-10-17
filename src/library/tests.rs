@@ -48,6 +48,72 @@ fn scan_paths(paths: &[PathBuf], known: &[KnownFile], ffmpeg_enabled: bool) -> R
 }
 
 #[test]
+fn duration_admission_uses_cue_segments_without_whole_source_fallback() -> Result<()> {
+    for frames in [150, 225] {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path().to_path_buf();
+        let audio = root.join("audio.wav");
+        let sheet = root.join("album.cue");
+        wav(&audio, frames)?;
+        two_track_sheet(&sheet)?;
+        let store = crate::store::Store::open(Path::new(":memory:"))?;
+        let mut result = scan_paths(std::slice::from_ref(&root), &[], false)?;
+        result.min_duration_secs = 2;
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.records.len(), 2);
+        assert_eq!(result.suppressed_sources, std::slice::from_ref(&audio));
+        let impacts = store.apply_scan(&result)?;
+        let skipped = if frames == 150 { 2 } else { 1 };
+        assert_eq!(impacts.skipped_short_tracks, skipped);
+        assert_eq!(store.track_count()?, if frames == 150 { 0 } else { 1 });
+        assert!(store.track_id_for_source(&audio, None)?.is_none());
+        assert!(store.track_id_for_source(&sheet, Some(1))?.is_none());
+        let second = store.track_id_for_source(&sheet, Some(2))?;
+        if frames == 225 {
+            let id = second.context("Boundary-duration CUE track must be admitted")?;
+            assert_eq!(store.track(id)?.unwrap().duration, Some(2.0));
+            // Fresh probing models a forced rescan. The sheet still establishes
+            // every identity even when the raised threshold rejects all new ones.
+            fs::write(
+                &sheet,
+                "TITLE \"Refreshed album\"\nFILE \"audio.wav\" WAVE\n  TRACK 01 AUDIO\n    INDEX 01 00:00:00\n  TRACK 02 AUDIO\n    TITLE \"Refreshed second\"\n    INDEX 01 00:01:00\n",
+            )?;
+            let mut rescanned = scan_paths(std::slice::from_ref(&root), &[], false)?;
+            rescanned.min_duration_secs = 10;
+            let impacts = store.apply_scan(&rescanned)?;
+            assert_eq!(impacts.skipped_short_tracks, 1);
+            assert_eq!(store.track_id_for_source(&sheet, Some(2))?, Some(id));
+            let track = store.track(id)?.unwrap();
+            assert!(!track.missing);
+            assert_eq!(track.title, "Refreshed second");
+            assert_eq!(track.album, "Refreshed album");
+            assert_eq!(track.duration, Some(2.0));
+        } else {
+            assert!(second.is_none());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn duration_skips_are_counted_separately_from_original_scan_errors() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let root = directory.path().to_path_buf();
+    wav(&root.join("short.wav"), 75)?;
+    fs::write(root.join("broken.wav"), b"not audio")?;
+    let mut result = scan_paths(&[root], &[], false)?;
+    result.min_duration_secs = 2;
+    assert_eq!(result.errors.len(), 1);
+    let errors = result.errors.clone();
+    let store = crate::store::Store::open(Path::new(":memory:"))?;
+    let impacts = store.apply_scan(&result)?;
+    assert_eq!(impacts.skipped_short_tracks, 1);
+    assert_eq!(result.errors, errors);
+    assert_eq!(store.track_count()?, 0);
+    Ok(())
+}
+
+#[test]
 fn new_and_retargeted_cue_sheets_reuse_known_sources_outside_request_scope() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let sources = directory.path().join("sources");

@@ -89,6 +89,7 @@ impl Core {
         tracing::info!(
             input = ?input,
             max_depth = config.scan_max_depth,
+            min_duration_secs = config.scan_min_duration_secs,
             "library_scan_started"
         );
         let id = self.next_scan_id;
@@ -171,6 +172,10 @@ impl Core {
                         (&worker_cancellation, sheets),
                         &mut progress,
                     )
+                    .map(|mut result| {
+                        result.min_duration_secs = config.scan_min_duration_secs;
+                        result
+                    })
                 })();
                 match &result {
                     Ok(result) => tracing::info!(
@@ -280,7 +285,6 @@ impl Core {
                     self.project_scan();
                     self.publish();
                 }
-                let message = scan.result.as_ref().ok().map(ScanResult::summary);
                 let scan_errors = scan
                     .result
                     .as_ref()
@@ -308,7 +312,6 @@ impl Core {
                             } else {
                                 ScanPhase::Failed
                             };
-                            task.status.message = message.unwrap_or_else(|| "Scan complete".into());
                             task.status.error = scan_errors;
                         }
                         Err(error) => {
@@ -363,6 +366,7 @@ impl Core {
         } else {
             saved.context("Failed to save scan")
         }?;
+        let summary = result.summary(impacts.skipped_short_tracks);
         if impacts.changed {
             let refreshed = self.apply_scan_impacts(impacts);
             if scan.import.is_some() {
@@ -403,6 +407,9 @@ impl Core {
             .context("Scan saved, but playlist creation failed")?;
             self.playlist_created(id, true)
                 .context("Scan saved and playlist created, but playlist refresh failed")?;
+        }
+        if let Some(task) = &mut self.active_scan {
+            task.status.message = summary;
         }
         Ok(successful)
     }

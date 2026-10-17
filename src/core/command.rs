@@ -302,6 +302,7 @@ impl Core {
                     structure: true,
                     duplicate_groups: impact.duplicate_groups,
                     duplicate_members: false,
+                    ..crate::store::ScanImpacts::default()
                 });
                 let queue = self
                     .reload_queue()
@@ -359,6 +360,7 @@ impl Core {
                         structure: true,
                         duplicate_groups: impact.duplicate_groups,
                         duplicate_members: false,
+                        ..crate::store::ScanImpacts::default()
                     });
                     let queue = self
                         .reload_queue()

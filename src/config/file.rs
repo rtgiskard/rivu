@@ -36,6 +36,7 @@ macro_rules! file_group {
 file_group!(Library, LibraryView {
     roots => library_roots: Vec<PathBuf>,
     scan_max_depth => scan_max_depth: u32,
+    scan_min_duration_secs => scan_min_duration_secs: u32,
 });
 
 fn deserialize_volume_percent<'de, D: serde::Deserializer<'de>>(

@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 // Bump when probing semantics change; fingerprints remain reusable.
 const PROBE_VERSION: i64 = 3;
 
-/// Semantic facts changed by one committed scan transaction.
+/// Semantic facts and admission counts from one committed scan transaction.
 ///
 /// Callers publish each affected projection once, rather than treating `changed`
 /// as a catalog reload request. Duplicate members also depend on `library` and
@@ -28,6 +28,8 @@ pub struct ScanImpacts {
     pub duplicate_groups: bool,
     /// Size/mtime verification facts for fingerprinted ordinary members.
     pub duplicate_members: bool,
+    /// Successfully scanned new identities excluded by the duration threshold.
+    pub skipped_short_tracks: usize,
 }
 
 // Keep equality and descendant branches separate so both path indexes can seek.
@@ -428,6 +430,7 @@ impl Store {
                 release_date
             ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         )?;
+        let mut skipped_short_tracks = 0;
         for r in &result.records {
             let key = identity(&r.path, r.cue.as_ref());
             let id = byidentity.get(&key).copied().or_else(|| {
@@ -443,6 +446,12 @@ impl Store {
                     (!seen.contains(&candidate.id)).then_some(candidate.id)
                 })
             });
+            // Resolve exact identities and the existing relocation contract before
+            // applying admission. Short existing tracks still refresh their metadata.
+            if id.is_none() && result.excludes_new_track(r.media.duration) {
+                skipped_short_tracks += 1;
+                continue;
+            }
             let m = &r.media;
             let sheet = r.cue.as_ref().and_then(|cue| cue.sheet.to_str());
             let number = r.cue.as_ref().map(|cue| cue.number);
@@ -552,6 +561,7 @@ impl Store {
                     structure: row.get(1)?,
                     duplicate_groups: row.get(2)?,
                     duplicate_members: row.get(3)?,
+                    skipped_short_tracks,
                     ..ScanImpacts::default()
                 })
             },
@@ -676,6 +686,103 @@ mod tests {
     }
 
     #[test]
+    fn duration_admission_requires_known_positive_duration_strictly_below_threshold() {
+        for threshold in [0, 60] {
+            for duration in [
+                None,
+                Some(f64::NAN),
+                Some(f64::INFINITY),
+                Some(f64::NEG_INFINITY),
+                Some(-1.0),
+                Some(0.0),
+                Some(59.999),
+                Some(60.0),
+                Some(60.001),
+            ] {
+                let store = Store::open(Path::new(":memory:")).unwrap();
+                let mut record = record();
+                record.media.duration = duration;
+                let scan = ScanResult {
+                    min_duration_secs: threshold,
+                    records: vec![record],
+                    ..ScanResult::default()
+                };
+                let skipped = threshold != 0 && duration == Some(59.999);
+                let impacts = store.apply_scan(&scan).unwrap();
+                assert_eq!(impacts.skipped_short_tracks, usize::from(skipped));
+                assert_eq!(impacts.changed, !skipped);
+                assert_eq!(
+                    store
+                        .track_id_for_source(&scan.records[0].path, None)
+                        .unwrap()
+                        .is_some(),
+                    !skipped,
+                    "threshold={threshold}, duration={duration:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn short_existing_ordinary_and_cue_tracks_refresh_without_losing_identity() {
+        for cue in [false, true] {
+            let mut record = record();
+            if cue {
+                record.cue = Some(CueSegment {
+                    sheet: "/music/album.cue".into(),
+                    number: 1,
+                    start_frame: 0,
+                    end_frame: Some(4500),
+                });
+            }
+            let (store, mut scan, id) = queued(record);
+            scan.min_duration_secs = 120;
+            scan.records[0].media.duration = Some(1.0);
+            scan.records[0].media.title = "Refreshed short track".into();
+            scan.records[0].modified_ns += 1;
+            if let Some(segment) = &mut scan.records[0].cue {
+                segment.end_frame = Some(75);
+            }
+            let impacts = store.apply_scan(&scan).unwrap();
+            assert_eq!(impacts.skipped_short_tracks, 0);
+            assert!(impacts.changed);
+            let track = store.track(id).unwrap().unwrap();
+            assert!(!track.missing);
+            assert_eq!(track.title, "Refreshed short track");
+            assert_eq!(track.duration, Some(1.0));
+            assert_eq!(track.cue, scan.records[0].cue);
+            assert_eq!(store.queue_page(None, 0, 10).unwrap().rows[0].track_id, id);
+        }
+    }
+
+    #[test]
+    fn short_track_relocation_keeps_the_existing_resolution_contract() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let mut record = record();
+        record.path = directory.path().join("absent-old.wav");
+        let mut scan = ScanResult {
+            records: vec![record],
+            ..ScanResult::default()
+        };
+        store.apply_scan(&scan).unwrap();
+        let id = store
+            .track_id_for_source(&scan.records[0].path, None)
+            .unwrap()
+            .unwrap();
+        scan.min_duration_secs = 120;
+        scan.records[0].path = directory.path().join("new.wav");
+        scan.records[0].media.title = "Moved short track".into();
+        let impacts = store.apply_scan(&scan).unwrap();
+        assert_eq!(impacts.skipped_short_tracks, 0);
+        assert_eq!(store.track_count().unwrap(), 1);
+        let track = store.track(id).unwrap().unwrap();
+        assert_eq!(track.path, scan.records[0].path);
+        assert_eq!(track.title, "Moved short track");
+        assert!(!track.missing);
+    }
+
+    #[test]
     fn inserts_report_identity_and_only_applicable_duplicate_impacts() {
         for (cue, fingerprint) in [(false, true), (false, false), (true, true)] {
             let store = Store::open(Path::new(":memory:")).unwrap();
@@ -704,6 +811,7 @@ mod tests {
                     structure: true,
                     duplicate_groups: !cue && fingerprint,
                     duplicate_members: !cue && fingerprint,
+                    ..ScanImpacts::default()
                 }
             );
             assert_eq!(store.apply_scan(&scan).unwrap(), ScanImpacts::default());

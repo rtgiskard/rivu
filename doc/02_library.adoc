@@ -67,6 +67,30 @@ directories beyond the limit are skipped and reported. Direct file and CUE
 requests are unaffected by this directory limit; `0` is invalid. An explicit
 nested scan has its own boundary, even when an enclosing walk skipped it.
 
+=== Minimum duration for new tracks
+
+`library.scan_min_duration_secs` is a new-track admission policy, not a constraint
+on library contents. It applies uniformly to every scan workflow, including
+directory, direct audio/CUE, forced scans, and playlist imports. `0` disables it;
+otherwise only new tracks with a known, finite, positive duration strictly less
+than the configured seconds are excluded. A duration equal to the threshold is
+accepted; unknown, unavailable, zero, or invalid duration is not treated as a
+short track. Existing tracks, including recognized relocations, are retained and
+their metadata is updated normally, even when short. `--force` rereads metadata
+but does not bypass this admission policy for new tracks.
+
+CUE tracks use each segment's duration, not the full source duration. Skipping
+segments never admits their source as a fallback full-file track. Existing probe
+failures remain scan errors; duration exclusions are counted separately from
+errors in the completion summary. Duration uses the normal bounded metadata
+probe/cache path, without decoding a complete source to measure its length.
+
+Each scan or playlist import captures the threshold at startup and keeps it for
+the entire task; saving a setting during a task affects only later tasks. The
+admission check runs while saving, after resolving existing track identities.
+Changing the setting neither starts a scan nor deletes or cleans existing tracks,
+and has no playback effect.
+
 === Errors and partial results
 
 Depth exclusions and filesystem, traversal, audio-read/probe, or CUE errors

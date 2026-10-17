@@ -120,6 +120,7 @@ fn fixture_with_database(duration: Option<f64>, persistent: bool) -> (tempfile::
     store
         .apply_scan(&ScanResult {
             roots: vec![directory.path().to_path_buf()],
+            min_duration_secs: 0,
             suppressed_sources: Vec::new(),
             skipped_directories: Vec::new(),
             skipped_directories_truncated: false,
@@ -3947,6 +3948,180 @@ fn settle_scan(core: &mut Core) -> bool {
 }
 
 #[test]
+fn duration_threshold_is_snapshotted_for_file_directory_and_forced_scans() {
+    for directory_scope in [false, true] {
+        for force in [false, true] {
+            for threshold in [0, 1] {
+                let (directory, mut core) = fixture();
+                let existing = directory.path().join("1.wav");
+                let new = directory.path().join("new.wav");
+                write_pcm(&existing);
+                write_pcm(&new);
+                Arc::make_mut(&mut core.state.system.config).scan_min_duration_secs = threshold;
+                let paths = if directory_scope {
+                    vec![directory.path().to_path_buf()]
+                } else {
+                    vec![existing.clone(), new.clone()]
+                };
+                core.scan(paths, force).unwrap();
+                // Mutating the live configuration after acceptance must not alter
+                // this task, regardless of when its worker reaches the source.
+                Arc::make_mut(&mut core.state.system.config).scan_min_duration_secs = 1 - threshold;
+                assert!(settle_scan(&mut core));
+                let status = core.scan_results.back().unwrap();
+                assert_eq!(status.progress.errors, 0);
+                assert!(status.error.is_none());
+                assert_eq!(
+                    core.store.track_id_for_source(&existing, None).unwrap(),
+                    Some(1)
+                );
+                let refreshed = core.store.track(1).unwrap().unwrap();
+                assert!(!refreshed.missing);
+                assert!(
+                    refreshed
+                        .duration
+                        .is_some_and(|duration| duration > 0.0 && duration < 1.0)
+                );
+                assert_ne!(refreshed.title, "Track 1");
+                assert_eq!(
+                    core.store
+                        .track_id_for_source(&new, None)
+                        .unwrap()
+                        .is_some(),
+                    threshold == 0
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn duration_only_exclusions_complete_successfully_without_errors() {
+    let (directory, mut core) = fixture();
+    let path = directory.path().join("new.wav");
+    write_pcm(&path);
+    Arc::make_mut(&mut core.state.system.config).scan_min_duration_secs = 1;
+    core.scan(vec![path.clone()], false).unwrap();
+    assert!(settle_scan(&mut core));
+    let task = core.scan_results.back().unwrap();
+    assert_eq!(task.progress.errors, 0);
+    assert!(task.error.is_none());
+    assert!(
+        core.store
+            .track_id_for_source(&path, None)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn forced_duration_scan_refreshes_cached_short_existing_tracks() {
+    let (directory, mut core) = fixture();
+    let path = directory.path().join("1.wav");
+    write_pcm(&path);
+    core.scan(vec![path.clone()], false).unwrap();
+    assert!(settle_scan(&mut core));
+    let known = core.store.known_source(&path).unwrap().unwrap();
+    let mut media = known.media.unwrap();
+    media.title = "Cached title".into();
+    media.duration = Some(99.0);
+    core.store
+        .apply_scan(&ScanResult {
+            records: vec![ScanRecord {
+                path: path.clone(),
+                size: known.size,
+                modified_ns: known.modified_ns,
+                fingerprint: known.fingerprint,
+                media,
+                cue: None,
+            }],
+            ..ScanResult::default()
+        })
+        .unwrap();
+    Arc::make_mut(&mut core.state.system.config).scan_min_duration_secs = 1;
+    core.scan(vec![path], true).unwrap();
+    assert!(settle_scan(&mut core));
+    let track = core.store.track(1).unwrap().unwrap();
+    assert!(!track.missing);
+    assert_ne!(track.title, "Cached title");
+    assert!(
+        track
+            .duration
+            .is_some_and(|duration| duration > 0.0 && duration < 1.0)
+    );
+}
+
+#[test]
+fn duration_threshold_playlist_import_keeps_existing_tracks_and_uses_accepted_snapshot() {
+    for extension in ["m3u8", "cue"] {
+        let (directory, mut core) = fixture();
+        let existing = directory.path().join("1.wav");
+        let new = directory.path().join("new.wav");
+        write_pcm_frames(&existing, 150);
+        write_pcm_frames(&new, 150);
+        let path = directory.path().join(format!("mix.{extension}"));
+        if extension == "cue" {
+            // Seed only the first segment, then introduce another short segment.
+            std::fs::write(
+                &path,
+                "FILE \"new.wav\" WAVE\n  TRACK 01 AUDIO\n    INDEX 01 00:00:00\n",
+            )
+            .unwrap();
+            core.scan(vec![path.clone()], false).unwrap();
+            assert!(settle_scan(&mut core));
+            std::fs::write(&path,
+                "TITLE \"Imported album\"\nFILE \"new.wav\" WAVE\n  TRACK 01 AUDIO\n    TITLE \"Updated segment\"\n    INDEX 01 00:00:00\n  TRACK 02 AUDIO\n    INDEX 01 00:01:00\n").unwrap();
+        } else {
+            std::fs::write(&path, "1.wav\nnew.wav\n").unwrap();
+        }
+        let expected = if extension == "cue" {
+            core.store
+                .track_id_for_source(&path, Some(1))
+                .unwrap()
+                .unwrap()
+        } else {
+            1
+        };
+        Arc::make_mut(&mut core.state.system.config).scan_min_duration_secs = 3;
+        core.command(Command::ImportPlaylist {
+            path: path.clone(),
+            name: Some("Filtered mix".into()),
+        })
+        .unwrap();
+        Arc::make_mut(&mut core.state.system.config).scan_min_duration_secs = 0;
+        assert!(settle_scan(&mut core));
+        let task = core.scan_results.back().unwrap();
+        assert_eq!(task.progress.errors, 0);
+        assert!(task.error.is_none());
+        let playlist = core.store.playlist_summary_page(None, 0, 10).unwrap().rows[0].id;
+        assert_eq!(
+            core.store.playlist_track_ids(playlist, 10).unwrap(),
+            [expected]
+        );
+        let track = core.store.track(expected).unwrap().unwrap();
+        assert!(!track.missing);
+        if extension == "cue" {
+            assert_eq!(track.duration, Some(1.0));
+            assert_eq!(track.title, "Updated segment");
+            assert!(
+                core.store
+                    .track_id_for_source(&path, Some(2))
+                    .unwrap()
+                    .is_none()
+            );
+        } else {
+            assert_eq!(track.duration, Some(2.0));
+        }
+        assert!(
+            core.store
+                .track_id_for_source(&new, None)
+                .unwrap()
+                .is_none()
+        );
+    }
+}
+
+#[test]
 fn scan_start_ack_binds_the_accepted_task() {
     let (directory, mut core) = fixture();
     let path = directory.path().join("1.wav");
@@ -4206,10 +4381,15 @@ fn scan_terminal_retention_is_bounded_and_unknown_ids_fail() {
 }
 
 fn write_pcm(path: &Path) {
+    write_pcm_frames(path, 1);
+}
+
+fn write_pcm_frames(path: &Path, frames: u32) {
     use std::io::Write;
+    let data_len = frames * 200;
     let mut file = std::fs::File::create(path).unwrap();
     file.write_all(b"RIFF").unwrap();
-    file.write_all(&236_u32.to_le_bytes()).unwrap();
+    file.write_all(&(36 + data_len).to_le_bytes()).unwrap();
     file.write_all(b"WAVEfmt ").unwrap();
     file.write_all(&16_u32.to_le_bytes()).unwrap();
     file.write_all(&1_u16.to_le_bytes()).unwrap();
@@ -4219,8 +4399,8 @@ fn write_pcm(path: &Path) {
     file.write_all(&2_u16.to_le_bytes()).unwrap();
     file.write_all(&16_u16.to_le_bytes()).unwrap();
     file.write_all(b"data").unwrap();
-    file.write_all(&200_u32.to_le_bytes()).unwrap();
-    file.write_all(&[0; 200]).unwrap();
+    file.write_all(&data_len.to_le_bytes()).unwrap();
+    file.write_all(&vec![0; data_len as usize]).unwrap();
 }
 
 #[test]
@@ -4988,6 +5168,7 @@ fn committed_impacts_refresh_current_track_activity_and_probe_metadata() {
         .store
         .apply_scan(&ScanResult {
             roots: vec![directory.path().to_path_buf()],
+            min_duration_secs: 0,
             suppressed_sources: Vec::new(),
             skipped_directories: Vec::new(),
             skipped_directories_truncated: false,

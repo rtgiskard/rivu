@@ -74,6 +74,10 @@ unchanged. Setting an override equal to its raw value still records that editing
 intent; an omitted field continues to follow rescanned metadata. No-op edits
 succeed for existing tracks and still reject unknown IDs. Queue-content validity
 is described in <<_revisions_and_watching,Revisions and watching>>.
+The new-track minimum-duration policy is captured from configuration when a scan
+or playlist import starts. Merge applies it only after exact-identity and
+relocation matching; it does not filter previously stored identities. See
+link:02_library.adoc#_minimum_duration_for_new_tracks[Library] for admission rules.
 
 Scanning requests cached raw source metadata on demand through task-ID-tagged
 core events; it no longer copies a whole-library known-file snapshot at startup.
@@ -298,7 +302,7 @@ The frame header is six bytes. `body_length` excludes the four-byte length field
 and includes the version, message type, and serialized body.
 
 Bodies use Postcard serialization without COBS framing. The current protocol
-version is `31`; clients and servers must use matching wire schemas. The four-byte
+version is `32`; clients and servers must use matching wire schemas. The four-byte
 frame length remains little-endian; body integers follow Postcard's encoding.
 Configuration state and Configure commands include the presentation language
 (`ui_language`: `auto`, `en-US`, or `zh-CN`). Language selection does not translate
@@ -320,6 +324,11 @@ The changed Postcard configuration schema is incompatible with earlier versions.
 Version 30 adds `confirm_queue_replace` to configuration state and Configure commands.
 The GUI uses this preference for queue replacement confirmation; direct commands remain noninteractive.
 The changed Postcard configuration schema is incompatible with earlier versions.
+Version 32 adds `scan_min_duration_secs` (`u32`) immediately after `scan_max_depth`
+in configuration state and Configure commands. The positional Postcard schema is
+incompatible with earlier versions; no compatibility alias or negotiation is used.
+Its link:02_library.adoc#_minimum_duration_for_new_tracks[new-track admission policy]
+is captured when a scan or playlist import starts, not when Configure is sent.
 
 Request frame content is limited to 4 MiB
 and response frame content to 16 MiB, including the version and message type but

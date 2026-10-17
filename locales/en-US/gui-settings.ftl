@@ -11,6 +11,7 @@ settings-blackman-harris = Blackman–Harris
 settings-none = None
 settings-library-folders = Library folders
 settings-maximum-scan-depth = Maximum scan depth
+settings-minimum-scan-duration-secs = Minimum new-track duration (s)
 settings-volume = Volume (%)
 settings-play-count-threshold = Play count threshold (%)
 settings-log-retention-weeks = Log retention (weeks)
@@ -58,6 +59,7 @@ settings-library-folders-empty = No folders; add folders in the Library componen
 settings-artwork-period-hint = Finite and greater than zero
 settings-animation-fps-hint = 0–240; 0 follows the display, a cap reduces rendering work
 settings-scan-depth-hint = Minimum 1; starting folder = depth 0
+settings-scan-duration-hint = Whole seconds; 0 disables filtering; applies only to new tracks
 settings-play-count-threshold-hint = 0 ≤ value < 100; based on time heard
 settings-media-buffer-hint = 1, 2, 4, 8, or 16. Applies when media is next opened
 settings-layout-grid-hint = 1–64 unscaled logical pixels; Alt temporarily inverts snapping while dragging

@@ -83,6 +83,7 @@ impl SettingChoice {
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Field {
     ScanMaxDepth,
+    ScanMinDuration,
     Volume,
     PlayCountThreshold,
     LogRetentionWeeks,
@@ -129,6 +130,7 @@ impl Field {
     fn label_id(self) -> &'static str {
         match self {
             Self::ScanMaxDepth => "settings-maximum-scan-depth",
+            Self::ScanMinDuration => "settings-minimum-scan-duration-secs",
             Self::Volume => "settings-volume",
             Self::PlayCountThreshold => "settings-play-count-threshold",
             Self::LogRetentionWeeks => "settings-log-retention-weeks",
@@ -199,6 +201,7 @@ impl Field {
             )
             .into(),
             Self::ScanMaxDepth => settings.tr("settings-scan-depth-hint"),
+            Self::ScanMinDuration => settings.tr("settings-scan-duration-hint"),
             Self::Volume => "0–100.".into(),
             Self::PlayCountThreshold => settings.tr("settings-play-count-threshold-hint"),
             Self::LogRetentionWeeks => "1–520.".into(),
@@ -711,6 +714,7 @@ impl Settings {
         }
         self.inputs = [
             Field::ScanMaxDepth,
+            Field::ScanMinDuration,
             Field::Volume,
             Field::PlayCountThreshold,
             Field::LogRetentionWeeks,
@@ -959,6 +963,12 @@ impl Settings {
         self.set_value(
             Field::ScanMaxDepth,
             self.draft.scan_max_depth.to_string(),
+            unchanged,
+            cx,
+        );
+        self.set_value(
+            Field::ScanMinDuration,
+            self.draft.scan_min_duration_secs.to_string(),
             unchanged,
             cx,
         );
@@ -1213,6 +1223,7 @@ impl Settings {
     fn parse(&self, cx: &App) -> Result<Config> {
         let mut config = self.draft.clone();
         config.scan_max_depth = self.number(Field::ScanMaxDepth, cx)?;
+        config.scan_min_duration_secs = self.number(Field::ScanMinDuration, cx)?;
         let volume_percent = self.number::<f32>(Field::Volume, cx)?;
         // Keep the exact migrated level when the displayed percentage is unchanged.
         if volume_percent != self.draft.volume * 100. {
@@ -2016,7 +2027,7 @@ impl Settings {
             column()
                 .gap_2()
                 .child(self.library_roots(cx))
-                .child(self.single(Field::ScanMaxDepth, cx)),
+                .child(self.pair(Field::ScanMaxDepth, Field::ScanMinDuration, cx)),
         );
         column()
             .gap_3()
@@ -3807,5 +3818,32 @@ mod tests {
             assert!(!this.applying);
             assert_eq!(this.parse(cx).unwrap().scan_max_depth, 9);
         });
+    }
+
+    #[gpui::test]
+    fn scan_min_duration_accepts_only_u32_seconds_and_applies(cx: &mut TestAppContext) {
+        let (_directory, runtime, settings) = fixture(cx);
+        settings.update(cx, |this, cx| {
+            assert_eq!(this.value(Field::ScanMinDuration, cx), "0");
+            for value in ["-1", "1.5", "4294967296", ""] {
+                this.set_value(Field::ScanMinDuration, value, None, cx);
+                assert!(this.parse(cx).is_err(), "accepted {value}");
+            }
+            this.set_value(Field::ScanMinDuration, u32::MAX.to_string(), None, cx);
+            assert_eq!(this.parse(cx).unwrap().scan_min_duration_secs, u32::MAX);
+        });
+        for seconds in [30, 0] {
+            settings.update(cx, |this, cx| {
+                this.set_value(Field::ScanMinDuration, seconds.to_string(), None, cx);
+            });
+            let (patch, submission) = submit(&settings, cx);
+            let (committed, result) = execute(&runtime, patch);
+            assert!(result.is_ok());
+            assert_eq!(committed.scan_min_duration_secs, seconds);
+            settings.update(cx, |this, cx| {
+                this.complete_settings_apply(submission, committed, result, cx);
+                assert_eq!(this.parse(cx).unwrap().scan_min_duration_secs, seconds);
+            });
+        }
     }
 }

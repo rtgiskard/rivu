@@ -244,6 +244,7 @@ impl Core {
                         structure: true,
                         duplicate_groups: true,
                         duplicate_members: true,
+                        ..crate::store::ScanImpacts::default()
                     }) {
                         task.status.error = Some(format!(
                             "Relocation committed; refreshing views failed; some projections may be stale: {error:#}"

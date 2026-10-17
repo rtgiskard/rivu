@@ -266,6 +266,8 @@ pub struct Config {
     pub library_roots: Vec<PathBuf>,
     /// Maximum directory depth traversed from each requested scan start.
     pub scan_max_depth: u32,
+    /// Minimum duration in seconds for newly admitted tracks; 0 disables filtering.
+    pub scan_min_duration_secs: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_device: Option<String>,
     pub volume: f32,
@@ -396,6 +398,7 @@ macro_rules! config_patch {
 config_patch! {
     library_roots: Vec<PathBuf>,
     scan_max_depth: u32,
+    scan_min_duration_secs: u32,
     output_device: Option<String>,
     volume: f32,
     shuffle: bool,
@@ -480,6 +483,7 @@ impl Default for Config {
         Self {
             library_roots: Vec::new(),
             scan_max_depth: DEFAULT_SCAN_MAX_DEPTH,
+            scan_min_duration_secs: 0,
             output_device: None,
             volume: 0.7,
             shuffle: false,
@@ -1515,6 +1519,7 @@ mod tests {
                 PathBuf::from("音楽"),
             ],
             scan_max_depth: 32,
+            scan_min_duration_secs: 45,
             output_device: Some("USB DAC".to_owned()),
             volume: 0.25,
             shuffle: true,
@@ -1629,6 +1634,49 @@ mod tests {
         fs::write(&path, "library.scan_max_depth = 0\n").unwrap();
         assert!(Config::load(&path).is_err());
         directory.close().unwrap();
+    }
+
+    #[test]
+    fn scan_min_duration_defaults_round_trips_and_rejects_non_u32_values() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        fs::write(&path, "[library]\n").unwrap();
+        assert_eq!(Config::load(&path).unwrap().scan_min_duration_secs, 0);
+
+        for seconds in [0, 1, 45, u32::MAX] {
+            let config = Config {
+                scan_min_duration_secs: seconds,
+                ..Config::default()
+            };
+            config.save(&path).unwrap();
+            assert_eq!(Config::load(&path).unwrap().scan_min_duration_secs, seconds);
+        }
+
+        for value in ["-1", "1.5", "4294967296", "\"30\""] {
+            fs::write(&path, format!("library.scan_min_duration_secs = {value}\n")).unwrap();
+            assert!(Config::load(&path).is_err(), "accepted {value}");
+        }
+        directory.close().unwrap();
+    }
+
+    #[test]
+    fn scan_min_duration_patch_preserves_concurrent_unedited_settings() {
+        let baseline = Config::default();
+        let draft = Config {
+            scan_min_duration_secs: 30,
+            ..baseline.clone()
+        };
+        let mut latest = Config {
+            scan_max_depth: 7,
+            ..baseline.clone()
+        };
+        ConfigPatch::between(&baseline, &draft).apply_to(&mut latest);
+        assert_eq!(latest.scan_min_duration_secs, 30);
+        assert_eq!(latest.scan_max_depth, 7);
+
+        ConfigPatch::between(&draft, &baseline).apply_to(&mut latest);
+        assert_eq!(latest.scan_min_duration_secs, 0);
+        assert_eq!(latest.scan_max_depth, 7);
     }
 
     #[test]

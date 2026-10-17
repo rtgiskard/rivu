@@ -1173,6 +1173,7 @@ fn system_config_wire_adapter_preserves_optional_fields_and_library_columns() {
         ),
     ] {
         let config = Arc::new(crate::config::Config {
+            scan_min_duration_secs: if output_device.is_some() { u32::MAX } else { 0 },
             output_device,
             library_columns,
             ui_theme: crate::theme::Theme::TokyoNight,
@@ -1290,6 +1291,7 @@ fn configure_request_round_trip_preserves_optional_config_field_and_library_colu
         let config = crate::config::Config {
             audio_visualizer_grid: output_device.is_some(),
             audio_visualizer_labels: output_device.is_none(),
+            scan_min_duration_secs: if output_device.is_some() { u32::MAX } else { 0 },
             output_device,
             library_columns,
             ui_theme: crate::theme::Theme::TokyoNightDay,

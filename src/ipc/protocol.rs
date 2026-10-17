@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-pub(super) const PROTOCOL_VERSION: u8 = 31;
+pub(super) const PROTOCOL_VERSION: u8 = 32;
 pub(super) const MAX_REQUEST: usize = 4 * 1024 * 1024;
 pub(super) const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 pub(super) const MAX_CLIENTS: usize = 16;
@@ -1191,6 +1191,7 @@ pub(super) struct WireStateResponse {
 pub(super) struct WireConfig {
     library_roots: Vec<PathBuf>,
     scan_max_depth: u32,
+    scan_min_duration_secs: u32,
     output_device: Option<String>,
     volume: f32,
     shuffle: bool,
@@ -1276,6 +1277,7 @@ impl From<&crate::config::Config> for WireConfig {
         Self {
             library_roots: value.library_roots.clone(),
             scan_max_depth: value.scan_max_depth,
+            scan_min_duration_secs: value.scan_min_duration_secs,
             output_device: value.output_device.clone(),
             volume: value.volume,
             shuffle: value.shuffle,
@@ -1368,6 +1370,7 @@ impl From<WireConfig> for crate::config::Config {
         Self {
             library_roots: value.library_roots,
             scan_max_depth: value.scan_max_depth,
+            scan_min_duration_secs: value.scan_min_duration_secs,
             output_device: value.output_device,
             volume: value.volume,
             shuffle: value.shuffle,

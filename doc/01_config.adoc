@@ -46,9 +46,12 @@ still_mode = false
 === Library roots and scanning
 
 `library.roots` defaults to an empty list; add existing directories before
-scanning. `library.scan_max_depth` defaults to `64` and must be at least `1`. See
-link:02_library.adoc[Library] for root normalization, scan boundaries, and CUE/path
-rules.
+scanning. `library.scan_max_depth` defaults to `64` and must be at least `1`.
+`library.scan_min_duration_secs` is an unsigned 32-bit integer in whole seconds,
+defaulting to `0` (disabled). Both controls are in desktop Library settings.
+See link:02_library.adoc#_minimum_duration_for_new_tracks[Minimum duration for new tracks]
+for the admission policy, and link:02_library.adoc[Library] for roots, scan
+boundaries, and CUE/path rules.
 
 === Browsing and keyboard navigation
 

@@ -141,6 +141,9 @@ pub struct ScanResult {
     /// Normalized, absolute UTF-8 scopes accepted for reconciliation coverage.
     pub roots: Vec<PathBuf>,
     pub records: Vec<ScanRecord>,
+    /// Admission threshold captured when the scan starts; zero disables filtering.
+    /// Keep all probed records here so storage can resolve existing identities first.
+    pub min_duration_secs: u32,
     pub errors: Vec<String>,
     /// Directories excluded because they exceed the configured scan depth.
     pub skipped_directories: Vec<SkippedDirectory>,
@@ -203,11 +206,26 @@ impl ScanResult {
         &self.errors
     }
 
-    pub fn summary(&self) -> String {
-        match (self.records.len(), self.errors.len()) {
-            (records, 0) => format!("Found {records} audio files"),
-            (records, errors) => format!("Found {records} audio files ({errors} errors)"),
+    pub fn summary(&self, skipped_short_tracks: usize) -> String {
+        let records = self.records.len().saturating_sub(skipped_short_tracks);
+        match (skipped_short_tracks, self.errors.len()) {
+            (0, 0) => format!("Found {records} audio files"),
+            (0, errors) => format!("Found {records} audio files ({errors} errors)"),
+            (skipped, 0) => format!("Found {records} audio files ({skipped} short tracks skipped)"),
+            (skipped, errors) => format!(
+                "Found {records} audio files ({skipped} short tracks skipped, {errors} errors)"
+            ),
         }
+    }
+
+    /// Unknown, non-finite and non-positive durations do not establish shortness.
+    pub(crate) fn excludes_new_track(&self, duration: Option<f64>) -> bool {
+        self.min_duration_secs != 0
+            && duration.is_some_and(|duration| {
+                duration.is_finite()
+                    && duration > 0.0
+                    && duration < f64::from(self.min_duration_secs)
+            })
     }
 }
 

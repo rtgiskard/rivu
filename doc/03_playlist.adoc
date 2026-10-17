@@ -165,6 +165,8 @@ Imports scan referenced sources before creating the playlist and may create
 partial playlists: `--wait` reports scan errors even when readable tracks were
 saved. Only identities successfully read or validly reused by that import's scan
 can enter its playlist; an old library row does not make a failed source eligible.
+The link:02_library.adoc#_minimum_duration_for_new_tracks[minimum-duration admission policy]
+also applies; excluded new tracks do not enter the playlist.
 Import fails if no entries resolve successfully. Without `--name`, the playlist
 name comes from the imported file's name without its extension. Both explicit
 and default names are validated before a scan starts or any scan data is saved.
