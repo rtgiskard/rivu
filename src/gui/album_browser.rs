@@ -1063,15 +1063,18 @@ impl Render for AlbumBrowser {
             let enqueue_key = key.clone();
             let menu_key = key.clone();
             header = header
-                .child(icon_button(
-                    "albums-back",
-                    "",
-                    self.tr("gl-back-albums"),
-                    cx,
-                    |this, _, cx| {
-                        this.selected = None;
-                        this.load(cx);
-                    },
+                .child(super::components::quiet_icon_button(
+                    theme,
+                    icon_button(
+                        "albums-back",
+                        "",
+                        self.tr("gl-back-albums"),
+                        cx,
+                        |this, _, cx| {
+                            this.selected = None;
+                            this.load(cx);
+                        },
+                    ),
                 ))
                 .child(
                     div()
