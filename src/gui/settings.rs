@@ -299,7 +299,7 @@ fn visual_switch(
     } else {
         format!("{label} ({hint})").into()
     };
-    toggle_button(id, icon, label, enabled, cx, move |this, _| {
+    toggle_button(i18n, id, icon, label, enabled, cx, move |this, _| {
         toggle(&mut this.draft);
     })
 }

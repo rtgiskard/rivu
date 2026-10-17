@@ -18,9 +18,17 @@ impl Render for KeyboardControls {
             }),
             self.disabled,
         );
-        let toggle = toggle_button("toggle", "T", "Toggle", false, cx, |this, _| {
-            this.counts[2] += 1;
-        });
+        let toggle = toggle_button(
+            &crate::i18n::Localizer::new("en-US"),
+            "toggle",
+            "T",
+            "Toggle",
+            false,
+            cx,
+            |this, _| {
+                this.counts[2] += 1;
+            },
+        );
         let outside = button("outside", "Outside", cx, |this, _, _| this.counts[3] += 1);
         div().size_full().child(outside).child(
             self.scope

@@ -544,6 +544,7 @@ pub(crate) fn danger_control(
 
 /// Compact toggle button used by visual and system settings.
 pub(crate) fn toggle_button<T: 'static>(
+    i18n: &crate::i18n::Localizer,
     id: impl Into<ElementId>,
     icon: impl Into<SharedString>,
     label: impl Into<SharedString>,
@@ -558,7 +559,15 @@ pub(crate) fn toggle_button<T: 'static>(
         icon_button(
             id,
             icon,
-            format!("{}: {}", label, if enabled { "On" } else { "Off" }),
+            format!(
+                "{}: {}",
+                label,
+                i18n.text(if enabled {
+                    "settings-on"
+                } else {
+                    "settings-off"
+                })
+            ),
             cx,
             move |this, _, cx| {
                 action(this, cx);
