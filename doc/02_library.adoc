@@ -188,6 +188,10 @@ The close icon leaves undecided pairs unchanged. `Keep destination independent`
 persists a decision that excludes that row from automatic and manual relocation,
 including after rescanning. No audio files are deleted.
 
+While the review is open, Tab cycles through its controls rather than the
+Settings behind it. Esc closes the review without applying or discarding the
+Settings draft.
+
 Eligible rows offer `Use as old record` or `Use as destination`. A destination
 with user state or references shows a rejection warning; old records and
 ineligible rows retain that information as metadata. Group and file paging are

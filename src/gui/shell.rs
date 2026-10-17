@@ -82,14 +82,14 @@ impl GuiApp {
         if self.manual_confirmation_open() {
             return Some(KeyboardSurface::Dialog(0));
         }
-        if self.settings_open {
-            return Some(KeyboardSurface::Settings);
-        }
         if self.about_open {
             return Some(KeyboardSurface::Dialog(1));
         }
         if self.duplicate_review.open {
             return Some(KeyboardSurface::Dialog(2));
+        }
+        if self.settings_open {
+            return Some(KeyboardSurface::Settings);
         }
         if self.playlist_editor.is_some() {
             return Some(KeyboardSurface::Dialog(3));
