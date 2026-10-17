@@ -31,28 +31,20 @@ fn card_icon_button(
     action: impl Fn(&mut AlbumBrowser, &mut Window, &mut Context<AlbumBrowser>) + 'static,
 ) -> Stateful<Div> {
     let theme = crate::gui::theme::palette(cx);
-    let hint = hint.into();
-    div()
-        .id(id)
+    compact_icon_button(theme, icon_button(id, icon, hint, cx, action))
         .w(rems(1.4))
         .h(rems(2.))
-        .flex()
-        .items_center()
-        .justify_center()
-        .flex_shrink_0()
-        .font_family(super::fonts::SYMBOLS_FAMILY)
-        .text_size(rems(1.))
+        .rounded_none()
+        .border_0()
+        .opacity(0.)
+        .group_hover("album-card", |style| style.opacity(1.))
+        .focus(|style| style.opacity(1.).border_0())
+        .bg(gpui::transparent_black())
         .text_color(rgb(theme.muted))
-        .cursor_pointer()
-        .hover(|style| style.text_color(rgb(theme.text)))
-        .child(icon)
-        .on_click(cx.listener(move |this, _, window, cx| {
-            action(this, window, cx);
-            cx.stop_propagation();
-        }))
-        .tooltip(move |_, cx| {
-            cx.new(|_| ButtonTooltip { text: hint.clone() })
-                .into()
+        .hover(|style| {
+            style
+                .bg(gpui::transparent_black())
+                .text_color(rgb(theme.text))
         })
 }
 
@@ -867,8 +859,6 @@ impl AlbumBrowser {
             .right(rems(0.5))
             .bottom(rems(0.5))
             .gap_0()
-            .invisible()
-            .group_hover("album-card", |style| style.visible())
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(|_, _, cx| cx.stop_propagation())
             .child(card_icon_button(
