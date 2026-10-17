@@ -563,12 +563,8 @@ fn scan_cue(
             .remove(path)
             .context("Import CUE sheet was not prepared"),
         None => {
-            let bytes = super::playlist_io::read_input(
-                path,
-                super::playlist_io::MAX_CUE_BYTES,
-                cancellation,
-            )
-            .with_context(|| format!("Reading CUE {}", path.display()))?;
+            let bytes = super::input::read_input(path, super::input::MAX_CUE_BYTES, cancellation)
+                .with_context(|| format!("Reading CUE {}", path.display()))?;
             crate::cue::parse_input(&bytes, path, cancellation)
         }
     };

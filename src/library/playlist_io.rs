@@ -1,11 +1,10 @@
 use super::ScanCancellation;
+use super::input::{MAX_CUE_BYTES, read_input};
 use super::paths::{is_cue_path, logical_path};
 use crate::model::Track;
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use std::collections::HashMap;
-use std::fs::{self, OpenOptions};
-use std::io::{self, BufWriter, Read, Write};
-use std::os::unix::fs::OpenOptionsExt;
+use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug)]
@@ -17,7 +16,6 @@ pub struct M3uItem {
 
 // Large enough for substantial music collections, while bounding hostile inputs.
 pub(crate) const MAX_IMPORT_FILE_BYTES: usize = 16 * 1024 * 1024;
-pub(super) const MAX_CUE_BYTES: usize = 1024 * 1024;
 const MAX_IMPORT_BYTES: usize = 64 * 1024 * 1024;
 pub(crate) const MAX_IMPORT_ENTRIES: usize = 100_000;
 const MAX_RETAINED_BYTES: usize = 64 * 1024 * 1024;
@@ -43,50 +41,6 @@ pub(crate) fn prepare_playlist_import(
     roots: Option<&[PathBuf]>,
 ) -> Result<PlaylistImport> {
     prepare_import(path, is_cue_path(path), cancellation, roots)
-}
-
-pub(super) fn read_input(
-    path: &Path,
-    limit: usize,
-    cancellation: &ScanCancellation,
-) -> Result<Vec<u8>> {
-    cancellation.check()?;
-    // O_NONBLOCK prevents a FIFO substituted between metadata and open from hanging.
-    ensure!(
-        fs::metadata(path)?.is_file(),
-        "input is not an ordinary file"
-    );
-    let mut file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NONBLOCK)
-        .open(path)?;
-    let metadata = file.metadata()?;
-    ensure!(metadata.is_file(), "input is not an ordinary file");
-    ensure!(
-        metadata.len() <= limit as u64,
-        "input exceeds {limit} bytes"
-    );
-    read_chunks(&mut file, limit, cancellation)
-}
-
-pub(super) fn read_chunks(
-    reader: &mut impl Read,
-    limit: usize,
-    cancellation: &ScanCancellation,
-) -> Result<Vec<u8>> {
-    let mut bytes = Vec::new();
-    let mut chunk = [0; 64 * 1024];
-    loop {
-        cancellation.check()?;
-        let count = reader.read(&mut chunk)?;
-        if count == 0 {
-            break;
-        }
-        ensure!(bytes.len() + count <= limit, "input exceeds {limit} bytes");
-        bytes.extend_from_slice(&chunk[..count]);
-    }
-    cancellation.check()?;
-    Ok(bytes)
 }
 
 fn prepare_import(
