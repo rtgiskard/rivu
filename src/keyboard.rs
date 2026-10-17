@@ -35,8 +35,6 @@ pub(crate) enum Action {
     Cancel,
     Close,
     Search,
-    Library,
-    Playlists,
     Toggle,
     Next,
     Previous,
@@ -94,6 +92,10 @@ const TRACKS: u16 =
     (1 << Context::GuiPlaylistTracks as u16) | (1 << Context::TuiPlaylistTracks as u16);
 const TREE: u16 = (1 << Context::GuiLibrary as u16) | (1 << Context::TuiTree as u16);
 const SEARCH: u16 = QUERY | (1 << Context::TuiSearchResults as u16);
+const TABS: u16 = (1 << Context::TuiQueue as u16)
+    | (1 << Context::TuiTree as u16)
+    | (1 << Context::TuiPlaylists as u16)
+    | (1 << Context::TuiPlaylistTracks as u16);
 const MULTI: u16 = (1 << Context::GuiQueue as u16)
     | (1 << Context::GuiPlaylistTracks as u16)
     | (1 << Context::GuiHistory as u16);
@@ -163,15 +165,6 @@ static BINDINGS: &[Binding] = &[
         TUI & !SEARCH,
         Search,
         "keyboard-library-search"
-    ),
-    binding!("t", "t", 0, TUI & !SEARCH, Library, "keyboard-library"),
-    binding!(
-        "p",
-        "P",
-        SHIFT,
-        TUI & !SEARCH,
-        Playlists,
-        "keyboard-playlists"
     ),
     binding!("space", "Space", 0, PLAYBACK, Toggle, "keyboard-toggle"),
     binding!("n", "n", 0, PLAYBACK, Next, "keyboard-next-previous"),
@@ -288,6 +281,15 @@ static BINDINGS: &[Binding] = &[
         GUI | SEARCH,
         Traverse,
         "keyboard-traverse"
+    ),
+    binding!("tab", "Tab", 0, TABS, Traverse, "keyboard-tabs-pair"),
+    binding!(
+        "tab",
+        "Shift+Tab",
+        SHIFT,
+        TABS,
+        Traverse,
+        "keyboard-tabs-pair"
     ),
     binding!(
         "backspace",
@@ -507,7 +509,6 @@ mod tests {
     fn terminal_only_actions_do_not_leak_into_desktop_contexts() {
         for (key, control, action) in [
             ("q", false, Action::Close),
-            ("t", false, Action::Library),
             ("home", true, Action::SeekStart),
             ("end", true, Action::SeekEnd),
         ] {
@@ -635,10 +636,7 @@ mod tests {
                 assert_eq!(resolve(key, Modifiers::default(), context), None);
             }
         }
-        assert_eq!(
-            resolve("P", Modifiers::default(), Context::TuiQueue),
-            Some(Action::Playlists)
-        );
+        assert_eq!(resolve("P", Modifiers::default(), Context::TuiQueue), None);
         assert_eq!(
             resolve("p", Modifiers::default(), Context::TuiQueue),
             Some(Action::Previous)
@@ -655,6 +653,78 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn terminal_tabs_traverse_pages_without_changing_search_or_gui_bindings() {
+        for context in [
+            Context::TuiQueue,
+            Context::TuiTree,
+            Context::TuiPlaylists,
+            Context::TuiPlaylistTracks,
+            Context::TuiSearchQuery,
+            Context::TuiSearchResults,
+            Context::Gui,
+            Context::GuiLibrary,
+            Context::GuiQueue,
+            Context::GuiPlaylistTracks,
+            Context::GuiHistory,
+            Context::GuiPlaylists,
+            Context::GuiAlbums,
+        ] {
+            for shift in [false, true] {
+                assert_eq!(
+                    resolve(
+                        "tab",
+                        Modifiers {
+                            shift,
+                            ..Default::default()
+                        },
+                        context
+                    ),
+                    Some(Action::Traverse)
+                );
+            }
+        }
+        for context in [Context::TuiHelp, Context::GuiHelp] {
+            for shift in [false, true] {
+                assert_eq!(
+                    resolve(
+                        "tab",
+                        Modifiers {
+                            shift,
+                            ..Default::default()
+                        },
+                        context
+                    ),
+                    None
+                );
+            }
+        }
+        for context in [
+            Context::TuiQueue,
+            Context::TuiTree,
+            Context::TuiPlaylists,
+            Context::TuiPlaylistTracks,
+            Context::TuiSearchQuery,
+            Context::TuiSearchResults,
+            Context::TuiHelp,
+        ] {
+            for key in ["t", "P"] {
+                assert_eq!(resolve(key, Modifiers::default(), context), None);
+            }
+            assert_eq!(
+                resolve(
+                    "p",
+                    Modifiers {
+                        shift: true,
+                        ..Default::default()
+                    },
+                    context
+                ),
+                None
+            );
+        }
     }
 
     #[test]

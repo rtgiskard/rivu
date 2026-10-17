@@ -229,7 +229,7 @@ GUI and TUI share playback keys outside text editors, menus and dialogs:
 |===
 
 The TUI additionally supports `Ctrl+Home` / `Ctrl+End` to seek to the track's
-start/end. The GUI does not bind these keys or the TUI's bare `q` and `t` actions;
+start/end. The GUI does not bind these keys or the TUI's bare `q` action;
 use its window controls and menus instead.
 
 Bare Left/Right are reserved for container navigation, not seeking. Home/End
@@ -253,13 +253,20 @@ link:01_config.adoc#_desktop_keyboard_navigation[desktop control navigation].
 
 == Terminal client
 
-`/` searches Library, `t` browses directories, and `P` lists playlists.
-Navigation, playback, removal, and help keys: <<keyboard-controls,Keyboard controls>>.
+`Tab` cycles Queue → Playlists → Library → Queue; `Shift+Tab` reverses the order.
+The current top tab is highlighted and bold. Switching retains each page's
+selection and scroll position, including an open playlist or library directory.
+Help and track-details overlays keep navigation inside the overlay.
+`/` opens Library search. Navigation, playback, removal, and help keys:
+<<keyboard-controls,Keyboard controls>>.
 
 In Search, `Tab`/`Shift+Tab` switches between the query and results. `Enter` from
 the query focuses results; on a result it plays the track. The query keeps the
 insertion point visible when text exceeds its width and owns printable characters,
 including `?`. Playback keys and help apply after focusing results.
+Text edits use the same
+link:02_library.adoc#_desktop_list_search[delayed application and immediate clearing]
+as desktop list searches.
 
 `Right` opens playlist entries; `Enter` plays a selected playlist, track, or queue
 occurrence. In playlist details, `a` enqueues the selected track. Moving selection
@@ -279,12 +286,19 @@ closed; Up/Down, PageUp/PageDown, and Home/End scroll it, and Esc closes it with
 changing the underlying selection. Playback and removal keys do not operate the
 list while details are open.
 
+Without a current track, the playback line shows only an idle message; with a
+current track, it retains the playing, paused, or stopped symbol and track title.
+
 The bottom area keeps playback position, duration, volume, and playback modes
 available while browsing. Shuffle and repeat use dim icons when disabled and
-highlighted icons when enabled; single-track repeat has its own icon. Notifications
-retain explanatory text: warnings and failures have distinct symbols, and ordinary
-playback updates do not replace a still-visible failure. Shortcut hints are not
-shown during browsing; open help to view the current bindings.
+highlighted icons when enabled; single-track repeat has its own icon. The volume
+icon and percentage use the same enabled color while nonzero and are dimmed when
+muted. Notifications retain explanatory text: warnings and failures have distinct
+symbols, and ordinary
+playback updates do not replace a still-visible failure. At startup, Queue shows a
+brief `F1 / ?` help hint for about five seconds. Notices, opening help or details,
+or leaving the initial view dismiss it; returning to Queue does not show it again.
+Open help to view the current bindings.
 
 Left/Backspace goes to the parent directory; Left/Esc leaves playlist details.
 Esc returns from search, the tree, or the playlist catalog to Queue.

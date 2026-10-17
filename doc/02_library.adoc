@@ -122,6 +122,12 @@ While the search field is open, counts inside its right edge show matches and th
 unfiltered total; counts are hidden when it is folded. No matches is distinct from an empty
 collection. Searching changes the view, not the saved contents or playback order.
 
+Desktop and terminal text searches apply nonempty edits after 150 ms without
+further input. Until then, the previous query and its results remain active.
+Leading and trailing whitespace is ignored; clearing the text or leaving only
+whitespace restores the unfiltered query immediately. Enter does not bypass the
+delay.
+
 Library retains its combined text, favorite, and missing-file filters. Albums
 searches album titles and member artists. Playlist names search by name; playlist,
 queue, and album track lists search track title, artist, album, and file name.

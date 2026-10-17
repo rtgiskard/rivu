@@ -21,7 +21,7 @@ use ratatui::{
     Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Layout, Rect},
-    style::Style,
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, LineGauge, List, ListItem, ListState, Paragraph},
 };
@@ -616,6 +616,7 @@ fn run_loop(
             redraw = true;
             immediate_redraw = true;
         }
+        let local_revision = tui.ui.local_revision;
         let latest = queries.latest.lock().take();
         if let Some((request, result)) = latest {
             // Instance validity is independent of view/state revision validity:
@@ -640,7 +641,11 @@ fn run_loop(
             }
             _ => {}
         }
-        if tui.ui.expire_message() {
+        if tui.ui.local_revision != local_revision {
+            redraw = true;
+            immediate_redraw = true;
+        }
+        if tui.ui.expire_message() | tui.ui.expire_startup_hint(Instant::now()) {
             redraw = true;
             immediate_redraw = true;
         }
@@ -662,14 +667,8 @@ fn run_loop(
                     let previous_revision = tui.snapshot.system.revision;
                     let next = match tui.ui.key_action(key, &tui.snapshot) {
                         KeyAction::Quit => break,
-                        action @ (KeyAction::Search | KeyAction::Tree) => {
-                            tui.ui.view = if matches!(action, KeyAction::Tree) {
-                                View::Tree(LibraryTree::new(&tui.snapshot.system.library_roots))
-                            } else {
-                                View::Search(LibrarySearch::default())
-                            };
-                            tui.ui.cancel_query();
-                            tui.ui.mark_local_change();
+                        KeyAction::Search => {
+                            tui.ui.open_search();
                             tui.snapshot.clone()
                         }
                         KeyAction::Command(command) => {
@@ -725,70 +724,23 @@ impl TuiState {
 
     fn apply_snapshot(&mut self, next: TuiSnapshot) {
         let page_size_changed = self.snapshot.system.page_size != next.system.page_size;
-        let rows_changed = self
-            .ui
-            .view_query_kind(false)
-            .is_some_and(|kind| kind.changed(&self.snapshot, &next));
-        let resolving_selection = match &self.ui.view {
-            View::Queue => self.ui.queue_anchor.is_some(),
-            View::PlaylistDetail { detail, .. } => detail.entry_anchor.is_some(),
-            _ => false,
-        };
-        let query_changed = if resolving_selection {
-            self.ui
-                .view_query_kind(true)
-                .is_some_and(|kind| kind.changed(&self.snapshot, &next))
-        } else {
-            rows_changed
-        };
-        let deleted_playlist = if let View::PlaylistDetail { detail, .. } = &mut self.ui.view {
-            let compact = Query::PlaylistEntryLocations {
-                query: None,
-                playlist_id: detail.playlist_id,
-                entry_ids: Vec::new(),
-            };
-            let scope = Some(detail.playlist_id);
-            if compact.stamp(self.snapshot.query_revisions(scope))
-                != compact.stamp(next.query_revisions(scope))
-            {
-                detail.entry_anchor = detail
-                    .entry_anchor
-                    .or(detail.selected_entry_id)
-                    .or_else(|| detail.entries.selected().map(|entry| entry.id));
-            }
-            !next
-                .library
-                .playlist_entry_revisions
-                .contains_key(&detail.playlist_id)
-        } else {
-            false
-        };
         self.ui.sync_queue(&self.snapshot, &next);
-        if rows_changed || page_size_changed {
-            self.ui.invalidate_views();
+        if page_size_changed {
+            self.ui.queue.pages.clear();
+            self.ui.queue.fetch_size = 0;
         }
-        if (query_changed && !matches!(self.ui.view, View::Queue)) || page_size_changed {
+        let active_changed = self
+            .ui
+            .view
+            .sync_snapshot(&self.snapshot, &next, page_size_changed);
+        if let Some(tree) = &mut self.ui.cached_library {
+            tree.sync_snapshot(&self.snapshot, &next, page_size_changed);
+        }
+        if let Some(playlists) = &mut self.ui.cached_playlists {
+            playlists.sync_snapshot(&self.snapshot, &next, page_size_changed);
+        }
+        if active_changed || page_size_changed {
             self.ui.cancel_query();
-        }
-        if deleted_playlist {
-            let View::PlaylistDetail { playlists, .. } = std::mem::take(&mut self.ui.view) else {
-                unreachable!();
-            };
-            self.ui.view = View::Playlists(PagedList {
-                selection: playlists.0,
-                viewport_rows: playlists.1,
-                ..PagedList::default()
-            });
-            self.ui.cancel_query();
-        }
-        if self.snapshot.system.library_roots != next.system.library_roots
-            && let View::Tree(tree) = &mut self.ui.view
-        {
-            tree.roots = LibraryTree::roots(&next.system.library_roots);
-            // The top-level forest is local demand, not a DirectoryPage projection.
-            if tree.directory.as_os_str().is_empty() {
-                tree.entries.clear();
-            }
         }
         if let Some(message) = snapshot_message(&self.snapshot, &next, &self.ui.i18n) {
             self.ui.set_notice(message, NoticeKind::Information);
@@ -866,9 +818,117 @@ enum View {
     },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TopTab {
+    Queue,
+    Playlists,
+    Library,
+}
+
+impl View {
+    fn tab(&self) -> TopTab {
+        match self {
+            Self::Queue => TopTab::Queue,
+            Self::Playlists(_) | Self::PlaylistDetail { .. } => TopTab::Playlists,
+            Self::Tree(_) | Self::Search(_) => TopTab::Library,
+        }
+    }
+
+    fn query_kind(&self, selection: bool) -> Option<QueryKind> {
+        match self {
+            Self::Queue => Some(QueryKind::Queue),
+            Self::Search(search) => Some(QueryKind::Search(search.applied_query.clone())),
+            Self::Tree(tree) if !tree.directory.as_os_str().is_empty() => {
+                Some(QueryKind::Directory(tree.directory.clone()))
+            }
+            Self::Playlists(_) => Some(QueryKind::Playlists),
+            Self::PlaylistDetail { detail, .. } => Some(match detail.entry_anchor {
+                Some(entry_id) if selection => QueryKind::PlaylistSelection {
+                    playlist_id: detail.playlist_id,
+                    entry_id,
+                },
+                _ => QueryKind::Playlist(detail.playlist_id),
+            }),
+            _ => None,
+        }
+    }
+
+    // Hidden pages follow the same revision rules as the visible page, without
+    // fetching data or disturbing the visible page's query generation.
+    fn sync_snapshot(
+        &mut self,
+        previous: &TuiSnapshot,
+        next: &TuiSnapshot,
+        page_size_changed: bool,
+    ) -> bool {
+        let rows_changed = self
+            .query_kind(false)
+            .is_some_and(|kind| kind.changed(previous, next));
+        let query_changed = if matches!(self, Self::PlaylistDetail { detail, .. } if detail.entry_anchor.is_some())
+        {
+            self.query_kind(true)
+                .is_some_and(|kind| kind.changed(previous, next))
+        } else {
+            rows_changed
+        };
+        if let Self::PlaylistDetail { detail, .. } = self {
+            let compact = Query::PlaylistEntryLocations {
+                query: None,
+                playlist_id: detail.playlist_id,
+                entry_ids: Vec::new(),
+            };
+            let scope = Some(detail.playlist_id);
+            if compact.stamp(previous.query_revisions(scope))
+                != compact.stamp(next.query_revisions(scope))
+            {
+                detail.entry_anchor = detail
+                    .entry_anchor
+                    .or(detail.selected_entry_id)
+                    .or_else(|| detail.entries.selected().map(|entry| entry.id));
+            }
+            if !next
+                .library
+                .playlist_entry_revisions
+                .contains_key(&detail.playlist_id)
+            {
+                let Self::PlaylistDetail { playlists, .. } = std::mem::take(self) else {
+                    unreachable!();
+                };
+                *self = Self::Playlists(PagedList {
+                    selection: playlists.0,
+                    viewport_rows: playlists.1,
+                    ..PagedList::default()
+                });
+                return true;
+            }
+        }
+        if rows_changed || page_size_changed {
+            match self {
+                Self::Search(search) => search.results.clear(),
+                Self::Tree(tree) => tree.entries.clear(),
+                Self::Playlists(playlists) => playlists.clear(),
+                Self::PlaylistDetail { detail, .. } => detail.entries.clear(),
+                Self::Queue => {}
+            }
+        }
+        if previous.system.library_roots != next.system.library_roots
+            && let Self::Tree(tree) = self
+        {
+            tree.roots = LibraryTree::roots(&next.system.library_roots);
+            if tree.directory.as_os_str().is_empty() {
+                tree.entries.clear();
+            }
+        }
+        query_changed && !matches!(self, Self::Queue)
+    }
+}
+
 struct UiState {
     i18n: Arc<Localizer>,
     view: View,
+    // Each slot owns only its tab's view; switching moves bounded page caches.
+    cached_library: Option<View>,
+    cached_playlists: Option<View>,
     queue: PagedList<QueueRow>,
     // Resolve the selected occurrence after edits before requesting its new viewport.
     queue_anchor: Option<u64>,
@@ -876,6 +936,8 @@ struct UiState {
     show_help: bool,
     help_selection: ListState,
     message: Option<Notice>,
+    // Started only after the initial IPC snapshot; None is permanently dismissed.
+    startup_hint_deadline: Option<Instant>,
     details: Option<Details>,
     requested: Option<QueryRequest>,
     projection: QueryProjection,
@@ -889,12 +951,15 @@ impl UiState {
         Self {
             i18n,
             view: View::default(),
+            cached_library: None,
+            cached_playlists: None,
             queue: PagedList::default(),
             queue_anchor: None,
             queue_selected_id: None,
             show_help: false,
             help_selection: ListState::default(),
             message: None,
+            startup_hint_deadline: Some(Instant::now() + Duration::from_secs(5)),
             details: None,
             requested: None,
             projection: QueryProjection::default(),
@@ -928,40 +993,22 @@ impl UiState {
         changed
     }
 
-    fn view_query_kind(&self, selection: bool) -> Option<QueryKind> {
-        match &self.view {
-            View::Queue => Some(if selection {
-                self.queue_anchor
-                    .map_or(QueryKind::Queue, QueryKind::QueueSelection)
-            } else {
-                QueryKind::Queue
-            }),
-            View::Search(search) => Some(QueryKind::Search(search.query.clone())),
-            View::Tree(tree) if !tree.directory.as_os_str().is_empty() => {
-                Some(QueryKind::Directory(tree.directory.clone()))
-            }
-            View::Playlists(_) => Some(QueryKind::Playlists),
-            View::PlaylistDetail { detail, .. } => Some(match detail.entry_anchor {
-                Some(entry_id) if selection => QueryKind::PlaylistSelection {
-                    playlist_id: detail.playlist_id,
-                    entry_id,
-                },
-                _ => QueryKind::Playlist(detail.playlist_id),
-            }),
-            _ => None,
-        }
-    }
-
     fn query_request(&mut self, state: &TuiSnapshot) -> Option<QueryRequest> {
+        if let View::Search(search) = &mut self.view
+            && search.apply_pending(Instant::now())
+        {
+            self.cancel_query();
+            self.mark_local_change();
+        }
         let limit = state.system.page_size as usize;
         let (kind, offset) = match &self.view {
             View::Queue if state.queue.total != 0 => match self.queue_anchor {
                 Some(queue_id) => (QueryKind::QueueSelection(queue_id), 0),
                 None => (QueryKind::Queue, self.queue.next_offset(limit)?),
             },
-            View::Search(search) if search.ready(Instant::now()) => {
+            View::Search(search) => {
                 let offset = search.results.next_offset(limit)?;
-                (QueryKind::Search(search.query.clone()), offset)
+                (QueryKind::Search(search.applied_query.clone()), offset)
             }
             View::Tree(tree) if !tree.directory.as_os_str().is_empty() => (
                 QueryKind::Directory(tree.directory.clone()),
@@ -1165,6 +1212,7 @@ impl UiState {
         if row.missing {
             text.push_str(&format!("\n\n {}", self.i18n.text("gl-missing")));
         }
+        self.startup_hint_deadline = None;
         self.details = Some(Details {
             text,
             wrapped: Vec::new(),
@@ -1175,6 +1223,7 @@ impl UiState {
     }
 
     fn set_notice(&mut self, text: String, kind: NoticeKind) {
+        self.startup_hint_deadline = None;
         // Keep actionable failures visible when an unrelated playback update arrives.
         if kind == NoticeKind::Information
             && self.message.as_ref().is_some_and(|notice| {
@@ -1198,6 +1247,17 @@ impl UiState {
             .is_some_and(|notice| Instant::now() >= notice.expires_at)
         {
             self.message = None;
+            return true;
+        }
+        false
+    }
+
+    fn expire_startup_hint(&mut self, now: Instant) -> bool {
+        if self
+            .startup_hint_deadline
+            .is_some_and(|deadline| now >= deadline)
+        {
+            self.startup_hint_deadline = None;
             return true;
         }
         false
@@ -1234,18 +1294,44 @@ impl UiState {
         self.projection.cancel();
     }
 
-    fn invalidate_views(&mut self) {
-        match &mut self.view {
-            View::Search(search) => search.results.clear(),
-            View::Tree(tree) => tree.entries.clear(),
-            View::Playlists(playlists) => playlists.clear(),
-            View::PlaylistDetail { detail, .. } => detail.entries.clear(),
-            View::Queue => {
-                // Queue data changes are reconciled by sync_queue; this also handles page size.
-                self.queue.pages.clear();
-                self.queue.fetch_size = 0;
+    fn open_search(&mut self) {
+        self.store_page();
+        self.view = View::Search(LibrarySearch::default());
+        self.cancel_query();
+        self.mark_local_change();
+    }
+
+    fn store_page(&mut self) {
+        match std::mem::take(&mut self.view) {
+            view @ View::Tree(_) => self.cached_library = Some(view),
+            view @ (View::Playlists(_) | View::PlaylistDetail { .. }) => {
+                self.cached_playlists = Some(view);
             }
+            View::Queue | View::Search(_) => {}
         }
+    }
+
+    fn switch_tab(&mut self, backward: bool, state: &TuiSnapshot) {
+        let target = match (self.view.tab(), backward) {
+            (TopTab::Queue, false) | (TopTab::Library, true) => TopTab::Playlists,
+            (TopTab::Playlists, false) | (TopTab::Queue, true) => TopTab::Library,
+            (TopTab::Library, false) | (TopTab::Playlists, true) => TopTab::Queue,
+        };
+        self.store_page();
+        self.view = match target {
+            TopTab::Queue => View::Queue,
+            TopTab::Playlists => self
+                .cached_playlists
+                .take()
+                .unwrap_or_else(|| View::Playlists(PagedList::default())),
+            TopTab::Library => self
+                .cached_library
+                .take()
+                .unwrap_or_else(|| View::Tree(LibraryTree::new(&state.system.library_roots))),
+        };
+        self.startup_hint_deadline = None;
+        self.cancel_query();
+        self.mark_local_change();
     }
 
     fn keyboard_context(&self) -> KeyboardContext {
@@ -1328,15 +1414,19 @@ impl UiState {
         {
             if let View::Search(search) = &mut self.view {
                 search.query.push(character);
-                search.filter(Instant::now());
+                if search.filter(Instant::now()) {
+                    self.cancel_query();
+                }
             }
-            self.cancel_query();
             self.mark_local_change();
             return KeyAction::Ignored;
         }
         let Some(action) = resolve_key(key, context) else {
             return KeyAction::Ignored;
         };
+        if matches!(action, Action::Help | Action::Search | Action::Traverse) {
+            self.startup_hint_deadline = None;
+        }
         match action {
             Action::Help => {
                 self.show_help = true;
@@ -1351,11 +1441,11 @@ impl UiState {
                 return KeyAction::Ignored;
             }
             Action::Search => return KeyAction::Search,
-            Action::Library => return KeyAction::Tree,
-            Action::Playlists => {
-                self.view = View::Playlists(PagedList::default());
-                self.cancel_query();
-                self.mark_local_change();
+            Action::Traverse if !matches!(self.view, View::Search(_)) => {
+                self.switch_tab(
+                    key.code == KeyCode::BackTab || key.modifiers.contains(KeyModifiers::SHIFT),
+                    state,
+                );
                 return KeyAction::Ignored;
             }
             _ => {}
@@ -1394,8 +1484,9 @@ impl UiState {
                     }
                     Action::Backspace => {
                         if search.query.pop().is_some() {
-                            search.filter(Instant::now());
-                            self.cancel_query();
+                            if search.filter(Instant::now()) {
+                                self.cancel_query();
+                            }
                             changed = true;
                         }
                     }
@@ -1436,7 +1527,12 @@ impl UiState {
                     }
                     _ => changed = tree.entries.navigate_action(action, page_size),
                 }
-                self.view = if close { View::Queue } else { View::Tree(tree) };
+                self.view = if close {
+                    self.cached_library = Some(View::Tree(tree));
+                    View::Queue
+                } else {
+                    View::Tree(tree)
+                };
                 changed |= close;
             }
             View::PlaylistDetail {
@@ -1512,6 +1608,7 @@ impl UiState {
                 }
                 self.view = if close {
                     self.cancel_query();
+                    self.cached_playlists = Some(View::Playlists(playlists));
                     View::Queue
                 } else {
                     View::Playlists(playlists)
@@ -1723,19 +1820,42 @@ enum SearchFocus {
 #[derive(Default)]
 struct LibrarySearch {
     query: String,
+    applied_query: String,
     results: PagedList<LibraryRow>,
     focus: SearchFocus,
     query_deadline: Option<Instant>,
 }
 
 impl LibrarySearch {
-    fn filter(&mut self, now: Instant) {
-        self.results = PagedList::default();
+    fn filter(&mut self, now: Instant) -> bool {
+        let query = self.query.trim();
+        if query == self.applied_query {
+            self.query_deadline = None;
+            return false;
+        }
+        if query.is_empty() {
+            self.query_deadline = None;
+            self.applied_query.clear();
+            self.results = PagedList::default();
+            return true;
+        }
         self.query_deadline = Some(now + crate::model::SEARCH_DEBOUNCE);
+        false
     }
 
-    fn ready(&self, now: Instant) -> bool {
-        self.query_deadline.is_none_or(|deadline| now >= deadline)
+    fn apply_pending(&mut self, now: Instant) -> bool {
+        if !self.query_deadline.is_some_and(|deadline| now >= deadline) {
+            return false;
+        }
+        self.query_deadline = None;
+        let query = self.query.trim();
+        if query == self.applied_query {
+            return false;
+        }
+        self.applied_query.clear();
+        self.applied_query.push_str(query);
+        self.results = PagedList::default();
+        true
     }
 }
 
@@ -1850,7 +1970,6 @@ fn move_selection_page(
 enum KeyAction {
     Quit,
     Search,
-    Tree,
     Command(Command),
     Ignored,
 }
@@ -2039,20 +2158,24 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut UiState) {
     ])
     .split(area);
     let i18n = &ui.i18n;
-    let current_view = match &ui.view {
-        View::Queue => "terminal-queue",
-        View::Search(_) => "terminal-search",
-        View::Tree(_) => "terminal-folders",
-        View::Playlists(_) | View::PlaylistDetail { .. } => "terminal-playlists",
-    };
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(" RIVU", Style::default().fg(colors.accent)),
-            Span::styled(" / ", Style::default().fg(colors.secondary)),
-            Span::styled(i18n.text(current_view), Style::default().fg(colors.accent)),
-        ])),
-        outer[0],
-    );
+    let active_tab = ui.view.tab();
+    let mut tabs = vec![Span::styled(" RIVU  ", Style::default().fg(colors.accent))];
+    for (tab, label) in [
+        (TopTab::Queue, "terminal-queue"),
+        (TopTab::Playlists, "terminal-playlists"),
+        (TopTab::Library, "terminal-library"),
+    ] {
+        let style = if tab == active_tab {
+            Style::default()
+                .fg(colors.accent)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(colors.secondary)
+        };
+        tabs.push(Span::styled(i18n.text(label), style));
+        tabs.push(Span::raw("  "));
+    }
+    frame.render_widget(Paragraph::new(Line::from(tabs)), outer[0]);
     ui.page_size = outer[1]
         .height
         .saturating_sub(match ui.view {
@@ -2070,11 +2193,12 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut UiState) {
         View::Queue => draw_queue(frame, outer[1], state, &mut ui.queue, i18n, colors),
     }
     let rows = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(outer[2]);
-    let mut now = vec![Span::styled(
-        format!(" {}  ", playback_symbol(state.playback.status)),
-        Style::default().fg(colors.accent),
-    )];
+    let mut now = Vec::with_capacity(3);
     if let Some(track) = state.current_track() {
+        now.push(Span::styled(
+            format!(" {}  ", playback_symbol(state.playback.status)),
+            Style::default().fg(colors.accent),
+        ));
         now.push(Span::raw(track.title.as_str()));
         if !track.artist.is_empty() {
             now.push(Span::styled(
@@ -2087,7 +2211,11 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut UiState) {
             ));
         }
     } else {
-        now.push(Span::raw(i18n.text("terminal-nothing-playing")));
+        now.push(Span::raw(" "));
+        now.push(Span::styled(
+            i18n.text("terminal-nothing-playing"),
+            Style::default().fg(colors.secondary),
+        ));
     }
     let metadata = state
         .current_track()
@@ -2169,7 +2297,14 @@ fn draw_status(
         RepeatMode::One => ("󰑘", colors.accent),
     };
     let modes = Line::from(vec![
-        Span::raw(format!(" {volume_icon}  {volume}%  ")),
+        Span::styled(
+            format!(" {volume_icon}  {volume}%  "),
+            Style::default().fg(if state.playback.volume == 0.0 {
+                colors.disabled
+            } else {
+                colors.accent
+            }),
+        ),
         Span::styled(
             "󰒟",
             Style::default().fg(if state.playback.shuffle {
@@ -2198,6 +2333,16 @@ fn draw_status(
         frame.render_widget(
             Paragraph::new(cell_text(&text, columns[1].width as usize, true))
                 .style(Style::default().fg(color)),
+            columns[1],
+        );
+    } else if matches!(ui.view, View::Queue) && ui.startup_hint_deadline.is_some() {
+        frame.render_widget(
+            Paragraph::new(cell_text(
+                ui.i18n.text("terminal-startup-help"),
+                columns[1].width as usize,
+                true,
+            ))
+            .style(Style::default().fg(colors.secondary)),
             columns[1],
         );
     }
@@ -2702,10 +2847,60 @@ fn fmt_time(seconds: f64) -> String {
 }
 
 #[cfg(test)]
+#[path = "terminal/search_tests.rs"]
+mod search_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::{model::Page, response::QueryRevisions};
     use ratatui::backend::TestBackend;
+
+    #[test]
+    fn startup_hint_expires_once_at_its_deadline() {
+        let mut ui = UiState::default();
+        let deadline = ui.startup_hint_deadline.unwrap();
+        assert!(!ui.expire_startup_hint(deadline - Duration::from_nanos(1)));
+        assert!(ui.startup_hint_deadline.is_some());
+        assert!(ui.expire_startup_hint(deadline));
+        assert!(ui.startup_hint_deadline.is_none());
+        assert!(!ui.expire_startup_hint(deadline));
+    }
+
+    #[test]
+    fn every_notice_permanently_dismisses_startup_hint() {
+        for kind in [
+            NoticeKind::Information,
+            NoticeKind::Warning,
+            NoticeKind::Error,
+        ] {
+            let mut ui = UiState::default();
+            ui.set_notice("Operation result".into(), kind);
+            assert!(ui.startup_hint_deadline.is_none());
+            ui.message.as_mut().unwrap().expires_at = Instant::now();
+            assert!(ui.expire_message());
+            assert!(ui.message.is_none());
+            assert!(ui.startup_hint_deadline.is_none());
+        }
+    }
+
+    #[test]
+    fn closing_help_or_returning_to_queue_never_restores_startup_hint() {
+        let state = TuiSnapshot::default();
+        for key in [KeyCode::F(1), KeyCode::Char('?'), KeyCode::Tab] {
+            let mut ui = UiState::default();
+            ui.key_action(KeyEvent::from(key), &state);
+            assert!(ui.startup_hint_deadline.is_none());
+            ui.key_action(KeyEvent::from(KeyCode::Esc), &state);
+            assert!(!ui.show_help);
+            assert!(matches!(ui.view, View::Queue));
+            assert!(ui.startup_hint_deadline.is_none());
+        }
+        let mut ui = UiState::default();
+        let action = ui.key_action(KeyEvent::from(KeyCode::Char('/')), &state);
+        assert!(matches!(action, KeyAction::Search));
+        assert!(ui.startup_hint_deadline.is_none());
+    }
 
     fn terminal_text(terminal: &Terminal<TestBackend>) -> String {
         let buffer = terminal.backend().buffer();
@@ -3034,6 +3229,8 @@ mod tests {
             KeyCode::Char(' '),
             KeyCode::Char('/'),
             KeyCode::F(1),
+            KeyCode::Tab,
+            KeyCode::BackTab,
         ] {
             assert!(matches!(
                 ui.key_action(KeyEvent::from(key), &state),
@@ -3555,6 +3752,290 @@ mod tests {
     }
 
     #[test]
+    fn tabs_wrap_in_both_directions_and_ignore_retired_shortcuts() {
+        let state = query_snapshot();
+        for backward in [false, true] {
+            for key in [
+                KeyEvent::from(if backward {
+                    KeyCode::BackTab
+                } else {
+                    KeyCode::Tab
+                }),
+                KeyEvent::new(
+                    KeyCode::Tab,
+                    if backward {
+                        KeyModifiers::SHIFT
+                    } else {
+                        KeyModifiers::NONE
+                    },
+                ),
+            ] {
+                let mut ui = UiState::default();
+                let expected = if backward {
+                    [TopTab::Library, TopTab::Playlists, TopTab::Queue]
+                } else {
+                    [TopTab::Playlists, TopTab::Library, TopTab::Queue]
+                };
+                for tab in expected.into_iter().cycle().take(6) {
+                    assert!(matches!(ui.key_action(key, &state), KeyAction::Ignored));
+                    assert_eq!(ui.view.tab(), tab);
+                    assert!(ui.startup_hint_deadline.is_none());
+                    for retired in ['t', 'P'] {
+                        ui.key_action(KeyEvent::from(KeyCode::Char(retired)), &state);
+                        assert_eq!(ui.view.tab(), tab);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tab_round_trip_moves_cached_pages_and_preserves_subpage_coordinates() {
+        let mut state = query_snapshot();
+        Arc::make_mut(&mut state.library.playlist_entry_revisions).insert(5, 0);
+        let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::new("en-US")));
+        tui.ui.queue.set_viewport(3);
+        load_queue(&mut tui.ui, &state);
+        for _ in 0..7 {
+            tui.ui.key_action(KeyEvent::from(KeyCode::Down), &state);
+        }
+        let queue_position = (
+            tui.ui.queue.selection.selected(),
+            tui.ui.queue.selection.offset(),
+        );
+        tui.ui.key_action(KeyEvent::from(KeyCode::Tab), &state);
+        let View::Playlists(playlists) = &mut tui.ui.view else {
+            unreachable!()
+        };
+        playlists.set_viewport(3);
+        load_visible(&mut tui.ui, &state);
+        for _ in 0..5 {
+            tui.ui.key_action(KeyEvent::from(KeyCode::Down), &state);
+        }
+        tui.ui.key_action(KeyEvent::from(KeyCode::Right), &state);
+        let View::PlaylistDetail { detail, .. } = &mut tui.ui.view else {
+            unreachable!()
+        };
+        detail.entries.set_viewport(3);
+        load_visible(&mut tui.ui, &state);
+        for _ in 0..7 {
+            tui.ui.key_action(KeyEvent::from(KeyCode::Down), &state);
+        }
+        load_visible(&mut tui.ui, &state);
+        let View::PlaylistDetail { detail, .. } = &tui.ui.view else {
+            unreachable!()
+        };
+        let entry = detail.entries.selected().unwrap() as *const PlaylistEntryRow;
+        tui.ui.key_action(KeyEvent::from(KeyCode::Tab), &state);
+        let View::Tree(tree) = &mut tui.ui.view else {
+            unreachable!()
+        };
+        tree.directory = "/music/disc".into();
+        tree.ancestors.push((
+            "/music".into(),
+            ListState::default().with_selected(Some(4)).with_offset(2),
+            3,
+        ));
+        tree.entries.set_viewport(3);
+        load_visible(&mut tui.ui, &state);
+        for _ in 0..7 {
+            tui.ui.key_action(KeyEvent::from(KeyCode::Down), &state);
+        }
+        load_visible(&mut tui.ui, &state);
+        let View::Tree(tree) = &tui.ui.view else {
+            unreachable!()
+        };
+        let directory_row = tree.entries.selected().unwrap() as *const DirectoryRow;
+        tui.ui.key_action(KeyEvent::from(KeyCode::Tab), &state);
+        assert_eq!(
+            (
+                tui.ui.queue.selection.selected(),
+                tui.ui.queue.selection.offset()
+            ),
+            queue_position
+        );
+        tui.ui.key_action(KeyEvent::from(KeyCode::BackTab), &state);
+        let View::Tree(tree) = &tui.ui.view else {
+            unreachable!()
+        };
+        assert_eq!(tree.directory, Path::new("/music/disc"));
+        assert_eq!(tree.ancestors.len(), 1);
+        assert_eq!(
+            (
+                tree.entries.selection.selected(),
+                tree.entries.selection.offset()
+            ),
+            (Some(7), 5)
+        );
+        assert_eq!(
+            tree.entries.selected().unwrap() as *const DirectoryRow,
+            directory_row
+        );
+        assert!(tui.ui.query_request(&state).is_none());
+        tui.ui.key_action(KeyEvent::from(KeyCode::BackTab), &state);
+        let View::PlaylistDetail { detail, .. } = &tui.ui.view else {
+            unreachable!()
+        };
+        assert_eq!(detail.playlist_id, 5);
+        assert_eq!(
+            (
+                detail.entries.selection.selected(),
+                detail.entries.selection.offset()
+            ),
+            (Some(7), 5)
+        );
+        assert_eq!(
+            detail.entries.selected().unwrap() as *const PlaylistEntryRow,
+            entry
+        );
+        assert!(tui.ui.query_request(&state).is_none());
+        tui.ui.key_action(KeyEvent::from(KeyCode::Left), &state);
+        let View::Playlists(playlists) = &tui.ui.view else {
+            unreachable!()
+        };
+        assert_eq!(
+            (playlists.selection.selected(), playlists.selection.offset()),
+            (Some(5), 3)
+        );
+    }
+
+    #[test]
+    fn switching_tabs_rejects_old_completion_even_after_returning_to_same_page() {
+        let state = query_snapshot();
+        let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::new("en-US")));
+        let old = tui.ui.query_request(&state).unwrap();
+        tui.ui.requested = Some(old.clone());
+        tui.ui.key_action(KeyEvent::from(KeyCode::Tab), &state);
+        assert!(tui.ui.requested.is_none());
+        assert!(!tui.ui.apply_query(&state, &old, Ok(response(&old, 12))));
+        tui.ui.key_action(KeyEvent::from(KeyCode::BackTab), &state);
+        let current = tui.ui.query_request(&state).unwrap();
+        assert_eq!(current.kind, old.kind);
+        assert_eq!(current.stamp, old.stamp);
+        assert_ne!(current.generation, old.generation);
+        assert!(!tui.ui.apply_query(&state, &old, Ok(response(&old, 12))));
+        assert!(
+            tui.ui
+                .apply_query(&state, &current, Ok(response(&current, 12)))
+        );
+    }
+
+    #[test]
+    fn hidden_pages_invalidate_without_cancelling_visible_queue_and_handle_deletion() {
+        let state = query_snapshot();
+        let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::new("en-US")));
+        tui.ui.view = View::Tree(LibraryTree {
+            directory: "/music".into(),
+            ..LibraryTree::default()
+        });
+        load_visible(&mut tui.ui, &state);
+        tui.ui.key_action(KeyEvent::from(KeyCode::Tab), &state);
+        tui.ui.view = playlist_view(1);
+        load_visible(&mut tui.ui, &state);
+        tui.ui.key_action(KeyEvent::from(KeyCode::Tab), &state);
+        tui.ui.key_action(KeyEvent::from(KeyCode::Tab), &state);
+        let queue_request = tui.ui.query_request(&state).unwrap();
+        tui.ui.requested = Some(queue_request.clone());
+        let mut next = state.clone();
+        next.library.revision += 1;
+        tui.apply_snapshot(next.clone());
+        assert_eq!(tui.ui.requested.as_ref(), Some(&queue_request));
+        assert_eq!(tui.ui.query_request(&next), Some(queue_request.clone()));
+        let View::Tree(tree) = tui.ui.cached_library.as_ref().unwrap() else {
+            unreachable!()
+        };
+        assert!(tree.entries.pages.is_empty());
+        assert_eq!(tree.directory, Path::new("/music"));
+        let View::PlaylistDetail { detail, .. } = tui.ui.cached_playlists.as_ref().unwrap() else {
+            unreachable!()
+        };
+        assert!(detail.entries.pages.is_empty());
+        assert_eq!(detail.selected_entry_id, Some(0));
+        Arc::make_mut(&mut next.library.playlist_entry_revisions).insert(1, 10);
+        tui.apply_snapshot(next.clone());
+        tui.ui.key_action(KeyEvent::from(KeyCode::Tab), &next);
+        assert_eq!(
+            tui.ui.query_request(&next).unwrap().kind,
+            QueryKind::PlaylistSelection {
+                playlist_id: 1,
+                entry_id: 0
+            }
+        );
+        tui.ui.key_action(KeyEvent::from(KeyCode::BackTab), &next);
+        Arc::make_mut(&mut next.library.playlist_entry_revisions).remove(&1);
+        next.library.playlist_revision += 1;
+        tui.apply_snapshot(next.clone());
+        tui.ui.key_action(KeyEvent::from(KeyCode::Tab), &next);
+        assert!(matches!(tui.ui.view, View::Playlists(_)));
+        assert_eq!(
+            tui.ui.query_request(&next).unwrap().kind,
+            QueryKind::Playlists
+        );
+    }
+
+    #[test]
+    fn hidden_pages_follow_page_size_and_library_root_changes() {
+        let mut state = query_snapshot();
+        state.system.library_roots = Arc::new(vec!["/one".into()]);
+        let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::new("en-US")));
+        tui.ui.key_action(KeyEvent::from(KeyCode::Tab), &state);
+        load_visible(&mut tui.ui, &state);
+        tui.ui.key_action(KeyEvent::from(KeyCode::Tab), &state);
+        assert!(tui.ui.prepare_local_view(&state));
+        tui.ui.key_action(KeyEvent::from(KeyCode::Tab), &state);
+        let old = tui.ui.query_request(&state).unwrap();
+        let mut next = state.clone();
+        next.system.page_size = 5;
+        next.system.library_roots = Arc::new(vec!["/two".into()]);
+        tui.apply_snapshot(next.clone());
+        let View::Playlists(playlists) = tui.ui.cached_playlists.as_ref().unwrap() else {
+            unreachable!()
+        };
+        assert!(playlists.pages.is_empty());
+        assert_eq!(playlists.selection.selected(), Some(0));
+        let current = tui.ui.query_request(&next).unwrap();
+        assert_eq!(current.limit, 5);
+        assert_ne!(current.generation, old.generation);
+        tui.ui.key_action(KeyEvent::from(KeyCode::BackTab), &next);
+        assert!(tui.ui.prepare_local_view(&next));
+        let View::Tree(tree) = &tui.ui.view else {
+            unreachable!()
+        };
+        assert_eq!(tree.roots, vec![PathBuf::from("/two")]);
+        assert!(
+            matches!(tree.entries.selected(), Some(DirectoryRow::Directory { path }) if path == Path::new("/two"))
+        );
+    }
+
+    #[test]
+    fn search_retains_editor_traversal_and_cached_library_while_highlighting_library() {
+        for language in ["en-US", "zh-CN"] {
+            let state = query_snapshot();
+            let mut ui = UiState::new(Arc::new(Localizer::new(language)));
+            ui.view = View::Tree(LibraryTree {
+                directory: "/music/disc".into(),
+                ..LibraryTree::default()
+            });
+            assert!(matches!(
+                ui.key_action(KeyEvent::from(KeyCode::Char('/')), &state),
+                KeyAction::Search
+            ));
+            ui.open_search();
+            for key in [KeyCode::Tab, KeyCode::BackTab] {
+                ui.key_action(KeyEvent::from(key), &state);
+                assert_eq!(ui.view.tab(), TopTab::Library);
+            }
+            assert!(matches!(&ui.view, View::Search(search) if search.focus == SearchFocus::Query));
+            ui.key_action(KeyEvent::from(KeyCode::Esc), &state);
+            assert!(matches!(ui.view, View::Queue));
+            ui.key_action(KeyEvent::from(KeyCode::BackTab), &state);
+            assert!(
+                matches!(&ui.view, View::Tree(tree) if tree.directory == Path::new("/music/disc"))
+            );
+        }
+    }
+
+    #[test]
     fn unrelated_updates_preserve_pending_and_loaded_terminal_pages() {
         for view in [
             View::Queue,
@@ -3791,7 +4272,7 @@ mod tests {
         }
         tui.ui.key_action(KeyEvent::from(KeyCode::Esc), &next);
         assert!(matches!(tui.ui.view, View::Queue));
-        tui.ui.key_action(KeyEvent::from(KeyCode::Char('P')), &next);
+        tui.ui.key_action(KeyEvent::from(KeyCode::Tab), &next);
         assert!(matches!(tui.ui.view, View::Playlists(_)));
         let reopened = tui.ui.query_request(&next).unwrap();
         assert_eq!(reopened.stamp, request.stamp);
@@ -4726,12 +5207,15 @@ mod tests {
                 KeyCode::Char('q'),
                 KeyCode::Enter,
                 KeyCode::Delete,
+                KeyCode::Tab,
+                KeyCode::BackTab,
             ] {
                 assert!(matches!(
                     ui.key_action(KeyEvent::from(key), &state),
                     KeyAction::Ignored
                 ));
             }
+            assert!(matches!(ui.view, View::Queue));
             assert_eq!(ui.queue.selection.selected(), Some(7));
             assert!(ui.show_help);
             ui.key_action(KeyEvent::from(KeyCode::Esc), &state);
