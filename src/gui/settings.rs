@@ -494,7 +494,7 @@ pub(super) struct Settings {
     dropdown: DropdownState<SettingChoice>,
     font_options: Vec<FontOption>,
     font_value: String,
-    device_scroll: UniformListScrollHandle,
+    dropdown_scroll: UniformListScrollHandle,
     dropdown_anchor: Measured,
     applying: bool,
     session: u64,
@@ -568,7 +568,7 @@ impl Settings {
             dropdown: DropdownState::default(),
             font_options: Vec::new(),
             font_value: config.ui_font.clone(),
-            device_scroll: UniformListScrollHandle::new(),
+            dropdown_scroll: UniformListScrollHandle::new(),
             dropdown_anchor: Measured::Device,
             applying: false,
             session: 0,
@@ -611,7 +611,7 @@ impl Settings {
         }
     }
 
-    pub(super) fn complete_visualizer_apply(
+    pub(super) fn complete_panel_apply(
         &mut self,
         session: u64,
         result: std::result::Result<(), String>,
@@ -623,15 +623,6 @@ impl Settings {
         self.applying = false;
         self.feedback = Some(result);
         cx.notify();
-    }
-
-    pub(super) fn complete_artwork_apply(
-        &mut self,
-        session: u64,
-        result: std::result::Result<(), String>,
-        cx: &mut Context<Self>,
-    ) {
-        self.complete_visualizer_apply(session, result, cx);
     }
 
     fn cancel(&mut self, cx: &mut Context<Self>) {
@@ -1295,7 +1286,7 @@ impl Settings {
                         && this.dropdown_anchor == Measured::SettingsFont
                         && let Some(index) = this.dropdown.selected_index()
                     {
-                        this.choose_device(index, cx);
+                        this.choose_setting(index, cx);
                     }
                     return;
                 }
@@ -1589,7 +1580,7 @@ impl Settings {
         self.inputs[&Field::Font].update(cx, |input, cx| input.set_text(value, cx));
     }
 
-    fn choose_device(&mut self, index: usize, cx: &mut Context<Self>) {
+    fn choose_setting(&mut self, index: usize, cx: &mut Context<Self>) {
         let Some((_, item)) = self.dropdown.filtered_item(index) else {
             return;
         };
@@ -1653,7 +1644,7 @@ impl Settings {
         self.dropdown.open(items);
         self.dropdown.select_index(selected);
         if let Some(index) = self.dropdown.selected_index() {
-            self.device_scroll
+            self.dropdown_scroll
                 .scroll_to_item(index, ScrollStrategy::Nearest);
         }
     }
@@ -1665,7 +1656,7 @@ impl Settings {
             "pageup" | "pagedown" => {
                 if let Some(index) = self.dropdown.selected_index() {
                     let viewport_height = self
-                        .device_scroll
+                        .dropdown_scroll
                         .0
                         .borrow()
                         .base_handle
@@ -1685,7 +1676,7 @@ impl Settings {
             }
             "enter" | "space" => {
                 if let Some(index) = self.dropdown.selected_index() {
-                    self.choose_device(index, cx);
+                    self.choose_setting(index, cx);
                 }
                 cx.stop_propagation();
                 return;
@@ -1693,7 +1684,7 @@ impl Settings {
             _ => return,
         }
         if let Some(index) = self.dropdown.selected_index() {
-            self.device_scroll
+            self.dropdown_scroll
                 .scroll_to_item(index, ScrollStrategy::Nearest);
         }
         cx.stop_propagation();
@@ -2034,7 +2025,7 @@ impl Settings {
                         if open {
                             this.dropdown.close();
                             if let Some(index) = this.dropdown.selected_index() {
-                                this.device_scroll
+                                this.dropdown_scroll
                                     .scroll_to_item(index, ScrollStrategy::Nearest);
                             }
                         } else {
@@ -3268,14 +3259,14 @@ impl Settings {
                                         cx.new(|_| ButtonTooltip { text: hint.clone() }).into()
                                     })
                                     .on_click(cx.listener(
-                                        move |this, _, _, cx| this.choose_device(item_index, cx),
+                                        move |this, _, _, cx| this.choose_setting(item_index, cx),
                                     )),
                                 )
                             })
                             .collect()
                     }),
                 )
-                .track_scroll(&self.device_scroll)
+                .track_scroll(&self.dropdown_scroll)
                 .h_full()
                 .w_full();
                 panel = panel.child(
@@ -3307,7 +3298,7 @@ impl Settings {
                                         super::components::scrollable_list(
                                             "settings-dropdown-scrollbar",
                                             choices,
-                                            &self.device_scroll,
+                                            &self.dropdown_scroll,
                                         ),
                                     )),
                             ),

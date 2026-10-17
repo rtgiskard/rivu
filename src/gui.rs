@@ -891,11 +891,11 @@ impl GuiApp {
                     {
                         this.queue_layout_save();
                         settings.update(cx, |settings, cx| {
-                            settings.complete_visualizer_apply(*session, Ok(()), cx)
+                            settings.complete_panel_apply(*session, Ok(()), cx)
                         });
                     } else {
                         settings.update(cx, |settings, cx| {
-                            settings.complete_visualizer_apply(
+                            settings.complete_panel_apply(
                                 *session,
                                 Err(this.i18n.text("shell-visualizer-gone").to_owned()),
                                 cx,
@@ -917,11 +917,11 @@ impl GuiApp {
                     {
                         this.queue_layout_save();
                         settings.update(cx, |settings, cx| {
-                            settings.complete_artwork_apply(*session, Ok(()), cx)
+                            settings.complete_panel_apply(*session, Ok(()), cx)
                         });
                     } else {
                         settings.update(cx, |settings, cx| {
-                            settings.complete_artwork_apply(
+                            settings.complete_panel_apply(
                                 *session,
                                 Err(this.i18n.text("shell-artwork-gone").to_owned()),
                                 cx,
