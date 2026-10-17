@@ -23,6 +23,7 @@ struct TerminalColors {
     text: ratatui::style::Color,
     secondary: ratatui::style::Color,
     border: ratatui::style::Color,
+    structure_border: ratatui::style::Color,
     disabled: ratatui::style::Color,
     accent: ratatui::style::Color,
     selected: ratatui::style::Color,
@@ -41,6 +42,7 @@ impl TerminalColors {
             text: rgb(palette.text),
             secondary: rgb(palette.secondary),
             border: rgb(palette.border),
+            structure_border: rgb(palette.structure_border),
             disabled: rgb(palette.disabled),
             accent: rgb(palette.accent),
             selected: rgb(palette.selected),
@@ -152,16 +154,45 @@ pub(super) fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut
         frame.render_stateful_widget(list, area, &mut ui.help_selection);
         return;
     }
+    let area = area.inner(ratatui::layout::Margin::new(1, 0));
+    let spacing = u16::from(area.height >= 16);
     let outer = Layout::vertical([
-        Constraint::Length(1),
+        Constraint::Length(1 + spacing),
         Constraint::Min(1),
-        Constraint::Length(2),
-        Constraint::Length(1),
+        Constraint::Length(2 + spacing),
+        Constraint::Length(1 + spacing),
     ])
     .split(area);
+    if spacing != 0 {
+        frame.render_widget(
+            Block::default()
+                .borders(Borders::BOTTOM)
+                .border_style(Style::default().fg(colors.structure_border)),
+            outer[0],
+        );
+        frame.render_widget(
+            Block::default()
+                .borders(Borders::TOP)
+                .border_style(Style::default().fg(colors.structure_border)),
+            outer[2],
+        );
+    }
+    let navigation = Rect {
+        height: 1.min(outer[0].height),
+        ..outer[0]
+    };
+    let playback = Rect {
+        y: outer[2].y + spacing.min(outer[2].height),
+        height: outer[2].height.saturating_sub(spacing),
+        ..outer[2]
+    };
+    let status = Rect {
+        height: 1.min(outer[3].height),
+        ..outer[3]
+    };
     let i18n = &ui.i18n;
     let active_tab = ui.view.tab();
-    let mut tabs = vec![Span::styled(" RIVU  ", Style::default().fg(colors.accent))];
+    let mut tabs = Vec::new();
     for (tab, label) in [
         (TopTab::Queue, "terminal-queue"),
         (TopTab::Playlists, "terminal-playlists"),
@@ -177,7 +208,7 @@ pub(super) fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut
         tabs.push(Span::styled(i18n.text(label), style));
         tabs.push(Span::raw("  "));
     }
-    frame.render_widget(Paragraph::new(Line::from(tabs)), outer[0]);
+    frame.render_widget(Paragraph::new(Line::from(tabs)), navigation);
     ui.page_size = outer[1]
         .height
         .saturating_sub(match ui.view {
@@ -194,7 +225,7 @@ pub(super) fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut
         View::Playlists(playlists) => draw_playlists(frame, outer[1], playlists, i18n, colors),
         View::Queue => draw_queue(frame, outer[1], state, &mut ui.queue, i18n, colors),
     }
-    let rows = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(outer[2]);
+    let rows = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(playback);
     let mut now = Vec::with_capacity(3);
     if let Some(track) = state.current_track() {
         now.push(Span::styled(
@@ -277,7 +308,7 @@ pub(super) fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut
         Paragraph::new(time).style(Style::default().fg(colors.secondary)),
         progress[1],
     );
-    draw_status(frame, outer[3], ui, state, colors);
+    draw_status(frame, status, ui, state, colors);
 }
 
 fn draw_status(
