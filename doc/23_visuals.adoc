@@ -42,10 +42,9 @@ buffers or angle-indexed image cache are created. `Img` forwards its existing
 transformation matrix through image painting to the WGPU sprite shader.
 `Window::paint_path_with_texture` fills actual path geometry from a caller-owned
 `RenderImage`, mapping it to `path.bounds` while preserving coverage and opacity.
-The pinned plain fill could not express Spectrum's full authored cubic palette;
-the former masked two-stop interval workaround changed its intended transitions
-and multiplied path submissions. Preserving those stitched colors or pixel
-equivalence is not required; preserving the authored smooth palette is.
+Spectrum requires the full authored cubic palette: approximating it with a plain
+two-stop fill changes its transitions, while masked palette intervals multiply
+path submissions.
 Spectrum's mapping and bounded ramp ownership are described in <<_spectrum,Spectrum>>.
 
 Rust scene records, WGPU pipeline/bindings, and WGSL/WebGL shader layouts change
@@ -130,12 +129,11 @@ display never resumes playback or overrides Still Mode. Destructive demand
 transitions invalidate queued input and late frame publication.
 
 Stream resets, analysis restarts, dropped samples, FFT/window changes, and
-optional-payload demand transitions break signal continuity. Views reject
-frames from stale analysis settings and reset envelopes or simulations at a
-break rather than smoothing across unrelated audio. Spectrogram does not pool
-new samples across that break; compatible historical frequency buckets can
-remain visible. Its sample time follows accepted audio, not wall time or the
-track's seek position.
+display-demand transitions break signal continuity. Views reject stale frames
+and reset envelopes or simulations rather than smoothing across unrelated audio.
+Spectrogram starts a new pooling interval at a break; compatible historical
+frequency buckets can remain visible. Its sample time follows accepted audio,
+not wall time or the track's seek position.
 
 GUI analysis demand follows visible views. Stereo density, spatial spectrum,
 and integrated band energy are independent requests combined across panels;
@@ -303,7 +301,7 @@ Upload or paint failures follow the existing visualization error reporting path,
 without substituting a different fill.
 
 Batching does not make dense styles free: more bars or LED segments still
-increase geometry work. The common gradient now needs only one body submission
+increase geometry work. The common gradient needs only one body submission
 per plot, without copying its geometry for each palette interval. The choice
 favors batching where the visual model allows it, rather than forcing Waveform
 and Spectrum through one strategy.
@@ -397,10 +395,8 @@ at the cost of approximating the light spread. Beams retains 189 branches, 756
 line segments, and 12 pulse slots. Flow retains 96 filaments with at most 24
 points each and 2208 line segments. Both styles draw at most 27 light paths per
 panel; Flow limits each integration step to 1/120 second and each accepted-frame
-update to 60 steps. All integration, history fading, and respawn substeps are
-retained, but both styles rebuild their render segments only once at the end of
-that update. Intermediate render segments are not simulation input; deferring
-their construction preserves the final trajectory and light levels. A gap longer
+update to 60 steps. Integration, history fading, and respawn retain those
+substeps, but render segments are rebuilt only from the final state. A gap longer
 than half a second resets the scene instead of attempting unbounded catch-up.
 
 == Failure boundaries
@@ -409,9 +405,11 @@ Views without accepted data do not invent signal history. Analysis frames with
 incompatible FFT settings are ignored; Spectrum and Spectrogram reject mismatched
 frequency and level counts. Explicit full-waveform decoding failures preserve
 an error result rather than installing an incomplete scan as complete.
-Full-waveform requests validate the selected track's metadata revision before
-starting the scan. Unchanged tracks remain eligible across unrelated library
-edits; changing the target or its metadata invalidates the pending request.
+Before a full scan starts, its Track query must still match the selected track's
+metadata stamp and request generation; unrelated library edits do not invalidate
+that query. Once decoding starts, ordinary metadata changes do not cancel it:
+the source, saved-hint, request-generation, and suspension checks described under
+<<_waveform,Waveform>> govern pending and completed previews.
 
 Spectrum tessellation and Spectrogram image upload/paint failures are surfaced
 as visualization errors. Stereo-analysis image failures are reported separately.

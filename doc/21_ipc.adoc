@@ -304,31 +304,9 @@ and includes the version, message type, and serialized body.
 Bodies use Postcard serialization without COBS framing. The current protocol
 version is `32`; clients and servers must use matching wire schemas. The four-byte
 frame length remains little-endian; body integers follow Postcard's encoding.
-Configuration state and Configure commands include the presentation language
-(`ui_language`: `auto`, `en-US`, or `zh-CN`). Language selection does not translate
-wire identifiers or machine-readable data. Restart older clients and hosts together
-after upgrading; incompatible versions are rejected before decoding the body.
-Configuration state and Configure commands include `artwork_decode_budget_mb`;
-its integer value limits retained decoded real-cover frames per window-local
-image, independently of workspace and dimension admission.
-Version 23 adds exact Library now-playing location queries and responses; the
-Postcard enum schema is incompatible with earlier versions.
-Version 27 replaces queue/playlist batch `after` and `next` with scoped matching-rank
-continuations; old position/id-only batch requests and responses are incompatible.
-Version 28 adds effective track duration and codec to playlist entry page and batch
-rows. Duration is optional and retains CUE segment duration rather than source-file
-duration; codec is a string. The changed Postcard row schema is incompatible with
-earlier versions.
-Version 29 adds `ui_theme` to configuration state and Configure commands.
-The changed Postcard configuration schema is incompatible with earlier versions.
-Version 30 adds `confirm_queue_replace` to configuration state and Configure commands.
-The GUI uses this preference for queue replacement confirmation; direct commands remain noninteractive.
-The changed Postcard configuration schema is incompatible with earlier versions.
-Version 32 adds `scan_min_duration_secs` (`u32`) immediately after `scan_max_depth`
-in configuration state and Configure commands. The positional Postcard schema is
-incompatible with earlier versions; no compatibility alias or negotiation is used.
-Its link:02_library.adoc#_minimum_duration_for_new_tracks[new-track admission policy]
-is captured when a scan or playlist import starts, not when Configure is sent.
+Restart clients and hosts together after upgrading: incompatible versions are
+rejected before decoding the body. There is no compatibility alias or schema
+negotiation. See <<_wire_schemas,Wire schemas>> for positional fields and adapters.
 
 Request frame content is limited to 4 MiB
 and response frame content to 16 MiB, including the version and message type but
@@ -439,7 +417,7 @@ Response types:
 * `Hello` — returns the server instance ID and selected state
 * `State` — returns selected state sections
 * `Query` — returns query revisions and the query result
-* `Ack` — returns command success, error, revision, and optional scan task ID
+* `Ack` — returns command success, error, publication revision, and optional scan or relocation task ID
 * `Watch` — returns changed state revisions
 * `Error` — returns a protocol or request error
 
@@ -523,10 +501,12 @@ content; directory/album/location projections also use structure. A single
 Track query uses `track = {track_id, revision}`. Root counts use structure only.
 Playlist summaries use the summary catalog only; full entry rows use
 `playlist_metadata = {playlist_id, revision}` plus their scoped content/lifetime
-token. Compact entry locations use only their content token. Queue queries use
-queue content. Duplicate groups use `duplicate_groups`; members use library,
-`duplicate_members`, and queue content. Playlist reference changes advance member
-facts, while playlist names and order do not.
+token. Unfiltered compact entry locations use only their content token; filtered
+locations also use scoped metadata, with the same library fallback as full rows.
+Queue queries use queue content and, while filtered, library content. Duplicate
+groups use `duplicate_groups`; members use library, `duplicate_members`, and queue
+content. Playlist reference changes advance member facts, while playlist names
+and order do not.
 
 Track and playlist metadata scopes share a bounded index of at most 256 entries.
 Committed title/artist/album/favorite changes identify affected tracks and playlist
@@ -546,9 +526,10 @@ Consumer generations independently reject abandoned identity/intent submissions;
 fresh data cannot authorize an obsolete operation. Acknowledgements carry success
 or error plus publication revision, never replacement state.
 
-Playlist entry page and batch rows include `favorite`, the current library
-track's boolean favorite state. Favorite changes advance library content and the
-affected track/playlist metadata scopes, not playlist entry order.
+Playlist entry page and batch rows include effective duration, codec, and favorite
+state alongside display metadata. Duration is optional and describes the CUE
+segment for CUE tracks, not the entire source. Favorite changes advance library
+content and the affected track/playlist metadata scopes, not playlist entry order.
 
 Interactive pages return an exact filtered total and at most 256 rows; larger
 limits are clamped, and `limit = 0` returns the count without rows. Offset pages
@@ -569,9 +550,9 @@ omits removed IDs, deduplicates repeated IDs, and returns rows in queue order.
 The query response's `revisions.queue` is captured with the rows; clients discard
 late results if the active queue-content revision no longer matches.
 
-`PlaylistEntryLocations {playlist_id, entry_ids}` resolves at most 256 stable entry
-IDs to compact `{id, playlist_id, track_id, position, total}` records in current
-playlist order, without loading track metadata. Repeated IDs are deduplicated;
+`PlaylistEntryLocations {playlist_id, query, entry_ids}` resolves at most 256 stable
+entry IDs to compact `{id, playlist_id, track_id, position, offset, total}` records
+in current playlist order, without projecting full track metadata. Repeated IDs are deduplicated;
 missing IDs and IDs belonging to other playlists are omitted. Empty requests
 return no rows, while a nonexistent playlist or oversized input returns a query
 error. Split larger selections into bounded requests and discard completions when
@@ -663,10 +644,11 @@ directory; artist order uses summary artist, title, then directory (binary order
 rows use the identical album-level filter. Browsing filters never restrict
 whole-album playback or queue command membership.
 
-Representative-track lookups, member pages, and whole-album queue operations use
-the existing path index to restrict directory ranges, then check the exact parent
-directory and effective title. This avoids scanning same-title albums outside the
-path range; exact totals and page rows still use separate grouping queries.
+Representative-track lookups use the ordered album-member index. Member pages
+and whole-album queue operations use the path index to restrict directory ranges,
+then check the exact parent directory and effective title. This avoids scanning
+same-title albums outside the path range. Member-page totals and rows use separate
+count and ordered-selection queries; album-summary counts do not regroup tracks.
 
 Members and the representative track use disc number, track number (each null
 last), effective title, then track ID. Summary artist is the sole nonempty
@@ -724,10 +706,12 @@ catalog baseline without an entry token may start an entry traversal
 (`after = None`) with unchanged library content, but cannot continue one. The CLI
 retains its summary baseline while capturing each playlist's entry baseline
 separately. Clients match the error variant, not diagnostic text. Other failures
-return `QueryError::Message`. Without `expected`, track and summary batches do
-not reserve consistency between requests; occurrence continuations still enforce
-their embedded scope. All use bounded results and explicit restart, not a database
-snapshot retained for an arbitrarily slow client.
+return `QueryError::Message`. In-process demand cancellation can instead return
+`QueryError::Cancelled` before dispatch; it does not interrupt SQL already running
+or act as an IPC cancellation request. Without `expected`, track and summary
+batches do not reserve consistency between requests; occurrence continuations
+still enforce their embedded scope. All use bounded results and explicit restart,
+not a database snapshot retained for an arbitrarily slow client.
 
 Playlist-only edits leave library and structure tokens unchanged. Imports can
 still invalidate track queries when their scan changes effective library facts.

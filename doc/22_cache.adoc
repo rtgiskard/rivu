@@ -29,6 +29,12 @@ panel demand. An open Add to playlist chooser also demands playlist summaries,
 independently of the Playlists panel. An unchanged key retains bounded album pages
 and page failures across hiding; covers are released independently.
 
+Album, Playlist catalog/entry, and Queue buffers retain at most the larger of
+eight pages or visible pages plus three; failed offsets have the same separate
+bound. Library payloads and failure markers share a least-recently-used bound of
+sixteen pages or current demand, including unverified ancestry, whichever is
+larger. Expansion and selection identities are retained separately from row payloads.
+
 Authoritative result counts are separate from retained scroll geometry. A data
 revision forgets counts and drops obsolete pages, failures, and positional pins,
 but retains nonempty geometry until a current result supplies its real total.
@@ -44,9 +50,10 @@ totals immediately, including zero; filtered queries require their own totals.
 Page-size changes clear boundary-dependent pages, failures, and reservations,
 not current counts, viewport geometry, or identity selections. Hiding and logical
 cancellation release only pending reservations, preserving accepted data and
-failures. For unchanged data and page boundaries, failed pages stay failed until
-explicit retry. A current transport error consumes its page reservation even
-without a query stamp; only successful payloads are checked for data freshness.
+retained failures. For unchanged data and page boundaries, a retained failed page
+requires explicit retry; eviction can make that page eligible for demand again.
+An accepted error consumes its reservation rather than leaving a loading
+placeholder; it is not a successful data publication.
 Cancelling a generation cannot release a physical worker gate: completion owns
 that release, and only the latest queued demand may then run. Metadata drafts/save baselines,
 occurrence identities, unavailable state, and relocation operations remain
@@ -163,8 +170,10 @@ frames received while hidden. This lifetime is independent of the cache setting.
 
 === Resource boundaries
 
-Caches are local to active panels or bounded Spectrogram history, not an
-unbounded record of earlier render states. Base waveform storage is bounded
+Caches are local to current panel owners or bounded shared history, not an
+unbounded record of earlier render states. Hiding a window releases Spectrogram
+history and stereo/generative results; it does not necessarily drop the active
+Spectrum panels' geometry or waveform previews. Base waveform storage is bounded
 independently of its derived images; see link:23_visuals.adoc#_waveform[Waveform].
 Derived image memory grows with panel dimensions and panel count.
 Spectrum uses at most 2000 display slots, further limited by drawable width;
@@ -325,13 +334,13 @@ Released results merely become evictable; neither release nor eviction performs
 filesystem work. Disk usage can grow until the user requests maintenance, and
 age-based cleanup does not enforce a global capacity limit.
 
-Source opening and potentially slow extraction run outside the maintenance gate.
-Cache-file publication and lookup registration share that gate with per-file
-removal, preventing cleanup from deleting a file during first use. Directory
-traversal and deletion never hold the lookup mutex over filesystem I/O; render
-and MPRIS property reads remain cache-only and do not wait for that gate.
-Maintenance ignores symlinks and unrelated names, reports inspection/deletion
-failures, and leaves the fallback and audio sources untouched.
+Each blocking acquisition holds a shared maintenance gate through source opening,
+extraction, cache-file publication, and lookup registration. Per-file cleanup
+takes the exclusive gate before inspecting protection and deleting, so cleanup
+can wait for a slow probe. Probing and filesystem I/O do not hold the lookup
+mutex; render and MPRIS property reads remain cache-only and do not wait for the
+maintenance gate. Maintenance ignores symlinks and unrelated names, reports
+inspection/deletion failures, and leaves the fallback and audio sources untouched.
 
 GUI previews keep decoded images separate from this session-wide lookup cache.
 Within one window, metadata previews, album cards, and the large artwork panel
@@ -506,8 +515,9 @@ are rejected before creating a page. A new page is committed only after its
 first tile reservation succeeds, so failed reservations leave no empty GPU page
 and do not consume reusable page slots.
 
-After the window is destroyed, the application switches the graphical platform
-to headless mode, releasing the display connection and its shared GPU context.
+After the window is destroyed, the application requests headless mode. A
+successful transition releases the display connection and its shared GPU
+context; a failed transition is logged, not treated as completed reclamation.
 Reopening reconnects to the original display before creating a new window;
 requests arriving during a connection switch are coalesced. A failed reconnect
 leaves the application running so another open request can retry.

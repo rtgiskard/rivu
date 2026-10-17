@@ -55,9 +55,9 @@ boundaries, and CUE/path rules.
 
 === Browsing and keyboard navigation
 
-`interface.page_size` accepts `20`–`256` and tunes internal GUI/TUI query batches,
-not visible pages or CLI listing/export batches. Browsing scrolls continuously;
-query batch tuning stays in the configuration file, not desktop settings. Queue behavior is described in
+`interface.page_size` accepts `20`–`256` (default `64`) and tunes internal GUI/TUI
+query batches, not visible pages or CLI listing/export batches. Browsing scrolls
+continuously; query batch tuning stays in the configuration file, not desktop settings. Queue behavior is described in
 link:04_playback.adoc#_queue[Playback]; query and batch contracts in
 link:02_library.adoc#_paged_views[Library].
 
@@ -188,14 +188,21 @@ audio commands. Resolve the audio failure before retrying or restarting.
 
 === Output and desktop integration
 
-`playback.pipewire_auto_mix` controls channel remixing; see link:04_playback.adoc[Playback].
-`interface.tray_enabled` and `interface.mpris_enabled` independently control desktop integration.
+Output selection and application errors are described under
+<<_output_and_applying_changes,Output and applying changes>> and in
+link:04_playback.adoc#_output_devices_and_speaker_layouts[Playback output].
+`interface.tray_enabled` and `interface.mpris_enabled` both default to `true` and
+independently control desktop integration. Tray changes require a graphical-host
+restart; MPRIS changes apply while running. Requirements and recovery are in
+link:04_playback.adoc#_desktop_tray_and_window_lifecycle[Desktop tray and window lifecycle]
+and link:04_playback.adoc#_mpris_and_artwork[MPRIS and artwork].
 
 === Logging and diagnostics
 
-`logging.level` accepts `debug`, `info`, `warning`, or `error`. Warnings and errors
-always go to stderr. `logging.to_file` enables weekly logs under the data directory;
-`logging.retention_weeks` accepts `1`–`520`. `NO_COLOR` or `RIVU_COLOR=never` disables
+`logging.level` accepts `debug`, `info`, `warning` (default), or `error`. Warnings
+and errors always go to stderr. `logging.to_file` defaults to `false`; enabling it
+writes weekly logs under the data directory. `logging.retention_weeks` accepts
+`1`–`520` and defaults to `4`. `NO_COLOR` or `RIVU_COLOR=never` disables
 stderr colors. Closing the GUI window does not stop file logging. Normal application
 shutdown makes a bounded attempt to drain and flush queued file logs; forced
 termination cannot guarantee the final records. File output uses a lossy queue
@@ -342,6 +349,7 @@ Font: type to search installed families, or use the arrow to browse them and
 remains text. Custom family names are accepted.
 
 `interface.font` defaults to `sans-serif`; empty values also select `sans-serif`.
+Names must contain no control characters and occupy at most 128 UTF-8 bytes.
 Family names use Fontconfig system and user rules
 (`~/.config/fontconfig/fonts.conf`) to select the primary family.
 Missing text glyphs use native fallback, which does not guarantee Fontconfig's
@@ -351,8 +359,8 @@ Fontconfig hinting, subpixel, and synthetic-bold settings do not control GUI
 rendering. If the requested primary family cannot be resolved or is unavailable
 to the GUI, Rivu logs a warning and uses `sans-serif`.
 
-`interface.scale` accepts `0.75`–`2.0` and adjusts desktop controls and list
-density independently of the desktop's display scaling. Menus and editor dialogs
+`interface.scale` accepts finite values from `0.75` to `2.0` (default `1.0`) and
+adjusts desktop controls and list density independently of the desktop's display scaling. Menus and editor dialogs
 stay within the window; scroll them when not all content fits. Settings dropdowns
 close when their control moves or the interface scale changes; reopen them at
 the new position.
@@ -377,13 +385,16 @@ link:02_library.adoc#_desktop_selection_and_directory_tree[Library display].
 
 === Output and applying changes
 
-Omitted `playback.output_device` uses the default output. A selected device must
-be available to play, but can remain saved while unavailable; playback reports
-the failure without substituting another device.
-Changing the output device or `playback.pipewire_auto_mix` reopens the current audio
-source and output, unlike display-only settings.
+Omitted `playback.output_device` uses the default PipeWire sink. A selected device
+must be available to play, but can remain saved while unavailable; playback
+reports the failure without substituting another device.
+`playback.pipewire_auto_mix` defaults to `true` and permits PipeWire remixing;
+disable it to require a compatible speaker layout without remixing.
+Changing either setting rebuilds the output stream and seeks the existing
+decoder to the current position, retaining paused state. It does not open a new
+decoder or apply a newly saved Decoder hint or media read-buffer size.
 
-Apply validates and saves all four settings groups together;
+Apply validates and saves the settings draft across all four sidebar groups together;
 navigation preserves the draft and each page's scroll position. Discard drops unapplied changes and closes
 settings. Invalid input or a save failure is reported in settings. Saving an
 unavailable output target succeeds; applying it stops playback and reports an
@@ -476,7 +487,8 @@ cache. Metadata's full preview is unchanged.
 
 The desktop stores named layouts and the current selection in `layout.json` in
 the data directory. Each layout has its own panel tree, relative sizes, tab
-order and selection, tab-bar visibility, instance options, and edit lock.
+order and selection, tab-bar visibility, and instance options. Edit locks are
+window-local, not saved; every newly opened window starts locked.
 
 Without a saved layout collection, Rivu starts in `Default` and also provides
 `Album` and `Visual`. Default keeps artwork, playback, browsing, queue, and a

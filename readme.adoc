@@ -44,8 +44,8 @@ rivu tui
 rivu quit
 ----
 
-Passing explicit paths to `rivu gui PATH...` requests a scan, including when
-raising an existing window, but does not add library roots.
+Passing explicit paths to `rivu gui PATH...` or `rivu serve PATH...` requests a scan
+but does not add library roots. `rivu gui PATH...` also scans when raising an existing window.
 One core runs per data directory. All clients must use the same `--data-dir` to
 reach the same instance. `--config` selects configuration when starting a core;
 it does not reconfigure an existing instance.
@@ -90,8 +90,10 @@ typical Linux installation: `~/.local/share/rivu`) and
 
 The data directory contains `library.db` (library and playback state),
 `layout.json` (desktop layouts), the `artwork/` cache, and optional `logs/`.
-Stop the core before operating on `library.db`; see
-link:doc/02_library.adoc[Library] for database maintenance and reset behavior.
+Stop the core before operating on `library.db`. Incompatible databases are rejected,
+not migrated or reset; preserve the database and any WAL before rebuilding.
+See link:doc/02_library.adoc#_sqlite_maintenance[SQLite maintenance] for supported
+versions, backups, and what rescanning cannot restore.
 IPC access and upgrade constraints are described in link:doc/21_ipc.adoc[IPC].
 
 

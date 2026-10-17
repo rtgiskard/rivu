@@ -5,10 +5,7 @@ CLI scan paths are relative to the invoking client's working directory;
 absolute paths are accepted. Playlist management and exchange are described in
 link:03_playlist.adoc[Playlists].
 
-CLI queue, library, and playlist listings stream revision-consistent batches.
-If the data changes during traversal, the command reports failure and exits with
-status 1 without retrying. Output already written may be incomplete, including
-JSON; consumers must check the exit status rather than parse failed output.
+For CLI listing completeness and failure handling, see <<_paged_views,Paged views>>.
 
 In the desktop Library, use the right-click menu to add selected tracks to the
 queue or remove them from the library. Removal requires confirmation and applies
@@ -20,8 +17,8 @@ Audio files are not deleted.
 Scanning requires at least one configured `library.roots`. Add a directory with
 the GUI Library `+` button or set absolute directory paths in `config.toml`.
 Saved roots appear immediately in the desktop Library, even when empty or not
-yet scanned. Saving roots does not scan or enqueue music. Use a root's scan action,
-choose `Scan paths` in Library.
+yet scanned. Saving roots does not scan or enqueue music. Use a root's scan action
+or choose `Scan paths` in Library.
 
 Configured roots must not overlap after logical path normalization: duplicate
 paths and parent/child roots are rejected. For example, `/Music` and `/Music/Jazz`
@@ -262,6 +259,12 @@ a whole. Directory scans omit sources represented by valid sheets; failed sheets
 may still leave their whole audio sources eligible for import. Explicitly
 scanning a source imports it as a whole track.
 
+CUE titles use each entry's `TITLE`, or `Track NN` when absent. The entry's
+`PERFORMER` takes precedence over the sheet's performer; without either, the
+source artist is kept. The sheet's `TITLE` supplies the album when present;
+otherwise the source album is kept. Technical metadata comes from the source,
+while duration is the individual segment's length.
+
 Within one scan, CUE sheets sharing a source and an explicitly requested whole
 source reuse the same source probe result or error. Changes to that source
 during the scan are picked up by a subsequent scan.
@@ -335,19 +338,16 @@ overrides, favorites, decoder hints, counts, and last-played timestamps. `librar
 they never delete media files. Missing rows remain visible in playlist views
 until removed or cleaned.
 
-Committed edits, deletions, scans, and playlist changes announce their actual
-affected query facts before refreshing counts, history, or current-track
-projections. Playlist names/catalog summaries and each playlist's content/lifetime
-are independent: changing one collection does not invalidate another. Queue
-content revisions are committed with the underlying transaction; refreshing the
-queue is attempted even if another projection read fails.
+Committed changes refresh the affected views without resetting unrelated
+collections. For transaction ownership and query invalidation rules, see
+link:21_ipc.adoc#_revisions_and_watching[IPC revisions].
 
 A refresh error explicitly reports that the change was committed, not rolled
 back. Some previous projections may remain visible until a later successful
 refresh; queries read the committed database state. Rivu does not automatically
 replay committed operations. Repeating an identical edit or cleaning when no
 missing records remain is a no-op, not another mutation or a projection retry.
-Write failures do not advance mutation tokens.
+Failed writes leave saved data unchanged.
 
 Metadata edits override only fields you change. An omitted CLI option or an
 unchanged Track details field keeps its current value and continues to follow
@@ -594,9 +594,9 @@ the Library, directory tree, queue, and playlists, with their normal track actio
 Same-name albums in different directories remain separate; different artists
 within one directory form a compilation. Disc subdirectories are not inferred
 to be one album. Missing artist metadata does not prevent album membership;
-empty artist metadata displays as `Unknown artist`, and multiple nonempty artists
-display as `Various artists`. Members are ordered by disc number, track number
-(unknown numbers last), title, then library ID. Metadata overrides affect grouping.
+for its display, see above. Albums with multiple distinct nonempty artists show
+`Various artists`. Members are ordered by disc number, track number (unknown
+numbers last), title, then library ID. Metadata overrides affect grouping.
 
 == Paged views
 

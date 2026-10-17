@@ -19,21 +19,13 @@ The current editor and in-flight metadata save remain alive even if Details is
 no longer visible. Switching cancels obsolete interactions and invalidates old
 geometry, reconciles visible-panel demand, and retires unused rendering resources
 through their existing owners. It does not preserve hidden graphics merely to
-restore them on a later switch. Renaming and deleting an inactive layout do not
-replace the active panel tree.
+restore them on a later switch. Renaming the active layout or deleting an
+inactive one does not replace the active panel tree.
 
 The initial collection contains three ordinary, editable layouts, with Default
-active. Each assigns 28% of vertical content to its top row and 72% below,
-excluding gutters. Their starting geometry serves three distinct priorities:
-
-* Default keeps browsing and Queue visible while tabbing competing plots. Its
-  top row is 22% Album artwork and 78% Playback; below, Library/Albums/Playlists
-  tabs take 60%, and the remaining 40% divides vertically into 60% Queue and
-  40% Spectrum/Spectrogram tabs.
-* Album emphasizes the cover and album browser: below Playback, 35% belongs to
-  Album artwork and 65% to Albums/Queue/Track details tabs.
-* Visual maximizes the plot canvas: below Playback, Audio Visualizer/Spectrum/
-  Spectrogram/Waveform tabs take 70% and Queue takes 30%.
+active. Default favors concurrent browsing and Queue access, Album favors the
+cover and album browser, and Visual favors a large plot canvas. Competing
+browsers and plots share tabs rather than all demanding work simultaneously.
 
 Templates construct only panel trees and instance-option slots; existing
 initialization supplies missing artwork/visualizer options from configuration.
@@ -84,10 +76,12 @@ state. No per-layout scroll snapshots are kept.
 
 == Normalized trees and resource boundaries
 
-Leaves are nonempty tab groups with a valid active panel. Splits have two or more
-ordered children and a horizontal or vertical axis. Empty containers disappear,
+A layout may have no root when it contains no panels. Otherwise, leaves are
+nonempty tab groups with a valid active panel. Splits have two or more ordered
+children and a horizontal or vertical axis. Empty containers disappear,
 single-child containers collapse, and directly nested same-axis splits flatten.
-Panel and container IDs share a runtime allocator; persistence never stores IDs.
+Panel and container IDs share an allocator within each runtime layout; they are
+neither collection-wide identities nor persisted IDs.
 
 A root-to-leaf path contains at most 32 splits; tab groups do not count toward
 that depth. Loading, saving, and editing enforce the same limit. There is no
@@ -189,8 +183,11 @@ exit event; viewport bounds provide the same cancellation in that case.
 
 A separator drag snapshots the relevant geometry and mouse-to-separator offset.
 Every update derives its target from that snapshot, not from a previous rounded
-result. Moving a boundary changes only its adjacent regions. Minimum pane sizes
-restrict the feasible interval; layout locking blocks structural edits.
+result. Moving a boundary changes only its adjacent regions. The feasible
+interval reserves 160 logical pixels per horizontal neighbor or 100 per vertical
+neighbor. If the pair is already too small for both minima, dragging selects its
+equal-content midpoint instead; snapping cannot satisfy impossible minima.
+Layout locking blocks structural edits, not playback or panel content updates.
 
 The window owns one interaction state with layout/geometry epochs. Measurement
 callbacks from an old epoch cannot repopulate the current bounds cache. Escape,
@@ -224,7 +221,8 @@ solver is stored.
 `layout.json` contains the selected name and a nonempty map of named layouts.
 Serialization borrows runtime data and writes one strict format. Unknown fields,
 duplicate layout names, invalid boundaries, malformed trees, and excess depth
-are errors. There is no legacy weight or wrapper compatibility path.
+are errors. Runtime IDs and edit locking are omitted; there is no legacy weight
+or wrapper compatibility path.
 
 One save owner belongs to the desktop session, not to an individual window. All
 runtime save paths, including selected tabs, docking, named-layout operations,

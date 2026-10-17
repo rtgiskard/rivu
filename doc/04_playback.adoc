@@ -18,9 +18,8 @@ The desktop Playback panel shows the current title, artist and album, playback
 progress, transport controls, and volume. Transport controls and volume stay on
 one row with horizontal scrolling in narrow panels. Use Album artwork for covers.
 The crosshair beside its title (*Locate playing entry in Queue*) reveals the
-Queue tab and locates the current occurrence; see <<_queue,Queue>>. If the layout
-has no Queue panel, it adds one only while the layout is unlocked. With a locked
-layout, it reports that a Queue panel must be added or the layout unlocked.
+Queue tab and locates the current occurrence, subject to layout locking;
+see <<_queue,Queue>>.
 
 Repeat cycles Off, All, and One. Previous restarts the current entry when its
 position exceeds three seconds; at or before three seconds it navigates back,
@@ -28,8 +27,9 @@ using playback history when shuffling.
 With Shuffle enabled, each Next independently chooses a queue occurrence with
 equal probability, including the current one. Immediate repeats are expected;
 duplicate occurrences increase their track's chances. Previous follows playback
-history; Next draws afresh even after Previous. Setting Shuffle to its current
-value preserves that history. Repeat One repeats the current occurrence at
+history, retaining up to 4096 occurrences during the running session; Next draws
+afresh even after Previous. Setting Shuffle to its current value preserves that
+history. Repeat One repeats the current occurrence at
 natural EOF but does not constrain explicit Next.
 CUE playback uses the original source without splitting or transcoding it.
 Positions and seeks are relative to the subtrack; pregap directives do not
@@ -78,12 +78,14 @@ Changing to an invalid or unavailable sink stops playback and keeps the newly
 requested setting. Subsequent playback attempts still target that sink; neither
 the previous selection nor the default sink is substituted automatically.
 Device-application failures are reported while stopped as well as during
-playback. Idle configuration errors belong only to the latest output request,
-independently of playback changes; they report a configuration failure without
-terminating playback. Reapplying unchanged settings while stopped validates
-them again. If applying settings actually terminates active playback, that
-playback is stopped regardless of a later device selection. Events from an
-older playback cannot stop a newer playback.
+playback. If playback is already stopped, a failure reports a configuration error
+for the latest output request. Reapplying unchanged settings while stopped
+validates them again. If applying settings actually terminates active playback,
+that playback remains stopped regardless of a later device selection. Events
+from an older playback cannot stop a newer playback.
+Changing the sink or remixing setting rebuilds the output at the current
+position and preserves paused state. The existing decoder is retained; these
+changes do not apply a newly saved Decoder hint or media read-buffer size.
 
 Multichannel output preserves speaker identities. `playback.pipewire_auto_mix` is enabled
 by default and permits PipeWire remixing; disable it to require a compatible
@@ -231,8 +233,9 @@ GUI and TUI share playback keys outside text editors, menus and dialogs:
 |===
 
 The TUI additionally supports `Ctrl+Home` / `Ctrl+End` to seek to the track's
-start/end. The GUI does not bind these keys or the TUI's bare `q` action;
-use its window controls and menus instead.
+start/known end; `Ctrl+End` does nothing when duration is unknown. The GUI does
+not bind these keys or the TUI's bare `q` action; use its window controls and
+menus instead.
 
 Bare Left/Right are reserved for container navigation, not seeking. Home/End
 select the first/last item in lists supporting row navigation. Enter opens a
@@ -241,8 +244,9 @@ Queue or playlist entries, never media files; bare `d` is not a removal shortcut
 Undeclared Ctrl/Alt/Shift/Super combinations do not inherit bare-key actions.
 Application shortcuts and text editing use Ctrl, not Cmd/Super aliases.
 
-In the TUI, F1 or `?` opens context-sensitive help outside text editors.
-In the GUI, help opens only through *Shortcuts* in the application menu.
+In the TUI, F1 opens context-sensitive help even from the search query editor;
+`?` opens it outside that editor. In the GUI, help opens only through *Shortcuts*
+in the application menu.
 Equivalent keys and paired operations share a help row; paired descriptions follow
 the displayed key order. Help can be scrolled with Up/Down, PageUp/PageDown and
 Home/End. Escape closes GUI help; F1, `?` or Escape closes TUI help, without
@@ -268,9 +272,11 @@ Help and track-details overlays keep navigation inside the overlay.
 <<keyboard-controls,Keyboard controls>>.
 
 In Search, `Tab`/`Shift+Tab` switches between the query and results. `Enter` from
-the query focuses results; on a result it plays the track. The query keeps the
-insertion point visible when text exceeds its width and owns printable characters,
-including `?`. Playback keys and help apply after focusing results.
+the query focuses results; on a result it plays the track. Typing appends to the
+query, and Backspace removes its last character. The visible text follows the
+query's end when it exceeds the available width. The query owns printable
+characters, including `?`; F1 still opens help. Playback keys apply after
+focusing results.
 Text edits use the same
 link:02_library.adoc#_desktop_list_search[delayed application and immediate clearing]
 as desktop list searches.
