@@ -2072,6 +2072,10 @@ impl Settings {
                         let open = this.dropdown.is_open();
                         if open {
                             this.dropdown.close();
+                            if let Some(index) = this.dropdown.selected_index() {
+                                this.device_scroll
+                                    .scroll_to_item(index, ScrollStrategy::Nearest);
+                            }
                         } else {
                             let selected = this
                                 .draft
@@ -2085,21 +2089,11 @@ impl Settings {
                                 SettingChoice::Device(0),
                                 this.i18n.text("settings-system-default"),
                             ))
-                            .chain(
-                                this.devices.iter().enumerate().map(|(index, device)| {
-                                    DropdownItem::new(
-                                        SettingChoice::Device(index + 1),
-                                        device.clone(),
-                                    )
-                                }),
-                            );
-                            this.dropdown_anchor = Measured::Device;
-                            this.dropdown.open(items);
-                            this.dropdown.select_index(selected);
-                        }
-                        if let Some(index) = this.dropdown.selected_index() {
-                            this.device_scroll
-                                .scroll_to_item(index, ScrollStrategy::Nearest);
+                            .chain(this.devices.iter().enumerate().map(|(index, device)| {
+                                DropdownItem::new(SettingChoice::Device(index + 1), device.clone())
+                            }))
+                            .collect();
+                            this.open_setting_dropdown(items, selected);
                         }
                     },
                 )
