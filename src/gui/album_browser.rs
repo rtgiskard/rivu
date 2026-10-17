@@ -49,6 +49,7 @@ fn card_icon_button(
 }
 
 const ALBUM_PAGE: usize = 24;
+const ALBUM_FADE_FRACTION: f32 = 0.4;
 
 #[derive(Clone, Copy, PartialEq)]
 struct AlbumGridLayout {
@@ -63,7 +64,7 @@ impl AlbumGridLayout {
         let columns = ((width / rem) / 12.).floor().max(1.) as usize;
         let card_width = (width - rem * 0.5 * columns.saturating_sub(1) as f32) / columns as f32;
         let artwork_size = (card_width - rem).max(px(0.));
-        let metadata_lift = rem * 0.75 + artwork_size * (1.0 / std::f32::consts::E - 0.25);
+        let metadata_lift = rem * 0.75 + artwork_size * (ALBUM_FADE_FRACTION - 0.25);
         Self {
             columns,
             artwork_size,
@@ -972,7 +973,7 @@ impl AlbumBrowser {
                             .absolute()
                             .bottom_0()
                             .w_full()
-                            .h(self.grid_layout.artwork_size / std::f32::consts::E)
+                            .h(self.grid_layout.artwork_size * ALBUM_FADE_FRACTION)
                             .bg(cover_fade(theme.panel))
                             .group_hover("album-card", move |style| {
                                 style.bg(cover_fade(theme.highlight))
