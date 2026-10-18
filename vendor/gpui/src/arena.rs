@@ -147,6 +147,17 @@ impl Arena {
         }
     }
 
+    /// Returns spare capacity only after all allocations and scopes have ended.
+    /// Unlike `clear`, this never invalidates a live allocation.
+    pub(crate) fn release_unused(&mut self) {
+        if self.scope_depth != 0 || !self.elements.is_empty() {
+            return;
+        }
+        self.chunks.truncate(1);
+        self.chunks.shrink_to_fit();
+        self.elements.shrink_to_fit();
+    }
+
     fn force_clear(&mut self) {
         self.valid.set(false);
         self.valid = Rc::new(Cell::new(true));
@@ -388,6 +399,28 @@ mod tests {
         assert_eq!(*value, 1);
         arena.clear();
         assert!(!value.valid.get());
+    }
+
+    #[test]
+    fn idle_reclamation_preserves_live_allocations_and_reuses_after_release() {
+        let mut arena = Arena::new(8);
+        let first = arena.alloc(|| 11u64);
+        let second = arena.alloc(|| 22u64);
+        arena.release_unused();
+        assert_eq!((*first, *second), (11, 22));
+        assert_eq!(arena.capacity(), 16);
+
+        arena.clear();
+        arena.begin_scope();
+        arena.release_unused();
+        assert_eq!(arena.capacity(), 16);
+        arena.end_scope();
+        arena.release_unused();
+        assert_eq!(arena.capacity(), 8);
+        assert_eq!(arena.elements.capacity(), 0);
+        let next = arena.alloc(|| 33u64);
+        let spill = arena.alloc(|| 44u64);
+        assert_eq!((*next, *spill), (33, 44));
     }
 
     #[test]

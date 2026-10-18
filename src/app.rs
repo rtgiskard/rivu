@@ -428,6 +428,9 @@ impl App {
                 match result {
                     Ok(()) => {
                         gui.headless = headless;
+                        if headless && !app.handle.state.lock().raise_pending {
+                            cx.release_unused_resources();
+                        }
                         if !headless && !app.handle.is_shutting_down() {
                             app.show_window(cx);
                         }

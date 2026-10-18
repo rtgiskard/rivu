@@ -558,6 +558,32 @@ mod tests {
     }
 
     #[test]
+    fn idle_reclamation_waits_for_events_and_skips_reopened_windows() {
+        for reopen in [false, true] {
+            let mut app = TestApp::new();
+            app.update(|cx| {
+                cx.event_arena = crate::Arena::new(8);
+                let first = cx.event_arena.alloc(|| 17u64);
+                let second = cx.event_arena.alloc(|| 29u64);
+                cx.release_unused_resources();
+                cx.defer(move |cx| {
+                    assert_eq!((*first, *second), (17, 29));
+                    if reopen {
+                        cx.open_window(WindowOptions::default(), |_, cx| {
+                            cx.new(|_| crate::EmptyView)
+                        })
+                        .unwrap();
+                    }
+                });
+            });
+            app.read(|cx| {
+                assert_eq!(cx.event_arena.capacity(), if reopen { 16 } else { 8 });
+            });
+            app.update(|cx| cx.shutdown());
+        }
+    }
+
+    #[test]
     fn test_basic_usage() {
         let mut app = TestApp::new();
 

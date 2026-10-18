@@ -303,6 +303,16 @@ impl TextSystem {
         Ok(())
     }
 
+    pub(crate) fn release_unused(&self) {
+        // Keep registered fonts and their identities. Destroy potentially large
+        // pooled buffers outside the locks; checked-out wrappers remain valid.
+        let metrics = std::mem::take(&mut *self.font_metrics.write());
+        let bounds = std::mem::take(&mut *self.raster_bounds.write());
+        let wrappers = std::mem::take(&mut *self.wrapper_pool.lock());
+        let runs = std::mem::take(&mut *self.font_runs_pool.lock());
+        drop((metrics, bounds, wrappers, runs));
+    }
+
     /// Takes the receiver for missing-glyph reports.
     ///
     /// Only one receiver is available for each text system. Returns `None` when
@@ -1101,15 +1111,14 @@ pub struct LineWrapperHandle {
 
 impl Drop for LineWrapperHandle {
     fn drop(&mut self) {
-        let mut state = self.text_system.wrapper_pool.lock();
         let wrapper = self.wrapper.take().unwrap();
-        state
-            .get_mut(&FontIdWithSize {
-                font_id: wrapper.font_id,
-                font_size: wrapper.font_size,
-            })
-            .unwrap()
-            .push(wrapper);
+        let mut state = self.text_system.wrapper_pool.lock();
+        if let Some(wrappers) = state.get_mut(&FontIdWithSize {
+            font_id: wrapper.font_id,
+            font_size: wrapper.font_size,
+        }) {
+            wrappers.push(wrapper);
+        }
     }
 }
 
@@ -1513,6 +1522,37 @@ mod missing_glyph_tests {
 #[cfg(test)]
 mod raster_bounds_reclamation_tests {
     use super::*;
+
+    #[test]
+    fn idle_reclamation_preserves_checked_out_wrappers_and_font_identity() {
+        let text = Arc::new(TextSystem::new(Arc::new(crate::NoopTextSystem)));
+        let font = font("shared font");
+        let font_id = text.resolve_font(&font);
+        let mut wrapper = text.line_wrapper(font.clone(), px(16.));
+        let fragments = [LineFragment::text("alpha beta gamma delta")];
+        let expected: Vec<_> = wrapper
+            .wrap_line(&fragments, px(40.), IndentAdjustment::NoIndent)
+            .collect();
+        drop(text.line_wrapper(font.clone(), px(16.)));
+
+        text.release_unused();
+        assert_eq!(text.resolve_font(&font), font_id);
+        assert_eq!(
+            wrapper
+                .wrap_line(&fragments, px(40.), IndentAdjustment::NoIndent)
+                .collect::<Vec<_>>(),
+            expected
+        );
+        drop(wrapper);
+        assert_eq!(text.wrapper_pool.lock().capacity(), 0);
+        assert_eq!(
+            text.line_wrapper(font, px(16.))
+                .wrap_line(&fragments, px(40.), IndentAdjustment::NoIndent)
+                .collect::<Vec<_>>(),
+            expected
+        );
+        text.release_unused();
+    }
 
     #[test]
     fn bounds_budget_recomputes_without_changing_shared_font_identity() -> Result<()> {

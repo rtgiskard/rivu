@@ -863,6 +863,7 @@ pub struct App {
     pub(crate) element_arena: RefCell<Arena>,
     /// Per-App event arena.
     pub(crate) event_arena: Arena,
+    release_unused_resources_requested: bool,
 
     // Drop globals last. We need to ensure all tasks owned by entities and
     // callbacks are marked cancelled at this point as this will also shutdown
@@ -1014,6 +1015,7 @@ impl App {
                 name: None,
                 element_arena: RefCell::new(Arena::new(1024 * 1024)),
                 event_arena: Arena::new(1024 * 1024),
+                release_unused_resources_requested: false,
 
                 #[cfg(any(test, gpui_leak_detection))]
                 _ref_counts,
@@ -1252,6 +1254,18 @@ impl App {
             )));
         }
         self.platform.request_windowing(request)
+    }
+
+    /// Requests reclamation of unused CPU drawing and text-cache capacity.
+    ///
+    /// Runs after the current update's events and deferred callbacks finish, and
+    /// is skipped if any window is then open. Live arena allocations are never
+    /// invalidated. Fonts, globals, assets, and platform resources are retained;
+    /// callers may separately switch to headless mode before requesting this.
+    /// Subsequent drawing rebuilds the discarded caches on demand. This does not
+    /// trim the process allocator or guarantee a reduction in resident memory.
+    pub fn release_unused_resources(&mut self) {
+        self.release_unused_resources_requested = true;
     }
 
     /// The environment of the display server the platform is connected to, or `None` while
@@ -2057,6 +2071,15 @@ impl App {
                     }
 
                     self.event_arena.clear();
+                    if std::mem::take(&mut self.release_unused_resources_requested)
+                        && self.windows.is_empty()
+                        && self.window_update_stack.is_empty()
+                    {
+                        self.element_arena.borrow_mut().release_unused();
+                        self.event_arena.release_unused();
+                        self.layout_id_buffer = Vec::new();
+                        self.text_system.release_unused();
+                    }
                     break;
                 }
             }
