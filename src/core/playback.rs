@@ -32,6 +32,14 @@ fn same_source_file(before: &std::fs::Metadata, after: &std::fs::Metadata) -> bo
 }
 
 impl Core {
+    pub(in crate::core) fn playback_metadata(track: &Track) -> Arc<audio::PlaybackMetadata> {
+        Arc::new(audio::PlaybackMetadata {
+            title: track.title.clone(),
+            artist: track.artist.clone(),
+            album: track.album.clone(),
+        })
+    }
+
     pub(in crate::core) fn audio_event(&mut self, event: AudioEvent) -> Result<()> {
         match event {
             AudioEvent::Started { generation, info } if generation == self.generation => {
@@ -185,6 +193,7 @@ impl Core {
             self.audio(AudioCommand::Load {
                 path: track.path.clone(),
                 decoder_hint: track.decoder_hint,
+                metadata: Self::playback_metadata(&track),
                 range: track.cue.as_ref().map(|cue| audio::PlaybackRange {
                     start_seconds: cue.start_seconds(),
                     end_seconds: cue.end_seconds(),

@@ -2,16 +2,18 @@
 //! Native PipeWire streams keep a fixed target and explicit speaker positions.
 //! The selected sink and its strict speaker routes are never silently replaced.
 
-use super::{Channel, channels};
+use super::{Channel, PlaybackMetadata, channels};
 use crate::analysis::{AnalysisControl, AnalysisWorker, TapFrame};
 use ::pipewire::{self as pw, properties::properties, spa};
 use anyhow::{Context, Result, bail};
 use crossbeam_channel::{Receiver, bounded};
+use parking_lot::Mutex;
 use ringbuf::{
     HeapCons, HeapProd, HeapRb,
     traits::{Consumer, Observer, Producer, Split},
 };
 use std::{
+    borrow::Cow,
     cell::{Cell, RefCell},
     collections::{BTreeMap, VecDeque},
     rc::Rc,
@@ -125,8 +127,8 @@ struct OutputShared {
     wakeup: crossbeam_channel::Sender<()>,
     notifications: Receiver<()>,
     refill_armed: AtomicBool,
+    // Audible source frames also determine position and output drain completion.
     heard: AtomicU64,
-    retired: AtomicU64,
     timing_error: AtomicU32,
     // Linear amplitude gain; conversion happens outside the realtime callback.
     volume: AtomicU32,
@@ -136,19 +138,22 @@ impl OutputShared {
         let (wakeup, notifications) = bounded(1);
         Self {
             paused: AtomicBool::new(paused),
-            pause_settled: AtomicBool::new(false),
+            pause_settled: AtomicBool::new(paused),
             wakeup,
             notifications,
             refill_armed: AtomicBool::new(false),
             heard: AtomicU64::new(0),
-            retired: AtomicU64::new(0),
             timing_error: AtomicU32::new(0),
             volume: AtomicU32::new(crate::volume::gain(volume).to_bits()),
         }
     }
 
     fn fail_timing(&self, code: u32) {
-        if self.timing_error.swap(code, Ordering::AcqRel) != code {
+        if self
+            .timing_error
+            .compare_exchange(0, code, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
             let _ = self.wakeup.try_send(());
         }
     }
@@ -169,7 +174,6 @@ struct PlaybackClock {
     pending: VecDeque<ScheduledFrames>,
     last_callback: Option<StreamInstant>,
     heard: u64,
-    retired: u64,
 }
 impl PlaybackClock {
     fn new() -> Self {
@@ -177,7 +181,6 @@ impl PlaybackClock {
             pending: VecDeque::with_capacity(1024),
             last_callback: None,
             heard: 0,
-            retired: 0,
         }
     }
 
@@ -209,7 +212,6 @@ impl PlaybackClock {
                 .min(u128::from(span.frames)) as u64;
             let newly_heard = heard - span.heard;
             self.heard += newly_heard;
-            self.retired += newly_heard;
             span.heard = heard;
             if heard != span.frames {
                 break;
@@ -217,8 +219,15 @@ impl PlaybackClock {
             self.pending.pop_front();
         }
         shared.heard.store(self.heard, Ordering::Release);
-        shared.retired.store(self.retired, Ordering::Release);
     }
+}
+
+pub(super) struct OutputOptions<'a> {
+    pub(super) device: Option<&'a str>,
+    pub(super) volume: f32,
+    pub(super) paused: bool,
+    pub(super) auto_mix: bool,
+    pub(super) metadata: Arc<PlaybackMetadata>,
 }
 
 pub(super) struct Output {
@@ -232,15 +241,12 @@ pub(super) struct Output {
 }
 impl Output {
     pub(super) fn new(
-        name: Option<&str>,
         source_rate: u32,
         source_layout: &[Channel],
-        volume: f32,
-        paused: bool,
-        pipewire_auto_mix: bool,
+        options: OutputOptions<'_>,
         analyzer: &AnalysisWorker,
     ) -> Result<Self> {
-        let target = target_name(name)?;
+        let target = target_name(options.device)?;
         let rate = source_rate;
         let source_channels = source_layout.len();
         let capacity = output_capacity(rate, source_channels)?;
@@ -255,7 +261,7 @@ impl Output {
             .try_reserve_exact(scratch_samples)
             .context("Cannot allocate audio output callback buffer")?;
         scratch.resize(scratch_samples, 0.0);
-        let shared = Arc::new(OutputShared::new(volume, paused));
+        let shared = Arc::new(OutputShared::new(options.volume, options.paused));
         let (error_send, errors) = bounded(4);
         analyzer.reset(rate);
         let callback = OutputCallback {
@@ -274,7 +280,8 @@ impl Output {
         let stream = NativeStream::open(
             target,
             source_layout,
-            pipewire_auto_mix,
+            options.auto_mix,
+            options.metadata,
             callback,
             error_send,
         )?;
@@ -299,6 +306,13 @@ impl Output {
             .store(crate::volume::gain(volume).to_bits(), Ordering::Release);
     }
 
+    pub(super) fn set_metadata(&self, metadata: Arc<PlaybackMetadata>) -> Result<()> {
+        if let Some(stream) = &self.stream {
+            stream.set_metadata(metadata)?;
+        }
+        Ok(())
+    }
+
     pub(super) fn vacant_frames(&self) -> usize {
         self.producer.vacant_len() / self.source_channels
     }
@@ -306,7 +320,7 @@ impl Output {
     pub(super) fn refill_delay(&self, eof: bool) -> Duration {
         let frames = if eof {
             self.submitted
-                .saturating_sub(self.shared.retired.load(Ordering::Acquire))
+                .saturating_sub(self.shared.heard.load(Ordering::Acquire))
         } else {
             (self.producer.occupied_len() / self.source_channels) as u64 / 2
         };
@@ -334,7 +348,7 @@ impl Output {
     }
 
     pub(super) fn drained(&self) -> bool {
-        self.shared.retired.load(Ordering::Acquire) == self.submitted
+        self.shared.heard.load(Ordering::Acquire) == self.submitted
     }
 
     pub(super) fn heard(&self) -> f64 {
@@ -342,11 +356,21 @@ impl Output {
     }
     pub(super) fn position(&self) -> f64 {
         // The source cursor advances only as scheduled PCM becomes audible.
-        self.shared.retired.load(Ordering::Acquire) as f64 / self.rate as f64
+        self.heard()
     }
     pub(super) fn pause(&self, paused: bool) {
+        if self.shared.paused.load(Ordering::Acquire) == paused {
+            return;
+        }
+        // Publish an unsettled transition before the callback can observe the
+        // new pause request. Duplicate pauses must leave an inactive stream settled.
         self.shared.pause_settled.store(false, Ordering::Release);
         self.shared.paused.store(paused, Ordering::Release);
+        if let Some(stream) = &self.stream
+            && stream.wake_owner().is_err()
+        {
+            self.shared.fail_timing(4);
+        }
     }
 
     pub(super) fn notifications(&self) -> &Receiver<()> {
@@ -358,6 +382,7 @@ impl Output {
             0 => Ok(()),
             1 => bail!("Audio output timestamp moved backwards"),
             2 => bail!("Audio output timing queue exhausted before playback advanced"),
+            4 => bail!("Cannot wake PipeWire output owner"),
             _ => bail!("PipeWire output returned invalid buffers or unavailable timing"),
         }
     }
@@ -497,7 +522,7 @@ impl OutputCallback {
             {
                 for (sample, source) in output.iter_mut().zip(&self.mapping) {
                     *sample = match source {
-                        Some(source) => (frame[*source] * volume).clamp(-1.0, 1.0),
+                        Some(source) => frame[*source] * volume,
                         None => 0.0,
                     };
                 }
@@ -788,16 +813,23 @@ impl Connection {
     }
 }
 
+#[derive(Default)]
+struct NativeControl {
+    stop: AtomicBool,
+    wake_pending: AtomicBool,
+    metadata: Mutex<Option<Arc<PlaybackMetadata>>>,
+}
+
 struct NativeStream {
-    stop: Arc<AtomicBool>,
+    control: Arc<NativeControl>,
     wake: pw::channel::Sender<()>,
     thread: Option<JoinHandle<()>>,
 }
 
 impl Drop for NativeStream {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Release);
-        let _ = self.wake.send(());
+        self.control.stop.store(true, Ordering::Release);
+        let _ = self.wake_owner();
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
@@ -805,17 +837,36 @@ impl Drop for NativeStream {
 }
 
 impl NativeStream {
+    fn wake_owner(&self) -> Result<()> {
+        if !self.control.wake_pending.swap(true, Ordering::AcqRel) && self.wake.send(()).is_err() {
+            self.control.wake_pending.store(false, Ordering::Release);
+            bail!("Cannot wake PipeWire output owner");
+        }
+        Ok(())
+    }
+
+    fn set_metadata(&self, metadata: Arc<PlaybackMetadata>) -> Result<()> {
+        let replaced = self.control.metadata.lock().replace(metadata);
+        // A last Arc may release all strings. Never do that while holding the mailbox.
+        drop(replaced);
+        self.wake_owner()
+    }
+
     fn open(
         name: Option<&str>,
         source_layout: &[Channel],
         auto_mix: bool,
+        metadata: Arc<PlaybackMetadata>,
         callback: OutputCallback,
         errors: crossbeam_channel::Sender<OutputError>,
     ) -> Result<Self> {
         let name = name.map(str::to_owned);
         let source_layout = source_layout.to_vec();
-        let stop = Arc::new(AtomicBool::new(false));
-        let stopping = stop.clone();
+        let control = Arc::new(NativeControl {
+            metadata: Mutex::new(Some(metadata)),
+            ..NativeControl::default()
+        });
+        let owner_control = control.clone();
         let (wake, receiver) = pw::channel::channel();
         let (ready, receive) = crossbeam_channel::bounded(1);
         let thread = std::thread::Builder::new()
@@ -826,7 +877,7 @@ impl NativeStream {
                     &source_layout,
                     auto_mix,
                     callback,
-                    &stopping,
+                    &owner_control,
                     &ready,
                     receiver,
                 ) {
@@ -836,7 +887,7 @@ impl NativeStream {
                 }
             })?;
         let stream = Self {
-            stop,
+            control,
             wake,
             thread: Some(thread),
         };
@@ -853,12 +904,18 @@ fn run(
     source_layout: &[Channel],
     auto_mix: bool,
     mut callback: OutputCallback,
-    stop: &AtomicBool,
+    control: &Arc<NativeControl>,
     ready: &crossbeam_channel::Sender<std::result::Result<(), String>>,
     wake: pw::channel::Receiver<()>,
 ) -> Result<()> {
     let connection = Connection::new()?;
-    let _wake = wake.attach(connection.mainloop.loop_(), |_| {});
+    let wake_control = control.clone();
+    let control_woken = Rc::new(Cell::new(false));
+    let received_control = control_woken.clone();
+    let _wake = wake.attach(connection.mainloop.loop_(), move |_| {
+        wake_control.wake_pending.store(false, Ordering::Release);
+        received_control.set(true);
+    });
     let target = connection.target(name)?;
     let speakers = parse_positions(&target.positions).with_context(|| {
         format!(
@@ -884,6 +941,7 @@ fn run(
     callback.mapping = mapping;
     callback.channels = stream_layout.len();
     let rate = callback.rate;
+    let shared = callback.shared.clone();
     let names: Vec<_> = stream_layout
         .iter()
         .map(|channel| {
@@ -895,18 +953,27 @@ fn run(
         })
         .collect();
     let positions = names.join(" ");
-    let stream = pw::stream::StreamBox::new(
-        &connection.core,
-        "Rivu native audio",
-        properties! {
-            "media.type" => "Audio", "media.category" => "Playback", "media.role" => "Music",
-            "application.name" => "Rivu", "node.name" => "rivu-native-output",
-            "target.object" => target.serial.as_str(), "node.dont-reconnect" => "true",
-            "node.dont-fallback" => "true", "stream.dont-remix" => (!auto_mix).to_string(),
-            "channelmix.disable" => (!auto_mix).to_string(), "audio.channels" => stream_layout.len().to_string(),
-            "audio.position" => format!("[ {positions} ]"), "audio.rate" => rate.to_string(),
-        },
-    )?;
+    let mut properties = properties! {
+        "media.type" => "Audio", "media.category" => "Playback", "media.role" => "Music",
+        "application.name" => "Rivu", "application.id" => "rivu",
+        "application.icon-name" => "rivu", "node.name" => "rivu-native-output",
+        "target.object" => target.serial.as_str(), "node.dont-reconnect" => "true",
+        "node.dont-fallback" => "true", "stream.dont-remix" => (!auto_mix).to_string(),
+        "channelmix.disable" => (!auto_mix).to_string(), "audio.channels" => stream_layout.len().to_string(),
+        "audio.position" => format!("[ {positions} ]"), "audio.rate" => rate.to_string(),
+        "node.rate" => format!("1/{rate}"),
+    };
+    if auto_mix {
+        properties.insert("channelmix.normalize", "true");
+    }
+    let stream = pw::stream::StreamBox::new(&connection.core, "Rivu native audio", properties)?;
+    let metadata = control
+        .metadata
+        .lock()
+        .take()
+        .context("Missing initial PipeWire track metadata")?;
+    update_stream_metadata(&stream, &metadata)?;
+    drop(metadata);
     let mut info = spa::param::audio::AudioInfoRaw::new();
     info.set_format(spa::param::audio::AudioFormat::F32LE);
     info.set_rate(rate);
@@ -975,6 +1042,7 @@ fn run(
     )?;
     let deadline = Instant::now() + TIMEOUT;
     let mut started = false;
+    let mut active = true;
     let mut observed_revision = None;
     let failure = Rc::new(RefCell::new(None));
     let failed = failure.clone();
@@ -985,14 +1053,20 @@ fn run(
             *failed.borrow_mut() = Some(message.to_owned());
         })
         .register();
-    while !stop.load(Ordering::Acquire) {
+    while !control.stop.load(Ordering::Acquire) {
         connection.mainloop.loop_().iterate(if started {
             pw::loop_::Timeout::Infinite
         } else {
             pw::loop_::Timeout::Finite(deadline.saturating_duration_since(Instant::now()))
         });
-        if stop.load(Ordering::Acquire) {
+        if control.stop.load(Ordering::Acquire) {
             break;
+        }
+        if control_woken.replace(false) {
+            let metadata = control.metadata.lock().take();
+            if let Some(metadata) = metadata {
+                update_stream_metadata(&stream, &metadata)?;
+            }
         }
         {
             let graph = connection.inventory.borrow();
@@ -1029,6 +1103,17 @@ fn run(
             }
             pw::stream::StreamState::Streaming if format_ok.get() && route_ok.get() => {
                 if !started {
+                    // Connect active to negotiate format and links even when
+                    // opening paused. No ring data is consumed while paused.
+                    if shared.paused.load(Ordering::Acquire) {
+                        stream
+                            .set_active(false)
+                            .context("Pausing PipeWire output")?;
+                        stream
+                            .flush(false)
+                            .context("Flushing paused PipeWire output")?;
+                        active = false;
+                    }
                     let _ = ready.send(Ok(()));
                     started = true;
                 }
@@ -1039,9 +1124,64 @@ fn run(
             ),
             _ => {}
         }
+        if started {
+            let should_be_active = !(shared.paused.load(Ordering::Acquire)
+                && shared.pause_settled.load(Ordering::Acquire));
+            if active != should_be_active {
+                // The callback only settles after every scheduled non-silent
+                // frame retires. Deactivation preserves unread ring PCM and
+                // leaves no scheduled frames to count during paused wall time.
+                stream
+                    .set_active(should_be_active)
+                    .context("Changing PipeWire output activity")?;
+                if !should_be_active {
+                    stream
+                        .flush(false)
+                        .context("Flushing paused PipeWire output")?;
+                }
+                active = should_be_active;
+            }
+        }
     }
     route_ok.set(false);
     stream.disconnect()?;
+    Ok(())
+}
+
+// Tags may contain NUL; encode that character without rejecting playable audio.
+fn property_text(text: &str) -> Cow<'_, str> {
+    if text.contains('\0') {
+        Cow::Owned(text.replace('\0', "�"))
+    } else {
+        Cow::Borrowed(text)
+    }
+}
+
+fn update_stream_metadata(stream: &pw::stream::Stream, metadata: &PlaybackMetadata) -> Result<()> {
+    let title = if metadata.title.trim().is_empty() {
+        "Rivu playback"
+    } else {
+        metadata.title.as_str()
+    };
+    let title = property_text(title);
+    let artist = property_text(&metadata.artist);
+    let album = property_text(&metadata.album);
+    let properties = properties! {
+        "media.name" => title.as_ref(),
+        "media.title" => title.as_ref(),
+        "media.artist" => artist.as_ref(),
+        "media.album" => album.as_ref(),
+    };
+    // Empty artist/album values explicitly clear tags from the previous track.
+    // SAFETY: this stream API has no 0.10.1 wrapper. Only its owner loop calls
+    // it, and PipeWire copies the live property dictionary synchronously.
+    let result = unsafe {
+        pw::sys::pw_stream_update_properties(stream.as_raw_ptr(), &properties.as_raw().dict)
+    };
+    if result < 0 {
+        return Err(std::io::Error::from_raw_os_error(-result))
+            .context("Updating PipeWire track metadata");
+    }
     Ok(())
 }
 
@@ -1371,6 +1511,23 @@ mod pcm_tests {
     }
 
     #[test]
+    fn float_output_preserves_overs_and_applies_gain_before_device_conversion() {
+        let (mut output, mut callback, _analyzer) = test_output(1000, false);
+        for (index, volume) in [1.0, 0.9, 0.5, 0.0].into_iter().enumerate() {
+            output.set_volume(volume);
+            let samples = [4.0, -3.0];
+            assert_eq!(output.push(&samples), 1);
+            let mut data = [0.0; 2];
+            callback.render(&mut data, timestamp(index as u64, index as u64 + 20));
+            let gain = crate::volume::gain(volume);
+            assert_eq!(data, samples.map(|sample| sample * gain));
+            if volume == 1.0 || volume == 0.9 {
+                assert!(data[0] > 1.0 && data[1] < -1.0);
+            }
+        }
+    }
+
+    #[test]
     fn device_names_require_the_native_prefix_without_aliases() {
         assert_eq!(target_name(None).unwrap(), None);
         assert_eq!(target_name(Some("PipeWire: sink")).unwrap(), Some("sink"));
@@ -1666,6 +1823,54 @@ mod pcm_tests {
     }
 
     #[test]
+    fn settled_pause_preserves_unread_frames_across_duplicates_and_long_inactivity() {
+        let (mut output, mut callback, _analyzer) = test_output(1000, false);
+        let source: Vec<_> = (1..=8)
+            .flat_map(|frame| [frame as f32, -(frame as f32)])
+            .collect();
+        assert_eq!(output.push(&source), 8);
+        let mut data = [0.0; 4];
+        callback.render(&mut data, timestamp(0, 20));
+        assert_eq!(data, source[..4]);
+        output.pause(true);
+        callback.render(&mut data, timestamp(21, 41));
+        assert_eq!(output.position(), 0.001);
+        assert_eq!(callback.consumer.occupied_len(), 12);
+        assert!(!output.shared.pause_settled.load(Ordering::Acquire));
+        output.pause(true);
+        callback.render(&mut data, timestamp(22, 42));
+        assert_eq!(output.position(), 0.002);
+        assert!(output.shared.pause_settled.load(Ordering::Acquire));
+        assert!(callback.clock.pending.is_empty());
+        output.pause(true);
+        assert!(output.shared.pause_settled.load(Ordering::Acquire));
+
+        // No process callbacks occur while inactive. A rapid resume/pause
+        // before the next callback must not consume or strand any ring frames.
+        output.pause(false);
+        output.pause(true);
+        callback.render(&mut data, timestamp(10_000, 10_020));
+        assert_eq!(data, [0.0; 4]);
+        assert_eq!(output.heard(), 0.002);
+        assert_eq!(callback.consumer.occupied_len(), 12);
+        assert!(output.shared.pause_settled.load(Ordering::Acquire));
+        output.pause(false);
+        output.pause(false);
+        callback.render(&mut data, timestamp(20_000, 20_020));
+        assert_eq!(data, source[4..8]);
+        assert_eq!(output.position(), 0.002);
+        assert_eq!(callback.consumer.occupied_len(), 8);
+        output.pause(true);
+        callback.render(&mut data, timestamp(20_022, 20_042));
+        assert_eq!(output.position(), 0.004);
+        assert_eq!(output.heard(), 0.004);
+        assert_eq!(callback.consumer.occupied_len(), 8);
+        assert!(output.shared.pause_settled.load(Ordering::Acquire));
+        assert!(!output.drained());
+        output.check_timing().unwrap();
+    }
+
+    #[test]
     fn refill_deadlines_keep_pcm_headroom_with_ten_wakes_per_second() {
         let stereo = [Channel::FrontLeft, Channel::FrontRight];
         for rate in [48_000, 192_000] {
@@ -1921,7 +2126,7 @@ mod routing_tests {
 
     #[test]
     fn native_stream_drop_wakes_and_joins_its_owner_loop() {
-        let stop = Arc::new(AtomicBool::new(false));
+        let control = Arc::new(NativeControl::default());
         let (wake, receiver) = pw::channel::channel();
         let (ready, started) = crossbeam_channel::bounded(1);
         let (finished, received) = crossbeam_channel::bounded(1);
@@ -1944,12 +2149,63 @@ mod routing_tests {
         });
         started.recv_timeout(TIMEOUT).unwrap();
         drop(NativeStream {
-            stop: stop.clone(),
+            control: control.clone(),
             thread: Some(thread),
             wake,
         });
-        assert!(stop.load(Ordering::Acquire));
+        assert!(control.stop.load(Ordering::Acquire));
         assert_eq!(received.try_recv(), Ok(true));
+    }
+
+    #[test]
+    fn metadata_pause_and_drop_share_one_coalesced_owner_wake() {
+        pw::init();
+        let mainloop = pw::main_loop::MainLoopRc::new(None).unwrap();
+        let control = Arc::new(NativeControl::default());
+        let (wake, receiver) = pw::channel::channel();
+        let layout = [FrontLeft, FrontRight];
+        let (mut output, _callback, _analyzer) =
+            super::pcm_tests::test_output_layout(1000, false, &layout, &layout, 128);
+        output.stream = Some(NativeStream {
+            control: control.clone(),
+            wake,
+            thread: None,
+        });
+        let first = Arc::new(PlaybackMetadata::default());
+        let replaced = Arc::downgrade(&first);
+        output.set_metadata(first).unwrap();
+        for index in 0..64 {
+            output.pause(index % 2 == 0);
+            output
+                .set_metadata(Arc::new(PlaybackMetadata {
+                    title: index.to_string(),
+                    ..PlaybackMetadata::default()
+                }))
+                .unwrap();
+        }
+        assert!(replaced.upgrade().is_none());
+        let latest = control.metadata.lock().take().unwrap();
+        assert_eq!(latest.title, "63");
+        drop(output);
+        assert!(control.stop.load(Ordering::Acquire));
+
+        let count = Rc::new(Cell::new(0));
+        let received = count.clone();
+        let received_control = control.clone();
+        let _receiver = receiver.attach(mainloop.loop_(), move |_| {
+            received_control
+                .wake_pending
+                .store(false, Ordering::Release);
+            received.set(received.get() + 1);
+        });
+        let deadline = Instant::now() + TIMEOUT;
+        while count.get() == 0 && Instant::now() < deadline {
+            mainloop.loop_().iterate(pw::loop_::Timeout::Finite(
+                deadline.saturating_duration_since(Instant::now()),
+            ));
+        }
+        assert_eq!(count.get(), 1);
+        assert!(!control.wake_pending.load(Ordering::Acquire));
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! Command handling, playback lifecycle, refill scheduling, and analyzer policy.
 
 use super::{
-    AudioCommand, AudioEvent, WaveformFrame,
+    AudioCommand, AudioEvent, PlaybackMetadata, WaveformFrame,
     output::validate_device,
     playback::{Playback, PlaybackOptions},
     source::Source,
@@ -69,6 +69,7 @@ struct Opening {
     range: Option<super::PlaybackRange>,
     decoder_hint: DecoderHint,
     generation: u64,
+    metadata: Arc<PlaybackMetadata>,
     start: f64,
     paused: bool,
     source: Option<Source>,
@@ -235,6 +236,7 @@ impl Worker {
                 range,
                 decoder_hint,
                 generation,
+                metadata,
                 start_seconds,
                 paused,
             } => {
@@ -244,10 +246,26 @@ impl Worker {
                     range,
                     decoder_hint,
                     generation,
+                    metadata,
                     start: start_seconds,
                     paused,
                     source: None,
                 });
+            }
+            AudioCommand::Metadata {
+                generation,
+                metadata,
+            } => {
+                if let Some(opening) = self.opening.as_mut()
+                    && opening.generation == generation
+                {
+                    opening.metadata = metadata;
+                } else if let Some(playback) = self.playback.as_mut()
+                    && playback.generation() == generation
+                    && let Err(error) = playback.set_metadata(metadata)
+                {
+                    self.fail(error);
+                }
             }
             AudioCommand::Pause(paused) => {
                 if let Some(opening) = self.opening.as_mut() {
@@ -348,6 +366,7 @@ impl Worker {
                         range: opening.range,
                         decoder_hint: opening.decoder_hint,
                         generation,
+                        metadata: opening.metadata,
                         start: opening.start,
                         paused: opening.paused,
                         device: self.device.clone(),
@@ -430,7 +449,7 @@ impl Worker {
                 self.commands.pending = Some(command);
                 continue;
             }
-            // Fatal backend errors must still be delivered while software-paused,
+            // Fatal backend errors must still be delivered while paused,
             // and must not be hidden by an otherwise completed drain.
             if let Ok(error) = self.playback.as_ref().unwrap().errors().try_recv() {
                 self.fail(anyhow!(error));
@@ -583,10 +602,92 @@ mod tests {
             path: path.to_owned(),
             range: None,
             decoder_hint: hint,
+            metadata: Arc::default(),
             generation,
             start_seconds: 0.0,
             paused: false,
         });
+    }
+
+    #[test]
+    fn paused_opening_retains_metadata_and_rejects_retired_generation_updates() {
+        let file = super::super::source::opening_prefix_file(1024, true);
+        let (mut worker, commands, events, _shutdown) = opening_worker();
+        load_prefix(&mut worker, file.path(), DecoderHint::Native, 41);
+        worker.poll_opening();
+        assert!(worker.opening.as_ref().unwrap().source.is_some());
+
+        let edited = Arc::new(PlaybackMetadata {
+            title: "Edited CUE title".into(),
+            artist: "Library artist".into(),
+            album: "Library album".into(),
+        });
+        for command in [
+            AudioCommand::Pause(true),
+            AudioCommand::Metadata {
+                generation: 41,
+                metadata: Arc::clone(&edited),
+            },
+            AudioCommand::Seek(0.125),
+            AudioCommand::Metadata {
+                generation: 40,
+                metadata: Arc::default(),
+            },
+        ] {
+            commands.send(command).unwrap();
+        }
+        assert!(worker.control_round());
+        let opening = worker.opening.as_ref().unwrap();
+        assert!(opening.paused);
+        assert_eq!(opening.start, 0.125);
+        assert!(
+            opening.source.is_some(),
+            "metadata must not reopen the source"
+        );
+        assert!(Arc::ptr_eq(&opening.metadata, &edited));
+        worker.poll_opening();
+        assert!(worker.playback.is_none());
+        assert!(events.is_empty());
+
+        let replacement = Arc::new(PlaybackMetadata {
+            title: "Replacement".into(),
+            ..PlaybackMetadata::default()
+        });
+        commands
+            .send(AudioCommand::Load {
+                path: file.path().to_owned(),
+                range: None,
+                decoder_hint: DecoderHint::Native,
+                metadata: Arc::clone(&replacement),
+                generation: 42,
+                start_seconds: 0.0,
+                paused: true,
+            })
+            .unwrap();
+        commands
+            .send(AudioCommand::Metadata {
+                generation: 41,
+                metadata: edited,
+            })
+            .unwrap();
+        assert!(worker.control_round());
+        let opening = worker.opening.as_ref().unwrap();
+        assert_eq!(opening.generation, 42);
+        assert!(opening.paused);
+        assert!(opening.source.is_none());
+        assert!(Arc::ptr_eq(&opening.metadata, &replacement));
+        worker.poll_opening();
+        assert!(worker.opening.as_ref().unwrap().source.is_some());
+        assert!(events.is_empty());
+
+        worker.command(AudioCommand::Stop);
+        worker.command(AudioCommand::Metadata {
+            generation: 42,
+            metadata: replacement,
+        });
+        assert!(worker.opening.is_none());
+        assert!(worker.playback.is_none());
+        assert!(events.is_empty());
     }
 
     #[test]
@@ -625,6 +726,7 @@ mod tests {
                     path: empty.path().to_owned(),
                     range: None,
                     decoder_hint: DecoderHint::Native,
+                    metadata: Arc::default(),
                     generation: 42,
                     start_seconds: 0.0,
                     paused: true,
@@ -885,9 +987,14 @@ mod tests {
                 path: PathBuf::from("other.wav"),
                 range: None,
                 decoder_hint: DecoderHint::Auto,
+                metadata: Arc::default(),
                 generation: 2,
                 start_seconds: 0.0,
                 paused: true,
+            },
+            AudioCommand::Metadata {
+                generation: 2,
+                metadata: Arc::default(),
             },
             AudioCommand::Pause(true),
             AudioCommand::Stop,

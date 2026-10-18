@@ -3,9 +3,9 @@
 //! The worker schedules playback; playback owns the source-to-output pipeline.
 //! Decoder internals and real-time output state remain in their respective modules.
 //!
-//! Pause is software-gated: the device continues receiving silence without
-//! consuming queued music. End-of-track waits for PipeWire's stream clock to pass
-//! the final valid frame's predicted playback time, not merely an empty ring.
+//! Pause deactivates the device without consuming queued music. End-of-track
+//! waits for PipeWire's stream clock to pass the final valid frame's predicted
+//! playback time, not merely an empty ring.
 //! Listened time is a conservative, callback-confirmed count; unconfirmed
 //! device buffers on stop are not counted as heard. Accuracy at the physical
 //! output remains bounded by PipeWire's playback timestamps.
@@ -169,14 +169,28 @@ pub struct PlaybackRange {
     pub end_seconds: Option<f64>,
 }
 
+/// Authoritative library/display metadata, independent of decoder source tags.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PlaybackMetadata {
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+}
+
 pub enum AudioCommand {
     Load {
         path: PathBuf,
         range: Option<PlaybackRange>,
         decoder_hint: DecoderHint,
+        metadata: Arc<PlaybackMetadata>,
         generation: u64,
         start_seconds: f64,
         paused: bool,
+    },
+    /// Update only the matching opening/playback generation, without reopening.
+    Metadata {
+        generation: u64,
+        metadata: Arc<PlaybackMetadata>,
     },
     Pause(bool),
     Stop,

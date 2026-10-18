@@ -397,6 +397,8 @@ must be available to play, but can remain saved while unavailable; playback
 reports the failure without substituting another device.
 `playback.pipewire_auto_mix` defaults to `true` and permits PipeWire remixing;
 disable it to require a compatible speaker layout without remixing.
+See link:04_playback.adoc#_output_devices_and_speaker_layouts[Playback] for
+normalization, source-rate negotiation and output gain behavior.
 Changing either setting rebuilds the output stream and seeks the existing
 decoder to the current position, retaining paused state. It does not open a new
 decoder or apply a newly saved Decoder hint or media read-buffer size.

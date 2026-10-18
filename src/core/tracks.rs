@@ -20,6 +20,22 @@ impl Core {
         album: Option<String>,
         decoder_hint: Option<DecoderHint>,
     ) -> Result<()> {
+        if let Some(current) = self.state.current_track.as_ref()
+            && current.id == track_id
+            && self
+                .playback
+                .as_ref()
+                .is_some_and(|playback| playback.track_id == track_id)
+            && (title.as_ref().is_some_and(|title| *title != current.title)
+                || artist
+                    .as_ref()
+                    .is_some_and(|artist| *artist != current.artist)
+                || album.as_ref().is_some_and(|album| *album != current.album))
+        {
+            // Core is the sole ordinary producer. Reserve this admission before
+            // committing a live edit; the worker can only free capacity meanwhile.
+            self.engine.ensure_command_capacity(1)?;
+        }
         let impact = self.store.edit_track(
             track_id,
             title.as_deref(),

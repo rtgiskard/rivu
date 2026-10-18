@@ -855,3 +855,107 @@ fn metadata_edit_refreshes_published_history_without_rewriting_old_snapshots() {
         "Track 1"
     );
 }
+
+#[test]
+fn current_metadata_edit_preflights_capacity_without_blocking_unrelated_facts() {
+    let (_directory, mut core) = fixture();
+    pending(&mut core, 1);
+    let (commands, receive) = bounded(1);
+    commands.send(AudioCommand::Volume(0.5)).unwrap();
+    let _idle_commands = core.engine.replace_commands(commands);
+    let current = Arc::clone(core.state.current_track.as_ref().unwrap());
+    let before = core.state.query_revisions();
+    let edit = || Command::EditTrack {
+        track_id: 1,
+        title: Some("Current title".into()),
+        artist: Some("Current artist".into()),
+        album: Some("Current album".into()),
+        decoder_hint: None,
+    };
+
+    assert!(core.command(edit()).is_err());
+    assert_eq!(core.track(1).unwrap().title, "Track 1");
+    assert_eq!(core.state.query_revisions(), before);
+    assert!(Arc::ptr_eq(
+        core.state.current_track.as_ref().unwrap(),
+        &current
+    ));
+
+    core.command(Command::SetFavorite {
+        track_ids: vec![1],
+        favorite: true,
+    })
+    .unwrap();
+    let stats = core.store.mark_played(1, 7).unwrap();
+    core.update_track_stats(1, stats).unwrap();
+    core.command(Command::EditTrack {
+        track_id: 2,
+        title: Some("Unrelated title".into()),
+        artist: None,
+        album: None,
+        decoder_hint: None,
+    })
+    .unwrap();
+    assert_eq!(core.state.current_track().unwrap().title, "Track 1");
+    assert!(core.state.current_track().unwrap().favorite);
+    assert_eq!(core.state.current_track().unwrap().last_played, Some(7));
+    assert!(matches!(receive.try_recv(), Ok(AudioCommand::Volume(_))));
+    assert!(receive.is_empty());
+
+    core.command(edit()).unwrap();
+    let current = core.state.current_track().unwrap();
+    assert_eq!(current.title, "Current title");
+    assert_eq!(current.artist, "Current artist");
+    assert_eq!(current.album, "Current album");
+    assert!(matches!(
+        receive.try_recv(),
+        Ok(AudioCommand::Metadata { .. })
+    ));
+    assert!(
+        receive.is_empty(),
+        "metadata edits must not reopen playback"
+    );
+}
+
+#[test]
+fn committed_metadata_refresh_preserves_the_old_snapshot_until_audio_admission() {
+    let (_directory, mut core) = fixture();
+    pending(&mut core, 1);
+    let (commands, receive) = bounded(1);
+    commands.send(AudioCommand::Volume(0.5)).unwrap();
+    let _idle_commands = core.engine.replace_commands(commands);
+    let current = Arc::clone(core.state.current_track.as_ref().unwrap());
+    core.store
+        .edit_track(
+            1,
+            Some("Committed title"),
+            Some("Artist"),
+            Some("Album"),
+            None,
+        )
+        .unwrap();
+
+    let result = core.apply_scan_impacts(crate::store::ScanImpacts {
+        changed: true,
+        library: true,
+        ..crate::store::ScanImpacts::default()
+    });
+    assert!(result.is_err());
+    assert_eq!(core.track(1).unwrap().title, "Committed title");
+    assert!(Arc::ptr_eq(
+        core.state.current_track.as_ref().unwrap(),
+        &current
+    ));
+    assert!(matches!(receive.try_recv(), Ok(AudioCommand::Volume(_))));
+
+    core.refresh_queue_tracks().unwrap();
+    let current = core.state.current_track().unwrap();
+    assert_eq!(current.title, "Committed title");
+    assert_eq!(current.artist, "Artist");
+    assert_eq!(current.album, "Album");
+    assert!(matches!(
+        receive.try_recv(),
+        Ok(AudioCommand::Metadata { .. })
+    ));
+    assert!(receive.is_empty());
+}

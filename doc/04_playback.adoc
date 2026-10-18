@@ -63,6 +63,9 @@ paused. A late EOF notification after pausing does not restart playback or
 automatically advance the queue. Pause also pauses live analysis. Listening
 statistics use confirmed heard time; see link:02_library.adoc[Library].
 
+Pausing lets already submitted audio finish, then makes the output stream inactive.
+Unread audio is retained for resume; paused wall time does not advance playback.
+
 == Output devices and speaker layouts
 
 `playback.output_device` is an exact name from `rivu playback devices`, which lists native
@@ -87,10 +90,23 @@ position and preserves paused state. The existing decoder is retained; these
 changes do not apply a newly saved Decoder hint or media read-buffer size.
 
 Multichannel output preserves speaker identities. `playback.pipewire_auto_mix` is enabled
-by default and permits PipeWire remixing; disable it to require a compatible
-sink layout without remixing. Both modes validate the actual selected sink and
-its negotiated speaker layout, including changes to links while playing.
-Unsupported routes report an error rather than using an unrelated compatible sink.
+by default and permits PipeWire remixing with channel-level normalization to prevent
+gain from summed channels. Downmixing may therefore reduce the level. Disable it to
+require a compatible sink layout without remixing. Both modes validate the actual
+selected sink and its negotiated speaker layout, including changes to links while
+playing. Unsupported routes report an error rather than using an unrelated compatible sink.
+
+Rivu sends 32-bit float audio at the decoded sample rate and suggests that rate to
+PipeWire without forcing the shared graph. Actual graph and device rates depend on
+system policy and device support; source-rate output alone is not a bit-perfect
+guarantee. Floating-point peaks above full scale are preserved before device
+conversion, not clipped by Rivu. Downstream gain and integer device conversion can
+still cause clipping; Rivu does not add a limiter or dither to its float output.
+
+Desktop audio mixers receive the current library/CUE title, artist and album,
+including edits made while playing or paused. The application identity remains
+Rivu. Mixer volume and mute are independent of Rivu's own software volume and
+remain effective with remixing disabled.
 
 The decoded PCM output queue retains a quarter second of audio, with a minimum of
 2048 frames, and is limited to 16 MiB of interleaved 32-bit float samples. Rates

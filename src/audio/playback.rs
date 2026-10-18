@@ -1,8 +1,8 @@
 //! One track's decode-to-output pipeline and audible playback accounting.
 
 use super::{
-    MediaInfo, PlaybackRange, WaveformFrame,
-    output::{Output, OutputError},
+    MediaInfo, PlaybackMetadata, PlaybackRange, WaveformFrame,
+    output::{Output, OutputError, OutputOptions},
     source::{DECODE_WORK_BUDGET, DecodeStep, Source},
     waveform::{WaveformAccumulator, WaveformCoverage},
 };
@@ -19,6 +19,7 @@ pub(super) struct PlaybackOptions {
     pub(super) path: PathBuf,
     pub(super) range: Option<PlaybackRange>,
     pub(super) decoder_hint: DecoderHint,
+    pub(super) metadata: Arc<PlaybackMetadata>,
     pub(super) generation: u64,
     pub(super) start: f64,
     pub(super) paused: bool,
@@ -34,6 +35,7 @@ pub(super) struct Playback {
     pending: Vec<f32>,
     offset_frames: usize,
     generation: u64,
+    metadata: Arc<PlaybackMetadata>,
     base_position: f64,
     prior_heard: f64,
     eof: bool,
@@ -55,6 +57,7 @@ impl Playback {
             path,
             range,
             decoder_hint,
+            metadata,
             generation,
             start,
             paused,
@@ -71,12 +74,15 @@ impl Playback {
         }
         let channels = source.layout().len();
         let output = Output::new(
-            device.as_deref(),
             source.info().sample_rate,
             source.layout(),
-            volume,
-            paused,
-            pipewire_auto_mix,
+            OutputOptions {
+                device: device.as_deref(),
+                volume,
+                paused,
+                auto_mix: pipewire_auto_mix,
+                metadata: Arc::clone(&metadata),
+            },
             analyzer,
         )?;
         let waveform_weights = super::output::analysis_weights(source.layout());
@@ -92,6 +98,7 @@ impl Playback {
             pending: Vec::with_capacity(PENDING_BUFFER_CAPACITY * channels),
             offset_frames: 0,
             generation,
+            metadata,
             base_position: start,
             prior_heard: 0.0,
             eof: false,
@@ -113,14 +120,18 @@ impl Playback {
         auto_mix: bool,
         analyzer: &AnalysisWorker,
     ) -> Result<()> {
+        let metadata = Arc::clone(&self.metadata);
         self.restart_output_with(target, |source, paused| {
             Output::new(
-                device,
                 source.info().sample_rate,
                 source.layout(),
-                volume,
-                paused,
-                auto_mix,
+                OutputOptions {
+                    device,
+                    volume,
+                    paused,
+                    auto_mix,
+                    metadata,
+                },
                 analyzer,
             )
         })
@@ -175,6 +186,14 @@ impl Playback {
 
     pub(super) fn set_volume(&self, volume: f32) {
         self.output.set_volume(volume);
+    }
+
+    pub(super) fn set_metadata(&mut self, metadata: Arc<PlaybackMetadata>) -> Result<()> {
+        if self.metadata != metadata {
+            self.output.set_metadata(Arc::clone(&metadata))?;
+            self.metadata = metadata;
+        }
+        Ok(())
     }
 
     pub(super) fn set_still_mode(&mut self, enabled: bool) {
@@ -375,6 +394,7 @@ mod tests {
             pending: Vec::new(),
             offset_frames: 0,
             generation: 1,
+            metadata: Arc::default(),
             base_position: 0.0,
             prior_heard: 0.0,
             eof: false,
