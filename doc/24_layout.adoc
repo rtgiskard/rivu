@@ -77,8 +77,11 @@ cannot always satisfy.
 Each list heading reserves at least 3 rem within its header row. Its title and
 count each stay on one line and truncate independently when space is limited;
 expanding search does not turn either into a multi-line block.
-Shared list search keeps a 2rem outer height, including its border, and expands
-only into available inline space up to 14rem. Its text region shrinks before
+Shared list search and default icon buttons use the same outer height: at least
+2rem, growing with the configured input line height at large text sizes. Search
+keeps that height when collapsed or expanded; icon glyph sizes remain independent
+of the text size. Search expands only into available inline space up to 14rem.
+Its text region shrinks before
 neighboring action buttons need another row; showing the clear button consumes
 space inside that same allocation. Embedded input lines center within the search
 control and retain editable text space by truncating the inline result count

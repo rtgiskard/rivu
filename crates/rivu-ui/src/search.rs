@@ -1,7 +1,7 @@
 //! Expandable search field with caller-supplied labels and debounce policy.
 
 use super::{
-    control::icon_button,
+    control::{icon_button, toolbar_control_height},
     input::{Input, InputEvent},
     layout::row,
 };
@@ -190,7 +190,7 @@ impl SearchField {
 impl Render for SearchField {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = crate::theme::palette(cx);
-        let height = gpui::rems((1.25 * crate::theme::font_size_scale(cx)).max(2.));
+        let height = toolbar_control_height(cx);
         let visible =
             self.expanded || !self.input.read(cx).text().is_empty() || self.query.is_some();
         let focused = self.input_focused(window, cx);
@@ -232,6 +232,7 @@ impl Render for SearchField {
                 )
                 .w(gpui::rems(1.4))
                 .h_full()
+                .min_h_0()
                 .border_0()
                 .bg(gpui::transparent_black())
                 .rounded_none(),
@@ -253,6 +254,7 @@ impl Render for SearchField {
                     )
                     .w(gpui::rems(1.4))
                     .h_full()
+                    .min_h_0()
                     .border_0()
                     .bg(gpui::transparent_black())
                     .rounded_none(),

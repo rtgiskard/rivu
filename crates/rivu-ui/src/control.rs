@@ -141,6 +141,11 @@ pub fn sortable_header<T: 'static>(
     control
 }
 
+/// Shared outer height for toolbar actions and collapsed or expanded search.
+pub(crate) fn toolbar_control_height(cx: &gpui::App) -> gpui::Rems {
+    gpui::rems((1.25 * crate::theme::font_size_scale(cx)).max(2.))
+}
+
 /// Icon button with the Nerd symbol font and shared tooltip behavior.
 /// Control text sizing is overridable; the glyph resets the base-text scale.
 pub fn icon_button<T: 'static>(
@@ -160,7 +165,8 @@ pub fn icon_button<T: 'static>(
         cx,
         action,
     )
-    .size(gpui::rems(2.))
+    .w(gpui::rems(2.))
+    .h(toolbar_control_height(cx))
     .text_size(gpui::rems(1.))
     .p_0()
     .flex()
