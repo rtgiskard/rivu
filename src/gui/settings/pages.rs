@@ -479,6 +479,7 @@ impl Settings {
                 this.open_setting_dropdown(items, selected);
             },
         )
+        .tooltip(text_tooltip(self.tr("settings-theme-hint")))
         .relative()
         .child(self.measurement(Measured::Theme, cx));
         settings_card(
@@ -487,7 +488,6 @@ impl Settings {
             column()
                 .gap_2()
                 .child(form_field(colors, self.tr("settings-theme"), theme))
-                .child(caption(colors, self.tr("settings-theme-hint")))
                 .child(
                     column()
                         .gap_1()
@@ -1002,24 +1002,30 @@ impl Settings {
                         settings.tr("settings-processing-cache"),
                         column()
                             .gap_2()
-                            .child(visual_switch(
-                                &self.i18n,
-                                "settings-still-mode",
-                                "",
-                                settings.tr("settings-still-mode"),
-                                draft.still_mode,
-                                cx,
-                                |draft| draft.still_mode = !draft.still_mode,
-                            ))
-                            .child(visual_switch(
-                                &self.i18n,
-                                "visual-cache",
-                                "",
-                                settings.tr("settings-rendering-cache"),
-                                draft.visualization_cache,
-                                cx,
-                                |draft| draft.visualization_cache = !draft.visualization_cache,
-                            ))
+                            .child(
+                                row()
+                                    .gap_2()
+                                    .child(visual_switch(
+                                        &self.i18n,
+                                        "settings-still-mode",
+                                        "",
+                                        settings.tr("settings-still-mode"),
+                                        draft.still_mode,
+                                        cx,
+                                        |draft| draft.still_mode = !draft.still_mode,
+                                    ))
+                                    .child(visual_switch(
+                                        &self.i18n,
+                                        "visual-cache",
+                                        "",
+                                        settings.tr("settings-rendering-cache"),
+                                        draft.visualization_cache,
+                                        cx,
+                                        |draft| {
+                                            draft.visualization_cache = !draft.visualization_cache
+                                        },
+                                    )),
+                            )
                             .child(settings.single(Field::GpuMaterialBudget, cx)),
                     ))
             }
