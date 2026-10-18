@@ -533,9 +533,11 @@ nonempty and unique after trimming surrounding whitespace. To delete the current
 layout, switch to another one first; the collection always retains a layout.
 Use the Sync layouts to file icon beside Rename to write the current collection.
 Sync cancels any active layout interaction before capturing the collection, so
-drag and resize previews are not saved. A write failure leaves the session's
-layouts unchanged and is reported in the footer. Press Sync again to retry;
-further layout edits do not automatically retry a failed write.
+drag and resize previews are not saved. The panel shows sync progress and confirms
+completion, including when no write is needed. A write failure leaves session
+layouts unchanged. The error appears in the panel while open, or in the footer
+after closing it. Press Sync again to retry; further layout edits do not
+automatically retry a failed write.
 
 Switching or duplicating updates the panel tree inside the same window. Playback,
 queue, global configuration, window placement, and the active Track details draft
