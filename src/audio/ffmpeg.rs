@@ -6,7 +6,7 @@
 use super::{
     Channel, MediaInfo,
     bitrate::PacketStats,
-    source::{DECODE_WORK_BUDGET, DecodeStep, SourceIdentity, check_cancelled},
+    source::{DecodeStep, SourceIdentity, check_cancelled},
 };
 use anyhow::{Context, Result, bail};
 use libloading::Library;
@@ -545,7 +545,6 @@ pub(super) struct Decoder {
     draining: bool,
     require_timestamp: bool,
     next_sample: i64,
-    primed: Option<(Vec<f32>, f64)>,
     layout: Vec<Channel>,
     info: MediaInfo,
     packet_stats: PacketStats,
@@ -705,7 +704,7 @@ impl Decoder {
             channels: 0,
             sample_rate: 0,
         };
-        let mut decoder = Self {
+        let decoder = Self {
             rt,
             identity: input.identity,
             _file: input.file.take().expect("FFmpeg input owns its local file"),
@@ -721,7 +720,6 @@ impl Decoder {
             next_sample: 0,
             layout: Vec::new(),
             info,
-            primed: None,
             packet_stats: PacketStats::new(),
             expected_samples: if pcm {
                 u64::try_from(stream_ref.duration).ok().and_then(|ticks| {
@@ -745,16 +743,6 @@ impl Decoder {
             },
         };
         input.format = ptr::null_mut();
-        let mut frames = Vec::new();
-        let timestamp = loop {
-            let mut budget = DECODE_WORK_BUDGET;
-            match decoder.next_frames(&mut frames, cancelled, &mut budget)? {
-                DecodeStep::Frames(timestamp) => break timestamp,
-                DecodeStep::Yield => continue,
-                DecodeStep::Eof => bail!("FFmpeg audio stream contains no decodable frames"),
-            }
-        };
-        decoder.primed = Some((frames, timestamp));
         Ok(decoder)
     }
     pub(super) fn identity(&self) -> SourceIdentity {
@@ -805,11 +793,6 @@ impl Decoder {
         check_cancelled(cancelled)?;
         if *budget == 0 {
             return Ok(DecodeStep::Yield);
-        }
-        if let Some((primed, timestamp)) = self.primed.take() {
-            *budget -= 1;
-            *frames = primed;
-            return Ok(DecodeStep::Frames(timestamp));
         }
         loop {
             // Include skipped packets and decoder buffering in the caller's
@@ -968,7 +951,6 @@ impl Decoder {
         self.draining = false;
         self.require_timestamp = seconds > 0.0;
         self.next_sample = 0;
-        self.primed = None;
         Ok(())
     }
 }
@@ -1172,7 +1154,7 @@ mod tests {
     }
 
     #[test]
-    fn complete_ffmpeg_decode_counts_primed_selected_packets_not_pcm_or_other_streams() {
+    fn complete_ffmpeg_decode_counts_selected_packets_not_pcm_or_other_streams() {
         let file = pcm_file();
         let mut decoder =
             Decoder::from_file(file.path(), open_regular_file(file.path()).unwrap(), None).unwrap();

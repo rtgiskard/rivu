@@ -10,7 +10,7 @@ use std::{
     fs::{File, OpenOptions},
     io::Seek,
     os::unix::fs::{MetadataExt, OpenOptionsExt},
-    path::Path,
+    path::{Path, PathBuf},
     sync::atomic::{AtomicBool, Ordering},
 };
 use symphonia::core::errors::Error as SymphoniaError;
@@ -399,6 +399,7 @@ pub(super) struct Source {
     complete_stream: bool,
     expected_samples: Option<u64>,
     mpeg_packets: bool,
+    opening_fallback: Option<(PathBuf, File)>,
 }
 impl Source {
     pub(super) fn open(
@@ -408,6 +409,24 @@ impl Source {
         ffmpeg_enabled: bool,
     ) -> Result<Self> {
         Self::open_with_cancel(path, buffer_len, decoder_hint, ffmpeg_enabled, None)
+    }
+
+    /// Open the container/codec without draining the first-frame packet prefix.
+    /// The worker retains this source between finite `poll_open` rounds.
+    pub(super) fn begin_open(
+        path: &Path,
+        buffer_len: usize,
+        decoder_hint: DecoderHint,
+        ffmpeg_enabled: bool,
+    ) -> Result<Self> {
+        Self::open_file_unprimed(
+            path,
+            open_regular_file(path)?,
+            buffer_len,
+            decoder_hint,
+            ffmpeg_enabled,
+            None,
+        )
     }
 
     fn open_with_cancel(
@@ -436,6 +455,26 @@ impl Source {
         ffmpeg_enabled: bool,
         cancelled: Option<&AtomicBool>,
     ) -> Result<Self> {
+        let mut source = Self::open_file_unprimed(
+            path,
+            file,
+            buffer_len,
+            decoder_hint,
+            ffmpeg_enabled,
+            cancelled,
+        )?;
+        while !source.poll_open_with_cancel(cancelled)? {}
+        Ok(source)
+    }
+
+    fn open_file_unprimed(
+        path: &Path,
+        file: File,
+        buffer_len: usize,
+        decoder_hint: DecoderHint,
+        ffmpeg_enabled: bool,
+        cancelled: Option<&AtomicBool>,
+    ) -> Result<Self> {
         check_cancelled(cancelled)?;
         match decoder_hint {
             DecoderHint::Auto => (),
@@ -446,10 +485,9 @@ impl Source {
                 if !ffmpeg_enabled {
                     bail!("This track requires FFmpeg, but the FFmpeg extension is disabled");
                 }
-                return Self::from_ffmpeg(
-                    super::ffmpeg::Decoder::from_file(path, file, cancelled)?,
-                    cancelled,
-                );
+                return Self::from_ffmpeg(super::ffmpeg::Decoder::from_file(
+                    path, file, cancelled,
+                )?);
             }
         }
         let input = if ffmpeg_enabled {
@@ -459,14 +497,14 @@ impl Source {
         };
         if input.as_ref().is_some_and(|input| !input.is_pcm()) {
             drop(file);
-            return Self::from_ffmpeg(
-                super::ffmpeg::Decoder::from_input(input.unwrap(), cancelled)?,
+            return Self::from_ffmpeg(super::ffmpeg::Decoder::from_input(
+                input.unwrap(),
                 cancelled,
-            );
+            )?);
         }
         // Native probing consumes its descriptor even when it rejects the codec.
         // Retain this exact object for Auto fallback, not its mutable pathname.
-        let fallback = if ffmpeg_enabled && input.is_none() {
+        let fallback = if ffmpeg_enabled {
             Some(
                 file.try_clone()
                     .context("Retaining audio source for FFmpeg fallback")?,
@@ -479,6 +517,7 @@ impl Source {
                 if input.is_some() {
                     source.probe_backend = ProbeBackend::Ffmpeg;
                 }
+                source.opening_fallback = fallback.map(|file| (path.to_owned(), file));
                 Ok(source)
             }
             Err(native_error)
@@ -488,21 +527,18 @@ impl Source {
                     Some(input) => super::ffmpeg::Decoder::from_input(input, cancelled),
                     None => super::ffmpeg::Decoder::from_file(path, fallback.unwrap(), cancelled),
                 };
-                decoded.and_then(|decode| Self::from_ffmpeg(decode, cancelled)).with_context(|| format!("Native decoder rejected the audio ({native_error:#}); FFmpeg extension failed"))
+                decoded.and_then(Self::from_ffmpeg).with_context(|| format!("Native decoder rejected the audio ({native_error:#}); FFmpeg extension failed"))
             }
             Err(error) => Err(error),
         }
     }
 
-    fn from_ffmpeg(decode: super::ffmpeg::Decoder, cancelled: Option<&AtomicBool>) -> Result<Self> {
+    fn from_ffmpeg(decode: super::ffmpeg::Decoder) -> Result<Self> {
         let info = decode.info().clone();
         let layout = decode.layout().to_vec();
-        if info.sample_rate == 0 || layout.is_empty() {
-            bail!("FFmpeg decoder returned incomplete audio metadata");
-        }
         let time_base = decode.time_base()?;
         // Container duration is only an estimate, never a decoder EOF.
-        let mut source = Self {
+        Ok(Self {
             identity: decode.identity(),
             format: None,
             metadata_budget: metadata_budget(false),
@@ -523,12 +559,8 @@ impl Source {
             complete_stream: true,
             expected_samples: None,
             mpeg_packets: false,
-        };
-        if !source.prime(cancelled)? {
-            bail!("FFmpeg audio stream contains no samples");
-        }
-        source.ready = true;
-        Ok(source)
+            opening_fallback: None,
+        })
     }
 
     fn open_native(
@@ -692,7 +724,7 @@ impl Source {
             sample_rate: rate,
         };
         metadata_tags(format.metadata(), track, &mut info);
-        let mut source = Self {
+        Ok(Self {
             identity,
             time_base: track_time_base.unwrap_or_else(|| TimeBase::try_new(1, rate).unwrap()),
             format: Some(format),
@@ -713,12 +745,8 @@ impl Source {
             complete_stream: true,
             expected_samples,
             mpeg_packets,
-        };
-        if !source.prime(cancelled)? {
-            bail!("Audio track contains no decodable samples");
-        }
-        source.ready = true;
-        Ok(source)
+            opening_fallback: None,
+        })
     }
     pub(super) fn restrict(&mut self, range: super::PlaybackRange) -> Result<()> {
         self.restrict_with_cancel(range, None)
@@ -891,6 +919,47 @@ impl Source {
         Ok(Some((&self.frames, self.frame_start)))
     }
 
+    /// One finite first-frame round. A successful round preserves its PCM for
+    /// the first playback refill; EOF before that frame is an opening failure.
+    pub(super) fn poll_open(&mut self) -> Result<bool> {
+        self.poll_open_with_cancel(None)
+    }
+
+    pub(super) fn disable_opening_fallback(&mut self) {
+        self.opening_fallback = None;
+    }
+
+    fn poll_open_with_cancel(&mut self, cancelled: Option<&AtomicBool>) -> Result<bool> {
+        if self.ready {
+            return Ok(true);
+        }
+        let mut budget = DECODE_WORK_BUDGET;
+        let step = match self.read_next(cancelled, &mut budget) {
+            Err(error) if error.is::<UnsupportedNative>() && self.opening_fallback.is_some() => {
+                let (path, file) = self.opening_fallback.take().unwrap();
+                *self =
+                    Self::from_ffmpeg(super::ffmpeg::Decoder::from_file(&path, file, cancelled)?)
+                        .with_context(|| {
+                        format!(
+                            "Native decoder rejected the audio ({error:#}); FFmpeg extension failed"
+                        )
+                    })?;
+                return Ok(false);
+            }
+            result => result?,
+        };
+        match step {
+            DecodeStep::Frames(()) => {
+                self.ready = true;
+                self.opening_fallback = None;
+                Ok(true)
+            }
+            DecodeStep::Yield => Ok(false),
+            DecodeStep::Eof => bail!("Audio track contains no decodable samples"),
+        }
+    }
+
+    #[cfg(test)]
     fn prime(&mut self, cancelled: Option<&AtomicBool>) -> Result<bool> {
         loop {
             let mut budget = DECODE_WORK_BUDGET;
@@ -1003,6 +1072,16 @@ impl Source {
                     return Err(error);
                 }
             };
+            // FFmpeg learns output rate/layout from the first decoded frame,
+            // not from potentially incomplete codec parameters at open time.
+            if self.layout.is_empty() {
+                let Decode::Ffmpeg(decoder) = &self.decode else {
+                    unreachable!()
+                };
+                self.layout.extend_from_slice(decoder.layout());
+                self.info.channels = decoder.info().channels;
+                self.info.sample_rate = decoder.info().sample_rate;
+            }
             let mut retained_start = packet_start;
             let channels = self.layout.len();
             if channels == 0 || !self.frames.len().is_multiple_of(channels) {
@@ -1267,11 +1346,110 @@ fn interleave_audio(audio: GenericAudioBufferRef<'_>, output: &mut Vec<f32>) {
     }
 }
 
+/// A real Matroska packet prefix on an unselected audio track. The selected
+/// track's first PCM is deliberately beyond several opening work rounds.
+#[cfg(test)]
+pub(super) fn opening_prefix_file(
+    prefix_packets: usize,
+    selected_samples: bool,
+) -> tempfile::NamedTempFile {
+    use std::io::Write;
+
+    fn element(id: &[u8], payload: &[u8]) -> Vec<u8> {
+        let mut bytes = id.to_vec();
+        bytes.extend_from_slice(&((1_u64 << 56) | payload.len() as u64).to_be_bytes());
+        bytes.extend_from_slice(payload);
+        bytes
+    }
+
+    fn track(number: u8) -> Vec<u8> {
+        let mut entry = element(&[0xd7], &[number]);
+        entry.extend(element(&[0x73, 0xc5], &[number]));
+        entry.extend(element(&[0x83], &[2]));
+        entry.extend(element(&[0x88], &[u8::from(number == 1)]));
+        entry.extend(element(&[0x86], b"A_PCM/INT/LIT"));
+        let mut audio = element(&[0xb5], &8000_f64.to_be_bytes());
+        audio.extend(element(&[0x9f], &[1]));
+        audio.extend(element(&[0x62, 0x64], &[16]));
+        entry.extend(element(&[0xe1], &audio));
+        element(&[0xae], &entry)
+    }
+
+    let mut header = element(&[0x42, 0x82], b"matroska");
+    header.extend(element(&[0x42, 0x87], &[4]));
+    header.extend(element(&[0x42, 0x85], &[2]));
+    let mut bytes = element(&[0x1a, 0x45, 0xdf, 0xa3], &header);
+    let mut info = element(&[0x2a, 0xd7, 0xb1], &1_000_000_u32.to_be_bytes());
+    info.extend(element(&[0x4d, 0x80], b"rivu regression"));
+    info.extend(element(&[0x57, 0x41], b"rivu regression"));
+    let mut segment = element(&[0x15, 0x49, 0xa9, 0x66], &info);
+    let mut tracks = track(1);
+    tracks.extend(track(2));
+    segment.extend(element(&[0x16, 0x54, 0xae, 0x6b], &tracks));
+    let mut cluster = element(&[0xe7], &[0]);
+    for _ in 0..prefix_packets {
+        cluster.extend(element(&[0xa3], &[0x82, 0, 0, 0x80, 0, 0]));
+    }
+    if selected_samples {
+        cluster.extend(element(&[0xa3], &[0x81, 0, 0, 0x80, 0, 0x40, 0, 0xc0]));
+    }
+    segment.extend(element(&[0x1f, 0x43, 0xb6, 0x75], &cluster));
+    bytes.extend(element(&[0x18, 0x53, 0x80, 0x67], &segment));
+    let mut file = tempfile::Builder::new().suffix(".mka").tempfile().unwrap();
+    file.write_all(&bytes).unwrap();
+    file
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Write;
     use symphonia::core::{checksum::Crc32, io::Monitor};
+
+    #[test]
+    fn opening_rounds_keep_real_packet_progress_and_the_first_pcm() {
+        let file = opening_prefix_file(DECODE_WORK_BUDGET * 3 + 1, true);
+        let mut source =
+            Source::begin_open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Native, false).unwrap();
+        for _ in 0..3 {
+            assert!(!source.poll_open().unwrap());
+        }
+        assert!(source.poll_open().unwrap());
+        assert!(
+            source.poll_open().unwrap(),
+            "completion must not consume primed PCM"
+        );
+        assert_eq!(source.info.sample_rate, 8000);
+        assert_eq!(source.info.channels, 1);
+        assert_eq!(decode_remaining(&mut source), [0.5, -0.5]);
+    }
+
+    #[test]
+    fn opening_an_empty_selected_stream_fails_after_finite_prefix_rounds() {
+        let file = opening_prefix_file(DECODE_WORK_BUDGET * 2, false);
+        let mut source =
+            Source::begin_open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Native, false).unwrap();
+        assert!(!source.poll_open().unwrap());
+        assert!(!source.poll_open().unwrap());
+        assert!(source.poll_open().is_err());
+    }
+
+    #[cfg(feature = "ffmpeg")]
+    #[test]
+    fn ffmpeg_opening_rounds_preserve_the_first_selected_pcm() {
+        let file = opening_prefix_file(DECODE_WORK_BUDGET * 3 + 1, true);
+        let mut source =
+            Source::begin_open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Ffmpeg, true).unwrap();
+        let mut rounds = 0;
+        while !source.poll_open().unwrap() {
+            rounds += 1;
+            assert!(rounds <= 8, "opening must retain decoder progress");
+        }
+        assert!(rounds >= 3, "the real prefix must cross work rounds");
+        assert_eq!(source.info.sample_rate, 8000);
+        assert_eq!(source.info.channels, 1);
+        assert_eq!(decode_remaining(&mut source), [0.5, -0.5]);
+    }
 
     #[test]
     fn native_metadata_budget_preserves_unsynchronised_audio() {
@@ -1869,6 +2047,22 @@ mod tests {
         assert!(source.seek(12.0).is_err());
     }
 
+    #[cfg(feature = "ffmpeg")]
+    #[test]
+    fn empty_ffmpeg_opening_fails_without_an_unbounded_prime() {
+        let file = opening_prefix_file(DECODE_WORK_BUDGET * 3 + 1, false);
+        let mut source =
+            Source::begin_open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Ffmpeg, true).unwrap();
+        for _ in 0..8 {
+            match source.poll_open() {
+                Ok(false) => {}
+                Ok(true) => panic!("an empty selected stream must not finish opening"),
+                Err(_) => return,
+            }
+        }
+        panic!("finite packet input must reach its opening failure");
+    }
+
     fn pcm_file() -> tempfile::NamedTempFile {
         let mut file = tempfile::NamedTempFile::new().unwrap();
         let samples = 88_200_u32;
@@ -1887,6 +2081,48 @@ mod tests {
             file.write_all(&value.to_le_bytes()).unwrap();
         }
         file
+    }
+
+    fn assert_incremental_pcm_start(hint: DecoderHint, ffmpeg_enabled: bool) {
+        let file = pcm_file();
+        let mut reference =
+            Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Native, false).unwrap();
+        let expected = decode_remaining(&mut reference);
+        let mut source =
+            Source::begin_open(file.path(), PROBE_BUFFER_LEN, hint, ffmpeg_enabled).unwrap();
+        while !source.poll_open().unwrap() {}
+        assert_eq!(
+            decode_remaining(&mut source),
+            expected,
+            "first-frame PCM must not be lost"
+        );
+
+        let mut source =
+            Source::begin_open(file.path(), PROBE_BUFFER_LEN, hint, ffmpeg_enabled).unwrap();
+        while !source.poll_open().unwrap() {}
+        source
+            .restrict(super::super::PlaybackRange {
+                start_seconds: 0.4,
+                end_seconds: Some(1.6),
+            })
+            .unwrap();
+        source.seek(0.2).unwrap();
+        let (first, timestamp) = source.next_frames().unwrap().unwrap();
+        assert!((timestamp - 0.2).abs() < 1e-9);
+        let mut actual = first.to_vec();
+        actual.extend(decode_remaining(&mut source));
+        assert_eq!(actual, expected[26_460..70_560]);
+    }
+
+    #[test]
+    fn incremental_native_open_preserves_pcm_range_and_start_seek() {
+        assert_incremental_pcm_start(DecoderHint::Native, false);
+    }
+
+    #[cfg(feature = "ffmpeg")]
+    #[test]
+    fn incremental_ffmpeg_open_preserves_pcm_range_and_start_seek() {
+        assert_incremental_pcm_start(DecoderHint::Ffmpeg, true);
     }
 
     #[test]
@@ -2087,53 +2323,63 @@ mod tests {
     }
 
     #[test]
-    fn first_packet_unsupported_falls_back_but_corruption_and_cancellation_do_not() {
+    fn opening_fallback_only_follows_native_unsupported_errors() {
         let unsupported = aac_packet_file(0x40); // ID_CCE, unsupported by native AAC.
-        let error = Source::open(
+        let mut native = Source::begin_open(
             unsupported.path(),
             PROBE_BUFFER_LEN,
             DecoderHint::Native,
             true,
         )
-        .err()
         .unwrap();
-        assert!(error.is::<UnsupportedNative>(), "{error:#}");
-        match Source::open(
+        assert!(native.poll_open().unwrap_err().is::<UnsupportedNative>());
+
+        let mut automatic = Source::begin_open(
             unsupported.path(),
             PROBE_BUFFER_LEN,
             DecoderHint::Auto,
             true,
-        ) {
-            Ok(source) => assert!(source.uses_ffmpeg()),
-            Err(error) => assert!(
-                error.to_string().contains("FFmpeg extension failed"),
-                "{error:#}"
-            ),
-        }
-        let corrupt = aac_packet_file(0);
-        let error = Source::open(corrupt.path(), PROBE_BUFFER_LEN, DecoderHint::Auto, true)
-            .err()
-            .unwrap();
-        assert!(!error.is::<UnsupportedNative>());
-        assert!(
-            !error.to_string().contains("FFmpeg extension failed"),
-            "{error:#}"
-        );
-        let cancelled = AtomicBool::new(true);
-        let error = Source::open_with_cancel(
-            unsupported.path(),
-            PROBE_BUFFER_LEN,
-            DecoderHint::Auto,
-            true,
-            Some(&cancelled),
         )
-        .err()
         .unwrap();
-        assert_eq!(error.to_string(), "Waveform loading cancelled");
+        assert!(!automatic.uses_ffmpeg());
+        #[cfg(feature = "ffmpeg")]
+        {
+            assert!(!automatic.poll_open().unwrap());
+            assert!(automatic.uses_ffmpeg());
+        }
+        #[cfg(not(feature = "ffmpeg"))]
+        {
+            assert!(automatic.poll_open().is_err());
+            assert!(!automatic.uses_ffmpeg());
+        }
+
+        let corrupt = aac_packet_file(0);
+        let mut source =
+            Source::begin_open(corrupt.path(), PROBE_BUFFER_LEN, DecoderHint::Auto, true).unwrap();
+        assert!(!source.poll_open().unwrap_err().is::<UnsupportedNative>());
+        assert!(!source.uses_ffmpeg());
+
+        let mut source = Source::begin_open(
+            unsupported.path(),
+            PROBE_BUFFER_LEN,
+            DecoderHint::Auto,
+            true,
+        )
+        .unwrap();
+        let cancelled = AtomicBool::new(true);
+        assert!(source.poll_open_with_cancel(Some(&cancelled)).is_err());
+        assert!(!source.uses_ffmpeg());
+        #[cfg(feature = "ffmpeg")]
+        {
+            // Cancellation did not consume the native packet or initiate fallback.
+            assert!(!source.poll_open().unwrap());
+            assert!(source.uses_ffmpeg());
+        }
     }
 
+    #[cfg(feature = "ffmpeg")]
     #[test]
-    fn opened_auto_fallback_never_reopens_a_replaced_source_path() {
+    fn opening_fallback_keeps_the_opened_object_after_path_replacement() {
         let unsupported = aac_packet_file(0x40);
         let replacement = opus_file();
         let directory = tempfile::tempdir().unwrap();
@@ -2143,26 +2389,22 @@ mod tests {
         let file = open_regular_file(&path).unwrap();
         std::fs::copy(replacement.path(), &next).unwrap();
         std::fs::rename(next, &path).unwrap();
-        match Source::open_file_with_cancel(
+        // Replacing the pathname also updates the unlinked original's ctime.
+        let original = SourceIdentity::from_file(&file).unwrap();
+        let replacement = SourceIdentity::from_file(&open_regular_file(&path).unwrap()).unwrap();
+        assert_ne!(original, replacement);
+        let mut source = Source::open_file_unprimed(
             &path,
             file,
             PROBE_BUFFER_LEN,
             DecoderHint::Auto,
             true,
             None,
-        ) {
-            Ok(source) => {
-                assert!(source.uses_ffmpeg());
-                assert_eq!(
-                    source.info.sample_rate, 44_100,
-                    "Not the replacement Opus stream"
-                );
-            }
-            Err(error) => assert!(
-                error.to_string().contains("FFmpeg extension failed"),
-                "{error:#}"
-            ),
-        }
+        )
+        .unwrap();
+        assert!(!source.poll_open().unwrap());
+        assert!(source.uses_ffmpeg());
+        assert_eq!(source.identity(), original);
     }
 
     #[test]

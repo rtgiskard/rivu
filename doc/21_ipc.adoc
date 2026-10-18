@@ -770,6 +770,14 @@ are saved retains the committed desired configuration and reports audio-applicat
 failure. Ordered stop acknowledgement keeps draining events while waiting;
 shutdown independently cancels blocked event delivery.
 
+First-frame opening and playback refill share finite decode-work scheduling:
+each opening round retains its decoder and packet progress and performs at most
+64 work steps before returning to command handling. Stop, replacement Load and
+shutdown retire the unfinished opening; other controls update its pending target.
+An abandoned opening cannot publish Started or Failed for a later generation.
+Container setup, seeking and individual decoder, file or device calls can still
+block; these work bounds are not wall-clock deadlines.
+
 A timeout or client disconnect is not command cancellation: an operation
 already queued at the core may still execute. An unsuccessful acknowledgement
 caused by a response timeout therefore does not prove the requested mutation

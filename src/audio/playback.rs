@@ -24,9 +24,6 @@ pub(super) struct PlaybackOptions {
     pub(super) paused: bool,
     pub(super) device: Option<String>,
     pub(super) volume: f32,
-    pub(super) prior_heard: f64,
-    pub(super) media_read_buffer_len: usize,
-    pub(super) ffmpeg_enabled: bool,
     pub(super) pipewire_auto_mix: bool,
     pub(super) still_mode: bool,
 }
@@ -48,7 +45,8 @@ pub(super) struct Playback {
     still_mode: bool,
 }
 impl Playback {
-    pub(super) fn new(
+    pub(super) fn from_source(
+        mut source: Source,
         options: PlaybackOptions,
         analyzer: &AnalysisWorker,
         waveform: Arc<RwLock<WaveformFrame>>,
@@ -62,13 +60,9 @@ impl Playback {
             paused,
             device,
             volume,
-            prior_heard,
-            media_read_buffer_len,
-            ffmpeg_enabled,
             pipewire_auto_mix,
             still_mode,
         } = options;
-        let mut source = Source::open(&path, media_read_buffer_len, decoder_hint, ffmpeg_enabled)?;
         if let Some(range) = range {
             source.restrict(range)?;
         }
@@ -99,7 +93,7 @@ impl Playback {
             offset_frames: 0,
             generation,
             base_position: start,
-            prior_heard,
+            prior_heard: 0.0,
             eof: false,
             paused,
             waveform,

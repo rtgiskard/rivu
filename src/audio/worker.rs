@@ -4,6 +4,7 @@ use super::{
     AudioCommand, AudioEvent, WaveformFrame,
     output::validate_device,
     playback::{Playback, PlaybackOptions},
+    source::Source,
 };
 use crate::analysis::AnalysisWorker;
 use crate::model::DecoderHint;
@@ -61,6 +62,39 @@ impl CommandInbox {
     }
 }
 
+// Only the worker owns an unfinished source. No output or lifecycle event is
+// published until its first-frame prefix has completed in finite rounds.
+struct Opening {
+    path: PathBuf,
+    range: Option<super::PlaybackRange>,
+    decoder_hint: DecoderHint,
+    generation: u64,
+    start: f64,
+    paused: bool,
+    source: Option<Source>,
+}
+
+impl Opening {
+    fn poll(&mut self, buffer_len: usize, ffmpeg_enabled: bool) -> anyhow::Result<bool> {
+        if self.source.is_none() {
+            self.source = Some(Source::begin_open(
+                &self.path,
+                buffer_len,
+                self.decoder_hint,
+                ffmpeg_enabled,
+            )?);
+        }
+        self.source.as_mut().unwrap().poll_open()
+    }
+
+    fn uses_ffmpeg(&self) -> bool {
+        self.source.as_ref().map_or(
+            self.decoder_hint == DecoderHint::Ffmpeg,
+            Source::uses_ffmpeg,
+        )
+    }
+}
+
 pub(super) struct Worker {
     commands: CommandInbox,
     events: Sender<AudioEvent>,
@@ -68,6 +102,7 @@ pub(super) struct Worker {
     analyzer: AnalysisWorker,
     waveform: Arc<RwLock<WaveformFrame>>,
     playback: Option<Playback>,
+    opening: Option<Opening>,
     device: Option<String>,
     volume: f32,
     media_read_buffer_len: usize,
@@ -97,6 +132,7 @@ impl Worker {
             analyzer,
             waveform,
             playback: None,
+            opening: None,
             device: None,
             volume: 0.7,
             media_read_buffer_len,
@@ -113,6 +149,9 @@ impl Worker {
     }
     fn stop(&mut self) -> (u64, f64) {
         self.analyzer.set_playback_active(false);
+        if let Some(opening) = self.opening.take() {
+            self.last_snapshot = (opening.generation, 0.0);
+        }
         if let Some(mut playback) = self.playback.take() {
             self.last_snapshot = (playback.generation(), playback.close());
         }
@@ -124,31 +163,6 @@ impl Worker {
                 .as_ref()
                 .is_some_and(|playback| !playback.paused()),
         );
-    }
-    fn playback_options(
-        &self,
-        path: PathBuf,
-        range: Option<super::PlaybackRange>,
-        decoder_hint: DecoderHint,
-        generation: u64,
-        start: f64,
-        paused: bool,
-    ) -> PlaybackOptions {
-        PlaybackOptions {
-            path,
-            range,
-            decoder_hint,
-            generation,
-            start,
-            paused,
-            device: self.device.clone(),
-            volume: self.volume,
-            prior_heard: 0.0,
-            media_read_buffer_len: self.media_read_buffer_len,
-            ffmpeg_enabled: self.ffmpeg_enabled,
-            pipewire_auto_mix: self.pipewire_auto_mix,
-            still_mode: self.still_mode,
-        }
     }
     fn command(&mut self, command: AudioCommand) -> bool {
         match command {
@@ -178,6 +192,24 @@ impl Worker {
             }
             AudioCommand::FfmpegEnabled(enabled) => {
                 self.ffmpeg_enabled = enabled;
+                if !enabled
+                    && let Some(source) = self
+                        .opening
+                        .as_mut()
+                        .and_then(|opening| opening.source.as_mut())
+                {
+                    source.disable_opening_fallback();
+                }
+                if !enabled && self.opening.as_ref().is_some_and(Opening::uses_ffmpeg) {
+                    let position = self.opening.as_ref().unwrap().start;
+                    let (generation, heard) = self.stop();
+                    self.event(AudioEvent::Progress {
+                        generation,
+                        position_seconds: position,
+                        listened_seconds: heard,
+                    });
+                    self.event(AudioEvent::DecoderStopped { generation });
+                }
                 if !enabled && self.playback.as_ref().is_some_and(Playback::uses_ffmpeg) {
                     let position = self.playback.as_ref().unwrap().position();
                     let (generation, heard) = self.stop();
@@ -207,39 +239,29 @@ impl Worker {
                 paused,
             } => {
                 self.stop();
-                match Playback::new(
-                    self.playback_options(
-                        path,
-                        range,
-                        decoder_hint,
-                        generation,
-                        start_seconds,
-                        paused,
-                    ),
-                    &self.analyzer,
-                    self.waveform.clone(),
-                ) {
-                    Ok(playback) => {
-                        self.event(AudioEvent::Started {
-                            generation,
-                            info: playback.info().clone(),
-                        });
-                        self.playback = Some(playback);
-                        self.refresh_analysis();
-                    }
-                    Err(error) => self.event(AudioEvent::Failed {
-                        generation,
-                        message: format!("{error:#}"),
-                    }),
-                }
+                self.opening = Some(Opening {
+                    path,
+                    range,
+                    decoder_hint,
+                    generation,
+                    start: start_seconds,
+                    paused,
+                    source: None,
+                });
             }
             AudioCommand::Pause(paused) => {
+                if let Some(opening) = self.opening.as_mut() {
+                    opening.paused = paused;
+                }
                 if let Some(playback) = self.playback.as_mut() {
                     playback.pause(paused);
                 }
                 self.refresh_analysis();
             }
             AudioCommand::Seek(seconds) => {
+                if let Some(opening) = self.opening.as_mut() {
+                    opening.start = seconds.max(0.0);
+                }
                 if let Err(error) = self.reopen(Some(seconds)) {
                     self.fail(error);
                 }
@@ -253,7 +275,7 @@ impl Worker {
                 let mix_changed = self.pipewire_auto_mix != auto_mix;
                 // Explicit idle applications must produce a fresh validation result,
                 // even for unchanged settings; request zero is startup initialization.
-                let idle_apply = self.playback.is_none() && request != 0;
+                let idle_apply = self.playback.is_none() && self.opening.is_none() && request != 0;
                 if device_changed || mix_changed || idle_apply {
                     // Desired settings survive failure; later loads must not use the old sink.
                     self.device = device;
@@ -265,9 +287,9 @@ impl Worker {
                     }
                     .and_then(|()| self.reopen(None));
                     if let Err(error) = result {
-                        if self.playback.is_some() {
-                            // A real stream was stopped: its terminal event remains
-                            // valid even if a newer device request supersedes this one.
+                        if self.playback.is_some() || self.opening.is_some() {
+                            // This generation was stopped, even if a newer
+                            // device request supersedes the failed setting.
                             self.fail(error);
                         } else {
                             self.event(AudioEvent::OutputSettingsFailed {
@@ -303,20 +325,96 @@ impl Worker {
             message: format!("{error:#}"),
         });
     }
+    fn poll_opening(&mut self) {
+        let Some(opening) = self.opening.as_mut() else {
+            return;
+        };
+        let generation = opening.generation;
+        let result = opening.poll(self.media_read_buffer_len, self.ffmpeg_enabled);
+        // Shutdown may disconnect during a single, non-interruptible backend
+        // call. Do not create output or publish completion after cancellation.
+        if matches!(self.shutdown.try_recv(), Err(TryRecvError::Disconnected)) {
+            self.stop();
+            return;
+        }
+        match result {
+            Ok(false) => {}
+            Ok(true) => {
+                let opening = self.opening.take().unwrap();
+                let result = Playback::from_source(
+                    opening.source.unwrap(),
+                    PlaybackOptions {
+                        path: opening.path,
+                        range: opening.range,
+                        decoder_hint: opening.decoder_hint,
+                        generation,
+                        start: opening.start,
+                        paused: opening.paused,
+                        device: self.device.clone(),
+                        volume: self.volume,
+                        pipewire_auto_mix: self.pipewire_auto_mix,
+                        still_mode: self.still_mode,
+                    },
+                    &self.analyzer,
+                    self.waveform.clone(),
+                );
+                if matches!(self.shutdown.try_recv(), Err(TryRecvError::Disconnected)) {
+                    if let Ok(mut playback) = result {
+                        playback.close();
+                    }
+                    return;
+                }
+                match result {
+                    Ok(playback) => {
+                        self.event(AudioEvent::Started {
+                            generation,
+                            info: playback.info().clone(),
+                        });
+                        self.playback = Some(playback);
+                        self.refresh_analysis();
+                    }
+                    Err(error) => self.event(AudioEvent::Failed {
+                        generation,
+                        message: format!("{error:#}"),
+                    }),
+                }
+            }
+            Err(error) => {
+                self.opening = None;
+                self.event(AudioEvent::Failed {
+                    generation,
+                    message: format!("{error:#}"),
+                });
+            }
+        }
+    }
+
+    fn control_round(&mut self) -> bool {
+        if matches!(self.shutdown.try_recv(), Err(TryRecvError::Disconnected)) {
+            self.stop();
+            return false;
+        }
+        let mut remaining = MAX_COMMANDS_PER_ROUND;
+        while let Ok(command) = self.commands.try_recv_round(&mut remaining) {
+            if matches!(self.shutdown.try_recv(), Err(TryRecvError::Disconnected)) {
+                self.stop();
+                return false;
+            }
+            if !self.command(command) {
+                return false;
+            }
+        }
+        true
+    }
+
     pub(super) fn run(mut self) {
         loop {
-            if matches!(self.shutdown.try_recv(), Err(TryRecvError::Disconnected)) {
-                break;
+            if !self.control_round() {
+                return;
             }
-            let mut remaining = MAX_COMMANDS_PER_ROUND;
-            while let Ok(command) = self.commands.try_recv_round(&mut remaining) {
-                if matches!(self.shutdown.try_recv(), Err(TryRecvError::Disconnected)) {
-                    self.stop();
-                    return;
-                }
-                if !self.command(command) {
-                    return;
-                }
+            if self.opening.is_some() {
+                self.poll_opening();
+                continue;
             }
             if self.playback.is_none() {
                 if self.commands.has_ready() {
@@ -438,6 +536,207 @@ fn send_event(events: &Sender<AudioEvent>, shutdown: &Receiver<()>, event: Audio
 mod tests {
     use super::*;
     use crossbeam_channel::bounded;
+
+    fn opening_worker() -> (
+        Worker,
+        Sender<AudioCommand>,
+        Receiver<AudioEvent>,
+        Sender<()>,
+    ) {
+        let (send, commands) = bounded(MAX_COMMANDS_PER_ROUND);
+        let (events, receive) = bounded(16);
+        let (stop, shutdown) = bounded(0);
+        let analyzer = AnalysisWorker::new(Arc::new(RwLock::new(
+            crate::analysis::AnalysisFrame::default(),
+        )))
+        .unwrap();
+        let worker = Worker::new(
+            commands,
+            events,
+            shutdown,
+            analyzer,
+            Arc::new(RwLock::new(WaveformFrame::default())),
+            65536,
+        );
+        (worker, send, receive, stop)
+    }
+
+    fn opening_hints() -> Vec<DecoderHint> {
+        #[cfg(feature = "ffmpeg")]
+        {
+            vec![DecoderHint::Native, DecoderHint::Ffmpeg]
+        }
+        #[cfg(not(feature = "ffmpeg"))]
+        {
+            vec![DecoderHint::Native]
+        }
+    }
+
+    fn load_prefix(
+        worker: &mut Worker,
+        path: &std::path::Path,
+        hint: DecoderHint,
+        generation: u64,
+    ) {
+        worker.ffmpeg_enabled = hint == DecoderHint::Ffmpeg;
+        worker.command(AudioCommand::Load {
+            path: path.to_owned(),
+            range: None,
+            decoder_hint: hint,
+            generation,
+            start_seconds: 0.0,
+            paused: false,
+        });
+    }
+
+    #[test]
+    fn stop_and_snapshot_cancel_real_first_frame_prefix_without_lifecycle_events() {
+        let file = super::super::source::opening_prefix_file(1024, true);
+        for hint in opening_hints() {
+            let (mut worker, commands, events, _shutdown) = opening_worker();
+            load_prefix(&mut worker, file.path(), hint, 41);
+            for _ in 0..2 {
+                worker.poll_opening();
+                assert!(worker.opening.is_some());
+                assert!(worker.playback.is_none());
+                assert!(events.is_empty());
+            }
+            let (reply, snapshot) = bounded(1);
+            commands.send(AudioCommand::StopAndSnapshot(reply)).unwrap();
+            assert!(worker.control_round());
+            assert_eq!(snapshot.try_recv().unwrap(), (41, 0.0));
+            assert!(worker.opening.is_none());
+            worker.poll_opening();
+            assert!(events.is_empty());
+        }
+    }
+
+    #[test]
+    fn replacing_a_real_first_frame_prefix_reports_only_the_new_generation() {
+        let old = super::super::source::opening_prefix_file(1024, true);
+        let empty = super::super::source::opening_prefix_file(0, false);
+        for hint in opening_hints() {
+            let (mut worker, commands, events, _shutdown) = opening_worker();
+            load_prefix(&mut worker, old.path(), hint, 41);
+            worker.poll_opening();
+            assert!(worker.opening.is_some());
+            commands
+                .send(AudioCommand::Load {
+                    path: empty.path().to_owned(),
+                    range: None,
+                    decoder_hint: DecoderHint::Native,
+                    generation: 42,
+                    start_seconds: 0.0,
+                    paused: true,
+                })
+                .unwrap();
+            assert!(worker.control_round());
+            worker.poll_opening();
+            assert!(matches!(
+                events.try_recv(),
+                Ok(AudioEvent::Failed { generation: 42, .. })
+            ));
+            assert!(events.is_empty());
+            assert!(worker.opening.is_none());
+            assert!(worker.playback.is_none());
+        }
+    }
+
+    #[test]
+    fn shutdown_cancels_real_first_frame_prefix_at_the_next_control_round() {
+        let file = super::super::source::opening_prefix_file(1024, true);
+        for hint in opening_hints() {
+            for disconnect in [false, true] {
+                let (mut worker, commands, events, shutdown) = opening_worker();
+                load_prefix(&mut worker, file.path(), hint, 41);
+                worker.poll_opening();
+                assert!(worker.opening.is_some());
+                if disconnect {
+                    drop(shutdown);
+                } else {
+                    commands.send(AudioCommand::Shutdown).unwrap();
+                }
+                assert!(!worker.control_round());
+                assert!(worker.opening.is_none());
+                assert!(worker.playback.is_none());
+                assert!(events.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn rejected_output_settings_cancel_the_opening_generation() {
+        let file = super::super::source::opening_prefix_file(1024, true);
+        let (mut worker, commands, events, _shutdown) = opening_worker();
+        load_prefix(&mut worker, file.path(), DecoderHint::Native, 41);
+        worker.poll_opening();
+        assert!(worker.opening.is_some());
+        commands
+            .send(AudioCommand::OutputSettings {
+                request: 7,
+                device: Some("invalid-opening-target".into()),
+                auto_mix: false,
+            })
+            .unwrap();
+        assert!(worker.control_round());
+        assert!(worker.opening.is_none());
+        assert_eq!(worker.device.as_deref(), Some("invalid-opening-target"));
+        assert!(!worker.pipewire_auto_mix);
+        assert!(matches!(
+            events.try_recv(),
+            Ok(AudioEvent::Failed { generation: 41, .. })
+        ));
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn disabling_ffmpeg_before_the_first_open_round_cancels_its_generation() {
+        let (mut worker, commands, events, _shutdown) = opening_worker();
+        load_prefix(
+            &mut worker,
+            std::path::Path::new("unopened.mka"),
+            DecoderHint::Ffmpeg,
+            41,
+        );
+        commands.send(AudioCommand::FfmpegEnabled(false)).unwrap();
+        assert!(worker.control_round());
+        assert!(worker.opening.is_none());
+        assert!(matches!(
+            events.try_recv(),
+            Ok(AudioEvent::Progress { generation: 41, .. })
+        ));
+        assert!(matches!(
+            events.try_recv(),
+            Ok(AudioEvent::DecoderStopped { generation: 41 })
+        ));
+        assert!(events.is_empty());
+    }
+
+    #[cfg(feature = "ffmpeg")]
+    #[test]
+    fn disabling_ffmpeg_cancels_its_real_opening_without_started_or_failed() {
+        let file = super::super::source::opening_prefix_file(1024, true);
+        let (mut worker, commands, events, _shutdown) = opening_worker();
+        load_prefix(&mut worker, file.path(), DecoderHint::Ffmpeg, 41);
+        worker.poll_opening();
+        assert!(worker.opening.is_some());
+        commands.send(AudioCommand::FfmpegEnabled(false)).unwrap();
+        assert!(worker.control_round());
+        assert!(worker.opening.is_none());
+        assert!(matches!(
+            events.try_recv(),
+            Ok(AudioEvent::Progress {
+                generation: 41,
+                listened_seconds: 0.0,
+                ..
+            })
+        ));
+        assert!(matches!(
+            events.try_recv(),
+            Ok(AudioEvent::DecoderStopped { generation: 41 })
+        ));
+        assert!(events.is_empty());
+    }
 
     #[test]
     fn rejected_output_change_keeps_new_target_instead_of_reusing_previous_device() {

@@ -16,11 +16,14 @@
 //! Stop/snapshot drains events while waiting; shutdown cancels blocked delivery.
 //!
 //! Scheduling rounds admit at most 64 commands, including coalesced seeks and
-//! read-ahead barriers. A refill submits only the initially vacant ring prefix
-//! and decodes at most 64 PCM chunks; concurrently reclaimed space belongs to
-//! the next round. A partial packet tail stays ahead of later PCM and EOF.
-//! Ready commands or refill work run another round without a timer wait.
-//! These are work bounds, not wall-clock bounds on decoder/device/file calls.
+//! read-ahead barriers. Opening retains decoder progress and yields after at
+//! most 64 decode work steps; queued controls update or cancel that opening
+//! before the next round. Cancelled openings publish no lifecycle completion.
+//! A refill submits only the initially vacant ring prefix and decodes at most
+//! 64 PCM chunks; concurrently reclaimed space belongs to the next round.
+//! A partial packet tail stays ahead of later PCM and EOF. Ready commands,
+//! opening or refill work run another round without a timer wait. These are
+//! work bounds, not wall-clock bounds on decoder/device/file calls.
 
 #[cfg(not(target_os = "linux"))]
 compile_error!("Rivu requires Linux and native PipeWire audio output");
