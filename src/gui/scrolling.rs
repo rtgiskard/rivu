@@ -149,16 +149,12 @@ impl ScrollViews {
         };
     }
 
-    pub(super) fn page(&self, down: bool, position: Point<Pixels>) -> bool {
-        let target = self.active.or_else(|| self.under_pointer(position));
-        let Some(region) = target
-            .and_then(|target| self.regions.get(&target))
-            .filter(|region| region.visible)
-        else {
-            return false;
-        };
+    /// Return the panel whose viewport changed so its cached view can be invalidated.
+    pub(super) fn page(&self, down: bool, position: Point<Pixels>) -> Option<u64> {
+        let target = self.active.or_else(|| self.under_pointer(position))?;
+        let region = self.regions.get(&target).filter(|region| region.visible)?;
         region.handle.page(down);
-        true
+        Some(target.1)
     }
 }
 
@@ -201,7 +197,7 @@ mod tests {
         views.begin_panel(metadata);
         views.finish_frame();
         assert!(views.active.is_none());
-        assert!(!views.page(true, gpui::point(px(0.), px(0.))));
+        assert!(views.page(true, gpui::point(px(0.), px(0.))).is_none());
         assert!(views.under_pointer(gpui::point(px(0.), px(0.))).is_none());
         views.scroll_list_to("queue", 80);
         assert!(queue_scroll.0.borrow().deferred_scroll_to_item.is_none());

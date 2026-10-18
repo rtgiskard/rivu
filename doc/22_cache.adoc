@@ -22,6 +22,12 @@ dependencies, including while its panels are hidden, and owns the execution and
 completion of its reads. Directory and root-count preparation, publication, and
 physical-worker retirement are Library owner transitions. Logical cancellation
 only changes publication rights; it cannot free a submitted worker slot.
+A retired completion still releases its physical slot and reevaluates current
+demand, including demand from a reopened consumer that was blocked by that slot.
+This handoff does not retry a current failure or poll an unfinished business task.
+Transport failures are handled without treating their absent payload revisions
+as evidence that a collection changed; successful payloads must pass their stamp
+and current-intent checks before publication.
 Queued directory demand alone does not invalidate the view; local forest
 publication and worker progress supply the notifications that resume rendering.
 

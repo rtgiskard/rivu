@@ -82,12 +82,20 @@ impl Library {
         if projection_changed {
             self.requests.cancel_directory_demand();
         }
+        if self.library.range_selection.target.is_none()
+            && let Some(intent) = self.selection_intent
+        {
+            self.fail_selection(intent, cx);
+        }
         self.library.sync_root_counts(
             &state.system.config.library_roots,
             state.library.structure_revision,
         );
         self.state = state;
         if !self.demanded() {
+            if let Some(intent) = self.library.navigation_intent {
+                self.fail_selection(intent, cx);
+            }
             self.cancel_reads();
         }
         self.sync_loading_text(cx);
@@ -106,6 +114,9 @@ impl Library {
         }
         self.visible = visible;
         if !self.demanded() {
+            if let Some(intent) = self.library.navigation_intent {
+                self.fail_selection(intent, cx);
+            }
             self.cancel_reads();
         }
         self.sync_loading_text(cx);
@@ -134,13 +145,16 @@ impl Library {
         }
     }
 
-    pub(in crate::gui) fn cancel_selection(&mut self) {
-        self.selection_intent = None;
+    pub(in crate::gui) fn cancel_selection(&mut self, cx: &mut Context<Self>) {
+        let pending = self.selection_intent.take().is_some();
         self.library.cancel_manual_selection();
+        if pending {
+            cx.notify();
+        }
     }
 
     pub(in crate::gui) fn clear_selection(&mut self, cx: &mut Context<Self>) {
-        self.cancel_selection();
+        self.cancel_selection(cx);
         self.library.clear_selection();
         cx.notify();
     }
@@ -162,7 +176,7 @@ impl Library {
 
     pub(super) fn fail_selection(&mut self, intent: ManualIntentId, cx: &mut Context<Self>) {
         if self.manual_intent_current(intent) {
-            self.selection_intent = None;
+            self.cancel_selection(cx);
             cx.emit(LibraryEvent::Failed(intent));
         }
     }

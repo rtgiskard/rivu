@@ -132,14 +132,14 @@ fn resolve_album(
             *offset = ids.len();
         }
         let response = query_page(query);
+        let result = response
+            .result
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
         anyhow::ensure!(
             scope.stamp(response.revisions) == expected,
             "collection changed"
         );
-        let ViewResponse::AlbumTracks(page) = response
-            .result
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?
-        else {
+        let ViewResponse::AlbumTracks(page) = result else {
             anyhow::bail!("unexpected album response");
         };
         anyhow::ensure!(
@@ -166,6 +166,43 @@ fn valid_page(offset: usize, rows: usize, total: usize) -> bool {
 }
 
 impl GuiApp {
+    fn set_content_resolution(&mut self, pending: bool, cx: &mut Context<Self>) {
+        if self.content_resolution != pending {
+            self.content_resolution = pending;
+            self.sync_transfer_state(cx);
+        }
+    }
+
+    pub(super) fn replace_content_menu(
+        &mut self,
+        menu: Option<ContentMenu>,
+        cx: &mut Context<Self>,
+    ) -> Option<ContentMenu> {
+        let previous = std::mem::replace(&mut self.content_menu, menu);
+        if previous.as_ref().is_some_and(|menu| menu.playlists)
+            != self
+                .content_menu
+                .as_ref()
+                .is_some_and(|menu| menu.playlists)
+        {
+            self.reconcile_feature_demand(cx);
+        }
+        if previous.is_some() || self.content_menu.is_some() {
+            cx.notify();
+        }
+        previous
+    }
+
+    fn set_content_menu_playlists(&mut self, visible: bool, cx: &mut Context<Self>) {
+        if let Some(menu) = &mut self.content_menu
+            && menu.playlists != visible
+        {
+            menu.playlists = visible;
+            self.reconcile_feature_demand(cx);
+            cx.notify();
+        }
+    }
+
     pub(super) fn open_content_menu(
         &mut self,
         request: ContentMenuRequest,
@@ -193,12 +230,12 @@ impl GuiApp {
         if matches!(&request.source, TrackSource::Tracks(ids) if ids.is_empty())
             && nodes.as_ref().is_none_or(Vec::is_empty)
         {
-            self.content_menu = None;
+            self.replace_content_menu(None, cx);
             cx.notify();
             return;
         }
         if matches!(request.source, TrackSource::Album(_)) && self.content_resolution {
-            self.content_menu = None;
+            self.replace_content_menu(None, cx);
             self.error = Some(self.i18n.text("li-source-busy").to_owned());
             cx.notify();
             return;
@@ -224,7 +261,7 @@ impl GuiApp {
             Some(Command::RemovePlaylistEntries { .. }) => "gl-remove-playlist",
             _ => "gl-remove-library-selected",
         };
-        self.content_menu = Some(ContentMenu {
+        let menu = Some(ContentMenu {
             token,
             source: request.source,
             nodes,
@@ -239,8 +276,9 @@ impl GuiApp {
             confirm_remove: None,
             playlists: false,
         });
+        self.replace_content_menu(menu, cx);
         if let Some(key) = album {
-            self.content_resolution = true;
+            self.set_content_resolution(true, cx);
             let query = Query::AlbumTracks {
                 key: key.clone(),
                 query: None,
@@ -255,7 +293,7 @@ impl GuiApp {
                     .spawn(async move { resolve_album(|query| handle.query(query), key, stamp) })
                     .await;
                 let _ = this.update(cx, |this, cx| {
-                    this.content_resolution = false;
+                    this.set_content_resolution(false, cx);
                     this.refresh(cx);
                     if !this
                         .content_menu
@@ -271,11 +309,11 @@ impl GuiApp {
                             menu.loading = false;
                         }
                         Ok(_) => {
-                            this.content_menu = None;
+                            this.replace_content_menu(None, cx);
                             this.error = Some(this.i18n.text("li-source-changed").to_owned());
                         }
                         Err(error) => {
-                            this.content_menu = None;
+                            this.replace_content_menu(None, cx);
                             this.error = Some(error.to_string());
                         }
                     }
@@ -302,7 +340,7 @@ impl GuiApp {
                     cx.notify();
                     return;
                 }
-                self.content_resolution = true;
+                self.set_content_resolution(true, cx);
                 let generation = self.content_generation;
                 let guard = ContentGuard::Library(
                     self.state.library.revision,
@@ -333,7 +371,7 @@ impl GuiApp {
                         )
                         .await;
                     let _ = this.update(cx, |this, cx| {
-                        this.content_resolution = false;
+                        this.set_content_resolution(false, cx);
                         this.refresh(cx);
                         if this.content_generation != generation
                             || !this.window_visible
@@ -402,7 +440,7 @@ impl GuiApp {
 
     fn content_action(&mut self, action: ContentAction, cx: &mut Context<Self>) {
         self.refresh(cx);
-        let Some(menu) = self.content_menu.take() else {
+        let Some(menu) = self.replace_content_menu(None, cx) else {
             return;
         };
         if menu.loading || !menu.guard.current(self) {
@@ -470,15 +508,19 @@ impl GuiApp {
     }
 
     pub(super) fn back_content_menu(&mut self, cx: &mut Context<Self>) {
-        if let Some(menu) = &mut self.content_menu {
-            if menu.playlists || menu.confirm_remove.is_some() {
-                menu.playlists = false;
+        if self
+            .content_menu
+            .as_ref()
+            .is_some_and(|menu| menu.playlists || menu.confirm_remove.is_some())
+        {
+            self.set_content_menu_playlists(false, cx);
+            if let Some(menu) = &mut self.content_menu {
                 menu.confirm_remove = None;
-            } else {
-                self.content_menu = None;
             }
+            cx.notify();
+        } else {
+            self.replace_content_menu(None, cx);
         }
-        cx.notify();
     }
 
     pub(super) fn content_menu_overlay(
@@ -493,7 +535,7 @@ impl GuiApp {
         let mut menu = context_menu_container(theme, "content-menu", window)
             .map(|surface| self.menu_surface(surface, cx))
             .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                this.content_menu = None;
+                this.replace_content_menu(None, cx);
                 cx.stop_propagation();
                 cx.notify();
             }));
@@ -519,7 +561,7 @@ impl GuiApp {
                     self.tr("gl-cancel"),
                     cx,
                     |this, _, cx| {
-                        this.content_menu = None;
+                        this.replace_content_menu(None, cx);
                         cx.notify();
                     },
                 ))
@@ -541,7 +583,7 @@ impl GuiApp {
                     cx,
                     |this, window, cx| {
                         this.refresh(cx);
-                        let Some(menu) = this.content_menu.take() else {
+                        let Some(menu) = this.replace_content_menu(None, cx) else {
                             return;
                         };
                         if !menu.guard.current(this) {
@@ -616,10 +658,7 @@ impl GuiApp {
                     self.tr("shell-back"),
                     cx,
                     |this, _, cx| {
-                        if let Some(menu) = &mut this.content_menu {
-                            menu.playlists = false;
-                        }
-                        cx.notify();
+                        this.set_content_menu_playlists(false, cx);
                     },
                 ));
         } else {
@@ -643,13 +682,7 @@ impl GuiApp {
                     self.tr("li-playlist"),
                     cx,
                     |this, _, cx| {
-                        if let Some(menu) = &mut this.content_menu {
-                            menu.playlists = true;
-                        }
-                        this.playlists.update(cx, |playlists, cx| {
-                            playlists.ensure_playlist_range(0..1, cx);
-                        });
-                        cx.notify();
+                        this.set_content_menu_playlists(true, cx);
                     },
                 ));
             if state.tracks_only {
@@ -730,7 +763,7 @@ impl GuiApp {
         else {
             return;
         };
-        self.content_resolution = true;
+        self.set_content_resolution(true, cx);
         let generation = self.content_generation;
         let revisions = self.state.query_revisions(Some(playlist_id));
         let handle = self.handle.clone();
@@ -749,13 +782,14 @@ impl GuiApp {
                             expected: Some(revisions),
                         };
                         let response = handle.query(query.clone());
+                        let result = response
+                            .result
+                            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
                         anyhow::ensure!(
                             query.stamp(response.revisions) == query.stamp(revisions),
                             "playlist changed"
                         );
-                        let crate::response::ViewResponse::PlaylistEntryBatch(batch) = response
-                            .result
-                            .map_err(|error| anyhow::anyhow!(error.to_string()))?
+                        let crate::response::ViewResponse::PlaylistEntryBatch(batch) = result
                         else {
                             anyhow::bail!("unexpected playlist response");
                         };
@@ -774,7 +808,7 @@ impl GuiApp {
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.content_resolution = false;
+                this.set_content_resolution(false, cx);
                 this.refresh(cx);
                 if this.content_generation != generation
                     || !this.window_visible

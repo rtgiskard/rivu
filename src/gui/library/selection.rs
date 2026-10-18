@@ -303,6 +303,7 @@ pub(super) struct LibrarySelection {
     // Cancellation keeps this slot occupied until the outstanding query returns.
     active: Option<u64>,
     intent: Option<ManualIntentId>,
+    pub(super) target: Option<usize>,
 }
 
 impl LibrarySelection {
@@ -310,6 +311,7 @@ impl LibrarySelection {
         self.projection.cancel();
         self.intent = None;
         self.pending = None;
+        self.target = None;
         if clear_anchor {
             self.anchor = None;
         }
@@ -340,6 +342,8 @@ enum RangeStep {
 
 impl LibraryBrowser {
     fn publish_selection(&mut self, commit: LibraryCommit) -> LibraryNode {
+        self.range_selection.target = None;
+        self.range_selection.intent = None;
         if let Some(selected) = commit.selected {
             self.apply_range(selected, commit.multi);
             if !self
@@ -398,6 +402,7 @@ impl LibraryBrowser {
         let range = self.range_selection.interval(&scope, index);
         self.range_selection.cancel(false);
         let query = self.projection_query();
+        self.range_selection.target = Some(index);
         self.range_selection.projection.sync(&query, revisions);
         let spans = self
             .tree
@@ -592,6 +597,7 @@ impl Library {
         } = request;
         let revisions = self.state.query_revisions(None);
         if !shift {
+            self.library.range_selection.target = Some(index);
             let commit = LibraryCommit {
                 scope: Scope::capture(&self.library, revisions),
                 endpoint: node,
@@ -670,8 +676,11 @@ impl Library {
         commit: LibraryCommit,
         cx: &mut Context<Self>,
     ) {
+        self.selection_intent = None;
         let endpoint = self.library.publish_selection(commit);
-        cx.emit(LibraryEvent::Focus);
+        if self.demanded() {
+            cx.emit(LibraryEvent::Focus);
+        }
         self.finish_library_selection(&endpoint, cx);
     }
 
@@ -911,6 +920,36 @@ mod tests {
                     .collect(),
             },
         );
+    }
+
+    #[test]
+    fn navigation_tracks_prepared_and_uncached_targets_until_commit_or_cancel() {
+        let (mut library, branch, _) = grouped(20, 2);
+        publish_row(&mut library, LibraryNode::Track(0), 1);
+        assert_eq!(library.navigate_tree_row(2), Some(LibraryNode::Track(1)));
+        assert_eq!(library.tree.selected_index(), Some(1));
+        assert_eq!(library.manual_navigation_index(), Some(2));
+        // Preparation precedes the root's cancellation of the previous action.
+        let next = library.manual_navigation_index().unwrap() + 1;
+        library.cancel_manual_selection();
+        assert!(library.navigate_tree_row(next).is_none());
+        let mut intents = crate::gui::manual_actions::ManualIntents::default();
+        library.defer_manual_navigation(intents.begin());
+        let next = library.manual_navigation_index().unwrap() + 1;
+        library.cancel_manual_selection();
+        assert!(library.navigate_tree_row(next).is_none());
+        let latest = intents.begin();
+        library.defer_manual_navigation(latest);
+        assert_eq!(next, 4);
+        load_group(&mut library, &branch, 2, 20, 2, 3);
+        assert_eq!(library.take_ready_manual_navigation(), Some((latest, 4)));
+        assert_eq!(library.tree.selected_index(), Some(1));
+        publish_row(&mut library, LibraryNode::Track(3), 4);
+        assert_eq!(library.manual_navigation_index(), Some(4));
+        assert!(library.navigate_tree_row(5).is_none());
+        library.cancel_manual_selection();
+        assert_eq!(library.manual_navigation_index(), Some(4));
+        assert!(library.take_ready_manual_navigation().is_none());
     }
 
     #[test]

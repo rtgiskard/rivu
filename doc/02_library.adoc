@@ -163,8 +163,10 @@ Use a list's Search button, or Ctrl+F with that list focused, to open and focus 
 search field. Once open, the Search button focuses the field without closing it.
 Each list keeps its own search condition. A nonempty search stays visible; use
 the field's Clear search button to restore the complete list without closing the
-field. Esc clears the search first and folds an empty field on the next press,
-after dismissing any active popup or composition.
+field. From list focus, Esc clears that list's search first and folds an empty
+field on the next press. Leaving a focused editor or dismissing an active popup
+or composition takes precedence. Ctrl+F retains the already focused search field,
+including when playlist names and playlist entries have different searches.
 While the search field is open, counts inside its right edge show matches and the
 unfiltered total; counts are hidden when it is folded. No matches is distinct from an empty
 collection. Searching changes the view, not the saved contents or playback order.
@@ -372,6 +374,9 @@ the playing track changes; unsaved or saving details stay on the original track
 instead of following playback. Saving resolves that draft; to abandon it, select
 another track, clear the selection, or reload and confirm Discard. Track details
 has no standalone Discard button. Edits made during a save remain protected.
+In playback-follow mode, manually restoring all edited fields and the decoder
+hint to their saved values also resumes follow once no save or manual action is
+pending. Explicitly selected tracks do not switch to playback automatically.
 Selecting a different track or clearing selection asks for Discard or Cancel;
 Cancel retains the draft and previous selection. Escape first leaves a focused
 input; Escape from the layout requests selection clearing with the same protection.

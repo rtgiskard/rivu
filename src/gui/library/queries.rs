@@ -192,6 +192,7 @@ impl Library {
             state.query_revisions(None),
         );
         if request.published {
+            self.resume_library_navigation(cx);
             cx.notify();
         }
         let Some(read) = request.read else {
@@ -232,6 +233,7 @@ impl Library {
                 {
                     this.report_error(error, cx);
                 }
+                this.resume_library_navigation(cx);
                 this.dispatch_directory_demand(cx);
                 cx.notify();
             });
@@ -266,7 +268,7 @@ impl Library {
         if self.library.buffer().query.as_deref().unwrap_or_default() == query {
             return;
         }
-        self.cancel_selection();
+        self.cancel_selection(cx);
         cx.emit(LibraryEvent::SearchChanged);
         self.library.refresh_search(query);
         self.request_directory_page(TreeBranch::default(), 0, cx);

@@ -56,10 +56,17 @@ impl ManualIntents {
         (self.serial == id.0).then_some(action)
     }
 
-    fn reject(&mut self, id: ManualIntentId) {
-        if self.current(id) {
-            self.preparing = false;
+    fn settle(&mut self, id: ManualIntentId) -> bool {
+        if self.serial != id.0 || (!self.preparing && self.pending.is_none()) {
+            return false;
         }
+        self.preparing = false;
+        self.pending = None;
+        true
+    }
+
+    pub(in crate::gui) fn allows_follow(&self) -> bool {
+        !self.preparing && self.pending.is_none()
     }
 }
 
@@ -79,22 +86,58 @@ pub(in crate::gui) enum ManualAction {
 
 impl GuiApp {
     pub(in crate::gui) fn begin_manual_intent(&mut self, cx: &mut Context<Self>) -> ManualIntentId {
+        let confirmation_open = self.manual_confirmation_open();
         let id = self.manual_intents.begin();
         self.library
-            .update(cx, |library, _| library.cancel_selection());
+            .update(cx, |library, cx| library.cancel_selection(cx));
         self.queue
             .update(cx, |queue, cx| queue.cancel_selection(cx));
         self.playlists
-            .update(cx, |playlists, _| playlists.cancel_selection());
+            .update(cx, |playlists, cx| playlists.cancel_selection(cx));
+        self.sync_transfer_state(cx);
+        if confirmation_open {
+            cx.notify();
+        }
         id
+    }
+
+    pub(super) fn invalidate_manual_intent(&mut self, cx: &mut Context<Self>) {
+        let id = self.begin_manual_intent(cx);
+        self.settle_manual_intent(id, cx);
     }
 
     pub(in crate::gui) fn manual_intent_current(&self, id: ManualIntentId) -> bool {
         self.manual_intents.current(id)
     }
 
-    pub(in crate::gui) fn fail_manual_intent(&mut self, id: ManualIntentId) {
-        self.manual_intents.reject(id);
+    pub(in crate::gui) fn fail_manual_intent(
+        &mut self,
+        id: ManualIntentId,
+        cx: &mut Context<Self>,
+    ) {
+        if self.manual_intent_current(id) {
+            self.settle_manual_intent(id, cx);
+        }
+    }
+
+    pub(super) fn settle_manual_intent(&mut self, id: ManualIntentId, cx: &mut Context<Self>) {
+        let confirmation_open = self.manual_confirmation_open();
+        if self.manual_intents.settle(id) {
+            self.reconcile_manual_follow(cx);
+            if confirmation_open {
+                cx.notify();
+            }
+        }
+    }
+
+    pub(super) fn reconcile_manual_follow(&mut self, cx: &mut Context<Self>) {
+        // A clean notification can be held behind preparation or confirmation.
+        // Every non-commit terminal transition releases that barrier; metadata
+        // still owns protection and explicit-track versus playback-follow policy.
+        if self.manual_intents.allows_follow() {
+            self.metadata
+                .update(cx, |metadata, cx| metadata.resume_follow(cx));
+        }
     }
 
     fn manual_action_valid(&self, action: &ManualAction, cx: &gpui::App) -> bool {
@@ -134,7 +177,7 @@ impl GuiApp {
             return;
         }
         if !self.manual_action_valid(&action, cx) {
-            self.manual_intents.reject(id);
+            self.fail_manual_intent(id, cx);
             self.reject_stale_manual_action(cx);
             return;
         }
@@ -159,20 +202,36 @@ impl GuiApp {
     }
 
     pub(super) fn cancel_manual_action(&mut self, cx: &mut Context<Self>) {
-        self.begin_manual_intent(cx);
+        self.invalidate_manual_intent(cx);
         cx.notify();
     }
 
     pub(super) fn resume_manual_action(&mut self, discard: bool, cx: &mut Context<Self>) {
-        let Some(action) = self.manual_intents.take_pending() else {
+        self.refresh(cx);
+        let Some((id, action)) = self.manual_intents.pending.as_ref() else {
             return;
         };
-        self.refresh(cx);
-        // Validate the frozen target before touching the original editor or draft.
-        if !self.manual_action_valid(&action, cx) {
+        // Validate while the confirmation still owns its identity, before either
+        // taking the commit or touching the original editor and draft.
+        if !self.manual_action_valid(action, cx) {
+            let id = *id;
+            self.settle_manual_intent(id, cx);
             self.reject_stale_manual_action(cx);
             return;
         }
+        // Clean notifications are queued. A later edit may already protect the
+        // original draft again; only explicit Discard may bypass that barrier.
+        if !discard
+            && self
+                .metadata
+                .read(cx)
+                .needs_confirmation(self.manual_action_target(action, cx), cx)
+        {
+            return;
+        }
+        let Some(action) = self.manual_intents.take_pending() else {
+            return;
+        };
         if discard {
             self.metadata
                 .update(cx, |metadata, cx| metadata.discard(cx));
@@ -292,6 +351,52 @@ mod tests {
     use super::{ManualAction, ManualIntents};
 
     #[test]
+    fn settlement_releases_both_barriers_once_without_reopening_committed_actions() {
+        for confirming in [false, true] {
+            let mut owner = ManualIntents::default();
+            let intent = owner.begin();
+            if confirming {
+                assert!(owner.offer(intent, ManualAction::Clear, true).is_none());
+            }
+            assert!(!owner.allows_follow());
+            assert!(owner.settle(intent));
+            assert!(owner.allows_follow());
+            assert!(owner.take_pending().is_none());
+            assert!(!owner.settle(intent));
+            assert!(owner.offer(intent, ManualAction::Quit, true).is_none());
+
+            let committed = owner.begin();
+            assert!(matches!(
+                owner.offer(committed, ManualAction::Clear, false),
+                Some(ManualAction::Clear)
+            ));
+            assert!(!owner.settle(committed));
+            let newer = owner.begin();
+            assert!(!owner.settle(committed));
+            assert!(owner.current(newer));
+            assert!(!owner.allows_follow());
+        }
+    }
+
+    #[test]
+    fn clean_editor_cannot_follow_over_newer_preparing_or_confirmed_intent() {
+        let mut owner = ManualIntents::default();
+        assert!(owner.allows_follow());
+        let first = owner.begin();
+        assert!(!owner.allows_follow());
+        assert!(owner.offer(first, ManualAction::Clear, true).is_none());
+        assert!(!owner.allows_follow());
+        let newer = owner.begin();
+        assert!(!owner.settle(first));
+        assert!(!owner.allows_follow());
+        assert!(owner.take_pending().is_none());
+        assert!(owner.settle(newer));
+        assert!(owner.allows_follow());
+        assert!(owner.offer(first, ManualAction::Quit, true).is_none());
+        assert!(owner.offer(newer, ManualAction::Quit, true).is_none());
+    }
+
+    #[test]
     fn late_range_cannot_replace_newer_exit_or_clean_selection() {
         let mut owner = ManualIntents::default();
         let range = owner.begin();
@@ -341,7 +446,7 @@ mod tests {
         assert!(owner.offer(protected, ManualAction::Clear, false).is_none());
         assert!(owner.take_pending().is_none());
         let failed = owner.begin();
-        owner.reject(failed);
+        assert!(owner.settle(failed));
         assert!(owner.offer(failed, ManualAction::Clear, false).is_none());
         assert!(owner.take_pending().is_none());
     }

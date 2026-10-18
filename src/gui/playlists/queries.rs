@@ -14,7 +14,7 @@ impl Playlists {
         if self.browser.playlists().summaries().query == query {
             return;
         }
-        self.cancel_selection();
+        self.cancel_selection(cx);
         cx.emit(PlaylistEvent::SearchChanged);
         if matches!(self.playlist_action, Some(PlaylistAction::Menu(..))) {
             self.playlist_action = None;
@@ -36,7 +36,7 @@ impl Playlists {
         if self.browser.playlists().entries().query == query {
             return;
         }
-        self.cancel_selection();
+        self.cancel_selection(cx);
         cx.emit(PlaylistEvent::SearchChanged);
         self.browser.search_playlist_entries(query);
         if let Some(id) = self.browser.playlists().selected() {

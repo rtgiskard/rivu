@@ -33,7 +33,7 @@ impl GuiApp {
             cx.stop_active_drag(window);
         }
         self.apply_layout_change(cancellation, cx);
-        self.begin_manual_intent(cx);
+        self.invalidate_manual_intent(cx);
         self.shell.dismiss(shell::Surface::Layouts);
         self.layout_action = None;
         self.shell.dismiss(shell::Surface::PanelCatalog);
@@ -396,6 +396,7 @@ impl GuiApp {
             AudioVisualizerOptions::from(self.state.system.config.as_ref()),
             crate::config::AlbumArtworkOptions::from(self.state.system.config.as_ref()),
         );
+        self.reconcile_feature_demand(cx);
         self.sync_analysis(cx);
         cx.notify();
     }

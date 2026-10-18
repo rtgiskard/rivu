@@ -565,11 +565,12 @@ impl PlaylistState {
             return None;
         }
         if !self.playlist_read_current(read, current)
-            || !self.requests.projections[&read.kind].accepts(
-                &read.query,
-                read.owner_generation,
-                response.revisions,
-            )
+            || (response.result.is_ok()
+                && !self.requests.projections[&read.kind].accepts(
+                    &read.query,
+                    read.owner_generation,
+                    response.revisions,
+                ))
         {
             self.cancel_playlist_read(read.kind);
             return None;
@@ -1030,7 +1031,8 @@ mod tests {
                 &read,
                 revisions,
                 QueryResponse {
-                    revisions,
+                    // Transport failures lack the playlist-local revision scope.
+                    revisions: QueryRevisions::default(),
                     result: Err(crate::response::QueryError::Message("unavailable".into())),
                 }
             ),

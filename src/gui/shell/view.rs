@@ -9,7 +9,6 @@ impl Render for GuiApp {
         self.presentation.update(cx, |presentation, cx| {
             presentation.request_frame(window, cx)
         });
-        self.reconcile_feature_demand(cx);
         self.synchronize_interaction(window, cx);
         self.synchronize_keyboard_focus(window, cx);
         if self.workspace.interaction.docking().is_some()

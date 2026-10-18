@@ -202,6 +202,11 @@ impl Playlists {
                 .query_revisions(self.browser.playlists().selected()),
         );
         self.browser.refresh_playlists(changes);
+        if (refresh_selection || selected != self.browser.playlists().selected())
+            && let Some(intent) = self.intent
+        {
+            self.fail_manual_intent(intent, cx);
+        }
         if refresh_selection {
             self.dispatch_entry_reconcile(cx);
         }
@@ -306,9 +311,15 @@ impl Playlists {
         &mut self,
         library_selection_pending: bool,
         content_resolution: bool,
+        cx: &mut Context<Self>,
     ) {
-        self.library_selection_pending = library_selection_pending;
-        self.content_resolution = content_resolution;
+        if (self.library_selection_pending, self.content_resolution)
+            != (library_selection_pending, content_resolution)
+        {
+            self.library_selection_pending = library_selection_pending;
+            self.content_resolution = content_resolution;
+            cx.notify();
+        }
     }
     pub(in crate::gui) fn set_focused(&mut self, focused: bool, cx: &mut Context<Self>) {
         if self.focused != focused {
@@ -326,15 +337,24 @@ impl Playlists {
         cx.emit(PlaylistEvent::Focus(None));
     }
     fn focus_list(&mut self, cx: &mut Context<Self>) {
+        let changed = !self.focused
+            || self.browser.focus() != Some(BrowserFocus::List(ListFocus::PlaylistTracks));
         self.focused = true;
         self.browser.focus_list(ListFocus::PlaylistTracks);
+        if changed {
+            cx.notify();
+        }
         cx.emit(PlaylistEvent::Focus(Some(BrowserFocus::List(
             ListFocus::PlaylistTracks,
         ))));
     }
     fn focus_catalog(&mut self, cx: &mut Context<Self>) {
+        let changed = !self.focused || self.browser.focus() != Some(BrowserFocus::Playlists);
         self.focused = true;
         self.browser.focus_playlists();
+        if changed {
+            cx.notify();
+        }
         cx.emit(PlaylistEvent::Focus(Some(BrowserFocus::Playlists)));
     }
     fn menu_surface(&self, surface: gpui::Stateful<Div>) -> gpui::Stateful<Div> {
@@ -380,28 +400,36 @@ impl Playlists {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let search = if entries && self.browser.playlists().selected().is_some() {
-            &self.playlist_entries_search
-        } else {
-            &self.playlist_search
-        };
+        let search = self.search_for_input(entries, window, cx);
         search.update(cx, |search, cx| search.focus(window, cx));
     }
     pub(in crate::gui) fn escape_search(
         &mut self,
+        entries: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        self.search_for_input(entries, window, cx)
+            .update(cx, |search, cx| search.escape(window, cx))
+    }
+    fn search_for_input(&self, entries: bool, window: &Window, cx: &App) -> &Entity<ListSearch> {
         for search in [&self.playlist_search, &self.playlist_entries_search] {
             if search.read(cx).input_focused(window, cx) {
-                return search.update(cx, |search, cx| search.escape(window, cx));
+                return search;
             }
         }
-        false
+        if entries && self.browser.playlists().selected().is_some() {
+            &self.playlist_entries_search
+        } else {
+            &self.playlist_search
+        }
     }
-    pub(in crate::gui) fn cancel_selection(&mut self) {
-        self.intent = None;
+    pub(in crate::gui) fn cancel_selection(&mut self, cx: &mut Context<Self>) {
+        let pending = self.intent.take().is_some();
         self.browser.playlist_selection_mut().cancel_manual();
+        if pending {
+            cx.notify();
+        }
     }
     fn manual_intent_current(&self, intent: ManualIntentId) -> bool {
         self.intent == Some(intent)
@@ -409,6 +437,7 @@ impl Playlists {
     fn fail_manual_intent(&mut self, intent: ManualIntentId, cx: &mut Context<Self>) {
         if self.intent == Some(intent) {
             self.intent = None;
+            self.browser.playlist_selection_mut().cancel_manual();
             cx.emit(PlaylistEvent::Failed(intent));
         }
     }
@@ -439,7 +468,7 @@ impl Playlists {
         self.playlist_action.as_ref()
     }
     pub(in crate::gui) fn clear_selection(&mut self, cx: &mut Context<Self>) {
-        self.cancel_selection();
+        self.cancel_selection(cx);
         self.browser.remove_playlist_selection();
         cx.notify();
     }

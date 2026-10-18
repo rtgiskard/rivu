@@ -385,9 +385,6 @@ impl Library {
         cx: &mut Context<Self>,
     ) {
         self.selection_intent = Some(id);
-        if !self.manual_intent_current(id) {
-            return;
-        }
         let Some(node) = self.library.navigate_tree_row(index) else {
             self.library.defer_manual_navigation(id);
             for (branch, offset) in self.library.demand_directories(index..index + 1) {
@@ -409,6 +406,25 @@ impl Library {
         );
     }
 
+    fn resume_library_navigation(&mut self, cx: &mut Context<Self>) {
+        if let Some((id, index)) = self.library.take_ready_manual_navigation() {
+            if self.manual_intent_current(id) {
+                self.prepare_tree_row(id, index, cx);
+            }
+        } else if let Some(id) = self.library.navigation_intent
+            && let Some(index) = self.library.range_selection.target
+            && matches!(
+                self.library.tree().item(index),
+                None | Some(TreeItem::Placeholder {
+                    status: tree::BranchStatus::Error | tree::BranchStatus::Empty,
+                    ..
+                })
+            )
+        {
+            self.fail_selection(id, cx);
+        }
+    }
+
     fn set_directory_expanded(
         &mut self,
         branch: &TreeBranch,
@@ -426,7 +442,7 @@ impl Library {
         if count == 0 {
             return;
         }
-        let index = match self.selected_tree_index() {
+        let index = match self.library.manual_navigation_index() {
             Some(index) if down => (index + 1).min(count - 1),
             Some(index) => index.saturating_sub(1),
             None if down => 0,
@@ -898,9 +914,6 @@ impl Library {
                         this.request_root_counts(cx);
                         for (path, offset) in this.library.demand_directories(range) {
                             this.request_directory_page(path, offset, cx);
-                        }
-                        if let Some((id, index)) = this.library.take_ready_manual_navigation() {
-                            this.prepare_tree_row(id, index, cx);
                         }
                     });
                 });

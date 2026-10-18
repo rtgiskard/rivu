@@ -21,6 +21,21 @@ pub(in crate::gui) struct EntryCommit {
     scroll: bool,
 }
 
+enum EntryTarget {
+    Row(EntryIdentity),
+    Offset(usize),
+}
+
+/// Frozen before root cancellation: subsequent input builds on the desired row,
+/// not the last committed row, even while range reads or confirmation are pending.
+pub(in crate::gui) struct PreparedEntrySelection {
+    scope: EntryNavigationScope,
+    target: EntryTarget,
+    shift: bool,
+    multi: bool,
+    all: bool,
+}
+
 struct EntryRangeRequest {
     intent: ManualIntentId,
     commit: EntryCommit,
@@ -140,6 +155,7 @@ pub(in crate::gui) struct EntrySelection {
     pub(in crate::gui) busy: bool,
     pub(in crate::gui) error: Option<String>,
     navigation: Option<EntryNavigationJob>,
+    navigation_target: Option<(EntryNavigationScope, usize)>,
     // Logical cancellation skips queued reads; dispatched reads retain the gate.
     navigation_in_flight: Option<EntryNavigationJob>,
     intent: Option<ManualIntentId>,
@@ -219,6 +235,7 @@ impl EntrySelection {
         self.error = None;
         // The physical worker owns its gate until completion, including after a switch.
         self.navigation = None;
+        self.navigation_target = None;
         self.intent = None;
         self.range_request = None;
     }
@@ -257,6 +274,7 @@ impl EntrySelection {
         multi: bool,
     ) -> Option<EntryCommit> {
         self.intent = Some(intent);
+        self.navigation_target = Some((scope, row.offset));
         let commit = EntryCommit {
             scope,
             generation: self.generation,
@@ -349,6 +367,8 @@ impl EntrySelection {
         self.busy = false;
         self.error = Some(message);
         self.navigation = None;
+        self.navigation_target = None;
+        self.intent = None;
     }
     #[cfg(test)]
     pub(in crate::gui) fn remove(&mut self, id: i64) {
@@ -399,10 +419,59 @@ impl EntrySelection {
         self.active = Some(target);
         self.busy = false;
         self.navigation = None;
+        self.navigation_target = None;
+        self.intent = None;
         true
     }
     fn can_select_all(&self, total: usize) -> bool {
-        total > 0 && self.ready()
+        total > 0 && (self.ready() || (self.busy && self.intent.is_some()))
+    }
+
+    fn prepare_request(
+        &self,
+        scope: EntryNavigationScope,
+        total: usize,
+        request: PlaylistSelectionRequest,
+        row: Option<EntryIdentity>,
+    ) -> Option<PreparedEntrySelection> {
+        let (target, shift, multi, all) = match request {
+            PlaylistSelectionRequest::Entry { shift, multi, .. } => {
+                if (shift || multi) && !self.can_select_all(total) {
+                    return None;
+                }
+                (EntryTarget::Row(row?), shift, multi, false)
+            }
+            PlaylistSelectionRequest::Navigate { down, shift, multi } => (
+                EntryTarget::Offset(self.navigation_offset(scope, total, down)?),
+                shift,
+                multi,
+                false,
+            ),
+            PlaylistSelectionRequest::Edge { last } => {
+                if !self.can_select_all(total) {
+                    return None;
+                }
+                (
+                    EntryTarget::Offset(if last { total - 1 } else { 0 }),
+                    false,
+                    false,
+                    false,
+                )
+            }
+            PlaylistSelectionRequest::All => {
+                if !self.can_select_all(total) {
+                    return None;
+                }
+                (EntryTarget::Offset(0), false, false, true)
+            }
+        };
+        Some(PreparedEntrySelection {
+            scope,
+            target,
+            shift,
+            multi,
+            all,
+        })
     }
 
     fn navigation_offset(
@@ -411,13 +480,13 @@ impl EntrySelection {
         total: usize,
         down: bool,
     ) -> Option<usize> {
-        if total == 0 || (!self.ready() && self.navigation.is_none()) {
+        if !self.can_select_all(total) {
             return None;
         }
         let current = self
-            .navigation
-            .filter(|job| job.scope.same_occurrences(scope))
-            .map(|job| job.offset)
+            .navigation_target
+            .filter(|(target_scope, _)| target_scope.same_occurrences(scope))
+            .map(|(_, offset)| offset)
             .or(self.active.map(|row| row.offset));
         let offset = match current {
             Some(index) if down => index.saturating_add(1).min(total - 1),
@@ -437,6 +506,7 @@ impl EntrySelection {
     ) {
         self.cancel();
         self.busy = true;
+        self.navigation_target = Some((scope, offset));
         self.navigation = Some(EntryNavigationJob {
             scope,
             generation: self.generation,
@@ -630,29 +700,64 @@ fn entry_query_result(
 }
 
 impl Playlists {
-    pub(in crate::gui) fn prepare_selection(
+    pub(in crate::gui) fn prepare_selection_request(
         &mut self,
         request: PlaylistSelectionRequest,
+        cx: &mut Context<Self>,
+    ) -> Option<PreparedEntrySelection> {
+        self.refresh(cx);
+        let scope = self.playlist_navigation_scope()?;
+        let entries = self.browser.playlists().entries();
+        let row = match request {
+            PlaylistSelectionRequest::Entry { id, index, .. } => entries
+                .rows
+                .get(index)
+                .filter(|row| row.id == id)
+                .map(|row| EntryIdentity::row(row, index)),
+            _ => None,
+        };
+        self.browser.playlists().track_selection.prepare_request(
+            scope,
+            entries.rows.total()?,
+            request,
+            row,
+        )
+    }
+
+    pub(in crate::gui) fn prepare_selection(
+        &mut self,
+        request: PreparedEntrySelection,
         intent: ManualIntentId,
         cx: &mut Context<Self>,
     ) {
         self.intent = Some(intent);
-        match request {
-            PlaylistSelectionRequest::Entry {
-                id,
-                index,
-                shift,
-                multi,
-            } => self.prepare_entry_selection(id, index, shift, multi, intent, cx),
-            PlaylistSelectionRequest::All => self.prepare_all_entries(intent, cx),
-            PlaylistSelectionRequest::Navigate { down, shift, multi } => {
-                self.prepare_navigation(down, shift, multi, intent, cx)
+        match request.target {
+            EntryTarget::Row(row) => {
+                if let Some(commit) = self.browser.playlist_selection_mut().begin_selection(
+                    intent,
+                    request.scope,
+                    row,
+                    request.shift,
+                    request.multi,
+                ) {
+                    self.ready_entry_selection(intent, commit, cx);
+                } else {
+                    self.dispatch_playlist_range(cx);
+                }
             }
-            PlaylistSelectionRequest::Edge { last } => self.prepare_edge(last, intent, cx),
+            EntryTarget::Offset(offset) => {
+                self.browser.playlist_selection_mut().begin_navigation(
+                    intent,
+                    request.scope,
+                    offset,
+                    request.shift,
+                    request.multi,
+                    request.all,
+                );
+                self.dispatch_playlist_navigation(cx);
+            }
         }
-        if self.browser.playlists().track_selection.intent != Some(intent) {
-            self.fail_manual_intent(intent, cx);
-        }
+        cx.notify();
     }
 
     pub(in crate::gui) fn select_playlist_entry(
@@ -900,51 +1005,13 @@ impl Playlists {
         index: usize,
         cx: &mut Context<Self>,
     ) {
-        self.cancel_selection();
+        self.cancel_selection(cx);
         cx.emit(PlaylistEvent::InvalidateManualIntent);
         if self.browser.select_playlist(id, name, index) {
             self.playlist_entries_search
                 .update(cx, |search, cx| search.reset(cx));
             self.request_playlist_entries(id, 0, cx);
             self.sync_entry_projection(cx);
-        }
-    }
-
-    fn prepare_entry_selection(
-        &mut self,
-        id: i64,
-        index: usize,
-        shift: bool,
-        multi: bool,
-        intent: ManualIntentId,
-        cx: &mut Context<Self>,
-    ) {
-        self.refresh(cx);
-        if (shift || multi) && !self.browser.playlists().track_selection.ready() {
-            return;
-        }
-        let Some(row) = self
-            .browser
-            .playlists()
-            .entries()
-            .rows
-            .get(index)
-            .filter(|row| row.id == id)
-            .map(|row| EntryIdentity::row(row, index))
-        else {
-            return;
-        };
-        let Some(scope) = self.playlist_navigation_scope() else {
-            return;
-        };
-        if let Some(commit) = self
-            .browser
-            .playlist_selection_mut()
-            .begin_selection(intent, scope, row, shift, multi)
-        {
-            self.ready_entry_selection(intent, commit, cx);
-        } else {
-            self.dispatch_playlist_range(cx);
         }
     }
 
@@ -979,7 +1046,9 @@ impl Playlists {
             selection.select(commit.target, commit.multi);
         }
         self.browser.sync_active_playlist_entry();
-        self.focus_list(cx);
+        if self.panel_demand("playlists") {
+            self.focus_list(cx);
+        }
         cx.emit(PlaylistEvent::Metadata(commit.target.track_id));
         if commit.scroll {
             self.context
@@ -1085,13 +1154,13 @@ impl Playlists {
                             this.ready_entry_selection(job.intent, job.commit, cx);
                         }
                         Err(message) => {
-                            this.fail_manual_intent(job.intent, cx);
                             this.entry_job_failed(
                                 job.commit.scope.playlist_id,
                                 generation,
                                 message,
                                 cx,
                             );
+                            this.fail_manual_intent(job.intent, cx);
                         }
                         Ok(None) => {}
                     }
@@ -1117,83 +1186,6 @@ impl Playlists {
                     .playlist_revision(playlist_id, self.state.library.revision),
             }
         })
-    }
-
-    fn prepare_all_entries(&mut self, intent: ManualIntentId, cx: &mut Context<Self>) {
-        self.refresh(cx);
-        let Some(scope) = self.playlist_navigation_scope() else {
-            return;
-        };
-        let Some(total) = self.browser.playlists().entries().rows.total() else {
-            return;
-        };
-        if !self
-            .browser
-            .playlists()
-            .track_selection
-            .can_select_all(total)
-        {
-            return;
-        }
-        self.browser
-            .playlist_selection_mut()
-            .begin_navigation(intent, scope, 0, false, false, true);
-        self.dispatch_playlist_navigation(cx);
-        cx.notify();
-    }
-
-    fn prepare_navigation(
-        &mut self,
-        down: bool,
-        shift: bool,
-        multi: bool,
-        intent: ManualIntentId,
-        cx: &mut Context<Self>,
-    ) {
-        self.refresh(cx);
-        let Some(scope) = self.playlist_navigation_scope() else {
-            return;
-        };
-        let Some(total) = self.browser.playlists().entries().rows.total() else {
-            return;
-        };
-        let Some(offset) = self
-            .browser
-            .playlists()
-            .track_selection
-            .navigation_offset(scope, total, down)
-        else {
-            return;
-        };
-        self.browser
-            .playlist_selection_mut()
-            .begin_navigation(intent, scope, offset, shift, multi, false);
-        self.dispatch_playlist_navigation(cx);
-        cx.notify();
-    }
-
-    fn prepare_edge(&mut self, last: bool, intent: ManualIntentId, cx: &mut Context<Self>) {
-        self.refresh(cx);
-        let Some(scope) = self.playlist_navigation_scope() else {
-            return;
-        };
-        let Some(total) = self.browser.playlists().entries().rows.total() else {
-            return;
-        };
-        let selection = &self.browser.playlists().track_selection;
-        if total == 0 || (!selection.ready() && selection.navigation.is_none()) {
-            return;
-        }
-        self.browser.playlist_selection_mut().begin_navigation(
-            intent,
-            scope,
-            if last { total - 1 } else { 0 },
-            false,
-            false,
-            false,
-        );
-        self.dispatch_playlist_navigation(cx);
-        cx.notify();
     }
 
     fn dispatch_playlist_navigation(&mut self, cx: &mut Context<Self>) {
@@ -1310,7 +1302,8 @@ impl Playlists {
 mod tests {
     use super::{
         EntryIdentity, EntryNavigationEffect, EntryNavigationJob, EntryNavigationRange,
-        EntryNavigationScope, EntryRangePages, EntrySelection,
+        EntryNavigationScope, EntryRangePages, EntrySelection, EntryTarget,
+        PlaylistSelectionRequest,
     };
     use crate::{
         model::{MAX_QUERY_ROWS, Page, PlaylistEntryRow},
@@ -1325,12 +1318,118 @@ mod tests {
         shift: bool,
         multi: bool,
     ) -> bool {
-        let Some(offset) = selection.navigation_offset(scope, total, down) else {
+        let Some(prepared) = selection.prepare_request(
+            scope,
+            total,
+            PlaylistSelectionRequest::Navigate { down, shift, multi },
+            None,
+        ) else {
             return false;
         };
+        let EntryTarget::Offset(offset) = prepared.target else {
+            panic!("navigation prepares an offset")
+        };
         let mut intents = crate::gui::manual_actions::ManualIntents::default();
-        selection.begin_navigation(intents.begin(), scope, offset, shift, multi, false);
+        // Match the root boundary: freeze intent before cancellation, then dispatch.
+        selection.cancel_manual();
+        selection.begin_navigation(
+            intents.begin(),
+            prepared.scope,
+            offset,
+            prepared.shift,
+            prepared.multi,
+            prepared.all,
+        );
         true
+    }
+
+    #[test]
+    fn navigation_after_ready_or_range_uses_desired_row_before_root_cancellation() {
+        let scope = navigation_scope();
+        for shift in [false, true] {
+            let mut selection = EntrySelection::default();
+            selection.select(identity(0, 0), false);
+            assert!(navigate(&mut selection, scope, 20, true, shift, false));
+            let first = selection.take_navigation().unwrap();
+            assert!(matches!(
+                selection.finish_navigation(
+                    "unexpected",
+                    first,
+                    Some(scope),
+                    navigation_response(first, 20)
+                ),
+                EntryNavigationEffect::Selected { .. }
+            ));
+            // Ready is not committed yet; Shift also has range work outstanding.
+            assert_eq!(selection.active, Some(identity(0, 0)));
+            assert!(selection.navigation.is_none());
+            assert!(navigate(&mut selection, scope, 20, true, shift, true));
+            let latest = selection.take_navigation().unwrap();
+            assert_eq!(latest.offset, 2);
+            assert_eq!(latest.shift, shift);
+            assert!(latest.multi);
+            assert_eq!(selection.anchor, Some(identity(0, 0)));
+            assert_eq!(selection.len(), 1);
+        }
+    }
+
+    #[test]
+    fn edges_and_select_all_supersede_pending_range_without_releasing_worker() {
+        use crate::gui::manual_actions::ManualIntents;
+        let scope = navigation_scope();
+        for (request, expected, all) in [
+            (PlaylistSelectionRequest::Edge { last: true }, 19, false),
+            (PlaylistSelectionRequest::Edge { last: false }, 0, false),
+            (PlaylistSelectionRequest::All, 0, true),
+        ] {
+            let mut intents = ManualIntents::default();
+            let mut selection = EntrySelection::default();
+            selection.select(identity(3, 3), false);
+            let old = intents.begin();
+            assert!(
+                selection
+                    .begin_selection(old, scope, identity(8, 8), true, false)
+                    .is_none()
+            );
+            let running = selection.take_range().unwrap();
+            let prepared = selection.prepare_request(scope, 20, request, None).unwrap();
+            let EntryTarget::Offset(offset) = prepared.target else {
+                panic!("edges and select-all prepare an offset")
+            };
+            assert_eq!(offset, expected);
+            assert_eq!(prepared.all, all);
+            selection.cancel_manual();
+            let latest = intents.begin();
+            selection.begin_navigation(
+                latest,
+                prepared.scope,
+                offset,
+                prepared.shift,
+                prepared.multi,
+                prepared.all,
+            );
+            assert!(selection.take_navigation().is_none());
+            assert!(!selection.finish_read(old, running.commit.generation));
+            assert_eq!(selection.anchor, Some(identity(3, 3)));
+            selection.release_range_worker(running.commit.generation);
+            let job = selection.take_navigation().unwrap();
+            assert_eq!(job.offset, expected);
+            assert_eq!(job.all, all);
+            assert!(selection.take_navigation().is_none());
+        }
+    }
+
+    #[test]
+    fn navigation_boundary_does_not_cancel_the_current_prepared_target() {
+        let scope = navigation_scope();
+        let mut selection = EntrySelection::default();
+        selection.select(identity(18, 18), false);
+        assert!(navigate(&mut selection, scope, 20, true, true, false));
+        let running = selection.take_navigation().unwrap();
+        assert!(!navigate(&mut selection, scope, 20, true, false, false));
+        assert_eq!(selection.navigation_in_flight, Some(running));
+        assert_eq!(selection.navigation, Some(running));
+        assert_eq!(selection.anchor, Some(identity(18, 18)));
     }
 
     #[test]
@@ -1896,7 +1995,7 @@ mod tests {
         assert!(!selection.can_select_all(0));
         assert!(selection.can_select_all(5));
         selection.begin_navigation(intents.begin(), scope, 0, false, false, true);
-        assert!(!selection.can_select_all(5));
+        assert!(selection.can_select_all(5));
         let job = selection.take_navigation().unwrap();
         assert_eq!(job.offset, 0);
         assert_eq!(

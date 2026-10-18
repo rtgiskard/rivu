@@ -38,7 +38,7 @@ impl GuiApp {
                             this.ready_manual_action(*intent, ManualAction::Library(commit), cx);
                         }
                     }
-                    LibraryEvent::Failed(intent) => this.fail_manual_intent(*intent),
+                    LibraryEvent::Failed(intent) => this.fail_manual_intent(*intent, cx),
                     LibraryEvent::SelectionChanged(id) => {
                         this.metadata.update(cx, |owner, cx| {
                             if let Some(id) = id {
@@ -69,7 +69,6 @@ impl GuiApp {
                     }
                     LibraryEvent::Error(error) => this.feature_error(error, cx),
                 }
-                this.sync_transfer_state(cx);
             }),
             cx.subscribe_in(&self.queue, window, |this, _, event, window, cx| {
                 use queue::QueueEvent;
@@ -85,7 +84,7 @@ impl GuiApp {
                             this.ready_manual_action(*intent, ManualAction::Queue(commit), cx);
                         }
                     }
-                    QueueEvent::SelectionFailed(intent) => this.fail_manual_intent(*intent),
+                    QueueEvent::SelectionFailed(intent) => this.fail_manual_intent(*intent, cx),
                     QueueEvent::SelectionCommitted { track_id } => {
                         this.selected_track(*track_id, cx)
                     }
@@ -134,19 +133,26 @@ impl GuiApp {
                 use playlists::PlaylistEvent;
                 match event {
                     PlaylistEvent::Selection(request) => {
-                        let intent = this.begin_manual_intent(cx);
-                        this.playlists.update(cx, |owner, cx| {
-                            owner.prepare_selection(*request, intent, cx)
+                        // Resolve while the feature's previous desired cursor still exists.
+                        // Root cancellation retires it; the prepared target and scope survive.
+                        let prepared = this.playlists.update(cx, |owner, cx| {
+                            owner.prepare_selection_request(*request, cx)
                         });
+                        if let Some(prepared) = prepared {
+                            let intent = this.begin_manual_intent(cx);
+                            this.playlists.update(cx, |owner, cx| {
+                                owner.prepare_selection(prepared, intent, cx)
+                            });
+                        }
                     }
                     PlaylistEvent::Ready(intent, commit) => {
                         if let Some(commit) = commit.borrow_mut().take() {
                             this.ready_manual_action(*intent, ManualAction::Playlist(commit), cx);
                         }
                     }
-                    PlaylistEvent::Failed(intent) => this.fail_manual_intent(*intent),
+                    PlaylistEvent::Failed(intent) => this.fail_manual_intent(*intent, cx),
                     PlaylistEvent::InvalidateManualIntent => {
-                        this.begin_manual_intent(cx);
+                        this.invalidate_manual_intent(cx);
                     }
                     PlaylistEvent::SearchChanged => this.search_changed(cx),
                     PlaylistEvent::Metadata(id) => this.selected_track(*id, cx),
@@ -161,7 +167,7 @@ impl GuiApp {
                         .update(cx, |owner, cx| owner.focus_name(window, cx)),
                     PlaylistEvent::ClearMenus => {
                         this.panel_menu = None;
-                        this.content_menu = None;
+                        this.replace_content_menu(None, cx);
                         this.queue_replace = None;
                         cx.notify();
                     }
@@ -208,9 +214,12 @@ impl GuiApp {
                         additive,
                     } => {
                         let intent = this.begin_manual_intent(cx);
-                        this.history.update(cx, |owner, cx| {
-                            owner.prepare_selection(*id, *shift, *additive, intent, cx);
+                        let prepared = this.history.update(cx, |owner, cx| {
+                            owner.prepare_selection(*id, *shift, *additive, intent, cx)
                         });
+                        if !prepared {
+                            this.fail_manual_intent(intent, cx);
+                        }
                     }
                     HistoryEvent::SelectionReady {
                         intent,
@@ -232,6 +241,7 @@ impl GuiApp {
                         this.selected_track(*track_id, cx)
                     }
                     HistoryEvent::SearchChanged => this.search_changed(cx),
+                    HistoryEvent::InvalidateManualIntent => this.invalidate_manual_intent(cx),
                     HistoryEvent::FocusRequested { panel_id } => {
                         this.search_panel = Some(*panel_id);
                         this.set_browser_focus(Some(BrowserFocus::History), cx);
@@ -256,8 +266,7 @@ impl GuiApp {
                         if this.manual_confirmation_open() {
                             this.resume_manual_action(false, cx);
                         } else if *resume_follow {
-                            this.metadata
-                                .update(cx, |owner, cx| owner.resume_follow(cx));
+                            this.reconcile_manual_follow(cx);
                         }
                     }
                     MetadataEvent::TrackChanged => this.sync_waveform(cx),
@@ -351,12 +360,13 @@ impl GuiApp {
     }
 
     fn search_changed(&mut self, cx: &mut Context<Self>) {
-        self.begin_manual_intent(cx);
+        let intent = self.begin_manual_intent(cx);
         self.metadata.update(cx, |owner, cx| {
             if !owner.protected(cx) {
                 owner.clear_selection(cx);
             }
         });
+        self.settle_manual_intent(intent, cx);
         self.sync_waveform(cx);
     }
 
@@ -365,6 +375,7 @@ impl GuiApp {
         focus: Option<BrowserFocus>,
         cx: &mut Context<Self>,
     ) {
+        let changed = self.focus != focus;
         self.focus = focus;
         self.library.update(cx, |owner, cx| {
             owner.set_focused(focus == Some(BrowserFocus::List(ListFocus::Library)), cx)
@@ -381,15 +392,18 @@ impl GuiApp {
                 cx,
             )
         });
+        if changed {
+            cx.notify();
+        }
     }
 
-    fn sync_transfer_state(&self, cx: &mut Context<Self>) {
+    pub(super) fn sync_transfer_state(&self, cx: &mut Context<Self>) {
         let pending = self.library.read(cx).library_range_pending();
-        self.queue.update(cx, |owner, _| {
-            owner.set_transfer_state(pending, self.content_resolution)
+        self.queue.update(cx, |owner, cx| {
+            owner.set_transfer_state(pending, self.content_resolution, cx)
         });
-        self.playlists.update(cx, |owner, _| {
-            owner.set_transfer_state(pending, self.content_resolution)
+        self.playlists.update(cx, |owner, cx| {
+            owner.set_transfer_state(pending, self.content_resolution, cx)
         });
     }
 
@@ -443,8 +457,6 @@ impl GuiApp {
         self.metadata.update(cx, |owner, cx| {
             owner.set_visible(self.panel_demand("metadata"), cx)
         });
-        self.sync_transfer_state(cx);
-        self.sync_playback_interaction(cx);
     }
 
     pub(super) fn cancel_window_reads(&self, cx: &mut Context<Self>) {

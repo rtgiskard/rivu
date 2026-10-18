@@ -43,6 +43,7 @@ pub(super) enum HistoryEvent {
         track_id: i64,
     },
     SearchChanged,
+    InvalidateManualIntent,
     FocusRequested {
         panel_id: u64,
     },
@@ -148,6 +149,7 @@ impl History {
 
     pub(super) fn select_all(&mut self, cx: &mut Context<Self>) {
         self.model.select_all();
+        cx.emit(HistoryEvent::InvalidateManualIntent);
         cx.notify();
     }
 

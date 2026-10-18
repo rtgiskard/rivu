@@ -495,7 +495,7 @@ impl GuiApp {
                         owner.focus_search(entries, window, cx);
                         true
                     } else {
-                        owner.escape_search(window, cx)
+                        owner.escape_search(entries, window, cx)
                     }
                 })
             }
@@ -1042,7 +1042,7 @@ impl GuiApp {
         }
         self.apply_interaction_cancellation(cancellation, cx);
         self.panel_menu = None;
-        self.content_menu = None;
+        self.replace_content_menu(None, cx);
         self.content_generation = self.content_generation.wrapping_add(1);
         cx.notify();
     }
@@ -1064,7 +1064,7 @@ impl GuiApp {
             .retain(|id, _| self.workspace.layouts.current().contains_panel(*id));
         self.apply_interaction_cancellation(cancellation, cx);
         self.panel_menu = None;
-        self.content_menu = None;
+        self.replace_content_menu(None, cx);
         self.content_generation = self.content_generation.wrapping_add(1);
         self.set_browser_focus(None, cx);
         for view in self.panel_views.values() {

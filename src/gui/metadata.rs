@@ -14,6 +14,9 @@ mod artwork;
 mod read;
 pub(in crate::gui) mod session;
 
+#[cfg(test)]
+mod tests;
+
 use super::{
     UI_INSET,
     artwork::{Artwork, ArtworkImages, ArtworkLoader, ArtworkView},
@@ -51,8 +54,8 @@ enum Field {
 
 pub(in crate::gui) enum MetadataEvent {
     ReloadPlaybackRequested,
-    /// The coordinator resumes a pending action; only a completed save follows playback
-    /// when no confirmation is pending. A no-op Save must not introduce that transition.
+    /// The coordinator resumes a pending action, or playback after protection ends.
+    /// A no-op Save must not introduce a follow transition.
     ResumeManualAction {
         resume_follow: bool,
     },
@@ -101,9 +104,9 @@ impl Metadata {
             (Field::Album, "shell-album"),
         ] {
             let input = cx.new(|cx| Input::new("", context.tr(placeholder), cx));
-            subscriptions.push(cx.subscribe(&input, |_, _, event, cx| {
-                if matches!(event, InputEvent::Changed { .. }) {
-                    cx.notify();
+            subscriptions.push(cx.subscribe(&input, |this, _, event, cx| {
+                if matches!(event, InputEvent::Changed { user: true }) {
+                    this.draft_changed(cx);
                 }
             }));
             inputs.insert(field, input);
@@ -236,6 +239,32 @@ impl Metadata {
             artist: self.inputs[&Field::Artist].read(cx).text(),
             album: self.inputs[&Field::Album].read(cx).text(),
             decoder_hint: self.metadata_decoder_hint,
+        }
+    }
+
+    fn draft_changed(&mut self, cx: &mut Context<Self>) {
+        self.resume_when_clean(cx);
+        cx.notify();
+    }
+
+    fn resume_when_clean(&mut self, cx: &mut Context<Self>) {
+        if self.protected(cx) {
+            return;
+        }
+        let draft = self.draft(cx);
+        if let Some(values) = self.metadata.reconcile_clean(draft) {
+            self.set_metadata_values(values, cx);
+        }
+        // The root arbitrates the newest manual intent before following playback.
+        cx.emit(MetadataEvent::ResumeManualAction {
+            resume_follow: true,
+        });
+    }
+
+    fn set_decoder_hint(&mut self, hint: DecoderHint, cx: &mut Context<Self>) {
+        if self.metadata.editable() && self.metadata_decoder_hint != hint {
+            self.metadata_decoder_hint = hint;
+            self.draft_changed(cx);
         }
     }
 
@@ -387,8 +416,12 @@ impl Metadata {
             && self.metadata.identity() != self.state.current_track().map(|track| track.id)
             && !matches!(self.metadata.read_state(), MetadataReadState::Pending(_))
         {
+            let previous = self.metadata.editor_identity();
             self.sync_metadata_default(cx);
-            cx.notify();
+            if self.metadata.editor_identity() != previous {
+                cx.emit(MetadataEvent::TrackChanged);
+                cx.notify();
+            }
         }
     }
 
@@ -416,39 +449,42 @@ impl Metadata {
                 .spawn(async move { handle.request_ack(command) })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                // A committed source change survives editor selection/discard.
-                if ack.ok
-                    && let Some(track) = hint_change
-                {
-                    cx.emit(SavedHintChanged(track));
-                }
-                if !this.metadata.complete_save(token, values, ack.ok) {
-                    return;
-                }
-                if ack.ok {
-                    // Only the submitted baseline is acknowledged; newer edits remain protected.
-                    if !this.dirty(cx) {
-                        let draft = this.draft(cx);
-                        if let Some(values) = this.metadata.reconcile_clean(draft) {
-                            this.set_metadata_values(values, cx);
-                        }
-                        cx.emit(MetadataEvent::ResumeManualAction {
-                            resume_follow: true,
-                        });
-                    }
-                    cx.emit(MetadataEvent::TrackChanged);
-                } else {
-                    this.report_error(
-                        ack.error.unwrap_or_else(|| {
-                            this.context.i18n.text("gl-metadata-save-failed").into()
-                        }),
-                        cx,
-                    );
-                }
-                cx.notify();
+                this.finish_save(token, values, hint_change, ack, cx);
             });
         })
         .detach();
+        cx.notify();
+    }
+
+    fn finish_save(
+        &mut self,
+        token: session::SaveToken,
+        values: MetadataValues,
+        hint_change: Option<Track>,
+        ack: crate::response::Ack,
+        cx: &mut Context<Self>,
+    ) {
+        // A committed source change survives editor selection/discard.
+        if ack.ok
+            && let Some(track) = hint_change
+        {
+            cx.emit(SavedHintChanged(track));
+        }
+        if !self.metadata.complete_save(token, values, ack.ok) {
+            return;
+        }
+        if ack.ok {
+            cx.emit(MetadataEvent::TrackChanged);
+        } else {
+            self.report_error(
+                ack.error
+                    .unwrap_or_else(|| self.context.i18n.text("gl-metadata-save-failed").into()),
+                cx,
+            );
+        }
+        // Successful writes acknowledge only the submitted baseline; failures retain it.
+        // Either completion releases saving protection, but never a newer dirty draft.
+        self.resume_when_clean(cx);
         cx.notify();
     }
 
@@ -1107,11 +1143,11 @@ impl Metadata {
                                                         move |this, _, cx| {
                                                             if this.metadata.editor_identity()
                                                                 == editor_identity
-                                                                && this.metadata.editable()
                                                             {
-                                                                this.metadata_decoder_hint =
-                                                                    decoder_hint;
-                                                                cx.notify();
+                                                                this.set_decoder_hint(
+                                                                    decoder_hint,
+                                                                    cx,
+                                                                );
                                                             }
                                                         },
                                                     ),

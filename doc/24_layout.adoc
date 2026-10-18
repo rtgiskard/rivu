@@ -113,6 +113,17 @@ read the current snapshot without re-entering the window coordinator.
 Selection-ready and cross-feature transfer events hand their owned payloads to
 their sole coordinator rather than cloning row collections.
 
+Features interpret relative input against their latest desired cursor, not only
+the committed selection. Relative targets are prepared before cross-feature
+cancellation retires that cursor; prepared selections carry the identity and
+validity scope required for commit. The window arbitrates the newest manual
+intent and any draft confirmation; it does not calculate feature targets.
+Ready results retain the desired target until commit or retirement. Confirmation
+revalidates the target before discarding a draft, and queued clean-editor events
+recheck current protection before proceeding. Non-commit terminal transitions
+release arbitration and reconsider playback follow; stale completions cannot
+settle a newer intent.
+
 The shell owns mutually exclusive application surfaces and keyboard focus
 restoration. Feature confirmations can cover a surface without discarding its
 draft. Deferred focus requests carry a generation so an obsolete callback cannot
@@ -120,12 +131,20 @@ focus a replacement surface. Workspace activation validates the target before
 cancelling an interaction and rolls back a live split against the outgoing tree,
 never against reused IDs in the incoming tree.
 
+Window visibility, layout activation, and menu transitions publish feature demand
+when they change. Rendering measures viewport demand but is not a fallback for
+advancing selection, retiring work, or synchronizing cross-feature eligibility.
+Directory publication resumes deferred navigation; transfer state changes notify
+their dependent owners even when no root frame would otherwise be needed.
+
 Business panels have cached view boundaries separate from shell traversal and
 observe their feature owner directly; rendering never calls back into the window
 root. Feature dependencies invalidate their content. Playback timeline updates
 invalidate transport and, when its live data changes, History, without rebuilding
 library or playlist rows. Global font/theme changes explicitly invalidate cached
 business views; geometry changes refresh the affected panel measurements.
+Page-key scrolling invalidates the panel owning the changed viewport, rather than
+notifying the root or every panel of the same feature.
 Layout visibility, not whether a cached subtree rendered in that frame, decides
 which retained scroll regions can receive input. Re-rendering a panel replaces
 only that panel's region registrations. Visualization scheduling and image

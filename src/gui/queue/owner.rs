@@ -149,9 +149,15 @@ impl Queue {
         &mut self,
         library_selection_pending: bool,
         content_resolution: bool,
+        cx: &mut Context<Self>,
     ) {
-        self.library_selection_pending = library_selection_pending;
-        self.content_resolution = content_resolution;
+        if (self.library_selection_pending, self.content_resolution)
+            != (library_selection_pending, content_resolution)
+        {
+            self.library_selection_pending = library_selection_pending;
+            self.content_resolution = content_resolution;
+            cx.notify();
+        }
     }
 
     pub(in crate::gui) fn input_focused(&self, window: &Window, cx: &gpui::App) -> bool {
@@ -197,6 +203,7 @@ impl Queue {
         match request {
             QueueSelectionRequest::Row { id, shift, multi } => {
                 if self.model.busy && (shift || multi) {
+                    cx.emit(QueueEvent::SelectionFailed(intent));
                     return;
                 }
                 let Some(row) = self
@@ -206,6 +213,7 @@ impl Queue {
                     .find(|row| row.id == id)
                     .map(QueueIdentity::from)
                 else {
+                    cx.emit(QueueEvent::SelectionFailed(intent));
                     return;
                 };
                 if let Some(commit) = self
@@ -222,6 +230,7 @@ impl Queue {
             }
             QueueSelectionRequest::Offset { offset, all } => {
                 if offset >= self.model.rows.len() {
+                    cx.emit(QueueEvent::SelectionFailed(intent));
                     return;
                 }
                 self.model.begin_navigation(intent, revisions, offset, all);

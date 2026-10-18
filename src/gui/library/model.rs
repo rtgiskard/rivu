@@ -402,6 +402,12 @@ impl LibraryBrowser {
         &self.tree
     }
 
+    pub(super) fn manual_navigation_index(&self) -> Option<usize> {
+        self.range_selection
+            .target
+            .or_else(|| self.tree.selected_index())
+    }
+
     pub(in crate::gui) fn take_ready_manual_navigation(
         &mut self,
     ) -> Option<(ManualIntentId, usize)> {
@@ -516,10 +522,12 @@ impl LibraryBrowser {
 
     pub(super) fn navigate_tree_row(&mut self, index: usize) -> Option<LibraryNode> {
         let Some(super::tree::TreeItem::Entry(visible)) = self.tree.item(index) else {
+            self.range_selection.target = Some(index);
             self.tree.defer_selection(index);
             return None;
         };
         self.cancel_navigation();
+        self.range_selection.target = Some(index);
         Some(match visible.row {
             DirectoryRow::Directory { path } => LibraryNode::Directory(std::sync::Arc::from(path)),
             DirectoryRow::Track(track) => LibraryNode::Track(track.id),
@@ -563,6 +571,7 @@ impl LibraryBrowser {
         self.locate.invalidate();
         self.tree.cancel_navigation();
         self.navigation_intent = None;
+        self.range_selection.target = None;
     }
 
     pub(super) fn invalidate_selection(&mut self) {

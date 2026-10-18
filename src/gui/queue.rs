@@ -310,6 +310,7 @@ impl QueueSelection {
         multi: bool,
     ) -> Option<QueueCommit> {
         self.manual = Some(intent);
+        self.navigation = Some(row.offset);
         let stamp = self.query().stamp(revisions);
         let generation = self.projection.generation();
         if shift && self.anchor.is_some() {
@@ -371,7 +372,10 @@ impl QueueSelection {
             return false;
         }
         self.busy = false;
-        self.navigation = None;
+        if error.is_some() {
+            self.navigation = None;
+            self.manual = None;
+        }
         self.selection_error = error.cloned();
         true
     }
@@ -583,6 +587,7 @@ impl QueueSelection {
         self.active = Some(target);
         self.busy = false;
         self.navigation = None;
+        self.manual = None;
         self.rows.pin(Some(target.offset));
         true
     }
@@ -753,8 +758,12 @@ impl Queue {
     /// Reconcile authoritative queue state even while its pane is hidden. No page demand.
     pub(super) fn sync_queue(&mut self, cx: &mut Context<Self>) -> bool {
         let revisions = self.state.query_revisions(None);
+        let intent = self.model.manual;
         if !self.model.sync(revisions, self.state.queue.total) {
             return false;
+        }
+        if let Some(intent) = intent {
+            cx.emit(QueueEvent::SelectionFailed(intent));
         }
         self.dispatch_queue_selection(cx);
         true
@@ -985,7 +994,9 @@ impl Queue {
 
     pub(super) fn select_all_queue_entries(&mut self, cx: &mut Context<Self>) {
         self.refresh(cx);
-        if self.model.rows.total().is_some_and(|total| total > 0) && self.model.ready() {
+        if self.model.rows.total().is_some_and(|total| total > 0)
+            && (self.model.ready() || self.model.manual.is_some())
+        {
             self.start_queue_navigation(0, true, cx);
         }
     }
@@ -1394,6 +1405,30 @@ mod tests {
         assert!(matches!(next.target, QueueTarget::Offset(8)));
         assert!(queue.take_job().is_none());
         assert!(queue.finish_selection(&next, None));
+        assert_eq!(queue.active(), Some(identity(1, 0)));
+    }
+
+    #[test]
+    fn ready_queue_navigation_keeps_desired_offset_until_confirmation_or_cancellation() {
+        use crate::gui::manual_actions::ManualIntents;
+        let mut intents = ManualIntents::default();
+        let mut queue = queue(0);
+        queue.select(identity(1, 0), false);
+        queue.begin_navigation(intents.begin(), revisions(0), 8, false);
+        let job = queue.take_job().unwrap();
+        queue.release_worker(job.generation);
+        assert!(queue.finish_selection(&job, None));
+        assert_eq!(queue.active(), Some(identity(1, 0)));
+        assert_eq!(queue.navigation, Some(8));
+        let next = queue.navigation.unwrap() + 1;
+        queue.cancel_manual();
+        queue.begin_navigation(intents.begin(), revisions(0), next, false);
+        let next = queue.take_job().unwrap();
+        assert!(matches!(next.target, super::QueueTarget::Offset(9)));
+        assert!(!queue.finish_selection(&job, Some(&"late failure".to_owned())));
+        assert_eq!(queue.navigation, Some(9));
+        assert!(queue.finish_selection(&next, Some(&"offline".to_owned())));
+        assert_eq!(queue.navigation, None);
         assert_eq!(queue.active(), Some(identity(1, 0)));
     }
     #[test]

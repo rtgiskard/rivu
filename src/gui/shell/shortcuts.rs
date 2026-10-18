@@ -208,13 +208,13 @@ impl GuiApp {
                 }
             }
             Action::PageUp | Action::PageDown => {
-                if self
+                let panel = self
                     .workspace
                     .scroll_views
-                    .borrow_mut()
-                    .page(action == Action::PageDown, window.mouse_position())
-                {
-                    cx.notify();
+                    .borrow()
+                    .page(action == Action::PageDown, window.mouse_position());
+                if let Some(view) = panel.and_then(|id| self.panel_views.get(&id)) {
+                    view.update(cx, |_, cx| cx.notify());
                 }
             }
             Action::Parent | Action::Expand => {
