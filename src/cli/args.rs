@@ -1,0 +1,380 @@
+use super::output::Terminal;
+use clap::{Parser, Subcommand, ValueEnum};
+use rivu::i18n::Localizer;
+use std::path::PathBuf;
+
+#[derive(Parser)]
+#[command(
+    name = "rivu",
+    version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("RIVU_GIT_VERSION"), ")"),
+    about = "A quiet, local-first music player",
+    long_about = "Rivu plays local audio with a shared Rust core. Run without a subcommand for the desktop UI; CLI and TUI control that same instance. Optional FFmpeg audio support is loaded on demand for enabled fallback decoding or explicit enhanced probing."
+)]
+pub(super) struct Args {
+    #[arg(long, global = true, value_name = "DIRECTORY")]
+    pub(super) data_dir: Option<PathBuf>,
+    #[arg(long, global = true, value_name = "FILE")]
+    pub(super) config: Option<PathBuf>,
+    #[arg(long, global = true)]
+    pub(super) json: bool,
+    #[command(subcommand)]
+    pub(super) action: Option<Action>,
+}
+
+#[derive(Subcommand)]
+pub(super) enum Action {
+    /// Open the desktop UI and optionally import paths.
+    Gui { paths: Vec<PathBuf> },
+    /// Run the shared core without a GUI (foreground).
+    Serve { paths: Vec<PathBuf> },
+    /// Control the running instance in a minimal terminal UI.
+    Tui,
+    /// Control playback, volume, and audio output devices.
+    #[command(subcommand)]
+    Playback(PlaybackAction),
+    /// Import and manage tracks, inspect metadata, and view listening information.
+    #[command(subcommand)]
+    Library(LibraryAction),
+    /// Manage the current playback queue.
+    #[command(subcommand)]
+    Queue(QueueAction),
+    /// Manage, import, and export playlists.
+    #[command(subcommand)]
+    Playlist(PlaylistAction),
+    /// Shut down the running GUI/headless core.
+    Quit,
+}
+
+#[derive(Subcommand)]
+pub(super) enum PlaybackAction {
+    /// Play a library track ID, or resume the current queue.
+    Play {
+        track_id: Option<i64>,
+    },
+    Pause,
+    Toggle,
+    Stop,
+    Next,
+    #[command(alias = "prev")]
+    Previous,
+    Seek {
+        seconds: f64,
+    },
+    /// Set volume as a percentage, 0..100.
+    Volume {
+        percent: u8,
+    },
+    Shuffle {
+        #[arg(value_enum)]
+        mode: Switch,
+    },
+    Repeat {
+        #[arg(value_enum)]
+        mode: Repeat,
+    },
+    /// List available output devices without starting an instance.
+    Devices,
+    /// Select an output device by exact name, or use the default.
+    Device {
+        name: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub(super) enum LibraryAction {
+    /// Import audio files, CUE sheets or directories without blocking playback.
+    Scan {
+        /// Paths relative to this client's working directory, or absolute paths.
+        #[arg(required = true)]
+        paths: Vec<PathBuf>,
+        #[arg(long)]
+        wait: bool,
+        /// Reprobe metadata even when file size and modification time are unchanged.
+        #[arg(long)]
+        force: bool,
+    },
+    /// List the library, optionally filtered by text.
+    List {
+        #[arg(short, long)]
+        query: Option<String>,
+        #[arg(long)]
+        favorites: bool,
+        #[arg(long)]
+        missing: bool,
+    },
+    /// Edit Rivu's library metadata; does not rewrite media files.
+    Edit {
+        track_id: i64,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        artist: Option<String>,
+        #[arg(long)]
+        album: Option<String>,
+    },
+    /// Remove library records, never the media files.
+    Remove {
+        #[arg(required = true)]
+        track_ids: Vec<i64>,
+    },
+    /// Set or clear favorites without modifying media files.
+    Favorite {
+        #[arg(required = true)]
+        track_ids: Vec<i64>,
+        #[arg(long, value_enum)]
+        set: Switch,
+    },
+    /// Remove missing library records and their references, never media files.
+    CleanMissing,
+    /// Show the running instance's playback and library state.
+    Status,
+    /// Show library size and aggregate play counts.
+    Stats,
+    /// Show recent tracks, once per track.
+    History {
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// Read real metadata and check decoder support without starting an instance.
+    Probe {
+        path: PathBuf,
+        /// Explicitly load FFmpeg for enhanced probing, regardless of the saved setting.
+        #[arg(long)]
+        enhanced: bool,
+    },
+    /// Reclaim database space and refresh query statistics; stop playback and scans first.
+    Optimize,
+    /// Read-only ordinary-file groups with matching historical content hashes.
+    Duplicates {
+        /// List members of one hash instead of group summaries.
+        #[arg(long)]
+        fingerprint: Option<String>,
+        #[arg(long, default_value_t = 0)]
+        offset: usize,
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+    },
+    /// Explicitly preserve a missing old track's identity at a verified target.
+    Relocate {
+        source_id: i64,
+        target_id: i64,
+        /// Wait for fresh verification and the atomic database commit.
+        #[arg(long)]
+        wait: bool,
+    },
+    /// Read retained relocation verification/completion status.
+    RelocationStatus { id: u64 },
+    /// Cancel a pending relocation verification (never undo a committed one).
+    CancelRelocation { id: u64 },
+    /// Prevent this ordinary row from participating in future identity reuse.
+    KeepIndependent { track_id: i64 },
+}
+#[derive(Clone, Copy, ValueEnum)]
+pub(super) enum Switch {
+    On,
+    Off,
+}
+#[derive(Clone, Copy, ValueEnum)]
+pub(super) enum Repeat {
+    Off,
+    All,
+    One,
+}
+#[derive(Subcommand)]
+pub(super) enum QueueAction {
+    List,
+    Add {
+        #[arg(required = true)]
+        track_ids: Vec<i64>,
+    },
+    Remove {
+        queue_id: u64,
+    },
+    Move {
+        queue_id: u64,
+        index: usize,
+    },
+    Play {
+        queue_id: u64,
+    },
+    Clear,
+}
+#[derive(Subcommand)]
+pub(super) enum PlaylistAction {
+    List,
+    New {
+        name: String,
+    },
+    Rename {
+        playlist_id: i64,
+        name: String,
+    },
+    Delete {
+        playlist_id: i64,
+    },
+    Add {
+        playlist_id: i64,
+        #[arg(required = true)]
+        track_ids: Vec<i64>,
+    },
+    Remove {
+        entry_id: i64,
+    },
+    Move {
+        entry_id: i64,
+        index: usize,
+    },
+    Play {
+        playlist_id: i64,
+    },
+    /// Import an M3U/M3U8 playlist or a CUE sheet in track order.
+    Import {
+        /// Playlist path relative to this client's working directory, or absolute.
+        path: PathBuf,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        wait: bool,
+    },
+    Export {
+        playlist_id: i64,
+        /// Destination relative to this client's working directory; need not exist.
+        path: PathBuf,
+    },
+}
+
+pub(super) fn terminal_cli_error(mut error: clap::Error) -> clap::Error {
+    use clap::error::{ContextKind, ContextValue};
+
+    // Keep clap's trusted usage layout and styling, escaping only argv values.
+    for kind in [
+        ContextKind::InvalidArg,
+        ContextKind::InvalidSubcommand,
+        ContextKind::InvalidValue,
+        ContextKind::PriorArg,
+    ] {
+        if let Some(mut value) = error.remove(kind) {
+            match &mut value {
+                ContextValue::String(text) => *text = Terminal(&*text).to_string(),
+                ContextValue::Strings(texts) => {
+                    for text in texts {
+                        *text = Terminal(&*text).to_string();
+                    }
+                }
+                _ => {}
+            }
+            error.insert(kind, value);
+        }
+    }
+    error
+}
+
+pub(super) fn localize_help(command: &mut clap::Command, i18n: &Localizer, path: &str) {
+    let messages = i18n
+        .fixed_texts()
+        .collect::<std::collections::HashMap<_, _>>();
+    localize_command_help(command, i18n, path, &messages);
+}
+
+fn localize_command_help(
+    command: &mut clap::Command,
+    i18n: &Localizer,
+    path: &str,
+    messages: &std::collections::HashMap<&str, &str>,
+) {
+    let id = if command.get_name() == "help" {
+        "core-help-help".to_owned()
+    } else if path.is_empty() {
+        "core-help-about".to_owned()
+    } else {
+        format!("core-help-{path}")
+    };
+    if let Some(text) = messages.get(id.as_str()) {
+        *command = command
+            .clone()
+            .about((*text).to_owned())
+            .long_about((*text).to_owned());
+    }
+    if path.is_empty() {
+        *command = command
+            .clone()
+            .long_about(i18n.text("core-help-long").to_owned());
+    }
+    *command = command.clone()
+        .help_template(format!("{{before-help}}{{name}} {{version}}\n{{about-with-newline}}\n{} {{usage}}\n\n{{all-args}}{{after-help}}", i18n.text("core-help-usage")))
+        .subcommand_help_heading(i18n.text("core-help-commands").to_owned());
+    let arguments = command
+        .get_arguments()
+        .map(|arg| (arg.get_id().to_string(), arg.is_positional()))
+        .collect::<Vec<_>>();
+    for (name, positional) in arguments {
+        let name_key = name.replace('_', "-");
+        let id = if path.is_empty() {
+            format!("core-help-{name_key}")
+        } else {
+            format!("core-help-{path}-{name_key}")
+        };
+        let text = if name == "help" {
+            Some(i18n.text("core-help-help"))
+        } else if name == "version" {
+            Some(i18n.text("core-help-version"))
+        } else if matches!(name.as_str(), "data_dir" | "config" | "json") {
+            messages
+                .get(format!("core-help-{name_key}").as_str())
+                .copied()
+        } else {
+            messages.get(id.as_str()).copied()
+        };
+        *command = command.clone().mut_arg(name.clone(), |arg| {
+            let arg = arg.help_heading(
+                i18n.text(if positional {
+                    "core-help-arguments"
+                } else {
+                    "core-help-options"
+                })
+                .to_owned(),
+            );
+            if let Some(text) = text {
+                arg.help(text.to_owned()).long_help(text.to_owned())
+            } else {
+                arg
+            }
+        });
+    }
+    for child in command.get_subcommands_mut() {
+        let child_path = if path.is_empty() {
+            child.get_name().to_owned()
+        } else {
+            format!("{path}-{}", child.get_name())
+        };
+        localize_command_help(child, i18n, &child_path, messages);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Args, terminal_cli_error};
+    use clap::CommandFactory;
+
+    #[test]
+    fn cli_parse_errors_escape_untrusted_arguments_and_preserve_exit_status() {
+        for arguments in [
+            vec!["rivu", "\x1b[31m音楽\n"],
+            vec!["rivu", "--\x1b[31m音楽\t"],
+            vec!["rivu", "library", "history", "--limit", "\u{009b}31m\n"],
+        ] {
+            let error = Args::command().try_get_matches_from(arguments).unwrap_err();
+            let status = error.exit_code();
+            let error = terminal_cli_error(error);
+            assert_eq!(error.exit_code(), status);
+            assert_eq!(status, 2);
+            let rendered = error.render().to_string();
+            assert!(!rendered.chars().any(|character| {
+                character.is_control() && character != '\n' && character != '\t'
+            }));
+            assert!(rendered.contains("\\x1b") || rendered.contains("\\u{009b}"));
+            assert!(rendered.contains("\\n") || rendered.contains("\\t"));
+            assert!(rendered.contains('\n'));
+        }
+    }
+}
