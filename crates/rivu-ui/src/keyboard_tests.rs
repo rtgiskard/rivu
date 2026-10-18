@@ -1,5 +1,8 @@
 use super::*;
-use gpui::{AnyWindowHandle, InputEvent, KeyDownEvent, KeyUpEvent, Keystroke, TestAppContext};
+use gpui::{
+    AnyWindowHandle, Context, InputEvent, KeyDownEvent, KeyUpEvent, Keystroke, Render,
+    TestAppContext, Window, div, prelude::*,
+};
 
 struct KeyboardControls {
     scope: FocusScope,
@@ -9,7 +12,7 @@ struct KeyboardControls {
 
 impl Render for KeyboardControls {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = crate::gui::theme::palette(cx);
+        let theme = crate::theme::palette(cx);
         let first = button("first", "First", cx, |this, _, _| this.counts[0] += 1);
         let middle = disabled_control(
             theme,
@@ -18,17 +21,9 @@ impl Render for KeyboardControls {
             }),
             self.disabled,
         );
-        let toggle = toggle_button(
-            &crate::i18n::Localizer::new("en-US"),
-            "toggle",
-            "T",
-            "Toggle",
-            false,
-            cx,
-            |this, _| {
-                this.counts[2] += 1;
-            },
-        );
+        let toggle = toggle_button("toggle", "T", "Toggle: off", false, cx, |this, _| {
+            this.counts[2] += 1;
+        });
         let outside = button("outside", "Outside", cx, |this, _, _| this.counts[3] += 1);
         div().size_full().child(outside).child(
             self.scope
@@ -69,6 +64,7 @@ fn press(cx: &mut TestAppContext, window: AnyWindowHandle, key: &str) {
 #[test]
 fn native_menu_focus_wraps_skips_disabled_and_activates_shared_controls() {
     let mut cx = TestAppContext::single();
+    cx.update(crate::theme::init_test);
     let scope = cx.update(FocusScope::new);
     let window = cx.add_window({
         let scope = scope.clone();
@@ -111,6 +107,7 @@ fn native_menu_focus_wraps_skips_disabled_and_activates_shared_controls() {
 #[test]
 fn modified_arrows_do_not_move_menu_focus_or_turn_into_activation() {
     let mut cx = TestAppContext::single();
+    cx.update(crate::theme::init_test);
     let scope = cx.update(FocusScope::new);
     let window = cx.add_window({
         let scope = scope.clone();
@@ -147,6 +144,7 @@ fn modified_arrows_do_not_move_menu_focus_or_turn_into_activation() {
 #[test]
 fn disabling_a_focused_control_cancels_keyboard_activation() {
     let mut cx = TestAppContext::single();
+    cx.update(crate::theme::init_test);
     let scope = cx.update(FocusScope::new);
     let window = cx.add_window({
         let scope = scope.clone();
@@ -213,4 +211,27 @@ fn disabling_a_focused_control_cancels_keyboard_activation() {
         })
         .unwrap();
     assert_eq!(counts, [0, 0, 1, 0]);
+}
+
+#[test]
+fn independent_overlay_roots_render_after_live_typography_changes() {
+    let mut cx = TestAppContext::single();
+    cx.update(crate::theme::init_test);
+    let tooltip = cx.add_window(|_, _| ButtonTooltip {
+        text: "Tooltip".into(),
+    });
+    let drag = cx.add_window(|_, _| ListDragPreview {
+        label: "Drag".into(),
+    });
+    draw(&mut cx, tooltip.into());
+    draw(&mut cx, drag.into());
+    cx.update(|cx| {
+        let mut font = gpui::font("sans-serif");
+        font.weight = gpui::FontWeight::BOLD;
+        crate::theme::set_typography(font.clone(), "updated-icons", cx);
+        assert_eq!(crate::theme::font(cx), &font);
+        assert_eq!(crate::theme::icon_family(cx).as_ref(), "updated-icons");
+    });
+    draw(&mut cx, tooltip.into());
+    draw(&mut cx, drag.into());
 }

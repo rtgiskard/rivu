@@ -168,6 +168,55 @@ retirement belong to a separate presentation owner; see
 link:23_visuals.adoc#_analysis_boundary[Analysis boundary].
 
 
+=== Reusable GPUI controls
+
+The workspace package `rivu-ui` provides the shared controls independently of
+Rivu's application root. It depends on GPUI and Unicode segmentation, not the
+playback core, configuration, localization catalog, or feature models. Rivu's
+GUI composition layer supplies track rows, metadata/artwork presentation, and
+localized search labels and count formatting. Consumers import generic controls
+directly from `rivu_ui`; there is no compatibility facade through the application.
+
+Hosts install an immutable `theme::Palette` with `theme::set_palette`, publish a
+resolved text font and icon family with `theme::set_typography`, and call
+`input::Input::init` before showing controls. Appearance is application-scoped;
+the host owns palette storage and font resolution/registration. Tooltip and drag
+roots read current typography without inspecting the window root. Rivu retains
+its GUI/TUI color presets and optional embedded-symbol registration outside the
+component package. Runtime appearance changes invalidate existing views.
+
+Input owns text, selection, IME conversion, focus and pointer-selection capture.
+Disabling an input keeps its draft while rejecting edits and removing its Tab
+stop. `SearchField` owns expansion, clear/Escape interaction and a cancellable
+debounce task; the host supplies the delay, text and count formatter. Clearing or
+resetting invalidates an older pending query. Its single-line height is bounded
+in both horizontal and vertical parent layouts.
+
+`ChoiceState` owns candidates, keyboard highlight and the existing scroll handle;
+`ChoicePopup` renders their viewport-bounded anchored surface. Select and editable
+input modes share navigation, but editable text/IME submission remains Input's
+responsibility. Owners supply filtering, value mapping, commit and dismissal
+decisions. `Dialog` and `Popover` supply materials, constraints and modal pointer
+barriers, not global surface state or an automatic outside-close policy. Shell
+focus restoration, draft protection and asynchronous business guards stay with
+their existing owners; a disabled visual control does not replace those guards.
+
+`VirtualList` accepts an absolute logical row count, a stable identity, an existing
+scroll handle and a range renderer. It owns neither records nor selection and
+does not fetch data. Only its actual viewport decoration reports demand: GPUI's
+sample-row measurement is not a query request. Sparse placeholders retain their
+logical indices. Optional decorations and a wrapper inside the scrollbar gutter
+keep host measurements and drop targets in the same content coordinates.
+Workspace remains responsible for panel lifetime and hidden-tab input routing.
+Library's sparse tree, album grid projection, and History's column geometry remain
+feature-owned; bounded heterogeneous duplicate-review pages use ordinary scroll
+areas rather than uniform-row virtualization.
+
+The package uses this workspace's pinned GPUI revision and local patches. It is
+not a renderer-independent API or a promise of compatibility with arbitrary GPUI
+versions. `make lint` and `make build` include the component package;
+`cargo test -p rivu-ui` runs its interaction and viewport regression tests.
+
 == Normalized trees and resource boundaries
 
 A layout may have no root when it contains no panels. Otherwise, leaves are

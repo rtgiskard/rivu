@@ -1,31 +1,5 @@
 use crate::model::Page;
-use gpui::{
-    AnyElement, App, Bounds, IntoElement, Pixels, Point, UniformListDecoration, Window, div,
-};
 use std::{collections::BTreeMap, ops::Range};
-
-/// Measurement renders a sample row too. Only the viewport decoration is a demand signal.
-pub(super) fn viewport_demand(
-    callback: impl Fn(Range<usize>, &mut Window, &mut App) + 'static,
-) -> impl UniformListDecoration {
-    ViewportDemand(callback)
-}
-struct ViewportDemand<F>(F);
-impl<F: Fn(Range<usize>, &mut Window, &mut App)> UniformListDecoration for ViewportDemand<F> {
-    fn compute(
-        &self,
-        range: Range<usize>,
-        _: Bounds<Pixels>,
-        _: Point<Pixels>,
-        _: Pixels,
-        _: usize,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> AnyElement {
-        (self.0)(range, window, cx);
-        div().into_any_element()
-    }
-}
 
 const MAX_PAGES: usize = 8;
 

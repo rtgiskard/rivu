@@ -5,17 +5,13 @@ use super::{
 };
 use crate::{
     gui::{
-        components::{
-            compact_icon_button, icon_button,
-            search::{ListSearch, SearchEvent},
-        },
-        feature::FeatureContext,
-        manual_actions::ManualIntentId,
+        components::search::new_search, feature::FeatureContext, manual_actions::ManualIntentId,
     },
     model::{Command, DirectoryRow},
     projection::GuiSnapshot,
 };
 use gpui::{AnyElement, App, Context, SharedString, Window, prelude::*};
+use rivu_ui::{compact_icon_button, icon_button, search::SearchEvent};
 use std::{cell::RefCell, rc::Rc, sync::Arc, time::Instant};
 
 // Position ticks and unrelated feature publications do not change this surface.
@@ -43,7 +39,7 @@ impl Library {
     pub(in crate::gui) fn new(context: FeatureContext, cx: &mut Context<Self>) -> Self {
         let state = context.snapshot();
         let i18n = Arc::clone(&context.i18n);
-        let library_search = cx.new(|cx| ListSearch::new(Arc::clone(&i18n), cx));
+        let library_search = cx.new(|cx| new_search(&i18n, cx));
         let subscription = cx.subscribe(&library_search, |this, _, event, cx| {
             let SearchEvent::Changed(query) = event;
             this.apply_library_search(query.clone(), cx);
@@ -291,7 +287,7 @@ impl Library {
         favorite: bool,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
-        let theme = crate::gui::theme::palette(cx);
+        let theme = rivu_ui::theme::palette(cx);
         compact_icon_button(
             theme,
             icon_button(

@@ -1,9 +1,7 @@
 use super::{PlaylistEvent, Playlists};
-use crate::gui::components::{
-    StatusKind, caption, column, form_field, icon_button, row, status_message,
-};
 use crate::{gui::UI_INSET, model::Command};
 use gpui::{AnyElement, Context, Focusable, Window, div, prelude::*, px, relative, rems, rgb};
+use rivu_ui::{StatusKind, caption, column, form_field, icon_button, row, status_message};
 
 pub(in crate::gui) enum PlaylistNameAction {
     Create { track_ids: Vec<i64> },
@@ -123,7 +121,7 @@ impl Playlists {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let theme = crate::gui::theme::palette(cx);
+        let theme = rivu_ui::theme::palette(cx);
         let editor = self.playlist_editor.as_ref().expect("playlist editor open");
         let (title, submit) = match editor.action {
             PlaylistNameAction::Create { .. } => (
@@ -185,7 +183,7 @@ impl Playlists {
                     )),
             );
         }
-        crate::gui::components::modal_backdrop("playlist-name-modal")
+        rivu_ui::Dialog::backdrop("playlist-name-modal")
             .map(|surface| self.dialog_surface(surface))
             .child(
                 column()

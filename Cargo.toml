@@ -1,3 +1,10 @@
+[workspace]
+members = ["crates/rivu-ui"]
+resolver = "3"
+
+[workspace.dependencies]
+gpui = { git = "https://github.com/zed-industries/zed", rev = "df48a139ce9c292738b523252c12f044697e673f", default-features = false }
+
 [package]
 name = "rivu"
 version = "0.1.0"
@@ -10,6 +17,7 @@ ffmpeg = ["dep:bindgen", "dep:libloading"]
 embed-nerd-font = []
 
 [dependencies]
+rivu-ui = { path = "crates/rivu-ui" }
 anyhow = "1"
 blake3 = "1"
 clap = { version = "4", features = ["derive", "string"] }
@@ -21,7 +29,7 @@ directories = "6"
 fluent-bundle = "0.16"
 fluent-syntax = "0.12"
 unic-langid = "0.9"
-gpui = { git = "https://github.com/zed-industries/zed", rev = "df48a139ce9c292738b523252c12f044697e673f", default-features = false }
+gpui.workspace = true
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "df48a139ce9c292738b523252c12f044697e673f", default-features = false, features = ["wayland"] }
 ashpd = { version = "0.13.13", default-features = false, features = ["async-io", "file_chooser"] }
 futures = "0.3"
@@ -57,7 +65,7 @@ pipewire = { version = "0.10.1", features = ["v1_2_0"] }
 fontconfig-sys = { package = "yeslogic-fontconfig-sys", version = "6" }
 
 [dev-dependencies]
-gpui = { git = "https://github.com/zed-industries/zed", rev = "df48a139ce9c292738b523252c12f044697e673f", default-features = false, features = ["test-support"] }
+gpui = { workspace = true, features = ["test-support"] }
 tokio = { version = "1", features = ["test-util"] }
 
 [build-dependencies]

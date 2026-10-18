@@ -342,7 +342,7 @@ impl Element for Scrollbar {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let theme = crate::gui::theme::palette(cx);
+        let theme = crate::theme::palette(cx);
         {
             let mut state = frame.state.borrow_mut();
             state.hovered = frame.hitbox.is_hovered(window);

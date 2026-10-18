@@ -1,11 +1,11 @@
 use super::*;
-use crate::gui::components::{
-    ButtonTooltip, caption, column, copyable_message, icon_button, menu_item, row,
+use rivu_ui::{
+    ButtonTooltip, Dialog, Popover, caption, column, copyable_message, icon_button, menu_item, row,
 };
 
 impl Render for GuiApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = crate::gui::theme::palette(cx);
+        let theme = rivu_ui::theme::palette(cx);
         self.presentation.update(cx, |presentation, cx| {
             presentation.request_frame(window, cx)
         });
@@ -241,7 +241,7 @@ impl Render for GuiApp {
                             .flex_shrink_0()
                             .gap_0()
                             .child(
-                                super::components::compact_icon_button(
+                                rivu_ui::compact_icon_button(
                                     theme,
                                     icon_button(
                                         "copy-error",
@@ -260,7 +260,7 @@ impl Render for GuiApp {
                                 }),
                             )
                             .child(
-                                super::components::compact_icon_button(
+                                rivu_ui::compact_icon_button(
                                     theme,
                                     icon_button(
                                         "dismiss-error",
@@ -349,14 +349,12 @@ impl Render for GuiApp {
                 cx.notify();
             });
             app = app.child(
-                components::floating_surface(theme)
+                Popover::surface(theme, "app-menu-popup")
                     .flex()
                     .flex_col()
                     .min_w_0()
                     .min_h_0()
-                    .id("app-menu-popup")
                     .map(|surface| self.menu_surface(surface, cx))
-                    .occlude()
                     .absolute()
                     .bottom(footer_height)
                     .right(gpui::px(UI_INSET))
@@ -429,7 +427,7 @@ impl Render for GuiApp {
                                 }),
                         ),
                     )
-                    .child(components::menu_separator(theme))
+                    .child(rivu_ui::menu_separator(theme))
                     .child(menu_item(
                         "app-keyboard-help",
                         self.tr("shell-shortcuts"),
@@ -440,7 +438,7 @@ impl Render for GuiApp {
                         },
                     ))
                     .child(about)
-                    .child(components::menu_separator(theme))
+                    .child(rivu_ui::menu_separator(theme))
                     .child(menu_item(
                         "app-close-window",
                         self.tr("shell-close-window"),
@@ -513,7 +511,7 @@ impl Render for GuiApp {
             );
         }
         if self.duplicates.read(cx).is_open() {
-            let surface = self.dialog_surface(components::modal_backdrop("duplicate-review-modal"));
+            let surface = self.dialog_surface(Dialog::backdrop("duplicate-review-modal"));
             app = app.child(self.duplicates.update(cx, |duplicates, cx| {
                 duplicates
                     .render_modal(surface, window, cx)
@@ -538,20 +536,17 @@ impl Render for GuiApp {
             .format("%Y-%m-%d %H:%M:%S %:z")
             .to_string();
             app = app.child(
-                crate::gui::components::modal_backdrop("about-modal")
+                Dialog::backdrop("about-modal")
                     .map(|surface| self.dialog_surface(surface))
                     .child(
-                        row()
+                        Dialog::card(theme)
+                            .flex_row()
                             .id("about-card")
                             .relative()
                             .max_w(relative(0.9))
                             .items_center()
                             .gap_6()
                             .p_12()
-                            .bg(rgb(theme.panel))
-                            .border_1()
-                            .border_color(rgb(theme.border))
-                            .rounded_md()
                             .on_mouse_down_out(cx.listener(|this, _, window, cx| {
                                 this.shell.dismiss(shell::Surface::About);
                                 this.focus_layout(window, cx);
@@ -614,7 +609,7 @@ impl Render for GuiApp {
                                     ),
                             )
                             .child(
-                                components::quiet_icon_button(
+                                rivu_ui::quiet_icon_button(
                                     theme,
                                     icon_button(
                                         "about-close",

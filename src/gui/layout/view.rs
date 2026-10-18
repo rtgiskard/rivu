@@ -1,5 +1,5 @@
 use super::super::*;
-use crate::gui::components::{column, icon_button, row};
+use rivu_ui::{column, icon_button, row};
 
 impl GuiApp {
     pub(in crate::gui) fn measurement(&self, key: Measured) -> AnyElement {
@@ -169,7 +169,7 @@ impl GuiApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let theme = crate::gui::theme::palette(cx);
+        let theme = rivu_ui::theme::palette(cx);
         match node {
             Node::Split {
                 id,
@@ -342,7 +342,7 @@ impl GuiApp {
                                 this.persist_layout(cx);
                             }))
                             .on_key_down(cx.listener(move |this, event, _, cx| {
-                                if components::context_menu_key(event) {
+                                if rivu_ui::context_menu_key(event) {
                                     this.open_keyboard_panel_menu(
                                         panel_id,
                                         tab_bar_visible,
@@ -385,7 +385,7 @@ impl GuiApp {
                             .child(self.measurement(Measured::Tab(panel_id)))
                             .when(!self.workspace.layouts.current().locked, |view| {
                                 view.child(
-                                    components::quiet_icon_button(
+                                    rivu_ui::quiet_icon_button(
                                         theme,
                                         icon_button(
                                             ("close", panel_id),
@@ -457,7 +457,7 @@ impl GuiApp {
                         this.search_panel = Some(active);
                     }))
                     .on_key_down(cx.listener(move |this, event, window, cx| {
-                        if components::context_menu_key(event) && !this.input_focused(window, cx) {
+                        if rivu_ui::context_menu_key(event) && !this.input_focused(window, cx) {
                             this.open_keyboard_panel_menu(
                                 active,
                                 show_tab_bar,

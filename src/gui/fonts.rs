@@ -20,6 +20,10 @@ pub(super) fn register_symbols(cx: &App) -> anyhow::Result<()> {
         )))])
 }
 
+pub(super) fn publish(font: &Font, cx: &mut App) {
+    rivu_ui::theme::set_typography(font.clone(), SYMBOLS_FAMILY, cx);
+}
+
 /// Resolve only at startup or when the saved setting changes, never while painting.
 pub(super) fn resolve(requested: &str, cx: &App) -> Font {
     let requested = requested.trim();

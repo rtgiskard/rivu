@@ -1,8 +1,5 @@
 //! Playback controls own their Core commands; the window owns pointer arbitration.
 use super::{
-    components::{
-        active_control, caption, column, disabled_control, icon_button, quiet_icon_button, row,
-    },
     feature::FeatureContext,
     fonts::tabular_numbers,
     format_time,
@@ -15,6 +12,9 @@ use crate::{
 use gpui::{
     AnyElement, Context, ElementId, EventEmitter, MouseButton, MouseDownEvent, Pixels, Point,
     Window, div, prelude::*, px, relative, rgb,
+};
+use rivu_ui::{
+    active_control, caption, column, disabled_control, icon_button, quiet_icon_button, row,
 };
 use std::rc::Rc;
 
@@ -122,7 +122,7 @@ impl Playback {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let theme = crate::gui::theme::palette(cx);
+        let theme = rivu_ui::theme::palette(cx);
         let track = self.state.current_track();
         let title = track
             .map(|track| track.title.clone())
@@ -296,7 +296,7 @@ impl Playback {
                     .tooltip({
                         let text = self.context.tr("gl-volume");
                         move |_, cx| {
-                            cx.new(|_| crate::gui::components::ButtonTooltip { text: text.clone() })
+                            cx.new(|_| rivu_ui::ButtonTooltip { text: text.clone() })
                                 .into()
                         }
                     }),
@@ -432,7 +432,7 @@ impl Playback {
         measurement: AnyElement,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let theme = crate::gui::theme::palette(cx);
+        let theme = rivu_ui::theme::palette(cx);
         let value = value.clamp(0., 1.);
         let is_dragging = match (self.dragging, dragging) {
             (Some(Dragging::Seek(active)), Dragging::Seek(id))

@@ -1,259 +1,37 @@
-//! Shared interaction state for optional list-local search.
-
-use super::{
-    icon_button,
-    input::{Input, InputEvent},
-    row,
-};
 use crate::i18n::Localizer;
-use gpui::{prelude::*, *};
-use std::sync::Arc;
+use gpui::{Context, SharedString};
+use rivu_ui::search::{SearchField, SearchLabels};
 
-pub(in crate::gui) enum SearchEvent {
-    Changed(Option<String>),
+/// Rivu supplies text and query pacing; the reusable field owns only local interaction.
+pub(in crate::gui) fn new_search(i18n: &Localizer, cx: &mut Context<SearchField>) -> SearchField {
+    SearchField::new(
+        SearchLabels {
+            placeholder: i18n.text("search-placeholder").to_owned().into(),
+            toggle: i18n.text("search-toggle").to_owned().into(),
+            clear: i18n.text("search-clear").to_owned().into(),
+        },
+        crate::model::SEARCH_DEBOUNCE,
+        cx,
+    )
 }
 
-pub(in crate::gui) struct ListSearch {
-    i18n: Arc<Localizer>,
-    input: Entity<Input>,
-    focus_handle: FocusHandle,
-    expanded: bool,
-    expansion: u64,
-    query: Option<String>,
-    generation: u64,
-    timer: Option<Task<()>>,
-    counts: Option<(usize, usize)>,
-    _subscription: Subscription,
-}
-
-impl EventEmitter<SearchEvent> for ListSearch {}
-
-impl ListSearch {
-    pub(in crate::gui) fn new(i18n: Arc<Localizer>, cx: &mut Context<Self>) -> Self {
-        let input =
-            cx.new(|cx| Input::new("", i18n.text("search-placeholder").to_owned(), cx).embedded());
-        input.update(cx, |input, cx| input.set_trailing_text("—".into(), cx));
-        let subscription = cx.subscribe(&input, |this, _, event, cx| {
-            if matches!(event, InputEvent::Changed { user: true }) {
-                this.edited(cx);
-            }
-        });
-        Self {
-            i18n,
-            input,
-            focus_handle: cx.focus_handle(),
-            expanded: false,
-            expansion: 0,
-            query: None,
-            generation: 0,
-            timer: None,
-            counts: None,
-            _subscription: subscription,
-        }
-    }
-
-    fn edited(&mut self, cx: &mut Context<Self>) {
-        self.timer.take();
-        self.generation = self.generation.wrapping_add(1);
-        let text = self.input.read(cx).text().trim();
-        let query = (!text.is_empty()).then(|| text.to_owned());
-        if query.is_none() {
-            self.apply(None, cx);
-        } else {
-            let generation = self.generation;
-            let delay = cx
-                .background_executor()
-                .timer(crate::model::SEARCH_DEBOUNCE);
-            self.timer = Some(cx.spawn(async move |this, cx| {
-                delay.await;
-                let _ = this.update(cx, |this, cx| {
-                    if this.generation == generation {
-                        this.timer = None;
-                        this.apply(query, cx);
-                    }
-                });
-            }));
-        }
-        cx.notify();
-    }
-
-    fn apply(&mut self, query: Option<String>, cx: &mut Context<Self>) {
-        if self.query != query {
-            self.query = query.clone();
-            self.clear_counts(cx);
-            cx.emit(SearchEvent::Changed(query));
-            cx.notify();
-        }
-    }
-
-    pub(in crate::gui) fn focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.expanded {
-            self.expansion = self.expansion.wrapping_add(1);
-            self.expanded = true;
-        }
-        self.input
-            .update(cx, |input, cx| input.focus_and_select_all(window, cx));
-        cx.notify();
-    }
-
-    pub(in crate::gui) fn toggle(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.focus(window, cx);
-    }
-
-    pub(in crate::gui) fn clear(&mut self, cx: &mut Context<Self>) {
-        self.timer.take();
-        self.generation = self.generation.wrapping_add(1);
-        self.input.update(cx, |input, cx| input.set_text("", cx));
-        self.apply(None, cx);
-        cx.notify();
-    }
-
-    pub(in crate::gui) fn reset(&mut self, cx: &mut Context<Self>) {
-        self.clear(cx);
-        self.expanded = false;
-        cx.notify();
-    }
-
-    pub(in crate::gui) fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if self.input_focused(window, cx)
-            && self
-                .input
-                .update(cx, |input, cx| input.dismiss_composition(cx))
-        {
-            return true;
-        }
-        if !self.input.read(cx).text().is_empty() || self.query.is_some() {
-            self.clear(cx);
-            return true;
-        }
-        if self.expanded {
-            self.expanded = false;
-            if self.input_focused(window, cx) {
-                self.focus_handle.focus(window, cx);
-            }
-            cx.notify();
-            return true;
-        }
-        false
-    }
-
-    pub(in crate::gui) fn input_focused(&self, window: &Window, cx: &App) -> bool {
-        self.input.read(cx).is_focused(window)
-    }
-
-    pub(in crate::gui) fn set_counts(
-        &mut self,
-        matched: usize,
-        total: usize,
-        cx: &mut Context<Self>,
-    ) {
-        if self.counts != Some((matched, total)) {
-            self.counts = Some((matched, total));
-            let text = self.i18n.format(
+pub(in crate::gui) fn set_search_counts(
+    search: &mut SearchField,
+    matched: usize,
+    total: usize,
+    i18n: &Localizer,
+    cx: &mut Context<SearchField>,
+) {
+    search.set_counts(
+        matched,
+        total,
+        |matched, total| -> SharedString {
+            i18n.format(
                 "search-count",
                 &[("matched", matched.into()), ("total", total.into())],
-            );
-            self.input
-                .update(cx, |input, cx| input.set_trailing_text(text.into(), cx));
-            cx.notify();
-        }
-    }
-
-    pub(in crate::gui) fn clear_counts(&mut self, cx: &mut Context<Self>) {
-        if self.counts.take().is_some() {
-            self.input
-                .update(cx, |input, cx| input.set_trailing_text("—".into(), cx));
-            cx.notify();
-        }
-    }
-}
-
-impl Render for ListSearch {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = crate::gui::theme::palette(cx);
-        let visible =
-            self.expanded || !self.input.read(cx).text().is_empty() || self.query.is_some();
-        let focused = self.input_focused(window, cx);
-        if !visible {
-            return row()
-                .track_focus(&self.focus_handle)
-                .h(gpui::rems(2.))
-                .flex_shrink_0()
-                .child(icon_button(
-                    "search-toggle",
-                    "󰍉",
-                    self.i18n.text("search-toggle").to_owned(),
-                    cx,
-                    |this, window, cx| this.toggle(window, cx),
-                ))
-                .into_any_element();
-        }
-        let mut field = row()
-            .gap_0()
-            .h_full()
-            .w_full()
-            .min_w_0()
-            .overflow_x_hidden()
-            .rounded_md()
-            .bg(rgb(theme.panel))
-            .border_1()
-            .border_color(if focused {
-                rgb(theme.accent)
-            } else {
-                rgb(theme.border)
-            })
-            .child(
-                icon_button(
-                    "search-toggle",
-                    "󰍉",
-                    self.i18n.text("search-toggle").to_owned(),
-                    cx,
-                    |this, window, cx| this.toggle(window, cx),
-                )
-                .w(gpui::rems(1.4))
-                .h_full()
-                .border_0()
-                .bg(gpui::transparent_black())
-                .rounded_none(),
-            );
-        field = field
-            .child(div().flex_1().min_w_0().h_full().child(self.input.clone()))
-            .when(!self.input.read(cx).text().is_empty(), |field| {
-                field.child(
-                    icon_button(
-                        "search-clear",
-                        "",
-                        self.i18n.text("search-clear").to_owned(),
-                        cx,
-                        |this, window, cx| {
-                            this.clear(cx);
-                            this.input
-                                .update(cx, |input, cx| input.focus_handle(cx).focus(window, cx));
-                        },
-                    )
-                    .w(gpui::rems(1.4))
-                    .h_full()
-                    .border_0()
-                    .bg(gpui::transparent_black())
-                    .rounded_none(),
-                )
-            });
-        let control = row()
-            .track_focus(&self.focus_handle)
-            .min_w_0()
-            .h(gpui::rems(2.))
-            .w(gpui::rems(14.))
-            .flex_basis(gpui::rems(2.))
-            .flex_shrink(1.)
-            .child(field);
-        control
-            .flex_grow(1.)
-            .with_animation(
-                ("search-expand", self.expansion),
-                Animation::new(std::time::Duration::from_millis(150))
-                    .with_easing(|t| 1. - (1. - t).powi(3)),
-                |control, progress| control.max_w(gpui::rems(2. + 12. * progress)),
             )
-            .into_any_element()
-    }
+            .into()
+        },
+        cx,
+    );
 }

@@ -8,34 +8,31 @@ use requests::ViewRequestKind;
 
 use super::{
     ListFocus, UI_INSET,
-    components::{
-        LIST_ROW_REMS, StatusKind, caption, column, compact_icon_button, context_menu_container,
-        danger_control, disabled_control, hover_actions, icon_button, list_panel_header, list_row,
-        list_row_height, list_viewport, panel_header, panel_surface, panel_toolbar, row, row_text,
-        scrollable_list, status_message, track_list_row,
-    },
+    components::{row_text, track_list_row},
     library::LibraryDrag,
-    paged,
 };
 use crate::{gui::queue::QueueDrag, model::Command};
-use gpui::{
-    AnyElement, Context, Div, SharedString, Window, div, prelude::*, px, rgb, uniform_list,
-};
+use gpui::{AnyElement, Context, Div, SharedString, Window, div, prelude::*, px, rgb};
 
 use crate::gui::list_interaction::TrackSource;
 use crate::gui::{
     BrowserFocus,
-    components::{
-        FocusScope,
-        input::{Input, InputEvent},
-        search::{ListSearch, SearchEvent},
-    },
+    components::search::{new_search, set_search_counts},
     feature::FeatureContext,
     loading::LoadingText,
     manual_actions::ManualIntentId,
 };
 use crate::projection::GuiSnapshot;
 use gpui::{App, Entity, EventEmitter, FocusHandle, Focusable, Subscription};
+use rivu_ui::{
+    FocusScope, LIST_ROW_REMS, StatusKind, VirtualList, caption, column, compact_icon_button,
+    danger_control, disabled_control, hover_actions, icon_button,
+    input::{Input, InputEvent},
+    list_panel_header, list_row, list_row_height, list_viewport, panel_header, panel_surface,
+    panel_toolbar, row,
+    search::{SearchEvent, SearchField},
+    status_message,
+};
 use std::{cell::RefCell, rc::Rc, sync::Arc};
 
 #[derive(Clone, Copy)]
@@ -93,8 +90,8 @@ pub(in crate::gui) struct Playlists {
     state: Rc<GuiSnapshot>,
     i18n: Arc<crate::i18n::Localizer>,
     browser: requests::PlaylistState,
-    playlist_search: Entity<ListSearch>,
-    playlist_entries_search: Entity<ListSearch>,
+    playlist_search: Entity<SearchField>,
+    playlist_entries_search: Entity<SearchField>,
     name_input: Entity<Input>,
     playlist_editor: Option<editor::PlaylistEditor>,
     playlist_action: Option<PlaylistAction>,
@@ -117,8 +114,8 @@ impl Playlists {
     pub(in crate::gui) fn new(context: FeatureContext, cx: &mut Context<Self>) -> Self {
         let i18n = context.i18n.clone();
         let state = context.snapshot();
-        let playlist_search = cx.new(|cx| ListSearch::new(i18n.clone(), cx));
-        let playlist_entries_search = cx.new(|cx| ListSearch::new(i18n.clone(), cx));
+        let playlist_search = cx.new(|cx| new_search(&i18n, cx));
+        let playlist_entries_search = cx.new(|cx| new_search(&i18n, cx));
         let name_input =
             cx.new(|cx| Input::new("", i18n.text("shell-playlist-name").to_owned(), cx));
         let subscriptions = vec![
@@ -412,7 +409,7 @@ impl Playlists {
         self.search_for_input(entries, window, cx)
             .update(cx, |search, cx| search.escape(window, cx))
     }
-    fn search_for_input(&self, entries: bool, window: &Window, cx: &App) -> &Entity<ListSearch> {
+    fn search_for_input(&self, entries: bool, window: &Window, cx: &App) -> &Entity<SearchField> {
         for search in [&self.playlist_search, &self.playlist_entries_search] {
             if search.read(cx).input_focused(window, cx) {
                 return search;
@@ -718,7 +715,7 @@ impl Playlists {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let theme = crate::gui::theme::palette(cx);
+        let theme = rivu_ui::theme::palette(cx);
         let Some(action) = self.playlist_action.clone() else {
             return div().into_any_element();
         };
@@ -727,13 +724,13 @@ impl Playlists {
             let has_tracks = self.state.current_track().is_some();
             let rename = target.clone();
             let delete = target.clone();
-            let menu = context_menu_container(theme, "playlist-row-menu", window)
+            let menu = rivu_ui::Popover::menu(theme, "playlist-row-menu", window)
                 .map(|surface| self.menu_surface(surface))
                 .on_mouse_down_out(cx.listener(|this, _, window, cx| {
                     this.dismiss_playlist_action(window, cx);
                     cx.stop_propagation();
                 }))
-                .child(crate::gui::components::menu_item(
+                .child(rivu_ui::menu_item(
                     "playlist-row-play",
                     self.tr("li-replace-queue"),
                     cx,
@@ -749,7 +746,7 @@ impl Playlists {
                         );
                     },
                 ))
-                .child(crate::gui::components::menu_item(
+                .child(rivu_ui::menu_item(
                     "playlist-row-queue",
                     self.tr("li-queue"),
                     cx,
@@ -758,9 +755,9 @@ impl Playlists {
                         this.append_playlist_to_queue(id, cx);
                     },
                 ))
-                .child(super::components::menu_separator(theme))
+                .child(rivu_ui::menu_separator(theme))
                 .child(
-                    crate::gui::components::menu_item(
+                    rivu_ui::menu_item(
                         "playlist-row-add",
                         self.tr("gl-add-current"),
                         cx,
@@ -782,7 +779,7 @@ impl Playlists {
                     .opacity(if has_tracks { 1. } else { 0.4 })
                     .when(!has_tracks, |view| view.cursor_default()),
                 )
-                .child(crate::gui::components::menu_item(
+                .child(rivu_ui::menu_item(
                     "playlist-row-rename",
                     self.tr("gl-rename"),
                     cx,
@@ -798,9 +795,9 @@ impl Playlists {
                         );
                     },
                 ))
-                .child(super::components::danger_menu_item(
+                .child(rivu_ui::danger_menu_item(
                     theme,
-                    crate::gui::components::menu_item(
+                    rivu_ui::menu_item(
                         "playlist-row-delete",
                         self.tr("gl-delete"),
                         cx,
@@ -825,20 +822,16 @@ impl Playlists {
             &[("name", target.name.as_str().into())],
         );
         let detail = self.i18n.text("gl-delete-playlist-note").to_owned();
-        crate::gui::components::modal_backdrop("playlist-action-modal")
+        rivu_ui::Dialog::backdrop("playlist-action-modal")
             .map(|surface| self.dialog_surface(surface))
             .child(
-                column()
+                rivu_ui::Dialog::card(theme)
                     .id("playlist-action-card")
                     .w(gpui::rems(26.25))
                     .max_w(gpui::relative(0.9))
                     .max_h(window.viewport_size().height * 0.9)
                     .overflow_y_scroll()
                     .p(px(UI_INSET))
-                    .bg(rgb(theme.panel))
-                    .border_1()
-                    .border_color(rgb(theme.border))
-                    .rounded_md()
                     .child(panel_header(theme, title, detail).flex_shrink_0())
                     .child(
                         row()
@@ -878,7 +871,7 @@ impl Playlists {
         panel_id: u64,
         cx: &mut Context<Self>,
     ) -> Div {
-        let theme = crate::gui::theme::palette(cx);
+        let theme = rivu_ui::theme::palette(cx);
         let rows_error = if kind == ViewRequestKind::Entries {
             self.browser.playlists().entries().rows.error(0)
         } else {
@@ -941,7 +934,7 @@ impl Playlists {
                     |text| text.invisible(),
                 )
                 .tooltip(move |_, cx| {
-                    cx.new(|_| crate::gui::components::ButtonTooltip {
+                    cx.new(|_| rivu_ui::ButtonTooltip {
                         text: message.clone(),
                     })
                     .into()
@@ -985,7 +978,7 @@ impl Playlists {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let theme = crate::gui::theme::palette(cx);
+        let theme = rivu_ui::theme::palette(cx);
         let owner = cx.weak_entity();
         window.defer(cx, move |_, cx| {
             let _ = owner.update(cx, |this, cx| this.request_playlist_selection(cx));
@@ -994,7 +987,7 @@ impl Playlists {
         let total = self.state.library.playlist_total;
         self.playlist_search.update(cx, |search, cx| {
             if let Some(matched) = matched {
-                search.set_counts(matched, total, cx);
+                set_search_counts(search, matched, total, &self.i18n, cx);
             } else {
                 search.clear_counts(cx);
             }
@@ -1003,7 +996,7 @@ impl Playlists {
         let total = self.browser.playlists().selected_total();
         self.playlist_entries_search.update(cx, |search, cx| {
             if let (Some(matched), Some(total)) = (matched, total) {
-                search.set_counts(matched, total, cx);
+                set_search_counts(search, matched, total, &self.i18n, cx);
             } else {
                 search.clear_counts(cx);
             }
@@ -1032,7 +1025,7 @@ impl Playlists {
                     .min_w_0()
                     .truncate()
                     .tooltip(move |_, cx| {
-                        cx.new(|_| crate::gui::components::ButtonTooltip {
+                        cx.new(|_| rivu_ui::ButtonTooltip {
                             text: selection_message.clone(),
                         })
                         .into()
@@ -1065,9 +1058,10 @@ impl Playlists {
             ("playlist-catalog", panel_id),
             &self.browser.playlists().summaries().scroll,
         );
-        let catalog = uniform_list(
+        let catalog = VirtualList::new(
             ("playlist-catalog", panel_id),
             catalog_len,
+            &self.browser.playlists().summaries().scroll,
             cx.processor(move |this, range: std::ops::Range<usize>, window, cx| {
                 range
                     .map(|index| {
@@ -1249,23 +1243,17 @@ impl Playlists {
                     .collect::<Vec<_>>()
             }),
         )
-        .with_decoration(paged::viewport_demand(
-            cx.processor(|this, range, _, cx| this.ensure_playlist_range(range, cx)),
-        ))
+        .on_viewport(cx.processor(|this, range, _, cx| this.ensure_playlist_range(range, cx)))
         .h_full()
         .min_h_0()
-        .w_full()
-        .track_scroll(&self.browser.playlists().summaries().scroll);
+        .w_full();
         let catalog = if catalog_len == 0 {
             self.empty_playlist_view(ViewRequestKind::Summaries, panel_id, cx)
                 .into_any_element()
         } else {
-            scrollable_list(
-                ("playlist-catalog-scrollbar", panel_id),
-                catalog,
-                &self.browser.playlists().summaries().scroll,
-            )
-            .into_any_element()
+            catalog
+                .scrollbar(("playlist-catalog-scrollbar", panel_id))
+                .into_any_element()
         };
         let mut lists = column()
             .flex_1()
@@ -1300,9 +1288,10 @@ impl Playlists {
                 &self.browser.playlists().entries().scroll,
             );
             let entries_len = self.browser.playlists().entries().rows.len();
-            let entries = uniform_list(
+            let entries = VirtualList::new(
                 ("playlist-entries", panel_id),
                 entries_len,
+                &self.browser.playlists().entries().scroll,
                 cx.processor(move |this, range: std::ops::Range<usize>, window, cx| {
                     range
                         .map(|index| {
@@ -1510,7 +1499,7 @@ impl Playlists {
                                     && this.browser.playlists().entries().query.is_none(),
                                 |row| {
                                     row.on_drag(drag, move |drag, _, window, cx| {
-                                        super::components::begin_list_drag(window, cx);
+                                        rivu_ui::begin_list_drag(window, cx);
                                         drag.entry_ids.get_or_init(|| {
                                             drag_owner
                                                 .update(cx, |this, cx| {
@@ -1584,7 +1573,7 @@ impl Playlists {
                                                 )],
                                             )
                                             .into();
-                                        cx.new(|_| super::components::ListDragPreview { label })
+                                        cx.new(|_| rivu_ui::ListDragPreview { label })
                                     })
                                 },
                             )
@@ -1627,9 +1616,7 @@ impl Playlists {
                         .collect::<Vec<_>>()
                 }),
             )
-            .with_decoration(paged::viewport_demand(
-                cx.processor(|this, range, _, cx| this.ensure_entry_range(range, cx)),
-            ))
+            .on_viewport(cx.processor(|this, range, _, cx| this.ensure_entry_range(range, cx)))
             .on_drop(cx.listener(move |this, drag: &PlaylistDrag, window, cx| {
                 window.prevent_default();
                 this.transfer_playlist_drag(
@@ -1653,18 +1640,14 @@ impl Playlists {
             })
             .h_full()
             .min_h_0()
-            .w_full()
-            .track_scroll(&self.browser.playlists().entries().scroll);
+            .w_full();
             let entries = if entries_len == 0 {
                 self.empty_playlist_view(ViewRequestKind::Entries, panel_id, cx)
                     .into_any_element()
             } else {
-                scrollable_list(
-                    ("playlist-entries-scrollbar", panel_id),
-                    entries,
-                    &self.browser.playlists().entries().scroll,
-                )
-                .into_any_element()
+                entries
+                    .scrollbar(("playlist-entries-scrollbar", panel_id))
+                    .into_any_element()
             };
             lists = lists.child(
                 column()

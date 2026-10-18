@@ -103,7 +103,7 @@ impl Input {
     }
 
     /// Reserve room for an overlaid trailing control without overlapping text.
-    pub(in crate::gui) fn with_trailing_space(mut self, space: Pixels) -> Self {
+    pub fn with_trailing_space(mut self, space: Pixels) -> Self {
         self.trailing_space = space;
         self
     }
@@ -112,12 +112,12 @@ impl Input {
     ///
     /// The parent owns the background, border, and height; the text line is
     /// vertically centered without the standalone input's vertical padding.
-    pub(in crate::gui) fn embedded(mut self) -> Self {
+    pub fn embedded(mut self) -> Self {
         self.embedded = true;
         self
     }
 
-    pub(in crate::gui) fn set_trailing_text(&mut self, text: SharedString, cx: &mut Context<Self>) {
+    pub fn set_trailing_text(&mut self, text: SharedString, cx: &mut Context<Self>) {
         if self.trailing_text.as_ref() != Some(&text) {
             self.trailing_text = Some(text);
             cx.notify();
@@ -146,7 +146,7 @@ impl Input {
     }
 
     /// Disabled inputs retain their entity and value but reject user editing.
-    pub(in crate::gui) fn set_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+    pub fn set_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
         if self.enabled == enabled {
             return;
         }
@@ -162,22 +162,18 @@ impl Input {
         self.focus_handle.is_focused(window)
     }
 
-    pub(in crate::gui) fn is_composing(&self) -> bool {
+    pub fn is_composing(&self) -> bool {
         self.marked_range.is_some()
     }
 
-    pub(in crate::gui) fn focus_and_select_all(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn focus_and_select_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.focus_handle.focus(window, cx);
         self.move_to(0, cx);
         self.select_to(self.content.len(), cx);
     }
 
     /// Cancel the current preedit without clearing committed input text.
-    pub(in crate::gui) fn dismiss_composition(&mut self, cx: &mut Context<Self>) -> bool {
+    pub fn dismiss_composition(&mut self, cx: &mut Context<Self>) -> bool {
         let Some(marked) = self.marked_range.take() else {
             return false;
         };
@@ -713,7 +709,7 @@ impl Element for InputElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
-        let theme = crate::gui::theme::palette(cx);
+        let theme = crate::theme::palette(cx);
         let input = self.input.read(cx);
         let content = input.content.clone();
         let selected_range = input.selected_range.clone();
@@ -885,7 +881,7 @@ impl Element for InputElement {
 
 impl Render for Input {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = crate::gui::theme::palette(cx);
+        let theme = crate::theme::palette(cx);
         let focused = self.enabled && self.focus_handle.is_focused(window);
         let scale = window.rem_size() / px(16.);
         div()
@@ -1058,6 +1054,7 @@ mod tests {
     #[test]
     fn mouse_selection_tracks_outside_motion_and_final_release_without_touching_other_inputs() {
         let mut cx = gpui::TestAppContext::single();
+        cx.update(crate::theme::init_test);
         let (input, other, handle) = selection_fixture(&mut cx);
         let (start, outside, over_other) = cx.update(|cx| {
             let field = input.read(cx);
@@ -1142,6 +1139,7 @@ mod tests {
     #[test]
     fn mouse_selection_cancels_on_missing_button_window_exit_blur_and_disable() {
         let mut cx = gpui::TestAppContext::single();
+        cx.update(crate::theme::init_test);
         let (input, other, handle) = selection_fixture(&mut cx);
         let (start, outside) = cx.update(|cx| {
             let bounds = input.read(cx).last_bounds.unwrap();
@@ -1244,6 +1242,7 @@ mod tests {
     #[test]
     fn endpoint_selection_preserves_anchor_across_direction_changes() {
         let mut cx = gpui::TestAppContext::single();
+        cx.update(crate::theme::init_test);
         cx.update(Input::init);
         let input = cx.update(|cx| cx.new(|cx| Input::new("a中😀z", "", cx)));
         let window = cx.add_window({
@@ -1309,6 +1308,7 @@ mod tests {
     #[test]
     fn escape_cancels_ime_preedit_without_dismissing_parent_dialog() {
         let mut cx = gpui::TestAppContext::single();
+        cx.update(crate::theme::init_test);
         let input = cx.update(|cx| cx.new(|cx| Input::new("kept", "", cx)));
         let escapes = std::rc::Rc::new(std::cell::Cell::new(0));
         let window = cx.add_window({

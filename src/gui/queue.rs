@@ -12,11 +12,7 @@
 use super::manual_actions::ManualIntentId;
 use super::*;
 use super::{
-    components::{
-        ButtonTooltip, LIST_ROW_REMS, StatusKind, button, caption, compact_icon_button,
-        disabled_control, hover_actions, icon_button, list_panel_header, list_viewport,
-        panel_surface, panel_toolbar, row, scrollable_list, status_message, track_list_row,
-    },
+    components::{search::set_search_counts, track_list_row},
     library::LibraryDrag,
     playlists::PlaylistDrag,
 };
@@ -24,6 +20,11 @@ use crate::{
     model::{Page, Query, QueryStamp, QueueRow},
     projection::QueryProjection,
     response::{QueryRevisions, ViewResponse},
+};
+use rivu_ui::{
+    ButtonTooltip, LIST_ROW_REMS, StatusKind, VirtualList, button, caption, compact_icon_button,
+    disabled_control, hover_actions, icon_button, list_panel_header, list_viewport, panel_surface,
+    panel_toolbar, row, status_message,
 };
 use std::{ops::Range, time::Duration};
 
@@ -1769,12 +1770,12 @@ impl Queue {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let theme = crate::gui::theme::palette(cx);
+        let theme = rivu_ui::theme::palette(cx);
         let matched = self.model.rows.total();
         let total = self.state.queue.total;
         self.queue_search.update(cx, |search, cx| {
             if let Some(matched) = matched {
-                search.set_counts(matched, total, cx);
+                set_search_counts(search, matched, total, &self.context.i18n, cx);
             } else {
                 search.clear_counts(cx);
             }
@@ -1929,11 +1930,11 @@ impl Queue {
                 self.model.busy || self.model.selection_error.is_some(),
                 |panel| panel.child(status),
             )
-            .child(list_viewport(scrollable_list(
-                ("queue-scrollbar", panel_id),
-                uniform_list(
+            .child(list_viewport(
+                VirtualList::new(
                     ("queue-rows", panel_id),
                     self.model.rows.len(),
+                    &scroll,
                     cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
                         range
                             .map(|index| {
@@ -2148,7 +2149,7 @@ impl Queue {
                                         && this.model.selection_error.is_none(),
                                     |row| {
                                         row.on_drag(drag, move |drag, _, window, cx| {
-                                            super::components::begin_list_drag(window, cx);
+                                            rivu_ui::begin_list_drag(window, cx);
                                             drag.entries.get_or_init(|| {
                                                 drag_owner
                                                     .update(cx, |this, cx| {
@@ -2181,7 +2182,7 @@ impl Queue {
                                                     )],
                                                 )
                                                 .into();
-                                            cx.new(|_| super::components::ListDragPreview { label })
+                                            cx.new(|_| rivu_ui::ListDragPreview { label })
                                         })
                                     },
                                 )
@@ -2208,9 +2209,7 @@ impl Queue {
                             .collect::<Vec<_>>()
                     }),
                 )
-                .with_decoration(paged::viewport_demand(
-                    cx.processor(|this, range, _, cx| this.ensure_queue_range(range, cx)),
-                ))
+                .on_viewport(cx.processor(|this, range, _, cx| this.ensure_queue_range(range, cx)))
                 .on_drop(cx.listener(|this, drag: &QueueDrag, window, cx| {
                     window.prevent_default();
                     this.move_queue_entry(drag, None, cx);
@@ -2251,9 +2250,8 @@ impl Queue {
                 .h_full()
                 .min_h_0()
                 .w_full()
-                .track_scroll(&scroll),
-                &scroll,
-            )))
+                .scrollbar(("queue-scrollbar", panel_id)),
+            ))
             .into_any_element()
     }
 }

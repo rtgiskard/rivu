@@ -1,0 +1,12 @@
+[package]
+name = "rivu-ui"
+version = "0.1.0"
+edition = "2024"
+description = "Reusable GPUI controls with host-provided appearance"
+
+[dependencies]
+gpui.workspace = true
+unicode-segmentation = "1.13.3"
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }

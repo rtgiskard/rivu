@@ -1,7 +1,5 @@
 use super::super::*;
-use crate::gui::components::{
-    button, caption, column, copyable_message, form_field, icon_button, menu_item, row,
-};
+use rivu_ui::{button, caption, column, copyable_message, form_field, icon_button, menu_item, row};
 
 #[derive(Clone)]
 pub(in crate::gui) enum Action {
@@ -133,12 +131,12 @@ impl GuiApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let theme = crate::gui::theme::palette(cx);
+        let theme = rivu_ui::theme::palette(cx);
         let mut content = column().gap_2().child(
             row()
                 .child(div().flex_1().text_lg().child(self.tr("shell-layouts")))
                 .child(
-                    components::quiet_icon_button(
+                    rivu_ui::quiet_icon_button(
                         theme,
                         icon_button(
                             "layouts-close",
@@ -202,7 +200,7 @@ impl GuiApp {
                         },
                     ))
                     .child(if matches!(action, Action::Delete(_)) {
-                        components::danger_control(
+                        rivu_ui::danger_control(
                             theme,
                             button("layout-action-submit", submit, cx, |this, window, cx| {
                                 this.finish_layout_action(window, cx)
@@ -257,7 +255,7 @@ impl GuiApp {
                 } else {
                     let name = name.to_owned();
                     choice = choice.child(
-                        components::quiet_icon_button(
+                        rivu_ui::quiet_icon_button(
                             theme,
                             icon_button(
                                 ("layout-delete", index),

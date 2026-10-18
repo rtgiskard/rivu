@@ -1,6 +1,6 @@
-use crate::gui::components::{caption, column, icon_button, row};
 use crate::gui::*;
 use crate::keyboard::{self, Action, Context as KeyContext, Modifiers as KeyModifiers};
+use rivu_ui::{Dialog, caption, column, icon_button, row};
 
 fn visible_panel(node: &Node, id: u64) -> Option<&layout::Panel> {
     match node {
@@ -92,7 +92,7 @@ impl GuiApp {
             cx.stop_propagation();
             return;
         }
-        if components::tab_key(event) {
+        if rivu_ui::tab_key(event) {
             if modifiers.shift {
                 window.focus_prev(cx);
             } else {
@@ -298,7 +298,7 @@ impl GuiApp {
         context: KeyContext,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let theme = crate::gui::theme::palette(cx);
+        let theme = rivu_ui::theme::palette(cx);
         let mut rows = column().flex_shrink_0().gap_2();
         let mut row_count = 0;
         for binding in keyboard::help_rows(&[context]) {
@@ -317,10 +317,10 @@ impl GuiApp {
             );
             row_count += 1;
         }
-        crate::gui::components::modal_backdrop("keyboard-help-modal")
+        Dialog::backdrop("keyboard-help-modal")
             .map(|surface| self.dialog_surface(surface))
             .child(
-                column()
+                Dialog::card(theme)
                     .id("keyboard-help-card")
                     .w(rems(42.))
                     .max_w(relative(0.9))
@@ -328,13 +328,9 @@ impl GuiApp {
                     .min_h_0()
                     .p_4()
                     .gap_3()
-                    .bg(rgb(theme.panel))
-                    .border_1()
-                    .border_color(rgb(theme.border))
-                    .rounded_md()
                     .child(
                         row().child(self.tr("shell-keyboard-help")).child(
-                            components::quiet_icon_button(
+                            rivu_ui::quiet_icon_button(
                                 theme,
                                 icon_button(
                                     "keyboard-help-close",
@@ -362,7 +358,7 @@ impl GuiApp {
                             .flex_shrink_1()
                             .min_h_0()
                             .px_4()
-                            .child(components::scrollable_area(
+                            .child(rivu_ui::scrollable_area(
                                 "keyboard-help-scrollbar",
                                 column()
                                     .id("keyboard-help-scroll")

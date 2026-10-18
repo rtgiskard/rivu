@@ -1,11 +1,7 @@
 //! Duplicates owns review state, query gates, commands and dialog rendering.
 //! Core retains relocation workers and task IDs; dismissal never joins a worker.
 
-use super::{components, feature::FeatureContext, format_time};
-use crate::gui::components::{
-    ButtonTooltip, StatusKind, active_control, button, caption, column, icon_button, panel_header,
-    panel_toolbar, row, status_message,
-};
+use super::{feature::FeatureContext, format_time};
 use crate::{
     model::{Command, Page, Query, RelocationPhase, RelocationTaskStatus},
     projection::{GuiSnapshot, QueryProjection},
@@ -13,6 +9,10 @@ use crate::{
     store::{DuplicateGroup, DuplicateMember},
 };
 use gpui::{prelude::*, *};
+use rivu_ui::{
+    ButtonTooltip, StatusKind, active_control, button, caption, column, icon_button, panel_header,
+    panel_toolbar, row, status_message,
+};
 use std::{rc::Rc, time::Duration};
 
 const GROUP_PAGE: usize = 12;
@@ -960,7 +960,7 @@ impl Duplicates {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let theme = crate::gui::theme::palette(cx);
+        let theme = rivu_ui::theme::palette(cx);
         let review = &self.duplicate_review;
         let busy = review.busy.is_some();
         let mut groups = column().gap_2();
@@ -975,7 +975,7 @@ impl Duplicates {
                 let selected = review.fingerprint.as_ref() == Some(&hash);
                 groups = groups.child(active_control(
                     theme,
-                    components::disabled_control(
+                    rivu_ui::disabled_control(
                         theme,
                         button(("duplicate-group", index), "", cx, move |this, _, cx| {
                             if this
@@ -1282,7 +1282,7 @@ impl Duplicates {
             if selectable_source {
                 actions = actions.child(active_control(
                     theme,
-                    components::disabled_control(
+                    rivu_ui::disabled_control(
                         theme,
                         button(
                             ("review-source", id as u64),
@@ -1302,7 +1302,7 @@ impl Duplicates {
             if selectable_target {
                 actions = actions.child(active_control(
                     theme,
-                    components::disabled_control(
+                    rivu_ui::disabled_control(
                         theme,
                         button(
                             ("review-target", id as u64),
@@ -1366,7 +1366,7 @@ impl Duplicates {
                 .child(
                     panel_toolbar()
                         .flex_wrap()
-                        .child(components::danger_control(
+                        .child(rivu_ui::danger_control(
                             theme,
                             button(
                                 "review-confirm",
@@ -1450,7 +1450,7 @@ impl Duplicates {
             decisions = decisions.child(status_message(theme, message, kind));
         }
         surface.child(
-            column()
+            rivu_ui::Dialog::card(theme)
                 .id("duplicate-review-card")
                 .w(relative(0.94))
                 .max_h(window.viewport_size().height * 0.92)
@@ -1459,10 +1459,6 @@ impl Duplicates {
                 .p_3()
                 .gap_2()
                 .overflow_y_scroll()
-                .bg(rgb(theme.panel))
-                .border_1()
-                .border_color(rgb(theme.border))
-                .rounded_md()
                 .child(
                     row()
                         .flex_shrink_0()
@@ -1471,9 +1467,9 @@ impl Duplicates {
                             self.tr("gl-same-files-title"),
                             self.tr("gl-same-files-note"),
                         )))
-                        .child(components::disabled_control(
+                        .child(rivu_ui::disabled_control(
                             theme,
-                            components::quiet_icon_button(
+                            rivu_ui::quiet_icon_button(
                                 theme,
                                 icon_button(
                                     "review-refresh",
@@ -1493,7 +1489,7 @@ impl Duplicates {
                             ),
                             busy,
                         ))
-                        .child(components::quiet_icon_button(
+                        .child(rivu_ui::quiet_icon_button(
                             theme,
                             icon_button(
                                 "review-close",
@@ -1578,7 +1574,7 @@ impl Duplicates {
         disabled: bool,
         cx: &mut Context<Self>,
     ) -> Div {
-        let theme = crate::gui::theme::palette(cx);
+        let theme = rivu_ui::theme::palette(cx);
         let mut pager = panel_toolbar().flex_shrink_0().child(caption(
             theme,
             self.context.i18n.format(
@@ -1600,7 +1596,7 @@ impl Duplicates {
             (offset + size, "󰁔", self.tr("gl-next-page"), false),
         ] {
             let enabled = !disabled && (if previous { offset > 0 } else { next < total });
-            pager = pager.child(components::disabled_control(
+            pager = pager.child(rivu_ui::disabled_control(
                 theme,
                 icon_button(
                     (

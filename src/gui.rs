@@ -37,8 +37,6 @@ use crate::{
 };
 use anyhow::Result;
 use ashpd::desktop::file_chooser::SelectedFiles;
-use components::drag_preview;
-use components::input::{Input, InputEvent};
 use futures::{StreamExt, channel::mpsc};
 use gpui::{prelude::*, *};
 use layout::interaction::{
@@ -49,6 +47,8 @@ use layout::save_owner::LayoutSaveHandle;
 use layout::{Axis, Edge, Node};
 use library::LibraryNode;
 use list_interaction::{ContentDrag, ContentMenuRequest, TrackSource};
+use rivu_ui::drag_preview;
+use rivu_ui::input::{Input, InputEvent};
 pub(crate) use session::UiSession;
 use std::{
     cell::RefCell,
@@ -673,6 +673,7 @@ impl GuiApp {
             .map(|error| i18n.format("shell-load-layouts-error", &[("error", error.into())]));
         workspace.save_error = error.clone();
         let ui_font = fonts::resolve(&state.system.config.ui_font, cx);
+        fonts::publish(&ui_font, cx);
         let layout_name =
             cx.new(|cx| Input::new("", i18n.text("shell-layout-name").to_owned(), cx));
         let mut subscriptions = Vec::new();
@@ -1113,6 +1114,7 @@ impl GuiApp {
             || self.state.system.config.ui_theme != state.system.config.ui_theme;
         if self.state.system.config.ui_font != state.system.config.ui_font {
             self.ui_font = fonts::resolve(&state.system.config.ui_font, cx);
+            fonts::publish(&self.ui_font, cx);
         }
         if self.state.system.config.ui_theme != state.system.config.ui_theme {
             theme::set_theme(state.system.config.ui_theme, cx);

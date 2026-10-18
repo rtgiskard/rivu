@@ -1,6 +1,6 @@
 use super::*;
-use crate::gui::components::{POPOVER_MAX_REMS, caption, context_menu_container, menu_item};
 use crate::response::ViewResponse;
+use rivu_ui::{POPOVER_MAX_REMS, Popover, caption, menu_item};
 
 #[derive(Clone)]
 pub(super) enum TrackSource {
@@ -82,6 +82,7 @@ pub(super) struct ContentMenu {
     loading: bool,
     confirm_remove: Option<RemoveTarget>,
     pub(super) playlists: bool,
+    playlist_scroll: UniformListScrollHandle,
 }
 
 // Preserve every page-state transition used to invalidate deferred menu focus.
@@ -275,6 +276,7 @@ impl GuiApp {
             loading,
             confirm_remove: None,
             playlists: false,
+            playlist_scroll: UniformListScrollHandle::new(),
         });
         self.replace_content_menu(menu, cx);
         if let Some(key) = album {
@@ -528,11 +530,11 @@ impl GuiApp {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let theme = crate::gui::theme::palette(cx);
+        let theme = rivu_ui::theme::palette(cx);
         let Some(state) = self.content_menu.as_ref() else {
             return div().into_any_element();
         };
-        let mut menu = context_menu_container(theme, "content-menu", window)
+        let mut menu = Popover::menu(theme, "content-menu", window)
             .map(|surface| self.menu_surface(surface, cx))
             .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                 this.replace_content_menu(None, cx);
@@ -565,7 +567,7 @@ impl GuiApp {
                         cx.notify();
                     },
                 ))
-                .child(components::danger_menu_item(
+                .child(rivu_ui::danger_menu_item(
                     theme,
                     menu_item(
                         "content-confirm-remove",
@@ -575,7 +577,7 @@ impl GuiApp {
                     ),
                 ));
         } else if state.playlists {
-            menu = menu.child(components::menu_title(theme, self.tr("li-playlist")));
+            menu = menu.child(rivu_ui::menu_title(theme, self.tr("li-playlist")));
             if state.tracks_only {
                 menu = menu.child(menu_item(
                     "content-new-playlist",
@@ -606,14 +608,15 @@ impl GuiApp {
                 ));
             }
             let count = self.playlists.read(cx).catalog_len();
-            let height = (window.rem_size() * components::LIST_ROW_REMS * count.max(1) as f32)
+            let height = (window.rem_size() * rivu_ui::LIST_ROW_REMS * count.max(1) as f32)
                 .min(window.rem_size() * POPOVER_MAX_REMS)
                 .min(window.viewport_size().height * 0.5);
             menu = menu
                 .child(
-                    uniform_list(
+                    rivu_ui::VirtualList::new(
                         "content-playlist-targets",
                         count,
+                        &state.playlist_scroll,
                         cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
                             range
                                 .map(|index| {
@@ -628,7 +631,7 @@ impl GuiApp {
                                             .update(cx, |playlists, cx| {
                                                 playlists.catalog_loading_row(index, cx)
                                             })
-                                            .h(gpui::rems(components::LIST_ROW_REMS));
+                                            .h(gpui::rems(rivu_ui::LIST_ROW_REMS));
                                     };
                                     menu_item(
                                         ("content-playlist-target", id as u64),
@@ -638,22 +641,20 @@ impl GuiApp {
                                             this.content_action(ContentAction::Playlist(id), cx)
                                         },
                                     )
-                                    .h(gpui::rems(components::LIST_ROW_REMS))
+                                    .h(gpui::rems(rivu_ui::LIST_ROW_REMS))
                                 })
                                 .collect::<Vec<_>>()
                         }),
                     )
-                    .with_decoration(paged::viewport_demand(cx.processor(
-                        |this, range, _, cx| {
-                            this.playlists.update(cx, |playlists, cx| {
-                                playlists.ensure_playlist_range(range, cx);
-                            });
-                        },
-                    )))
+                    .on_viewport(cx.processor(|this, range, _, cx| {
+                        this.playlists.update(cx, |playlists, cx| {
+                            playlists.ensure_playlist_range(range, cx);
+                        });
+                    }))
                     .h(height)
                     .w_full(),
                 )
-                .child(components::menu_back(
+                .child(rivu_ui::menu_back(
                     "content-back",
                     self.tr("shell-back"),
                     cx,
@@ -687,7 +688,7 @@ impl GuiApp {
                 ));
             if state.tracks_only {
                 menu = menu
-                    .child(components::menu_separator(theme))
+                    .child(rivu_ui::menu_separator(theme))
                     .child(menu_item(
                         "content-favorite",
                         self.tr("li-favorite"),
@@ -702,8 +703,9 @@ impl GuiApp {
                     ));
             }
             if state.remove.is_some() {
-                menu = menu.child(components::menu_separator(theme)).child(
-                    components::danger_menu_item(
+                menu = menu
+                    .child(rivu_ui::menu_separator(theme))
+                    .child(rivu_ui::danger_menu_item(
                         theme,
                         menu_item(
                             "content-remove",
@@ -716,12 +718,12 @@ impl GuiApp {
                                 cx.notify();
                             },
                         ),
-                    ),
-                );
+                    ));
             }
             if state.root.is_some() {
-                menu = menu.child(components::menu_separator(theme)).child(
-                    components::danger_menu_item(
+                menu = menu
+                    .child(rivu_ui::menu_separator(theme))
+                    .child(rivu_ui::danger_menu_item(
                         theme,
                         menu_item(
                             "content-remove-root",
@@ -734,8 +736,7 @@ impl GuiApp {
                                 cx.notify();
                             },
                         ),
-                    ),
-                );
+                    ));
             }
         }
         anchored()

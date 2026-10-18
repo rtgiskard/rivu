@@ -8,11 +8,11 @@ export CARGO_TARGET_DIR
 .PHONY: build lint clean install
 
 build:
-	RIVU_GIT_VERSION="$(RIVU_GIT_VERSION)" cargo build --release
+	RIVU_GIT_VERSION="$(RIVU_GIT_VERSION)" cargo build --workspace --release
 
 lint:
 	cargo fmt --all -- --check
-	cargo clippy --all-targets --all-features -- -D warnings
+	cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 clean:
 	cargo clean

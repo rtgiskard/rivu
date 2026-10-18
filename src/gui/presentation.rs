@@ -356,7 +356,7 @@ impl Presentation {
                 .bg(rgb(self.config.visual_background.rgb()))
                 .into_any_element();
         }
-        let theme = super::theme::palette(cx);
+        let theme = rivu_ui::theme::palette(cx);
         match self.panels.get(&id).copied() {
             Some(PanelKind::Spectrum) => self.visuals.spectrum(theme, &self.i18n, id),
             Some(PanelKind::Spectrogram) => self.visuals.spectrogram(theme, &self.i18n, id),

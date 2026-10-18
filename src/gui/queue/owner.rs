@@ -1,14 +1,11 @@
 //! Window-local queue owner and its typed integration boundary.
 use super::*;
-use crate::gui::{
-    components::{
-        list_row,
-        search::{ListSearch, SearchEvent},
-    },
-    feature::FeatureContext,
-    loading::LoadingText,
-};
+use crate::gui::{components::search::new_search, feature::FeatureContext, loading::LoadingText};
 use crate::projection::GuiSnapshot;
+use rivu_ui::{
+    list_row,
+    search::{SearchEvent, SearchField},
+};
 use std::{cell::RefCell, rc::Rc};
 
 #[derive(Clone, Copy)]
@@ -44,7 +41,7 @@ pub(in crate::gui) struct Queue {
     pub(super) context: FeatureContext,
     pub(super) state: Rc<GuiSnapshot>,
     pub(super) model: QueueSelection,
-    pub(super) queue_search: Entity<ListSearch>,
+    pub(super) queue_search: Entity<SearchField>,
     pub(super) loading: LoadingText<()>,
     pub(super) visible: bool,
     pub(super) focused: bool,
@@ -58,7 +55,7 @@ impl gpui::EventEmitter<QueueEvent> for Queue {}
 impl Queue {
     pub(in crate::gui) fn new(context: FeatureContext, cx: &mut Context<Self>) -> Self {
         let state = context.snapshot();
-        let queue_search = cx.new(|cx| ListSearch::new(context.i18n.clone(), cx));
+        let queue_search = cx.new(|cx| new_search(&context.i18n, cx));
         let subscription = cx.subscribe(&queue_search, |this, _, event, cx| {
             let SearchEvent::Changed(query) = event;
             this.apply_queue_search(query.clone(), cx);
@@ -338,7 +335,7 @@ impl Queue {
         favorite: bool,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<Div> {
-        let theme = crate::gui::theme::palette(cx);
+        let theme = rivu_ui::theme::palette(cx);
         compact_icon_button(
             theme,
             icon_button(
@@ -372,7 +369,7 @@ impl Queue {
         index: usize,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<Div> {
-        let theme = crate::gui::theme::palette(cx);
+        let theme = rivu_ui::theme::palette(cx);
         let error = self.model.rows.error(index);
         list_row(theme, ("loading-row", index), false)
             .child(

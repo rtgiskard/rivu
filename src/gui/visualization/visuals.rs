@@ -616,7 +616,7 @@ impl Visuals {
 
     pub(in crate::gui) fn spectrum(
         &self,
-        theme: &'static crate::theme::Palette,
+        theme: &'static rivu_ui::theme::Palette,
         i18n: &Arc<Localizer>,
         panel_id: u64,
     ) -> AnyElement {
@@ -625,7 +625,7 @@ impl Visuals {
 
     pub(in crate::gui) fn spectrogram(
         &self,
-        theme: &'static crate::theme::Palette,
+        theme: &'static rivu_ui::theme::Palette,
         i18n: &Arc<Localizer>,
         panel_id: u64,
     ) -> AnyElement {
@@ -715,7 +715,7 @@ impl Visuals {
 
     fn view(
         &self,
-        theme: &'static crate::theme::Palette,
+        theme: &'static rivu_ui::theme::Palette,
         i18n: &Arc<Localizer>,
         panel_id: u64,
         mode: VisualMode,
@@ -760,7 +760,7 @@ impl Visuals {
                     .text_size(px(10.0))
                     .line_height(px(12.0))
                     .tooltip(move |_, cx| {
-                        cx.new(|_| crate::gui::components::ButtonTooltip {
+                        cx.new(|_| rivu_ui::ButtonTooltip {
                             text: tooltip.clone(),
                         })
                         .into()

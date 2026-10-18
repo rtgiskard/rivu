@@ -4,9 +4,7 @@ mod model;
 mod panel;
 
 use super::{
-    components::search::{ListSearch, SearchEvent},
-    feature::FeatureContext,
-    list_interaction::ContentMenuRequest,
+    components::search::new_search, feature::FeatureContext, list_interaction::ContentMenuRequest,
     manual_actions::ManualIntentId,
 };
 use crate::{
@@ -19,7 +17,8 @@ use gpui::{
 use model::HistoryBrowser;
 pub(super) use model::HistoryCommit;
 use panel::HistoryColumnWidths;
-use std::{cell::RefCell, rc::Rc, sync::Arc};
+use rivu_ui::search::{SearchEvent, SearchField};
+use std::{cell::RefCell, rc::Rc};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum HistorySort {
@@ -55,7 +54,7 @@ pub(super) struct History {
     context: FeatureContext,
     state: Rc<GuiSnapshot>,
     model: HistoryBrowser,
-    search: Entity<ListSearch>,
+    search: Entity<SearchField>,
     ui_font: Font,
     column_widths: Option<HistoryColumnWidths>,
     _search_subscription: Subscription,
@@ -67,7 +66,7 @@ impl History {
     pub(super) fn new(context: FeatureContext, cx: &mut Context<Self>) -> Self {
         let state = context.snapshot();
         let ui_font = super::fonts::resolve(&state.system.config.ui_font, cx);
-        let search = cx.new(|cx| ListSearch::new(Arc::clone(&context.i18n), cx));
+        let search = cx.new(|cx| new_search(&context.i18n, cx));
         let subscription = cx.subscribe(&search, |this, _, event, cx| {
             let SearchEvent::Changed(query) = event;
             this.model.set_query(query.clone());

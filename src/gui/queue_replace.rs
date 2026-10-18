@@ -1,6 +1,6 @@
 //! Confirmation of commands that replace the playback queue, not playlist management.
-use super::components::{column, danger_control, icon_button, panel_header, row};
 use super::*;
+use rivu_ui::{column, danger_control, icon_button, panel_header, row};
 
 #[derive(Clone)]
 pub(super) enum QueueReplacement {
@@ -47,7 +47,7 @@ impl GuiApp {
         let Some(replacement) = &self.queue_replace else {
             return div().into_any_element();
         };
-        let theme = crate::gui::theme::palette(cx);
+        let theme = rivu_ui::theme::palette(cx);
         let (name, title_key) = match replacement {
             QueueReplacement::Playlist { name, .. } => (name, "gl-confirm-play-playlist"),
             QueueReplacement::Album(key) => (&key.title, "gl-confirm-play-album"),
@@ -60,7 +60,7 @@ impl GuiApp {
             &[("count", self.state.queue.total.into())],
         );
         let command = replacement.command();
-        crate::gui::components::modal_backdrop("queue-replace-modal")
+        rivu_ui::Dialog::backdrop("queue-replace-modal")
             .map(|surface| self.dialog_surface(surface))
             .child(
                 column()

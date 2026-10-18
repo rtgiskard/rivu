@@ -1,5 +1,6 @@
 //! Library-owned query dispatch; worker retirement is independent of visibility.
 use super::{Library, LibraryEvent, TreeBranch, model};
+use crate::gui::components::search::set_search_counts;
 use crate::{model::Query, response::ViewResponse};
 use gpui::Context;
 use std::rc::Rc;
@@ -161,8 +162,9 @@ impl Library {
                     counts,
                 ) {
                     if let Some((matched, total)) = this.library.search_counts() {
-                        this.library_search
-                            .update(cx, |search, cx| search.set_counts(matched, total, cx));
+                        this.library_search.update(cx, |search, cx| {
+                            set_search_counts(search, matched, total, &this.i18n, cx);
+                        });
                     }
                 } else if this.demanded() {
                     this.request_library_search_counts(cx);

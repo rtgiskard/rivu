@@ -6,19 +6,15 @@ mod requests;
 pub(in crate::gui) mod selection;
 pub(super) mod tree;
 
-use super::{
-    components::{
-        active_control, button, caption, column, disabled_control, icon_button, list_panel_header,
-        list_viewport, panel_surface, panel_toolbar, quiet_icon_button, row,
-    },
-    feature::FeatureContext,
-};
+use super::feature::FeatureContext;
 use crate::{
     config::{LibraryColumn, LibraryColumns},
     model::{Command, DirectoryRow, LibraryRow},
 };
-use gpui::{
-    AnyElement, Context, Div, Render, SharedString, Window, div, prelude::*, px, rgb, uniform_list,
+use gpui::{AnyElement, Context, Div, Render, SharedString, Window, div, prelude::*, px, rgb};
+use rivu_ui::{
+    VirtualList, active_control, button, caption, column, disabled_control, icon_button,
+    list_panel_header, list_viewport, panel_surface, panel_toolbar, quiet_icon_button, row,
 };
 use std::{path::Path, sync::Arc};
 
@@ -58,7 +54,7 @@ pub(in crate::gui) struct Library {
     state: std::rc::Rc<crate::projection::GuiSnapshot>,
     i18n: Arc<crate::i18n::Localizer>,
     library: LibraryBrowser,
-    library_search: gpui::Entity<super::components::search::ListSearch>,
+    library_search: gpui::Entity<rivu_ui::search::SearchField>,
     requests: requests::LibraryRequests,
     loading_text: super::loading::LoadingText<TreeBranch>,
     visible: bool,
@@ -114,7 +110,7 @@ pub(super) fn track_detail(
 }
 
 fn track_columns(
-    theme: &'static crate::theme::Palette,
+    theme: &'static rivu_ui::theme::Palette,
     track: &LibraryRow,
     columns: LibraryColumns,
 ) -> Option<gpui::Div> {
@@ -168,7 +164,7 @@ fn track_columns(
                 },
             ),
         };
-        let cell = crate::gui::components::caption(theme, value).truncate();
+        let cell = rivu_ui::caption(theme, value).truncate();
         cells = cells.child(match column {
             LibraryColumn::Artist | LibraryColumn::Album => {
                 cell.max_w(gpui::rems(6.0)).flex_initial().min_w_0()
@@ -261,8 +257,8 @@ impl LibraryDragPreview {
 
 impl Render for LibraryDragPreview {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        super::components::anchor_list_drag_preview(
-            super::components::drag_preview_surface(window, cx)
+        rivu_ui::anchor_list_drag_preview(
+            rivu_ui::drag_preview_surface(window, cx)
                 .gap_2()
                 .child(
                     div()
@@ -277,7 +273,7 @@ impl Render for LibraryDragPreview {
 }
 
 fn tree_guides(
-    theme: &'static crate::theme::Palette,
+    theme: &'static rivu_ui::theme::Palette,
     tree: &DirectoryTree,
     index: usize,
 ) -> gpui::Div {
@@ -520,391 +516,384 @@ impl Library {
         panel_id: u64,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let theme = crate::gui::theme::palette(cx);
+        let theme = rivu_ui::theme::palette(cx);
         let row_count = self.library.tree().row_count();
         let scroll = &self.library.tree().scroll;
         // Local forest acceptance must notify after prepaint to redraw the loaded rows.
         let demand_owner = cx.entity().downgrade();
         let view = list_viewport(
-            super::components::scrollable_list(
-                ("library-directory-scrollbar", panel_id),
-            uniform_list(
-                ("library-directory-tree", panel_id),
-                row_count,
-                cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
-                    let playing_track = this.state.current_track()
-                        .filter(|_| this.state.playback.status == crate::model::PlaybackStatus::Playing)
-                        .map(|track| track.id);
-                    let focused_index = this.focused
-                        .then(|| this.library.tree().selected_index())
-                        .flatten();
-                    range
-                        .filter_map(|index| {
-                            let item = this.library.tree().item(index)?;
-                            let visible = match item {
-                                TreeItem::Entry(visible) => visible,
-                                TreeItem::Placeholder {
-                                    branch,
-                                    offset,
-                                    depth,
-                                    status,
-                                } => {
-                                    let failed = status == BranchStatus::Error;
-                                    let placeholder = crate::gui::components::tree_row(
-                                        theme,
-                                        gpui::ElementId::named_usize("library-loading", index),
-                                        0,
-                                        false,
-                                    )
-                                    .gap_0()
-                                    .overflow_hidden()
-                                    .child(
-                                        div()
-                                            .relative()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .h_full()
-                                            .overflow_hidden()
-                                            .child(tree_guides(theme, this.library.tree(), index))
-                                            .child(
-                                                row()
-                                                    .h_full()
-                                                    .pl(gpui::rems(depth as f32 * 1.25))
-                                                    .child(
-                                                        crate::gui::components::caption(theme, this.tr(if failed { "gl-unavailable" } else { "gl-loading" }))
-                                                            .when(!this.loading_text.show(&branch, failed), |text| text.invisible())
-                                                            .min_w_0()
-                                                            .truncate(),
-                                                    )
-                                                    .when(failed, |view| {
-                                                        view.child(
-                                                            super::components::quiet_icon_button(theme, icon_button(
-                                                                gpui::ElementId::named_usize("library-retry", index),
-                                                                "󰑐",
-                                                                this.tr("gl-retry-folder"),
-                                                                cx,
-                                                                move |this, _, cx| {
-                                                                    this.library.retry_directory(&branch);
-                                                                    this.request_directory_page(branch.clone(), offset, cx);
-                                                                },
-                                                            ))
-                                                            .min_h_0()
-                                                            .size(gpui::rems(1.5)),
-                                                        )
-                                                    }),
-                                            ),
-                                    );
-                                    return Some(placeholder.into_any_element());
-                                }
-                            };
-                            let entry = &visible.row;
-                            let (node, title, detail, path) = match entry {
-                                DirectoryRow::Directory { path } => {
-                                    let title = if visible.depth == 0 {
-                                        path.display().to_string()
-                                    } else {
-                                        path.file_name().map_or_else(
-                                            || path.display().to_string(),
-                                            |name| name.to_string_lossy().into_owned(),
-                                        )
-                                    };
-                                    let detail = match visible.status {
-                                        BranchStatus::Loading => this.i18n.text("gl-loading").to_owned(),
-                                        BranchStatus::Empty => this.i18n.text("gl-empty").to_owned(),
-                                        BranchStatus::Error => this.i18n.text("gl-unavailable").to_owned(),
-                                        BranchStatus::Unloaded | BranchStatus::Ready => {
-                                            String::new()
-                                        }
-                                    };
-                                    (
-                                        LibraryNode::Directory(Arc::from(path.as_path())),
-                                        title,
-                                        detail,
-                                        Some(path.clone()),
-                                    )
-                                }
-                                DirectoryRow::Track(track) => (
-                                    LibraryNode::Track(track.id),
-                                    track.title.clone(),
-                                    String::new(),
-                                    None,
-                                ),
-                            };
-                            let selected = this.directory_row_selected(entry);
-                            let id = node.clone();
-                            let retry_counts = path.as_deref().is_some_and(|path| {
-                                this.library.root_count_failed(path)
-                            });
-                            let scan = path.clone().map(|scan_path| {
-                                let hint = if retry_counts {
-                                    this.i18n.format("gl-retry-root-counts", &[("path", scan_path.display().to_string().into())])
-                                } else {
-                                    this.i18n.format("gl-rescan-path", &[("path", scan_path.display().to_string().into())])
-                                };
-                                super::components::quiet_icon_button(theme, icon_button(
-                                    gpui::ElementId::named_usize("library-scan", index),
-                                    "󰑐",
-                                    hint,
-                                    cx,
-                                    move |this, _, cx| {
-                                        if this.library.root_count_failed(&scan_path) {
-                                            this.library.retry_root_counts();
-                                            this.request_root_counts(cx);
-                                        } else {
-                                            this.send(
-                                                Command::Scan {
-                                                    paths: vec![scan_path.clone()],
-                                                    force: this.library.force_scan(),
-                                                },
-                                                cx,
-                                            );
-                                        }
-                                    },
-                                ))
-                                .when(retry_counts, |view| view.text_color(gpui::rgb(theme.error)))
-                            });
-                            let title = gpui::SharedString::from(title);
-                            let tooltip_title = path.as_ref().map_or_else(
-                                || title.clone(),
-                                |path| path.display().to_string().into(),
-                            );
-                            let name_content = row()
-                                .w_full()
-                                .h_full()
-                                .gap_1()
-                                .pl(gpui::rems(visible.depth as f32 * 1.25))
-                                .child(
-                                    div()
-                                        .flex_shrink_0()
-                                        .text_sm()
-                                        .font_family(super::fonts::SYMBOLS_FAMILY)
-                                        .child(if let Some(branch) = &visible.branch {
-                                            if this.library.tree().expanded(branch) {
-                                                "󰝰"
-                                            } else {
-                                                "󰉋"
-                                            }
-                                        } else {
-                                            "󰎇"
-                                        }),
-                                )
-                                .child(
-                                    row()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .gap_1()
-                                        .overflow_hidden()
-                                        .child(
-                                            div()
-                                                .min_w_0()
-                                                .text_sm()
-                                                .truncate()
-                                                .when(matches!(entry, DirectoryRow::Track(track)
-                                                    if playing_track == Some(track.id)), |view| {
-                                                    view.text_color(gpui::rgb(theme.accent))
-                                                })
-                                                .text_overflow(gpui::TextOverflow::Truncate("..".into()))
-                                                .child(title.clone())
-                                                .when(path.is_none(), |view| view.flex_1()),
-                                        )
-                                        .when(path.is_some() && !detail.is_empty(), |view| {
-                                            view.child(crate::gui::components::caption(theme, detail.clone()).min_w_0().truncate()
-                                                .when(visible.status == BranchStatus::Loading && !visible.branch.as_ref().is_some_and(|branch| this.loading_text.show(branch, false)), |text| text.invisible())
-                                                .text_overflow(gpui::TextOverflow::Truncate("..".into())))
-                                        })
-                                        .when(matches!(entry, DirectoryRow::Track(track) if track.missing), |view| {
-                                            view.child(
-                                                div()
-                                                    .flex_shrink_0()
-                                                    .text_sm()
-                                                    .font_family(super::fonts::SYMBOLS_FAMILY)
-                                                    .text_color(gpui::rgb(theme.error))
-                                                    .child("󰩋"),
-                                            )
-                                        }),
-                                )
-                                .when(visible.depth == 0 && path.is_some(), |view| {
-                                    let count = this.library.root_count_label(path.as_deref().expect("root path"));
-                                    view.child(
-                                        row()
-                                            .gap_1()
-                                            .flex_shrink_0()
-                                            .child(crate::gui::components::caption(theme, "󰎇").font_family(super::fonts::SYMBOLS_FAMILY))
-                                            .child(crate::gui::components::caption(theme, count)
-                                                .font_features(super::fonts::tabular_numbers())),
-                                    )
-                                });
-                            let name_cell = div()
-                                .w(gpui::rems(14.0))
-                                .flex_auto()
-                                .min_w_0()
-                                .h_full()
-                                .relative()
-                                .overflow_hidden()
-                                .child(tree_guides(theme, this.library.tree(), index))
-                                .child(name_content)
-                                .when_some(scan, |view, scan| {
-                                    view.child(
-                                        row()
-                                            .id(gpui::ElementId::named_usize("library-scan-overlay", index))
-                                            .absolute()
-                                            .right_0()
-                                            .top_0()
-                                            .h_full()
-                                            .bg(super::components::row_background(theme, selected, false))
-                                            .when(!retry_counts, |view| view.invisible())
-                                            .group_hover("library-track-row", move |style| {
-                                                style.visible().bg(super::components::row_background(theme, selected, true))
-                                            })
-                                            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                                            .on_click(|_, _, cx| cx.stop_propagation())
-                                            .child(scan.min_h_0().h(gpui::rems(1.5)).w(gpui::rems(1.4))),
-                                    )
-                                });
-                            let menu_node = id.clone();
-                            let menu_root = path.clone().filter(|path| this.state.system.config.library_roots.contains(path));
-                            let row_view = super::components::lazy_row_tooltip(
-                                crate::gui::components::tree_row(
+            VirtualList::new(("library-directory-tree", panel_id), row_count, scroll, cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
+                let playing_track = this.state.current_track()
+                    .filter(|_| this.state.playback.status == crate::model::PlaybackStatus::Playing)
+                    .map(|track| track.id);
+                let focused_index = this.focused
+                    .then(|| this.library.tree().selected_index())
+                    .flatten();
+                range
+                    .filter_map(|index| {
+                        let item = this.library.tree().item(index)?;
+                        let visible = match item {
+                            TreeItem::Entry(visible) => visible,
+                            TreeItem::Placeholder {
+                                branch,
+                                offset,
+                                depth,
+                                status,
+                            } => {
+                                let failed = status == BranchStatus::Error;
+                                let placeholder = rivu_ui::tree_row(
                                     theme,
-                                    gpui::ElementId::named_usize("library-node", index),
+                                    gpui::ElementId::named_usize("library-loading", index),
                                     0,
-                                    selected,
+                                    false,
                                 )
                                 .gap_0()
                                 .overflow_hidden()
-                                .group("library-track-row")
-                                .relative()
-                                .when(focused_index == Some(index), |view| {
-                                    view.border_color(gpui::rgb(theme.accent))
-                                })
-                                .when(matches!(entry, DirectoryRow::Track(track)
-                                    if this.library.locate.highlight.is_some_and(|(id, started)|
-                                        id == track.id && started.elapsed() < std::time::Duration::from_secs(2))), |view| {
-                                    view.bg(gpui::rgb(theme.highlight)).border_color(gpui::rgb(theme.accent))
-                                })
-                                .on_mouse_down(gpui::MouseButton::Right, cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
-                                    cx.emit(LibraryEvent::Focus);
-                                    if this.library_range_pending() { cx.stop_propagation(); return; }
-                                    let selected = match &menu_node {
-                                        LibraryNode::Track(id) => this.library.selected().contains(id),
-                                        LibraryNode::Directory(_) => this.library.selected_nodes().contains(&menu_node),
-                                    };
-                                    if !selected { this.select_library_row(menu_node.clone(), index, false, false, cx); }
-                                    let nodes = this.library.drag_nodes(&menu_node);
-                                    let track_ids = this.library_drag_track_ids(&nodes);
-                                    let only_tracks = nodes.iter().all(|node| matches!(node, LibraryNode::Track(_)));
-                                    let play = match &menu_node { LibraryNode::Track(track_id) => Some(Command::Play { track_id: *track_id }), _ => None };
-                                    let remove = only_tracks.then(|| Command::RemoveTracks { track_ids: track_ids.clone() });
-                                    this.open_object_menu(super::ContentMenuRequest {
-                                        source: super::TrackSource::Tracks(track_ids), position: event.position, play,
-                                    }, super::list_interaction::ContentGuard::Library(this.state.library.revision, this.state.library.structure_revision),
-                                        remove, Some(nodes), menu_root.clone(), cx);
-                                    cx.stop_propagation();
-                                }))
-                                .child(name_cell)
-                                .when_some(
-                                    match entry {
-                                        DirectoryRow::Track(track) => track_columns(theme, track, this.state.system.config.library_columns),
-                                        DirectoryRow::Directory { .. } => None,
-                                    },
-                                    |view, columns| view.child(columns),
-                                )
-                                .when_some(
-                                    match entry {
-                                        DirectoryRow::Track(track) => Some((track.id, track.favorite)),
-                                        DirectoryRow::Directory { .. } => None,
-                                    },
-                                    |view, (track_id, favorite)| {
-                                        view.child(
-                                            super::components::hover_actions(theme, "library-track-row", selected).child(this.track_favorite_toggle(
-                                                gpui::ElementId::named_usize("library-tree-favorite", index),
-                                                "library-track-row",
-                                                track_id,
-                                                favorite,
-                                                cx,
-                                            )),
-                                        )
-                                    },
-                                ),
-                                tooltip_title,
-                                {
-                                    let entry = visible.row;
-                                    let i18n = Arc::clone(&this.i18n);
-                                    move || match &entry {
-                                        DirectoryRow::Track(track) => track_detail(&i18n, track).into(),
-                                        DirectoryRow::Directory { .. } => detail.clone().into(),
+                                .child(
+                                    div()
+                                        .relative()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .h_full()
+                                        .overflow_hidden()
+                                        .child(tree_guides(theme, this.library.tree(), index))
+                                        .child(
+                                            row()
+                                                .h_full()
+                                                .pl(gpui::rems(depth as f32 * 1.25))
+                                                .child(
+                                                    rivu_ui::caption(theme, this.tr(if failed { "gl-unavailable" } else { "gl-loading" }))
+                                                        .when(!this.loading_text.show(&branch, failed), |text| text.invisible())
+                                                        .min_w_0()
+                                                        .truncate(),
+                                                )
+                                                .when(failed, |view| {
+                                                    view.child(
+                                                        rivu_ui::quiet_icon_button(theme, icon_button(
+                                                            gpui::ElementId::named_usize("library-retry", index),
+                                                            "󰑐",
+                                                            this.tr("gl-retry-folder"),
+                                                            cx,
+                                                            move |this, _, cx| {
+                                                                this.library.retry_directory(&branch);
+                                                                this.request_directory_page(branch.clone(), offset, cx);
+                                                            },
+                                                        ))
+                                                        .min_h_0()
+                                                        .size(gpui::rems(1.5)),
+                                                    )
+                                                }),
+                                        ),
+                                );
+                                return Some(placeholder.into_any_element());
+                            }
+                        };
+                        let entry = &visible.row;
+                        let (node, title, detail, path) = match entry {
+                            DirectoryRow::Directory { path } => {
+                                let title = if visible.depth == 0 {
+                                    path.display().to_string()
+                                } else {
+                                    path.file_name().map_or_else(
+                                        || path.display().to_string(),
+                                        |name| name.to_string_lossy().into_owned(),
+                                    )
+                                };
+                                let detail = match visible.status {
+                                    BranchStatus::Loading => this.i18n.text("gl-loading").to_owned(),
+                                    BranchStatus::Empty => this.i18n.text("gl-empty").to_owned(),
+                                    BranchStatus::Error => this.i18n.text("gl-unavailable").to_owned(),
+                                    BranchStatus::Unloaded | BranchStatus::Ready => {
+                                        String::new()
                                     }
+                                };
+                                (
+                                    LibraryNode::Directory(Arc::from(path.as_path())),
+                                    title,
+                                    detail,
+                                    Some(path.clone()),
+                                )
+                            }
+                            DirectoryRow::Track(track) => (
+                                LibraryNode::Track(track.id),
+                                track.title.clone(),
+                                String::new(),
+                                None,
+                            ),
+                        };
+                        let selected = this.directory_row_selected(entry);
+                        let id = node.clone();
+                        let retry_counts = path.as_deref().is_some_and(|path| {
+                            this.library.root_count_failed(path)
+                        });
+                        let scan = path.clone().map(|scan_path| {
+                            let hint = if retry_counts {
+                                this.i18n.format("gl-retry-root-counts", &[("path", scan_path.display().to_string().into())])
+                            } else {
+                                this.i18n.format("gl-rescan-path", &[("path", scan_path.display().to_string().into())])
+                            };
+                            rivu_ui::quiet_icon_button(theme, icon_button(
+                                gpui::ElementId::named_usize("library-scan", index),
+                                "󰑐",
+                                hint,
+                                cx,
+                                move |this, _, cx| {
+                                    if this.library.root_count_failed(&scan_path) {
+                                        this.library.retry_root_counts();
+                                        this.request_root_counts(cx);
+                                    } else {
+                                        this.send(
+                                            Command::Scan {
+                                                paths: vec![scan_path.clone()],
+                                                force: this.library.force_scan(),
+                                            },
+                                            cx,
+                                        );
+                                    }
+                                },
+                            ))
+                            .when(retry_counts, |view| view.text_color(gpui::rgb(theme.error)))
+                        });
+                        let title = gpui::SharedString::from(title);
+                        let tooltip_title = path.as_ref().map_or_else(
+                            || title.clone(),
+                            |path| path.display().to_string().into(),
+                        );
+                        let name_content = row()
+                            .w_full()
+                            .h_full()
+                            .gap_1()
+                            .pl(gpui::rems(visible.depth as f32 * 1.25))
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .text_sm()
+                                    .font_family(super::fonts::SYMBOLS_FAMILY)
+                                    .child(if let Some(branch) = &visible.branch {
+                                        if this.library.tree().expanded(branch) {
+                                            "󰝰"
+                                        } else {
+                                            "󰉋"
+                                        }
+                                    } else {
+                                        "󰎇"
+                                    }),
+                            )
+                            .child(
+                                row()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .gap_1()
+                                    .overflow_hidden()
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .text_sm()
+                                            .truncate()
+                                            .when(matches!(entry, DirectoryRow::Track(track)
+                                                if playing_track == Some(track.id)), |view| {
+                                                view.text_color(gpui::rgb(theme.accent))
+                                            })
+                                            .text_overflow(gpui::TextOverflow::Truncate("..".into()))
+                                            .child(title.clone())
+                                            .when(path.is_none(), |view| view.flex_1()),
+                                    )
+                                    .when(path.is_some() && !detail.is_empty(), |view| {
+                                        view.child(rivu_ui::caption(theme, detail.clone()).min_w_0().truncate()
+                                            .when(visible.status == BranchStatus::Loading && !visible.branch.as_ref().is_some_and(|branch| this.loading_text.show(branch, false)), |text| text.invisible())
+                                            .text_overflow(gpui::TextOverflow::Truncate("..".into())))
+                                    })
+                                    .when(matches!(entry, DirectoryRow::Track(track) if track.missing), |view| {
+                                        view.child(
+                                            div()
+                                                .flex_shrink_0()
+                                                .text_sm()
+                                                .font_family(super::fonts::SYMBOLS_FAMILY)
+                                                .text_color(gpui::rgb(theme.error))
+                                                .child("󰩋"),
+                                        )
+                                    }),
+                            )
+                            .when(visible.depth == 0 && path.is_some(), |view| {
+                                let count = this.library.root_count_label(path.as_deref().expect("root path"));
+                                view.child(
+                                    row()
+                                        .gap_1()
+                                        .flex_shrink_0()
+                                        .child(rivu_ui::caption(theme, "󰎇").font_family(super::fonts::SYMBOLS_FAMILY))
+                                        .child(rivu_ui::caption(theme, count)
+                                            .font_features(super::fonts::tabular_numbers())),
+                                )
+                            });
+                        let name_cell = div()
+                            .w(gpui::rems(14.0))
+                            .flex_auto()
+                            .min_w_0()
+                            .h_full()
+                            .relative()
+                            .overflow_hidden()
+                            .child(tree_guides(theme, this.library.tree(), index))
+                            .child(name_content)
+                            .when_some(scan, |view, scan| {
+                                view.child(
+                                    row()
+                                        .id(gpui::ElementId::named_usize("library-scan-overlay", index))
+                                        .absolute()
+                                        .right_0()
+                                        .top_0()
+                                        .h_full()
+                                        .bg(rivu_ui::row_background(theme, selected, false))
+                                        .when(!retry_counts, |view| view.invisible())
+                                        .group_hover("library-track-row", move |style| {
+                                            style.visible().bg(rivu_ui::row_background(theme, selected, true))
+                                        })
+                                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                        .on_click(|_, _, cx| cx.stop_propagation())
+                                        .child(scan.min_h_0().h(gpui::rems(1.5)).w(gpui::rems(1.4))),
+                                )
+                            });
+                        let menu_node = id.clone();
+                        let menu_root = path.clone().filter(|path| this.state.system.config.library_roots.contains(path));
+                        let row_view = rivu_ui::lazy_row_tooltip(
+                            rivu_ui::tree_row(
+                                theme,
+                                gpui::ElementId::named_usize("library-node", index),
+                                0,
+                                selected,
+                            )
+                            .gap_0()
+                            .overflow_hidden()
+                            .group("library-track-row")
+                            .relative()
+                            .when(focused_index == Some(index), |view| {
+                                view.border_color(gpui::rgb(theme.accent))
+                            })
+                            .when(matches!(entry, DirectoryRow::Track(track)
+                                if this.library.locate.highlight.is_some_and(|(id, started)|
+                                    id == track.id && started.elapsed() < std::time::Duration::from_secs(2))), |view| {
+                                view.bg(gpui::rgb(theme.highlight)).border_color(gpui::rgb(theme.accent))
+                            })
+                            .on_mouse_down(gpui::MouseButton::Right, cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                                cx.emit(LibraryEvent::Focus);
+                                if this.library_range_pending() { cx.stop_propagation(); return; }
+                                let selected = match &menu_node {
+                                    LibraryNode::Track(id) => this.library.selected().contains(id),
+                                    LibraryNode::Directory(_) => this.library.selected_nodes().contains(&menu_node),
+                                };
+                                if !selected { this.select_library_row(menu_node.clone(), index, false, false, cx); }
+                                let nodes = this.library.drag_nodes(&menu_node);
+                                let track_ids = this.library_drag_track_ids(&nodes);
+                                let only_tracks = nodes.iter().all(|node| matches!(node, LibraryNode::Track(_)));
+                                let play = match &menu_node { LibraryNode::Track(track_id) => Some(Command::Play { track_id: *track_id }), _ => None };
+                                let remove = only_tracks.then(|| Command::RemoveTracks { track_ids: track_ids.clone() });
+                                this.open_object_menu(super::ContentMenuRequest {
+                                    source: super::TrackSource::Tracks(track_ids), position: event.position, play,
+                                }, super::list_interaction::ContentGuard::Library(this.state.library.revision, this.state.library.structure_revision),
+                                    remove, Some(nodes), menu_root.clone(), cx);
+                                cx.stop_propagation();
+                            }))
+                            .child(name_cell)
+                            .when_some(
+                                match entry {
+                                    DirectoryRow::Track(track) => track_columns(theme, track, this.state.system.config.library_columns),
+                                    DirectoryRow::Directory { .. } => None,
+                                },
+                                |view, columns| view.child(columns),
+                            )
+                            .when_some(
+                                match entry {
+                                    DirectoryRow::Track(track) => Some((track.id, track.favorite)),
+                                    DirectoryRow::Directory { .. } => None,
+                                },
+                                |view, (track_id, favorite)| {
+                                    view.child(
+                                        rivu_ui::hover_actions(theme, "library-track-row", selected).child(this.track_favorite_toggle(
+                                            gpui::ElementId::named_usize("library-tree-favorite", index),
+                                            "library-track-row",
+                                            track_id,
+                                            favorite,
+                                            cx,
+                                        )),
+                                    )
+                                },
+                            ),
+                            tooltip_title,
+                            {
+                                let entry = visible.row;
+                                let i18n = Arc::clone(&this.i18n);
+                                move || match &entry {
+                                    DirectoryRow::Track(track) => track_detail(&i18n, track).into(),
+                                    DirectoryRow::Directory { .. } => detail.clone().into(),
+                                }
+                            },
+                        )
+                        .when(!this.library_range_pending(), |view| {
+                            let app = cx.entity();
+                            view.on_drag(
+                                LibraryDrag {
+                                    source: id.clone(),
+                                    nodes: std::cell::OnceCell::new(),
+                                },
+                                move |drag, _, window, cx| {
+                                    rivu_ui::begin_list_drag(window, cx);
+                                    app.update(cx, |this, cx| {
+                                        let nodes = drag.nodes.get_or_init(|| {
+                                            this.library.drag_nodes(&drag.source)
+                                        });
+                                        cx.new(|_| {
+                                            LibraryDragPreview::new(&this.i18n, nodes, title.clone())
+                                        })
+                                    })
                                 },
                             )
-                            .when(!this.library_range_pending(), |view| {
-                                let app = cx.entity();
-                                view.on_drag(
-                                    LibraryDrag {
-                                        source: id.clone(),
-                                        nodes: std::cell::OnceCell::new(),
-                                    },
-                                    move |drag, _, window, cx| {
-                                        super::components::begin_list_drag(window, cx);
-                                        app.update(cx, |this, cx| {
-                                            let nodes = drag.nodes.get_or_init(|| {
-                                                this.library.drag_nodes(&drag.source)
-                                            });
-                                            cx.new(|_| {
-                                                LibraryDragPreview::new(&this.i18n, nodes, title.clone())
-                                            })
-                                        })
-                                    },
-                                )
-                            })
-                            .on_click(cx.listener(
-                                move |this, event: &gpui::ClickEvent, _, cx| {
-                                    this.library.cancel_navigation();
-                                    cx.emit(LibraryEvent::Focus);
-                                    match id.clone() {
-                                        LibraryNode::Track(id) => {
-                                            let modifiers = event.modifiers();
-                                            this.select_library_row(
-                                                LibraryNode::Track(id),
-                                                index,
-                                                modifiers.shift,
-                                                modifiers.control,
-                                                cx,
-                                            );
-                                            if event.click_count() == 2 {
-                                                this.send(Command::Play { track_id: id }, cx);
-                                            }
-                                        }
-                                        LibraryNode::Directory(path) => {
-                                            let modifiers = event.modifiers();
-                                            let multi = modifiers.control;
-                                            if !multi && !modifiers.shift {
-                                                let branch = visible
-                                                    .branch
-                                                    .as_ref()
-                                                    .expect("directory occurrence");
-                                                this.set_directory_expanded(
-                                                    branch,
-                                                    !this.library.tree().expanded(branch),
-                                                    cx,
-                                                );
-                                            }
-                                            this.select_library_row(
-                                                LibraryNode::Directory(path),
-                                                index,
-                                                modifiers.shift,
-                                                multi,
-                                                cx,
-                                            );
+                        })
+                        .on_click(cx.listener(
+                            move |this, event: &gpui::ClickEvent, _, cx| {
+                                this.library.cancel_navigation();
+                                cx.emit(LibraryEvent::Focus);
+                                match id.clone() {
+                                    LibraryNode::Track(id) => {
+                                        let modifiers = event.modifiers();
+                                        this.select_library_row(
+                                            LibraryNode::Track(id),
+                                            index,
+                                            modifiers.shift,
+                                            modifiers.control,
+                                            cx,
+                                        );
+                                        if event.click_count() == 2 {
+                                            this.send(Command::Play { track_id: id }, cx);
                                         }
                                     }
-                                },
-                            ));
-                            Some(row_view.into_any_element())
-                        })
-                        .collect::<Vec<_>>()
-                }),
-            )
-            .with_decoration(super::paged::viewport_demand(move |range, _, cx| {
+                                    LibraryNode::Directory(path) => {
+                                        let modifiers = event.modifiers();
+                                        let multi = modifiers.control;
+                                        if !multi && !modifiers.shift {
+                                            let branch = visible
+                                                .branch
+                                                .as_ref()
+                                                .expect("directory occurrence");
+                                            this.set_directory_expanded(
+                                                branch,
+                                                !this.library.tree().expanded(branch),
+                                                cx,
+                                            );
+                                        }
+                                        this.select_library_row(
+                                            LibraryNode::Directory(path),
+                                            index,
+                                            modifiers.shift,
+                                            multi,
+                                            cx,
+                                        );
+                                    }
+                                }
+                            },
+                        ));
+                        Some(row_view.into_any_element())
+                    })
+                    .collect::<Vec<_>>()
+            })).on_viewport(move |range, _, cx| {
                 let owner = demand_owner.clone();
                 cx.defer(move |cx| {
                     let _ = owner.update(cx, |this, cx| {
@@ -917,13 +906,10 @@ impl Library {
                         }
                     });
                 });
-            }))
+            })
             .h_full()
             .min_h_0()
-            .w_full()
-            .track_scroll(scroll),
-                scroll,
-            ),
+            .w_full().scrollbar(("library-directory-scrollbar", panel_id)),
         );
         view.into_any_element()
     }
@@ -931,7 +917,7 @@ impl Library {
 
 impl Library {
     fn library_scan_status(&self, panel_id: u64, cx: &mut Context<Self>) -> Div {
-        let theme = crate::gui::theme::palette(cx);
+        let theme = rivu_ui::theme::palette(cx);
         use crate::model::ScanPhase;
         let progress = self.state.system.scan_progress.as_ref();
         let header_text = progress.map_or_else(
@@ -1032,7 +1018,7 @@ impl Library {
                     .min_w_0()
                     .truncate()
                     .tooltip(move |_, cx| {
-                        cx.new(|_| crate::gui::components::ButtonTooltip { text: path.clone() })
+                        cx.new(|_| rivu_ui::ButtonTooltip { text: path.clone() })
                             .into()
                     }),
             )
@@ -1044,7 +1030,7 @@ impl Library {
                     .min_w_0()
                     .truncate()
                     .tooltip(move |_, cx| {
-                        cx.new(|_| crate::gui::components::ButtonTooltip {
+                        cx.new(|_| rivu_ui::ButtonTooltip {
                             text: message.clone(),
                         })
                         .into()
@@ -1058,7 +1044,7 @@ impl Library {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let theme = crate::gui::theme::palette(cx);
+        let theme = rivu_ui::theme::palette(cx);
         self.finish_library_locate_render(window, cx);
         let total = self.library.tree().root_total();
         let range_pending = self.library_range_pending();
@@ -1099,7 +1085,7 @@ impl Library {
             .min_w(gpui::rems(3.))
             .id(("library-selection-count", panel_id))
             .tooltip(move |_, cx| {
-                cx.new(|_| crate::gui::components::ButtonTooltip {
+                cx.new(|_| rivu_ui::ButtonTooltip {
                     text: selection_label.clone().into(),
                 })
                 .into()
@@ -1307,6 +1293,14 @@ mod library_root_tests {
     fn empty_library_projects_first_added_appended_and_removed_roots(
         cx: &mut gpui::TestAppContext,
     ) {
+        cx.update(|cx| {
+            rivu_ui::theme::set_palette(crate::theme::Theme::default().palette(), cx);
+            rivu_ui::theme::set_typography(
+                gpui::font("sans-serif"),
+                crate::gui::fonts::SYMBOLS_FAMILY,
+                cx,
+            );
+        });
         let directory = tempfile::tempdir().unwrap();
         let config_path = directory.path().join("config.toml");
         Config {

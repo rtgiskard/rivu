@@ -3,11 +3,9 @@
 //! owns only cross-feature intent identity and the window's confirmation dialog.
 //! Refresh reconciles owners before a frozen target is validated or a draft discarded.
 
-use super::{
-    GuiApp, UI_INSET,
-    components::{column, icon_button, panel_header, row},
-};
+use super::{GuiApp, UI_INSET};
 use gpui::{AnyElement, Context, prelude::*, px, rgb};
+use rivu_ui::{column, icon_button, panel_header, row};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::gui) struct ManualIntentId(u64);
@@ -294,7 +292,7 @@ impl GuiApp {
         &mut self,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let theme = crate::gui::theme::palette(cx);
+        let theme = rivu_ui::theme::palette(cx);
         self.manual_intents.pending.as_ref()?;
         let detail = if self.metadata.read(cx).saving() {
             self.i18n.text("gl-metadata-discard-saving")
@@ -302,7 +300,7 @@ impl GuiApp {
             self.i18n.text("gl-metadata-discard-note")
         };
         Some(
-            crate::gui::components::modal_backdrop("metadata-confirmation-modal")
+            rivu_ui::Dialog::backdrop("metadata-confirmation-modal")
                 .map(|surface| self.shell.scope().surface(surface))
                 .child(
                     column()
@@ -329,7 +327,7 @@ impl GuiApp {
                                     cx,
                                     |this, _, cx| this.cancel_manual_action(cx),
                                 ))
-                                .child(super::components::danger_control(
+                                .child(rivu_ui::danger_control(
                                     theme,
                                     icon_button(
                                         "metadata-confirmation-discard",

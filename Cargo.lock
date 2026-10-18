@@ -5049,6 +5049,7 @@ dependencies = [
  "rand 0.10.3",
  "ratatui",
  "ringbuf",
+ "rivu-ui",
  "rusqlite",
  "rustfft",
  "serde",
@@ -5068,6 +5069,14 @@ dependencies = [
  "walkdir",
  "yeslogic-fontconfig-sys",
  "zbus",
+]
+
+[[package]]
+name = "rivu-ui"
+version = "0.1.0"
+dependencies = [
+ "gpui",
+ "unicode-segmentation",
 ]
 
 [[package]]

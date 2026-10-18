@@ -1295,7 +1295,7 @@ impl Waveform {
             )
             .when(labels, |panel| {
                 panel.child(
-                    crate::gui::components::row()
+                    rivu_ui::row()
                         .absolute()
                         .bottom_0()
                         .left_0()

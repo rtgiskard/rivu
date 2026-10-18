@@ -20,12 +20,7 @@ mod tests;
 use super::{
     UI_INSET,
     artwork::{Artwork, ArtworkImages, ArtworkLoader, ArtworkView},
-    components::{
-        active_control, artwork_preview, button, caption, column, disabled_control, form_field,
-        icon_button,
-        input::{Input, InputEvent},
-        metadata_item, panel_surface, row, section_group,
-    },
+    components::{artwork_preview, metadata_item},
     feature::FeatureContext,
     format_time,
 };
@@ -40,6 +35,11 @@ use gpui::{
     div, prelude::*, px, rgb,
 };
 use read::{MetadataReadCoordinator, MetadataReadTask, ReadCompletion, ReadEnvironment};
+use rivu_ui::{
+    active_control, button, caption, column, disabled_control, form_field, icon_button,
+    input::{Input, InputEvent},
+    panel_surface, row, section_group,
+};
 use session::{
     MetadataAvailability, MetadataDraft, MetadataReadState, MetadataSession, MetadataValues,
 };
@@ -502,7 +502,7 @@ impl Metadata {
 
     fn panel_field(
         &self,
-        theme: &'static crate::theme::Palette,
+        theme: &'static rivu_ui::theme::Palette,
         field: Field,
         label: SharedString,
     ) -> Div {
@@ -561,9 +561,9 @@ fn metadata_copy(
     cx: &mut Context<Metadata>,
 ) -> Option<gpui::Stateful<Div>> {
     let hint = hint.filter(|_| !value.is_empty() && value.as_ref() != "—")?;
-    let theme = super::theme::palette(cx);
+    let theme = rivu_ui::theme::palette(cx);
     Some(
-        super::components::compact_icon_button(
+        rivu_ui::compact_icon_button(
             theme,
             icon_button(label, "", hint, cx, move |_, _, cx| {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(value.to_string()));
@@ -579,7 +579,7 @@ fn metadata_copy(
 }
 
 fn metadata_rows(
-    theme: &'static crate::theme::Palette,
+    theme: &'static rivu_ui::theme::Palette,
     rows: impl IntoIterator<Item = [(SharedString, SharedString); 2]>,
     label_widths: [gpui::Pixels; 2],
     copy_hint: Option<SharedString>,
@@ -618,7 +618,7 @@ fn metadata_row(first: Div, second: Div) -> Div {
 }
 
 fn metadata_group(
-    theme: &'static crate::theme::Palette,
+    theme: &'static rivu_ui::theme::Palette,
     title: impl Into<SharedString>,
     content: impl IntoElement,
 ) -> Div {
@@ -632,7 +632,7 @@ impl Metadata {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let theme = crate::gui::theme::palette(cx);
+        let theme = rivu_ui::theme::palette(cx);
         let owner = cx.weak_entity();
         window.defer(cx, move |_, cx| {
             let _ = owner.update(cx, |this, cx| {
@@ -1054,7 +1054,7 @@ impl Metadata {
                                             .truncate(),
                                     )
                                     .tooltip(move |_, cx| {
-                                        cx.new(|_| crate::gui::components::ButtonTooltip {
+                                        cx.new(|_| rivu_ui::ButtonTooltip {
                                             text: status.clone(),
                                         })
                                         .into()
@@ -1080,7 +1080,7 @@ impl Metadata {
                                 )
                                 .id(("metadata-path", panel_id))
                                 .tooltip(move |_, cx| {
-                                    cx.new(|_| crate::gui::components::ButtonTooltip {
+                                    cx.new(|_| rivu_ui::ButtonTooltip {
                                         text: path_tooltip.clone(),
                                     })
                                     .into()

@@ -30,6 +30,10 @@ fn track(id: i64, title: &str) -> Track {
 }
 
 fn fixture(cx: &mut TestAppContext) -> (tempfile::TempDir, Runtime, Entity<Metadata>) {
+    cx.update(|cx| {
+        crate::gui::theme::set_theme(crate::theme::Theme::default(), cx);
+        crate::gui::fonts::publish(&gpui::font("sans-serif"), cx);
+    });
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");
     Config {

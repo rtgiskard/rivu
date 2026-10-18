@@ -1,12 +1,12 @@
 /// A candidate shown by a dropdown or autocomplete popup.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct DropdownItem<T> {
-    pub(crate) value: T,
-    pub(crate) label: String,
+pub struct DropdownItem<T> {
+    pub value: T,
+    pub label: String,
 }
 
 impl<T> DropdownItem<T> {
-    pub(crate) fn new(value: T, label: impl Into<String>) -> Self {
+    pub fn new(value: T, label: impl Into<String>) -> Self {
         Self {
             value,
             label: label.into(),
@@ -15,7 +15,7 @@ impl<T> DropdownItem<T> {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct DropdownState<T> {
+pub struct DropdownState<T> {
     items: Vec<DropdownItem<T>>,
     selected: usize,
     open: bool,
@@ -32,48 +32,48 @@ impl<T> Default for DropdownState<T> {
 }
 
 impl<T> DropdownState<T> {
-    pub(crate) fn open(&mut self, items: impl IntoIterator<Item = DropdownItem<T>>) {
+    pub fn open(&mut self, items: impl IntoIterator<Item = DropdownItem<T>>) {
         self.items = items.into_iter().collect();
         self.selected = 0;
         self.open = !self.items.is_empty();
     }
 
-    pub(crate) fn close(&mut self) {
+    pub fn close(&mut self) {
         self.open = false;
         self.selected = 0;
     }
 
-    pub(crate) fn is_open(&self) -> bool {
+    pub fn is_open(&self) -> bool {
         self.open
     }
 
-    pub(crate) fn filtered(&self) -> impl Iterator<Item = (usize, &DropdownItem<T>)> {
+    pub fn filtered(&self) -> impl Iterator<Item = (usize, &DropdownItem<T>)> {
         self.items.iter().enumerate()
     }
 
-    pub(crate) fn filtered_item(&self, index: usize) -> Option<(usize, &DropdownItem<T>)> {
+    pub fn filtered_item(&self, index: usize) -> Option<(usize, &DropdownItem<T>)> {
         self.items.get(index).map(|item| (index, item))
     }
 
-    pub(crate) fn move_next(&mut self) {
+    pub fn move_next(&mut self) {
         let count = self.items.len();
         if count > 0 {
             self.selected = (self.selected + 1) % count;
         }
     }
 
-    pub(crate) fn move_previous(&mut self) {
+    pub fn move_previous(&mut self) {
         let count = self.items.len();
         if count > 0 {
             self.selected = self.selected.checked_sub(1).unwrap_or(count - 1);
         }
     }
 
-    pub(crate) fn selected_index(&self) -> Option<usize> {
+    pub fn selected_index(&self) -> Option<usize> {
         (!self.items.is_empty()).then_some(self.selected)
     }
 
-    pub(crate) fn select_index(&mut self, index: usize) {
+    pub fn select_index(&mut self, index: usize) {
         self.selected = index.min(self.items.len().saturating_sub(1));
     }
 }

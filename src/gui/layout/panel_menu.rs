@@ -2,7 +2,9 @@
 
 use super::super::*;
 use crate::config::AudioVisualizerStyle;
-use crate::gui::components::{button, caption, column, context_menu_container, menu_item, row};
+use rivu_ui::{
+    Popover, button, caption, checked_menu_item, column, menu_item, row, surface::MenuIndicator,
+};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(in crate::gui) enum PanelMenuPage {
@@ -49,7 +51,7 @@ impl GuiApp {
 
     pub(in crate::gui) fn render_panel_catalog(
         &self,
-        theme: &'static crate::theme::Palette,
+        theme: &'static rivu_ui::theme::Palette,
         footer_height: Pixels,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -80,14 +82,12 @@ impl GuiApp {
                 choices = choices.child(choice);
             }
         }
-        components::floating_surface(theme)
+        Popover::surface(theme, "panel-catalog")
             .flex()
             .flex_col()
             .min_w_0()
             .min_h_0()
-            .id("panel-catalog")
             .map(|surface| self.menu_surface(surface, cx))
-            .occlude()
             .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                 this.shell.dismiss(shell::Surface::PanelCatalog);
                 cx.stop_propagation();
@@ -105,7 +105,7 @@ impl GuiApp {
                     .text_color(rgb(theme.muted))
                     .child(self.tr("shell-add-panel")),
             )
-            .child(components::menu_separator(theme))
+            .child(rivu_ui::menu_separator(theme))
             .child(choices)
             .child(visualizations)
             .into_any_element()
@@ -114,7 +114,7 @@ impl GuiApp {
     pub(in crate::gui) fn render_panel_menu(
         &self,
         state: PanelMenu,
-        theme: &'static crate::theme::Palette,
+        theme: &'static rivu_ui::theme::Palette,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -131,7 +131,7 @@ impl GuiApp {
         let is_waveform = panel_kind == Some("waveform");
         let is_audio_visualizer = panel_kind == Some("audio_visualizer");
         let is_album_artwork = panel_kind == Some("album_artwork");
-        let mut menu = context_menu_container(theme, "panel-context-menu", window)
+        let mut menu = Popover::menu(theme, "panel-context-menu", window)
             .map(|surface| self.menu_surface(surface, cx))
             .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                 this.panel_menu = None;
@@ -275,7 +275,7 @@ impl GuiApp {
                                 }
                             },
                         ))
-                        .child(components::menu_separator(theme));
+                        .child(rivu_ui::menu_separator(theme));
                 }
                 if is_audio_visualizer
                     && let Some(options) = self
@@ -430,7 +430,7 @@ impl GuiApp {
                             cx,
                             |this, window, cx| this.save_queue_as_playlist(window, cx),
                         ))
-                        .child(components::danger_menu_item(
+                        .child(rivu_ui::danger_menu_item(
                             theme,
                             menu_item(
                                 "clear-queue",
@@ -471,44 +471,38 @@ impl GuiApp {
             }
             PanelMenuPage::LibraryColumns => {
                 menu = menu
-                    .child(components::menu_title(
+                    .child(rivu_ui::menu_title(
                         theme,
                         self.tr("shell-track-information"),
                     ))
-                    .child(components::menu_separator(theme));
+                    .child(rivu_ui::menu_separator(theme));
                 for column in crate::config::LibraryColumn::ALL {
                     let enabled = self.state.system.config.library_columns.enabled(column);
-                    menu = menu.child(
-                        menu_item(
-                            column.key(),
-                            self.tr(match column {
-                                crate::config::LibraryColumn::Artist => "gl-artist",
-                                crate::config::LibraryColumn::Album => "gl-album",
-                                crate::config::LibraryColumn::Duration => "gl-duration",
-                                crate::config::LibraryColumn::Codec => "gl-codec",
-                                crate::config::LibraryColumn::Bitrate => "gl-bitrate",
-                            }),
-                            cx,
-                            move |this, _, cx| {
-                                if let Err(error) = this.handle.update_gui_config(
-                                    crate::core::GuiConfigChange::ToggleLibraryColumn(column),
-                                ) {
-                                    this.error = Some(format!("{error:#}"));
-                                }
-                                cx.notify();
-                            },
-                        )
-                        .child(
-                            div()
-                                .ml_auto()
-                                .text_color(rgb(if enabled { theme.accent } else { theme.muted }))
-                                .child(if enabled { "✓" } else { "" }),
-                        ),
-                    );
+                    menu = menu.child(checked_menu_item(
+                        column.key(),
+                        self.tr(match column {
+                            crate::config::LibraryColumn::Artist => "gl-artist",
+                            crate::config::LibraryColumn::Album => "gl-album",
+                            crate::config::LibraryColumn::Duration => "gl-duration",
+                            crate::config::LibraryColumn::Codec => "gl-codec",
+                            crate::config::LibraryColumn::Bitrate => "gl-bitrate",
+                        }),
+                        enabled,
+                        MenuIndicator::Check,
+                        cx,
+                        move |this, _, cx| {
+                            if let Err(error) = this.handle.update_gui_config(
+                                crate::core::GuiConfigChange::ToggleLibraryColumn(column),
+                            ) {
+                                this.error = Some(format!("{error:#}"));
+                            }
+                            cx.notify();
+                        },
+                    ));
                 }
                 menu = menu
-                    .child(components::menu_separator(theme))
-                    .child(components::menu_back(
+                    .child(rivu_ui::menu_separator(theme))
+                    .child(rivu_ui::menu_back(
                         "library-columns-back",
                         self.tr("shell-back"),
                         cx,
@@ -523,11 +517,8 @@ impl GuiApp {
             }
             PanelMenuPage::AlbumArtworkStyle => {
                 menu = menu
-                    .child(components::menu_title(
-                        theme,
-                        self.tr("shell-artwork-style"),
-                    ))
-                    .child(components::menu_separator(theme));
+                    .child(rivu_ui::menu_title(theme, self.tr("shell-artwork-style")))
+                    .child(rivu_ui::menu_separator(theme));
                 for style in album_artwork::ALBUM_ARTWORK_STYLES {
                     let selected = self
                         .workspace
@@ -536,43 +527,37 @@ impl GuiApp {
                         .album_artwork_options(state.panel_id)
                         .is_some_and(|options| options.style == style);
                     let label = self.tr(album_artwork::album_artwork_style_id(style));
-                    menu = menu.child(
-                        menu_item(
-                            ("album-artwork-style", style as usize),
-                            label,
-                            cx,
-                            move |this, _, cx| {
-                                this.panel_menu = None;
-                                if let Some(mut options) = this
+                    menu = menu.child(checked_menu_item(
+                        ("album-artwork-style", style as usize),
+                        label,
+                        selected,
+                        MenuIndicator::Radio,
+                        cx,
+                        move |this, _, cx| {
+                            this.panel_menu = None;
+                            if let Some(mut options) = this
+                                .workspace
+                                .layouts
+                                .current()
+                                .album_artwork_options(state.panel_id)
+                            {
+                                options.style = style;
+                                if this
                                     .workspace
                                     .layouts
-                                    .current()
-                                    .album_artwork_options(state.panel_id)
+                                    .current_mut()
+                                    .set_album_artwork_options(state.panel_id, options)
                                 {
-                                    options.style = style;
-                                    if this
-                                        .workspace
-                                        .layouts
-                                        .current_mut()
-                                        .set_album_artwork_options(state.panel_id, options)
-                                    {
-                                        this.persist_layout(cx);
-                                    }
+                                    this.persist_layout(cx);
                                 }
-                                cx.notify();
-                            },
-                        )
-                        .child(
-                            div()
-                                .ml_auto()
-                                .text_color(rgb(if selected { theme.accent } else { theme.muted }))
-                                .child(if selected { "●" } else { "○" }),
-                        ),
-                    );
+                            }
+                            cx.notify();
+                        },
+                    ));
                 }
                 menu = menu
-                    .child(components::menu_separator(theme))
-                    .child(components::menu_back(
+                    .child(rivu_ui::menu_separator(theme))
+                    .child(rivu_ui::menu_back(
                         "album-artwork-style-back",
                         self.tr("shell-back"),
                         cx,
@@ -587,11 +572,11 @@ impl GuiApp {
             }
             PanelMenuPage::AudioVisualizerStyle => {
                 menu = menu
-                    .child(components::menu_title(
+                    .child(rivu_ui::menu_title(
                         theme,
                         self.tr("shell-visualizer-style"),
                     ))
-                    .child(components::menu_separator(theme));
+                    .child(rivu_ui::menu_separator(theme));
                 if let Some(options) = self
                     .workspace
                     .layouts
@@ -608,44 +593,34 @@ impl GuiApp {
                         AudioVisualizerStyle::FractalFlow,
                     ] {
                         let selected = options.style == style;
-                        menu = menu.child(
-                            menu_item(
-                                ("audio-visualizer-style", style as usize),
-                                self.tr(visualization::audio_visualizer_style_id(style)),
-                                cx,
-                                move |this, _, cx| {
-                                    this.panel_menu = None;
-                                    if let Some(mut options) = this
-                                        .workspace
+                        menu = menu.child(checked_menu_item(
+                            ("audio-visualizer-style", style as usize),
+                            self.tr(visualization::audio_visualizer_style_id(style)),
+                            selected,
+                            MenuIndicator::Radio,
+                            cx,
+                            move |this, _, cx| {
+                                this.panel_menu = None;
+                                if let Some(mut options) = this
+                                    .workspace
+                                    .layouts
+                                    .current()
+                                    .audio_visualizer_options(state.panel_id)
+                                {
+                                    options.style = style;
+                                    this.workspace
                                         .layouts
-                                        .current()
-                                        .audio_visualizer_options(state.panel_id)
-                                    {
-                                        options.style = style;
-                                        this.workspace
-                                            .layouts
-                                            .current_mut()
-                                            .set_audio_visualizer_options(state.panel_id, options);
-                                        this.persist_layout(cx);
-                                    }
-                                },
-                            )
-                            .child(
-                                div()
-                                    .ml_auto()
-                                    .text_color(rgb(if selected {
-                                        theme.accent
-                                    } else {
-                                        theme.muted
-                                    }))
-                                    .child(if selected { "●" } else { "○" }),
-                            ),
-                        );
+                                        .current_mut()
+                                        .set_audio_visualizer_options(state.panel_id, options);
+                                    this.persist_layout(cx);
+                                }
+                            },
+                        ));
                     }
                 }
                 menu = menu
-                    .child(components::menu_separator(theme))
-                    .child(components::menu_back(
+                    .child(rivu_ui::menu_separator(theme))
+                    .child(rivu_ui::menu_back(
                         "audio-visualizer-style-back",
                         self.tr("shell-back"),
                         cx,
@@ -682,7 +657,7 @@ impl GuiApp {
                                     cx.notify();
                                 },
                             ))
-                            .child(components::danger_menu_item(
+                            .child(rivu_ui::danger_menu_item(
                                 theme,
                                 menu_item(
                                     "confirm-clear-queue",

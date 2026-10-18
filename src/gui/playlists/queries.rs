@@ -1,9 +1,10 @@
 //! Playlist transport is owned by the feature and retains physical gate lifetimes.
 use super::*;
-use crate::gui::{chooser_path, chooser_result, components::ButtonTooltip};
+use crate::gui::{chooser_path, chooser_result};
 use ashpd::desktop::file_chooser::SelectedFiles;
 use gpui::Stateful;
 use requests::ViewRequest;
+use rivu_ui::ButtonTooltip;
 use std::time::Instant;
 impl Playlists {
     pub(in crate::gui) fn apply_playlist_search(
@@ -300,7 +301,7 @@ impl Playlists {
         index: usize,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        let theme = crate::gui::theme::palette(cx);
+        let theme = rivu_ui::theme::palette(cx);
         let error = match kind {
             ViewRequestKind::Summaries => self.browser.playlists().summaries().rows.error(index),
             ViewRequestKind::Entries => self.browser.playlists().entries().rows.error(index),
@@ -341,7 +342,7 @@ impl Playlists {
         favorite: bool,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<Div> {
-        let theme = crate::gui::theme::palette(cx);
+        let theme = rivu_ui::theme::palette(cx);
         compact_icon_button(
             theme,
             icon_button(

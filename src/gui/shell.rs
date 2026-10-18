@@ -49,7 +49,7 @@ pub(super) enum Surface {
 pub(super) struct WindowShell {
     surface: Option<Surface>,
     layout_focus: FocusHandle,
-    scope: components::FocusScope,
+    scope: rivu_ui::FocusScope,
     keyboard_surface: Option<KeyboardSurface>,
     restore: Option<FocusHandle>,
     focus_epoch: u64,
@@ -62,7 +62,7 @@ impl WindowShell {
         Self {
             surface: None,
             layout_focus: cx.focus_handle(),
-            scope: components::FocusScope::new(cx),
+            scope: rivu_ui::FocusScope::new(cx),
             keyboard_surface: None,
             restore: None,
             focus_epoch: 0,
@@ -101,7 +101,7 @@ impl WindowShell {
         &self.layout_focus
     }
 
-    pub(super) fn scope(&self) -> &components::FocusScope {
+    pub(super) fn scope(&self) -> &rivu_ui::FocusScope {
         &self.scope
     }
 

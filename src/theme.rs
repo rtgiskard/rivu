@@ -3,6 +3,7 @@
 //! Tokyo Night colors: https://github.com/folke/tokyonight.nvim/tree/main/lua/tokyonight/colors
 //! Day uses the upstream generated extras/lua/tokyonight_day.lua palette.
 
+use rivu_ui::theme::Palette;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,29 +33,6 @@ impl Theme {
             Self::TokyoNightDay => &TOKYO_NIGHT_DAY,
         }
     }
-}
-
-/// Semantic 24-bit RGB colors; no alpha or runtime color conversion is stored.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Palette {
-    pub bg: u32,
-    pub panel: u32,
-    pub control: u32,
-    pub structure_border: u32,
-    pub border: u32,
-    pub text: u32,
-    pub secondary: u32,
-    pub muted: u32,
-    pub disabled: u32,
-    pub accent: u32,
-    pub accent_hover: u32,
-    pub on_accent: u32,
-    pub highlight: u32,
-    pub selected: u32,
-    pub selected_hover: u32,
-    pub error: u32,
-    pub error_bg: u32,
-    pub warning: u32,
 }
 
 // Integer sRGB interpolation is only used in static initializers, never while rendering.

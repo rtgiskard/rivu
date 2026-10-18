@@ -185,6 +185,9 @@ Release builds strip symbols. For troubleshooting, set
 
 The pinned GPUI renderer has local extensions under `vendor/`; see
 link:doc/23_visuals.adoc#_pinned_gpu_extensions[GPU extension boundaries and maintenance].
+The `rivu-ui` workspace package contains reusable GUI controls; see
+link:doc/24_layout.adoc#_reusable_gpui_controls[component boundaries and host setup].
+`make lint` and `make build` cover the workspace, including this package.
 
 About and `rivu -V` report the build version. `make build` obtains it from Git;
 plain Cargo uses the package version unless `RIVU_GIT_VERSION` is supplied.

@@ -750,7 +750,7 @@ impl Artwork {
 
     pub(super) fn image(
         &self,
-        theme: &'static crate::theme::Palette,
+        theme: &'static rivu_ui::theme::Palette,
         side: Pixels,
         window: &Window,
     ) -> Img {
@@ -760,15 +760,13 @@ impl Artwork {
         img(move |window: &mut Window, cx: &mut App| {
             cache.update(cx, |cache, cx| cache.load(side, window, cx))
         })
-        .with_fallback(move || {
-            crate::gui::components::caption(theme, fallback.clone()).into_any_element()
-        })
+        .with_fallback(move || rivu_ui::caption(theme, fallback.clone()).into_any_element())
     }
 }
 
 impl Render for Artwork {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = crate::gui::theme::palette(cx);
+        let theme = rivu_ui::theme::palette(cx);
         let cache = self.cache.clone();
         let fallback = self.fallback.clone();
         div()
@@ -1343,6 +1341,10 @@ mod tests {
     fn artwork_panel_visibility_style_and_layout_transfer_real_decorations(
         cx: &mut gpui::TestAppContext,
     ) {
+        cx.update(|cx| {
+            crate::gui::theme::set_theme(crate::theme::Theme::default(), cx);
+            crate::gui::fonts::publish(&gpui::font("sans-serif"), cx);
+        });
         use super::super::{
             album_artwork::{AlbumArtwork, AlbumArtworkPanel},
             layout::{Axis, Node, Panel},

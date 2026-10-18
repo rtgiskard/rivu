@@ -538,7 +538,7 @@ impl AlbumArtwork {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let theme = crate::gui::theme::palette(cx);
+        let theme = rivu_ui::theme::palette(cx);
         self.request_frame(window, cx);
         let image = self.view.image(cx).map(|mut image| {
             // Multiple panels share a decode, not their playback cursor.

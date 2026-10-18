@@ -1,15 +1,6 @@
 use super::{
     UI_INSET,
     album_artwork::{ALBUM_ARTWORK_STYLES, album_artwork_style_label},
-    components::{
-        ButtonTooltip, DROPDOWN_ROW_REMS, DropdownItem, DropdownState, FocusScope,
-        POPOVER_MAX_REMS, StatusKind, activate_control, active_control, button, caption, column,
-        copyable_message, disabled_control, dropdown_container, dropdown_key, dropdown_row,
-        dropdown_trigger, form_field, icon_button as common_icon_button,
-        input::{Input, InputEvent},
-        row, section_group, status_message, toggle_button, two_column,
-    },
-    theme::palette,
     visualization::audio_visualizer_style_label,
 };
 use crate::{
@@ -21,10 +12,20 @@ use crate::{
     },
     core::CoreHandle,
     i18n::Localizer,
-    theme::{Palette, Theme},
+    theme::Theme,
 };
 use anyhow::{Context as _, Result};
 use gpui::{prelude::*, *};
+use rivu_ui::{
+    ButtonTooltip, ChoiceAction, ChoiceMode, ChoicePopup, ChoiceState, Dialog, DropdownItem,
+    FocusScope, StatusKind, activate_control, active_control, button, caption, column,
+    copyable_message, disabled_control, dropdown_trigger, form_field,
+    icon_button as common_icon_button,
+    input::{Input, InputEvent},
+    row, section_group, status_message,
+    theme::{Palette, palette},
+    toggle_button, two_column,
+};
 use std::{cell::RefCell, collections::HashMap, rc::Rc, str::FromStr, sync::Arc, time::Duration};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -290,7 +291,7 @@ fn dropdown_button(
     action: impl Fn(&mut Settings, &mut Window, &mut Context<Settings>) + 'static,
 ) -> Stateful<Div> {
     settings_control(activate_control(
-        dropdown_trigger(palette(cx), id, label),
+        dropdown_trigger(palette(cx), id, label, cx),
         cx,
         move |this, window, cx| {
             action(this, window, cx);
@@ -322,14 +323,21 @@ fn visual_switch(
         format!("{label} ({hint})").into()
     };
     settings_control(toggle_button(
-        i18n,
         id,
         icon,
-        label,
+        format!(
+            "{label}: {}",
+            i18n.text(if enabled {
+                "settings-on"
+            } else {
+                "settings-off"
+            })
+        ),
         enabled,
         cx,
-        move |this, _| {
+        move |this, cx| {
             toggle(&mut this.draft);
+            this.sync_field_enabled(cx);
         },
     ))
 }
@@ -491,10 +499,9 @@ pub(super) struct Settings {
     draft: Config,
     inputs: HashMap<Field, Entity<Input>>,
     initialized: bool,
-    dropdown: DropdownState<SettingChoice>,
+    dropdown: ChoiceState<SettingChoice>,
     font_options: Vec<FontOption>,
     font_value: String,
-    dropdown_scroll: UniformListScrollHandle,
     dropdown_anchor: Measured,
     applying: bool,
     session: u64,
@@ -565,10 +572,9 @@ impl Settings {
             draft: config.as_ref().clone(),
             inputs: HashMap::new(),
             initialized: false,
-            dropdown: DropdownState::default(),
+            dropdown: ChoiceState::default(),
             font_options: Vec::new(),
             font_value: config.ui_font.clone(),
-            dropdown_scroll: UniformListScrollHandle::new(),
             dropdown_anchor: Measured::Device,
             applying: false,
             session: 0,
@@ -820,31 +826,27 @@ impl Settings {
         )
     }
 
-    fn field_state(&self, field: Field, enabled: bool, cx: &App) -> Div {
-        if enabled {
-            return self.field(field, cx).min_w(rems(180. / 16.));
+    fn field_state(&self, field: Field, cx: &App) -> Div {
+        self.field(field, cx).min_w(rems(180. / 16.))
+    }
+
+    fn sync_field_enabled(&self, cx: &mut App) {
+        let solid = self.draft.spectrum_style == SpectrumStyle::Solid;
+        for (field, enabled) in [
+            (
+                Field::AlbumArtworkPeriod,
+                self.draft.album_artwork_mode == AlbumArtworkMode::Rotating,
+            ),
+            (Field::SpectrumBars, !solid),
+            (Field::SpectrumBarWidth, !solid),
+            (Field::SpectrumGap, !solid),
+            (Field::SpectrumHold, self.draft.spectrum_peaks),
+            (Field::SpectrumGravity, self.draft.spectrum_peaks),
+        ] {
+            if let Some(input) = self.inputs.get(&field) {
+                input.update(cx, |input, cx| input.set_enabled(enabled, cx));
+            }
         }
-        let colors = palette(cx);
-        // Keep the draft value, but unmount the editor so disabled fields cannot take focus or edits.
-        let control = div()
-            .id(("inactive-setting", field as usize))
-            .line_height(rems(20. / 16.))
-            .text_size(rems(14. / 16.))
-            .bg(rgb(colors.control))
-            .text_color(rgb(colors.disabled))
-            .border_1()
-            .border_color(rgb(colors.structure_border))
-            .rounded(rems(4. / 16.))
-            .cursor_default()
-            .child(
-                div()
-                    .h(rems(34. / 16.))
-                    .w_full()
-                    .p(rems(7. / 16.))
-                    .overflow_hidden()
-                    .child(self.value(field, cx)),
-            );
-        field.form(colors, self, control).min_w(rems(180. / 16.))
     }
 
     fn value(&self, field: Field, cx: &App) -> String {
@@ -1170,6 +1172,7 @@ impl Settings {
             unchanged,
             cx,
         );
+        self.sync_field_enabled(cx);
     }
 
     fn parse(&self, cx: &App) -> Result<Config> {
@@ -1338,27 +1341,12 @@ impl Settings {
                 }),
             )
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                let Some(key) = dropdown_key(event) else {
-                    return;
-                };
-                if this.inputs[&Field::Font].read(cx).is_composing() {
+                // Input owns IME and Enter submission; only local candidate navigation is captured.
+                let composing = this.inputs[&Field::Font].read(cx).is_composing();
+                if this.dropdown.is_open() && this.dropdown_anchor != Measured::SettingsFont {
                     return;
                 }
-                let open =
-                    this.dropdown.is_open() && this.dropdown_anchor == Measured::SettingsFont;
-                if !open {
-                    if matches!(key, "up" | "down") {
-                        this.open_font_dropdown(false, cx);
-                        cx.stop_propagation();
-                        cx.notify();
-                    }
-                } else if key == "escape" {
-                    this.dropdown.close();
-                    cx.stop_propagation();
-                    cx.notify();
-                } else if matches!(key, "up" | "down" | "pageup" | "pagedown") {
-                    this.settings_dropdown_key(key, window, cx);
-                }
+                this.choice_key(event, ChoiceMode::Editable, composing, window, cx);
             }))
             .child(input)
             .child(
@@ -1620,6 +1608,7 @@ impl Settings {
         }
         self.dropdown.select_index(index);
         self.dropdown.close();
+        self.sync_field_enabled(cx);
         cx.notify();
     }
 
@@ -1641,53 +1630,25 @@ impl Settings {
                 SettingChoice::AlbumArtworkDirection(_) => Measured::AlbumArtworkDirection,
             };
         }
-        self.dropdown.open(items);
-        self.dropdown.select_index(selected);
-        if let Some(index) = self.dropdown.selected_index() {
-            self.dropdown_scroll
-                .scroll_to_item(index, ScrollStrategy::Nearest);
-        }
+        self.dropdown.open(items, selected);
     }
 
-    fn settings_dropdown_key(&mut self, key: &str, window: &Window, cx: &mut Context<Self>) {
-        match key {
-            "up" => self.dropdown.move_previous(),
-            "down" => self.dropdown.move_next(),
-            "pageup" | "pagedown" => {
-                if let Some(index) = self.dropdown.selected_index() {
-                    let viewport_height = self
-                        .dropdown_scroll
-                        .0
-                        .borrow()
-                        .base_handle
-                        .bounds()
-                        .size
-                        .height;
-                    let row_height = DROPDOWN_ROW_REMS * f32::from(window.rem_size());
-                    let visible_rows =
-                        ((f32::from(viewport_height) / row_height).floor() as usize).max(1);
-                    let next = if key == "pagedown" {
-                        index.saturating_add(visible_rows)
-                    } else {
-                        index.saturating_sub(visible_rows)
-                    };
-                    self.dropdown.select_index(next);
-                }
-            }
-            "enter" | "space" => {
-                if let Some(index) = self.dropdown.selected_index() {
-                    self.choose_setting(index, cx);
-                }
-                cx.stop_propagation();
-                return;
-            }
-            _ => return,
+    fn choice_key(
+        &mut self,
+        event: &KeyDownEvent,
+        mode: ChoiceMode,
+        composing: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let disposition = self.dropdown.key(event, mode, composing, window);
+        match disposition.apply(window, cx) {
+            ChoiceAction::None => return,
+            ChoiceAction::Open => self.open_font_dropdown(false, cx),
+            ChoiceAction::Commit(index) => self.choose_setting(index, cx),
+            ChoiceAction::Dismiss => self.dropdown.close(),
+            ChoiceAction::Navigated => {}
         }
-        if let Some(index) = self.dropdown.selected_index() {
-            self.dropdown_scroll
-                .scroll_to_item(index, ScrollStrategy::Nearest);
-        }
-        cx.stop_propagation();
         cx.notify();
     }
 
@@ -1929,7 +1890,7 @@ impl Settings {
                             .tooltip(settings_tooltip(path)),
                     )
                     .child(
-                        super::components::quiet_icon_button(
+                        rivu_ui::quiet_icon_button(
                             colors,
                             icon_button(
                                 ("settings-library-root-remove", index),
@@ -2024,10 +1985,6 @@ impl Settings {
                         let open = this.dropdown.is_open();
                         if open {
                             this.dropdown.close();
-                            if let Some(index) = this.dropdown.selected_index() {
-                                this.dropdown_scroll
-                                    .scroll_to_item(index, ScrollStrategy::Nearest);
-                            }
                         } else {
                             let selected = this
                                 .draft
@@ -2556,12 +2513,12 @@ impl Settings {
                         ),
                     ))
                     .child(two_column(
-                        settings.field_state(Field::AlbumArtworkPeriod, rotating, cx),
+                        settings.field_state(Field::AlbumArtworkPeriod, cx),
                         column().when(settings.artwork_panel.is_none(), |column| {
                             column
                                 .min_w(rems(180. / 16.))
                                 .gap_2()
-                                .child(settings.field_state(Field::AlbumArtworkFps, true, cx))
+                                .child(settings.field_state(Field::AlbumArtworkFps, cx))
                         }),
                     )),
             ))
@@ -2725,7 +2682,6 @@ impl Settings {
                     ))
             }
             VisualPage::Spectrum => {
-                let solid = draft.spectrum_style == SpectrumStyle::Solid;
                 let style = dropdown_button(
                     "spectrum-style",
                     spectrum_style_label(&self.i18n, draft.spectrum_style),
@@ -2768,11 +2724,11 @@ impl Settings {
                             .child(two_column(
                                 form_field(palette(cx), settings.tr("settings-style"), style)
                                     .min_w(rems(180. / 16.)),
-                                settings.field_state(Field::SpectrumBars, !solid, cx),
+                                settings.field_state(Field::SpectrumBars, cx),
                             ))
                             .child(two_column(
-                                settings.field_state(Field::SpectrumBarWidth, !solid, cx),
-                                settings.field_state(Field::SpectrumGap, !solid, cx),
+                                settings.field_state(Field::SpectrumBarWidth, cx),
+                                settings.field_state(Field::SpectrumGap, cx),
                             ))
                             .child(settings.single(Field::SpectrumDb, cx))
                             .child(
@@ -2837,12 +2793,8 @@ impl Settings {
                                 |draft| draft.spectrum_peaks = !draft.spectrum_peaks,
                             )))
                             .child(two_column(
-                                settings.field_state(Field::SpectrumHold, draft.spectrum_peaks, cx),
-                                settings.field_state(
-                                    Field::SpectrumGravity,
-                                    draft.spectrum_peaks,
-                                    cx,
-                                ),
+                                settings.field_state(Field::SpectrumHold, cx),
+                                settings.field_state(Field::SpectrumGravity, cx),
                             )),
                     ))
             }
@@ -3144,8 +3096,11 @@ impl Settings {
         if self.visualizer_panel.is_none() && self.artwork_panel.is_none() {
             let sidebar_scroll = self.scrolls.entry("settings-sidebar").or_default().clone();
             body = body.child(
-                div().w(rems(11.)).h_full().flex_shrink_0().child(
-                    super::components::scrollable_area(
+                div()
+                    .w(rems(11.))
+                    .h_full()
+                    .flex_shrink_0()
+                    .child(rivu_ui::scrollable_area(
                         "settings-sidebar-surface",
                         self.sidebar(cx)
                             .id("settings-sidebar")
@@ -3154,12 +3109,11 @@ impl Settings {
                             .overflow_y_scroll()
                             .track_scroll(&sidebar_scroll),
                         &sidebar_scroll,
-                    ),
-                ),
+                    )),
             );
         }
         panel = panel.child(
-            body.child(super::components::scrollable_area(
+            body.child(rivu_ui::scrollable_area(
                 page_id,
                 div()
                     .id(page_id)
@@ -3233,77 +3187,28 @@ impl Settings {
         if self.dropdown.is_open() {
             let bounds = self.measured.borrow().get(&self.dropdown_anchor).copied();
             if let Some(bounds) = bounds {
-                let selected = self.dropdown.selected_index().unwrap_or(0);
-                let item_count = self.dropdown.filtered().count();
-                let row_height = DROPDOWN_ROW_REMS * f32::from(window.rem_size());
-                let height = (item_count as f32 * row_height)
-                    .min(f32::from(window.rem_size()) * POPOVER_MAX_REMS)
-                    .min(f32::from(window.viewport_size().height) * 0.45);
-                let choices = uniform_list(
-                    "settings-dropdown",
-                    item_count,
-                    cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
-                        range
-                            .filter_map(|index| {
-                                let (item_index, item) = this.dropdown.filtered_item(index)?;
-                                let label: SharedString = item.label.clone().into();
-                                let hint = label.clone();
-                                Some(
-                                    dropdown_row(
-                                        palette(cx),
-                                        ("settings-choice", item_index),
-                                        item_index == selected,
-                                        label,
-                                    )
-                                    .tooltip(move |_, cx| {
-                                        cx.new(|_| ButtonTooltip { text: hint.clone() }).into()
-                                    })
-                                    .on_click(cx.listener(
-                                        move |this, _, _, cx| this.choose_setting(item_index, cx),
-                                    )),
-                                )
-                            })
-                            .collect()
-                    }),
-                )
-                .track_scroll(&self.dropdown_scroll)
-                .h_full()
-                .w_full();
                 panel = panel.child(
-                    deferred(
-                        anchored()
-                            .position(bounds.bottom_left())
-                            .snap_to_window()
-                            .child(
-                                dropdown_container(colors, "settings-dropdown", bounds.size.width)
-                                    .on_mouse_down_out(cx.listener(
-                                        |this, event: &MouseDownEvent, _, cx| {
-                                            if this.dropdown_anchor == Measured::SettingsFont
-                                                && this
-                                                    .measured
-                                                    .borrow()
-                                                    .get(&Measured::SettingsFont)
-                                                    .is_some_and(|bounds| {
-                                                        bounds.contains(&event.position)
-                                                    })
-                                            {
-                                                return;
-                                            }
-                                            this.dropdown.close();
-                                            cx.stop_propagation();
-                                            cx.notify();
-                                        },
-                                    ))
-                                    .child(div().h(px(height)).w_full().child(
-                                        super::components::scrollable_list(
-                                            "settings-dropdown-scrollbar",
-                                            choices,
-                                            &self.dropdown_scroll,
-                                        ),
-                                    )),
-                            ),
-                    )
-                    .with_priority(2),
+                    ChoicePopup::new("settings-dropdown", "settings-dropdown-scrollbar", bounds)
+                        .render(
+                            self,
+                            |this| &this.dropdown,
+                            |this, index, _, cx| this.choose_setting(index, cx),
+                            |this, event, _, _| {
+                                if this.dropdown_anchor == Measured::SettingsFont
+                                    && this
+                                        .measured
+                                        .borrow()
+                                        .get(&Measured::SettingsFont)
+                                        .is_some_and(|bounds| bounds.contains(&event.position))
+                                {
+                                    return false;
+                                }
+                                this.dropdown.close();
+                                true
+                            },
+                            window,
+                            cx,
+                        ),
                 );
             }
         }
@@ -3316,33 +3221,15 @@ impl Render for Settings {
         let colors = palette(cx);
         let panel = self.panel(window, cx);
         self.scope.surface(
-            div()
-                .id("settings-modal")
+            Dialog::backdrop("settings-modal")
                 .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                     if !this.dropdown.is_open() {
-                        return;
-                    }
-                    let Some(key) = dropdown_key(event) else {
-                        return;
-                    };
-                    if key == "tab" {
-                        this.dropdown.close();
-                        cx.notify();
                         return;
                     }
                     if this.settings_font_input_focused(window, cx) {
                         return;
                     }
-                    if key == "escape" {
-                        this.dropdown.close();
-                        cx.notify();
-                    } else {
-                        this.settings_dropdown_key(key, window, cx);
-                    }
-                    // Do not leave a native pending keyboard click on the trigger:
-                    // key-up would otherwise reopen the dropdown after selection.
-                    window.prevent_default();
-                    cx.stop_propagation();
+                    this.choice_key(event, ChoiceMode::Select, false, window, cx);
                 }))
                 .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                     let key = event.keystroke.key.as_str();
@@ -3382,15 +3269,8 @@ impl Render for Settings {
                         cx.stop_propagation();
                     }
                 }))
-                .occlude()
-                .absolute()
-                .size_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(rgb(0x000000).alpha(0.58))
                 .child(
-                    column()
+                    Dialog::card(colors)
                         .max_w(rems(860. / 16.))
                         .w(relative(0.9))
                         .h((window.viewport_size().height - px(32.))
@@ -3398,10 +3278,6 @@ impl Render for Settings {
                             .min(window.rem_size() * (640. / 16.)))
                         .gap_0()
                         .overflow_hidden()
-                        .bg(rgb(colors.panel))
-                        .border_1()
-                        .border_color(rgb(colors.border))
-                        .rounded_md()
                         .child(
                             row()
                                 .h(rems(2.5))
@@ -3425,6 +3301,14 @@ mod tests {
     use core::prelude::v1::test;
 
     fn fixture(cx: &mut TestAppContext) -> (tempfile::TempDir, Runtime, Entity<Settings>) {
+        cx.update(|cx| {
+            rivu_ui::theme::set_palette(Theme::default().palette(), cx);
+            rivu_ui::theme::set_typography(
+                gpui::font("sans-serif"),
+                crate::gui::fonts::SYMBOLS_FAMILY,
+                cx,
+            );
+        });
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.toml");
         Config {
@@ -3559,6 +3443,50 @@ mod tests {
             assert!(!this.dropdown.is_open());
             assert!(this.active);
         });
+    }
+
+    #[gpui::test]
+    fn disabling_artwork_period_retains_editor_draft_and_reenables_editing(
+        cx: &mut TestAppContext,
+    ) {
+        let (_directory, _runtime, settings) = fixture(cx);
+        let window = cx.add_window({
+            let settings = settings.clone();
+            move |_, _| SettingsWindow(settings)
+        });
+        cx.update_window(window.into(), |_, window, cx| {
+            settings.update(cx, |this, cx| {
+                this.set_value(Field::AlbumArtworkPeriod, "1e", None, cx);
+                let input = this.inputs[&Field::AlbumArtworkPeriod].clone();
+                this.open_setting_dropdown(
+                    vec![DropdownItem::new(
+                        SettingChoice::AlbumArtworkMode(AlbumArtworkMode::Static),
+                        "Static",
+                    )],
+                    0,
+                );
+                this.choose_setting(0, cx);
+                input.update(cx, |input, cx| {
+                    input.replace_text_in_range(Some(0..2), "99", window, cx);
+                });
+                assert_eq!(this.value(Field::AlbumArtworkPeriod, cx), "1e");
+                assert_eq!(this.inputs[&Field::AlbumArtworkPeriod], input);
+                this.open_setting_dropdown(
+                    vec![DropdownItem::new(
+                        SettingChoice::AlbumArtworkMode(AlbumArtworkMode::Rotating),
+                        "Rotating",
+                    )],
+                    0,
+                );
+                this.choose_setting(0, cx);
+                assert_eq!(this.value(Field::AlbumArtworkPeriod, cx), "1e");
+                input.update(cx, |input, cx| {
+                    input.replace_text_in_range(Some(0..2), "12", window, cx);
+                });
+                assert_eq!(this.value(Field::AlbumArtworkPeriod, cx), "12");
+            });
+        })
+        .unwrap();
     }
 
     #[gpui::test]

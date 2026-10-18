@@ -248,7 +248,7 @@ impl GuiApp {
 
     pub(in crate::gui) fn docking_overlay(
         &self,
-        theme: &'static crate::theme::Palette,
+        theme: &'static rivu_ui::theme::Palette,
     ) -> AnyElement {
         let Some(session) = self.workspace.interaction.docking() else {
             return div().into_any_element();
