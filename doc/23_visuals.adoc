@@ -12,6 +12,11 @@ defaults, and display behavior are documented in
 link:01_config.adoc[Configuration and layout]. Cache ownership, invalidation,
 and resource lifetime are covered by link:22_cache.adoc[Caching and Resource Lifecycles].
 
+The next rendering interface, implemented vendor prototype and migration plan are
+documented in link:25_gpu_rendering.adoc[Parameter-Driven GPU Rendering Design].
+That design distinguishes agreed constraints from mechanisms to refine during
+implementation; the visualizer behavior described below remains unchanged.
+
 == Pinned GPU extensions
 
 `Cargo.toml` overrides `gpui` and `gpui_wgpu` with `vendor/gpui` and
@@ -23,9 +28,16 @@ maintained rendering capability patch, not a framework replacement or upgrade.
 The extensions add centered image transforms and caller-owned path textures on
 Rivu's Linux/WGPU rendering path. Existing untransformed images and ordinary
 path backgrounds retain their existing behavior.
+The vendor patch also contains a fixed-schema parameterized rectangle program for
+the link:25_gpu_rendering.adoc#_internal_led_vertical_slice[initial GPU rendering slice].
+It is an experimental integration entry point, not a migrated application visualizer.
 
 Run `cargo test --manifest-path vendor/gpui_wgpu/Cargo.toml --lib` to exercise
 the patched shader and headless GPU regressions in their isolated test workspace.
+The companion GPUI workspace runs publication/replay regressions with
+`cargo test --manifest-path vendor/gpui/Cargo.toml --lib gpu_rectangles --no-default-features`
+and existing scene regressions with
+`cargo test --manifest-path vendor/gpui/Cargo.toml --lib scene::reclamation_tests --no-default-features`.
 Compilation also requires the pinned upstream `assets/fonts/lilex` and
 `assets/fonts/ibm-plex-sans` fixtures, placed under this repository's
 `tests/fixtures/fonts/` with their original subdirectory names.

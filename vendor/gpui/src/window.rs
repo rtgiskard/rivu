@@ -4876,6 +4876,33 @@ impl Window {
         Ok(())
     }
 
+    /// Record experimental procedural rectangle content at the current z-index.
+    ///
+    /// Bounds, clipping and inherited opacity are captured independently of the
+    /// immutable content. Dynamic sources are resolved by the renderer, not here.
+    /// This only records a paint; publication does not schedule a frame. Native
+    /// Metal backends return an explicit unsupported error.
+    #[doc(hidden)]
+    pub fn paint_gpu_rectangles(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        source: crate::GpuRectangleSource,
+    ) -> Result<()> {
+        self.invalidator.debug_assert_paint();
+        let batch = crate::GpuRectangleBatch::from_logical(
+            bounds,
+            self.content_mask(),
+            self.element_opacity(),
+            self.scale_factor(),
+            source,
+        )?;
+        #[cfg(not(target_os = "macos"))]
+        self.next_frame.scene.insert_primitive(batch);
+        #[cfg(target_os = "macos")]
+        let _ = batch;
+        Ok(())
+    }
+
     /// Paint an underline into the scene for the next frame at the current z-index.
     ///
     /// This method should only be called as part of the paint phase of element drawing.

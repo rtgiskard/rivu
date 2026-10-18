@@ -1,3 +1,4 @@
+use crate::gpu_rectangles::RectangleRenderer;
 use crate::{CompositorGpuHint, DeviceErrorState, WgpuAtlas, WgpuContext};
 use anyhow::{Context as _, Result};
 use bytemuck::{Pod, Zeroable};
@@ -191,6 +192,7 @@ struct WgpuResources {
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
     pipelines: WgpuPipelines,
+    rectangles: RectangleRenderer,
     bind_group_layouts: WgpuBindGroupLayouts,
     atlas_sampler: wgpu::Sampler,
     atlas_texture_bind_groups: FxHashMap<AtlasTextureId, CachedTextureBindGroup>,
@@ -1378,6 +1380,7 @@ impl WgpuRendererCore {
 
         Self {
             resources: WgpuResources {
+                rectangles: RectangleRenderer::new(&device, target_format, alpha_mode),
                 device,
                 queue,
                 pipelines,
@@ -1518,6 +1521,16 @@ impl WgpuRendererCore {
         );
 
         self.record_frame(scene, target_view, size, clear_color)
+    }
+
+    fn record_frame(
+        &mut self,
+        scene: &Scene,
+        frame_view: &wgpu::TextureView,
+        size: Size<DevicePixels>,
+        clear_color: wgpu::Color,
+    ) -> Result<wgpu::SubmissionIndex> {
+        self.record_frame_inner(scene, frame_view, size, clear_color)
             .inspect_err(|_| {
                 // Queue writes are staged before encoding; flush them even if the frame fails.
                 self.low_instance_data_frames = 0;
@@ -1527,10 +1540,11 @@ impl WgpuRendererCore {
                 self.low_path_sprite_frames = 0;
                 self.low_path_sprite_peak = 0;
                 self.resources.queue.submit(std::iter::empty());
+                self.resources.rectangles.submitted(&self.resources.queue);
             })
     }
 
-    fn record_frame(
+    fn record_frame_inner(
         &mut self,
         scene: &Scene,
         frame_view: &wgpu::TextureView,
@@ -1559,6 +1573,10 @@ impl WgpuRendererCore {
                 )
             })?;
         self.prepare_texture_bind_groups(scene);
+        let rectangles =
+            self.resources
+                .rectangles
+                .prepare(&self.resources.device, &scene.gpu_rectangles, size);
 
         let mut encoder =
             self.resources()
@@ -1585,6 +1603,14 @@ impl WgpuRendererCore {
 
             for batch in scene.batches() {
                 match batch {
+                    #[cfg(not(target_os = "macos"))]
+                    PrimitiveBatch::GpuRectangles(range) => {
+                        for index in range {
+                            if let Some(draw) = rectangles.get(&index) {
+                                self.resources.rectangles.draw(draw, &mut pass);
+                            }
+                        }
+                    }
                     PrimitiveBatch::Quads(range) => self.draw_instances(
                         &instance_bindings.quads,
                         &self.resources().pipelines.quads,
@@ -1690,6 +1716,7 @@ impl WgpuRendererCore {
             .resources()
             .queue
             .submit(std::iter::once(encoder.finish()));
+        self.resources.rectangles.submitted(&self.resources.queue);
         self.maintain_instance_data_capacity(instance_offset, frame_start_capacity);
         Self::maintain_path_scratch_capacity(
             &mut self.path_vertices,
@@ -3663,3 +3690,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "gpu_rectangles_tests.rs"]
+mod rectangle_tests;
