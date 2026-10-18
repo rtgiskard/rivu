@@ -759,21 +759,23 @@ intervals stay blank.
 
 `visualizations.waveform.labels`, `visualizations.waveform.cursor_color`, and `visualizations.waveform.glow` control labels,
 cursor, and glow. The Amplitude display group exposes `visualizations.waveform.rms_gain`
-(`0`–`3`, default `1.6`), `visualizations.waveform.peak_gain` (`0`–`2`, default `0.75`), and
-`visualizations.waveform.peak_gamma` (`0.25`–`3`, default `1.1`). Gamma above `1` reduces low
+(`0`–`3`, default `0.94`), `visualizations.waveform.peak_gain` (`0`–`2`, default `1.0`), and
+`visualizations.waveform.peak_gamma` (`0.25`–`3`, default `0.86`). Gamma above `1` reduces low
 peaks; below `1` lifts them. These controls affect rendering only, not playback
 volume or decoded preview data.
 
 === Spectrum and Spectrogram
 
 Spectrum shows current frequency energy. `visualizations.spectrum.style` accepts `bars`,
-`outline`, `led`, `line`, or `solid` (default `bars`). The remaining `visualizations.spectrum.*`
+`outline`, `led`, `line`, or `solid` (default `solid`). The remaining `visualizations.spectrum.*`
 settings control band density, spacing, bar and peak hold, release motion,
 smoothing, reference lines, labels, and display range. `visualizations.spectrum.bars = 0`
 (default) chooses the band count automatically; explicit counts accept `1`–`512`.
 Motion freezes while paused.
+The default bar falling acceleration (`visualizations.spectrum.bar_gravity`) is
+`200` dB/s². Labels default to off; reference lines remain enabled.
 
-`visualizations.spectrum.interpolate` controls frequency interpolation and whether `solid` has a
+`visualizations.spectrum.interpolate` defaults to `false` and controls frequency interpolation and whether `solid` has a
 continuous or stepped boundary. `line` always connects valid body points
 continuously and skips empty slots rather than drawing them at the floor.
 Peak indicators remain discrete in every style.
