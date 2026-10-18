@@ -178,6 +178,65 @@ fn gpu_rectangles_palette_alpha_segments_and_scale() -> anyhow::Result<()> {
 }
 
 #[test]
+fn gpu_rectangles_fractional_edges_and_adjacent_segments_match_paths() -> anyhow::Result<()> {
+    let mut renderer = WgpuHeadlessRenderer::new()?;
+    for segmented in [false, true] {
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let rectangles = [(4.25, 1.0), (5.25, 1.0), (8.25, 0.25)].map(|(x, width)| {
+                GpuRectangle {
+                    bounds: [x / 16.0, 2.25 / 16.0, width / 16.0, 7.25 / 16.0],
+                    palette_range: [0.0, 1.0],
+                }
+            });
+            let params = if segmented {
+                GpuRectangleParams { cell_height: 3.0, cell_gap: 2.0 }
+            } else {
+                GpuRectangleParams::default()
+            };
+            let content = rectangle_frame(&rectangles, &[[1.0; 4]], params, limits())?;
+            let extent = bounds(0.0, 0.0, 16.0 * scale, 16.0 * scale);
+            let mut placement = draw(GpuSource::Fixed(content), extent);
+            placement.scale_factor = scale;
+            let mut scene = Scene::default();
+            scene.insert_primitive(placement);
+            scene.finish();
+            let actual = renderer.render_scene_to_image(&scene, size(32, 32))?;
+
+            let mut builder = gpui::PathBuilder::fill().with_style(gpui::PathStyle::Fill(
+                gpui::FillOptions::default().with_fill_rule(gpui::FillRule::NonZero),
+            ));
+            for rectangle in rectangles {
+                let [x, y, width, height] = rectangle.bounds.map(|value| value * 16.0);
+                let mut bottom = y + height;
+                while bottom > y {
+                    let top = if segmented { (bottom - 3.0).max(y) } else { y };
+                    builder.move_to(gpui::point(gpui::px(x), gpui::px(top)));
+                    builder.line_to(gpui::point(gpui::px(x + width), gpui::px(top)));
+                    builder.line_to(gpui::point(gpui::px(x + width), gpui::px(bottom)));
+                    builder.line_to(gpui::point(gpui::px(x), gpui::px(bottom)));
+                    builder.close();
+                    bottom = top - 2.0;
+                }
+            }
+            let mut path = builder.build()?.scale(scale);
+            path.bounds = extent;
+            path.color = gpui::white().into();
+            path.content_mask = ContentMask { bounds: extent };
+            let mut scene = Scene::default();
+            scene.insert_primitive(path);
+            scene.finish();
+            let expected = renderer.render_scene_to_image(&scene, size(32, 32))?;
+            for (actual, expected) in actual.pixels().zip(expected.pixels()) {
+                assert!(actual.0.iter().zip(expected.0).all(|(a, e)| a.abs_diff(e) <= 3),
+                    "segmented={segmented} scale={scale}: {actual:?} != {expected:?}");
+            }
+            pixel(&actual, (5.25 * scale) as u32, (8.0 * scale) as u32, [255; 4]);
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn gpu_rectangles_fixed_dynamic_coherence_clear_and_retirement() -> anyhow::Result<()> {
     let mut renderer = WgpuHeadlessRenderer::new()?;
     let initial = frame([1.0, 0.0, 0.0, 1.0]);

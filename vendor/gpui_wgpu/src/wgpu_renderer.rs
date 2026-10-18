@@ -1618,7 +1618,7 @@ impl WgpuRendererCore {
                             let Some(draw) = materials.get(&index) else {
                                 continue;
                             };
-                            if draw.is_path {
+                            if draw.multisampled() {
                                 let record = &scene.gpu_draws[index];
                                 let mut bounds =
                                     record.bounds.intersect(&record.content_mask.bounds);
@@ -1633,7 +1633,7 @@ impl WgpuRendererCore {
                                         let Some(next) = materials.get(&next_index) else {
                                             break;
                                         };
-                                        if !next.is_path {
+                                        if !next.multisampled() {
                                             break;
                                         }
                                         let record = &scene.gpu_draws[next_index];

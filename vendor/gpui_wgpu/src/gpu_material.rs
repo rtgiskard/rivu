@@ -44,9 +44,13 @@ struct PlacementAllocation {
     _buffer: wgpu::Buffer,
     last_submission: u64,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MaterialKind { Rectangles, Field, Path }
+impl MaterialKind {
+    fn multisampled(self) -> bool { self != Self::Field }
+}
 struct Program {
-    pipeline: Option<wgpu::RenderPipeline>,
-    path_pipeline: Option<wgpu::RenderPipeline>,
+    pipelines: [Option<wgpu::RenderPipeline>; 3],
     layout: wgpu::PipelineLayout,
     shader: wgpu::ShaderModule,
     placement_layout: wgpu::BindGroupLayout,
@@ -57,7 +61,10 @@ pub(crate) struct PreparedDraw {
     data: wgpu::BindGroup,
     instances: u32,
     vertices: u32,
-    pub(crate) is_path: bool,
+    kind: MaterialKind,
+}
+impl PreparedDraw {
+    pub(crate) fn multisampled(&self) -> bool { self.kind.multisampled() }
 }
 pub(crate) type PreparedMaterials = FxHashMap<usize, PreparedDraw>;
 pub(crate) struct MaterialRenderer {
@@ -84,7 +91,7 @@ pub(crate) struct MaterialRenderer {
     #[cfg(test)]
     resolution_count: usize,
     #[cfg(test)]
-    pipeline_counts: [usize; 2],
+    pipeline_counts: [usize; 3],
 }
 fn buffer_entry(binding: u32, uniform: bool, minimum: u64) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
@@ -154,52 +161,47 @@ impl MaterialRenderer {
             source: wgpu::ShaderSource::Wgsl(SHADER.into()),
         });
         Some(Program {
-            pipeline: None,
-            path_pipeline: None,
+            pipelines: [None, None, None],
             layout,
             shader,
             placement_layout,
             data_layout,
         })
     }
-    fn ensure_pipeline(&mut self, device: &wgpu::Device, path: bool) {
+    fn ensure_pipeline(&mut self, device: &wgpu::Device, kind: MaterialKind) {
         let program = self.program.as_mut().unwrap();
-        let pipeline = if path {
-            &mut program.path_pipeline
-        } else {
-            &mut program.pipeline
-        };
+        let pipeline = &mut program.pipelines[kind as usize];
         if pipeline.is_some() {
             return;
         }
         *pipeline = Some(
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some(if path {
-                    "GPU palette path"
-                } else {
-                    "GPU palette rectangles and field"
+                label: Some(match kind {
+                    MaterialKind::Rectangles => "GPU palette rectangles",
+                    MaterialKind::Field => "GPU palette field",
+                    MaterialKind::Path => "GPU palette path",
                 }),
                 layout: Some(&program.layout),
                 vertex: wgpu::VertexState {
                     module: &program.shader,
-                    entry_point: Some(if path {
-                        "path_vertex"
-                    } else {
-                        "material_vertex"
+                    entry_point: Some(match kind {
+                        MaterialKind::Rectangles => "rectangle_vertex",
+                        MaterialKind::Field => "material_vertex",
+                        MaterialKind::Path => "path_vertex",
                     }),
                     buffers: &[],
                     compilation_options: Default::default(),
                 },
                 fragment: Some(wgpu::FragmentState {
                     module: &program.shader,
-                    entry_point: Some(if path {
-                        "path_fragment"
-                    } else {
-                        "material_fragment"
+                    entry_point: Some(match kind {
+                        MaterialKind::Rectangles => "rectangle_fragment",
+                        MaterialKind::Field => "material_fragment",
+                        MaterialKind::Path => "path_fragment",
                     }),
                     targets: &[Some(wgpu::ColorTargetState {
                         format: self.target_format,
-                        blend: Some(if path || self.premultiplied {
+                        blend: Some(if kind.multisampled() || self.premultiplied {
                             wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING
                         } else {
                             wgpu::BlendState::ALPHA_BLENDING
@@ -211,7 +213,7 @@ impl MaterialRenderer {
                 primitive: Default::default(),
                 depth_stencil: None,
                 multisample: wgpu::MultisampleState {
-                    count: if path { self.path_samples } else { 1 },
+                    count: if kind.multisampled() { self.path_samples } else { 1 },
                     ..Default::default()
                 },
                 multiview_mask: None,
@@ -220,7 +222,7 @@ impl MaterialRenderer {
         );
         #[cfg(test)]
         {
-            self.pipeline_counts[usize::from(path)] += 1;
+            self.pipeline_counts[kind as usize] += 1;
         }
     }
     pub(crate) fn new(
@@ -253,7 +255,7 @@ impl MaterialRenderer {
             #[cfg(test)]
             resolution_count: 0,
             #[cfg(test)]
-            pipeline_counts: [0; 2],
+            pipeline_counts: [0; 3],
         }
     }
     fn can_allocate(&self, bytes: u64, count: usize) -> bool {
@@ -386,7 +388,7 @@ impl MaterialRenderer {
             let Some(frame) = frame else {
                 continue;
             };
-            let (instances, vertices, is_path) = draw_counts(&frame);
+            let (instances, vertices, kind) = draw_counts(&frame);
             if instances == 0 {
                 continue;
             }
@@ -415,7 +417,7 @@ impl MaterialRenderer {
                 continue;
             }
             // Only admitted draws demand a pipeline; replay retains each variant.
-            self.ensure_pipeline(device, is_path);
+            self.ensure_pipeline(device, kind);
             let program = self.program.as_ref().unwrap();
             let buffer = mapped_buffer(
                 device,
@@ -455,7 +457,7 @@ impl MaterialRenderer {
                     data: upload.binding.clone(),
                     instances,
                     vertices,
-                    is_path,
+                    kind,
                 },
             );
             self.placements.push(PlacementAllocation {
@@ -573,11 +575,7 @@ impl MaterialRenderer {
     }
     pub(crate) fn draw(&self, draw: &PreparedDraw, pass: &mut wgpu::RenderPass<'_>) {
         let program = self.program.as_ref().unwrap();
-        pass.set_pipeline(if draw.is_path {
-            program.path_pipeline.as_ref().unwrap()
-        } else {
-            program.pipeline.as_ref().unwrap()
-        });
+        pass.set_pipeline(program.pipelines[draw.kind as usize].as_ref().unwrap());
         pass.set_bind_group(0, &draw.placement, &[]);
         pass.set_bind_group(1, &draw.data, &[]);
         pass.draw(0..draw.vertices, 0..draw.instances);
@@ -597,10 +595,10 @@ impl MaterialRenderer {
         });
     }
 }
-fn draw_counts(frame: &GpuFrame) -> (u32, u32, bool) {
+fn draw_counts(frame: &GpuFrame) -> (u32, u32, MaterialKind) {
     match frame.content() {
-        GpuContent::Rectangles { rectangles, .. } => (rectangles.len() as u32, 6, false),
-        GpuContent::Field { values, .. } => (u32::from(!values.is_empty()), 6, false),
+        GpuContent::Rectangles { rectangles, .. } => (rectangles.len() as u32, 6, MaterialKind::Rectangles),
+        GpuContent::Field { values, .. } => (u32::from(!values.is_empty()), 6, MaterialKind::Field),
         GpuContent::Path { path, .. } => (
             u32::from(
                 !path.vertices.is_empty()
@@ -608,7 +606,7 @@ fn draw_counts(frame: &GpuFrame) -> (u32, u32, bool) {
                     && f32::from(path.bounds.size.height) > 0.0,
             ),
             path.vertices.len() as u32,
-            true,
+            MaterialKind::Path,
         ),
     }
 }

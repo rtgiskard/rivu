@@ -15,10 +15,18 @@
 use crate::i18n::Localizer;
 
 use gpui::{
-    AnyElement, App, Bounds, Path, PathBuilder, Pixels, Point, RenderImage, SharedString,
-    TextAlign, Window, canvas, div, fill, point, prelude::*, px, rgb, size,
+    AnyElement, App, Bounds, GpuFrame, GpuLimits, GpuPalette, GpuRectangle, GpuRectangleParams,
+    GpuSource, Path, PathBuilder, Pixels, Point, RenderImage, SharedString, TextAlign, Window,
+    canvas, div, fill, point, prelude::*, px, rgb, size,
 };
-use std::{cell::RefCell, collections::HashMap, ops::Range, rc::Rc, sync::Arc, time::Duration};
+use std::{
+    cell::{OnceCell, RefCell},
+    collections::HashMap,
+    ops::Range,
+    rc::Rc,
+    sync::Arc,
+    time::Duration,
+};
 
 use crate::{
     analysis::AnalysisFrame,
@@ -62,11 +70,14 @@ fn visible_palette_fraction(palette: VisualizationPalette, fraction: f32) -> f32
 }
 
 const PALETTE_LUT_SIZE: usize = 1024;
+// Texture filtering has half-texel knots; this uniform grid includes every knot.
+const SPECTRUM_GPU_PALETTE_SIZE: usize = 2 * PALETTE_LUT_SIZE + 1;
 
 pub(super) struct PaletteLut {
     palette: VisualizationPalette,
     colors: [[u8; 3]; PALETTE_LUT_SIZE],
     spectrum_ramp: Arc<RenderImage>,
+    spectrum_gpu_palette: OnceCell<Result<Arc<GpuPalette>, String>>,
 }
 
 impl PaletteLut {
@@ -86,7 +97,45 @@ impl PaletteLut {
                 gradient(fraction, palette_stops(palette))
             }),
             spectrum_ramp: Arc::new(RenderImage::new([image::Frame::new(pixels)])),
+            spectrum_gpu_palette: OnceCell::new(),
         }
+    }
+
+    fn spectrum_gpu_palette(&self) -> Result<Arc<GpuPalette>, String> {
+        self.spectrum_gpu_palette
+            .get_or_init(|| {
+                let bytes = self
+                    .spectrum_ramp
+                    .as_bytes(0)
+                    .ok_or_else(|| "Cannot read spectrum gradient samples".to_owned())?;
+                // The old texture samples clamp(t * N - 0.5, 0, N - 1), whereas
+                // GpuPalette samples t * (M - 1). At M = 2N + 1, odd entries are
+                // the original texels and even interiors are their exact midpoints.
+                // Reverse top-to-bottom BGRA into bottom-to-top numerical RGBA.
+                let color = |index: usize| {
+                    let offset = (PALETTE_LUT_SIZE - 1 - index) * 4;
+                    [
+                        bytes[offset + 2],
+                        bytes[offset + 1],
+                        bytes[offset],
+                        bytes[offset + 3],
+                    ]
+                    .map(|channel| channel as f32 / 255.0)
+                };
+                let colors: [[f32; 4]; SPECTRUM_GPU_PALETTE_SIZE] = std::array::from_fn(|index| {
+                    let position =
+                        (index as f32 * 0.5 - 0.5).clamp(0.0, (PALETTE_LUT_SIZE - 1) as f32);
+                    let lower = position as usize;
+                    let a = color(lower);
+                    let b = color((lower + 1).min(PALETTE_LUT_SIZE - 1));
+                    std::array::from_fn(|channel| {
+                        a[channel] + (b[channel] - a[channel]) * position.fract()
+                    })
+                });
+                GpuPalette::new(&colors, SPECTRUM_GPU_PALETTE_SIZE)
+                    .map_err(|error| format!("Cannot create spectrum GPU palette: {error}"))
+            })
+            .clone()
     }
 
     pub(super) fn lookup_rgb(&self, fraction: f32) -> [u8; 3] {
@@ -182,6 +231,7 @@ struct SpectrumGeometryKey {
     low: f32,
     high: f32,
     style: SpectrumStyle,
+    palette: VisualizationPalette,
     bars: usize,
     bar_width: f32,
     bar_gravity: f32,
@@ -201,11 +251,33 @@ struct SpectrumGroupingKey {
     high: f32,
 }
 
+#[derive(Clone)]
+enum SpectrumBody {
+    Path(Path<Pixels>),
+    Rectangles(Arc<GpuFrame>),
+}
+
+impl SpectrumBody {
+    fn paint(
+        self,
+        plot: Bounds<Pixels>,
+        window: &mut Window,
+        palette: &PaletteLut,
+    ) -> Result<(), String> {
+        match self {
+            Self::Path(path) => paint_spectrum_path(path, plot, window, palette),
+            Self::Rectangles(frame) => window
+                .paint_gpu(plot, GpuSource::Fixed(frame))
+                .map_err(|error| format!("Cannot paint spectrum GPU rectangles: {error}")),
+        }
+    }
+}
+
 struct SpectrumGeometry {
     key: Option<SpectrumGeometryKey>,
     grouping_key: SpectrumGroupingKey,
     bins: Vec<Range<usize>>,
-    body: Option<Path<Pixels>>,
+    body: Option<SpectrumBody>,
 }
 
 struct VisualData {
@@ -233,6 +305,7 @@ struct VisualData {
     spectrum_visible: bool,
     envelope_initialized: bool,
     spectrum_points: Vec<Point<Pixels>>,
+    spectrum_rectangles: Vec<GpuRectangle>,
     spectrum_geometry: HashMap<u64, SpectrumGeometry>,
     spectrum_geometry_revision: u64,
     visualization_cache: bool,
@@ -312,6 +385,7 @@ impl Visuals {
                 spectrum_visible: true,
                 envelope_initialized: false,
                 spectrum_points: Vec::new(),
+                spectrum_rectangles: Vec::new(),
                 spectrum_geometry: HashMap::new(),
                 spectrum_geometry_revision: 0,
                 visualization_cache: true,
@@ -382,6 +456,7 @@ impl Visuals {
         data.smoothed_levels = Vec::new();
         data.spectrum_bins = Vec::new();
         data.spectrum_points = Vec::new();
+        data.spectrum_rectangles = Vec::new();
         data.spectrum_geometry = HashMap::new();
         data.last_analysis_sequence = None;
         data.envelope_initialized = false;
@@ -1000,6 +1075,7 @@ impl VisualData {
     fn clear_derived_caches(&mut self) {
         self.spectrum_bins.clear();
         self.spectrum_points.clear();
+        self.spectrum_rectangles.clear();
         self.spectrum_geometry.clear();
         self.heat_samples.clear();
         self.heat_sample_generation = 0;
@@ -1166,6 +1242,207 @@ impl VisualData {
         }
     }
 
+    fn prepare_spectrum_body(
+        &mut self,
+        panel_id: u64,
+        plot: Bounds<Pixels>,
+        bars: usize,
+        low: f32,
+        high: f32,
+    ) -> Result<Option<SpectrumBody>, String> {
+        self.prepare_spectrum_bins(panel_id, bars, low, high);
+        let geometry_key = SpectrumGeometryKey {
+            origin: plot.origin,
+            width: plot.size.width,
+            height: plot.size.height,
+            low,
+            high,
+            style: self.spectrum_style,
+            palette: self.palette_lut.palette,
+            bars,
+            bar_width: self.spectrum_bar_width,
+            bar_gravity: self.spectrum_bar_gravity,
+            interpolate: self.spectrum_interpolate,
+            peaks: self.spectrum_peaks,
+            top_db: self.top_db,
+            db_range: self.spectrum_db_range,
+            gap: self.spectrum_gap,
+            revision: self.spectrum_geometry_revision,
+        };
+        if self.visualization_cache
+            && let Some(geometry) = self.spectrum_geometry.get(&panel_id)
+            && geometry.key.as_ref() == Some(&geometry_key)
+        {
+            return Ok(geometry.body.clone());
+        }
+        self.spectrum_points.clear();
+        self.spectrum_rectangles.clear();
+        let style = self.spectrum_style;
+        let bottom = plot.bottom();
+        let top = plot.top();
+        let continuous = matches!(style, SpectrumStyle::Line | SpectrumStyle::Solid);
+        let rectangles = matches!(style, SpectrumStyle::Bars | SpectrumStyle::Led);
+        if continuous {
+            // Reserve once before the point loop; clear retains capacity for later frames.
+            self.spectrum_points.reserve(bars);
+        }
+        if rectangles {
+            self.spectrum_rectangles.reserve(bars);
+        }
+        // Fill contours share clockwise winding. NonZero keeps overlapping
+        // body regions filled instead of cutting even-odd holes.
+        let mut shape_path = if rectangles {
+            None
+        } else if style == SpectrumStyle::Line {
+            Some(PathBuilder::stroke(px(2.0)))
+        } else {
+            Some(PathBuilder::fill().with_style(gpui::PathStyle::Fill(
+                gpui::FillOptions::default().with_fill_rule(gpui::FillRule::NonZero),
+            )))
+        };
+        let mut any_visible = false;
+        for bar in 0..bars {
+            let left_t = bar as f32 / bars as f32;
+            let right_t = (bar + 1) as f32 / bars as f32;
+            let range = self.spectrum_bin(panel_id, bar);
+            let mut level = f32::NEG_INFINITY;
+            for index in range.clone() {
+                level = level.max(self.display_level(index));
+            }
+            let center_hz = axis_frequency(low, high, (left_t + right_t) * 0.5, true);
+            if self.spectrum_interpolate {
+                // Interpolation fills undersampled slots, but never averages
+                // away a transient already max-pooled into this slot.
+                level = level.max(self.interpolate_level(center_hz, low, high, false));
+            }
+            let slot_width = plot.size.width * (right_t - left_t);
+            let slot_gap = px(self.spectrum_gap)
+                .max(px(0.0))
+                .min((slot_width - px(1.0)).max(px(0.0)));
+            let level_fraction = db_height(level, self.top_db, self.spectrum_db_range);
+            let bar_height = (plot.size.height * level_fraction).clamp(px(0.0), plot.size.height);
+            any_visible |= bar_height > px(0.0);
+            let (x, width) = match style {
+                SpectrumStyle::Line | SpectrumStyle::Solid => {
+                    (plot.left() + plot.size.width * left_t, slot_width)
+                }
+                _ => (
+                    plot.left() + plot.size.width * left_t + slot_gap * 0.5,
+                    (slot_width - slot_gap).max(px(1.0)),
+                ),
+            };
+            if (style == SpectrumStyle::Line && level.is_finite())
+                || (style != SpectrumStyle::Line && (continuous || bar_height > px(0.0)))
+            {
+                match style {
+                    SpectrumStyle::Bars | SpectrumStyle::Led => {
+                        let height = if style == SpectrumStyle::Bars {
+                            bar_height.max(px(1.0)).min(plot.size.height)
+                        } else {
+                            bar_height
+                        };
+                        let normalized_height = height / plot.size.height;
+                        let normalized_x = ((x - plot.left()) / plot.size.width).clamp(0.0, 1.0);
+                        // Match the existing plot mask at the right edge and avoid
+                        // rejecting a last-slot rounding overshoot at publication.
+                        let normalized_width = (width / plot.size.width).min(1.0 - normalized_x);
+                        self.spectrum_rectangles.push(GpuRectangle {
+                            bounds: [
+                                normalized_x,
+                                1.0 - normalized_height,
+                                normalized_width,
+                                normalized_height,
+                            ],
+                            palette_range: [0.0, normalized_height],
+                        });
+                    }
+                    SpectrumStyle::Outline => {
+                        let shape_path = shape_path.as_mut().unwrap();
+                        let height = bar_height.max(px(1.0)).min(plot.size.height);
+                        let edge = px(1.0).min(width * 0.5).min(height * 0.5);
+                        append_rect(
+                            shape_path,
+                            Bounds::new(point(x, bottom - height), size(width, edge)),
+                        );
+                        if height > edge {
+                            append_rect(
+                                shape_path,
+                                Bounds::new(point(x, bottom - edge), size(width, edge)),
+                            );
+                        }
+                        if height > edge * 2.0 {
+                            append_rect(
+                                shape_path,
+                                Bounds::new(
+                                    point(x, bottom - height + edge),
+                                    size(edge, height - edge * 2.0),
+                                ),
+                            );
+                            append_rect(
+                                shape_path,
+                                Bounds::new(
+                                    point(x + width - edge, bottom - height + edge),
+                                    size(edge, height - edge * 2.0),
+                                ),
+                            );
+                        }
+                    }
+                    SpectrumStyle::Line | SpectrumStyle::Solid => {
+                        let y = (bottom - bar_height).clamp(top + px(1.0), bottom - px(1.0));
+                        self.spectrum_points.push(point(x + width * 0.5, y));
+                    }
+                }
+            }
+        }
+        if continuous && any_visible {
+            append_spectrum_shape(
+                shape_path.as_mut().unwrap(),
+                &self.spectrum_points,
+                plot,
+                style == SpectrumStyle::Solid,
+                style == SpectrumStyle::Line || self.spectrum_interpolate,
+            );
+        }
+        let body = if !any_visible {
+            None
+        } else if rectangles {
+            let params = if style == SpectrumStyle::Led {
+                GpuRectangleParams {
+                    cell_height: 3.0,
+                    cell_gap: 2.0,
+                }
+            } else {
+                GpuRectangleParams::default()
+            };
+            let frame = GpuFrame::rectangles(
+                &self.spectrum_rectangles,
+                self.palette_lut.spectrum_gpu_palette()?,
+                params,
+                GpuLimits {
+                    max_rectangles: bars,
+                    max_palette_colors: SPECTRUM_GPU_PALETTE_SIZE,
+                    ..GpuLimits::default()
+                },
+            )
+            .map_err(|error| format!("Cannot create spectrum GPU rectangles: {error}"))?;
+            Some(SpectrumBody::Rectangles(frame))
+        } else {
+            Some(SpectrumBody::Path(shape_path.unwrap().build().map_err(
+                |error| format!("Cannot tessellate spectrum: {error}"),
+            )?))
+        };
+        // Only immutable publications, never mutable scratch, enter panel caches.
+        self.spectrum_rectangles.clear();
+        if self.visualization_cache {
+            let geometry = self.spectrum_geometry.get_mut(&panel_id).unwrap();
+            geometry.key = Some(geometry_key);
+            geometry.body = body.clone();
+        } else {
+            self.spectrum_geometry.remove(&panel_id);
+        }
+        Ok(body)
+    }
+
     fn paint_spectrum(
         &mut self,
         panel_id: u64,
@@ -1198,7 +1475,6 @@ impl VisualData {
             self.spectrum_bar_width,
             self.spectrum_gap,
         );
-        self.prepare_spectrum_bins(panel_id, bars, low, high);
         let mut grid_path = PathBuilder::stroke(px(1.0));
         let mut has_grid = false;
         for step in 0..self.db_labels.len() {
@@ -1225,179 +1501,12 @@ impl VisualData {
                 .map_err(|error| format!("Cannot tessellate spectrum grid: {error}"))?;
             window.paint_path(path, rgb(0x14161b));
         }
-        let geometry_key = SpectrumGeometryKey {
-            origin: plot.origin,
-            width: plot.size.width,
-            height: plot.size.height,
-            low,
-            high,
-            style: self.spectrum_style,
-            bars,
-            bar_width: self.spectrum_bar_width,
-            bar_gravity: self.spectrum_bar_gravity,
-            interpolate: self.spectrum_interpolate,
-            peaks: self.spectrum_peaks,
-            top_db: self.top_db,
-            db_range: self.spectrum_db_range,
-            gap: self.spectrum_gap,
-            revision: self.spectrum_geometry_revision,
-        };
 
         window.with_content_mask(
             Some(gpui::ContentMask { bounds: plot }),
             |window| -> Result<(), String> {
-                if self.visualization_cache
-                    && let Some(geometry) = self.spectrum_geometry.get(&panel_id)
-                    && geometry.key.as_ref() == Some(&geometry_key)
-                {
-                    if let Some(path) = geometry.body.clone() {
-                        paint_spectrum_path(path, plot, window, self.palette_lut.as_ref())?;
-                    }
-                    return Ok(());
-                }
-                self.spectrum_points.clear();
-                let style = self.spectrum_style;
-                let bottom = plot.bottom();
-                let top = plot.top();
-                let continuous = matches!(style, SpectrumStyle::Line | SpectrumStyle::Solid);
-                if continuous {
-                    // Reserve once before the point loop; clear retains capacity for later frames.
-                    self.spectrum_points.reserve(bars);
-                }
-                // Fill contours share clockwise winding. NonZero keeps overlapping
-                // body regions filled instead of cutting even-odd holes.
-                let mut shape_path = if style == SpectrumStyle::Line {
-                    PathBuilder::stroke(px(2.0))
-                } else {
-                    PathBuilder::fill().with_style(gpui::PathStyle::Fill(
-                        gpui::FillOptions::default().with_fill_rule(gpui::FillRule::NonZero),
-                    ))
-                };
-                let mut any_visible = false;
-                for bar in 0..bars {
-                    let left_t = bar as f32 / bars as f32;
-                    let right_t = (bar + 1) as f32 / bars as f32;
-                    let range = self.spectrum_bin(panel_id, bar);
-                    let mut level = f32::NEG_INFINITY;
-                    for index in range.clone() {
-                        level = level.max(self.display_level(index));
-                    }
-                    let center_hz = axis_frequency(low, high, (left_t + right_t) * 0.5, true);
-                    if self.spectrum_interpolate {
-                        // Interpolation fills undersampled slots, but never averages
-                        // away a transient already max-pooled into this slot.
-                        level = level.max(self.interpolate_level(center_hz, low, high, false));
-                    }
-                    let slot_width = plot.size.width * (right_t - left_t);
-                    let slot_gap = px(self.spectrum_gap)
-                        .max(px(0.0))
-                        .min((slot_width - px(1.0)).max(px(0.0)));
-                    let level_fraction = db_height(level, self.top_db, self.spectrum_db_range);
-                    let bar_height =
-                        (plot.size.height * level_fraction).clamp(px(0.0), plot.size.height);
-                    any_visible |= bar_height > px(0.0);
-                    let (x, width) = match style {
-                        SpectrumStyle::Line | SpectrumStyle::Solid => {
-                            (plot.left() + plot.size.width * left_t, slot_width)
-                        }
-                        _ => (
-                            plot.left() + plot.size.width * left_t + slot_gap * 0.5,
-                            (slot_width - slot_gap).max(px(1.0)),
-                        ),
-                    };
-                    if (style == SpectrumStyle::Line && level.is_finite())
-                        || (style != SpectrumStyle::Line && (continuous || bar_height > px(0.0)))
-                    {
-                        match style {
-                            SpectrumStyle::Bars => {
-                                let height = bar_height.max(px(1.0)).min(plot.size.height);
-                                append_rect(
-                                    &mut shape_path,
-                                    Bounds::new(point(x, bottom - height), size(width, height)),
-                                );
-                            }
-                            SpectrumStyle::Outline => {
-                                let height = bar_height.max(px(1.0)).min(plot.size.height);
-                                let edge = px(1.0).min(width * 0.5).min(height * 0.5);
-                                append_rect(
-                                    &mut shape_path,
-                                    Bounds::new(point(x, bottom - height), size(width, edge)),
-                                );
-                                if height > edge {
-                                    append_rect(
-                                        &mut shape_path,
-                                        Bounds::new(point(x, bottom - edge), size(width, edge)),
-                                    );
-                                }
-                                if height > edge * 2.0 {
-                                    append_rect(
-                                        &mut shape_path,
-                                        Bounds::new(
-                                            point(x, bottom - height + edge),
-                                            size(edge, height - edge * 2.0),
-                                        ),
-                                    );
-                                    append_rect(
-                                        &mut shape_path,
-                                        Bounds::new(
-                                            point(x + width - edge, bottom - height + edge),
-                                            size(edge, height - edge * 2.0),
-                                        ),
-                                    );
-                                }
-                            }
-                            SpectrumStyle::Led => {
-                                let mut segment_bottom = bottom;
-                                let segment_height = px(3.0);
-                                let segment_gap = px(2.0);
-                                while segment_bottom > bottom - bar_height {
-                                    let segment_top =
-                                        (segment_bottom - segment_height).max(bottom - bar_height);
-                                    append_rect(
-                                        &mut shape_path,
-                                        Bounds::new(
-                                            point(x, segment_top),
-                                            size(width, segment_bottom - segment_top),
-                                        ),
-                                    );
-                                    segment_bottom = segment_top - segment_gap;
-                                }
-                            }
-                            SpectrumStyle::Line | SpectrumStyle::Solid => {
-                                let y =
-                                    (bottom - bar_height).clamp(top + px(1.0), bottom - px(1.0));
-                                self.spectrum_points.push(point(x + width * 0.5, y));
-                            }
-                        }
-                    }
-                }
-                if continuous && any_visible {
-                    append_spectrum_shape(
-                        &mut shape_path,
-                        &self.spectrum_points,
-                        plot,
-                        style == SpectrumStyle::Solid,
-                        style == SpectrumStyle::Line || self.spectrum_interpolate,
-                    );
-                }
-                let body = if any_visible {
-                    Some(
-                        shape_path
-                            .build()
-                            .map_err(|error| format!("Cannot tessellate spectrum: {error}"))?,
-                    )
-                } else {
-                    None
-                };
-                if self.visualization_cache {
-                    let geometry = self.spectrum_geometry.get_mut(&panel_id).unwrap();
-                    geometry.key = Some(geometry_key);
-                    geometry.body = body.clone();
-                } else {
-                    self.spectrum_geometry.remove(&panel_id);
-                }
-                if let Some(path) = body {
-                    paint_spectrum_path(path, plot, window, self.palette_lut.as_ref())?;
+                if let Some(body) = self.prepare_spectrum_body(panel_id, plot, bars, low, high)? {
+                    body.paint(plot, window, self.palette_lut.as_ref())?;
                 }
                 Ok(())
             },
@@ -2019,6 +2128,323 @@ fn paint_aligned_label(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn prepared_body(
+        visuals: &Visuals,
+        panel: u64,
+        width: f32,
+        height: f32,
+    ) -> Option<SpectrumBody> {
+        let mut data = visuals.data.borrow_mut();
+        let (_, _, low, high) = data.spectrum_render_range().unwrap();
+        let bars = spectrum_bar_count(
+            width,
+            data.spectrum_style == SpectrumStyle::Solid,
+            data.spectrum_bars,
+            data.spectrum_bar_width,
+            data.spectrum_gap,
+        );
+        data.prepare_spectrum_body(
+            panel,
+            Bounds::new(point(px(13.25), px(21.5)), size(px(width), px(height))),
+            bars,
+            low,
+            high,
+        )
+        .unwrap()
+    }
+
+    fn rectangle_frame(body: Option<SpectrumBody>) -> Arc<GpuFrame> {
+        match body {
+            Some(SpectrumBody::Rectangles(frame)) => frame,
+            _ => panic!("expected procedural spectrum rectangles"),
+        }
+    }
+
+    #[test]
+    fn gpu_spectrum_preserves_nonzero_heights_and_led_partial_cells() {
+        for style in [SpectrumStyle::Bars, SpectrumStyle::Led] {
+            for height in [0.0, 0.125, 1.0, 2.75, 3.0, 4.5, 5.0, 5.25, 8.0, 100.0] {
+                let mut visuals = configured_visuals();
+                visuals.configure(&Config {
+                    spectrum_style: style,
+                    spectrum_db_range: Some(100.0),
+                    spectrum_bars: 4,
+                    spectrum_gap: 2.0,
+                    ..Config::default()
+                });
+                visuals.update(&frame(1.0, height - 100.0));
+                let body = prepared_body(&visuals, 1, 100.0, 100.0);
+                if height == 0.0 {
+                    assert!(body.is_none());
+                    assert!(visuals.data.borrow().spectrum_geometry[&1].body.is_none());
+                    continue;
+                }
+                let frame = rectangle_frame(body);
+                let gpui::GpuContent::Rectangles { rectangles, params } = frame.content() else {
+                    unreachable!()
+                };
+                assert_eq!(
+                    rectangles.len(),
+                    4,
+                    "one instance per bar, not per LED cell"
+                );
+                assert_eq!(
+                    params.cell_height,
+                    if style == SpectrumStyle::Led {
+                        3.0
+                    } else {
+                        0.0
+                    }
+                );
+                assert_eq!(
+                    params.cell_gap,
+                    if style == SpectrumStyle::Led {
+                        2.0
+                    } else {
+                        0.0
+                    }
+                );
+                let expected_height = if style == SpectrumStyle::Bars {
+                    height.max(1.0)
+                } else {
+                    height
+                };
+                for (bar, rectangle) in rectangles.iter().enumerate() {
+                    let [x, y, width, actual_height] = rectangle.bounds;
+                    assert!((x * 100.0 - (bar as f32 * 25.0 + 1.0)).abs() < 1e-5);
+                    assert!((width * 100.0 - 23.0).abs() < 1e-5);
+                    assert!((actual_height * 100.0 - expected_height).abs() < 1e-5);
+                    assert!((y + actual_height - 1.0).abs() < 1e-6);
+                    assert_eq!(rectangle.palette_range, [0.0, actual_height]);
+                }
+                assert!(visuals.data.borrow().spectrum_rectangles.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn gpu_spectrum_dense_fractional_bounds_stay_inside_plot() {
+        for width in [3.125, 7.25, 1200.375, 4096.125] {
+            let mut visuals = configured_visuals();
+            visuals.configure(&Config {
+                spectrum_style: SpectrumStyle::Bars,
+                spectrum_bars: u32::MAX,
+                spectrum_gap: 10.0,
+                spectrum_interpolate: true,
+                ..Config::default()
+            });
+            visuals.update(&frame(1.0, 0.0));
+            let frame = rectangle_frame(prepared_body(&visuals, 1, width, 77.125));
+            let gpui::GpuContent::Rectangles { rectangles, .. } = frame.content() else {
+                unreachable!()
+            };
+            assert_eq!(
+                rectangles.len(),
+                (width.floor() as usize).min(MAX_SPECTRUM_BARS)
+            );
+            for rectangle in rectangles {
+                let [x, y, w, h] = rectangle.bounds;
+                assert!(x >= 0.0 && w > 0.0 && x + w <= 1.0);
+                assert_eq!([y, h], [0.0, 1.0]);
+            }
+        }
+    }
+
+    #[test]
+    fn gpu_spectrum_cache_tracks_revision_size_style_palette_and_range() {
+        let mut visuals = configured_visuals();
+        let mut config = Config {
+            spectrum_style: SpectrumStyle::Bars,
+            spectrum_bars: 4,
+            ..Config::default()
+        };
+        visuals.configure(&config);
+        visuals.update(&frame(1.0, -30.0));
+        let first = rectangle_frame(prepared_body(&visuals, 1, 100.0, 100.0));
+        visuals.update(&frame(1.0, -30.0));
+        assert!(Arc::ptr_eq(
+            &first,
+            &rectangle_frame(prepared_body(&visuals, 1, 100.0, 100.0))
+        ));
+        let other = rectangle_frame(prepared_body(&visuals, 2, 101.0, 100.0));
+        assert!(Arc::ptr_eq(first.palette(), other.palette()));
+        visuals.update(&frame(1.1, -10.0));
+        let revised = rectangle_frame(prepared_body(&visuals, 1, 100.0, 100.0));
+        assert_ne!(first.id(), revised.id());
+        let resized = rectangle_frame(prepared_body(&visuals, 1, 100.0, 101.0));
+        assert_ne!(revised.id(), resized.id());
+        config.spectrum_style = SpectrumStyle::Led;
+        visuals.configure(&config);
+        let led = rectangle_frame(prepared_body(&visuals, 1, 100.0, 101.0));
+        assert_ne!(resized.id(), led.id());
+        assert!(Arc::ptr_eq(first.palette(), led.palette()));
+        config.spectrum_db_range = Some(40.0);
+        visuals.configure(&config);
+        let ranged = rectangle_frame(prepared_body(&visuals, 1, 100.0, 101.0));
+        assert_ne!(led.id(), ranged.id());
+        let first_height = |frame: &GpuFrame| match frame.content() {
+            gpui::GpuContent::Rectangles { rectangles, .. } => rectangles[0].bounds[3],
+            _ => unreachable!(),
+        };
+        assert!((first_height(&ranged) - 0.75).abs() < 1e-6);
+        assert!(first_height(&ranged) < first_height(&led));
+        let (levels, held, smoothed, peaks, revision) = {
+            let data = visuals.data.borrow();
+            (
+                data.latest_levels.clone(),
+                data.bar_levels.clone(),
+                data.smoothed_levels.clone(),
+                data.peaks.clone(),
+                data.spectrum_geometry_revision,
+            )
+        };
+        config.visual_palette = match config.visual_palette {
+            VisualizationPalette::Deadbeef => VisualizationPalette::TokyoNight,
+            VisualizationPalette::TokyoNight => VisualizationPalette::Deadbeef,
+        };
+        visuals.configure(&config);
+        let recolored = rectangle_frame(prepared_body(&visuals, 1, 100.0, 101.0));
+        assert_ne!(ranged.id(), recolored.id());
+        assert_eq!(first_height(&ranged), first_height(&recolored));
+        {
+            let data = visuals.data.borrow();
+            assert_eq!(data.latest_levels, levels);
+            assert_eq!(data.bar_levels, held);
+            assert_eq!(data.smoothed_levels, smoothed);
+            assert_eq!(data.peaks, peaks);
+            assert_eq!(data.spectrum_geometry_revision, revision);
+        }
+        assert!(!Arc::ptr_eq(first.palette(), recolored.palette()));
+        for style in [
+            SpectrumStyle::Outline,
+            SpectrumStyle::Line,
+            SpectrumStyle::Solid,
+        ] {
+            config.spectrum_style = style;
+            visuals.configure(&config);
+            assert!(matches!(
+                prepared_body(&visuals, 1, 100.0, 101.0),
+                Some(SpectrumBody::Path(_))
+            ));
+        }
+        config.spectrum_style = SpectrumStyle::Bars;
+        visuals.configure(&config);
+        assert_ne!(
+            recolored.id(),
+            rectangle_frame(prepared_body(&visuals, 1, 100.0, 101.0)).id()
+        );
+    }
+
+    #[test]
+    fn gpu_spectrum_cache_off_pruning_and_disable_release_publications() {
+        let mut visuals = configured_visuals();
+        visuals.configure(&Config {
+            spectrum_style: SpectrumStyle::Bars,
+            ..Config::default()
+        });
+        visuals.update(&frame(1.0, -30.0));
+        let cached = Arc::downgrade(&rectangle_frame(prepared_body(&visuals, 1, 100.0, 100.0)));
+        visuals.retain_spectrum_panels(&[]);
+        visuals.set_spectrum_visible(false);
+        visuals.update(&frame(1.1, -60.0));
+        assert!(visuals.data.borrow().spectrum_render_range().is_none());
+        visuals.set_spectrum_visible(true);
+        assert!(visuals.data.borrow().spectrum_render_range().is_none());
+        visuals.update(&frame(1.2, -60.0));
+        let restored = rectangle_frame(prepared_body(&visuals, 1, 100.0, 100.0));
+        let gpui::GpuContent::Rectangles { rectangles, .. } = restored.content() else {
+            unreachable!()
+        };
+        assert!((rectangles[0].bounds[3] - 1.0 / 7.0).abs() < 1e-6);
+        assert!(cached.upgrade().is_none());
+        visuals.configure(&Config {
+            spectrum_style: SpectrumStyle::Bars,
+            visualization_cache: false,
+            ..Config::default()
+        });
+        let first = rectangle_frame(prepared_body(&visuals, 1, 100.0, 100.0));
+        let second = rectangle_frame(prepared_body(&visuals, 1, 100.0, 100.0));
+        assert_ne!(first.id(), second.id());
+        assert!(Arc::ptr_eq(first.palette(), second.palette()));
+        assert!(visuals.data.borrow().spectrum_geometry.is_empty());
+        let uncached = Arc::downgrade(&second);
+        drop(second);
+        assert!(uncached.upgrade().is_none());
+        visuals.configure(&Config {
+            spectrum_style: SpectrumStyle::Bars,
+            ..Config::default()
+        });
+        let cached = Arc::downgrade(&rectangle_frame(prepared_body(&visuals, 1, 100.0, 100.0)));
+        visuals.set_enabled(false);
+        assert!(cached.upgrade().is_none());
+        assert!(visuals.data.borrow().spectrum_geometry.is_empty());
+        assert_eq!(visuals.data.borrow().spectrum_rectangles.capacity(), 0);
+    }
+
+    #[test]
+    fn gpu_spectrum_palette_matches_old_texture_filter_including_half_texels() {
+        for palette in [
+            VisualizationPalette::Deadbeef,
+            VisualizationPalette::TokyoNight,
+        ] {
+            let lut = PaletteLut::new(palette);
+            assert!(lut.spectrum_gpu_palette.get().is_none());
+            let gpu = lut.spectrum_gpu_palette().unwrap();
+            assert!(Arc::ptr_eq(&gpu, &lut.spectrum_gpu_palette().unwrap()));
+            let bytes = lut.spectrum_ramp.as_bytes(0).unwrap();
+            let colors = gpu.colors();
+            // Cover texel centers, clamped end regions, and off-knot positions.
+            for step in 0..=8192 {
+                let fraction = step as f32 / 8192.0;
+                let old_position = ((1.0 - fraction) * PALETTE_LUT_SIZE as f32 - 0.5)
+                    .clamp(0.0, (PALETTE_LUT_SIZE - 1) as f32);
+                let row = old_position.floor() as usize;
+                let next = (row + 1).min(PALETTE_LUT_SIZE - 1);
+                let position = fraction * (colors.len() - 1) as f32;
+                let lower = position.floor() as usize;
+                let upper = (lower + 1).min(colors.len() - 1);
+                for (channel, bgra) in [2, 1, 0, 3].into_iter().enumerate() {
+                    let a = bytes[row * 4 + bgra] as f32 / 255.0;
+                    let b = bytes[next * 4 + bgra] as f32 / 255.0;
+                    let expected = a + (b - a) * old_position.fract();
+                    let actual = colors[lower][channel]
+                        + (colors[upper][channel] - colors[lower][channel]) * position.fract();
+                    assert!(
+                        (actual - expected).abs() < 2e-7,
+                        "palette mismatch at {fraction}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn gpu_spectrum_palette_failure_propagates_without_path_fallback() {
+        let mut visuals = configured_visuals();
+        visuals.configure(&Config {
+            spectrum_style: SpectrumStyle::Bars,
+            ..Config::default()
+        });
+        visuals.update(&frame(1.0, -30.0));
+        let lut = PaletteLut::new(VisualizationPalette::Deadbeef);
+        lut.spectrum_gpu_palette
+            .set(Err("palette allocation failed".into()))
+            .unwrap();
+        let mut data = visuals.data.borrow_mut();
+        data.palette_lut = Rc::new(lut);
+        let (_, _, low, high) = data.spectrum_render_range().unwrap();
+        let result = data.prepare_spectrum_body(
+            1,
+            Bounds::new(point(px(0.0), px(0.0)), size(px(100.0), px(100.0))),
+            4,
+            low,
+            high,
+        );
+        assert!(result.is_err());
+        assert!(data.spectrum_geometry[&1].key.is_none());
+        assert!(data.spectrum_geometry[&1].body.is_none());
+    }
 
     #[test]
     fn small_canvases_explain_missing_space_instead_of_painting_unreadable_plots() {

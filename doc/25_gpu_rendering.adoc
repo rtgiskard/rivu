@@ -8,6 +8,8 @@ Design baseline, 2026-10-18. The fixed-schema rectangle, numerical-field and
 existing-path slice described under <<_internal_led_vertical_slice>> is implemented.
 Density/Spatial now consume numerical fields; their authoritative behavior and
 ownership are described in link:23_visuals.adoc#_stereo_analysis_styles[Stereo analysis styles].
+Spectrum Bars/LED now consume rectangle publications; their palette sampling and
+ownership are described in link:23_visuals.adoc#_spectrum[Spectrum rendering].
 The general `Program`, generated-schema interfaces and remaining consumer migrations
 below remain proposals. The agreed safety and platform boundaries remain binding.
 
@@ -506,8 +508,9 @@ tessellated path. Rectangle segmentation and bottom-to-top palette coordinates
 retain their initial behavior. Palette samples are straight-alpha sRGB values;
 their interpolation is in sRGB numerical space. Bounds, clip, scale and inherited
 opacity belong to each scene placement, independently of shared content.
-Density/Spatial use this interface. The old rectangle-only publication/recording
-API is removed; the still-used textured-path interface remains independent.
+Density/Spatial and Spectrum Bars/LED use this interface. The old rectangle-only
+publication/recording API is removed; the still-used textured-path interface
+remains independent.
 
 Frame construction validates geometry, palette, parameters and explicit caller
 capacities before copying payloads. A process-unique, checked monotonic frame ID
@@ -529,15 +532,21 @@ non-finite coordinates, negative dimensions and overflowing extents are rejected
 
 The fixed WGSL layout has explicit little-endian scalar encoders and zeroed
 padding, checked structurally with the matching Naga version. This is not the
-general ABI generator. Shared shader/layout preparation is lazy. The ordinary
-rectangle/field pipeline and the MSAA path pipeline are created independently,
-only after a valid draw passes upload/placement admission; replay reuses them.
+general ABI generator. Shared shader/layout preparation is lazy. The field pipeline
+and the separate MSAA rectangle and path pipelines are created only after valid
+draws pass upload/placement admission; replay reuses them.
 An unused geometry pipeline is not compiled merely because another geometry is
 drawn. Immutable content uploads are reused by all
 placements of that frame and by static replay. Independently identified immutable
 palettes are shared across geometry kinds and publications. Per-placement uniforms
 are still prepared per draw; a new field publication copies/uploads the complete
 numeric payload. There are no reusable upload pages or partial-field updates.
+
+Rectangle edges and procedural segments use per-sample coverage in the existing
+Path intermediate. Adjacent zero-gap instances therefore do not blend two alpha
+edge ramps into a dark seam. This retains compact instance data but adds the
+intermediate rasterization and resolve cost; the renderer owns the shared MSAA
+storage and its existing lifetime, rather than allocating a surface per panel.
 
 GPU buffers are initialized through WGPU's write-only mapped view, never by
 reinterpreting the Rust model or overwriting an older revision. Completion
@@ -778,6 +787,30 @@ internal resource release. Cross-binary screenshots were not audio-frame
 synchronized, so they do not establish exact pixel equivalence. Broader whole-app
 performance and physical VRAM claims require separate evidence. Raw samples,
 binary/source identities and limitations are retained under `density_spatial_consumers`
+in link:25_gpu_rendering_benchmark.json[the benchmark record].
+
+==== Spectrum Bars/LED consumer measurements
+
+The final comparison uses four unequal Spectrum panels, LED with 512 slots,
+labels and Peaks enabled, caching enabled, 30 Hz analysis and an 8192-point
+Blackman-Harris FFT. Three fresh processes per binary alternate baseline/candidate
+after builds finish; each CPU window lasts five seconds following the same seek
+and playback-position gate. The isolated Weston GL/niri surface uses AMD 780M
+with Mesa 26.2.4. CPU is a percentage of one core.
+
+[cols="2,1,1",options="header"]
+|===
+|Observation |Textured Path baseline |Final MSAA instances
+|CPU median [range] |9.194% [8.995–9.393%] |7.395% [7.394–7.595%]
+|RSS range |118.43–121.21 MiB |119.00–121.06 MiB
+|===
+
+CPU was lower in this bounded workload; RSS/PSS ranges overlap. These observations
+do not isolate GPU time or demonstrate physical VRAM savings. The final candidate
+uses MSAA coverage: rejected direct/alpha-edge variants and their measurements
+are not mixed into these results. Real-app frames were not synchronized, so
+cross-binary screenshots do not establish pixel equality. Source/binary identities,
+the exact configuration and raw samples are retained under `spectrum_bars_led_consumers`
 in link:25_gpu_rendering_benchmark.json[the benchmark record].
 
 === Remaining consumers and integrated delivery

@@ -31,8 +31,9 @@ path backgrounds retain their existing behavior.
 The vendor patch also contains experimental fixed-schema rectangle, numerical-field
 and existing-path drawing through one shared publication and recording interface;
 see the link:25_gpu_rendering.adoc#_internal_led_vertical_slice[GPU rendering slice].
-Stereo Density and Spatial Spectrum use the numerical-field material; other
-visualizers retain their existing rendering paths.
+Stereo Density and Spatial Spectrum use the numerical-field material, and
+Spectrum Bars/LED use rectangle instances. Other visualizers retain their
+existing rendering paths.
 
 Run `cargo test --manifest-path vendor/gpui_wgpu/Cargo.toml --lib` to exercise
 the patched shader and headless GPU regressions in their isolated test workspace.
@@ -294,13 +295,16 @@ for less repeated rendering of an otherwise unchanged waveform.
 
 == Spectrum
 
-Spectrum uses batched body geometry with a shared spatial gradient texture.
-Continuous curves and filled areas, as well as bars, outlines, and LED segments,
-each submit their body as one path. GPUI fills that actual path from a custom
-one-column image, normalized to the common plot bounds with the strongest color
-at the top and the visible minimum at the bottom. Linear sampling is clamped to
-the image's texel centers. The texture contains the full authored cubic palette
-mapping, not a two-color approximation or duplicated, masked palette intervals.
+Spectrum Bars and LED submit compact GPU rectangle instances: one rectangle per
+visible display slot. LED uses a bottom-aligned 3-pixel segment and 2-pixel gap
+pattern in logical coordinates, including the partial segment at the body's top,
+rather than tessellating every segment on the CPU. Outline, Line, and Solid retain
+their batched Path bodies and one-column gradient texture.
+
+Both routes normalize the gradient to the common plot bounds, with the strongest
+color at the top and the visible minimum at the bottom. They retain the full
+authored cubic palette mapping, not a two-color approximation or duplicated,
+masked palette intervals.
 
 Waveform and Spectrum exclude DeaDBeeF's initial black-to-deep-blue interval:
 normalized color levels map to `0.06 + 0.94 * level` in the original palette.
@@ -324,14 +328,26 @@ changes alter geometry or the plot mapping, not the ramp. Palette replacement
 queues the old image through the visualization owner's existing frame-boundary
 retirement mechanism; closing the window explicitly drops the current ramp and
 all retired images from its atlas. The active LUT retains the CPU ramp for reuse.
+Bars and LED lazily create one shared 2049-entry floating-point GPU palette from
+that ramp. Original texels and interpolated midpoints reproduce the old
+texel-center-clamped, piecewise-linear sampling function; simply sampling 1024
+colors from endpoint to endpoint would shift its knots by half a texel. This
+adds 32,784 bytes of CPU color payload per active palette, plus renderer-owned
+backing when used. Rectangles use the renderer's existing MSAA intermediate;
+coverage is evaluated per sample, so adjacent zero-gap columns do not darken
+one another through overlapping alpha edge ramps. This includes an intermediate
+draw and resolve rather than assuming a direct single-sample draw is equivalent.
+GPU publications own their palette references; replaced publications remain
+valid for captured frames and renderer resources retire on demand without
+application image-atlas cleanup.
 Upload or paint failures follow the existing visualization error reporting path,
 without substituting a different fill.
 
-Batching does not make dense styles free: more bars or LED segments still
-increase geometry work. The common gradient needs only one body submission
-per plot, without copying its geometry for each palette interval. The choice
-favors batching where the visual model allows it, rather than forcing Waveform
-and Spectrum through one strategy.
+More display slots still increase aggregation, rectangle construction, and
+fragment work. Increasing LED segments does not increase CPU body geometry.
+The common gradient needs one body submission per plot without copying geometry
+for each palette interval. These bounded changes are not by themselves evidence
+of an application CPU or GPU timing improvement.
 
 == Audio Visualizer ownership
 

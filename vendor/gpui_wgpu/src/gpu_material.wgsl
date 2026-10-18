@@ -20,25 +20,40 @@ struct VertexOutput {
     @location(0) local: vec2<f32>,
     @location(1) @interpolate(flat) instance: u32,
 }
+struct RectangleVertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) @interpolate(perspective, sample) local: vec2<f32>,
+    @location(1) @interpolate(flat) instance: u32,
+}
 fn screen_position(pixel: vec2<f32>) -> vec4<f32> {
     return vec4<f32>(pixel / placement.viewport * vec2<f32>(2.0, -2.0) + vec2<f32>(-1.0, 1.0), 0.0, 1.0);
 }
-@vertex
-fn material_vertex(@builtin(vertex_index) vertex: u32, @builtin(instance_index) instance: u32) -> VertexOutput {
+fn quad_vertex(vertex: u32, instance: u32) -> VertexOutput {
     let corners = array<vec2<f32>, 6>(
         vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 0.0), vec2<f32>(0.0, 1.0),
         vec2<f32>(0.0, 1.0), vec2<f32>(1.0, 0.0), vec2<f32>(1.0, 1.0));
     let local = corners[vertex];
-    var unit = local;
+    var pixel = placement.bounds.xy + local * placement.bounds.zw;
     if placement.config.x == 0u {
         let offset = instance * 8u;
-        unit = vec2<f32>(data_float(offset), data_float(offset + 1u)) + local * vec2<f32>(data_float(offset + 2u), data_float(offset + 3u));
+        let origin = vec2<f32>(data_float(offset), data_float(offset + 1u)) * placement.bounds.zw;
+        let extent = vec2<f32>(data_float(offset + 2u), data_float(offset + 3u)) * placement.bounds.zw;
+        pixel = placement.bounds.xy + origin + local * extent;
     }
     var output: VertexOutput;
-    output.position = screen_position(placement.bounds.xy + unit * placement.bounds.zw);
+    output.position = screen_position(pixel);
     output.local = local;
     output.instance = instance;
     return output;
+}
+@vertex
+fn material_vertex(@builtin(vertex_index) vertex: u32, @builtin(instance_index) instance: u32) -> VertexOutput {
+    return quad_vertex(vertex, instance);
+}
+@vertex
+fn rectangle_vertex(@builtin(vertex_index) vertex: u32, @builtin(instance_index) instance: u32) -> RectangleVertexOutput {
+    let value = quad_vertex(vertex, instance);
+    return RectangleVertexOutput(value.position, value.local, value.instance);
 }
 @vertex
 fn path_vertex(@builtin(vertex_index) vertex: u32) -> VertexOutput {
@@ -99,27 +114,27 @@ fn field_color(uv: vec2<f32>) -> vec4<f32> {
 }
 @fragment
 fn material_fragment(input: VertexOutput) -> @location(0) vec4<f32> {
-    // Evaluate derivatives outside all clipping/segmentation branches.
-    let offset = input.instance * 8u;
-    var rectangle_height = 1.0;
-    if placement.config.x == 0u { rectangle_height = data_float(offset + 3u); }
-    let bottom_distance = (1.0 - input.local.y) * rectangle_height * placement.bounds.w;
-    let aa = max(fwidth(bottom_distance), 0.0001);
     if clipped(input.position.xy) { discard; }
-    if placement.config.x == 1u {
-        return finish_color(field_color(input.local), 1.0, placement.config.z != 0u);
-    }
-    var coverage = 1.0;
+    return finish_color(field_color(input.local), 1.0, placement.config.z != 0u);
+}
+@fragment
+fn rectangle_fragment(input: RectangleVertexOutput) -> @location(0) vec4<f32> {
+    if clipped(input.position.xy) { discard; }
+    let offset = input.instance * 8u;
+    let bottom = placement.bounds.y + (data_float(offset + 1u) + data_float(offset + 3u)) * placement.bounds.w;
+    let bottom_distance = bottom - input.position.y;
     let height = placement.params.x * placement.scale;
     let gap = placement.params.y * placement.scale;
     if height > 0.0 && gap > 0.0 {
         let period = height + gap;
         let phase = bottom_distance - floor(bottom_distance / period) * period;
-        let distance = select(-min(phase - height, period - phase), min(phase, height - phase), phase <= height);
-        coverage = clamp(distance / aa + 0.5, 0.0, 1.0);
+        // Match rasterized rectangles: top included, bottom excluded.
+        if phase <= 0.0 || phase > height { discard; }
     }
     let coordinate = mix(data_float(offset + 4u), data_float(offset + 5u), 1.0 - input.local.y);
-    return finish_color(continuous_palette(coordinate), coverage, placement.config.z != 0u);
+    // Coverage belongs to MSAA samples, not alpha ramps on adjacent instances.
+    // The shared intermediate is premultiplied; its compositor applies surface alpha.
+    return finish_color(continuous_palette(coordinate), 1.0, true);
 }
 @fragment
 fn path_fragment(input: VertexOutput) -> @location(0) vec4<f32> {
