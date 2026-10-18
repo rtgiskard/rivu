@@ -331,8 +331,13 @@ impl GuiApp {
         }
         if let Some(error) = &self.error {
             content = content.child(
-                copyable_message("layout-management-error", error.clone(), cx)
-                    .text_color(rgb(theme.error)),
+                copyable_message(
+                    "layout-management-error",
+                    self.tr("shell-copy-message"),
+                    error.clone(),
+                    cx,
+                )
+                .text_color(rgb(theme.error)),
             );
         }
         rivu_ui::Dialog::backdrop("layouts-modal")

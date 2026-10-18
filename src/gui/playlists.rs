@@ -118,8 +118,14 @@ impl Playlists {
         let state = context.snapshot();
         let playlist_search = cx.new(|cx| new_search(&i18n, cx));
         let playlist_entries_search = cx.new(|cx| new_search(&i18n, cx));
-        let name_input =
-            cx.new(|cx| Input::new("", i18n.text("shell-playlist-name").to_owned(), cx));
+        let name_input = cx.new(|cx| {
+            Input::new(
+                i18n.text("shell-playlist-name").to_owned(),
+                "",
+                i18n.text("shell-playlist-name").to_owned(),
+                cx,
+            )
+        });
         let subscriptions = vec![
             cx.subscribe(&playlist_search, |this, _, event, cx| {
                 let SearchEvent::Changed(query) = event;

@@ -970,21 +970,43 @@ impl Duplicates {
             if page.total == 0 {
                 groups = groups.child(caption(theme, self.tr("gl-groups-empty")));
             }
-            for (index, group) in page.rows.iter().enumerate() {
+            for group in &page.rows {
                 let hash = group.fingerprint.clone();
                 let selected = review.fingerprint.as_ref() == Some(&hash);
+                let group_label = self.context.i18n.format(
+                    "gl-duplicate-group-count",
+                    &[
+                        (
+                            "hash",
+                            (&group.fingerprint[..group.fingerprint.len().min(12)]).into(),
+                        ),
+                        ("count", group.total_members.into()),
+                    ],
+                );
                 groups = groups.child(active_control(
                     theme,
                     rivu_ui::disabled_control(
                         theme,
-                        button(("duplicate-group", index), "", cx, move |this, _, cx| {
-                            if this
-                                .duplicate_review
-                                .select_group(&hash, this.state.query_revisions(None))
-                            {
-                                this.start_duplicate_members(cx);
-                                cx.notify();
-                            }
+                        button(
+                            (gpui::SharedString::from(group.fingerprint.clone()), 0usize),
+                            "",
+                            cx,
+                            move |this, _, cx| {
+                                if this
+                                    .duplicate_review
+                                    .select_group(&hash, this.state.query_revisions(None))
+                                {
+                                    this.start_duplicate_members(cx);
+                                    cx.notify();
+                                }
+                            },
+                        )
+                        .role(gpui::Role::RadioButton)
+                        .aria_label(group_label.clone())
+                        .aria_toggled(if selected {
+                            gpui::Toggled::True
+                        } else {
+                            gpui::Toggled::False
                         })
                         .w_full()
                         .justify_start()
@@ -993,22 +1015,7 @@ impl Duplicates {
                                 .flex_1()
                                 .min_w_0()
                                 .gap_1()
-                                .child(
-                                    div().text_sm().truncate().child(
-                                        self.context.i18n.format(
-                                            "gl-duplicate-group-count",
-                                            &[
-                                                (
-                                                    "hash",
-                                                    (&group.fingerprint
-                                                        [..group.fingerprint.len().min(12)])
-                                                        .into(),
-                                                ),
-                                                ("count", (group.total_members).into()),
-                                            ],
-                                        ),
-                                    ),
-                                )
+                                .child(div().text_sm().truncate().child(group_label))
                                 .child(
                                     caption(
                                         theme,
@@ -1288,7 +1295,13 @@ impl Duplicates {
                                     cx.notify();
                                 }
                             },
-                        ),
+                        )
+                        .role(gpui::Role::RadioButton)
+                        .aria_toggled(if source_selected {
+                            gpui::Toggled::True
+                        } else {
+                            gpui::Toggled::False
+                        }),
                         busy || review.confirming,
                     ),
                     source_selected,
@@ -1308,7 +1321,13 @@ impl Duplicates {
                                     cx.notify();
                                 }
                             },
-                        ),
+                        )
+                        .role(gpui::Role::RadioButton)
+                        .aria_toggled(if target_selected {
+                            gpui::Toggled::True
+                        } else {
+                            gpui::Toggled::False
+                        }),
                         busy || review.confirming,
                     ),
                     target_selected,

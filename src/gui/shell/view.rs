@@ -276,6 +276,7 @@ impl Render for GuiApp {
             footer = footer.child(
                 copyable_message(
                     "copy-scan-message",
+                    self.tr("shell-copy-message"),
                     self.state.system.scan_message.clone(),
                     cx,
                 )
@@ -343,6 +344,7 @@ impl Render for GuiApp {
             });
             app = app.child(
                 Popover::surface(theme, "app-menu-popup")
+                    .role(gpui::Role::Menu)
                     .flex()
                     .flex_col()
                     .min_w_0()

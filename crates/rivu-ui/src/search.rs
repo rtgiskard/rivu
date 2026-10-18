@@ -15,6 +15,7 @@ pub enum SearchEvent {
 
 /// Labels are resolved by the host; the field does not load localization resources.
 pub struct SearchLabels {
+    pub name: SharedString,
     pub placeholder: SharedString,
     pub toggle: SharedString,
     pub clear: SharedString,
@@ -38,7 +39,9 @@ impl EventEmitter<SearchEvent> for SearchField {}
 
 impl SearchField {
     pub fn new(labels: SearchLabels, debounce: Duration, cx: &mut Context<Self>) -> Self {
-        let input = cx.new(|cx| Input::new("", labels.placeholder.clone(), cx).embedded());
+        let input = cx.new(|cx| {
+            Input::new(labels.name.clone(), "", labels.placeholder.clone(), cx).embedded()
+        });
         input.update(cx, |input, cx| input.set_trailing_text("—".into(), cx));
         let subscription = cx.subscribe(&input, |this, _, event, cx| {
             if matches!(event, InputEvent::Changed { user: true }) {
@@ -302,6 +305,7 @@ mod tests {
             cx.new(|cx| {
                 SearchField::new(
                     SearchLabels {
+                        name: "Search".into(),
                         placeholder: "Search".into(),
                         toggle: "Search".into(),
                         clear: "Clear".into(),
@@ -338,6 +342,7 @@ mod tests {
         let window = cx.add_window(move |_, cx| {
             SearchField::new(
                 SearchLabels {
+                    name: "Search".into(),
                     placeholder: "Search".into(),
                     toggle: "Search".into(),
                     clear: "Clear".into(),

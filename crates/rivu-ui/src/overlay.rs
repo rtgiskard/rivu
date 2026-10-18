@@ -9,11 +9,17 @@ use gpui::{
 
 pub fn copyable_message<T: 'static>(
     id: impl Into<ElementId>,
+    copy_label: impl Into<SharedString>,
     message: String,
     cx: &mut Context<T>,
 ) -> Stateful<Div> {
     row()
         .id(id)
+        .role(gpui::Role::Button)
+        .aria_label(copy_label)
+        .aria_description(message.clone())
+        .tab_index(0)
+        .focus(|style| style.bg(rgb(crate::theme::palette(cx).highlight)))
         .flex_1()
         .min_w_0()
         .overflow_hidden()

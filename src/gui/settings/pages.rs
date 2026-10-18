@@ -158,8 +158,13 @@ impl Settings {
                 ));
             if let Some(error) = &report.first_error {
                 content = content.child(
-                    copyable_message("copy-artwork-cache-file-error", error.clone(), cx)
-                        .text_color(rgb(colors.error)),
+                    copyable_message(
+                        "copy-artwork-cache-file-error",
+                        self.tr("shell-copy-message"),
+                        error.clone(),
+                        cx,
+                    )
+                    .text_color(rgb(colors.error)),
                 );
             }
             if report.failed_files > 0 {
@@ -169,8 +174,13 @@ impl Settings {
         }
         if let Some(error) = &self.artwork_cache_error {
             content = content.child(
-                copyable_message("copy-artwork-cache-error", error.clone(), cx)
-                    .text_color(rgb(colors.error)),
+                copyable_message(
+                    "copy-artwork-cache-error",
+                    self.tr("shell-copy-message"),
+                    error.clone(),
+                    cx,
+                )
+                .text_color(rgb(colors.error)),
             );
         }
         settings_card(colors, self.tr("settings-artwork-cache"), content)
@@ -290,7 +300,9 @@ impl Settings {
             .child(
                 dropdown_button(
                     "output-device-selector",
+                    self.tr("settings-output-device"),
                     chosen_device.clone(),
+                    self.dropdown.is_open() && self.dropdown_anchor == Measured::Device,
                     cx,
                     |this, _, _| {
                         let open = this.dropdown.is_open();
@@ -418,11 +430,13 @@ impl Settings {
         let draft = &self.model.draft;
         let language = dropdown_button(
             "settings-language",
+            self.tr("settings-language"),
             match draft.ui_language.as_str() {
                 "en-US" => SharedString::from("English"),
                 "zh-CN" => SharedString::from("简体中文"),
                 _ => self.tr("settings-language-auto"),
             },
+            self.dropdown.is_open() && self.dropdown_anchor == Measured::Language,
             cx,
             |this, _, _| {
                 let values = ["auto", "en-US", "zh-CN"];
@@ -449,7 +463,9 @@ impl Settings {
         .child(self.measurement(Measured::Language, cx));
         let theme = dropdown_button(
             "settings-theme",
+            self.tr("settings-theme"),
             draft.ui_theme.label(),
+            self.dropdown.is_open() && self.dropdown_anchor == Measured::Theme,
             cx,
             |this, _, _| {
                 let selected = Theme::ALL
@@ -567,7 +583,9 @@ impl Settings {
         let draft = &self.model.draft;
         let log_level_dropdown = dropdown_button(
             "settings-log-level",
+            self.tr("settings-log-level"),
             SettingChoice::LogLevel(draft.log_level).label(&self.i18n),
+            self.dropdown.is_open() && self.dropdown_anchor == Measured::SettingsLogLevel,
             cx,
             |this, _, _| {
                 let values = [
@@ -718,7 +736,9 @@ impl Settings {
         let draft = &settings.model.draft;
         let style = dropdown_button(
             "album-artwork-style",
+            self.tr("settings-style"),
             SettingChoice::AlbumArtworkStyle(draft.album_artwork_style).label(&self.i18n),
+            self.dropdown.is_open() && self.dropdown_anchor == Measured::AlbumArtworkStyle,
             cx,
             |this, _, _| {
                 let values = ALBUM_ARTWORK_STYLES;
@@ -742,7 +762,9 @@ impl Settings {
         .child(self.measurement(Measured::AlbumArtworkStyle, cx));
         let mode = dropdown_button(
             "album-artwork-mode",
+            self.tr("settings-mode"),
             SettingChoice::AlbumArtworkMode(draft.album_artwork_mode).label(&self.i18n),
+            self.dropdown.is_open() && self.dropdown_anchor == Measured::AlbumArtworkMode,
             cx,
             |this, _, _| {
                 let values = [AlbumArtworkMode::Static, AlbumArtworkMode::Rotating];
@@ -766,7 +788,9 @@ impl Settings {
         .child(self.measurement(Measured::AlbumArtworkMode, cx));
         let direction = dropdown_button(
             "album-artwork-direction",
+            self.tr("settings-direction"),
             SettingChoice::AlbumArtworkDirection(draft.album_artwork_direction).label(&self.i18n),
+            self.dropdown.is_open() && self.dropdown_anchor == Measured::AlbumArtworkDirection,
             cx,
             |this, _, _| {
                 let values = [
@@ -842,7 +866,9 @@ impl Settings {
             VisualPage::Common => {
                 let palette_control = dropdown_button(
                     "visual-palette",
+                    self.tr("settings-color-scheme"),
                     visualization_palette_label(&self.i18n, draft.visual_palette),
+                    self.dropdown.is_open() && self.dropdown_anchor == Measured::SettingsStyle,
                     cx,
                     |this, _, _| {
                         let values = [
@@ -871,7 +897,9 @@ impl Settings {
                 .child(self.measurement(Measured::SettingsStyle, cx));
                 let fft = dropdown_button(
                     "analysis-fft",
+                    self.tr("settings-fft-size-samples"),
                     draft.analysis_fft_size.to_string(),
+                    self.dropdown.is_open() && self.dropdown_anchor == Measured::SettingsFft,
                     cx,
                     |this, _, _| {
                         let values = [512, 1024, 2048, 4096, 8192, 16384, 32768];
@@ -894,7 +922,9 @@ impl Settings {
                 .child(self.measurement(Measured::SettingsFft, cx));
                 let window = dropdown_button(
                     "analysis-window",
+                    self.tr("settings-fft-window"),
                     SettingChoice::Window(draft.analysis_window).label(&self.i18n),
+                    self.dropdown.is_open() && self.dropdown_anchor == Measured::SettingsWindow,
                     cx,
                     |this, _, _| {
                         let values = [
@@ -995,7 +1025,9 @@ impl Settings {
             VisualPage::Spectrum => {
                 let style = dropdown_button(
                     "spectrum-style",
+                    self.tr("settings-style"),
                     spectrum_style_label(&self.i18n, draft.spectrum_style),
+                    self.dropdown.is_open() && self.dropdown_anchor == Measured::SettingsStyle,
                     cx,
                     |this, _, _| {
                         let values = [
@@ -1150,7 +1182,9 @@ impl Settings {
             VisualPage::AudioVisualizer => {
                 let style = dropdown_button(
                     "audio-visualizer-style",
+                    self.tr("settings-style"),
                     audio_visualizer_style_label(&self.i18n, draft.audio_visualizer_style),
+                    self.dropdown.is_open() && self.dropdown_anchor == Measured::SettingsStyle,
                     cx,
                     |this, _, _| {
                         let values = [

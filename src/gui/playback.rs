@@ -187,7 +187,12 @@ impl Playback {
                     ),
                 )
                 .rounded_full()
-                .text_lg(),
+                .text_lg()
+                .aria_toggled(if self.state.playback.shuffle {
+                    gpui::Toggled::True
+                } else {
+                    gpui::Toggled::False
+                }),
                 self.state.playback.shuffle,
             ))
             .child(
@@ -271,7 +276,12 @@ impl Playback {
                     ),
                 )
                 .rounded_full()
-                .text_lg(),
+                .text_lg()
+                .aria_value(match self.state.playback.repeat {
+                    RepeatMode::Off => self.context.tr("gl-repeat-off"),
+                    RepeatMode::All => self.context.tr("gl-repeat-all"),
+                    RepeatMode::One => self.context.tr("gl-repeat-one"),
+                }),
                 self.state.playback.repeat != RepeatMode::Off,
             ));
         let volume_control = row()

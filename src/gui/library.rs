@@ -1112,7 +1112,12 @@ impl Library {
                     |this, _, cx| {
                         this.refresh_favorite_filter(cx);
                     },
-                ),
+                )
+                .aria_toggled(if self.library.favorites_only() {
+                    gpui::Toggled::True
+                } else {
+                    gpui::Toggled::False
+                }),
                 self.library.favorites_only(),
             ))
             .child(active_control(
@@ -1126,7 +1131,12 @@ impl Library {
                         this.library.toggle_missing();
                         this.refresh_filter(cx);
                     },
-                ),
+                )
+                .aria_toggled(if self.library.missing_only() {
+                    gpui::Toggled::True
+                } else {
+                    gpui::Toggled::False
+                }),
                 self.library.missing_only(),
             ))
             .child(active_control(
@@ -1144,7 +1154,12 @@ impl Library {
                         this.library.toggle_force_scan();
                         cx.notify();
                     },
-                ),
+                )
+                .aria_toggled(if self.library.force_scan() {
+                    gpui::Toggled::True
+                } else {
+                    gpui::Toggled::False
+                }),
                 self.library.force_scan(),
             ))
             .child(icon_button(

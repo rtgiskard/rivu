@@ -196,28 +196,55 @@ mod tests {
 
 use crate::{caption, list_row};
 use gpui::{Div, ElementId, SharedString, Stateful, prelude::*};
+
+/// Host-localized labels for a page placeholder and its recovery actions.
+pub struct LoadingRowLabels {
+    pub message: SharedString,
+    pub retry: SharedString,
+    pub copy_error: SharedString,
+}
+
 /// Page placeholder presentation; request identity and retry gating remain with the owner.
 pub fn paged_loading_row<T: 'static>(
     id: impl Into<ElementId>,
     error: Option<&str>,
     show: bool,
-    label: SharedString,
+    labels: LoadingRowLabels,
     cx: &mut gpui::Context<T>,
     retry: impl Fn(&mut T, &mut gpui::Window, &mut gpui::Context<T>) + 'static,
 ) -> Stateful<Div> {
     let theme = crate::theme::palette(cx);
     list_row(theme, id, false)
-        .child(caption(theme, label).when(!show, |text| text.invisible()))
+        .child(
+            caption(theme, labels.message)
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .when(!show, |text| text.invisible()),
+        )
         .when_some(
             error.map(|error| SharedString::from(error.to_owned())),
             |row, error| {
-                row.tooltip(move |_, cx| {
-                    cx.new(|_| crate::ButtonTooltip {
-                        text: error.clone(),
-                    })
-                    .into()
-                })
-                .on_click(cx.listener(move |this, _, window, cx| retry(this, window, cx)))
+                row.role(gpui::Role::Group)
+                    .aria_label(error.clone())
+                    .child(crate::compact_icon_button(
+                        theme,
+                        crate::icon_button(
+                            "copy-error",
+                            "⧉",
+                            labels.copy_error,
+                            cx,
+                            move |_, _, cx| {
+                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                    error.to_string(),
+                                ));
+                            },
+                        ),
+                    ))
+                    .child(crate::compact_icon_button(
+                        theme,
+                        crate::icon_button("retry", "󰑐", labels.retry, cx, retry),
+                    ))
             },
         )
 }
@@ -240,10 +267,14 @@ mod row_tests {
                     ("loading-row", 0usize),
                     self.error,
                     self.show,
-                    if self.error.is_some() {
-                        "Loading failed".into()
-                    } else {
-                        "Loading".into()
+                    LoadingRowLabels {
+                        message: if self.error.is_some() {
+                            "Loading failed".into()
+                        } else {
+                            "Loading".into()
+                        },
+                        retry: "Retry loading".into(),
+                        copy_error: "Copy full error".into(),
                     },
                     cx,
                     |this, _, cx| {
@@ -283,7 +314,7 @@ mod row_tests {
             cx.run_until_parked();
             cx.update_window(handle, |_, window, cx| {
                 window.draw(cx).clear(cx);
-                let position = gpui::point(gpui::px(12.), gpui::px(12.));
+                let position = gpui::point(gpui::px(220.), gpui::px(12.));
                 window.dispatch_event(
                     gpui::MouseDownEvent {
                         button: gpui::MouseButton::Left,
@@ -306,5 +337,51 @@ mod row_tests {
             .unwrap();
             assert_eq!(row.read_with(cx, |row, _| row.retries), retries);
         }
+    }
+
+    #[gpui::test]
+    fn keyboard_recovery_copies_full_error_without_retrying(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init_test);
+        let error = "Page failed: a long diagnostic with Unicode 路径 and a second line\nDetails";
+        let window = cx.add_window(|_, _| LoadingRow {
+            error: Some(error),
+            show: true,
+            retries: 0,
+        });
+        let row = window.root(cx).unwrap();
+        let handle = window.into();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.draw(cx).clear(cx);
+            window.focus_next(cx);
+        })
+        .unwrap();
+        for expected_retries in [0, 1] {
+            cx.update_window(handle, |_, window, cx| {
+                window.draw(cx).clear(cx);
+                let keystroke = gpui::Keystroke::parse("enter").unwrap();
+                window.dispatch_event(
+                    gpui::KeyDownEvent {
+                        keystroke: keystroke.clone(),
+                        is_held: false,
+                        prefer_character_input: false,
+                    }
+                    .to_platform_input(),
+                    cx,
+                );
+                window.dispatch_event(gpui::KeyUpEvent { keystroke }.to_platform_input(), cx);
+            })
+            .unwrap();
+            cx.run_until_parked();
+            assert_eq!(row.read_with(cx, |row, _| row.retries), expected_retries);
+            cx.update_window(handle, |_, window, cx| window.focus_next(cx))
+                .unwrap();
+        }
+        assert_eq!(
+            cx.read_from_clipboard()
+                .and_then(|item| item.text())
+                .as_deref(),
+            Some(error)
+        );
     }
 }

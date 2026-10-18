@@ -103,7 +103,8 @@ impl Metadata {
             (Field::Artist, "shell-artist"),
             (Field::Album, "shell-album"),
         ] {
-            let input = cx.new(|cx| Input::new("", context.tr(placeholder), cx));
+            let input =
+                cx.new(|cx| Input::new(context.tr(placeholder), "", context.tr(placeholder), cx));
             subscriptions.push(cx.subscribe(&input, |this, _, event, cx| {
                 if matches!(event, InputEvent::Changed { user: true }) {
                     this.draft_changed(cx);
@@ -1139,6 +1140,17 @@ impl Metadata {
                                                                     cx,
                                                                 );
                                                             }
+                                                        },
+                                                    )
+                                                    .role(gpui::Role::RadioButton)
+                                                    .aria_toggled(
+                                                        if editable
+                                                            && self.metadata_decoder_hint
+                                                                == decoder_hint
+                                                        {
+                                                            gpui::Toggled::True
+                                                        } else {
+                                                            gpui::Toggled::False
                                                         },
                                                     ),
                                                     editable

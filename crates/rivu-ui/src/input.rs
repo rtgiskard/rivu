@@ -8,8 +8,12 @@
 //! Mouse selection remains owned by its originating input outside the textbox
 //! until release, window exit, focus loss, or disabling the input.
 
-use std::ops::Range;
+use std::{cell::RefCell, ops::Range, rc::Rc};
 
+use gpui::AccessibleAction;
+use gpui::accesskit::{
+    ActionData, Node, NodeId, Rect, Role, TextDirection, TextPosition, TextSelection,
+};
 use gpui::prelude::*;
 use gpui::{
     App, ClipboardItem, Context, CursorStyle, DispatchPhase, Element, ElementId,
@@ -70,9 +74,17 @@ pub enum InputEvent {
 /// Text offsets used internally are UTF-8 byte offsets, while GPUI's IME
 /// protocol is UTF-16 based. Conversion is kept at the handler boundary so
 /// editing and grapheme navigation remain safe for all Unicode text.
+/// Accessibility exposes the explicit name independently of the placeholder,
+/// the current value, and one synthetic text run. Its character positions use
+/// Unicode scalar indices (matching the smallest selectable IME text unit),
+/// converted to UTF-8 only at the action boundary. Selection preserves marked
+/// text; replacement follows normal user editing and emits `Changed { user: true }`.
+/// Disabled inputs expose their state but reject editing and focus actions.
 pub struct Input {
     focus_handle: FocusHandle,
     enabled: bool,
+    name: SharedString,
+    accessibility: Rc<RefCell<InputAccessibility>>,
     content: SharedString,
     placeholder: SharedString,
     trailing_space: Pixels,
@@ -90,8 +102,9 @@ pub struct Input {
 impl EventEmitter<InputEvent> for Input {}
 
 impl Input {
-    /// Creates an input with an initial value and placeholder.
+    /// Creates an input with an explicit accessible name, initial value and placeholder.
     pub fn new(
+        name: impl Into<SharedString>,
         value: impl Into<SharedString>,
         placeholder: impl Into<SharedString>,
         cx: &mut Context<Self>,
@@ -101,6 +114,8 @@ impl Input {
         Self {
             focus_handle: cx.focus_handle().tab_stop(true),
             enabled: true,
+            name: name.into(),
+            accessibility: Rc::default(),
             content,
             placeholder: placeholder.into(),
             trailing_space: px(7.),
@@ -502,6 +517,54 @@ impl Input {
         cx.emit(InputEvent::Changed { user: true });
         cx.notify();
     }
+
+    fn accessible_edit(
+        &mut self,
+        data: Option<&ActionData>,
+        replace_all: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.enabled {
+            return;
+        }
+        let Some(ActionData::Value(value)) = data else {
+            return;
+        };
+        let range = replace_all.then(|| 0..self.offset_to_utf16(self.content.len()));
+        // Use the same user-edit path as typing/paste, including marked-text replacement.
+        if value.contains(['\r', '\n']) {
+            self.replace_selection(range, &value.replace(['\r', '\n'], " "), window, cx);
+        } else {
+            self.replace_selection(range, value, window, cx);
+        }
+    }
+
+    fn accessible_selection(&mut self, data: Option<&ActionData>, cx: &mut Context<Self>) {
+        if !self.enabled {
+            return;
+        }
+        let Some(ActionData::SetTextSelection(selection)) = data else {
+            return;
+        };
+        let run_id = self.accessibility.borrow().run_id;
+        if Some(selection.anchor.node) != run_id || Some(selection.focus.node) != run_id {
+            return;
+        }
+        let Some(anchor) =
+            utf8_offset_from_character(&self.content, selection.anchor.character_index)
+        else {
+            return;
+        };
+        let Some(focus) =
+            utf8_offset_from_character(&self.content, selection.focus.character_index)
+        else {
+            return;
+        };
+        // Selection changes must not commit or cancel an in-progress IME composition.
+        self.move_to(anchor, cx);
+        self.select_to(focus, cx);
+    }
 }
 
 const CARET_WIDTH: f32 = 1.5;
@@ -513,6 +576,25 @@ fn scroll_to_caret(previous: Pixels, caret: Pixels, width: Pixels, line_width: P
         .max(caret - visible_width)
         .min(caret)
         .clamp(px(0.), max_scroll)
+}
+
+#[derive(Default)]
+struct InputAccessibility {
+    run_id: Option<NodeId>,
+    run: Option<Node>,
+}
+
+fn utf8_offset_from_character(text: &str, index: usize) -> Option<usize> {
+    text.char_indices()
+        .map(|(offset, _)| offset)
+        .chain(std::iter::once(text.len()))
+        .nth(index)
+}
+
+fn character_index_from_utf8(text: &str, offset: usize) -> usize {
+    text.char_indices()
+        .take_while(|(index, _)| *index < offset)
+        .count()
 }
 
 fn utf8_offset_from_utf16(text: &str, offset: usize) -> usize {
@@ -783,6 +865,46 @@ impl Element for InputElement {
                 line.width()
             },
         );
+        if window.is_a11y_active() {
+            let scale = window.scale_factor();
+            let mut run = Node::new(Role::TextRun);
+            run.set_value(input.content.to_string());
+            run.set_text_direction(TextDirection::LeftToRight);
+            run.set_character_lengths(
+                input
+                    .content
+                    .chars()
+                    .map(|ch| ch.len_utf8() as u8)
+                    .collect::<Vec<_>>(),
+            );
+            let mut positions = Vec::with_capacity(input.content.chars().count());
+            let mut widths = Vec::with_capacity(positions.capacity());
+            for (offset, ch) in input.content.char_indices() {
+                let start = line.x_for_index(offset);
+                let end = line.x_for_index(offset + ch.len_utf8());
+                positions.push(f32::from(start.min(end)) * scale);
+                widths.push(f32::from((end - start).abs()) * scale);
+            }
+            run.set_character_positions(positions);
+            run.set_character_widths(widths);
+            let origin = bounds.left() - scroll_offset;
+            run.set_bounds(Rect {
+                x0: f64::from(f32::from(origin) * scale),
+                y0: f64::from(f32::from(bounds.top()) * scale),
+                x1: f64::from(
+                    f32::from(
+                        origin
+                            + if input.content.is_empty() {
+                                px(0.)
+                            } else {
+                                line.width()
+                            },
+                    ) * scale,
+                ),
+                y1: f64::from(f32::from(bounds.bottom()) * scale),
+            });
+            input.accessibility.borrow_mut().run = Some(run);
+        }
         let origin = bounds.left() - scroll_offset;
         let (selection, cursor) = if selected_range.is_empty() {
             (
@@ -898,7 +1020,79 @@ impl Render for Input {
         let theme = crate::theme::palette(cx);
         let focused = self.enabled && self.focus_handle.is_focused(window);
         let scale = window.rem_size() / px(16.);
+        let accessibility = self.accessibility.clone();
+        let placeholder = self.placeholder.clone();
+        let content = self.content.clone();
+        let enabled = self.enabled;
+        let anchor = if self.selection_reversed {
+            self.selected_range.end
+        } else {
+            self.selected_range.start
+        };
+        let focus = self.cursor_offset();
         div()
+            .id("input")
+            .role(Role::TextInput)
+            .aria_label(self.name.clone())
+            .aria_value(self.content.clone())
+            .a11y_synthetic_children(move |builder| {
+                let mut accessibility = accessibility.borrow_mut();
+                let run_id = builder.synthetic_node_id("text");
+                accessibility.run_id = Some(run_id);
+                if let Some(run) = accessibility.run.take() {
+                    builder.push_child(run_id, run);
+                    builder.parent_node().set_text_selection(TextSelection {
+                        anchor: TextPosition {
+                            node: run_id,
+                            character_index: character_index_from_utf8(&content, anchor),
+                        },
+                        focus: TextPosition {
+                            node: run_id,
+                            character_index: character_index_from_utf8(&content, focus),
+                        },
+                    });
+                }
+                let node = builder.parent_node();
+                node.set_placeholder(placeholder.to_string());
+                if !enabled {
+                    node.set_disabled();
+                    node.remove_action(AccessibleAction::Focus);
+                }
+            })
+            .on_a11y_action(AccessibleAction::Focus, {
+                let input = cx.entity().downgrade();
+                move |_, window, cx| {
+                    let _ = input.update(cx, |input, cx| {
+                        if input.enabled {
+                            input.focus_handle.focus(window, cx);
+                        }
+                    });
+                }
+            })
+            .when(self.enabled, |view| {
+                view.on_a11y_action(AccessibleAction::SetValue, {
+                    let input = cx.entity().downgrade();
+                    move |data, window, cx| {
+                        let _ = input.update(cx, |input, cx| {
+                            input.accessible_edit(data, true, window, cx)
+                        });
+                    }
+                })
+                .on_a11y_action(AccessibleAction::ReplaceSelectedText, {
+                    let input = cx.entity().downgrade();
+                    move |data, window, cx| {
+                        let _ = input.update(cx, |input, cx| {
+                            input.accessible_edit(data, false, window, cx)
+                        });
+                    }
+                })
+                .on_a11y_action(AccessibleAction::SetTextSelection, {
+                    let input = cx.entity().downgrade();
+                    move |data, _, cx| {
+                        let _ = input.update(cx, |input, cx| input.accessible_selection(data, cx));
+                    }
+                })
+            })
             .flex()
             .key_context("Input")
             .track_focus(&self.focus_handle(cx))
@@ -1034,8 +1228,8 @@ mod tests {
     fn selection_fixture(
         cx: &mut gpui::TestAppContext,
     ) -> (Entity<Input>, Entity<Input>, gpui::AnyWindowHandle) {
-        let input = cx.update(|cx| cx.new(|cx| Input::new("a中😀z", "", cx)));
-        let other = cx.update(|cx| cx.new(|cx| Input::new("untouched", "", cx)));
+        let input = cx.update(|cx| cx.new(|cx| Input::new("First field", "a中😀z", "", cx)));
+        let other = cx.update(|cx| cx.new(|cx| Input::new("Other field", "untouched", "", cx)));
         let window = cx.add_window({
             let input = input.clone();
             let other = other.clone();
@@ -1259,7 +1453,7 @@ mod tests {
         let mut cx = gpui::TestAppContext::single();
         cx.update(crate::theme::init_test);
         cx.update(Input::init);
-        let input = cx.update(|cx| cx.new(|cx| Input::new("a中😀z", "", cx)));
+        let input = cx.update(|cx| cx.new(|cx| Input::new("Dialog field", "a中😀z", "", cx)));
         let window = cx.add_window({
             let input = input.clone();
             move |_, _| InputDialog {
@@ -1324,7 +1518,7 @@ mod tests {
     fn escape_cancels_ime_preedit_without_dismissing_parent_dialog() {
         let mut cx = gpui::TestAppContext::single();
         cx.update(crate::theme::init_test);
-        let input = cx.update(|cx| cx.new(|cx| Input::new("kept", "", cx)));
+        let input = cx.update(|cx| cx.new(|cx| Input::new("Dialog field", "kept", "", cx)));
         let escapes = std::rc::Rc::new(std::cell::Cell::new(0));
         let window = cx.add_window({
             let input = input.clone();
@@ -1411,5 +1605,127 @@ mod tests {
             selected_range_after_replacement("😀a", Some(&(2..3)), 5),
             9..10
         );
+    }
+
+    #[test]
+    fn accessible_character_positions_round_trip_utf8_and_reject_invalid_indices() {
+        let text = "a中😀e\u{301}";
+        for (index, byte) in [0, 1, 4, 8, 9, 11].into_iter().enumerate() {
+            assert_eq!(utf8_offset_from_character(text, index), Some(byte));
+            assert_eq!(character_index_from_utf8(text, byte), index);
+        }
+        assert_eq!(utf8_offset_from_character(text, 6), None);
+        assert_eq!(utf8_offset_from_character("", 0), Some(0));
+        assert_eq!(utf8_offset_from_character("", 1), None);
+    }
+
+    #[test]
+    fn accessible_selection_and_replacement_use_the_user_edit_path() {
+        let mut cx = gpui::TestAppContext::single();
+        cx.update(crate::theme::init_test);
+        let (input, _, window) = selection_fixture(&mut cx);
+        let edits = Rc::new(RefCell::new(Vec::new()));
+        let _subscription = cx.update(|cx| {
+            cx.subscribe(&input, {
+                let edits = edits.clone();
+                move |_, event, _| edits.borrow_mut().push(event.clone())
+            })
+        });
+        cx.update_window(window, |_, window, cx| {
+            input.update(cx, |input, cx| {
+                let run = NodeId(42);
+                input.accessibility.borrow_mut().run_id = Some(run);
+                let selection = ActionData::SetTextSelection(TextSelection {
+                    anchor: TextPosition {
+                        node: run,
+                        character_index: 3,
+                    },
+                    focus: TextPosition {
+                        node: run,
+                        character_index: 1,
+                    },
+                });
+                input.accessible_selection(Some(&selection), cx);
+                assert_eq!(input.selected_range, 1..8);
+                assert!(input.selection_reversed);
+                let foreign = ActionData::SetTextSelection(TextSelection {
+                    anchor: TextPosition {
+                        node: NodeId(43),
+                        character_index: 0,
+                    },
+                    focus: TextPosition {
+                        node: run,
+                        character_index: 0,
+                    },
+                });
+                input.accessible_selection(Some(&foreign), cx);
+                assert_eq!(input.selected_range, 1..8);
+                let invalid = ActionData::SetTextSelection(TextSelection {
+                    anchor: TextPosition {
+                        node: run,
+                        character_index: 0,
+                    },
+                    focus: TextPosition {
+                        node: run,
+                        character_index: 99,
+                    },
+                });
+                input.accessible_selection(Some(&invalid), cx);
+                assert_eq!(input.selected_range, 1..8);
+                input.accessible_edit(Some(&ActionData::Value("Ω".into())), false, window, cx);
+                assert_eq!(input.text(), "aΩz");
+                assert_eq!(input.selected_range, 3..3);
+            });
+        })
+        .unwrap();
+        assert_eq!(
+            *edits.borrow(),
+            vec![super::InputEvent::Changed { user: true }]
+        );
+    }
+
+    #[test]
+    fn accessible_actions_preserve_composition_and_reject_disabled_edits() {
+        let mut cx = gpui::TestAppContext::single();
+        cx.update(crate::theme::init_test);
+        let (input, _, window) = selection_fixture(&mut cx);
+        cx.update_window(window, |_, window, cx| {
+            input.update(cx, |input, cx| {
+                let run = NodeId(42);
+                input.accessibility.borrow_mut().run_id = Some(run);
+                input.replace_and_mark_text_in_range(None, "候", Some(1..1), window, cx);
+                let marked = input.marked_range.clone();
+                let selection = ActionData::SetTextSelection(TextSelection {
+                    anchor: TextPosition {
+                        node: run,
+                        character_index: 0,
+                    },
+                    focus: TextPosition {
+                        node: run,
+                        character_index: 1,
+                    },
+                });
+                input.accessible_selection(Some(&selection), cx);
+                assert_eq!(input.marked_range, marked);
+                input.accessible_edit(Some(&ActionData::Value("補".into())), false, window, cx);
+                assert_eq!(input.text(), "a中😀z補");
+                assert!(!input.is_composing());
+                input.accessible_edit(Some(&ActionData::Value("😀\n中".into())), true, window, cx);
+                assert_eq!(input.text(), "😀 中");
+                input.set_enabled(false, cx);
+                let selection_before = input.selected_range.clone();
+                input.accessible_selection(Some(&selection), cx);
+                input.accessible_edit(Some(&ActionData::Value("ignored".into())), true, window, cx);
+                input.accessible_edit(
+                    Some(&ActionData::Value("ignored".into())),
+                    false,
+                    window,
+                    cx,
+                );
+                assert_eq!(input.text(), "😀 中");
+                assert_eq!(input.selected_range, selection_before);
+            });
+        })
+        .unwrap();
     }
 }

@@ -71,6 +71,7 @@ impl Popover {
         window: &Window,
     ) -> Stateful<Div> {
         Self::surface(theme, id)
+            .role(Role::Menu)
             .w(rems(MENU_WIDTH / 16.))
             .max_w((window.viewport_size().width - px(UI_INSET * 2.)).max(px(0.)))
             .max_h((window.viewport_size().height - px(UI_INSET * 2.)).max(px(0.)))
@@ -85,7 +86,12 @@ impl Popover {
         id: impl Into<ElementId>,
         width: Pixels,
     ) -> Stateful<Div> {
-        Self::surface(theme, id).w(width).gap_0().p_1().rounded_sm()
+        Self::surface(theme, id)
+            .role(Role::ListBox)
+            .w(width)
+            .gap_0()
+            .p_1()
+            .rounded_sm()
     }
 }
 
@@ -98,7 +104,7 @@ pub enum MenuIndicator {
 /// A normal actionable menu row with a shared checked/radio indicator.
 pub fn checked_menu_item<T: 'static>(
     id: impl Into<ElementId>,
-    label: impl IntoElement,
+    label: impl Into<SharedString>,
     checked: bool,
     indicator: MenuIndicator,
     cx: &mut Context<T>,
@@ -111,10 +117,20 @@ pub fn checked_menu_item<T: 'static>(
         (MenuIndicator::Radio, true) => "●",
         (MenuIndicator::Radio, false) => "○",
     };
-    menu_item(id, label, cx, action).child(
-        div()
-            .ml_auto()
-            .text_color(rgb(if checked { theme.accent } else { theme.muted }))
-            .child(mark),
-    )
+    menu_item(id, label, cx, action)
+        .role(match indicator {
+            MenuIndicator::Check => Role::MenuItemCheckBox,
+            MenuIndicator::Radio => Role::MenuItemRadio,
+        })
+        .aria_toggled(if checked {
+            Toggled::True
+        } else {
+            Toggled::False
+        })
+        .child(
+            div()
+                .ml_auto()
+                .text_color(rgb(if checked { theme.accent } else { theme.muted }))
+                .child(mark),
+        )
 }

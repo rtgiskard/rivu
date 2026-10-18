@@ -670,8 +670,14 @@ impl GuiApp {
         workspace.save_error = error.clone();
         let ui_font = appearance::fonts::resolve(&state.system.config.ui_font, cx);
         appearance::fonts::publish(&ui_font, cx);
-        let layout_name =
-            cx.new(|cx| Input::new("", i18n.text("shell-layout-name").to_owned(), cx));
+        let layout_name = cx.new(|cx| {
+            Input::new(
+                i18n.text("shell-layout-name").to_owned(),
+                "",
+                i18n.text("shell-layout-name").to_owned(),
+                cx,
+            )
+        });
         let mut subscriptions = Vec::new();
         let settings = cx.new(|cx| {
             settings::Settings::new(

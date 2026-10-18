@@ -309,11 +309,15 @@ impl Playlists {
             ("loading-row", index),
             error,
             self.loading_text.show(&kind, error.is_some()),
-            self.tr(if error.is_some() {
-                "shell-loading-failed"
-            } else {
-                "shell-loading"
-            }),
+            rivu_ui::loading::LoadingRowLabels {
+                message: self.tr(if error.is_some() {
+                    "shell-loading-failed"
+                } else {
+                    "shell-loading"
+                }),
+                retry: self.tr("gl-retry-loading"),
+                copy_error: self.tr("shell-copy-message"),
+            },
             cx,
             move |this, _, cx| {
                 this.retry_view_page(kind, cx);

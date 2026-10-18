@@ -215,46 +215,37 @@ impl GuiApp {
                                 cx.notify();
                             },
                         ))
-                        .child(
-                            menu_item(
-                                "album-artwork-rotation",
-                                self.tr("shell-artwork-rotation"),
-                                cx,
-                                move |this, _, cx| {
-                                    this.panel_menu = None;
-                                    if let Some(mut options) = this
-                                        .workspace
+                        .child(checked_menu_item(
+                            "album-artwork-rotation",
+                            self.tr("shell-artwork-rotation"),
+                            options.mode == crate::config::AlbumArtworkMode::Rotating,
+                            MenuIndicator::Check,
+                            cx,
+                            move |this, _, cx| {
+                                this.panel_menu = None;
+                                if let Some(mut options) = this
+                                    .workspace
+                                    .layouts
+                                    .current()
+                                    .album_artwork_options(state.panel_id)
+                                {
+                                    options.mode = match options.mode {
+                                        crate::config::AlbumArtworkMode::Static => {
+                                            crate::config::AlbumArtworkMode::Rotating
+                                        }
+                                        crate::config::AlbumArtworkMode::Rotating => {
+                                            crate::config::AlbumArtworkMode::Static
+                                        }
+                                    };
+                                    this.workspace
                                         .layouts
-                                        .current()
-                                        .album_artwork_options(state.panel_id)
-                                    {
-                                        options.mode = match options.mode {
-                                            crate::config::AlbumArtworkMode::Static => {
-                                                crate::config::AlbumArtworkMode::Rotating
-                                            }
-                                            crate::config::AlbumArtworkMode::Rotating => {
-                                                crate::config::AlbumArtworkMode::Static
-                                            }
-                                        };
-                                        this.workspace
-                                            .layouts
-                                            .current_mut()
-                                            .set_album_artwork_options(state.panel_id, options);
-                                        this.persist_layout(cx);
-                                    }
-                                    cx.notify();
-                                },
-                            )
-                            .child(
-                                div().ml_auto().text_color(rgb(theme.accent)).child(
-                                    if options.mode == crate::config::AlbumArtworkMode::Rotating {
-                                        "✓"
-                                    } else {
-                                        ""
-                                    },
-                                ),
-                            ),
-                        )
+                                        .current_mut()
+                                        .set_album_artwork_options(state.panel_id, options);
+                                    this.persist_layout(cx);
+                                }
+                                cx.notify();
+                            },
+                        ))
                         .child(menu_item(
                             "album-artwork-settings",
                             self.tr("shell-artwork-settings"),
@@ -309,72 +300,52 @@ impl GuiApp {
                         ))
                         .child(div().h(px(1.)).mx_2().my_1().bg(rgb(theme.border)));
                     menu = menu
-                        .child(
-                            menu_item(
-                                "audio-visualizer-grid",
-                                self.tr("shell-reference-lines"),
-                                cx,
-                                move |this, _, cx| {
-                                    this.panel_menu = None;
-                                    if let Some(mut options) = this
-                                        .workspace
+                        .child(checked_menu_item(
+                            "audio-visualizer-grid",
+                            self.tr("shell-reference-lines"),
+                            options.reference_lines,
+                            MenuIndicator::Check,
+                            cx,
+                            move |this, _, cx| {
+                                this.panel_menu = None;
+                                if let Some(mut options) = this
+                                    .workspace
+                                    .layouts
+                                    .current()
+                                    .audio_visualizer_options(state.panel_id)
+                                {
+                                    options.reference_lines = !options.reference_lines;
+                                    this.workspace
                                         .layouts
-                                        .current()
-                                        .audio_visualizer_options(state.panel_id)
-                                    {
-                                        options.reference_lines = !options.reference_lines;
-                                        this.workspace
-                                            .layouts
-                                            .current_mut()
-                                            .set_audio_visualizer_options(state.panel_id, options);
-                                        this.persist_layout(cx);
-                                    }
-                                },
-                            )
-                            .child(
-                                div()
-                                    .ml_auto()
-                                    .text_color(rgb(if options.reference_lines {
-                                        theme.accent
-                                    } else {
-                                        theme.muted
-                                    }))
-                                    .child(if options.reference_lines { "✓" } else { "" }),
-                            ),
-                        )
-                        .child(
-                            menu_item(
-                                "audio-visualizer-labels",
-                                self.tr("shell-labels"),
-                                cx,
-                                move |this, _, cx| {
-                                    this.panel_menu = None;
-                                    if let Some(mut options) = this
-                                        .workspace
+                                        .current_mut()
+                                        .set_audio_visualizer_options(state.panel_id, options);
+                                    this.persist_layout(cx);
+                                }
+                            },
+                        ))
+                        .child(checked_menu_item(
+                            "audio-visualizer-labels",
+                            self.tr("shell-labels"),
+                            options.labels,
+                            MenuIndicator::Check,
+                            cx,
+                            move |this, _, cx| {
+                                this.panel_menu = None;
+                                if let Some(mut options) = this
+                                    .workspace
+                                    .layouts
+                                    .current()
+                                    .audio_visualizer_options(state.panel_id)
+                                {
+                                    options.labels = !options.labels;
+                                    this.workspace
                                         .layouts
-                                        .current()
-                                        .audio_visualizer_options(state.panel_id)
-                                    {
-                                        options.labels = !options.labels;
-                                        this.workspace
-                                            .layouts
-                                            .current_mut()
-                                            .set_audio_visualizer_options(state.panel_id, options);
-                                        this.persist_layout(cx);
-                                    }
-                                },
-                            )
-                            .child(
-                                div()
-                                    .ml_auto()
-                                    .text_color(rgb(if options.labels {
-                                        theme.accent
-                                    } else {
-                                        theme.muted
-                                    }))
-                                    .child(if options.labels { "✓" } else { "" }),
-                            ),
-                        )
+                                        .current_mut()
+                                        .set_audio_visualizer_options(state.panel_id, options);
+                                    this.persist_layout(cx);
+                                }
+                            },
+                        ))
                         .child(div().h(px(1.)).mx_2().my_1().bg(rgb(theme.border)))
                         .child(menu_item(
                             "audio-visualizer-settings",

@@ -214,6 +214,23 @@ impl ChoicePopup {
                                 selected == Some(index),
                                 label,
                             )
+                            .role(Role::ListBoxOption)
+                            .aria_label(hint.clone())
+                            .aria_selected(selected == Some(index))
+                            .aria_position_in_set(index + 1)
+                            .aria_size_of_set(count)
+                            .on_a11y_action(AccessibleAction::Click, {
+                                let owner = cx.entity().downgrade();
+                                move |_, window, cx| {
+                                    let _ = owner.update(cx, |owner, cx| {
+                                        if state(owner).is_open()
+                                            && state(owner).filtered_item(index).is_some()
+                                        {
+                                            choose(owner, index, window, cx);
+                                        }
+                                    });
+                                }
+                            })
                             .tooltip(text_tooltip(hint))
                             .on_click(cx.listener(
                                 move |owner, _, window, cx| choose(owner, index, window, cx),
@@ -308,7 +325,13 @@ mod tests {
     impl Render for NativeChoice {
         fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             let trigger = crate::activate_control(
-                crate::dropdown_trigger(palette(cx), "trigger", "Choose", cx),
+                crate::dropdown_trigger(
+                    palette(cx),
+                    "trigger",
+                    "Choose",
+                    self.choices.is_open(),
+                    cx,
+                ),
                 cx,
                 |this, _, cx| {
                     this.opens += 1;

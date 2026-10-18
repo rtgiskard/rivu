@@ -1,7 +1,9 @@
 use crate::{layout::UI_INSET, overlay::text_tooltip};
-use gpui::{Context, Div, ElementId, SharedString, Stateful, Window, div, prelude::*, rgb};
+use gpui::{
+    Context, Div, ElementId, Role, SharedString, Stateful, Toggled, Window, div, prelude::*, rgb,
+};
 
-/// Keep native keyboard clicks and pointer clicks on the exact same action path.
+/// Keep keyboard, pointer, and GPUI's accessible Click on the same action path.
 pub fn activate_control<T: 'static>(
     control: Stateful<Div>,
     cx: &mut Context<T>,
@@ -13,7 +15,7 @@ pub fn activate_control<T: 'static>(
     }))
 }
 
-/// Applies the shared selected state to any control with a selectable meaning.
+/// Selected appearance only; callers supply role-specific selected/toggled semantics.
 pub fn active_control(
     theme: &'static crate::theme::Palette,
     control: Stateful<Div>,
@@ -59,9 +61,12 @@ pub fn button_style(
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
 ) -> Stateful<Div> {
+    let label = label.into();
     control_surface(theme, id)
+        .role(Role::Button)
+        .aria_label(label.clone())
         .justify_center()
-        .child(label.into())
+        .child(label)
 }
 
 /// Text button with shared application event handling.
@@ -86,8 +91,20 @@ pub fn sortable_header<T: 'static>(
     action: impl Fn(&mut T, &mut Window, &mut Context<T>) + 'static,
 ) -> Stateful<Div> {
     let theme = crate::theme::palette(cx);
+    let label = label.into();
     let mut control = div()
         .id(id)
+        .role(Role::ColumnHeader)
+        .aria_label(label.clone())
+        .a11y_synthetic_children(move |builder| {
+            if active {
+                builder.parent_node().set_sort_direction(if descending {
+                    gpui::accesskit::SortDirection::Descending
+                } else {
+                    gpui::accesskit::SortDirection::Ascending
+                });
+            }
+        })
         .tab_index(0)
         .focus(|style| style.border_color(rgb(theme.accent)))
         .flex()
@@ -106,7 +123,7 @@ pub fn sortable_header<T: 'static>(
             action(this, window, cx);
             cx.stop_propagation();
         }))
-        .child(div().min_w_0().truncate().child(label.into()))
+        .child(div().min_w_0().truncate().child(label))
         .when(active, |control| {
             control.child(
                 div()
@@ -131,16 +148,24 @@ pub fn icon_button<T: 'static>(
     cx: &mut Context<T>,
     action: impl Fn(&mut T, &mut Window, &mut Context<T>) + 'static,
 ) -> Stateful<Div> {
-    button(id, icon, cx, action)
-        .font_family(crate::theme::icon_family(cx))
-        .text_size(gpui::rems(1.))
-        .size(gpui::rems(2.))
-        .p_0()
-        .flex()
-        .items_center()
-        .justify_center()
-        .flex_shrink_0()
-        .tooltip(text_tooltip(hint))
+    let hint = hint.into();
+    let theme = crate::theme::palette(cx);
+    activate_control(
+        control_surface(theme, id)
+            .role(Role::Button)
+            .aria_label(hint.clone())
+            .child(self::icon(icon, cx)),
+        cx,
+        action,
+    )
+    .text_size(gpui::rems(1.))
+    .size(gpui::rems(2.))
+    .p_0()
+    .flex()
+    .items_center()
+    .justify_center()
+    .flex_shrink_0()
+    .tooltip(text_tooltip(hint))
 }
 
 /// Low-emphasis inline action; preserve the shared icon hit area and tooltip.
@@ -154,7 +179,7 @@ pub fn quiet_icon_button(
         .text_color(rgb(theme.secondary))
 }
 
-/// Shared unavailable-action appearance; the action owner retains its guard.
+/// Unavailable actions retain owner guards and suppress all native activation paths.
 pub fn disabled_control(
     theme: &'static crate::theme::Palette,
     control: Stateful<Div>,
@@ -166,6 +191,12 @@ pub fn disabled_control(
             .group_hover("control", |style| style.bg(rgb(theme.control)))
             .cursor_default()
             .tab_stop(false)
+            .a11y_synthetic_children(|builder| {
+                let node = builder.parent_node();
+                node.set_disabled();
+                node.remove_action(gpui::AccessibleAction::Click);
+                node.remove_action(gpui::AccessibleAction::Focus);
+            })
             .capture_key_down(|event, window, cx| {
                 if matches!(event.keystroke.key.as_str(), "enter" | "space") {
                     window.prevent_default();
@@ -214,6 +245,12 @@ pub fn toggle_button<T: 'static>(
         icon_button(id, icon, hint, cx, move |this, _, cx| {
             action(this, cx);
             cx.notify();
+        })
+        .role(Role::Switch)
+        .aria_toggled(if enabled {
+            Toggled::True
+        } else {
+            Toggled::False
         }),
         enabled,
     )
@@ -224,12 +261,18 @@ pub fn dropdown_trigger(
     theme: &'static crate::theme::Palette,
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
+    expanded: bool,
     cx: &gpui::App,
 ) -> Stateful<Div> {
+    let label = label.into();
     control_surface(theme, id)
+        .role(Role::Button)
+        .aria_label(label.clone())
+        .aria_value(label.clone())
+        .aria_expanded(expanded)
         .w_full()
         .gap_2()
-        .child(div().flex_1().min_w_0().truncate().child(label.into()))
+        .child(div().flex_1().min_w_0().truncate().child(label))
         .child(
             div()
                 .flex_shrink_0()
@@ -244,4 +287,190 @@ pub fn compact_icon_button(
     control: gpui::Stateful<Div>,
 ) -> gpui::Stateful<Div> {
     quiet_icon_button(theme, control).w(gpui::rems(1.4))
+}
+
+/// Decorative Nerd Font glyph; the owning control supplies its accessible name.
+/// Size is inherited so callers can use the normal GPUI text-size builders.
+pub fn icon(glyph: impl Into<SharedString>, cx: &gpui::App) -> Div {
+    div()
+        .font_family(crate::theme::icon_family(cx))
+        .flex_shrink_0()
+        .child(glyph.into())
+}
+
+/// Controlled labeled checkbox. The owner commits the requested next value.
+/// Its hit area uses normal control sizing; disabled controls never request changes.
+pub fn checkbox<T: 'static>(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    checked: bool,
+    enabled: bool,
+    cx: &mut Context<T>,
+    on_change: impl Fn(&mut T, bool, &mut Context<T>) + 'static,
+) -> Stateful<Div> {
+    let theme = crate::theme::palette(cx);
+    let label = label.into();
+    let control = control_surface(theme, id)
+        .role(Role::CheckBox)
+        .aria_label(label.clone())
+        .aria_toggled(if checked {
+            Toggled::True
+        } else {
+            Toggled::False
+        })
+        .gap_2()
+        .child(icon(if checked { "󰄲" } else { "󰄱" }, cx))
+        .child(label);
+    let control = activate_control(control, cx, move |this, _, cx| {
+        if enabled {
+            on_change(this, !checked, cx);
+            cx.notify();
+        }
+    });
+    disabled_control(theme, control, !enabled)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{Element, FocusHandle, InputEvent, Render, TestAppContext};
+
+    struct Controls {
+        focus: FocusHandle,
+        disabled: bool,
+        clicks: usize,
+    }
+
+    impl Render for Controls {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let theme = crate::theme::palette(cx);
+            div().size_full().child(disabled_control(
+                theme,
+                button("action", "Apply", cx, |this, _, cx| {
+                    this.clicks += 1;
+                    cx.notify();
+                })
+                .track_focus(&self.focus)
+                .w(gpui::px(160.)),
+                self.disabled,
+            ))
+        }
+    }
+
+    #[gpui::test]
+    fn disabled_controls_block_pointer_and_native_keyboard_clicks(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init_test);
+        let focus = cx.update(|cx| cx.focus_handle());
+        let window = cx.add_window(|_, _| Controls {
+            focus: focus.clone(),
+            disabled: true,
+            clicks: 0,
+        });
+        let controls = window.root(cx).unwrap();
+        let handle = window.into();
+        for (disabled, expected) in [(true, 0), (false, 3), (true, 3)] {
+            controls.update(cx, |this, cx| {
+                this.disabled = disabled;
+                cx.notify();
+            });
+            cx.update_window(handle, |_, window, cx| window.focus(&focus, cx))
+                .unwrap();
+            cx.run_until_parked();
+            cx.update_window(handle, |_, window, cx| {
+                window.draw(cx).clear(cx);
+                let position = gpui::point(gpui::px(12.), gpui::px(12.));
+                window.dispatch_event(
+                    gpui::MouseDownEvent {
+                        button: gpui::MouseButton::Left,
+                        position,
+                        ..Default::default()
+                    }
+                    .to_platform_input(),
+                    cx,
+                );
+                window.dispatch_event(
+                    gpui::MouseUpEvent {
+                        button: gpui::MouseButton::Left,
+                        position,
+                        ..Default::default()
+                    }
+                    .to_platform_input(),
+                    cx,
+                );
+            })
+            .unwrap();
+            for key in ["enter", "space"] {
+                cx.update_window(handle, |_, window, cx| {
+                    window.draw(cx).clear(cx);
+                    let keystroke = gpui::Keystroke::parse(key).unwrap();
+                    window.dispatch_event(
+                        gpui::KeyDownEvent {
+                            keystroke: keystroke.clone(),
+                            is_held: false,
+                            prefer_character_input: false,
+                        }
+                        .to_platform_input(),
+                        cx,
+                    );
+                    window.dispatch_event(gpui::KeyUpEvent { keystroke }.to_platform_input(), cx);
+                })
+                .unwrap();
+                cx.run_until_parked();
+            }
+            assert_eq!(controls.read_with(cx, |this, _| this.clicks), expected);
+        }
+    }
+
+    #[gpui::test]
+    fn icon_names_and_boolean_roles_are_not_visual_glyphs(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init_test);
+        let entity = cx.new(|cx| Controls {
+            focus: cx.focus_handle(),
+            disabled: false,
+            clicks: 0,
+        });
+        entity.update(cx, |_, cx| {
+            let icon = icon_button("save", "󰆓", "Save changes", cx, |_, _, _| {});
+            let mut node = gpui::accesskit::Node::new(icon.a11y_role().unwrap());
+            icon.write_a11y_info(&mut node);
+            assert_eq!(node.role(), Role::Button);
+            assert_eq!(node.label(), Some("Save changes"));
+            assert!(node.supports_action(gpui::AccessibleAction::Click));
+
+            let toggle = toggle_button("enabled", "󰄲", "Enabled", true, cx, |_, _| {});
+            let mut node = gpui::accesskit::Node::new(toggle.a11y_role().unwrap());
+            toggle.write_a11y_info(&mut node);
+            assert_eq!(node.role(), Role::Switch);
+            assert_eq!(node.toggled(), Some(Toggled::True));
+            assert_eq!(node.is_selected(), None);
+
+            let check = checkbox("check", "Keep enabled", false, true, cx, |_, _, _| {});
+            let mut node = gpui::accesskit::Node::new(check.a11y_role().unwrap());
+            check.write_a11y_info(&mut node);
+            assert_eq!(node.role(), Role::CheckBox);
+            assert_eq!(node.label(), Some("Keep enabled"));
+            assert_eq!(node.toggled(), Some(Toggled::False));
+            assert!(node.supports_action(gpui::AccessibleAction::Click));
+
+            for (indicator, role) in [
+                (crate::surface::MenuIndicator::Check, Role::MenuItemCheckBox),
+                (crate::surface::MenuIndicator::Radio, Role::MenuItemRadio),
+            ] {
+                let item = crate::surface::checked_menu_item(
+                    "menu-choice",
+                    "Choose item",
+                    true,
+                    indicator,
+                    cx,
+                    |_, _, _| {},
+                );
+                let mut node = gpui::accesskit::Node::new(item.a11y_role().unwrap());
+                item.write_a11y_info(&mut node);
+                assert_eq!(node.role(), role);
+                assert_eq!(node.label(), Some("Choose item"));
+                assert_eq!(node.toggled(), Some(Toggled::True));
+                assert!(node.supports_action(gpui::AccessibleAction::Click));
+            }
+        });
+    }
 }

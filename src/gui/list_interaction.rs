@@ -633,9 +633,13 @@ impl GuiApp {
                                             })
                                             .h(gpui::rems(rivu_ui::LIST_ROW_REMS));
                                     };
-                                    menu_item(
-                                        ("content-playlist-target", id as u64),
-                                        div().min_w_0().truncate().child(name),
+                                    rivu_ui::activate_control(
+                                        rivu_ui::menu_item_style(
+                                            rivu_ui::theme::palette(cx),
+                                            ("content-playlist-target", id as u64),
+                                            name.clone(),
+                                            div().min_w_0().truncate().child(name),
+                                        ),
                                         cx,
                                         move |this, _, cx| {
                                             this.content_action(ContentAction::Playlist(id), cx)

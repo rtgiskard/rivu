@@ -26,7 +26,7 @@ use rivu_ui::{
     input::{Input, InputEvent},
     input_aligned_control, row, section_group, status_message,
     theme::{Palette, palette},
-    toggle_button, two_column,
+    two_column,
 };
 use std::{cell::RefCell, collections::HashMap, rc::Rc, str::FromStr, sync::Arc, time::Duration};
 
@@ -277,12 +277,16 @@ fn icon_button(
 
 fn dropdown_button(
     id: &'static str,
+    name: impl Into<SharedString>,
     label: impl Into<SharedString>,
+    expanded: bool,
     cx: &mut Context<Settings>,
     action: impl Fn(&mut Settings, &mut Window, &mut Context<Settings>) + 'static,
 ) -> Stateful<Div> {
     input_aligned_control(activate_control(
-        dropdown_trigger(palette(cx), id, label, cx),
+        dropdown_trigger(palette(cx), id, label, expanded, cx)
+            .role(Role::ComboBox)
+            .aria_label(name),
         cx,
         move |this, window, cx| {
             action(this, window, cx);
@@ -313,7 +317,7 @@ fn visual_switch(
     } else {
         format!("{label} ({hint})").into()
     };
-    input_aligned_control(toggle_button(
+    input_aligned_control(rivu_ui::toggle_button(
         id,
         icon,
         format!(
@@ -511,8 +515,14 @@ impl Settings {
     ) -> Self {
         let (ffmpeg_status, mpris_status) = runtime_status;
         let config = handle.config_snapshot();
-        let artwork_cache_age =
-            cx.new(|cx| Input::new("30", i18n.text("settings-age-in-days").to_owned(), cx));
+        let artwork_cache_age = cx.new(|cx| {
+            Input::new(
+                i18n.text("settings-age-in-days").to_owned(),
+                "30",
+                i18n.text("settings-age-in-days").to_owned(),
+                cx,
+            )
+        });
         let artwork_cache_subscription = cx.subscribe(&artwork_cache_age, |this, _, event, cx| {
             if matches!(event, InputEvent::Changed { .. }) {
                 this.artwork_cache_age_revision = this.artwork_cache_age_revision.wrapping_add(1);
@@ -687,10 +697,15 @@ impl Settings {
         .map(|field| {
             let input = cx.new(|cx| {
                 if field == Field::Font {
-                    Input::new("", self.tr("settings-font-search-placeholder"), cx)
-                        .with_trailing_space(px(28.))
+                    Input::new(
+                        self.tr(field.label_id()),
+                        "",
+                        self.tr("settings-font-search-placeholder"),
+                        cx,
+                    )
+                    .with_trailing_space(px(28.))
                 } else {
-                    Input::new("", self.tr(field.label_id()), cx)
+                    Input::new(self.tr(field.label_id()), "", self.tr(field.label_id()), cx)
                 }
             });
             (field, input)
@@ -1258,6 +1273,8 @@ impl Settings {
             }),
             active,
         )
+        .role(Role::Tab)
+        .aria_selected(active)
         .flex_shrink_0()
     }
 }
@@ -1312,6 +1329,16 @@ impl Settings {
             && self.inputs[&Field::Font].read(cx).is_focused(window)
     }
 
+    fn toggle_font_dropdown(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dropdown.is_open() && self.dropdown_anchor == Measured::SettingsFont {
+            self.dropdown.close();
+        } else {
+            self.open_font_dropdown(false, cx);
+        }
+        self.inputs[&Field::Font].focus_handle(cx).focus(window, cx);
+        cx.notify();
+    }
+
     fn font_control(&self, cx: &mut Context<Self>) -> Div {
         let input = self.inputs[&Field::Font].clone();
         let control = div()
@@ -1334,10 +1361,23 @@ impl Settings {
                 }
                 this.choice_key(event, ChoiceMode::Editable, composing, window, cx);
             }))
-            .child(input)
+            .child(input.clone())
             .child(
                 div()
                     .id("settings-font-arrow")
+                    .role(Role::ComboBox)
+                    .aria_label(self.tr(Field::Font.label_id()))
+                    .aria_value(SharedString::from(input.read(cx).text().to_owned()))
+                    .aria_expanded(
+                        self.dropdown.is_open() && self.dropdown_anchor == Measured::SettingsFont,
+                    )
+                    .on_a11y_action(AccessibleAction::Click, {
+                        let owner = cx.entity().downgrade();
+                        move |_, window, cx| {
+                            let _ =
+                                owner.update(cx, |this, cx| this.toggle_font_dropdown(window, cx));
+                        }
+                    })
                     .absolute()
                     .right(px(1.))
                     .top(px(1.))
@@ -1353,16 +1393,8 @@ impl Settings {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _, window, cx| {
-                            if this.dropdown.is_open()
-                                && this.dropdown_anchor == Measured::SettingsFont
-                            {
-                                this.dropdown.close();
-                            } else {
-                                this.open_font_dropdown(false, cx);
-                            }
-                            this.inputs[&Field::Font].focus_handle(cx).focus(window, cx);
+                            this.toggle_font_dropdown(window, cx);
                             cx.stop_propagation();
-                            cx.notify();
                         }),
                     ),
             )
@@ -1775,9 +1807,14 @@ impl Settings {
             .into_any_element()
         } else {
             match self.model.feedback() {
-                Some(Err(error)) => copyable_message("copy-settings-error", error.clone(), cx)
-                    .text_color(rgb(colors.error))
-                    .into_any_element(),
+                Some(Err(error)) => copyable_message(
+                    "copy-settings-error",
+                    self.tr("shell-copy-message"),
+                    error.clone(),
+                    cx,
+                )
+                .text_color(rgb(colors.error))
+                .into_any_element(),
                 Some(Ok(())) => {
                     status_message(colors, self.tr("settings-applied"), StatusKind::Success)
                         .into_any_element()

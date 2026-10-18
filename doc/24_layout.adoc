@@ -214,11 +214,13 @@ shared presentation does not absorb business ownership.
 Track compositions share the favorite action's icon, tooltip, hover visibility
 and pointer isolation; feature owners still send the command for the current
 track. `rivu_ui::loading::paged_loading_row` supplies list-placeholder presentation
-and registers a retry click only while an error is displayed. Owners supply
-resolved labels, error details, text visibility and the retry callback, retaining
-request identity, failure recovery and notification responsibility. Tree and
-album placeholders keep their specialized layouts. The row does not introduce
-keyboard activation or change pointer propagation.
+and exposes explicit retry and full-error copy buttons only while an error is
+displayed. Owners supply `LoadingRowLabels`, error details, text visibility and
+the retry callback, retaining request identity and recovery responsibility.
+Recovery buttons support Tab and Enter/Space, and native accessible activation;
+copying leaves the failed request unchanged. Tree and album placeholders retain
+their specialized layouts. `copyable_message` likewise takes a localized action
+name, exposes the full message as its description and supports keyboard copying.
 
 `loading::LoadingText` owns only delayed text visibility, with a host-provided
 delay and at most one timer per instance. Its tokens match presentation updates;
@@ -242,12 +244,43 @@ roots read current typography without inspecting the window root. Rivu retains
 its GUI/TUI color presets and optional embedded-symbol registration outside the
 component package. Runtime appearance changes invalidate existing views.
 
+Buttons, menu items, checkboxes and choice options expose native AccessKit roles,
+names and current state. Accessible Click uses the same activation path as mouse
+and keyboard input. Disabled controls remove Click/Focus actions as well as
+rejecting pointer and keyboard activation; business guards still belong to owners.
+Rich menu content requires a separate textual name. Decorative `icon` glyphs do
+not create duplicate accessible controls; their owning action supplies the name.
+
+`checkbox` is controlled: the host provides checked/enabled state and receives
+the requested next value. The state owner updates its draft and synchronizes
+dependent controls. Checkbox notifies its owner after an enabled activation,
+as icon switches do. Menu actions and choice callbacks retain owner-managed
+notification; generic activation helpers do not implicitly notify owners.
+Settings retains icon switches and its existing Apply/Discard transaction;
+the shared checkbox does not dictate application presentation. The component
+neither stores configuration nor saves.
+
+Button composition uses the base surface, then a visual variant, selected styling
+and finally disabled state. These style decorators are not commutative.
+`active_control` is visual only: the semantic role and checked/selected/value state
+must match the actual operation. Ordinary controls use their normal minimum height;
+`input_aligned_control` opts into form geometry, while `compact_icon_button`
+reduces inline width rather than uniformly scaling the control. Tree/list heights
+and two-line text gap/line height remain separate from outer row spacing.
+
 Input owns text, selection, IME conversion, focus and pointer-selection capture.
 Disabling an input keeps its draft while rejecting edits and removing its Tab
 stop. `SearchField` owns expansion, clear/Escape interaction and a cancellable
 debounce task; the host supplies the delay, text and count formatter. Clearing or
 resetting invalidates an older pending query. Its single-line height is bounded
 in both horizontal and vertical parent layouts.
+
+`Input::new(name, value, placeholder, cx)` requires a resolved accessible name;
+placeholder text is not its label. Inputs expose value, character geometry and
+selection through a synthetic text run. Accessible edits use the existing user
+edit path; selection requests validate node identity and Unicode character bounds.
+Platform adapter support determines which text actions reach those handlers.
+`SearchLabels::name` names the editable search independently of its icon actions.
 
 `ChoiceState` owns candidates, keyboard highlight and the existing scroll handle;
 `ChoicePopup` renders their viewport-bounded anchored surface. Select and editable
@@ -289,6 +322,18 @@ The package uses this workspace's pinned GPUI revision and local patches. It is
 not a renderer-independent API or a promise of compatibility with arbitrary GPUI
 versions. `make lint` and `make build` include the component package;
 `cargo test -p rivu-ui` runs its interaction and viewport regression tests.
+
+Run `cargo run --example rivu_ui` on a Wayland desktop for a small consumer example.
+It installs host appearance, retains inputs and subscriptions, filters a virtual
+list, and demonstrates choice, checkbox, disabled and error-recovery behavior.
+Its explicit Begin/Fail/Finish controls exercise presentation transitions without
+pretending to perform network or database work. The example uses the same pinned
+GPUI and requires the normal build and font prerequisites.
+
+Playback seek/volume drag transactions and Settings validation remain application
+responsibilities; the package does not provide an automatic form submission,
+query-retry, global overlay or slider-session framework.
+
 
 == Normalized trees and resource boundaries
 

@@ -6,6 +6,7 @@ use rivu_ui::search::{SearchField, SearchLabels};
 pub(in crate::gui) fn new_search(i18n: &Localizer, cx: &mut Context<SearchField>) -> SearchField {
     SearchField::new(
         SearchLabels {
+            name: i18n.text("search-toggle").to_owned().into(),
             placeholder: i18n.text("search-placeholder").to_owned().into(),
             toggle: i18n.text("search-toggle").to_owned().into(),
             clear: i18n.text("search-clear").to_owned().into(),

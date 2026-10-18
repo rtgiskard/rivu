@@ -719,11 +719,15 @@ impl Queue {
             ("loading-row", index),
             error,
             self.loading.show(&(), error.is_some()),
-            self.tr(if error.is_some() {
-                "shell-loading-failed"
-            } else {
-                "shell-loading"
-            }),
+            rivu_ui::loading::LoadingRowLabels {
+                message: self.tr(if error.is_some() {
+                    "shell-loading-failed"
+                } else {
+                    "shell-loading"
+                }),
+                retry: self.tr("gl-retry-loading"),
+                copy_error: self.tr("shell-copy-message"),
+            },
             cx,
             |this, _, cx| {
                 this.retry_queue_page(cx);
