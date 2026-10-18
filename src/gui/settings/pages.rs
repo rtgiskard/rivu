@@ -1000,7 +1000,7 @@ impl Settings {
                     .child(settings_card(
                         palette(cx),
                         settings.tr("settings-processing-cache"),
-                        row()
+                        column()
                             .gap_2()
                             .child(visual_switch(
                                 &self.i18n,
@@ -1019,7 +1019,8 @@ impl Settings {
                                 draft.visualization_cache,
                                 cx,
                                 |draft| draft.visualization_cache = !draft.visualization_cache,
-                            )),
+                            ))
+                            .child(settings.single(Field::GpuMaterialBudget, cx)),
                     ))
             }
             VisualPage::Spectrum => {

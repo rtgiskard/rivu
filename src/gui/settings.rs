@@ -94,6 +94,7 @@ enum Field {
     LogRetentionWeeks,
     MediaReadBuffer,
     ArtworkDecodeBudget,
+    GpuMaterialBudget,
     Font,
     Scale,
     LayoutSnapGrid,
@@ -141,6 +142,7 @@ impl Field {
             Self::LogRetentionWeeks => "settings-log-retention-weeks",
             Self::MediaReadBuffer => "settings-media-read-buffer-mib",
             Self::ArtworkDecodeBudget => "settings-artwork-decode-budget-mib",
+            Self::GpuMaterialBudget => "settings-gpu-material-budget-mib",
             Self::Font => "settings-font-family",
             Self::Scale => "settings-interface-scale",
             Self::LayoutSnapGrid => "settings-layout-grid-spacing-px",
@@ -212,6 +214,7 @@ impl Field {
             Self::LogRetentionWeeks => "1–520.".into(),
             Self::MediaReadBuffer => settings.tr("settings-media-buffer-hint"),
             Self::ArtworkDecodeBudget => settings.tr("settings-artwork-decode-budget-hint"),
+            Self::GpuMaterialBudget => settings.tr("settings-gpu-material-budget-hint"),
             Self::Font => "".into(),
             Self::Scale => "0.75–2.".into(),
             Self::LayoutSnapGrid => settings.tr("settings-layout-grid-hint"),
@@ -656,6 +659,7 @@ impl Settings {
             Field::LogRetentionWeeks,
             Field::MediaReadBuffer,
             Field::ArtworkDecodeBudget,
+            Field::GpuMaterialBudget,
             Field::Font,
             Field::Scale,
             Field::LayoutSnapGrid,
@@ -934,6 +938,12 @@ impl Settings {
             unchanged,
             cx,
         );
+        self.set_value(
+            Field::GpuMaterialBudget,
+            self.model.draft.gpu_material_budget_mb.to_string(),
+            unchanged,
+            cx,
+        );
         self.font_value = self.model.draft.ui_font.clone();
         self.set_value(Field::Font, self.model.draft.ui_font.clone(), unchanged, cx);
         self.set_value(
@@ -1190,6 +1200,7 @@ impl Settings {
         config.log_retention_weeks = self.number(Field::LogRetentionWeeks, cx)?;
         config.media_read_buffer_mb = self.number(Field::MediaReadBuffer, cx)?;
         config.artwork_decode_budget_mb = self.number(Field::ArtworkDecodeBudget, cx)?;
+        config.gpu_material_budget_mb = self.number(Field::GpuMaterialBudget, cx)?;
         config.ui_font = self.value(Field::Font, cx).trim().to_owned();
         if config.ui_font.is_empty() {
             config.ui_font = "sans-serif".to_owned();

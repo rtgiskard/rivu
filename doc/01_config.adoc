@@ -797,6 +797,8 @@ The startup-only `interface.gpu_material_budget_mb` setting accepts `16`–`1024
 MiB and defaults to `64`. Restart the GUI to apply a change. It limits the shared
 charged material buffers per window, including initialization copies and uploads
 awaiting GPU completion, not image atlases, render targets or total GPU memory.
+Edit it in Settings > Visualizations > General > Processing / cache using
+Shared GPU buffer budget (MiB).
 Spectrogram also caps frequency rows against that startup budget; long histories
 can have fewer display rows than the configured maximum. Time resolution and
 playback audio are unchanged.
