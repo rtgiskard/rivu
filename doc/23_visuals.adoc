@@ -264,8 +264,8 @@ file descriptor; only a subsequent Load selects the replacement content.
 RMS fills extend above and below the centerline for the respective stereo
 channels. Each display column has its own gradient endpoint, preserving color
 differences between adjacent columns with different energy. The gradient starts
-at the visible palette minimum on the centerline and brightens toward that column's
-RMS edge. Nonlinear color compression keeps warm colors as high-energy accents
+at a dimmed, desaturated palette minimum on the centerline and brightens toward
+that column's RMS edge. Nonlinear color compression keeps warm colors as high-energy accents
 while preserving access to the full visible palette range. It is a visual choice, not an
 amplitude or renderer limit.
 Peak is a thin, solid marker at the channel's peak level. Color compression
@@ -291,9 +291,10 @@ mapping, not a two-color approximation or duplicated, masked palette intervals.
 Waveform and Spectrum exclude DeaDBeeF's initial black-to-deep-blue interval:
 normalized color levels map to `0.06 + 0.94 * level` in the original palette.
 Spectrum samples the remaining visible domain across the full plot height; body
-and Peak colors use that same domain. Waveform uses it for its centerline, RMS
-endpoints, and Peak colors, retaining the color compression described above.
-Tokyo Night is unchanged. Spectrogram continues to use the complete palette,
+and Peak colors use that same domain. Waveform uses it for RMS endpoints and
+Peak colors, retaining the color compression described above; its center color
+is dimmed and desaturated separately. Tokyo Night's palette domain is unchanged.
+Spectrogram continues to use the complete palette,
 including DeaDBeeF's black floor. These color mappings do not alter signal levels
 or amplitude geometry.
 

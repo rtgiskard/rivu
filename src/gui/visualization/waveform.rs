@@ -380,6 +380,11 @@ impl WaveformPlot {
         let mut pixels = image::RgbaImage::new(x_end - x_start, height);
         let center = height as f32 * 0.5;
         let range = tile_columns(x_start, x_end, width, values.len());
+        // Keep the center subdued and near-neutral; only the RMS edge carries
+        // the column's full palette color. This does not change amplitude mapping.
+        let floor = palette.lookup_mapped_rgb(0.0);
+        let neutral = floor.iter().map(|&channel| u32::from(channel)).sum::<u32>() / 3;
+        let low_color = floor.map(|channel| ((u32::from(channel) + 3 * neutral) / 6) as u8);
         for column in range {
             let WaveformColumn {
                 left_rms,
@@ -397,7 +402,6 @@ impl WaveformPlot {
                 let height_px = (center * level).max(1.0);
                 let start = if upper { center - height_px } else { center };
                 let end = if upper { center } else { center + height_px };
-                let low_color = palette.lookup_mapped_rgb(0.0);
                 let rms_color = palette.lookup_mapped_rgb(waveform_color_level(level));
                 for y in (start.floor() as u32)..(end.ceil() as u32).min(height) {
                     let t = ((y as f32 + 0.5 - start) / (end - start)).clamp(0.0, 1.0);
@@ -1213,91 +1217,75 @@ impl Waveform {
                                     // it never snaps at a cycle boundary.
                                     let jitter = cursor_wobble(position) * 0.8;
                                     let cursor_center = plot.center().y + px(jitter);
-                                    let x = plot.left() + plot.size.width * fraction;
+                                    let scale = window.scale_factor();
+                                    let line_width = px((1.5 * scale).round().max(1.0) / scale);
+                                    let line_left = px((f32::from(
+                                        plot.left() + plot.size.width * fraction - line_width * 0.5,
+                                    ) * scale)
+                                        .round()
+                                        / scale);
+                                    let x = line_left + line_width * 0.5;
+                                    let cursor_top = (cursor_center - px(22.0)).max(plot.top());
+                                    let cursor_bottom =
+                                        (cursor_center + px(22.0)).min(plot.bottom());
                                     if glow > 0.0 {
-                                        for (width, opacity) in
-                                            [(10.0, 0.025), (5.0, 0.05), (2.0, 0.14)]
-                                        {
-                                            window.paint_quad(fill(
-                                                Bounds::new(
-                                                    point(x - px(width * 0.5), plot.top()),
-                                                    size(px(width), plot.size.height),
-                                                ),
-                                                water.alpha(opacity * glow),
-                                            ));
-                                        }
+                                        window.paint_quad(fill(
+                                            Bounds::new(
+                                                point(x - px(2.0), cursor_top),
+                                                size(px(4.0), cursor_bottom - cursor_top),
+                                            ),
+                                            water.alpha(0.06 * glow),
+                                        ));
                                     }
-                                    // Leave the droplet readable: the playhead is continuous
-                                    // above and below it, but does not cut through its body.
+                                    // Keep the short line close to the droplet, without
+                                    // cutting through its body. Small panels use only the line.
                                     let line_gap = if plot.size.height >= px(24.0) {
-                                        px(10.0)
+                                        px(5.0)
                                     } else {
                                         px(0.0)
                                     };
-                                    let upper_height = cursor_center - line_gap - plot.top();
-                                    if upper_height > px(0.0) {
-                                        window.paint_quad(fill(
-                                            Bounds::new(
-                                                point(x - px(0.5), plot.top()),
-                                                size(px(1.0), upper_height),
-                                            ),
-                                            water.alpha(0.62),
-                                        ));
-                                    }
-                                    let lower_top = cursor_center + line_gap;
-                                    if lower_top < plot.bottom() {
-                                        window.paint_quad(fill(
-                                            Bounds::new(
-                                                point(x - px(0.5), lower_top),
-                                                size(px(1.0), plot.bottom() - lower_top),
-                                            ),
-                                            water.alpha(0.62),
-                                        ));
+                                    for (top, bottom) in [
+                                        (cursor_top, cursor_center - line_gap),
+                                        (cursor_center + line_gap, cursor_bottom),
+                                    ] {
+                                        if bottom > top {
+                                            window.paint_quad(fill(
+                                                Bounds::new(
+                                                    point(line_left, top),
+                                                    size(line_width, bottom - top),
+                                                ),
+                                                water.alpha(0.7),
+                                            ));
+                                        }
                                     }
                                     if plot.size.height >= px(24.0) {
                                         if glow > 0.0 {
                                             let mut halo = fill(
                                                 Bounds::new(
-                                                    point(x - px(7.0), cursor_center - px(7.0)),
-                                                    size(px(14.0), px(14.0)),
+                                                    point(x - px(5.5), cursor_center - px(6.0)),
+                                                    size(px(11.0), px(12.0)),
                                                 ),
-                                                water.alpha(0.12 * glow),
+                                                water.alpha(0.08 * glow),
                                             );
-                                            halo.corner_radii = px(7.0).into();
+                                            halo.corner_radii = px(5.5).into();
                                             window.paint_quad(halo);
                                         }
-                                        for (width, offset) in
-                                            [(6.0, -4.0), (4.0, -2.0), (2.0, 0.0)]
-                                        {
-                                            window.paint_quad(fill(
-                                                Bounds::new(
-                                                    point(
-                                                        x - px(width * 0.5),
-                                                        cursor_center + px(offset),
-                                                    ),
-                                                    size(px(width), px(2.0)),
-                                                ),
-                                                water,
-                                            ));
-                                        }
+                                        window.paint_quad(fill(
+                                            Bounds::new(
+                                                point(x - px(1.0), cursor_center - px(5.0)),
+                                                size(px(2.0), px(2.0)),
+                                            ),
+                                            water,
+                                        ));
                                         let mut droplet = fill(
                                             Bounds::new(
-                                                point(x - px(4.5), cursor_center - px(5.0)),
-                                                size(px(9.0), px(10.0)),
+                                                point(x - px(3.5), cursor_center - px(4.0)),
+                                                size(px(7.0), px(8.0)),
                                             ),
                                             water,
                                         );
-                                        droplet.corner_radii = px(4.5).into();
+                                        droplet.corner_radii = px(3.5).into();
                                         window.paint_quad(droplet);
-                                        let mut glint = fill(
-                                            Bounds::new(
-                                                point(x - px(2.5), cursor_center - px(3.0)),
-                                                size(px(2.5), px(3.0)),
-                                            ),
-                                            rgb(0xc4f5ee).alpha(0.8),
-                                        );
-                                        glint.corner_radii = px(1.25).into();
-                                        window.paint_quad(glint);
                                     }
                                 }
                             },
