@@ -14,21 +14,21 @@ mod metadata;
 mod paged;
 mod panels;
 mod playlists;
-mod queries;
+mod presentation;
 mod queue;
 mod queue_replace;
 mod scrolling;
 pub(crate) mod session;
 mod settings;
 mod shell;
-mod shortcuts;
 mod theme;
 mod visualization;
+mod workspace;
 use crate::{
-    config::{AudioVisualizerOptions, AudioVisualizerStyle},
+    config::AudioVisualizerOptions,
     core::CoreHandle,
     i18n::Localizer,
-    model::{Command, PlaybackStatus, Query, Track},
+    model::{Command, Query, Track},
     projection::GuiSnapshot,
 };
 use anyhow::Result;
@@ -41,12 +41,11 @@ use components::{ButtonTooltip, caption, drag_preview, list_row};
 use futures::{StreamExt, channel::mpsc};
 use gpui::{prelude::*, *};
 use layout::interaction::{
-    Cancellation, DockGeometry, DockHover, DockRequest, DragCommit, Dragging, LayoutInteraction,
-    Measured,
+    Cancellation, DockGeometry, DockHover, DockRequest, DragCommit, Dragging, Measured,
 };
 use layout::panel_menu::{PanelMenu, PanelMenuPage};
 use layout::save_owner::LayoutSaveHandle;
-use layout::{Axis, Edge, LayoutSet, Node};
+use layout::{Axis, Edge, Node};
 use library::LibraryNode;
 use list_interaction::{ContentDrag, ContentMenuRequest, TrackSource};
 use metadata::session::MetadataSession;
@@ -345,71 +344,13 @@ impl FullWaveformRequest {
     }
 }
 
-fn retain_analysis_staging(
-    frame: &mut crate::analysis::AnalysisFrame,
-    demand: crate::analysis::DisplayDemand,
-) {
-    if !demand.enabled {
-        *frame = crate::analysis::AnalysisFrame::default();
-        return;
-    }
-    // Release optional allocations immediately, without waiting for the worker's
-    // next publication or discarding data still used by another visible panel.
-    let visualizer = &mut frame.visualizer;
-    if !demand.visualizer.stereo_density {
-        visualizer.demand.stereo_density = false;
-        visualizer.density = crate::analysis::DensitySnapshot::default();
-        visualizer.correlation = None;
-        visualizer.balance = None;
-        visualizer.side_ratio = None;
-    }
-    if !demand.visualizer.spatial_spectrum {
-        visualizer.demand.spatial_spectrum = false;
-        visualizer.spatial = Vec::new();
-    }
-    if !demand.visualizer.band_energy {
-        visualizer.demand.band_energy = false;
-        visualizer.band_rms = [0.0; 3];
-    }
-}
-
-fn stage_analysis_frame(
-    staging: &mut crate::analysis::AnalysisFrame,
-    sequence: &mut u64,
-    needs_refresh: bool,
-    frame: &crate::analysis::AnalysisFrame,
-    frame_is_current: bool,
-) -> bool {
-    if !frame_is_current
-        || (frame.sequence == *sequence && !(needs_refresh && staging.settings.is_some()))
-    {
-        return false;
-    }
-    staging.frequencies_hz.clone_from(&frame.frequencies_hz);
-    staging.spectrum_db.clone_from(&frame.spectrum_db);
-    staging.sequence = frame.sequence;
-    staging.display_token = frame.display_token;
-    staging.sample_rate = frame.sample_rate;
-    staging.sample_time = frame.sample_time;
-    staging.generation = frame.generation;
-    staging.settings = frame.settings;
-    staging.rms_left = frame.rms_left;
-    staging.rms_right = frame.rms_right;
-    staging.visualizer.clone_from(&frame.visualizer);
-    *sequence = frame.sequence;
-    true
-}
-
 pub(super) struct GuiApp {
     pub(super) i18n: Arc<Localizer>,
     localized_text: HashMap<String, SharedString>,
     handle: CoreHandle,
     state: GuiSnapshot,
-    layouts: LayoutSet,
+    workspace: workspace::Workspace,
     session: Weak<RefCell<UiSession>>,
-    layout_save: LayoutSaveHandle,
-    layout_save_seen: u64,
-    layout_save_error: Option<String>,
     inputs: HashMap<Field, Entity<Input>>,
     queue_search: Entity<ListSearch>,
     playlist_search: Entity<ListSearch>,
@@ -425,15 +366,8 @@ pub(super) struct GuiApp {
     manual_intents: manual_actions::ManualIntents,
     duplicate_review: duplicates::DuplicateReview,
     metadata_decoder_hint: crate::model::DecoderHint,
-    layout_focus: FocusHandle,
-    keyboard_scope: components::FocusScope,
-    keyboard_surface: Option<shell::KeyboardSurface>,
-    keyboard_restore: Option<FocusHandle>,
-    scroll_views: scrolling::ScrollViews,
-    keyboard_help: Option<crate::keyboard::Context>,
-    help_scroll: std::rc::Rc<ScrollHandle>,
+    shell: shell::WindowShell,
 
-    interaction: LayoutInteraction,
     error: Option<String>,
     artwork_manager: Arc<crate::artwork::ArtworkManager>,
     artwork_images: artwork::ArtworkImages,
@@ -443,17 +377,12 @@ pub(super) struct GuiApp {
     album_artwork: Entity<album_artwork::AlbumArtwork>,
     artwork_panels: HashMap<u64, Entity<album_artwork::AlbumArtworkPanel>>,
     album_browsers: HashMap<u64, Entity<album_browser::AlbumBrowser>>,
+    feature_panels: HashMap<u64, Entity<shell::panels::FeaturePanel>>,
     playlist_editor: Option<playlists::editor::PlaylistEditor>,
     playlist_action: Option<playlists::PlaylistAction>,
     queue_replace: Option<queue_replace::QueueReplacement>,
     settings: Entity<settings::Settings>,
-    visuals: visualization::Visuals,
-    audio_visualizer: visualization::AudioVisualizer,
-    catalog_open: bool,
-    settings_open: bool,
-    about_open: bool,
-    app_menu_open: bool,
-    layouts_open: bool,
+    presentation: Entity<presentation::Presentation>,
     layout_action: Option<layout::layout_manager::Action>,
     panel_menu: Option<PanelMenu>,
     content_menu: Option<list_interaction::ContentMenu>,
@@ -461,14 +390,7 @@ pub(super) struct GuiApp {
     content_resolution: bool,
     waveform: Entity<visualization::Waveform>,
     full_waveform_request: FullWaveformRequest,
-    analysis_worker_enabled: bool,
-    analysis_sequence: u64,
-    analysis_staging: crate::analysis::AnalysisFrame,
-    analysis_needs_refresh: bool,
     window_visible: bool,
-    frame_pending: bool,
-    frame_timer: Option<Task<()>>,
-    last_analysis_request: Option<Instant>,
     ui_font: Font,
     history_column_widths: Option<panels::HistoryColumnWidths>,
     _subscriptions: Vec<Subscription>,
@@ -482,14 +404,10 @@ impl Drop for GuiApp {
 
 impl GuiApp {
     fn panel_demand(&self, kind: &str) -> bool {
-        self.window_visible
-            && !self.state.system.shutting_down
-            && self
-                .layouts
-                .current()
-                .active_panels()
-                .iter()
-                .any(|panel| panel.kind == kind)
+        self.workspace.panel_demand(
+            kind,
+            self.window_visible && !self.state.system.shutting_down,
+        )
     }
     pub(super) fn tr(&self, id: &str) -> SharedString {
         self.localized_text
@@ -518,7 +436,7 @@ impl GuiApp {
     }
 
     fn focus_layout(&self, window: &mut Window, cx: &mut Context<Self>) {
-        self.layout_focus.focus(window, cx);
+        self.shell.layout_focus().focus(window, cx);
     }
 
     fn route_search_key(
@@ -563,7 +481,7 @@ impl GuiApp {
                 }
             });
         }
-        let panels = self.layouts.current().active_panels();
+        let panels = self.workspace.layouts.current().active_panels();
         if self.input_focused(window, cx) {
             return false;
         }
@@ -645,6 +563,7 @@ impl GuiApp {
     ) {
         self.cancel_interaction(window, cx);
         if let Some(panel_id) = self
+            .workspace
             .layouts
             .current()
             .panels()
@@ -652,28 +571,29 @@ impl GuiApp {
             .find(|panel| panel.kind == "library")
             .map(|panel| panel.id)
         {
-            self.layouts.current_mut().activate(panel_id);
+            self.workspace.layouts.current_mut().activate(panel_id);
             self.browser.focus_list(ListFocus::Library);
             self.search_panel = Some(panel_id);
-            self.catalog_open = false;
+            self.shell.dismiss(shell::Surface::PanelCatalog);
             if focus_search {
                 self.library_search
                     .update(cx, |search, cx| search.focus(window, cx));
             }
             self.persist_layout(cx);
-        } else if self.layouts.current().locked {
+        } else if self.workspace.layouts.current().locked {
             self.error = Some(self.i18n.text("shell-library-locked").to_owned());
             cx.notify();
         } else {
             let panel_id = self
+                .workspace
                 .layouts
                 .current_mut()
-                .add("library", self.interaction.target_group());
-            self.layouts.current_mut().activate(panel_id);
+                .add("library", self.workspace.interaction.target_group());
+            self.workspace.layouts.current_mut().activate(panel_id);
             self.layout_changed(cx);
             self.search_panel = Some(panel_id);
             self.browser.focus_list(ListFocus::Library);
-            self.catalog_open = false;
+            self.shell.dismiss(shell::Surface::PanelCatalog);
             if focus_search {
                 self.library_search
                     .update(cx, |search, cx| search.focus(window, cx));
@@ -685,6 +605,7 @@ impl GuiApp {
     fn reveal_queue_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         self.cancel_interaction(window, cx);
         let panel = self
+            .workspace
             .layouts
             .current()
             .panels()
@@ -692,22 +613,23 @@ impl GuiApp {
             .find(|panel| panel.kind == "queue")
             .map(|panel| panel.id);
         let panel_id = if let Some(panel) = panel {
-            self.layouts.current_mut().activate(panel);
+            self.workspace.layouts.current_mut().activate(panel);
             panel
-        } else if self.layouts.current().locked {
+        } else if self.workspace.layouts.current().locked {
             self.error = Some(self.i18n.text("gl-locate-queue-locked").to_owned());
             cx.notify();
             return false;
         } else {
             let panel = self
+                .workspace
                 .layouts
                 .current_mut()
-                .add("queue", self.interaction.target_group());
+                .add("queue", self.workspace.interaction.target_group());
             self.layout_changed(cx);
             panel
         };
         self.search_panel = Some(panel_id);
-        self.catalog_open = false;
+        self.shell.dismiss(shell::Surface::PanelCatalog);
         self.browser.focus_list(ListFocus::Queue);
         self.focus_layout(window, cx);
         self.persist_layout(cx);
@@ -798,21 +720,14 @@ impl GuiApp {
             .fixed_texts()
             .map(|(id, text)| (id.to_owned(), SharedString::from(text.to_owned())))
             .collect();
-        let (mut layouts, load_error) = layout_save.snapshot();
-        layouts.reset_edit_mode();
+        let (mut workspace, load_error) = workspace::Workspace::new(
+            layout_save.clone(),
+            AudioVisualizerOptions::from(state.system.config.as_ref()),
+            crate::config::AlbumArtworkOptions::from(state.system.config.as_ref()),
+        );
         let error = load_error
             .map(|error| i18n.format("shell-load-layouts-error", &[("error", error.into())]));
-        if layouts
-            .current_mut()
-            .initialize_audio_visualizers(AudioVisualizerOptions::from(
-                state.system.config.as_ref(),
-            ))
-            | layouts.current_mut().initialize_album_artworks(
-                crate::config::AlbumArtworkOptions::from(state.system.config.as_ref()),
-            )
-        {
-            layout_save.submit(&layouts);
-        }
+        workspace.save_error = error.clone();
         let ui_font = fonts::resolve(&state.system.config.ui_font, cx);
         let mut inputs = HashMap::new();
         for (field, placeholder) in [
@@ -854,7 +769,7 @@ impl GuiApp {
             if !this.metadata_protected(cx) {
                 this.clear_metadata_selection(cx);
             }
-            this.scroll_views.scroll_list_to("history", 0);
+            this.workspace.scroll_views.scroll_list_to("history", 0);
             cx.notify();
         }));
         subscriptions.push(cx.subscribe(&library_search, |this, _, event, cx| {
@@ -880,7 +795,7 @@ impl GuiApp {
             window,
             |this, settings, event, window, cx| match event {
                 settings::SettingsEvent::Closed => {
-                    this.settings_open = false;
+                    this.shell.dismiss(shell::Surface::Settings);
                     this.focus_layout(window, cx);
                     cx.notify();
                 }
@@ -893,11 +808,12 @@ impl GuiApp {
                     session,
                 } => {
                     if this
+                        .workspace
                         .layouts
                         .current_mut()
                         .set_audio_visualizer_options(*panel_id, *options)
                     {
-                        this.queue_layout_save();
+                        this.workspace.submit_save();
                         settings.update(cx, |settings, cx| {
                             settings.complete_panel_apply(*session, Ok(()), cx)
                         });
@@ -919,11 +835,12 @@ impl GuiApp {
                     session,
                 } => {
                     if this
+                        .workspace
                         .layouts
                         .current_mut()
                         .set_album_artwork_options(*panel_id, *options)
                     {
-                        this.queue_layout_save();
+                        this.workspace.submit_save();
                         settings.update(cx, |settings, cx| {
                             settings.complete_panel_apply(*session, Ok(()), cx)
                         });
@@ -942,7 +859,9 @@ impl GuiApp {
             },
         ));
         let waveform = cx.new(|_| visualization::Waveform::new(Arc::clone(&handle.waveform)));
-        subscriptions.push(cx.observe(&waveform, |_, _, cx| cx.notify()));
+        let presentation = cx.new(|cx| {
+            presentation::Presentation::new(handle.clone(), Arc::clone(&i18n), waveform.clone(), cx)
+        });
         subscriptions.push(
             cx.subscribe(&waveform, |this, waveform, event, cx| match event {
                 visualization::WaveformEvent::Preview {
@@ -957,11 +876,12 @@ impl GuiApp {
                     {
                         return;
                     }
-                    if this.interaction.waveform_preview(
+                    if this.workspace.interaction.waveform_preview(
                         *seconds,
                         this.state.queue.current_id,
                         *generation,
                     ) {
+                        this.sync_waveform(cx);
                         cx.notify();
                     }
                 }
@@ -972,7 +892,10 @@ impl GuiApp {
                     if !waveform.read(cx).accepts_seek_event(*generation) {
                         return;
                     }
-                    if let Some(seek) = this.interaction.finish_waveform(*seconds, *generation)
+                    if let Some(seek) = this
+                        .workspace
+                        .interaction
+                        .finish_waveform(*seconds, *generation)
                         && !this.state.system.config.still_mode
                         && this.state.system.config.waveform_seek_enabled
                     {
@@ -986,7 +909,8 @@ impl GuiApp {
                     }
                 }
                 visualization::WaveformEvent::Cancelled { generation } => {
-                    if this.interaction.cancel_waveform(*generation) {
+                    if this.workspace.interaction.cancel_waveform(*generation) {
+                        this.sync_waveform(cx);
                         cx.notify();
                     }
                 }
@@ -997,7 +921,7 @@ impl GuiApp {
             window,
             |this, _, event, window, cx| {
                 if matches!(event, InputEvent::Submit)
-                    && this.layouts_open
+                    && this.shell.is_open(shell::Surface::Layouts)
                     && this.layout_action.is_some()
                 {
                     this.finish_layout_action(window, cx);
@@ -1027,7 +951,6 @@ impl GuiApp {
         subscriptions.push(
             cx.observe_window_visibility(window, |this, visibility, window, cx| {
                 this.window_visible = matches!(visibility, WindowVisibility::Visible);
-                this.frame_timer.take();
                 if !this.window_visible {
                     this.invalidate_window_interaction(window, cx);
                     this.cancel_window_reads();
@@ -1037,6 +960,9 @@ impl GuiApp {
                 if !this.window_visible {
                     // Hidden windows may never deliver another paint/frame.
                     // Flush both current and already-scheduled retired owners.
+                    this.presentation.update(cx, |presentation, cx| {
+                        presentation.release_render_images(window, cx);
+                    });
                     this.album_artwork.update(cx, |artwork, cx| {
                         artwork.release_all_images(window, cx);
                     });
@@ -1045,7 +971,9 @@ impl GuiApp {
                     }
                     this.artwork_images.release_all_retired(window, cx);
                 }
-                this.request_frame(window, cx);
+                this.presentation.update(cx, |presentation, cx| {
+                    presentation.request_frame(window, cx)
+                });
                 cx.notify();
             }),
         );
@@ -1067,7 +995,9 @@ impl GuiApp {
                         if !this.window_visible {
                             this.artwork_images.release_all_retired(window, cx);
                         }
-                        this.request_frame(window, cx);
+                        this.presentation.update(cx, |presentation, cx| {
+                            presentation.request_frame(window, cx)
+                        });
                     })
                     .is_err()
                 {
@@ -1102,11 +1032,8 @@ impl GuiApp {
             settings,
             handle,
             state,
-            layouts,
+            workspace,
             session,
-            layout_save,
-            layout_save_seen: 0,
-            layout_save_error: error.clone(),
             inputs,
             queue_search,
             playlist_search,
@@ -1121,14 +1048,7 @@ impl GuiApp {
             manual_intents: manual_actions::ManualIntents::default(),
             duplicate_review: duplicates::DuplicateReview::default(),
             metadata_decoder_hint: Default::default(),
-            layout_focus: cx.focus_handle(),
-            keyboard_scope: components::FocusScope::new(cx),
-            keyboard_surface: None,
-            keyboard_restore: None,
-            scroll_views: scrolling::ScrollViews::default(),
-            keyboard_help: None,
-            help_scroll: std::rc::Rc::new(ScrollHandle::new()),
-            interaction: LayoutInteraction::default(),
+            shell: shell::WindowShell::new(cx),
             error,
             playlist_editor: None,
             playlist_action: None,
@@ -1144,17 +1064,12 @@ impl GuiApp {
             artwork_panels: HashMap::new(),
             default_album,
             album_browsers: HashMap::new(),
+            feature_panels: HashMap::new(),
             artwork_manager,
             artwork_loader: artwork::ArtworkLoader::default(),
             artwork_view: artwork::ArtworkView::new(artwork_images.clone()),
             artwork_images,
-            visuals: visualization::Visuals::new(),
-            audio_visualizer: visualization::AudioVisualizer::new(),
-            catalog_open: false,
-            settings_open: false,
-            about_open: false,
-            app_menu_open: false,
-            layouts_open: false,
+            presentation,
             layout_action: None,
             panel_menu: None,
             content_menu: None,
@@ -1162,31 +1077,21 @@ impl GuiApp {
             content_resolution: false,
             waveform,
             full_waveform_request: FullWaveformRequest::default(),
-            analysis_worker_enabled: false,
-            analysis_sequence: 0,
-            analysis_staging: crate::analysis::AnalysisFrame::default(),
-            analysis_needs_refresh: false,
             window_visible: window.is_visible(),
-            frame_pending: false,
-            frame_timer: None,
-            last_analysis_request: None,
             _subscriptions: subscriptions,
             ui_font,
             history_column_widths: None,
         };
-        app.interaction
-            .retain_layout(app.layouts.current().root.as_ref());
         app.sync_metadata_default(cx);
-        app.browser
-            .history
-            .sync(&app.state.library.history, app.history_playback());
+        let effects = app.browser.reconcile(&app.state, &app.state);
+        app.apply_browser_effects(effects, cx);
         app.sync_layout_save(cx);
         app.sync_analysis(cx);
         // Initialization may have completed before the wakeup callback was
         // installed. Reconcile once so the first frame never keeps the empty snapshot.
         app.refresh(cx);
         app.refresh_queue(cx);
-        app.layout_focus.focus(window, cx);
+        app.shell.layout_focus().focus(window, cx);
         window
             .observe_release(&cx.entity(), cx, |this: &mut Self, window, cx| {
                 this.release_render_images(window, cx);
@@ -1195,12 +1100,9 @@ impl GuiApp {
         app
     }
     fn release_render_images(&self, window: &mut Window, cx: &mut App) {
-        self.audio_visualizer.release_all_images(window);
-        self.visuals.release_all_images(window);
-        self.waveform
-            .read(cx)
-            .image_releaser()
-            .release_all_images(window);
+        self.presentation.update(cx, |presentation, cx| {
+            presentation.release_render_images(window, cx);
+        });
         self.artwork_view.release_all_images(window, cx);
         self.album_artwork.update(cx, |artwork, cx| {
             artwork.release_all_images(window, cx);
@@ -1344,7 +1246,7 @@ impl GuiApp {
         let error = match kind {
             ViewRequestKind::Summaries => self.browser.playlists().summaries().rows.error(index),
             ViewRequestKind::Entries => self.browser.playlists().entries().rows.error(index),
-            ViewRequestKind::Queue => self.browser.queue.rows.error(index),
+            ViewRequestKind::Queue => self.browser.queue.rows().error(index),
             _ => None,
         };
         list_row(theme, ("loading-row", index), false)
@@ -1413,15 +1315,14 @@ impl GuiApp {
         cancellation: Cancellation,
         cx: &mut Context<Self>,
     ) {
-        if cancellation.split.is_some() {
-            cancellation.restore_split(self.layouts.current_mut());
-        }
+        self.workspace.restore_interaction(&cancellation);
         self.waveform
             .update(cx, |waveform, _| waveform.cancel_seek());
+        self.sync_waveform(cx);
     }
 
     fn cancel_interaction(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let cancellation = self.interaction.cancel();
+        let cancellation = self.workspace.interaction.cancel();
         if cancellation.docking {
             cx.stop_active_drag(window);
         }
@@ -1430,7 +1331,7 @@ impl GuiApp {
     }
 
     fn invalidate_window_interaction(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let cancellation = self.interaction.invalidate_window();
+        let cancellation = self.workspace.interaction.invalidate_window();
         if cancellation.docking {
             cx.stop_active_drag(window);
         }
@@ -1443,16 +1344,19 @@ impl GuiApp {
 
     fn synchronize_interaction(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let geometry = DockGeometry::current(window, self.state.system.config.ui_scale);
-        if let Some(cancellation) = self.interaction.synchronize_geometry(geometry) {
+        if let Some(cancellation) = self.workspace.interaction.synchronize_geometry(geometry) {
             self.apply_interaction_cancellation(cancellation, cx);
         }
     }
 
     fn layout_changed(&mut self, cx: &mut Context<Self>) {
-        self.scroll_views.retain_layout(self.layouts.current());
-        let cancellation = self
-            .interaction
-            .layout_changed(self.layouts.current().root.as_ref());
+        let cancellation = self.workspace.reconcile_structure();
+        self.apply_layout_change(cancellation, cx);
+    }
+
+    fn apply_layout_change(&mut self, cancellation: Cancellation, cx: &mut Context<Self>) {
+        self.feature_panels
+            .retain(|id, _| self.workspace.layouts.current().contains_panel(*id));
         self.apply_interaction_cancellation(cancellation, cx);
         self.panel_menu = None;
         self.content_menu = None;
@@ -1460,215 +1364,82 @@ impl GuiApp {
         self.browser.clear_focus();
     }
 
-    fn history_playback(&self) -> Option<(i64, i64)> {
-        if self.state.playback.status == PlaybackStatus::Stopped {
-            return None;
-        }
-        Some((
-            self.state.current_track()?.id,
-            self.state.playback.last_heard_at?,
-        ))
-    }
-
     fn refresh(&mut self, cx: &mut Context<Self>) {
-        let state = (self.handle.revision() != self.state.system.revision)
-            .then(|| self.handle.gui_snapshot());
-        let changed = state
-            .as_ref()
-            .is_some_and(|state| state.revisions != self.state.revisions);
-        let mut config_changed = false;
-        if let Some(state) = state {
-            config_changed = !Arc::ptr_eq(&self.state.system.config, &state.system.config);
-            if !Arc::ptr_eq(&self.state.system.devices, &state.system.devices)
-                || self.state.system.ffmpeg_status != state.system.ffmpeg_status
-                || self.state.system.mpris_status != state.system.mpris_status
-                || self.state.system.config.ui_scale != state.system.config.ui_scale
-            {
-                self.settings.update(cx, |settings, cx| {
-                    settings.sync_runtime(
-                        &state.system.devices,
-                        &state.system.ffmpeg_status,
-                        &state.system.mpris_status,
-                        state.system.config.ui_scale,
-                        cx,
-                    );
-                });
-            }
-            let playlist_refresh = self
-                .browser
-                .playlists()
-                .refresh_changes(&self.state.library, &state.library);
-            let roots_changed =
-                self.state.system.config.library_roots != state.system.config.library_roots;
-            let page_size_changed =
-                self.state.system.config.page_size != state.system.config.page_size;
-            let waveform_seek_disabled = self.state.system.config.waveform_seek_enabled
-                && !state.system.config.waveform_seek_enabled;
-            let still_mode_changed =
-                self.state.system.config.still_mode != state.system.config.still_mode;
-            if self.state.system.config.ui_font != state.system.config.ui_font {
-                self.ui_font = fonts::resolve(&state.system.config.ui_font, cx);
-            }
-            if self.state.system.config.ui_theme != state.system.config.ui_theme {
-                theme::set_theme(state.system.config.ui_theme, cx);
-            }
-            self.state = state;
-            if self
-                .artwork_images
-                .set_decode_budget_mb(self.state.system.config.artwork_decode_budget_mb, cx)
-            {
-                // Cached failures no longer render an Img, so notify the
-                // consumer owners as well as the root metadata preview.
-                self.album_artwork.update(cx, |_, cx| cx.notify());
-                for albums in self.album_browsers.values() {
-                    albums.update(cx, |_, cx| cx.notify());
-                }
-                cx.notify();
-            }
-            self.sync_duplicate_review(cx);
-            if self
-                .browser
-                .library
-                .sync_projection(self.state.query_revisions(None))
-            {
-                self.browser.requests.cancel_directory_demand();
-            }
-            self.browser.library.sync_root_counts(
-                &self.state.system.config.library_roots,
-                self.state.library.structure_revision,
-            );
-            self.sync_queue(cx);
-            self.sync_metadata_query();
-            self.browser
-                .history
-                .sync(&self.state.library.history, self.history_playback());
-            self.sync_metadata_default(cx);
-            self.sync_full_waveform_request();
-            self.browser.reconcile_playlist_selection();
-            if self.browser.playlists().selected().is_some_and(|id| {
-                !self
-                    .state
-                    .library
-                    .playlist_entry_revisions
-                    .contains_key(&id)
-            }) {
-                self.browser.remove_playlist_selection();
-            }
-            self.sync_entry_projection(cx);
-            if playlist_refresh.summaries && self.panel_demand("playlists") {
-                self.request_playlist_selection(cx);
-            }
-            if still_mode_changed {
-                let cancellation = self.interaction.cancel();
-                self.apply_interaction_cancellation(cancellation, cx);
-                // Resuming must wait for a new publication, not redraw pre-mode audio.
-                self.analysis_staging = crate::analysis::AnalysisFrame::default();
-                self.analysis_sequence = self.handle.analysis.read().sequence;
-                self.analysis_needs_refresh = false;
-            }
-            if waveform_seek_disabled {
-                let cancellation = self.interaction.cancel();
-                self.apply_interaction_cancellation(cancellation, cx);
-                self.waveform
-                    .update(cx, |waveform, _| waveform.set_seek_enabled(false));
-            }
-            if roots_changed {
-                self.browser.library.roots_changed();
-            }
-            if page_size_changed {
-                self.refresh_page_size();
-            }
-            self.browser.refresh_playlists(playlist_refresh);
-        }
-        self.sync_album_artwork(cx);
-        self.sync_loading_text(cx);
-        if self.state.system.shutting_down {
+        if self.handle.revision() == self.state.system.revision {
             return;
         }
-        if config_changed {
-            self.sync_analysis(cx);
+        let state = self.handle.gui_snapshot();
+        let changed = state.revisions.changed_since(self.state.revisions);
+        let same_track = match (&state.current_track, &self.state.current_track) {
+            (Some(next), Some(previous)) => Arc::ptr_eq(next, previous),
+            (None, None) => true,
+            _ => false,
+        };
+        let transport_only = changed.playback
+            && !changed.library
+            && !changed.queue
+            && !changed.system
+            && same_track
+            && state.playback.status == self.state.playback.status;
+        if !Arc::ptr_eq(&self.state.system.devices, &state.system.devices)
+            || self.state.system.ffmpeg_status != state.system.ffmpeg_status
+            || self.state.system.mpris_status != state.system.mpris_status
+            || self.state.system.config.ui_scale != state.system.config.ui_scale
+        {
+            self.settings.update(cx, |settings, cx| {
+                settings.sync_runtime(
+                    &state.system.devices,
+                    &state.system.ffmpeg_status,
+                    &state.system.mpris_status,
+                    state.system.config.ui_scale,
+                    cx,
+                );
+            });
         }
-        if changed {
+        let effects = self.browser.reconcile(&self.state, &state);
+        let history_changed = effects.history_changed;
+        let waveform_seek_disabled = self.state.system.config.waveform_seek_enabled
+            && !state.system.config.waveform_seek_enabled;
+        let still_mode_changed =
+            self.state.system.config.still_mode != state.system.config.still_mode;
+        if self.state.system.config.ui_font != state.system.config.ui_font {
+            self.ui_font = fonts::resolve(&state.system.config.ui_font, cx);
+        }
+        if self.state.system.config.ui_theme != state.system.config.ui_theme {
+            theme::set_theme(state.system.config.ui_theme, cx);
+        }
+        self.state = state;
+        self.apply_browser_effects(effects, cx);
+        if self
+            .artwork_images
+            .set_decode_budget_mb(self.state.system.config.artwork_decode_budget_mb, cx)
+        {
+            self.album_artwork.update(cx, |_, cx| cx.notify());
+            for albums in self.album_browsers.values() {
+                albums.update(cx, |_, cx| cx.notify());
+            }
+            cx.notify();
+        }
+        self.sync_duplicate_review(cx);
+        self.sync_metadata_query();
+        self.sync_metadata_default(cx);
+        if still_mode_changed || waveform_seek_disabled {
+            let cancellation = self.workspace.interaction.cancel();
+            self.apply_interaction_cancellation(cancellation, cx);
+        }
+        if waveform_seek_disabled {
+            self.waveform
+                .update(cx, |waveform, _| waveform.set_seek_enabled(false));
+        }
+        self.sync_analysis(cx);
+        self.sync_loading_text(cx);
+        if transport_only {
+            self.refresh_playback_panels(history_changed, cx);
+        } else if !changed.is_empty() {
             cx.notify();
         }
     }
 
-    fn analysis_frame_interval(&self) -> Option<Duration> {
-        (self.window_visible
-            && self.analysis_worker_enabled
-            && self.state.playback.status == PlaybackStatus::Playing
-            && !self.state.system.shutting_down)
-            .then(|| Duration::from_secs_f64(1. / self.state.system.config.analysis_fps as f64))
-    }
-
-    fn request_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.window_visible || self.frame_pending || self.frame_timer.is_some() {
-            return;
-        }
-        // Native callbacks, core changes and local redraws share one consumer.
-        // An existing deadline is also pending work, not another clock to race.
-        self.frame_pending = true;
-        let view = cx.weak_entity();
-        window.on_next_frame(move |window, cx| {
-            let _ = view.update(cx, |this, cx| {
-                this.frame_pending = false;
-                if !this.window_visible {
-                    return;
-                }
-                this.refresh(cx);
-                this.consume_analysis(cx);
-                let track = this.state.current_track().or(this.metadata.track());
-                this.waveform
-                    .update(cx, |waveform, cx| waveform.sync(track, cx));
-                let Some(interval) = this.analysis_frame_interval() else {
-                    this.last_analysis_request = None;
-                    return;
-                };
-                let now = Instant::now();
-                if this
-                    .last_analysis_request
-                    .is_none_or(|last| now - last >= interval)
-                {
-                    this.last_analysis_request = Some(now);
-                    this.handle.request_analysis_frame();
-                }
-                let delay = interval.saturating_sub(this.last_analysis_request.unwrap().elapsed());
-                let timer = cx.background_executor().timer(delay);
-                this.frame_timer = Some(cx.spawn_in(window, async move |this, cx| {
-                    timer.await;
-                    let _ = this.update_in(cx, |this, window, cx| {
-                        this.frame_timer = None;
-                        this.request_frame(window, cx);
-                    });
-                }));
-            });
-        });
-        // A real draw keeps Wayland's outstanding native callback authoritative.
-        // A clean local callback must not become a free-running analysis clock.
-        cx.notify();
-    }
-
-    fn consume_analysis(&mut self, cx: &mut Context<Self>) {
-        if !self.analysis_worker_enabled {
-            return;
-        }
-        {
-            let frame = self.handle.analysis.read();
-            if !stage_analysis_frame(
-                &mut self.analysis_staging,
-                &mut self.analysis_sequence,
-                self.analysis_needs_refresh,
-                &frame,
-                self.handle.analysis_frame_is_current(&frame),
-            ) {
-                return;
-            }
-        }
-        self.analysis_needs_refresh = false;
-        self.visuals.update(&self.analysis_staging);
-        self.audio_visualizer.update(&self.analysis_staging);
-        cx.notify();
-    }
     fn album_browser_panel(
         &mut self,
         id: u64,
@@ -1722,8 +1493,8 @@ impl GuiApp {
     }
 
     fn sync_album_browser(&mut self, cx: &mut Context<Self>) {
-        let panels = self.layouts.current().panels();
-        let active = self.layouts.current().active_panels();
+        let panels = self.workspace.layouts.current().panels();
+        let active = self.workspace.layouts.current().active_panels();
         let visible = self.window_visible && !self.state.system.shutting_down;
         let revisions = self.state.query_revisions(None);
         let page_size = self.view_page_size();
@@ -1750,14 +1521,19 @@ impl GuiApp {
 
     fn sync_album_artwork(&mut self, cx: &mut Context<Self>) {
         self.sync_album_browser(cx);
-        self.artwork_panels
-            .retain(|id, _| self.layouts.current().album_artwork_options(*id).is_some());
+        self.artwork_panels.retain(|id, _| {
+            self.workspace
+                .layouts
+                .current()
+                .album_artwork_options(*id)
+                .is_some()
+        });
         self.album_artwork.update(cx, |artwork, cx| {
             artwork.sync(
                 self.state.current_track(),
                 self.state.playback.status,
                 &self.state.system.config,
-                self.layouts.current().root.as_ref(),
+                self.workspace.layouts.current().root.as_ref(),
                 self.window_visible && !self.state.system.shutting_down,
                 cx,
             );
@@ -1766,76 +1542,6 @@ impl GuiApp {
 
     fn sync_analysis(&mut self, cx: &mut Context<Self>) {
         self.sync_album_artwork(cx);
-        let enabled = !self.state.system.config.still_mode;
-        self.visuals.set_enabled(enabled);
-        let active_panels = if enabled {
-            self.layouts.current().active_panels()
-        } else {
-            Vec::new()
-        };
-        let spectrogram_panel_ids = active_panels
-            .iter()
-            .filter(|panel| self.window_visible && panel.kind == "spectrogram")
-            .map(|panel| panel.id)
-            .collect::<Vec<_>>();
-        let spectrum_panel_ids = active_panels
-            .iter()
-            .filter(|panel| panel.kind == "spectrum")
-            .map(|panel| panel.id)
-            .collect::<Vec<_>>();
-        self.visuals
-            .retain_spectrogram_panels(&spectrogram_panel_ids);
-        self.visuals.retain_spectrum_panels(&spectrum_panel_ids);
-        let spectrum_restored = self
-            .visuals
-            .set_spectrum_visible(self.window_visible && !spectrum_panel_ids.is_empty());
-        let audio_visualizer_changed = self.audio_visualizer.sync(
-            &self.state.system.config,
-            &active_panels,
-            self.window_visible,
-        );
-        let mut demand = crate::analysis::VisualizerDemand::default();
-        if self.window_visible {
-            for panel in &active_panels {
-                if panel.kind != "audio_visualizer" {
-                    continue;
-                }
-                let options = panel.audio_visualizer.unwrap_or_else(|| {
-                    AudioVisualizerOptions::from(self.state.system.config.as_ref())
-                });
-                match options.style {
-                    AudioVisualizerStyle::StereoDensity => demand.stereo_density = true,
-                    AudioVisualizerStyle::SpatialSpectrum => demand.spatial_spectrum = true,
-                    AudioVisualizerStyle::FractalBeams | AudioVisualizerStyle::FractalFlow => {
-                        demand.band_energy = true;
-                    }
-                    _ => {}
-                }
-            }
-        }
-        let analysis_visible = self.window_visible
-            && active_panels.iter().any(|panel| {
-                matches!(
-                    panel.kind.as_str(),
-                    "spectrum" | "spectrogram" | "audio_visualizer"
-                )
-            });
-        if analysis_visible {
-            let spectrum_changed = self.visuals.configure(&self.state.system.config);
-            self.analysis_needs_refresh |=
-                spectrum_restored || spectrum_changed || audio_visualizer_changed;
-        } else {
-            // Reopening must wait for a current display-demand publication, not
-            // refresh a retained pre-hide frame with the same sequence.
-            self.analysis_needs_refresh = false;
-        }
-        self.analysis_worker_enabled = analysis_visible;
-        let demand = crate::analysis::DisplayDemand {
-            enabled: analysis_visible,
-            visualizer: demand,
-        };
-        retain_analysis_staging(&mut self.analysis_staging, demand);
-        self.handle.set_display_demand(demand);
         self.sync_waveform(cx);
     }
 
@@ -1848,20 +1554,37 @@ impl GuiApp {
 
     fn sync_waveform(&mut self, cx: &mut Context<Self>) {
         self.sync_full_waveform_request();
-        let enabled = !self.state.system.config.still_mode;
-        let panels = if enabled {
-            self.layouts.current().active_panels()
+        let current = self.state.current_track();
+        let track = current.or(self.metadata.track());
+        let position = if current.is_some() {
+            self.workspace
+                .interaction
+                .seek_preview()
+                .unwrap_or(self.state.playback.position)
         } else {
-            Vec::new()
+            0.0
         };
-        let track = self.state.current_track().or(self.metadata.track());
-        self.waveform.update(cx, |waveform, cx| {
-            waveform.set_enabled(enabled);
-            if !enabled {
-                return;
-            }
-            waveform.retain_panels(&panels, cx);
-            waveform.sync(track, cx);
+        let duration = if current.is_some() {
+            self.state.playback.duration
+        } else {
+            None
+        }
+        .or_else(|| track.and_then(|track| track.duration));
+        let panels = self.workspace.layouts.current().active_panels();
+        self.presentation.update(cx, |presentation, cx| {
+            presentation.sync(
+                presentation::PresentationState {
+                    config: Arc::clone(&self.state.system.config),
+                    panels: &panels,
+                    status: self.state.playback.status,
+                    visible: self.window_visible,
+                    shutting_down: self.state.system.shutting_down,
+                    track,
+                    position,
+                    duration,
+                },
+                cx,
+            );
         });
     }
     fn load_full_waveform(&mut self, cx: &mut Context<Self>) {
@@ -1919,53 +1642,8 @@ impl GuiApp {
         })
         .detach();
     }
-    fn spectrum_panel(&mut self, id: u64, _: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let theme = crate::gui::theme::palette(cx);
-        self.visuals.spectrum(theme, &self.i18n, id)
-    }
-    fn audio_visualizer_panel(
-        &mut self,
-        panel: &layout::Panel,
-        _: &mut Window,
-        _: &mut Context<GuiApp>,
-    ) -> AnyElement {
-        let options = panel
-            .audio_visualizer
-            .unwrap_or_else(|| AudioVisualizerOptions::from(self.state.system.config.as_ref()));
-        self.audio_visualizer.view(
-            &self.i18n,
-            panel.id,
-            self.state.playback.status == PlaybackStatus::Playing,
-            options,
-        )
-    }
-    fn spectrogram_panel(&mut self, id: u64, _: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let theme = crate::gui::theme::palette(cx);
-        self.visuals.spectrogram(theme, &self.i18n, id)
-    }
-    fn waveform_panel(&mut self, id: u64, _: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let current = self.state.current_track();
-        let track = current.or(self.metadata.track());
-        let position = if current.is_some() {
-            self.interaction
-                .seek_preview()
-                .unwrap_or(self.state.playback.position)
-        } else {
-            0.0
-        };
-        let duration = if current.is_some() {
-            self.state.playback.duration
-        } else {
-            None
-        }
-        .or_else(|| track.and_then(|track| track.duration));
-        let config = self.state.system.config.clone();
-        self.waveform.update(cx, |waveform, cx| {
-            waveform.view(&self.i18n, id, position, duration, &config, cx)
-        })
-    }
     fn drag_position(&mut self, position: Point<Pixels>, alt: bool, cx: &mut Context<Self>) {
-        let Some(dragging) = self.interaction.dragging() else {
+        let Some(dragging) = self.workspace.interaction.dragging() else {
             return;
         };
         let bounds = match dragging {
@@ -1976,7 +1654,8 @@ impl GuiApp {
                 } else {
                     Measured::Volume(id)
                 };
-                let Some(bounds) = self.interaction.measurements().get(&key).copied() else {
+                let Some(bounds) = self.workspace.interaction.measurements().get(&key).copied()
+                else {
                     return;
                 };
                 bounds
@@ -1986,7 +1665,12 @@ impl GuiApp {
             Dragging::Split(_) => self.drag_split(position, alt, cx),
             Dragging::Seek(_) => {
                 let fraction = ((position.x - bounds.origin.x) / bounds.size.width).clamp(0., 1.);
-                if self.interaction.update_slider_seek(f64::from(fraction)) {
+                if self
+                    .workspace
+                    .interaction
+                    .update_slider_seek(f64::from(fraction))
+                {
+                    self.sync_waveform(cx);
                     cx.notify();
                 }
             }
@@ -1997,7 +1681,7 @@ impl GuiApp {
         }
     }
     fn finish_drag(&mut self, cx: &mut Context<Self>) {
-        match self.interaction.finish_drag() {
+        match self.workspace.interaction.finish_drag() {
             DragCommit::None => {}
             DragCommit::Seek(seek) => self.send(
                 Command::SeekQueue {
@@ -2019,7 +1703,7 @@ impl GuiApp {
     ) -> AnyElement {
         let theme = crate::gui::theme::palette(cx);
         let value = value.clamp(0., 1.);
-        let is_dragging = match (self.interaction.dragging(), dragging) {
+        let is_dragging = match (self.workspace.interaction.dragging(), dragging) {
             (Some(Dragging::Seek(active)), Dragging::Seek(id))
             | (Some(Dragging::Volume(active)), Dragging::Volume(id)) => active == id,
             _ => false,
@@ -2075,7 +1759,7 @@ impl GuiApp {
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                     this.synchronize_interaction(window, cx);
-                    let cancellation = this.interaction.begin_slider(
+                    let cancellation = this.workspace.interaction.begin_slider(
                         dragging,
                         this.state.queue.current_id,
                         this.state.playback.duration,
@@ -2098,9 +1782,8 @@ impl GuiApp {
 
 #[cfg(test)]
 mod state_tests {
-    use super::{
-        BrowserFocus, ListFocus, panel_list_focus, retain_analysis_staging, stage_analysis_frame,
-    };
+    use super::presentation::{retain_analysis_staging, stage_analysis_frame};
+    use super::{BrowserFocus, ListFocus, panel_list_focus};
     use crate::analysis::{
         AnalysisFrame, AnalysisSettings, AnalysisWorker, DisplayDemand, TapFrame, VisualizerDemand,
     };

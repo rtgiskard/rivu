@@ -13,15 +13,15 @@ fn panel_group(node: &Node, panel: u64) -> Option<(u64, usize)> {
 
 impl GuiApp {
     pub(in crate::gui) fn panel_docking_blocked(&self) -> bool {
-        self.layouts.current().locked
-            || self.settings_open
-            || self.about_open
-            || self.keyboard_help.is_some()
-            || self.layouts_open
-            || self.app_menu_open
+        self.workspace.layouts.current().locked
+            || self.shell.is_open(shell::Surface::Settings)
+            || self.shell.is_open(shell::Surface::About)
+            || self.shell.help().is_some()
+            || self.shell.is_open(shell::Surface::Layouts)
+            || self.shell.is_open(shell::Surface::AppMenu)
             || self.panel_menu.is_some()
             || self.content_menu.is_some()
-            || self.catalog_open
+            || self.shell.is_open(shell::Surface::PanelCatalog)
     }
 
     pub(in crate::gui) fn start_panel_docking(
@@ -31,7 +31,7 @@ impl GuiApp {
         cx: &mut Context<Self>,
     ) {
         self.synchronize_interaction(window, cx);
-        let cancellation = self.interaction.start_docking(
+        let cancellation = self.workspace.interaction.start_docking(
             source,
             DockGeometry::current(window, self.state.system.config.ui_scale),
         );
@@ -43,7 +43,7 @@ impl GuiApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.interaction.cancel_docking() {
+        if self.workspace.interaction.cancel_docking() {
             cx.stop_active_drag(window);
             cx.notify();
         }
@@ -63,11 +63,13 @@ impl GuiApp {
             self.cancel_panel_docking(window, cx);
             return;
         }
-        let Some(mut session) = self.interaction.take_docking() else {
+        let Some(mut session) = self.workspace.interaction.take_docking() else {
             return;
         };
         let geometry = DockGeometry::current(window, self.state.system.config.ui_scale);
-        if session.geometry != geometry || self.interaction.measured_geometry() != Some(geometry) {
+        if session.geometry != geometry
+            || self.workspace.interaction.measured_geometry() != Some(geometry)
+        {
             let had_preview = session.hover.is_some();
             session.hover = None;
             if had_preview {
@@ -75,8 +77,8 @@ impl GuiApp {
             }
         }
         // Bounds notifications precede repaint; never rebuild from the previous frame.
-        if self.interaction.measured_geometry() != Some(geometry) {
-            self.interaction.restore_docking(session);
+        if self.workspace.interaction.measured_geometry() != Some(geometry) {
+            self.workspace.interaction.restore_docking(session);
             return;
         }
         session.geometry = geometry;
@@ -86,12 +88,12 @@ impl GuiApp {
                 request.and_then(|request| self.prepare_docking(session.source, request));
             cx.notify();
         }
-        self.interaction.restore_docking(session);
+        self.workspace.interaction.restore_docking(session);
     }
 
     fn docking_request(&self, pointer: Point<Pixels>) -> Option<DockRequest> {
-        let root = self.layouts.current().root.as_ref()?;
-        let measured = self.interaction.measurements();
+        let root = self.workspace.layouts.current().root.as_ref()?;
+        let measured = self.workspace.interaction.measurements();
         let bounds = |id| measured.get(&Measured::Node(id)).copied();
         fn leaf<'a>(
             node: &'a Node,
@@ -128,10 +130,10 @@ impl GuiApp {
     }
 
     fn prepare_docking(&self, source: u64, request: DockRequest) -> Option<DockHover> {
-        let current = self.layouts.current();
+        let current = self.workspace.layouts.current();
         let root = current.root.as_ref()?;
         let target = layout_geometry::find(root, request.target.node)?;
-        let measured = self.interaction.measurements();
+        let measured = self.workspace.interaction.measurements();
         let owner = *measured.get(&Measured::Node(request.target.node))?;
         let outer = *measured.get(&Measured::Node(layout_geometry::node_id(root)))?;
         drop(measured);
@@ -184,7 +186,7 @@ impl GuiApp {
             outer,
             preview_node,
             f64::from(SPLIT_GUTTER),
-            self.interaction.scale_factor(),
+            self.workspace.interaction.scale_factor(),
         )?;
         hover.preview = Some(preview);
         hover.prepared = Some(prepared);
@@ -199,6 +201,7 @@ impl GuiApp {
     ) {
         if self.panel_docking_blocked()
             || self
+                .workspace
                 .interaction
                 .docking()
                 .is_none_or(|session| session.source != source)
@@ -209,16 +212,17 @@ impl GuiApp {
         // Mouse-up can arrive without an intervening move (or after a resize).
         // Resolve through exactly the same path as the displayed preview.
         self.update_panel_docking(window.mouse_position(), window, cx);
-        let Some(session) = self.interaction.take_docking() else {
+        let Some(session) = self.workspace.interaction.take_docking() else {
             return;
         };
         if let Some(hover) = session.hover
             && let Some(prepared) = hover.prepared
         {
-            *self.layouts.current_mut() = prepared;
+            *self.workspace.layouts.current_mut() = prepared;
             self.layout_changed(cx);
-            self.interaction.set_target_group(
-                self.layouts
+            self.workspace.interaction.set_target_group(
+                self.workspace
+                    .layouts
                     .current()
                     .root
                     .as_ref()
@@ -233,7 +237,7 @@ impl GuiApp {
         &self,
         theme: &'static crate::theme::Palette,
     ) -> AnyElement {
-        let Some(session) = self.interaction.docking() else {
+        let Some(session) = self.workspace.interaction.docking() else {
             return div().into_any_element();
         };
         let mut overlay = div().absolute().top_0().left_0().size_full();

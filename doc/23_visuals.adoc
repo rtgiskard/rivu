@@ -143,12 +143,21 @@ avoids separate analyzers for different views while allowing unused result
 storage to be released. A demand transition invalidates the sampling window,
 including a quick hide/show that the worker did not observe as a steady state.
 
-GUI consumption follows window frames. Native callbacks, local redraws, and
-core wakeups share one pending frame or deadline; they do not create parallel
-analysis loops. A frame consumes the latest published result and requests the
-next one. A redraw can bootstrap initial display or recovery without waiting
-for an analysis result. Playback, commands, and shutdown remain independent of
-presentation.
+The GUI presentation owner consumes analysis on window frames and owns the
+shared visual models, staging buffer, display demand, and per-panel view
+entities. Business/configuration changes update its inputs; frame callbacks
+never refresh the business root. Native callbacks, local redraws, and core
+wakeups share one pending frame or deadline rather than parallel analysis loops.
+A frame consumes the latest publication and requests the next one; paused
+business updates permit a single refresh without starting an idle clock.
+
+Only affected visual panel entities are invalidated by analysis or waveform
+updates. Cached scenes retain their measured panel dimensions until geometry or
+visibility changes. Shared Spectrogram geometry changes invalidate sibling
+scenes before retired images can be reused. Disabling visualization caching also
+disables scene caching for these panels because transient renderer images cannot
+outlive their retirement boundary. Playback, commands, and shutdown remain
+independent of presentation.
 
 A reliable Hidden notification cancels frame scheduling and disables analysis.
 Without that notification, compositor-throttled frames reduce analysis demand

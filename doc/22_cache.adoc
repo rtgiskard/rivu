@@ -17,6 +17,14 @@ A projection key is normalized query identity plus its stamp, excluding page
 offsets, limits, batch cursors, and expected revisions. Request generations
 reject obsolete intent independently of data freshness.
 
+The browser reconciles every feature's revision and configuration dependencies
+before the window dispatches resulting reads, including while panels are hidden.
+Directory and root-count preparation, publication, and physical-worker retirement
+are owner transitions. Logical cancellation only changes publication rights;
+it cannot free a submitted worker slot.
+Queued directory demand alone does not invalidate the view; local forest
+publication and worker progress supply the notifications that resume rendering.
+
 The forest page is synthesized locally from configured roots, not another
 database query; root-count identity also includes those roots. Metadata-only
 changes preserve the latest navigation target and modifiers; an already

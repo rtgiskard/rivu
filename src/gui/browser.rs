@@ -5,8 +5,12 @@
 //! selection/cancellation changes identities. Rendering and scope capture borrow
 //! read-only buffers and tree state. Only the owners prepare, accept, retry, and
 //! pin payloads or start and complete range selection.
+//! Snapshot reconciliation runs regardless of pane visibility and returns only host
+//! dispatch effects. Physical read reservations survive logical cancellation;
+//! directory/count publication and retirement are aggregate-owner transitions.
 
 mod playlists;
+mod queries;
 pub(super) mod requests;
 pub(super) mod selection;
 
@@ -51,11 +55,80 @@ pub(super) struct BrowserState {
     playlists: PlaylistBrowser,
     pub(super) queue: QueueSelection,
     pub(super) history: HistoryBrowser,
-    pub(super) requests: ViewRequests,
+    requests: ViewRequests,
     focus: Option<BrowserFocus>,
+    page_size: usize,
+}
+
+/// Host work produced after all feature state has reconciled, including hidden panes.
+#[derive(Default)]
+pub(super) struct BrowserEffects {
+    pub(super) queue_selection: bool,
+    pub(super) entry_selection: bool,
+    pub(super) playlist_lookup: bool,
+    pub(super) history_changed: bool,
 }
 
 impl BrowserState {
+    pub(super) fn reconcile(
+        &mut self,
+        previous: &crate::projection::GuiSnapshot,
+        next: &crate::projection::GuiSnapshot,
+    ) -> BrowserEffects {
+        let playlist_refresh = self
+            .playlists
+            .refresh_changes(&previous.library, &next.library);
+        if previous.system.config.library_roots != next.system.config.library_roots {
+            self.library.roots_changed();
+        }
+        self.configure_page_size(next.system.config.page_size as usize);
+        if self.library.sync_projection(next.query_revisions(None)) {
+            self.requests.cancel_directory_demand();
+        }
+        self.library.sync_root_counts(
+            &next.system.config.library_roots,
+            next.library.structure_revision,
+        );
+        let queue_selection = self
+            .queue
+            .sync(next.query_revisions(None), next.queue.total);
+        let playback = (next.playback.status != crate::model::PlaybackStatus::Stopped)
+            .then(|| {
+                next.current_track()
+                    .map(|track| track.id)
+                    .zip(next.playback.last_heard_at)
+            })
+            .flatten();
+        let history_changed = self.history.sync(&next.library.history, playback);
+        self.playlists.reconcile_selection();
+        if self
+            .playlists
+            .selected()
+            .is_some_and(|id| !next.library.playlist_entry_revisions.contains_key(&id))
+        {
+            self.remove_playlist_selection();
+        }
+        let entry_selection =
+            self.sync_entry_projection(next.query_revisions(self.playlists.selected()));
+        self.refresh_playlists(playlist_refresh);
+        BrowserEffects {
+            queue_selection,
+            entry_selection,
+            playlist_lookup: playlist_refresh.summaries,
+            history_changed,
+        }
+    }
+
+    pub(super) fn sync_entry_projection(&mut self, revisions: QueryRevisions) -> bool {
+        let Some(id) = self.playlists.selected() else {
+            return false;
+        };
+        let query = self.playlists.entries().query.clone();
+        self.playlists
+            .track_selection
+            .sync_projection(id, query, revisions)
+    }
+
     pub(super) fn playlists(&self) -> &PlaylistBrowser {
         &self.playlists
     }
@@ -67,8 +140,12 @@ impl BrowserState {
         &mut self.playlists.track_selection
     }
 
-    pub(super) fn reconcile_playlist_selection(&mut self) {
-        self.playlists.reconcile_selection();
+    pub(super) fn view_pending(&self, kind: ViewRequestKind) -> bool {
+        self.requests.pending(kind)
+    }
+
+    pub(super) fn view_loading(&self, kind: ViewRequestKind, token: u64) -> bool {
+        self.requests.is_current(kind, token)
     }
 
     pub(super) fn sync_active_playlist_entry(&mut self) {
@@ -125,6 +202,12 @@ impl BrowserState {
         } else {
             self.remove_playlist_selection();
         }
+    }
+
+    pub(super) fn cancel_manual_selection(&mut self) {
+        self.library.cancel_manual_selection();
+        self.playlists.track_selection.cancel_manual();
+        self.queue.cancel_manual();
     }
 
     pub(super) fn clear_selection(&mut self) {
@@ -188,7 +271,7 @@ pub(super) struct LibraryViewBuffer {
 }
 
 pub(super) struct LibraryBrowser {
-    pub(super) projection: QueryProjection,
+    projection: QueryProjection,
     search_counts: SearchCounts,
     buffer: LibraryViewBuffer,
     tree: DirectoryTree,
@@ -326,7 +409,7 @@ impl LibraryBrowser {
         self.search_counts.totals
     }
 
-    pub(super) fn projection_query(&self) -> Query {
+    fn projection_query(&self) -> Query {
         if self.tree_active {
             Query::DirectoryPage {
                 path: Default::default(),
@@ -349,7 +432,7 @@ impl LibraryBrowser {
         }
     }
 
-    pub(super) fn sync_projection(&mut self, revisions: QueryRevisions) -> bool {
+    fn sync_projection(&mut self, revisions: QueryRevisions) -> bool {
         if !self.projection.sync(&self.projection_query(), revisions) {
             return false;
         }
@@ -357,11 +440,7 @@ impl LibraryBrowser {
         self.tree.invalidate();
         true
     }
-    pub(super) fn sync_root_counts(
-        &mut self,
-        roots: &[std::path::PathBuf],
-        structure_revision: u64,
-    ) {
+    fn sync_root_counts(&mut self, roots: &[std::path::PathBuf], structure_revision: u64) {
         let revisions = QueryRevisions {
             structure: structure_revision,
             ..Default::default()
@@ -382,7 +461,7 @@ impl LibraryBrowser {
         }
     }
 
-    pub(super) fn root_count_ticket(&mut self) -> crate::core::QueryTicket {
+    fn root_count_ticket(&mut self) -> crate::core::QueryTicket {
         self.counts.owner.ticket()
     }
 
@@ -405,10 +484,10 @@ impl LibraryBrowser {
         self.counts.settled = false;
     }
 
-    pub(super) fn root_counts_settled(&self) -> bool {
+    fn root_counts_settled(&self) -> bool {
         self.counts.settled
     }
-    pub(super) fn begin_root_counts(
+    fn begin_root_counts(
         &mut self,
         roots: &[std::path::PathBuf],
         structure_revision: u64,
@@ -433,7 +512,7 @@ impl LibraryBrowser {
         (self.counts.owner.generation(), batches)
     }
 
-    pub(super) fn counts_current(
+    fn counts_current(
         &self,
         generation: u64,
         roots: &[std::path::PathBuf],
@@ -449,7 +528,7 @@ impl LibraryBrowser {
                 }))
     }
 
-    pub(super) fn accept_root_counts(
+    fn accept_root_counts(
         &mut self,
         generation: u64,
         offset: usize,
@@ -462,7 +541,7 @@ impl LibraryBrowser {
         }
     }
 
-    pub(super) fn fail_root_counts(&mut self, generation: u64, offset: usize) {
+    fn fail_root_counts(&mut self, generation: u64, offset: usize) {
         if self.counts.owner.generation() == generation && self.counts.pending.remove(&offset) {
             self.counts.failed.insert(offset);
         }
@@ -525,7 +604,7 @@ impl LibraryBrowser {
         }
     }
 
-    pub(super) fn prepare_directory(
+    fn prepare_directory(
         &mut self,
         branch: TreeBranch,
         offset: usize,
@@ -540,7 +619,8 @@ impl LibraryBrowser {
         offset
     }
 
-    pub(super) fn directory_request_pending(
+    #[cfg(test)]
+    fn directory_request_pending(
         &self,
         branch: &TreeBranch,
         generation: u64,
@@ -556,12 +636,7 @@ impl LibraryBrowser {
             && self.tree.request_pending(branch, generation)
     }
 
-    pub(super) fn accept_directory(
-        &mut self,
-        branch: &TreeBranch,
-        generation: u64,
-        page: Page<DirectoryRow>,
-    ) {
+    fn accept_directory(&mut self, branch: &TreeBranch, generation: u64, page: Page<DirectoryRow>) {
         let projection = self.tree.projection_revision();
         self.tree.accept(branch, generation, page);
         if self.tree.projection_revision() != projection {
@@ -570,11 +645,11 @@ impl LibraryBrowser {
         self.remember_selection();
     }
 
-    pub(super) fn fail_directory(&mut self, branch: &TreeBranch, generation: u64) {
+    fn fail_directory(&mut self, branch: &TreeBranch, generation: u64) {
         self.tree.fail(branch, generation);
     }
 
-    pub(super) fn cancel_directory(&mut self, branch: &TreeBranch, generation: u64) {
+    fn cancel_directory(&mut self, branch: &TreeBranch, generation: u64) {
         self.tree.cancel_request(branch, generation);
     }
 
@@ -728,7 +803,7 @@ impl LibraryBrowser {
             .remember_selection(&self.selected_nodes, &self.selected);
     }
 
-    pub(super) fn roots_changed(&mut self) {
+    fn roots_changed(&mut self) {
         self.invalidate_projection();
         self.tree.clear();
         self.counts.invalidate();
@@ -828,7 +903,11 @@ impl Default for HistoryBrowser {
 }
 
 impl HistoryBrowser {
-    pub(super) fn sync(&mut self, source: &Arc<Vec<HistoryEntry>>, playback: Option<(i64, i64)>) {
+    pub(super) fn sync(
+        &mut self,
+        source: &Arc<Vec<HistoryEntry>>,
+        playback: Option<(i64, i64)>,
+    ) -> bool {
         let source_changed = !Arc::ptr_eq(&self.source, source);
         let playback_changed = self.playback != playback;
         self.playback = playback;
@@ -836,7 +915,7 @@ impl HistoryBrowser {
             if playback_changed && self.sort == HistorySort::Recent {
                 self.rebuild();
             }
-            return;
+            return playback_changed;
         }
         self.source = Arc::clone(source);
         self.title_keys = source
@@ -846,6 +925,7 @@ impl HistoryBrowser {
         self.rebuild();
         self.selected.retain(|id| self.positions.contains_key(id));
         self.anchor = self.anchor.filter(|id| self.positions.contains_key(id));
+        true
     }
 
     pub(super) fn set_query(&mut self, query: Option<String>) {
@@ -1360,10 +1440,44 @@ mod tests {
         history.sync(&source, None);
         history.select_all();
         let generation = history.generation();
-        history.sync(&source, Some((3, 200)));
+        assert!(history.sync(&source, Some((3, 200))));
         assert_eq!(history.ordered_selection(), [3, 1, 2]);
         assert!(history.drag_ids(1, generation).is_empty());
         assert_eq!(history.drag_ids(1, history.generation()), [3, 1, 2]);
+
+        // A later heard timestamp needs fresh row handlers even when the row
+        // order stays the same. Ordinary playback ticks must keep them usable.
+        let generation = history.generation();
+        assert!(!history.sync(&source, Some((3, 200))));
+        assert_eq!(history.drag_ids(1, generation), [3, 1, 2]);
+        assert!(history.sync(&source, Some((3, 201))));
+        assert_eq!(history.ordered_selection(), [3, 1, 2]);
+        assert!(history.drag_ids(1, generation).is_empty());
+        assert_eq!(history.drag_ids(1, history.generation()), [3, 1, 2]);
+    }
+
+    #[test]
+    fn history_live_timestamp_changes_keep_non_recent_row_actions_valid() {
+        for sort in [HistorySort::Title, HistorySort::Plays] {
+            let mut history = HistoryBrowser::default();
+            let source = history_selection_source(&[1, 2, 3]);
+            history.sync(&source, Some((3, 200)));
+            history.set_sort(sort);
+            select_history(&mut history, 1, false, false);
+            select_history(&mut history, 3, false, true);
+            let generation = history.generation();
+            let selected = history.ordered_selection();
+            let commit = history.prepare_selection(2, false, false).unwrap();
+
+            // The timestamp cell changes, but these sorts do not invalidate
+            // row identity or an already prepared selection.
+            assert!(history.sync(&source, Some((3, 201))));
+            assert_eq!(history.drag_ids(1, generation), selected);
+            assert!(history.commit_selection(commit));
+            assert_eq!(history.ordered_selection(), [2]);
+            assert!(!history.sync(&source, Some((3, 201))));
+            assert_eq!(history.drag_ids(2, generation), [2]);
+        }
     }
 
     #[test]

@@ -7,6 +7,8 @@
 //! or metadata intent handling.
 //! Selection starts and completions belong to QueueSelection; window-wide intent,
 //! metadata confirmation, focus and scrolling remain with GuiApp.
+//! Search, snapshot reconciliation, retry and page publication are owner transitions.
+//! Physical page retirement precedes host refresh; publication follows that refresh.
 
 use super::manual_actions::{ManualAction, ManualIntentId};
 use super::*;
@@ -190,9 +192,9 @@ enum QueueWorker {
 
 #[derive(Default)]
 pub(super) struct QueueSelection {
-    pub(super) rows: paged::PagedRows<QueueRow>,
-    pub(super) query: Option<String>,
-    pub(super) locate_filtered: Option<u64>,
+    rows: paged::PagedRows<QueueRow>,
+    query: Option<String>,
+    locate_filtered: Option<u64>,
     selected: HashMap<u64, QueueIdentity>,
     anchor: Option<QueueIdentity>,
     page_projection: QueryProjection,
@@ -201,8 +203,8 @@ pub(super) struct QueueSelection {
     projection: QueryProjection,
     reconcile_projection: QueryProjection,
     reconcile_pending: Option<QueueReconcileJob>,
-    pub(super) busy: bool,
-    pub(super) selection_error: Option<String>,
+    busy: bool,
+    selection_error: Option<String>,
     navigation: Option<usize>,
     active: Option<QueueIdentity>,
     pending: Option<QueueJob>,
@@ -211,6 +213,9 @@ pub(super) struct QueueSelection {
     locate: QueueLocate,
 }
 impl QueueSelection {
+    pub(super) fn rows(&self) -> &paged::PagedRows<QueueRow> {
+        &self.rows
+    }
     pub(super) fn len(&self) -> usize {
         self.selected.len()
     }
@@ -277,6 +282,12 @@ impl QueueSelection {
         self.anchor = None;
         self.active = None;
         self.rows.pin(None);
+    }
+    fn change_search(&mut self, query: Option<String>) {
+        self.clear();
+        self.query = query;
+        self.locate_filtered = None;
+        self.rows.clear();
     }
     fn select(&mut self, row: QueueIdentity, multi: bool) {
         self.cancel();
@@ -376,7 +387,7 @@ impl QueueSelection {
         self.projection
             .accepts(&self.query(), generation, stamp.revisions())
     }
-    fn sync(&mut self, revisions: QueryRevisions, total: usize) -> bool {
+    pub(super) fn sync(&mut self, revisions: QueryRevisions, total: usize) -> bool {
         let query = self.query();
         let identity_changed = !self.page_projection.matches_identity(&query);
         let changed = self.page_projection.sync(&query, revisions);
@@ -390,12 +401,57 @@ impl QueueSelection {
                 self.rows.invalidate();
             }
             self.cancel();
+            self.schedule_reconcile(revisions);
         }
         if self.query.is_none() {
             // The snapshot count is authoritative even when DATA invalidation retired the pages.
             self.rows.set_total(total);
         }
         changed
+    }
+    fn retry_selection(&mut self, revisions: QueryRevisions, total: usize) -> bool {
+        if self.sync(revisions, total) {
+            return true;
+        }
+        if self.selection_error.is_none() {
+            return false;
+        }
+        self.cancel();
+        self.schedule_reconcile(revisions);
+        true
+    }
+
+    fn retry_page(&mut self, revisions: QueryRevisions, total: usize) -> Range<usize> {
+        self.rows.retry();
+        if self.busy {
+            self.retry_selection(revisions, total);
+        }
+        self.rows.visible()
+    }
+
+    // Must precede host refresh, which can submit replacement demand.
+    fn retire_page_worker(&mut self) {
+        self.page_worker = false;
+    }
+
+    fn accept_page(
+        &mut self,
+        query: &Query,
+        generation: u64,
+        response: crate::response::QueryResponse,
+        unexpected: impl FnOnce() -> String,
+    ) {
+        if !self
+            .page_projection
+            .accepts(query, generation, response.revisions)
+        {
+            return;
+        }
+        match response.result {
+            Ok(ViewResponse::QueuePage(page)) => self.rows.accept(page),
+            Err(error) => self.rows.fail(error.to_string()),
+            _ => self.rows.fail(unexpected()),
+        }
     }
     fn reconcile_query(&self) -> Query {
         Query::QueueEntries {
@@ -543,11 +599,8 @@ impl GuiApp {
             self.clear_metadata_selection(cx);
         }
         self.content_menu = None;
-        self.browser.queue.clear();
-        self.browser.queue.query = query;
-        self.browser.queue.locate_filtered = None;
-        self.browser.queue.rows.clear();
-        self.scroll_views.scroll_list_to("queue", 0);
+        self.browser.queue.change_search(query);
+        self.workspace.scroll_views.scroll_list_to("queue", 0);
         self.sync_queue(cx);
         self.ensure_queue_range(0..1, cx);
         cx.notify();
@@ -707,23 +760,28 @@ impl GuiApp {
         if !self.browser.queue.sync(revisions, self.state.queue.total) {
             return false;
         }
-        self.browser.queue.schedule_reconcile(revisions);
         self.dispatch_queue_selection(cx);
         true
     }
 
     /// Explicit retry of failed identity relocation; unchanged pages and locate survive.
     pub(super) fn refresh_queue(&mut self, cx: &mut Context<Self>) {
-        if self.sync_queue(cx) {
-            return;
-        }
-        if self.browser.queue.selection_error.is_some() {
-            self.browser.queue.cancel();
-            self.browser
-                .queue
-                .schedule_reconcile(self.state.query_revisions(None));
+        if self
+            .browser
+            .queue
+            .retry_selection(self.state.query_revisions(None), self.state.queue.total)
+        {
             self.dispatch_queue_selection(cx);
         }
+    }
+
+    pub(super) fn retry_queue_page(&mut self, cx: &mut Context<Self>) {
+        let range = self
+            .browser
+            .queue
+            .retry_page(self.state.query_revisions(None), self.state.queue.total);
+        self.dispatch_queue_selection(cx);
+        self.ensure_queue_range(range, cx);
     }
 
     fn dispatch_queue_reconcile(&mut self, job: QueueReconcileJob, cx: &mut Context<Self>) {
@@ -830,25 +888,14 @@ impl GuiApp {
                     generation,
                     cx,
                 );
-                // Only physical completion releases this gate, including obsolete responses.
-                this.browser.queue.page_worker = false;
+                this.browser.queue.retire_page_worker();
                 this.refresh(cx);
                 this.sync_queue(cx);
-                if this.browser.queue.page_projection.accepts(
-                    &request,
-                    generation,
-                    response.revisions,
-                ) {
-                    match response.result {
-                        Ok(ViewResponse::QueuePage(page)) => this.browser.queue.rows.accept(page),
-                        Err(error) => this.browser.queue.rows.fail(error.to_string()),
-                        _ => this
-                            .browser
-                            .queue
-                            .rows
-                            .fail(this.i18n.text("gl-queue-page-response").to_owned()),
-                    }
-                }
+                this.browser
+                    .queue
+                    .accept_page(&request, generation, response, || {
+                        this.i18n.text("gl-queue-page-response").to_owned()
+                    });
                 cx.notify();
             });
         })
@@ -922,7 +969,8 @@ impl GuiApp {
         self.browser.focus_list(ListFocus::Queue);
         self.request_track(commit.target.track_id, cx);
         if commit.scroll {
-            self.scroll_views
+            self.workspace
+                .scroll_views
                 .scroll_list_to("queue", commit.target.offset);
         }
         self.sync_waveform(cx);
@@ -996,7 +1044,7 @@ impl GuiApp {
             && self.browser.queue.current(job.generation, job.stamp)
     }
 
-    fn dispatch_queue_selection(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn dispatch_queue_selection(&mut self, cx: &mut Context<Self>) {
         if let Some(job) = self.browser.queue.take_reconcile_job() {
             self.dispatch_queue_reconcile(job, cx);
             return;
@@ -1555,14 +1603,22 @@ mod tests {
                 .page_projection
                 .accepts(&query, generation, revisions(7))
         );
-        queue.page_worker = false;
-        queue.rows.fail("offline".into());
+        queue.retire_page_worker();
+        queue.accept_page(
+            &query,
+            generation,
+            crate::response::QueryResponse {
+                revisions: revisions(7),
+                result: Err(crate::response::QueryError::Message("offline".into())),
+            },
+            || unreachable!(),
+        );
         for _ in 0..3 {
             assert!(!queue.sync(revisions(7), 20));
             assert!(queue.demand_page(0..10, 20).is_none());
         }
         assert_eq!(queue.rows.error(0), Some("offline"));
-        queue.rows.retry();
+        assert_eq!(queue.retry_page(revisions(7), 20), queue.rows.visible());
         assert!(queue.demand_page(0..10, 20).is_some());
     }
 
@@ -1572,12 +1628,10 @@ mod tests {
         queue.select(identity(10, 199_999), false);
         queue.select(identity(11, 3), true);
         assert!(queue.sync(revisions(8), 10));
-        queue.schedule_reconcile(revisions(8));
         assert!(!queue.page_worker);
         assert!(queue.busy);
         let old = queue.take_reconcile_job().unwrap();
         assert!(queue.sync(revisions(9), 10));
-        queue.schedule_reconcile(revisions(9));
         assert!(!queue.reconcile_current(&old, revisions(8)));
         assert!(queue.take_reconcile_job().is_none());
         assert!(queue.take_job().is_none());
@@ -1591,8 +1645,7 @@ mod tests {
         assert!(!queue.sync(revisions(9), 10));
         assert!(queue.take_reconcile_job().is_none());
         assert_eq!(queue.selected.len(), 2);
-        queue.cancel(); // Explicit retry retires the failed logical operation.
-        queue.schedule_reconcile(revisions(9));
+        assert!(queue.retry_selection(revisions(9), 10));
         assert!(queue.take_reconcile_job().is_some());
         queue.reconcile(vec![identity(10, 0), identity(11, 1)]);
         assert_eq!(queue.ordered_ids(), vec![10, 11]);
@@ -1813,7 +1866,7 @@ impl GuiApp {
                     },
                 ))
             });
-        let scroll = self.scroll_views.list(("queue", panel_id));
+        let scroll = self.workspace.scroll_views.list(("queue", panel_id));
         self.reveal_queue_locate(&scroll, cx);
         let panel_drop_owner = cx.entity().downgrade();
         let list_drop_owner = panel_drop_owner.clone();
@@ -1931,7 +1984,7 @@ impl GuiApp {
                                         .bg(rgb(theme.highlight))
                                 })
                                 .when(
-                                    this.layout_focus.is_focused(window)
+                                    this.shell.layout_focus().is_focused(window)
                                         && this.browser.focus()
                                             == Some(super::BrowserFocus::List(ListFocus::Queue))
                                         && this

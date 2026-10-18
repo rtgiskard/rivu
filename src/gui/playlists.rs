@@ -286,7 +286,7 @@ impl GuiApp {
         } else {
             self.browser.playlists().summaries().rows.error(0)
         };
-        let pending = self.browser.requests.pending(kind);
+        let pending = self.browser.view_pending(kind);
         let playlist_id = self.browser.playlists().selected();
         let message = if let Some(error) = rows_error {
             error
@@ -367,7 +367,7 @@ impl GuiApp {
                     self.tr("gl-retry"),
                     cx,
                     move |this, _, cx| {
-                        if this.browser.requests.pending(kind) {
+                        if this.browser.view_pending(kind) {
                             return;
                         }
                         if kind == ViewRequestKind::Entries {
@@ -467,7 +467,7 @@ impl GuiApp {
                 },
             ));
         let catalog_len = self.browser.playlists().summaries().rows.len();
-        self.scroll_views.register_list(
+        self.workspace.scroll_views.register_list(
             ("playlist-catalog", panel_id),
             &self.browser.playlists().summaries().scroll,
         );
@@ -495,7 +495,7 @@ impl GuiApp {
                             this.browser.playlists().selected() == Some(id),
                         )
                         .when(
-                            this.layout_focus.is_focused(window)
+                            this.shell.layout_focus().is_focused(window)
                                 && this.browser.focus() == Some(super::BrowserFocus::Playlists)
                                 && this.browser.playlists().selected() == Some(id),
                             |row| row.border_color(rgb(theme.accent)),
@@ -703,7 +703,7 @@ impl GuiApp {
                     )))
                     .child(self.playlist_entries_search.clone()),
             );
-            self.scroll_views.register_list(
+            self.workspace.scroll_views.register_list(
                 ("playlist-entries", panel_id),
                 &self.browser.playlists().entries().scroll,
             );
@@ -761,7 +761,7 @@ impl GuiApp {
                                 this.browser.playlists().track_selection.contains(id),
                             )
                             .when(
-                                this.layout_focus.is_focused(window)
+                                this.shell.layout_focus().is_focused(window)
                                     && this.browser.focus()
                                         == Some(super::BrowserFocus::List(
                                             ListFocus::PlaylistTracks,

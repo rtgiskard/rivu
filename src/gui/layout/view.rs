@@ -3,7 +3,7 @@ use crate::gui::components::{column, icon_button, row};
 
 impl GuiApp {
     pub(in crate::gui) fn measurement(&self, key: Measured) -> AnyElement {
-        let measured = self.interaction.measurement_handle(key);
+        let measured = self.workspace.interaction.measurement_handle(key);
         let ui_scale = self.state.system.config.ui_scale;
         canvas(
             move |bounds, window, _| {
@@ -18,8 +18,8 @@ impl GuiApp {
         .into_any_element()
     }
     pub(in crate::gui) fn layout_gutter(&self) -> f64 {
-        (f64::from(SPLIT_GUTTER) * self.interaction.scale_factor()).round()
-            / self.interaction.scale_factor()
+        (f64::from(SPLIT_GUTTER) * self.workspace.interaction.scale_factor()).round()
+            / self.workspace.interaction.scale_factor()
     }
     pub(in crate::gui) fn layout_edit_sizes(
         &self,
@@ -27,6 +27,7 @@ impl GuiApp {
         docking: Option<(u64, Edge, u64)>,
     ) -> HashMap<u64, (f64, f64)> {
         let sizes = self
+            .workspace
             .interaction
             .measurements()
             .iter()
@@ -41,7 +42,8 @@ impl GuiApp {
                 ))
             })
             .collect();
-        self.layouts
+        self.workspace
+            .layouts
             .current()
             .root
             .as_ref()
@@ -58,19 +60,20 @@ impl GuiApp {
     }
     pub(in crate::gui) fn reconcile_layout_sizes(&mut self, sizes: &HashMap<u64, (f64, f64)>) {
         let gutter = self.layout_gutter();
-        self.layouts
+        self.workspace
+            .layouts
             .current_mut()
             .preserve_region_sizes(sizes, gutter);
         // Structural callers invalidate through layout_changed after adjusting sizes.
     }
     pub(in crate::gui) fn remove_layout_panel(&mut self, panel: u64, cx: &mut Context<Self>) {
-        if self.layouts.current().locked {
+        if self.workspace.layouts.current().locked {
             return;
         }
-        let cancellation = self.interaction.cancel();
+        let cancellation = self.workspace.interaction.cancel();
         self.apply_interaction_cancellation(cancellation, cx);
         let sizes = self.layout_edit_sizes(panel, None);
-        if self.layouts.current_mut().remove(panel) {
+        if self.workspace.layouts.current_mut().remove(panel) {
             self.reconcile_layout_sizes(&sizes);
             self.layout_changed(cx);
             self.persist_layout(cx);
@@ -85,10 +88,10 @@ impl GuiApp {
         cx: &mut Context<Self>,
     ) {
         self.synchronize_interaction(window, cx);
-        if self.layouts.current().locked {
+        if self.workspace.layouts.current().locked {
             return;
         }
-        let Some(root) = self.layouts.current().root.as_ref() else {
+        let Some(root) = self.workspace.layouts.current().root.as_ref() else {
             return;
         };
         let Some(Node::Split {
@@ -100,7 +103,7 @@ impl GuiApp {
         else {
             return;
         };
-        let measured = self.interaction.measurements();
+        let measured = self.workspace.interaction.measurements();
         let Some(bounds) = measured.get(&Measured::Node(id)).copied() else {
             return;
         };
@@ -154,7 +157,10 @@ impl GuiApp {
         drag.pointer_offset = drag.pointer_coordinate(pointer) - f64::from(f32::from(center));
         let original_fraction = boundary(index + 1);
         drop(measured);
-        let cancellation = self.interaction.begin_split(drag, original_fraction, root);
+        let cancellation = self
+            .workspace
+            .interaction
+            .begin_split(drag, original_fraction, root);
         self.apply_interaction_cancellation(cancellation, cx);
     }
     pub(in crate::gui) fn render_node(
@@ -182,7 +188,7 @@ impl GuiApp {
                             .id(("split", index))
                             .absolute()
                             .bg(rgb(theme.bg))
-                            .when(!self.layouts.current().locked, |view| {
+                            .when(!self.workspace.layouts.current().locked, |view| {
                                 view.hover(|style| style.bg(rgb(theme.accent)))
                                     .when(axis == Axis::Horizontal, |view| view.cursor_col_resize())
                                     .when(axis == Axis::Vertical, |view| view.cursor_row_resize())
@@ -305,7 +311,9 @@ impl GuiApp {
                             .border_1()
                             .border_color(gpui::transparent_black())
                             .text_xs()
-                            .when(!self.layouts.current().locked, |view| view.cursor_move())
+                            .when(!self.workspace.layouts.current().locked, |view| {
+                                view.cursor_move()
+                            })
                             .bg(rgb(if active == panel_id {
                                 theme.selected
                             } else {
@@ -324,12 +332,12 @@ impl GuiApp {
                                 theme.secondary
                             }))
                             .on_click(cx.listener(move |this, event, window, cx| {
-                                this.layouts.current_mut().activate(panel_id);
+                                this.workspace.layouts.current_mut().activate(panel_id);
                                 this.search_panel = Some(panel_id);
                                 if matches!(event, gpui::ClickEvent::Mouse(_)) {
                                     this.focus_layout(window, cx);
                                 }
-                                this.interaction.set_target_group(Some(node_id));
+                                this.workspace.interaction.set_target_group(Some(node_id));
                                 this.persist_layout(cx);
                             }))
                             .on_key_down(cx.listener(move |this, event, _, cx| {
@@ -356,7 +364,7 @@ impl GuiApp {
                                     cx.notify();
                                 }),
                             )
-                            .when(!self.layouts.current().locked, |view| {
+                            .when(!self.workspace.layouts.current().locked, |view| {
                                 let entity = cx.entity().downgrade();
                                 view.on_drag(drag, move |drag, _, window, cx| {
                                     let _ = entity.update(cx, |this, cx| {
@@ -374,7 +382,7 @@ impl GuiApp {
                             })
                             .child(title)
                             .child(self.measurement(Measured::Tab(panel_id)))
-                            .when(!self.layouts.current().locked, |view| {
+                            .when(!self.workspace.layouts.current().locked, |view| {
                                 view.child(
                                     components::quiet_icon_button(
                                         theme,
@@ -384,7 +392,7 @@ impl GuiApp {
                                             self.tr("shell-remove-panel"),
                                             cx,
                                             move |this, _, cx| {
-                                                if this.layouts.current().locked {
+                                                if this.workspace.layouts.current().locked {
                                                     return;
                                                 }
                                                 this.remove_layout_panel(panel_id, cx);
@@ -417,7 +425,7 @@ impl GuiApp {
                                 .into_any_element();
                         }
                         panel_spec(&panel.kind)
-                            .map(|spec| (spec.render)(self, panel, window, cx))
+                            .map(|_| self.render_panel(panel, window, cx))
                             .unwrap_or_else(|| {
                                 div()
                                     .p(gpui::px(UI_INSET))
@@ -501,11 +509,11 @@ impl GuiApp {
         alt: bool,
         cx: &mut Context<Self>,
     ) {
-        if self.layouts.current().locked {
+        if self.workspace.layouts.current().locked {
             return;
         }
         let config = &self.state.system.config;
-        let Some((id, index, fraction)) = self.interaction.update_split(
+        let Some((id, index, fraction)) = self.workspace.interaction.update_split(
             position,
             config.layout_snap_enabled ^ alt,
             f64::from(config.ui_scale),
@@ -513,7 +521,12 @@ impl GuiApp {
         ) else {
             return;
         };
-        if self.layouts.current_mut().set_boundary(id, index, fraction) {
+        if self
+            .workspace
+            .layouts
+            .current_mut()
+            .set_boundary(id, index, fraction)
+        {
             cx.notify();
         }
     }

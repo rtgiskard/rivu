@@ -597,8 +597,8 @@ impl GuiApp {
             let _ = self.handle.send(Command::CancelRelocation { id });
         }
         self.panel_menu = None;
-        self.app_menu_open = false;
-        self.catalog_open = false;
+        self.shell.dismiss(shell::Surface::AppMenu);
+        self.shell.dismiss(shell::Surface::PanelCatalog);
         self.start_duplicate_groups(cx);
         cx.notify();
     }
@@ -607,7 +607,7 @@ impl GuiApp {
         if let Some(id) = self.duplicate_review.close() {
             let _ = self.handle.send(Command::CancelRelocation { id });
         }
-        if self.settings_open {
+        if self.shell.is_open(shell::Surface::Settings) {
             self.settings.focus_handle(cx).focus(window, cx);
         } else {
             self.focus_layout(window, cx);

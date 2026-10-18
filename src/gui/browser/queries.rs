@@ -1,8 +1,7 @@
-//! View queries and paged buffers, including stale-response rejection and cancellation.
-//! GuiApp retains the entity and the single frame scheduler.
+//! Background query transport; feature owners reserve, retire and publish results.
 
-use super::browser::requests::{DIRECTORY_WORKERS, ViewRequest};
-use super::*;
+use super::requests::ViewRequest;
+use crate::gui::*;
 use crate::{model::Query, response::ViewResponse};
 
 fn library_search_counts(
@@ -91,7 +90,27 @@ fn library_search_counts(
 }
 
 impl GuiApp {
-    pub(super) fn apply_playlist_search(&mut self, query: Option<String>, cx: &mut Context<Self>) {
+    pub(in crate::gui) fn apply_browser_effects(
+        &mut self,
+        effects: browser::BrowserEffects,
+        cx: &mut Context<Self>,
+    ) {
+        if effects.queue_selection {
+            self.dispatch_queue_selection(cx);
+        }
+        if effects.entry_selection {
+            self.dispatch_entry_reconcile(cx);
+        }
+        if effects.playlist_lookup && self.panel_demand("playlists") {
+            self.request_playlist_selection(cx);
+        }
+    }
+
+    pub(in crate::gui) fn apply_playlist_search(
+        &mut self,
+        query: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         if self.browser.playlists().summaries().query == query {
             return;
         }
@@ -102,7 +121,7 @@ impl GuiApp {
         self.content_menu = None;
         if matches!(
             self.playlist_action,
-            Some(super::playlists::PlaylistAction::Menu(..))
+            Some(playlists::PlaylistAction::Menu(..))
         ) {
             self.playlist_action = None;
         }
@@ -115,7 +134,7 @@ impl GuiApp {
         cx.notify();
     }
 
-    pub(super) fn apply_playlist_entries_search(
+    pub(in crate::gui) fn apply_playlist_entries_search(
         &mut self,
         query: Option<String>,
         cx: &mut Context<Self>,
@@ -138,12 +157,12 @@ impl GuiApp {
         cx.notify();
     }
 
-    pub(super) fn cancel_window_reads(&mut self) {
+    pub(in crate::gui) fn cancel_window_reads(&mut self) {
         self.browser.cancel_window_reads();
         self.cancel_metadata_read();
     }
 
-    pub(super) fn start_loading_text(
+    pub(in crate::gui) fn start_loading_text(
         &mut self,
         owner: loading::LoadingOwner,
         token: u64,
@@ -154,7 +173,7 @@ impl GuiApp {
             .schedule(cx, |this| &mut this.loading_text);
     }
 
-    pub(super) fn finish_loading_text(
+    pub(in crate::gui) fn finish_loading_text(
         &mut self,
         owner: &loading::LoadingOwner,
         token: u64,
@@ -165,7 +184,7 @@ impl GuiApp {
             .schedule(cx, |this| &mut this.loading_text);
     }
 
-    pub(super) fn sync_loading_text(&mut self, cx: &mut Context<Self>) {
+    pub(in crate::gui) fn sync_loading_text(&mut self, cx: &mut Context<Self>) {
         let library_visible = self.panel_demand("library");
         let playlists_visible = self.panel_demand("playlists");
         let queue_visible = self.panel_demand("queue");
@@ -178,7 +197,7 @@ impl GuiApp {
                 queue_visible && browser.queue.page_loading(token)
             }
             loading::LoadingOwner::View(kind) => {
-                playlists_visible && browser.requests.is_current(*kind, token)
+                playlists_visible && browser.view_loading(*kind, token)
             }
         });
         self.loading_text
@@ -196,77 +215,43 @@ impl GuiApp {
                     .is_some_and(|menu| menu.playlists))
     }
 
-    pub(super) fn request_root_counts(&mut self, cx: &mut Context<Self>) {
+    pub(in crate::gui) fn request_root_counts(&mut self, cx: &mut Context<Self>) {
         if !self.panel_demand("library") {
             return;
         }
         self.request_library_search_counts(cx);
-        if !self.browser.requests.root_count_workers.is_empty()
-            || self.browser.library.root_counts_settled()
-        {
+        let Some(read) = self.browser.prepare_root_count_read(
+            &self.state.system.config.library_roots,
+            self.state.library.structure_revision,
+        ) else {
             return;
-        }
-        let roots = &self.state.system.config.library_roots;
-        let structure_revision = self.state.library.structure_revision;
-        let (generation, batches) = self
-            .browser
-            .library
-            .begin_root_counts(roots, structure_revision);
-        self.browser
-            .requests
-            .root_count_workers
-            .extend(batches.iter().copied());
-        for offset in batches {
-            let batch =
-                roots[offset..(offset + crate::model::MAX_QUERY_ROWS).min(roots.len())].to_vec();
-            let handle = self.handle.clone();
-            let ticket = self.browser.library.root_count_ticket();
-            cx.spawn(async move |this, cx| {
-                let response = cx
-                    .background_executor()
-                    .spawn(async move {
-                        handle.query_if_current(Query::LibraryRootCounts { roots: batch }, ticket)
-                    })
-                    .await;
-                let _ = this.update(cx, |this, cx| {
-                    this.browser.requests.root_count_workers.remove(&offset);
-                    this.refresh(cx);
-                    if !this.browser.library.counts_current(
-                        generation,
-                        &this.state.system.config.library_roots,
-                        this.state.library.structure_revision,
-                    ) {
-                        this.request_root_counts(cx);
-                        return;
-                    }
-                    let query = Query::LibraryRootCounts { roots: Vec::new() };
-                    if query.stamp(response.revisions)
-                        != query.stamp(this.state.query_revisions(None))
-                    {
-                        this.browser.library.fail_root_counts(generation, offset);
-                        this.request_root_counts(cx);
-                        return;
-                    }
-                    match response.result {
-                        Ok(ViewResponse::LibraryRootCounts(counts)) => this
-                            .browser
-                            .library
-                            .accept_root_counts(generation, offset, counts),
-                        Err(error) => {
-                            this.browser.library.fail_root_counts(generation, offset);
-                            this.error = Some(error.to_string());
-                        }
-                        _ => this.browser.library.fail_root_counts(generation, offset),
-                    }
-                    this.request_root_counts(cx);
-                    cx.notify();
-                });
-            })
-            .detach();
-        }
+        };
+        let handle = self.handle.clone();
+        let query = read.query.clone();
+        let ticket = read.ticket.clone();
+        cx.spawn(async move |this, cx| {
+            let response = cx
+                .background_executor()
+                .spawn(async move { handle.query_if_current(query, ticket) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.refresh(cx);
+                if let Some(error) = this.browser.complete_root_count_read(
+                    read,
+                    &this.state.system.config.library_roots,
+                    this.state.query_revisions(None),
+                    response,
+                ) {
+                    this.error = Some(error);
+                }
+                this.request_root_counts(cx);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
-    pub(super) fn view_page_size(&self) -> usize {
+    pub(in crate::gui) fn view_page_size(&self) -> usize {
         self.state.system.config.page_size as usize
     }
 
@@ -384,7 +369,7 @@ impl GuiApp {
         .detach();
     }
 
-    pub(super) fn request_directory_page(
+    pub(in crate::gui) fn request_directory_page(
         &mut self,
         branch: library::TreeBranch,
         offset: usize,
@@ -394,89 +379,42 @@ impl GuiApp {
             return;
         }
         self.request_library_search_counts(cx);
-        let page_size = self.view_page_size();
-        if self
-            .browser
-            .library
-            .sync_projection(self.state.query_revisions(None))
-        {
-            self.browser.requests.cancel_directory_demand();
-        }
-        let owner_query = self.browser.library.projection_query();
-        let owner_generation = self.browser.library.projection.generation();
-        if !branch.is_forest()
-            && (self.browser.requests.directory_workers.contains(&branch)
-                || self.browser.requests.directory_workers.len() >= DIRECTORY_WORKERS)
-        {
-            self.browser.requests.queue_directory(branch, offset);
-            return;
-        }
-        let generation = self.browser.requests.next_generation();
-        let offset =
-            self.browser
-                .library
-                .prepare_directory(branch.clone(), offset, page_size, generation);
-        if branch.is_forest() {
-            let roots = &self.state.system.config.library_roots;
-            let page = crate::model::Page::<crate::model::DirectoryRow> {
-                total: roots.len(),
-                rows: roots
-                    .iter()
-                    .skip(offset)
-                    .take(page_size)
-                    .map(|path| crate::model::DirectoryRow::Directory { path: path.clone() })
-                    .collect(),
-            };
-            self.browser
-                .library
-                .accept_directory(&branch, generation, page);
+        let request = self.browser.prepare_directory_read(
+            branch,
+            offset,
+            self.view_page_size(),
+            &self.state.system.config.library_roots,
+            self.state.query_revisions(None),
+        );
+        if request.published {
             cx.notify();
-            return;
         }
+        let Some(read) = request.read else {
+            return;
+        };
         self.start_loading_text(
-            loading::LoadingOwner::Branch(branch.clone()),
-            generation,
+            loading::LoadingOwner::Branch(read.branch.clone()),
+            read.generation,
             cx,
         );
-        self.browser
-            .requests
-            .directory_workers
-            .insert(branch.clone());
-        let ticket = self.browser.library.projection.ticket();
         let handle = self.handle.clone();
-        let favorite = self.browser.library.favorites_only().then_some(true);
-        let query = self.browser.library.buffer().query.clone();
-        let tree_active = self.browser.library.tree_active();
-        let missing = self.browser.library.buffer().missing;
-        let sort = self.browser.library.buffer().sort;
         cx.spawn(async move |this, cx| {
             if !this
                 .update(cx, |this, cx| {
                     this.refresh(cx);
                     if this.panel_demand("library")
-                        && this.browser.library.projection.accepts(
-                            &owner_query,
-                            owner_generation,
-                            this.state.query_revisions(None),
-                        )
-                        && this.browser.library.directory_request_pending(
-                            &branch,
-                            generation,
-                            query.as_deref(),
-                            favorite,
-                            tree_active,
-                            missing,
-                        )
+                        && this
+                            .browser
+                            .directory_read_current(&read, this.state.query_revisions(None))
                     {
                         return true;
                     }
-                    this.browser.library.cancel_directory(&branch, generation);
+                    this.browser.abandon_directory_read(&read);
                     this.finish_loading_text(
-                        &loading::LoadingOwner::Branch(branch.clone()),
-                        generation,
+                        &loading::LoadingOwner::Branch(read.branch.clone()),
+                        read.generation,
                         cx,
                     );
-                    this.browser.requests.directory_workers.remove(&branch);
                     this.dispatch_directory_demand(cx);
                     cx.notify();
                     false
@@ -485,95 +423,26 @@ impl GuiApp {
             {
                 return;
             }
-            let request_query = query.clone();
-            let request_path = branch.path().to_path_buf();
+            let query = read.query.clone();
+            let ticket = read.ticket.clone();
             let response = cx
                 .background_executor()
-                .spawn(async move {
-                    handle.query_if_current(
-                        if tree_active {
-                            Query::DirectoryPage {
-                                path: request_path,
-                                query: request_query,
-                                favorite,
-                                missing,
-                                offset,
-                                limit: page_size,
-                            }
-                        } else {
-                            Query::LibraryRootPage {
-                                path: request_path,
-                                query: request_query,
-                                favorite,
-                                missing,
-                                sort,
-                                offset,
-                                limit: page_size,
-                            }
-                        },
-                        ticket,
-                    )
-                })
+                .spawn(async move { handle.query_if_current(query, ticket) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.finish_loading_text(
-                    &loading::LoadingOwner::Branch(branch.clone()),
-                    generation,
+                    &loading::LoadingOwner::Branch(read.branch.clone()),
+                    read.generation,
                     cx,
                 );
-                this.browser.requests.directory_workers.remove(&branch);
                 this.refresh(cx);
-                (|| {
-                    if !this.browser.library.directory_request_pending(
-                        &branch,
-                        generation,
-                        query.as_deref(),
-                        favorite,
-                        tree_active,
-                        missing,
-                    ) {
-                        return;
-                    }
-                    if this.browser.library.projection.generation() != owner_generation {
-                        this.browser.library.cancel_directory(&branch, generation);
-                        return;
-                    }
-                    let result = match response.result {
-                        Ok(result) => result,
-                        Err(error) => {
-                            this.browser.library.fail_directory(&branch, generation);
-                            this.error = Some(error.to_string());
-                            return;
-                        }
-                    };
-                    if !this.browser.library.projection.accepts(
-                        &owner_query,
-                        owner_generation,
-                        response.revisions,
-                    ) {
-                        this.browser.library.cancel_directory(&branch, generation);
-                        return;
-                    }
-                    let page = match result {
-                        ViewResponse::DirectoryPage(page) if tree_active => Some(page),
-                        ViewResponse::LibraryPage(page) if !tree_active => {
-                            Some(crate::model::Page {
-                                total: page.total,
-                                rows: page
-                                    .rows
-                                    .into_iter()
-                                    .map(crate::model::DirectoryRow::Track)
-                                    .collect(),
-                            })
-                        }
-                        _ => None,
-                    };
-                    if let Some(page) = page {
-                        this.browser
-                            .library
-                            .accept_directory(&branch, generation, page);
-                    }
-                })();
+                if let Some(error) = this.browser.complete_directory_read(
+                    &read,
+                    this.state.query_revisions(None),
+                    response,
+                ) {
+                    this.error = Some(error);
+                }
                 this.dispatch_directory_demand(cx);
                 cx.notify();
             });
@@ -583,31 +452,13 @@ impl GuiApp {
     }
 
     fn dispatch_directory_demand(&mut self, cx: &mut Context<Self>) {
-        if !self.panel_demand("library") {
-            self.browser.requests.directory_queued.clear();
-            return;
-        }
-        while self.browser.requests.directory_workers.len() < DIRECTORY_WORKERS {
-            let next = self
-                .browser
-                .requests
-                .directory_queued
-                .iter()
-                .position(|(branch, _)| !self.browser.requests.directory_workers.contains(branch));
-            let Some(index) = next else {
-                break;
-            };
-            let (branch, offset) = self
-                .browser
-                .requests
-                .directory_queued
-                .remove(index)
-                .expect("queued directory demand");
+        let demanded = self.panel_demand("library");
+        while let Some((branch, offset)) = self.browser.next_directory_demand(demanded) {
             self.request_directory_page(branch, offset, cx);
         }
     }
 
-    pub(super) fn request_playlist_selection(&mut self, cx: &mut Context<Self>) {
+    pub(in crate::gui) fn request_playlist_selection(&mut self, cx: &mut Context<Self>) {
         if !self.panel_demand("playlists") {
             return;
         }
@@ -617,7 +468,11 @@ impl GuiApp {
         self.request_view(prepared, cx);
     }
 
-    pub(super) fn request_playlist_summaries(&mut self, offset: usize, cx: &mut Context<Self>) {
+    pub(in crate::gui) fn request_playlist_summaries(
+        &mut self,
+        offset: usize,
+        cx: &mut Context<Self>,
+    ) {
         let prepared = self.browser.request_playlist_summaries(
             offset,
             self.view_page_size(),
@@ -626,7 +481,7 @@ impl GuiApp {
         self.request_view(prepared, cx);
     }
 
-    pub(super) fn request_playlist_entries(
+    pub(in crate::gui) fn request_playlist_entries(
         &mut self,
         playlist_id: i64,
         offset: usize,
@@ -641,7 +496,7 @@ impl GuiApp {
         self.request_view(prepared, cx);
     }
 
-    pub(super) fn ensure_playlist_range(
+    pub(in crate::gui) fn ensure_playlist_range(
         &mut self,
         range: std::ops::Range<usize>,
         cx: &mut Context<Self>,
@@ -657,7 +512,7 @@ impl GuiApp {
                 .demand_playlist_summaries(range, self.view_page_size(), revisions);
         self.request_view(prepared, cx);
     }
-    pub(super) fn ensure_entry_range(
+    pub(in crate::gui) fn ensure_entry_range(
         &mut self,
         range: std::ops::Range<usize>,
         cx: &mut Context<Self>,
@@ -674,7 +529,11 @@ impl GuiApp {
         self.request_view(prepared, cx);
     }
 
-    pub(super) fn retry_view_page(&mut self, kind: ViewRequestKind, cx: &mut Context<Self>) {
+    pub(in crate::gui) fn retry_view_page(
+        &mut self,
+        kind: ViewRequestKind,
+        cx: &mut Context<Self>,
+    ) {
         let page_size = self.view_page_size();
         match kind {
             ViewRequestKind::Summaries | ViewRequestKind::Entries => {
@@ -688,30 +547,27 @@ impl GuiApp {
                 };
                 self.request_view(prepared, cx);
             }
-            ViewRequestKind::Queue => {
-                self.browser.queue.rows.retry();
-                if self.browser.queue.busy {
-                    self.refresh_queue(cx);
-                }
-                let range = self.browser.queue.rows.visible();
-                self.ensure_queue_range(range, cx);
-            }
+            ViewRequestKind::Queue => self.retry_queue_page(cx),
             _ => {}
         }
     }
 
-    pub(super) fn toggle_library_view(&mut self, cx: &mut Context<Self>) {
+    pub(in crate::gui) fn toggle_library_view(&mut self, cx: &mut Context<Self>) {
         self.browser.library.toggle_view();
         self.request_directory_page(library::TreeBranch::default(), 0, cx);
         cx.notify();
     }
 
-    pub(super) fn refresh_favorite_filter(&mut self, cx: &mut Context<Self>) {
+    pub(in crate::gui) fn refresh_favorite_filter(&mut self, cx: &mut Context<Self>) {
         self.browser.library.toggle_favorites();
         self.request_directory_page(library::TreeBranch::default(), 0, cx);
     }
 
-    pub(super) fn apply_library_search(&mut self, query: Option<String>, cx: &mut Context<Self>) {
+    pub(in crate::gui) fn apply_library_search(
+        &mut self,
+        query: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         let query = query.unwrap_or_default().trim().to_lowercase();
         if self
             .browser
@@ -729,13 +585,9 @@ impl GuiApp {
         cx.notify();
     }
 
-    pub(super) fn refresh_filter(&mut self, cx: &mut Context<Self>) {
+    pub(in crate::gui) fn refresh_filter(&mut self, cx: &mut Context<Self>) {
         self.browser.library.refresh_filter();
         self.request_directory_page(library::TreeBranch::default(), 0, cx);
-    }
-
-    pub(super) fn refresh_page_size(&mut self) {
-        self.browser.configure_page_size(self.view_page_size());
     }
 }
 

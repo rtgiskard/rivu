@@ -1,5 +1,5 @@
-use super::*;
 use crate::gui::components::{caption, column, icon_button, row};
+use crate::gui::*;
 use crate::keyboard::{self, Action, Context as KeyContext, Modifiers as KeyModifiers};
 
 fn visible_panel(node: &Node, id: u64) -> Option<&layout::Panel> {
@@ -23,15 +23,21 @@ fn modifiers(event: &KeyDownEvent) -> KeyModifiers {
 }
 
 impl GuiApp {
-    pub(super) fn open_keyboard_help(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(in crate::gui) fn open_keyboard_help(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.cancel_interaction(window, cx);
-        self.keyboard_help = Some(self.keyboard_context());
-        self.help_scroll.set_offset(point(px(0.), px(0.)));
+        self.shell.open_help(self.keyboard_context());
         cx.notify();
     }
 
-    pub(super) fn keyboard_panel(&self) -> Option<&layout::Panel> {
-        visible_panel(self.layouts.current().root.as_ref()?, self.search_panel?)
+    pub(in crate::gui) fn keyboard_panel(&self) -> Option<&layout::Panel> {
+        visible_panel(
+            self.workspace.layouts.current().root.as_ref()?,
+            self.search_panel?,
+        )
     }
 
     fn keyboard_context(&self) -> KeyContext {
@@ -48,7 +54,7 @@ impl GuiApp {
         }
     }
 
-    pub(super) fn keyboard_input(
+    pub(in crate::gui) fn keyboard_input(
         &mut self,
         event: &KeyDownEvent,
         window: &mut Window,
@@ -62,7 +68,7 @@ impl GuiApp {
             cx.stop_propagation();
             return;
         }
-        if self.keyboard_help.is_some() {
+        if self.shell.help().is_some() {
             if let Some(action) = keyboard::resolve(key, modifiers, KeyContext::GuiHelp) {
                 self.help_key(action, cx);
             }
@@ -70,7 +76,7 @@ impl GuiApp {
             return;
         }
         if matches!(
-            self.keyboard_surface,
+            self.shell.keyboard_surface(),
             Some(shell::KeyboardSurface::Menu(..))
         ) {
             if plain {
@@ -131,23 +137,23 @@ impl GuiApp {
             cx.stop_propagation();
             return;
         }
-        if self.about_open {
+        if self.shell.is_open(shell::Surface::About) {
             if cancel {
-                self.about_open = false;
+                self.shell.dismiss(shell::Surface::About);
                 cx.notify();
             }
             cx.stop_propagation();
             return;
         }
-        if self.settings_open {
+        if self.shell.is_open(shell::Surface::Settings) {
             return;
         }
-        if self.layouts_open {
+        if self.shell.is_open(shell::Surface::Layouts) {
             if cancel {
                 if self.layout_action.is_some() {
                     self.layout_action = None;
                 } else {
-                    self.layouts_open = false;
+                    self.shell.dismiss(shell::Surface::Layouts);
                 }
                 self.focus_layout(window, cx);
                 cx.notify();
@@ -169,7 +175,7 @@ impl GuiApp {
             return;
         }
         // Native controls own Enter/Space; playback never also activates behind them.
-        if !self.layout_focus.is_focused(window) {
+        if !self.shell.layout_focus().is_focused(window) {
             return;
         }
         let Some(action) = action else { return };
@@ -192,6 +198,7 @@ impl GuiApp {
             }
             Action::PageUp | Action::PageDown => {
                 if self
+                    .workspace
                     .scroll_views
                     .page(action == Action::PageDown, window.mouse_position())
                 {
@@ -244,12 +251,16 @@ impl GuiApp {
     }
 
     fn help_key(&mut self, action: Action, cx: &mut Context<Self>) {
-        let handle = &self.help_scroll;
+        if action == Action::Cancel {
+            self.shell.close_help();
+            cx.notify();
+            return;
+        }
+        let handle = self.shell.help_scroll();
         let mut offset = handle.offset();
         let maximum = handle.max_offset().y.max(px(0.));
         let page = handle.bounds().size.height;
         match action {
-            Action::Cancel => self.keyboard_help = None,
             Action::Up => offset.y += px(32. * self.state.system.config.ui_scale),
             Action::Down => offset.y -= px(32. * self.state.system.config.ui_scale),
             Action::PageUp => offset.y += page,
@@ -262,7 +273,7 @@ impl GuiApp {
         cx.notify();
     }
 
-    pub(super) fn keyboard_help_overlay(
+    pub(in crate::gui) fn keyboard_help_overlay(
         &self,
         context: KeyContext,
         cx: &mut Context<Self>,
@@ -311,7 +322,7 @@ impl GuiApp {
                                     self.tr("shell-close-keyboard-help"),
                                     cx,
                                     |this, _, cx| {
-                                        this.keyboard_help = None;
+                                        this.shell.close_help();
                                         cx.notify();
                                     },
                                 ),
@@ -338,9 +349,9 @@ impl GuiApp {
                                     .size_full()
                                     .min_h_0()
                                     .overflow_y_scroll()
-                                    .track_scroll(&self.help_scroll)
+                                    .track_scroll(self.shell.help_scroll())
                                     .child(rows),
-                                &self.help_scroll,
+                                self.shell.help_scroll(),
                             )),
                     )
                     .child(caption(theme, self.tr("shell-keyboard-help-navigation")))

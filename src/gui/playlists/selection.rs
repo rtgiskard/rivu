@@ -148,6 +148,58 @@ pub(in crate::gui) struct EntrySelection {
     refresh_pending: bool,
 }
 impl EntrySelection {
+    pub(in crate::gui) fn sync_projection(
+        &mut self,
+        playlist_id: i64,
+        query: Option<String>,
+        revisions: QueryRevisions,
+    ) -> bool {
+        let changed = self.projection.sync(
+            &Query::PlaylistEntryLocations {
+                query: query.clone(),
+                playlist_id,
+                entry_ids: Vec::new(),
+            },
+            revisions,
+        );
+        if changed {
+            self.request_refresh();
+        }
+        self.navigation_projection.sync(
+            &Query::PlaylistEntries {
+                query,
+                playlist_id,
+                offset: 0,
+                limit: 1,
+            },
+            revisions,
+        );
+        changed
+    }
+
+    fn request_refresh(&mut self) {
+        self.invalidate();
+        self.refresh_pending = true;
+    }
+
+    fn prepare_refresh(&mut self) -> Option<(Vec<i64>, u64, crate::core::QueryTicket)> {
+        if self.refresh_in_flight || !self.refresh_pending {
+            return None;
+        }
+        self.refresh_pending = false;
+        let ids = self.ids();
+        if ids.is_empty() {
+            return None;
+        }
+        self.refresh_in_flight = true;
+        Some((ids, self.generation, self.projection.ticket()))
+    }
+
+    fn retire_refresh(&mut self) -> bool {
+        self.refresh_in_flight = false;
+        self.refresh_pending
+    }
+
     pub(in crate::gui) fn len(&self) -> usize {
         self.selected.len()
     }
@@ -161,6 +213,7 @@ impl EntrySelection {
         self.generation = self.generation.wrapping_add(1);
         self.projection.cancel();
         self.navigation_projection.cancel();
+        self.refresh_pending = false;
         self.busy = false;
         self.error = None;
         // The physical worker owns its gate until completion, including after a switch.
@@ -589,34 +642,11 @@ impl GuiApp {
     }
 
     pub(in crate::gui) fn sync_entry_projection(&mut self, cx: &mut Context<Self>) {
-        if let Some(playlist_id) = self.browser.playlists().selected() {
-            let filter = self.browser.playlists().entries().query.clone();
-            let query = Query::PlaylistEntryLocations {
-                query: filter.clone(),
-                playlist_id,
-                entry_ids: Vec::new(),
-            };
-            let revisions = self.state.query_revisions(Some(playlist_id));
-            if self
-                .browser
-                .playlist_selection_mut()
-                .projection
-                .sync(&query, revisions)
-            {
-                self.refresh_entry_selection(cx);
-            }
-            self.browser
-                .playlist_selection_mut()
-                .navigation_projection
-                .sync(
-                    &Query::PlaylistEntries {
-                        query: filter,
-                        playlist_id,
-                        offset: 0,
-                        limit: 1,
-                    },
-                    revisions,
-                );
+        let revisions = self
+            .state
+            .query_revisions(self.browser.playlists().selected());
+        if self.browser.sync_entry_projection(revisions) {
+            self.dispatch_entry_reconcile(cx);
         }
     }
 
@@ -676,22 +706,19 @@ impl GuiApp {
         }
     }
     pub(in crate::gui) fn refresh_entry_selection(&mut self, cx: &mut Context<Self>) {
+        self.browser.playlist_selection_mut().request_refresh();
+        self.dispatch_entry_reconcile(cx);
+    }
+
+    pub(in crate::gui) fn dispatch_entry_reconcile(&mut self, cx: &mut Context<Self>) {
         let Some(playlist_id) = self.browser.playlists().selected() else {
             return;
         };
-        let selection = self.browser.playlist_selection_mut();
-        selection.invalidate();
-        if selection.refresh_in_flight {
-            selection.refresh_pending = true;
+        let Some((ids, generation, ticket)) =
+            self.browser.playlist_selection_mut().prepare_refresh()
+        else {
             return;
-        }
-        let ids = selection.ids();
-        if ids.is_empty() {
-            return;
-        }
-        selection.refresh_in_flight = true;
-        selection.refresh_pending = false;
-        let generation = selection.generation;
+        };
         let revision = self.playlist_revision(playlist_id);
         let library = self
             .state
@@ -699,7 +726,6 @@ impl GuiApp {
             .metadata_revisions
             .playlist_revision(playlist_id, self.state.library.revision);
         let handle = self.handle.clone();
-        let ticket = self.browser.playlist_selection_mut().projection.ticket();
         let i18n = std::sync::Arc::clone(&self.i18n);
         let filter = self.browser.playlists().entries().query.clone();
         cx.spawn(async move |this, cx| {
@@ -794,10 +820,8 @@ impl GuiApp {
             }
             .await;
             let _ = this.update(cx, |this, cx| {
-                let selection = this.browser.playlist_selection_mut();
-                selection.refresh_in_flight = false;
-                if std::mem::take(&mut selection.refresh_pending) {
-                    this.refresh_entry_selection(cx);
+                if this.browser.playlist_selection_mut().retire_refresh() {
+                    this.dispatch_entry_reconcile(cx);
                 }
             });
         })
@@ -887,7 +911,8 @@ impl GuiApp {
         self.browser.focus_list(ListFocus::PlaylistTracks);
         self.request_track(commit.target.track_id, cx);
         if commit.scroll {
-            self.scroll_views
+            self.workspace
+                .scroll_views
                 .scroll_list_to("playlist-entries", commit.target.offset);
         }
         self.sync_waveform(cx);
@@ -1277,6 +1302,37 @@ mod tests {
             offset: position,
         }
     }
+    #[test]
+    fn entry_projection_changes_queue_one_refresh_without_releasing_the_running_worker() {
+        let mut selection = EntrySelection::default();
+        let mut first = identity(1, 0);
+        first.track_id = 100;
+        let mut duplicate = identity(2, 1);
+        duplicate.track_id = 100;
+        selection.select(first, false);
+        selection.select(duplicate, true);
+        let revisions = QueryRevisions::default();
+        assert!(selection.sync_projection(5, None, revisions));
+        let (ids, old_generation, ticket) = selection.prepare_refresh().unwrap();
+        assert_eq!(ids.len(), 2);
+        for query in ["first", "second", "latest"] {
+            assert!(selection.sync_projection(5, Some(query.into()), revisions));
+            assert!(selection.prepare_refresh().is_none());
+            assert!(selection.refresh_in_flight);
+            assert!(!selection.current(old_generation));
+        }
+        assert!(!ticket.is_current());
+        assert!(selection.retire_refresh());
+        let (ids, generation, _) = selection.prepare_refresh().unwrap();
+        assert_eq!(ids.len(), 2);
+        assert_ne!(generation, old_generation);
+        assert!(!selection.retire_refresh());
+        assert!(selection.prepare_refresh().is_none());
+        selection.request_refresh();
+        selection.clear();
+        assert!(selection.prepare_refresh().is_none());
+    }
+
     fn page(offset: usize, count: usize, total: usize) -> Page<PlaylistEntryRow> {
         Page {
             total,

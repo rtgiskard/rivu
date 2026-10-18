@@ -12,7 +12,7 @@ pub(in crate::gui) enum Action {
 
 impl GuiApp {
     pub(in crate::gui) fn layout_management_allowed(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.settings_open {
+        if self.shell.is_open(shell::Surface::Settings) {
             self.error = Some(self.i18n.text("shell-settings-before-layout").to_owned());
             cx.notify();
             false
@@ -21,44 +21,46 @@ impl GuiApp {
         }
     }
 
-    fn finish_layout_switch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // Layouts only replace the panel tree. Keep the window/editor and its
-        // in-flight metadata save alive even when Details is no longer visible.
-        self.scroll_views = scrolling::ScrollViews::default();
-        self.layouts
-            .current_mut()
-            .initialize_audio_visualizers(AudioVisualizerOptions::from(
-                self.state.system.config.as_ref(),
-            ));
-        self.layouts.current_mut().initialize_album_artworks(
-            crate::config::AlbumArtworkOptions::from(self.state.system.config.as_ref()),
-        );
-        self.queue_layout_save();
+    fn finish_layout_switch(
+        &mut self,
+        cancellation: Cancellation,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Workspace has committed the tree and viewport transition; feature
+        // drafts and accepted metadata writes remain with their existing owners.
+        if cancellation.docking {
+            cx.stop_active_drag(window);
+        }
+        self.apply_layout_change(cancellation, cx);
         self.begin_manual_intent();
-        self.layouts_open = false;
+        self.shell.dismiss(shell::Surface::Layouts);
         self.layout_action = None;
-        self.catalog_open = false;
-        self.layout_changed(cx);
+        self.shell.dismiss(shell::Surface::PanelCatalog);
         self.focus_layout(window, cx);
         self.sync_analysis(cx);
         cx.notify();
     }
 
     fn select_layout(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.layout_management_allowed(cx) || name == self.layouts.active_name() {
+        if !self.layout_management_allowed(cx) || name == self.workspace.layouts.active_name() {
             return;
         }
-        let cancellation = self.interaction.cancel();
-        self.apply_interaction_cancellation(cancellation, cx);
-        if let Err(error) = self.layouts.select(name) {
-            self.error = Some(self.i18n.format(
-                "shell-switch-layout-error",
-                &[("error", format!("{error:#}").into())],
-            ));
-            cx.notify();
-            return;
+        match self.workspace.activate(
+            name,
+            AudioVisualizerOptions::from(self.state.system.config.as_ref()),
+            crate::config::AlbumArtworkOptions::from(self.state.system.config.as_ref()),
+        ) {
+            Ok(Some(cancellation)) => self.finish_layout_switch(cancellation, window, cx),
+            Ok(None) => {}
+            Err(error) => {
+                self.error = Some(self.i18n.format(
+                    "shell-switch-layout-error",
+                    &[("error", format!("{error:#}").into())],
+                ));
+                cx.notify();
+            }
         }
-        self.finish_layout_switch(window, cx);
     }
 
     fn begin_layout_action(&mut self, action: Action, window: &mut Window, cx: &mut Context<Self>) {
@@ -66,7 +68,7 @@ impl GuiApp {
             return;
         }
         let name = if matches!(action, Action::Rename) {
-            self.layouts.active_name().to_owned()
+            self.workspace.layouts.active_name().to_owned()
         } else {
             String::new()
         };
@@ -93,26 +95,28 @@ impl GuiApp {
             return;
         };
         let name = self.value(Field::LayoutName, cx).trim().to_owned();
-        let (result, switched) = match action {
-            Action::Duplicate => {
-                let cancellation = self.interaction.cancel();
-                self.apply_interaction_cancellation(cancellation, cx);
-                let result = self.layouts.duplicate(&name);
-                (result, true)
-            }
-            Action::Rename => (self.layouts.rename(&name), false),
-            Action::Delete(name) => (self.layouts.remove(&name), false),
+        let result = match action {
+            Action::Duplicate => self
+                .workspace
+                .duplicate(
+                    &name,
+                    AudioVisualizerOptions::from(self.state.system.config.as_ref()),
+                    crate::config::AlbumArtworkOptions::from(self.state.system.config.as_ref()),
+                )
+                .map(Some),
+            Action::Rename => self.workspace.layouts.rename(&name).map(|()| None),
+            Action::Delete(name) => self.workspace.layouts.remove(&name).map(|()| None),
         };
         match result {
-            Ok(()) => {
+            Ok(cancellation) => {
                 self.layout_action = None;
-                if self.error != self.layout_save_error {
+                if self.error != self.workspace.save_error {
                     self.error = None;
                 }
-                if switched {
-                    self.finish_layout_switch(window, cx);
+                if let Some(cancellation) = cancellation {
+                    self.finish_layout_switch(cancellation, window, cx);
                 } else {
-                    self.queue_layout_save();
+                    self.workspace.submit_save();
                     self.focus_layout(window, cx);
                 }
             }
@@ -144,7 +148,7 @@ impl GuiApp {
                             self.tr("shell-close-layouts"),
                             cx,
                             |this, window, cx| {
-                                this.layouts_open = false;
+                                this.shell.dismiss(shell::Surface::Layouts);
                                 this.layout_action = None;
                                 this.focus_layout(window, cx);
                                 cx.notify();
@@ -219,12 +223,18 @@ impl GuiApp {
         } else {
             let mut choices = column().gap_1();
             let names = self
+                .workspace
                 .layouts
                 .names()
                 .filter(|name| *name == "Default")
-                .chain(self.layouts.names().filter(|name| *name != "Default"));
+                .chain(
+                    self.workspace
+                        .layouts
+                        .names()
+                        .filter(|name| *name != "Default"),
+                );
             for (index, name) in names.enumerate() {
-                let current = name == self.layouts.active_name();
+                let current = name == self.workspace.layouts.active_name();
                 let target = name.to_owned();
                 let mut choice = row().group("layout-choice-row").child(
                     menu_item(
@@ -315,8 +325,7 @@ impl GuiApp {
                             cx,
                             |this, window, cx| {
                                 this.cancel_interaction(window, cx);
-                                this.queue_layout_save();
-                                this.layout_save.sync();
+                                this.workspace.request_save();
                                 cx.notify();
                             },
                         )),
@@ -356,35 +365,28 @@ impl GuiApp {
 }
 
 impl GuiApp {
-    pub(in crate::gui) fn queue_layout_save(&self) -> u64 {
-        self.layout_save.submit(&self.layouts)
-    }
-
     pub(in crate::gui) fn sync_layout_save(&mut self, cx: &mut Context<Self>) {
-        let Some(completion) = self.layout_save.completion() else {
+        let Some(completion) = self.workspace.take_save_completion() else {
             return;
         };
-        if completion.revision <= self.layout_save_seen {
-            return;
-        }
-        self.layout_save_seen = completion.revision;
-        let result = completion.result.map_err(|error| {
+        let result = completion.map_err(|error| {
             self.i18n
                 .format("shell-save-layout-error", &[("error", error.into())])
         });
         match &result {
             Ok(()) => {
                 if self
-                    .layout_save_error
+                    .workspace
+                    .save_error
                     .as_ref()
                     .is_some_and(|error| self.error.as_ref() == Some(error))
                 {
                     self.error = None;
                 }
-                self.layout_save_error = None;
+                self.workspace.save_error = None;
             }
             Err(error) => {
-                self.layout_save_error = Some(error.clone());
+                self.workspace.save_error = Some(error.clone());
                 self.error = Some(error.clone());
             }
         }
@@ -392,18 +394,10 @@ impl GuiApp {
     }
 
     pub(in crate::gui) fn persist_layout(&mut self, cx: &mut Context<Self>) {
-        self.interaction.clear_docking_preview();
-        self.layouts
-            .current_mut()
-            .initialize_audio_visualizers(AudioVisualizerOptions::from(
-                self.state.system.config.as_ref(),
-            ));
-        self.layouts.current_mut().initialize_album_artworks(
+        self.workspace.persist(
+            AudioVisualizerOptions::from(self.state.system.config.as_ref()),
             crate::config::AlbumArtworkOptions::from(self.state.system.config.as_ref()),
         );
-        self.interaction
-            .retain_layout(self.layouts.current().root.as_ref());
-        self.queue_layout_save();
         self.sync_analysis(cx);
         cx.notify();
     }

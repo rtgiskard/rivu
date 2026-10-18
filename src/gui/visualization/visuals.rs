@@ -633,6 +633,8 @@ impl Visuals {
     }
     pub(in crate::gui) fn retain_spectrogram_panels(&mut self, panel_ids: &[u64]) {
         let mut data = self.data.borrow_mut();
+        // Cached panel views may reuse prepaint. Keep their last measurement
+        // until the panel is hidden/removed or prepaints with changed bounds.
         data.spectrogram_panel_sizes
             .retain(|panel_id, _| panel_ids.contains(panel_id));
         data.spectrogram_visible = !panel_ids.is_empty();
@@ -659,14 +661,10 @@ impl Visuals {
             .retain(|panel_id, _| panel_ids.contains(panel_id));
     }
 
-    pub(in crate::gui) fn begin_frame(&self) {
-        self.data.borrow_mut().spectrogram_panel_sizes.clear();
-    }
-
     // The root's first paint runs after every panel's prepaint. Size shared
     // history once here, never while individual panels are painting it.
-    pub(in crate::gui) fn finish_prepaint(&self) {
-        self.data.borrow_mut().finish_prepaint();
+    pub(in crate::gui) fn finish_prepaint(&self) -> bool {
+        self.data.borrow_mut().finish_prepaint()
     }
 
     pub(in crate::gui) fn release_retired(&self, window: &mut Window) {
@@ -850,9 +848,9 @@ impl Visuals {
 }
 
 impl VisualData {
-    fn finish_prepaint(&mut self) {
+    fn finish_prepaint(&mut self) -> bool {
         if !self.enabled || !self.spectrogram_visible {
-            return;
+            return false;
         }
         let Some(width) = self
             .spectrogram_panel_sizes
@@ -861,8 +859,9 @@ impl VisualData {
             .max()
         else {
             // No measurement yet; keep sizing out of individual panel paints.
-            return;
+            return false;
         };
+        let previous = (self.history_columns, self.spectrogram_panel_height);
         self.spectrogram_panel_height = self
             .spectrogram_panel_sizes
             .values()
@@ -874,6 +873,7 @@ impl VisualData {
         self.resize_history(columns);
         self.history_limit_seconds = (columns as f64 / self.analysis_fps.max(1) as f64)
             .min(self.spectrogram_history_seconds as f64);
+        previous != (self.history_columns, self.spectrogram_panel_height)
     }
 
     fn display_level(&self, index: usize) -> f32 {
@@ -2665,7 +2665,11 @@ mod tests {
     #[test]
     fn spectrogram_labels_toggle_without_resetting_history() {
         let mut visuals = configured_visuals();
-        let mut config = Config::default();
+        let mut config = Config {
+            spectrum_labels: true,
+            ..Config::default()
+        };
+        visuals.configure(&config);
         visuals.update(&frame(1.0, -30.0));
         for visible in [false, true] {
             config.spectrogram_labels = visible;
@@ -2746,7 +2750,6 @@ mod tests {
             [(1, (400, 100)), (2, (3, 700))],
             [(2, (3, 700)), (1, (400, 100))],
         ] {
-            visuals.begin_frame();
             visuals
                 .data
                 .borrow_mut()
@@ -2757,10 +2760,43 @@ mod tests {
             assert_eq!(visuals.data.borrow().spectrogram_panel_height, 700);
             assert_eq!(history_times(), original);
         }
-        visuals.begin_frame();
+        // Reusing cached prepaint leaves both panel measurements authoritative.
         visuals.finish_prepaint();
         assert_eq!(visuals.data.borrow().history_columns, 400);
         assert_eq!(history_times(), original);
+    }
+
+    #[test]
+    fn cached_spectrogram_sizes_change_only_on_measurement_or_panel_retirement() {
+        let mut visuals = configured_visuals();
+        visuals.retain_spectrogram_panels(&[1, 2]);
+        visuals
+            .data
+            .borrow_mut()
+            .spectrogram_panel_sizes
+            .extend([(1, (400, 100)), (2, (3, 700))]);
+        assert!(visuals.finish_prepaint());
+        assert!(
+            !visuals.finish_prepaint(),
+            "cached prepaint must not invalidate siblings"
+        );
+        visuals
+            .data
+            .borrow_mut()
+            .spectrogram_panel_sizes
+            .insert(1, (200, 100));
+        assert!(
+            visuals.finish_prepaint(),
+            "shared width changes invalidate sibling scenes"
+        );
+        assert_eq!(visuals.data.borrow().history_columns, 200);
+        visuals.retain_spectrogram_panels(&[1]);
+        assert!(visuals.finish_prepaint());
+        assert_eq!(visuals.data.borrow().spectrogram_panel_height, 100);
+        assert!(!visuals.finish_prepaint());
+        visuals.retain_spectrogram_panels(&[]);
+        assert!(visuals.data.borrow().spectrogram_panel_sizes.is_empty());
+        assert_eq!(visuals.data.borrow().history_columns, 0);
     }
 
     #[test]

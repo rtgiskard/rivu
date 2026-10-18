@@ -89,6 +89,7 @@ impl GuiApp {
             .map(|(index, root)| (index, root.clone()));
         self.activate_library(window, cx, false);
         if !self
+            .workspace
             .layouts
             .current()
             .panels()

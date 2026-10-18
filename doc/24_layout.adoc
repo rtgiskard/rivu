@@ -2,10 +2,12 @@
 
 == Scope and ownership
 
-The desktop owns a collection of named docking trees. The playback core owns
-playback, queue state, global configuration, and audio analysis; layout edits
-must not replace that ownership. User operations and file syntax are documented
-in link:01_config.adoc#_layout[Configuration and layout].
+The window's workspace owns named docking trees, docking interactions, and
+panel-local scroll state. The GUI session owns the layout writer so accepted
+saves outlive a window. The playback core owns playback, queue state, global
+configuration, and audio analysis; layout edits must not replace that ownership.
+User operations and file syntax are documented in
+link:01_config.adoc#_layout[Configuration and layout].
 
 Switching or duplicating a saved layout replaces the panel tree inside the
 existing window and GUI session. Existing owners retain their state naturally;
@@ -94,6 +96,32 @@ visibility in a frame. Inactive tabs retain their viewport state but cannot
 receive pointer or page-key input. Structural edits release state for removed
 panels; switching or duplicating a named layout starts new view-local scroll
 state. No per-layout scroll snapshots are kept.
+
+== GUI composition boundaries
+
+GPUI remains the rendering and input framework. The window coordinates explicit
+cross-feature actions and metadata confirmation; feature owners decide query
+validity, selection identity, and accepted results. The browser dispatcher runs
+the returned read effects rather than reconstructing owner transitions. See
+link:22_cache.adoc#_query_projection_retention[Query projection retention].
+
+The shell owns mutually exclusive application surfaces and keyboard focus
+restoration. Feature confirmations can cover a surface without discarding its
+draft. Deferred focus requests carry a generation so an obsolete callback cannot
+focus a replacement surface. Workspace activation validates the target before
+cancelling an interaction and rolls back a live split against the outgoing tree,
+never against reused IDs in the incoming tree.
+
+Business panels have cached view boundaries separate from the shell traversal.
+Window business notifications invalidate their content; playback timeline updates
+invalidate transport and, when its live data changes, History, without rebuilding
+library or playlist rows.
+Layout visibility, not whether a cached subtree rendered in that frame, decides
+which retained scroll regions can receive input. Re-rendering a panel replaces
+only that panel's region registrations. Visualization scheduling and image
+retirement belong to a separate presentation owner; see
+link:23_visuals.adoc#_analysis_boundary[Analysis boundary].
+
 
 == Normalized trees and resource boundaries
 

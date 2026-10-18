@@ -78,9 +78,7 @@ pub(in crate::gui) enum ManualAction {
 impl GuiApp {
     pub(in crate::gui) fn begin_manual_intent(&mut self) -> ManualIntentId {
         let id = self.manual_intents.begin();
-        self.browser.library.cancel_manual_selection();
-        self.browser.playlist_selection_mut().cancel_manual();
-        self.browser.queue.cancel_manual();
+        self.browser.cancel_manual_selection();
         id
     }
 
@@ -227,7 +225,7 @@ impl GuiApp {
         };
         Some(
             crate::gui::components::modal_backdrop("metadata-confirmation-modal")
-                .map(|surface| self.keyboard_scope.surface(surface))
+                .map(|surface| self.shell.scope().surface(surface))
                 .child(
                     column()
                         .id("metadata-confirmation-card")

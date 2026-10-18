@@ -30,6 +30,7 @@ impl GuiApp {
         cx: &mut Context<Self>,
     ) {
         let position = self
+            .workspace
             .interaction
             .measurements()
             .get(&anchor)
@@ -57,16 +58,17 @@ impl GuiApp {
         for spec in PANELS {
             let kind = spec.kind;
             let choice = button(kind, self.tr(spec.title_id), cx, move |this, _, cx| {
-                if this.layouts.current().locked {
+                if this.workspace.layouts.current().locked {
                     return;
                 }
-                let cancellation = this.interaction.cancel();
+                let cancellation = this.workspace.interaction.cancel();
                 this.apply_interaction_cancellation(cancellation, cx);
-                this.layouts
+                this.workspace
+                    .layouts
                     .current_mut()
-                    .add(kind, this.interaction.target_group());
+                    .add(kind, this.workspace.interaction.target_group());
                 this.layout_changed(cx);
-                this.catalog_open = false;
+                this.shell.dismiss(shell::Surface::PanelCatalog);
                 this.persist_layout(cx);
             });
             if matches!(
@@ -87,7 +89,7 @@ impl GuiApp {
             .map(|surface| self.menu_surface(surface))
             .occlude()
             .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                this.catalog_open = false;
+                this.shell.dismiss(shell::Surface::PanelCatalog);
                 cx.stop_propagation();
                 cx.notify();
             }))
@@ -117,6 +119,7 @@ impl GuiApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let panel_kind = self
+            .workspace
             .layouts
             .current()
             .panels()
@@ -183,6 +186,7 @@ impl GuiApp {
                     ));
                 }
                 if let Some(options) = self
+                    .workspace
                     .layouts
                     .current()
                     .album_artwork_options(state.panel_id)
@@ -218,8 +222,11 @@ impl GuiApp {
                                 cx,
                                 move |this, _, cx| {
                                     this.panel_menu = None;
-                                    if let Some(mut options) =
-                                        this.layouts.current().album_artwork_options(state.panel_id)
+                                    if let Some(mut options) = this
+                                        .workspace
+                                        .layouts
+                                        .current()
+                                        .album_artwork_options(state.panel_id)
                                     {
                                         options.mode = match options.mode {
                                             crate::config::AlbumArtworkMode::Static => {
@@ -229,7 +236,8 @@ impl GuiApp {
                                                 crate::config::AlbumArtworkMode::Static
                                             }
                                         };
-                                        this.layouts
+                                        this.workspace
+                                            .layouts
                                             .current_mut()
                                             .set_album_artwork_options(state.panel_id, options);
                                         this.persist_layout(cx);
@@ -253,13 +261,16 @@ impl GuiApp {
                             cx,
                             move |this, window, cx| {
                                 this.panel_menu = None;
-                                if let Some(options) =
-                                    this.layouts.current().album_artwork_options(state.panel_id)
+                                if let Some(options) = this
+                                    .workspace
+                                    .layouts
+                                    .current()
+                                    .album_artwork_options(state.panel_id)
                                 {
                                     this.settings.update(cx, |settings, cx| {
                                         settings.open_artwork(state.panel_id, options, window, cx)
                                     });
-                                    this.settings_open = true;
+                                    this.shell.open(shell::Surface::Settings);
                                     cx.notify();
                                 }
                             },
@@ -268,6 +279,7 @@ impl GuiApp {
                 }
                 if is_audio_visualizer
                     && let Some(options) = self
+                        .workspace
                         .layouts
                         .current()
                         .audio_visualizer_options(state.panel_id)
@@ -305,12 +317,14 @@ impl GuiApp {
                                 move |this, _, cx| {
                                     this.panel_menu = None;
                                     if let Some(mut options) = this
+                                        .workspace
                                         .layouts
                                         .current()
                                         .audio_visualizer_options(state.panel_id)
                                     {
                                         options.reference_lines = !options.reference_lines;
-                                        this.layouts
+                                        this.workspace
+                                            .layouts
                                             .current_mut()
                                             .set_audio_visualizer_options(state.panel_id, options);
                                         this.persist_layout(cx);
@@ -336,12 +350,14 @@ impl GuiApp {
                                 move |this, _, cx| {
                                     this.panel_menu = None;
                                     if let Some(mut options) = this
+                                        .workspace
                                         .layouts
                                         .current()
                                         .audio_visualizer_options(state.panel_id)
                                     {
                                         options.labels = !options.labels;
-                                        this.layouts
+                                        this.workspace
+                                            .layouts
                                             .current_mut()
                                             .set_audio_visualizer_options(state.panel_id, options);
                                         this.persist_layout(cx);
@@ -367,6 +383,7 @@ impl GuiApp {
                             move |this, window, cx| {
                                 this.panel_menu = None;
                                 if let Some(options) = this
+                                    .workspace
                                     .layouts
                                     .current()
                                     .audio_visualizer_options(state.panel_id)
@@ -379,7 +396,7 @@ impl GuiApp {
                                             cx,
                                         )
                                     });
-                                    this.settings_open = true;
+                                    this.shell.open(shell::Surface::Settings);
                                     cx.notify();
                                 }
                             },
@@ -443,7 +460,8 @@ impl GuiApp {
                         },
                         cx,
                         move |this, _, cx| {
-                            this.layouts
+                            this.workspace
+                                .layouts
                                 .current_mut()
                                 .set_tab_bar_visible(state.panel_id, !state.tab_bar_visible);
                             this.panel_menu = None;
@@ -512,6 +530,7 @@ impl GuiApp {
                     .child(components::menu_separator(theme));
                 for style in album_artwork::ALBUM_ARTWORK_STYLES {
                     let selected = self
+                        .workspace
                         .layouts
                         .current()
                         .album_artwork_options(state.panel_id)
@@ -524,11 +543,15 @@ impl GuiApp {
                             cx,
                             move |this, _, cx| {
                                 this.panel_menu = None;
-                                if let Some(mut options) =
-                                    this.layouts.current().album_artwork_options(state.panel_id)
+                                if let Some(mut options) = this
+                                    .workspace
+                                    .layouts
+                                    .current()
+                                    .album_artwork_options(state.panel_id)
                                 {
                                     options.style = style;
                                     if this
+                                        .workspace
                                         .layouts
                                         .current_mut()
                                         .set_album_artwork_options(state.panel_id, options)
@@ -570,6 +593,7 @@ impl GuiApp {
                     ))
                     .child(components::menu_separator(theme));
                 if let Some(options) = self
+                    .workspace
                     .layouts
                     .current()
                     .audio_visualizer_options(state.panel_id)
@@ -592,12 +616,14 @@ impl GuiApp {
                                 move |this, _, cx| {
                                     this.panel_menu = None;
                                     if let Some(mut options) = this
+                                        .workspace
                                         .layouts
                                         .current()
                                         .audio_visualizer_options(state.panel_id)
                                     {
                                         options.style = style;
-                                        this.layouts
+                                        this.workspace
+                                            .layouts
                                             .current_mut()
                                             .set_audio_visualizer_options(state.panel_id, options);
                                         this.persist_layout(cx);

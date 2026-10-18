@@ -646,7 +646,7 @@ impl GuiApp {
             .filter(|track| track.missing)
             .map(|track| track.path.to_string_lossy().into_owned().into())
             .unwrap_or_else(|| file[0][0].1.clone());
-        let scroll = self.scroll_views.content(("metadata", panel_id));
+        let scroll = self.workspace.scroll_views.content(("metadata", panel_id));
         let details = div()
             .id(("metadata-details", panel_id))
             .flex()

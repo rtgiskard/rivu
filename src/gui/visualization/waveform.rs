@@ -716,12 +716,13 @@ impl Waveform {
         panels: &[&super::super::layout::Panel],
         cx: &mut Context<Self>,
     ) {
-        self.plot
-            .borrow_mut()
-            .retain_panels(|id| panels.iter().any(|panel| panel.id == id));
-        if let Some(generation) =
-            self.retain_interaction_panels(|id| panels.iter().any(|panel| panel.id == id))
-        {
+        let keep = |id| {
+            panels
+                .iter()
+                .any(|panel| panel.id == id && panel.kind == "waveform")
+        };
+        self.plot.borrow_mut().retain_panels(keep);
+        if let Some(generation) = self.retain_interaction_panels(keep) {
             cx.emit(WaveformEvent::Cancelled { generation });
         }
     }
@@ -2351,6 +2352,107 @@ mod tests {
             assert!(std::ptr::eq(waveform.display_frame(&shared), &*shared));
             assert!(waveform.full_preview(&shared).is_none());
         }
+    }
+
+    #[gpui::test]
+    fn presentation_hiding_retains_pending_and_completed_full_previews(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::gui::presentation::{Presentation, PresentationState};
+
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        Config {
+            volume: 0.0,
+            ffmpeg_enabled: false,
+            mpris_enabled: false,
+            ..Config::default()
+        }
+        .save(&config_path)
+        .unwrap();
+        let runtime = crate::core::Runtime::start(directory.path(), &config_path).unwrap();
+        let config = runtime.handle.config_snapshot();
+        let window = cx.add_empty_window();
+        let waveform = window.update(|_, cx| cx.new(|_| preview(frame(vec![Some(0.25), None]))));
+        let owner = window.update(|_, cx| {
+            cx.new(|cx| {
+                Presentation::new(
+                    runtime.handle.clone(),
+                    Arc::new(Localizer::new("en-US")),
+                    waveform.clone(),
+                    cx,
+                )
+            })
+        });
+        let track = track("track.flac", DecoderHint::Auto);
+        let panel = crate::gui::layout::Panel {
+            id: 1,
+            kind: "waveform".into(),
+            show_tab_bar: true,
+            audio_visualizer: None,
+            album_artwork: None,
+        };
+        window.update(|window, cx| {
+            let panels = [&panel];
+            let state = |visible, has_panel| PresentationState {
+                config: Arc::clone(&config),
+                panels: if has_panel { &panels } else { &[] },
+                status: crate::model::PlaybackStatus::Paused,
+                visible,
+                shutting_down: false,
+                track: Some(&track),
+                position: 0.0,
+                duration: track.duration,
+            };
+            owner.update(cx, |owner, cx| owner.sync(state(true, true), cx));
+            for complete in [false, true] {
+                let (generation, cancelled) =
+                    waveform.update(cx, |waveform, _| waveform.start_full(DecoderHint::Auto));
+                if complete {
+                    waveform.update(cx, |waveform, _| {
+                        assert!(waveform.finish_full(generation, Ok(frame(vec![Some(0.5); 2]))));
+                    });
+                }
+                for (visible, has_panel, release) in [
+                    (true, false, false),
+                    (true, true, false),
+                    (false, true, false),
+                    (false, true, true),
+                    (true, true, false),
+                ] {
+                    owner.update(cx, |owner, cx| {
+                        owner.sync(state(visible, has_panel), cx);
+                        if release {
+                            owner.release_render_images(window, cx);
+                        }
+                    });
+                    assert!(!cancelled.load(Ordering::Relaxed));
+                    let waveform = waveform.read(cx);
+                    if complete {
+                        assert_eq!(
+                            waveform.full.as_ref().unwrap().frame.peaks,
+                            vec![Some(0.5); 2]
+                        );
+                    } else {
+                        assert!(waveform.manual.is_some());
+                    }
+                }
+                if !complete {
+                    waveform.update(cx, |waveform, _| {
+                        assert!(waveform.finish_full(generation, Ok(frame(vec![Some(0.5); 2]))));
+                    });
+                }
+            }
+            let mut still = config.as_ref().clone();
+            still.still_mode = true;
+            owner.update(cx, |owner, cx| {
+                let mut state = state(true, true);
+                state.config = Arc::new(still);
+                owner.sync(state, cx);
+            });
+            assert!(waveform.read(cx).full.is_none());
+            assert!(waveform.read(cx).manual.is_none());
+        });
     }
 
     #[test]

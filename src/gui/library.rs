@@ -475,7 +475,7 @@ impl GuiApp {
                     let playing_track = this.state.current_track()
                         .filter(|_| this.state.playback.status == crate::model::PlaybackStatus::Playing)
                         .map(|track| track.id);
-                    let focused_index = (this.layout_focus.is_focused(window)
+                    let focused_index = (this.shell.layout_focus().is_focused(window)
                         && this.browser.focus() == Some(super::BrowserFocus::List(ListFocus::Library)))
                         .then(|| this.browser.library.tree().selected_index())
                         .flatten();
@@ -1171,7 +1171,7 @@ impl GuiApp {
         if self.state.system.scan_progress.is_some() || self.state.system.scanning {
             panel = panel.child(self.library_scan_status(panel_id, cx));
         }
-        self.scroll_views.register_list(
+        self.workspace.scroll_views.register_list(
             ("library-projection", panel_id),
             &self.browser.library.tree().scroll,
         );
@@ -1209,7 +1209,7 @@ mod library_root_tests {
         i18n::Localizer,
         model::{DirectoryRow, Query},
     };
-    use gpui::{AppContext, Entity, IntoElement, VisualTestContext, point, px, size};
+    use gpui::{Entity, IntoElement, VisualTestContext, point, px, size};
     use std::{path::PathBuf, sync::Arc};
 
     fn settle_config(handle: &CoreHandle) {
@@ -1283,19 +1283,16 @@ mod library_root_tests {
         layouts.handle().submit(&initial_layouts);
         layouts.flush().unwrap();
         let artwork = Arc::new(crate::artwork::ArtworkManager::new(directory.path()));
-        let window = cx.add_empty_window();
-        let app = window.update(|window, cx| {
-            cx.new(|cx| {
-                GuiApp::new(
-                    runtime.handle.clone(),
-                    layouts.handle(),
-                    artwork,
-                    std::rc::Weak::new(),
-                    Arc::new(Localizer::new("en-US")),
-                    window,
-                    cx,
-                )
-            })
+        let (app, window) = cx.add_window_view(|window, cx| {
+            GuiApp::new(
+                runtime.handle.clone(),
+                layouts.handle(),
+                artwork,
+                std::rc::Weak::new(),
+                Arc::new(Localizer::new("en-US")),
+                window,
+                cx,
+            )
         });
         // Native worker threads cannot wake GPUI's deterministic scheduler.
         // FIFO Core barriers and draw_library's refresh own test synchronization.
@@ -1303,7 +1300,7 @@ mod library_root_tests {
         layouts.handle().set_wakeup(|| {});
         app.update(&mut window.cx, |this, _| {
             this.window_visible = true;
-            this.layouts.current_mut().root = Some(Node::Tabs {
+            this.workspace.layouts.current_mut().root = Some(Node::Tabs {
                 id: 1,
                 active: 2,
                 panels: vec![Panel {

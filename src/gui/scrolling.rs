@@ -60,9 +60,22 @@ impl ScrollViews {
         self.active = None;
     }
 
-    pub(super) fn begin_frame(&mut self) {
-        for region in self.regions.values_mut() {
-            region.visible = false;
+    /// Cached active panels may not render again this frame. Keep their last
+    /// registrations, but never route input into a panel hidden by tab changes.
+    pub(super) fn begin_frame(&mut self, layout: &Layout) {
+        for ((_, panel_id), region) in &mut self.regions {
+            region.visible &= layout.is_panel_active(*panel_id);
+        }
+    }
+
+    /// An actual panel render rebuilds only its own registrations. In particular,
+    /// switching a playlist's list region must retire the previous region even
+    /// while other cached panels remain input-active.
+    pub(super) fn begin_panel(&mut self, panel_id: u64) {
+        for ((_, owner), region) in &mut self.regions {
+            if *owner == panel_id {
+                region.visible = false;
+            }
         }
     }
 
@@ -184,7 +197,8 @@ mod tests {
             .content(("metadata", metadata))
             .set_offset(gpui::point(px(0.), px(-160.)));
         views.active = Some(("queue", queue));
-        views.begin_frame();
+        views.begin_frame(&layout);
+        views.begin_panel(metadata);
         views.finish_frame();
         assert!(views.active.is_none());
         assert!(!views.page(true, gpui::point(px(0.), px(0.))));
@@ -229,7 +243,7 @@ mod tests {
             .borrow()
             .base_handle
             .set_offset(gpui::point(px(0.), px(-420.)));
-        views.begin_frame();
+        views.begin_frame(&layout);
         views.finish_frame();
         assert!(layout.remove(removed));
         views.retain_layout(&layout);
@@ -255,6 +269,36 @@ mod tests {
                 .y,
             px(0.)
         );
+    }
+
+    #[test]
+    fn cached_active_panels_keep_scroll_targets_until_their_own_render() {
+        let mut layout = layout();
+        let playlist = layout.add("playlists", None);
+        let mut views = ScrollViews::default();
+        let old = views.list(("playlist-list", playlist));
+        views.active = Some(("playlist-list", playlist));
+        views.begin_frame(&layout);
+        views.finish_frame();
+        assert_eq!(views.active, Some(("playlist-list", playlist)));
+        views.scroll_list_to("playlist-list", 7);
+        assert!(old.0.borrow().deferred_scroll_to_item.is_some());
+
+        views.begin_panel(playlist);
+        views.list(("playlist-tracks", playlist));
+        views.finish_frame();
+        assert!(views.active.is_none());
+        assert!(!views.regions[&("playlist-list", playlist)].visible);
+        assert!(views.regions[&("playlist-tracks", playlist)].visible);
+        views.begin_frame(&layout);
+        views.finish_frame();
+        assert!(!views.regions[&("playlist-list", playlist)].visible);
+        assert!(views.regions[&("playlist-tracks", playlist)].visible);
+
+        layout.add("history", None);
+        views.begin_frame(&layout);
+        views.finish_frame();
+        assert!(!views.regions[&("playlist-tracks", playlist)].visible);
     }
 
     #[test]

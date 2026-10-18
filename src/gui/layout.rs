@@ -1405,6 +1405,13 @@ impl Layout {
             .is_some_and(|root| root.panel_group(panel_id).is_some())
     }
 
+    pub(super) fn is_panel_active(&self, panel_id: u64) -> bool {
+        matches!(
+            self.root.as_ref().and_then(|root| root.panel_group(panel_id)),
+            Some(Node::Tabs { active, .. }) if *active == panel_id
+        )
+    }
+
     pub fn active_panels(&self) -> Vec<&Panel> {
         let mut panels = Vec::new();
         if let Some(root) = &self.root {
@@ -1555,7 +1562,7 @@ impl LayoutSet {
         }
     }
 
-    fn unused_name<'a>(&self, name: &'a str) -> Result<&'a str> {
+    pub(super) fn unused_name<'a>(&self, name: &'a str) -> Result<&'a str> {
         let name = checked_name(name)?;
         if self.layouts.contains_key(name) {
             return Err(anyhow!("layout {name:?} already exists"));
@@ -1563,11 +1570,16 @@ impl LayoutSet {
         Ok(name)
     }
 
-    pub fn select(&mut self, name: &str) -> Result<()> {
+    pub(super) fn selectable_name<'a>(&self, name: &'a str) -> Result<&'a str> {
         let name = checked_name(name)?;
         if !self.layouts.contains_key(name) {
             return Err(anyhow!("layout {name:?} does not exist"));
         }
+        Ok(name)
+    }
+
+    pub fn select(&mut self, name: &str) -> Result<()> {
+        let name = self.selectable_name(name)?;
         if self.active.as_ref() != name {
             self.active = name.into();
         }

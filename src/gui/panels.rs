@@ -25,6 +25,57 @@ pub(super) struct HistoryColumnWidths {
 }
 
 impl GuiApp {
+    fn presentation_panel(&mut self, id: u64, cx: &mut Context<Self>) -> AnyElement {
+        let panel = self
+            .presentation
+            .update(cx, |presentation, cx| presentation.panel(id, cx));
+        if self.state.system.config.visualization_cache {
+            panel
+                .cached(gpui::StyleRefinement::default().size_full())
+                .into_any_element()
+        } else {
+            // Uncached renderer images retire at the next paint boundary;
+            // a cached GPUI scene must not retain their atlas references.
+            panel.into_any_element()
+        }
+    }
+
+    pub(super) fn spectrum_panel(
+        &mut self,
+        id: u64,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.presentation_panel(id, cx)
+    }
+
+    pub(super) fn spectrogram_panel(
+        &mut self,
+        id: u64,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.presentation_panel(id, cx)
+    }
+
+    pub(super) fn audio_visualizer_panel(
+        &mut self,
+        panel: &super::layout::Panel,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.presentation_panel(panel.id, cx)
+    }
+
+    pub(super) fn waveform_panel(
+        &mut self,
+        id: u64,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.presentation_panel(id, cx)
+    }
+
     pub(super) fn last_played_text(&self, track_id: i64, stored_at: Option<i64>) -> String {
         let current = self
             .state
@@ -92,6 +143,7 @@ impl GuiApp {
             .duration
             .or_else(|| track.and_then(|track| track.duration));
         let preview_position = self
+            .workspace
             .interaction
             .seek_preview()
             .unwrap_or(self.state.playback.position);
@@ -255,7 +307,7 @@ impl GuiApp {
                     }),
             )
             .child(div().flex_1().min_w_0().child(volume));
-        let scroll = self.scroll_views.content(("transport", panel_id));
+        let scroll = self.workspace.scroll_views.content(("transport", panel_id));
         column()
             .id(("transport-panel", panel_id))
             .size_full()
@@ -597,7 +649,7 @@ impl GuiApp {
                 cx,
             ))
             .child(div().w(px(12.)).flex_shrink_0());
-        let scroll = self.scroll_views.list(("history", panel_id));
+        let scroll = self.workspace.scroll_views.list(("history", panel_id));
         panel_surface(("history-panel", panel_id))
             .child(
                 row()
