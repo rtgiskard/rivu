@@ -11,14 +11,45 @@ use rivu_ui::{
 };
 use std::cell::RefCell;
 
-// Re-measure only when content, playback labels, font, or UI scale changes.
-// Layout growth belongs exclusively to Track, not these three content columns.
+// Static content is independent of playback. At most one row's time label is
+// replaced, so two maxima preserve the exact width without retaining every row.
 pub(super) struct HistoryColumnWidths {
     source: std::sync::Arc<Vec<crate::model::HistoryEntry>>,
     font: gpui::Font,
     rem_size: gpui::Pixels,
-    playback: (Option<i64>, PlaybackStatus, Option<i64>),
+    times: TimeWidths,
+    playback: Option<(i64, PlaybackStatus, Option<i64>)>,
+    playback_text: Option<SharedString>,
     widths: [gpui::Pixels; 3],
+}
+
+struct TimeWidths {
+    header: gpui::Pixels,
+    widest: [(Option<i64>, gpui::Pixels); 2],
+}
+
+impl TimeWidths {
+    fn new(header: gpui::Pixels) -> Self {
+        Self {
+            header,
+            widest: [(None, px(0.)); 2],
+        }
+    }
+
+    // Each track occurs once in the history source; ties must retain both rows.
+    fn include(&mut self, track_id: i64, width: gpui::Pixels) {
+        if width >= self.widest[0].1 {
+            self.widest[1] = self.widest[0];
+            self.widest[0] = (Some(track_id), width);
+        } else if width > self.widest[1].1 {
+            self.widest[1] = (Some(track_id), width);
+        }
+    }
+
+    fn width(&self, replaced: Option<i64>, replacement: gpui::Pixels) -> gpui::Pixels {
+        let index = usize::from(replaced.is_some() && self.widest[0].0 == replaced);
+        self.header.max(self.widest[index].1).max(replacement)
+    }
 }
 
 impl History {
@@ -39,6 +70,13 @@ impl History {
         } else {
             stored_at
         };
+        self.format_played_at(
+            played_at,
+            current && self.state.playback.status == PlaybackStatus::Paused,
+        )
+    }
+
+    fn format_played_at(&self, played_at: Option<i64>, paused: bool) -> String {
         match played_at.and_then(|time| DateTime::from_timestamp(time, 0)) {
             Some(time) => self.context.i18n.format(
                 "gl-played-at",
@@ -51,13 +89,7 @@ impl History {
                             .to_string())
                         .into(),
                     ),
-                    (
-                        "paused",
-                        (usize::from(
-                            current && self.state.playback.status == PlaybackStatus::Paused,
-                        ))
-                        .into(),
-                    ),
+                    ("paused", usize::from(paused).into()),
                 ],
             ),
             None => self.context.i18n.text("gl-played-none").into(),
@@ -135,48 +167,50 @@ impl History {
         self.search.update(cx, |search, cx| {
             set_search_counts(search, history_len, history_total, &self.context.i18n, cx)
         });
-        let playback = (
-            self.state.current_track().map(|track| track.id),
-            self.state.playback.status,
-            self.state.playback.last_heard_at.map(|time| {
-                if self.state.playback.status == PlaybackStatus::Paused {
-                    time
-                } else {
-                    0
-                }
-            }),
-        );
+        // Playing uses one fixed label regardless of the latest heard timestamp.
+        // Stopped or not-yet-heard playback leaves the stored labels untouched.
+        let playback =
+            self.state
+                .current_track()
+                .and_then(|track| match self.state.playback.status {
+                    PlaybackStatus::Playing if self.state.playback.last_heard_at.is_some() => {
+                        Some((track.id, PlaybackStatus::Playing, None))
+                    }
+                    PlaybackStatus::Paused => Some((
+                        track.id,
+                        PlaybackStatus::Paused,
+                        self.state.playback.last_heard_at,
+                    )),
+                    _ => None,
+                });
         let source = &self.state.library.history;
         let rem_size = window.rem_size();
-        let widths = if let Some(cache) = &self.column_widths
-            && std::sync::Arc::ptr_eq(&cache.source, source)
-            && cache.font == self.ui_font
-            && cache.rem_size == rem_size
-            && cache.playback == playback
-        {
-            cache.widths
-        } else {
-            let measure = |text: SharedString, font: gpui::Font| {
-                let run = gpui::TextRun {
-                    len: text.len(),
-                    font,
-                    color: rgb(theme.muted).into(),
-                    background_color: None,
-                    underline: None,
-                    strikethrough: None,
-                };
-                window
-                    .text_system()
-                    .shape_line(text, rem_size * 0.75, &[run], None)
-                    .width()
-                    .ceil()
+        let measure = |text: SharedString, font: gpui::Font| {
+            let run = gpui::TextRun {
+                len: text.len(),
+                font,
+                color: rgb(theme.muted).into(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
             };
-            let text_width = |text: SharedString| measure(text, self.ui_font.clone());
-            let numeric_width = |text: SharedString| {
-                let mut font = self.ui_font.clone();
-                font.features = tabular_numbers();
-                measure(text, font)
-            };
+            window
+                .text_system()
+                .shape_line(text, rem_size * 0.75, &[run], None)
+                .width()
+                .ceil()
+        };
+        let text_width = |text: SharedString| measure(text, self.ui_font.clone());
+        let numeric_width = |text: SharedString| {
+            let mut font = self.ui_font.clone();
+            font.features = tabular_numbers();
+            measure(text, font)
+        };
+        if !self.column_widths.as_ref().is_some_and(|cache| {
+            std::sync::Arc::ptr_eq(&cache.source, source)
+                && cache.font == self.ui_font
+                && cache.rem_size == rem_size
+        }) {
             // Keep space for either sort direction so sorting does not move columns.
             let arrow = measure(
                 "󰁅".into(),
@@ -191,23 +225,47 @@ impl History {
                 text_width(self.tr("gl-play-count")) + arrow,
                 text_width(self.tr("gl-last-played")) + arrow,
             ];
+            let mut times = TimeWidths::new(widths[2]);
             for (index, item) in source.iter().enumerate() {
                 widths[0] = widths[0].max(numeric_width((index + 1).to_string().into()));
                 widths[1] = widths[1].max(numeric_width(item.play_count.to_string().into()));
-                let last_played = self.last_played_text(item.track_id, Some(item.played_at));
-                widths[2] = widths[2].max(text_width(last_played.into()));
+                let last_played = self.format_played_at(Some(item.played_at), false);
+                times.include(item.track_id, text_width(last_played.into()));
             }
-            // Match px_2 on both header controls and data cells.
-            let widths = widths.map(|width| width + rem_size);
+            widths[2] = times.width(None, px(0.));
             self.column_widths = Some(HistoryColumnWidths {
                 source: std::sync::Arc::clone(source),
                 font: self.ui_font.clone(),
                 rem_size,
-                playback,
+                times,
+                playback: None,
+                playback_text: None,
                 widths,
             });
-            widths
-        };
+        }
+        if self.column_widths.as_ref().unwrap().playback != playback {
+            let label = playback
+                .filter(|(id, _, _)| source.iter().any(|item| item.track_id == *id))
+                .map(|(id, _, _)| {
+                    let text: SharedString = self.last_played_text(id, None).into();
+                    let width = text_width(text.clone());
+                    (text, width)
+                });
+            let cache = self.column_widths.as_mut().unwrap();
+            cache.widths[2] = cache.times.width(
+                playback.map(|(id, _, _)| id),
+                label.as_ref().map_or(px(0.), |(_, width)| *width),
+            );
+            cache.playback = playback;
+            cache.playback_text = label.map(|(text, _)| text);
+        }
+        // Match px_2 on both header controls and data cells.
+        let widths = self
+            .column_widths
+            .as_ref()
+            .unwrap()
+            .widths
+            .map(|width| width + rem_size);
         let header = row()
             .items_center()
             .gap_0()
@@ -285,8 +343,10 @@ impl History {
                             } else {
                                 item.title.clone()
                             };
-                            let last_played =
-                                this.last_played_text(id, Some(item.played_at));
+                            let last_played = this.column_widths.as_ref()
+                                .filter(|cache| cache.playback.is_some_and(|(track, _, _)| track == id))
+                                .and_then(|cache| cache.playback_text.clone())
+                                .unwrap_or_else(|| this.last_played_text(id, Some(item.played_at)).into());
                             let selected = this.model.contains(id);
                             let generation = this.model.generation();
                             let drag_owner = cx.weak_entity();
@@ -416,5 +476,37 @@ impl History {
                 .w_full().scrollbar(("history-scrollbar", panel_id))),
             ))
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn time_column_excludes_only_the_replaced_row_and_preserves_ties() {
+        let mut times = TimeWidths::new(px(10.));
+        for (id, width) in [(1, 30.), (2, 20.), (3, 15.)] {
+            times.include(id, px(width));
+        }
+        assert_eq!(times.width(None, px(0.)), px(30.));
+        assert_eq!(times.width(Some(1), px(12.)), px(20.));
+        assert_eq!(times.width(Some(2), px(12.)), px(30.));
+        assert_eq!(times.width(Some(99), px(0.)), px(30.));
+        assert_eq!(times.width(Some(1), px(40.)), px(40.));
+
+        times.include(4, px(30.));
+        assert_eq!(times.width(Some(1), px(12.)), px(30.));
+        assert_eq!(times.width(Some(4), px(12.)), px(30.));
+    }
+
+    #[test]
+    fn time_column_keeps_header_space_for_empty_or_single_row_history() {
+        let mut times = TimeWidths::new(px(10.));
+        assert_eq!(times.width(None, px(0.)), px(10.));
+        times.include(1, px(30.));
+        assert_eq!(times.width(Some(1), px(5.)), px(10.));
+        assert_eq!(times.width(Some(1), px(15.)), px(15.));
+        assert_eq!(times.width(None, px(0.)), px(30.));
     }
 }

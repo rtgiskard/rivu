@@ -183,6 +183,15 @@ Publication revisions and four state-section tokens are distinct from query
 stamps and request generations. A publication with unchanged section tokens does
 not invalidate the GUI root; independent audio frame processing still proceeds.
 
+History column measurements belong to its window-local owner. The immutable
+history source, resolved font and text size determine static widths; search,
+sorting and scrolling do not. Playback replaces at most one row's time label.
+Two widest stored-time measurements retain exact content sizing when that row
+is excluded, including ties, without a per-row cache. Only the replacement label
+is remeasured when playback presentation changes; advancing a playing timestamp
+does not change its fixed label. Static measurements rebuild on source or
+typography changes. This cache is independent of visualization caching.
+
 == Visualization caching
 
 === Scope and contract
