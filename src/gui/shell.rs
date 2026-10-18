@@ -128,6 +128,15 @@ impl WindowShell {
         self.restore = window.focused(cx);
     }
 
+    fn native_focus_frame_is_current(
+        &self,
+        epoch: u64,
+        rendered: Option<KeyboardSurface>,
+        live: Option<KeyboardSurface>,
+    ) -> bool {
+        self.focus_epoch == epoch && rendered == live
+    }
+
     /// Return a deferred focus ticket; stale callbacks cannot focus a replacement
     /// surface, even if it has the same keyboard category as its predecessor.
     fn synchronize(
@@ -259,13 +268,47 @@ impl GuiApp {
 
     fn synchronize_keyboard_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let surface = self.current_keyboard_surface(cx);
-        let Some(epoch) = self.shell.synchronize(surface, window, cx) else {
+        let focus_ticket = self.shell.synchronize(surface, window, cx);
+        let frame_epoch = self.shell.focus_epoch;
+        let confirmation = self.manual_confirmation_id();
+        let owner = cx.weak_entity();
+        window.set_native_focus_guard(move |focus, window, cx| {
+            let Some(owner) = owner.upgrade() else {
+                return false;
+            };
+            let owner = owner.read(cx);
+            if !owner.shell.native_focus_frame_is_current(
+                frame_epoch,
+                surface,
+                owner.current_keyboard_surface(cx),
+            ) || owner.manual_confirmation_id() != confirmation
+            {
+                return false;
+            }
+            match surface {
+                Some(KeyboardSurface::Settings) => owner
+                    .settings
+                    .read(cx)
+                    .focus_handle(cx)
+                    .contains(focus, window),
+                Some(_) => owner.shell.scope().handle().contains(focus, window),
+                None => true,
+            }
+        });
+        let Some(epoch) = focus_ticket else {
             return;
         };
         let entity = cx.weak_entity();
         window.on_next_frame(move |window, cx| {
             let _ = entity.update(cx, |this, cx| {
-                this.shell.focus_surface(epoch, window, cx);
+                if this.shell.native_focus_frame_is_current(
+                    epoch,
+                    surface,
+                    this.current_keyboard_surface(cx),
+                ) && this.manual_confirmation_id() == confirmation
+                {
+                    this.shell.focus_surface(epoch, window, cx);
+                }
             });
         });
     }
@@ -293,5 +336,52 @@ impl GuiApp {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::prelude::v1::test;
+
+    #[gpui::test]
+    fn native_focus_publication_expires_before_replacement_render(cx: &mut gpui::TestAppContext) {
+        let mut shell = cx.update(WindowShell::new);
+        let window = cx.add_window(|_, _| gpui::EmptyView).into();
+        let surfaces = [
+            Some(KeyboardSurface::Settings),
+            Some(KeyboardSurface::Dialog(DialogSurface::MetadataConfirmation)),
+            Some(KeyboardSurface::Dialog(DialogSurface::About)),
+            Some(KeyboardSurface::Menu(MenuSurface::App)),
+            None,
+        ];
+        cx.update_window(window, |_, window, cx| {
+            let mut previous = None;
+            for surface in surfaces {
+                let epoch = shell.focus_epoch;
+                assert!(!shell.native_focus_frame_is_current(epoch, previous, surface));
+                let ticket = shell.synchronize(surface, window, cx);
+                assert!(shell.native_focus_frame_is_current(shell.focus_epoch, surface, surface));
+                assert!(!shell.native_focus_frame_is_current(epoch, previous, surface));
+                if surface == Some(KeyboardSurface::Settings) {
+                    assert!(
+                        ticket.is_none(),
+                        "Settings keeps its independent focus owner"
+                    );
+                }
+                previous = surface;
+            }
+            shell.open(Surface::Settings);
+            let surface = Some(KeyboardSurface::Settings);
+            shell.synchronize(surface, window, cx);
+            let epoch = shell.focus_epoch;
+            shell.dismiss(Surface::Settings);
+            shell.open(Surface::Settings);
+            assert!(
+                !shell.native_focus_frame_is_current(epoch, surface, surface),
+                "close/reopen of the same surface invalidates its published native focus"
+            );
+        })
+        .unwrap();
     }
 }

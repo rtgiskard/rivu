@@ -7167,6 +7167,17 @@ impl Window {
         self.a11y.debug_tree_json()
     }
 
+    /// Authorize native accessibility Focus requests before custom listeners or
+    /// built-in focus handling. Missing focus targets are rejected when installed.
+    /// Other native actions and programmatic [`Self::focus`] are unaffected.
+    /// The guard persists across frames and should read the current focus scope.
+    pub fn set_native_focus_guard(
+        &mut self,
+        guard: impl Fn(&FocusHandle, &Window, &App) -> bool + 'static,
+    ) {
+        self.a11y.native_focus_guard = Some(Box::new(guard));
+    }
+
     /// Register a listener for an accessibility action on a specific node.
     /// The listener will be called when a screen reader requests the given
     /// action on the node identified by `node_id`.
@@ -7187,6 +7198,21 @@ impl Window {
 
     #[cfg(not(target_family = "wasm"))]
     pub(crate) fn handle_a11y_action(&mut self, request: accesskit::ActionRequest, cx: &mut App) {
+        if request.action == accesskit::Action::Focus
+            && let Some(guard) = self.a11y.native_focus_guard.as_ref()
+        {
+            let target = self
+                .a11y
+                .focus_ids
+                .get(&request.target_node)
+                .and_then(|id| FocusHandle::for_id(*id, &cx.focus_handles));
+            if target
+                .as_ref()
+                .is_none_or(|target| !guard(target, self, cx))
+            {
+                return;
+            }
+        }
         // Take listeners out temporarily so the closures can borrow Window
         // mutably, then restore them afterward.
         if let Some(mut listeners) = self.a11y.action_listeners.remove(&request.target_node) {
@@ -8088,11 +8114,8 @@ mod tests {
     #[test]
     fn oversized_tooltips_and_tiny_viewports_have_nonnegative_origins() {
         for viewport in [size(px(0.), px(0.)), size(px(10.), px(10.))] {
-            let bounds = super::tooltip_bounds(
-                point(px(5.), px(5.)),
-                size(px(200.), px(400.)),
-                viewport,
-            );
+            let bounds =
+                super::tooltip_bounds(point(px(5.), px(5.)), size(px(200.), px(400.)), viewport);
             assert_eq!(bounds.origin, Point::default());
         }
     }

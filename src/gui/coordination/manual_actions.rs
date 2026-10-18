@@ -203,6 +203,10 @@ impl GuiApp {
         self.manual_intents.pending.is_some()
     }
 
+    pub(in crate::gui) fn manual_confirmation_id(&self) -> Option<ManualIntentId> {
+        self.manual_intents.pending.as_ref().map(|(id, _)| *id)
+    }
+
     pub(in crate::gui) fn cancel_manual_action(&mut self, cx: &mut Context<Self>) {
         self.invalidate_manual_intent(cx);
         cx.notify();
