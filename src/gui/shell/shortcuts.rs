@@ -213,8 +213,12 @@ impl GuiApp {
                     .scroll_views
                     .borrow()
                     .page(action == Action::PageDown, window.mouse_position());
-                if let Some(view) = panel.and_then(|id| self.panel_views.get(&id)) {
-                    view.update(cx, |_, cx| cx.notify());
+                if let Some(id) = panel {
+                    if let Some(albums) = self.album_browsers.get(&id) {
+                        albums.update(cx, |_, cx| cx.notify());
+                    } else if let Some(view) = self.panel_views.get(&id) {
+                        view.update(cx, |_, cx| cx.notify());
+                    }
                 }
             }
             Action::Parent | Action::Expand => {

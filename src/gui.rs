@@ -1162,8 +1162,13 @@ impl GuiApp {
         let albums = self.album_browsers.entry(id).or_insert_with(|| {
             let albums = cx.new(|cx| {
                 album_browser::AlbumBrowser::new(
-                    Arc::clone(&self.i18n),
-                    self.handle.clone(),
+                    id,
+                    feature::FeatureContext {
+                        snapshots: Rc::clone(&self.snapshots),
+                        i18n: Arc::clone(&self.i18n),
+                        labels: Rc::clone(&self.localized_text),
+                        scroll: Rc::clone(&self.workspace.scroll_views),
+                    },
                     Arc::clone(&self.artwork_manager),
                     self.default_album.clone(),
                     self.artwork_images.clone(),

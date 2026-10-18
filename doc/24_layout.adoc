@@ -112,6 +112,10 @@ visibility in a frame. Inactive tabs retain their viewport state but cannot
 receive pointer or page-key input. Structural edits release state for removed
 panels; switching or duplicating a named layout starts new view-local scroll
 state. No per-layout scroll snapshots are kept.
+Albums registers only its currently displayed grid or track-list viewport for
+PageUp/PageDown. Paging updates that panel's existing scroll handle and invalidates
+its AlbumBrowser view; switching regions retires the previous input target without
+discarding the grid's retained position.
 
 == GUI composition boundaries
 

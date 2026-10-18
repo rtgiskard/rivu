@@ -1,4 +1,7 @@
-use std::{collections::BTreeMap, ops::Range, path::PathBuf, sync::Arc, time::Instant};
+use std::{
+    cell::RefCell, collections::BTreeMap, ops::Range, path::PathBuf, rc::Rc, sync::Arc,
+    time::Instant,
+};
 
 use gpui::{prelude::*, *};
 
@@ -17,6 +20,7 @@ use super::{
     },
     format_time,
     list_interaction::{ContentDrag, ContentMenuRequest, TrackSource},
+    scrolling::ScrollViews,
 };
 use rivu_ui::{
     ButtonTooltip, LIST_ROW_REMS, VirtualList, caption, column, compact_icon_button, icon_button,
@@ -139,6 +143,8 @@ impl AlbumCover {
 /// Sparse absolute rows and viewport-owned covers per panel. Visibility cancels
 /// submissions and cover demand, not unchanged album or track data.
 pub(super) struct AlbumBrowser {
+    panel_id: u64,
+    scroll_views: Rc<RefCell<ScrollViews>>,
     handle: CoreHandle,
     i18n: Arc<crate::i18n::Localizer>,
     localized_text: BTreeMap<&'static str, SharedString>,
@@ -172,13 +178,16 @@ impl EventEmitter<AlbumPlayRequest> for AlbumBrowser {}
 
 impl AlbumBrowser {
     pub(super) fn new(
-        i18n: Arc<crate::i18n::Localizer>,
-        handle: CoreHandle,
+        panel_id: u64,
+        context: super::feature::FeatureContext,
         manager: Arc<ArtworkManager>,
         default_album: Entity<Artwork>,
         images: ArtworkImages,
         cx: &mut Context<Self>,
     ) -> Self {
+        let handle = context.handle().clone();
+        let i18n = context.i18n;
+        let scroll_views = context.scroll;
         let localized_text = [
             "gl-album-no-tracks",
             "gl-album-tracks-no-matches",
@@ -219,6 +228,8 @@ impl AlbumBrowser {
             }
         });
         Self {
+            panel_id,
+            scroll_views,
             i18n,
             localized_text,
             handle,
@@ -300,6 +311,9 @@ impl AlbumBrowser {
             self.clear_covers(cx);
         }
         if !visible {
+            let mut scroll_views = self.scroll_views.borrow_mut();
+            scroll_views.begin_panel(self.panel_id);
+            scroll_views.finish_frame();
             self.dismissed_actions = None;
         }
         if visible && (change.visibility || data_changed || change.demand) {
@@ -865,6 +879,7 @@ fn track_marker(current: Option<i64>, status: PlaybackStatus, id: i64) -> Option
 
 impl Render for AlbumBrowser {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.scroll_views.borrow_mut().begin_panel(self.panel_id);
         let theme = rivu_ui::theme::palette(cx);
         let total = self.model.total();
         let mut header = row().items_end().flex_shrink_0().min_w_0().px_2();
@@ -984,6 +999,11 @@ impl Render for AlbumBrowser {
                     ))
                     .into_any_element()
             } else {
+                if self.model.visible() {
+                    self.scroll_views
+                        .borrow_mut()
+                        .register_list(("album-tracks", self.panel_id), &self.track_scroll);
+                }
                 VirtualList::new(
                     "album-tracks",
                     self.model.tracks().len(),
@@ -1129,6 +1149,11 @@ impl Render for AlbumBrowser {
                 ))
                 .into_any_element()
         } else {
+            if self.model.visible() {
+                self.scroll_views
+                    .borrow_mut()
+                    .register_list(("album-grid", self.panel_id), &self.grid_scroll);
+            }
             let layout = self.grid_layout;
             let columns = layout.columns;
             let generation = self.model.generation();
@@ -1202,6 +1227,7 @@ impl Render for AlbumBrowser {
             })
             .into_any_element()
         };
+        self.scroll_views.borrow_mut().finish_frame();
         panel_surface("albums-browser")
             .p_2()
             .child(header)

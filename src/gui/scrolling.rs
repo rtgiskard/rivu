@@ -298,6 +298,77 @@ mod tests {
     }
 
     #[test]
+    fn album_region_switch_retires_grid_and_preserves_other_instances() {
+        let mut views = ScrollViews::default();
+        let grid = UniformListScrollHandle::new();
+        let tracks = UniformListScrollHandle::new();
+        let sibling = UniformListScrollHandle::new();
+        views.register_list(("album-grid", 1), &grid);
+        views.register_list(("album-grid", 2), &sibling);
+        grid.scroll_to_item(12, gpui::ScrollStrategy::Top);
+        sibling.scroll_to_item(24, gpui::ScrollStrategy::Top);
+        views.active = Some(("album-grid", 1));
+
+        // Paging mutates the browser-owned handle, not a parallel registry handle.
+        assert_eq!(views.page(true, gpui::point(px(-1.), px(-1.))), Some(1));
+        assert!(grid.0.borrow().deferred_scroll_to_item.is_none());
+        assert!(sibling.0.borrow().deferred_scroll_to_item.is_some());
+
+        grid.0
+            .borrow()
+            .base_handle
+            .set_offset(gpui::point(px(0.), px(-240.)));
+        views.begin_panel(1);
+        views.register_list(("album-tracks", 1), &tracks);
+        views.finish_frame();
+        assert!(views.active.is_none());
+        assert!(!views.regions[&("album-grid", 1)].visible);
+        assert!(views.regions[&("album-tracks", 1)].visible);
+        assert!(views.regions[&("album-grid", 2)].visible);
+
+        tracks.scroll_to_item(8, gpui::ScrollStrategy::Top);
+        views.active = Some(("album-tracks", 1));
+        assert_eq!(views.page(false, gpui::point(px(-1.), px(-1.))), Some(1));
+        assert!(tracks.0.borrow().deferred_scroll_to_item.is_none());
+        assert!(sibling.0.borrow().deferred_scroll_to_item.is_some());
+
+        views.begin_panel(1);
+        views.register_list(("album-grid", 1), &grid);
+        views.finish_frame();
+        assert!(!views.regions[&("album-tracks", 1)].visible);
+        assert_eq!(grid.0.borrow().base_handle.offset().y, px(-240.));
+    }
+
+    #[test]
+    fn hidden_and_removed_album_regions_cannot_receive_paging() {
+        let mut layout = layout();
+        let albums = layout.add("albums", None);
+        let mut views = ScrollViews::default();
+        let grid = UniformListScrollHandle::new();
+        views.register_list(("album-grid", albums), &grid);
+        views.active = Some(("album-grid", albums));
+        grid.scroll_to_item(12, gpui::ScrollStrategy::Top);
+
+        // Window hiding/empty content retires registrations even without a paint.
+        views.begin_panel(albums);
+        views.finish_frame();
+        assert_eq!(views.page(true, gpui::point(px(-1.), px(-1.))), None);
+        assert!(grid.0.borrow().deferred_scroll_to_item.is_some());
+
+        views.register_list(("album-grid", albums), &grid);
+        views.active = Some(("album-grid", albums));
+        layout.add("history", None);
+        views.begin_frame(&layout);
+        views.finish_frame();
+        assert_eq!(views.page(true, gpui::point(px(-1.), px(-1.))), None);
+        assert!(grid.0.borrow().deferred_scroll_to_item.is_some());
+
+        assert!(layout.remove(albums));
+        views.retain_layout(&layout);
+        assert!(!views.regions.contains_key(&("album-grid", albums)));
+    }
+
+    #[test]
     fn page_steps_by_viewport_and_clamps_both_edges() {
         assert_eq!(page_offset(px(-20.), px(100.), px(250.), true), px(-120.));
         assert_eq!(page_offset(px(-120.), px(100.), px(250.), false), px(-20.));
