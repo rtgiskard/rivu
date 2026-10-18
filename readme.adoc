@@ -205,6 +205,10 @@ timestamp. Invalid values fail the build; About displays the timestamp locally.
 * `src/model/query.rs` owns query identities and selected revision stamps;
   `src/model.rs` exposes the shared model API. Responses and consumer projections
   remain in `src/response.rs` and `src/projection.rs`.
+* `src/config.rs` declares runtime fields and field-based Settings patches together;
+  `config/file.rs` maps the grouped TOML format, `config/persistence.rs` owns
+  filesystem loading and atomic saving, and `config/tests.rs` covers their behavior.
+  The positional IPC configuration schema remains independent.
 * `src/gui/queue.rs` owns the Queue entity and integration events; its `model`,
   `queries`, and `view` modules separate state, asynchronous work, and rendering.
 * `src/gui/settings.rs` owns settings controls and session integration;
