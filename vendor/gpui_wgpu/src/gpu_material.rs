@@ -88,6 +88,7 @@ struct PaletteUpload {
 }
 struct PlacementAllocation {
     _buffer: wgpu::Buffer,
+    bytes: u64,
     last_submission: u64,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -110,7 +111,7 @@ struct Program {
     data_layout: wgpu::BindGroupLayout,
 }
 pub(crate) struct PreparedDraw {
-    placement: wgpu::BindGroup,
+    placement_offset: u32,
     data: wgpu::BindGroup,
     instances: u32,
     vertices: u32,
@@ -122,7 +123,11 @@ impl PreparedDraw {
         self.kind.multisampled()
     }
 }
-pub(crate) type PreparedMaterials = FxHashMap<usize, PreparedDraw>;
+#[derive(Default)]
+pub(crate) struct PreparedMaterials {
+    pub(crate) draws: FxHashMap<usize, PreparedDraw>,
+    placement: Option<wgpu::BindGroup>,
+}
 pub(crate) struct MaterialRenderer {
     downlevel_flags: wgpu::DownlevelFlags,
     program: Option<Program>,
@@ -160,7 +165,7 @@ fn buffer_entry(binding: u32, uniform: bool, minimum: u64) -> wgpu::BindGroupLay
             } else {
                 wgpu::BufferBindingType::Storage { read_only: true }
             },
-            has_dynamic_offset: false,
+            has_dynamic_offset: uniform,
             min_binding_size: NonZeroU64::new(minimum),
         },
         count: None,
@@ -396,7 +401,7 @@ impl MaterialRenderer {
         let completed = self.completed.load(Ordering::Acquire);
         self.placements.retain(|allocation| {
             if allocation.last_submission <= completed {
-                self.bytes -= PLACEMENT_SIZE * INITIALIZATION_COPIES;
+                self.bytes -= allocation.bytes;
                 false
             } else {
                 true
@@ -459,7 +464,10 @@ impl MaterialRenderer {
             return prepared;
         }
         let serial = self.submitted + 1;
-        for (index, (batch, frame)) in batches.iter().zip(resolved).enumerate() {
+        let limits = device.limits();
+        let placement_stride =
+            PLACEMENT_SIZE.next_multiple_of(u64::from(limits.min_uniform_buffer_offset_alignment));
+        for (index, (batch, frame)) in batches.iter().zip(&resolved).enumerate() {
             let Some(frame) = frame else {
                 continue;
             };
@@ -480,13 +488,22 @@ impl MaterialRenderer {
                 skipped[1] += 1;
                 continue;
             }
-            let visible_bounds = batch.visible_bounds_for(&frame);
+            let visible_bounds = batch.visible_bounds_for(frame);
             if visible_bounds.is_empty() {
+                continue;
+            }
+            let placement_offset = prepared.draws.len() as u64 * placement_stride;
+            let placement_bytes = placement_offset + PLACEMENT_SIZE;
+            if placement_offset > u64::from(u32::MAX)
+                || placement_bytes > limits.max_buffer_size
+                || !self.can_allocate(placement_bytes, 1)
+            {
+                skipped[3] += 1;
                 continue;
             }
             let key = frame.id();
             if !self.uploads.contains_key(&key) {
-                if let Err(error) = self.upload(device, &frame, serial) {
+                if let Err(error) = self.upload(device, frame, serial, placement_bytes) {
                     skipped[2] += 1;
                     if first_upload_error.is_none() {
                         first_upload_error = Some(error);
@@ -494,48 +511,19 @@ impl MaterialRenderer {
                     continue;
                 }
             }
-            if !self.can_allocate(PLACEMENT_SIZE, 1) {
-                skipped[3] += 1;
-                continue;
-            }
             // Only admitted draws demand a pipeline; replay retains each variant.
             self.ensure_pipeline(device, kind);
-            let program = self.program.as_ref().unwrap();
-            let buffer = mapped_buffer(
-                device,
-                PLACEMENT_SIZE,
-                wgpu::BufferUsages::UNIFORM,
-                "GPU placement",
-                |bytes| {
-                    encode_placement(
-                        bytes,
-                        batch,
-                        &frame,
-                        size,
-                        self.premultiplied,
-                        self.srgb_target,
-                    )
-                },
-            );
-            let placement = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("GPU placement"),
-                layout: &program.placement_layout,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: buffer.as_entire_binding(),
-                }],
-            });
             let upload = self.uploads.get_mut(&key).unwrap();
-            debug_assert!(upload.owner.ptr_eq(&Arc::downgrade(&frame)));
+            debug_assert!(upload.owner.ptr_eq(&Arc::downgrade(frame)));
             upload.last_submission = serial;
             self.palettes
                 .get_mut(&upload.palette_id)
                 .unwrap()
                 .last_submission = serial;
-            prepared.insert(
+            prepared.draws.insert(
                 index,
                 PreparedDraw {
-                    placement,
+                    placement_offset: placement_offset as u32,
                     data: upload.binding.clone(),
                     instances,
                     vertices,
@@ -543,11 +531,49 @@ impl MaterialRenderer {
                     visible_bounds,
                 },
             );
+        }
+        if !prepared.draws.is_empty() {
+            let bytes = (prepared.draws.len() as u64 - 1) * placement_stride + PLACEMENT_SIZE;
+            // One exact-size immutable slab per frame, not a retained high-water pool.
+            // Offsets satisfy the device alignment; padding and initialization stay charged.
+            let buffer = mapped_buffer(
+                device,
+                bytes,
+                wgpu::BufferUsages::UNIFORM,
+                "GPU frame placements",
+                |mapped| {
+                    for (&index, draw) in &prepared.draws {
+                        let offset = draw.placement_offset as usize;
+                        encode_placement(
+                            &mut mapped.slice(offset..offset + PLACEMENT_SIZE as usize),
+                            &batches[index],
+                            resolved[index].as_ref().unwrap(),
+                            size,
+                            self.premultiplied,
+                            self.srgb_target,
+                        );
+                    }
+                },
+            );
+            prepared.placement = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("GPU frame placements"),
+                layout: &self.program.as_ref().unwrap().placement_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &buffer,
+                        offset: 0,
+                        size: NonZeroU64::new(PLACEMENT_SIZE),
+                    }),
+                }],
+            }));
+            let charge = bytes * INITIALIZATION_COPIES;
             self.placements.push(PlacementAllocation {
                 _buffer: buffer,
+                bytes: charge,
                 last_submission: serial,
             });
-            self.bytes += PLACEMENT_SIZE * INITIALIZATION_COPIES;
+            self.bytes += charge;
             self.preparing = true;
         }
         self.report_skipped(skipped, first_upload_error.as_ref());
@@ -558,6 +584,7 @@ impl MaterialRenderer {
         device: &wgpu::Device,
         frame: &Arc<GpuFrame>,
         serial: u64,
+        placement_bytes: u64,
     ) -> anyhow::Result<()> {
         let limits = device.limits();
         let data_size = match frame.content() {
@@ -593,9 +620,9 @@ impl MaterialRenderer {
         let palette_id = frame.palette().id();
         let new_palette = !self.palettes.contains_key(&palette_id);
         let bytes = data_size + if new_palette { palette_size } else { 0 };
-        // Atomic admission includes both uploads and the first placement.
+        // Admission reserves the complete aligned placement slab, including earlier draws.
         anyhow::ensure!(
-            self.can_allocate(bytes + PLACEMENT_SIZE, 2 + usize::from(new_palette)),
+            self.can_allocate(bytes + placement_bytes, 2 + usize::from(new_palette)),
             "aggregate GPU material resource limit exceeded"
         );
         if new_palette {
@@ -667,10 +694,19 @@ impl MaterialRenderer {
         }
         Ok(())
     }
-    pub(crate) fn draw(&self, draw: &PreparedDraw, pass: &mut wgpu::RenderPass<'_>) {
+    pub(crate) fn draw(
+        &self,
+        materials: &PreparedMaterials,
+        draw: &PreparedDraw,
+        pass: &mut wgpu::RenderPass<'_>,
+    ) {
         let program = self.program.as_ref().unwrap();
         pass.set_pipeline(program.pipelines[draw.kind as usize].as_ref().unwrap());
-        pass.set_bind_group(0, &draw.placement, &[]);
+        pass.set_bind_group(
+            0,
+            materials.placement.as_ref().unwrap(),
+            &[draw.placement_offset],
+        );
         pass.set_bind_group(1, &draw.data, &[]);
         pass.draw(0..draw.vertices, 0..draw.instances);
     }

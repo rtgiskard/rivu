@@ -1596,7 +1596,7 @@ impl WgpuRendererCore {
                     PrimitiveBatch::Gpu(range) => {
                         let mut indices = range.peekable();
                         while let Some(index) = indices.next() {
-                            let Some(draw) = materials.get(&index) else {
+                            let Some(draw) = materials.draws.get(&index) else {
                                 continue;
                             };
                             if draw.multisampled() {
@@ -1609,7 +1609,7 @@ impl WgpuRendererCore {
                                 // integer bounds let each draw retain its exact composite area.
                                 if Self::gpu_path_bounds_are_integer(bounds) {
                                     while let Some(&next_index) = indices.peek() {
-                                        let Some(next) = materials.get(&next_index) else {
+                                        let Some(next) = materials.draws.get(&next_index) else {
                                             break;
                                         };
                                         if !next.multisampled() {
@@ -1654,7 +1654,7 @@ impl WgpuRendererCore {
                                     &mut pass,
                                 )?;
                             } else {
-                                self.resources.materials.draw(draw, &mut pass);
+                                self.resources.materials.draw(&materials, draw, &mut pass);
                             }
                         }
                     }
@@ -1996,7 +1996,7 @@ impl WgpuRendererCore {
         for index in range {
             if grouped {
                 // Use the coherent captured footprint, not coordinate mapping.
-                let bounds = materials[&index].visible_bounds.intersect(&viewport);
+                let bounds = materials.draws[&index].visible_bounds.intersect(&viewport);
                 if bounds.is_empty() {
                     continue;
                 }
@@ -2007,7 +2007,9 @@ impl WgpuRendererCore {
                     bounds.size.height.0 as u32,
                 );
             }
-            resources.materials.draw(&materials[&index], &mut pass);
+            resources
+                .materials
+                .draw(materials, &materials.draws[&index], &mut pass);
         }
     }
 
