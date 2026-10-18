@@ -65,6 +65,7 @@ pub(super) struct AlbumModel {
     tracks_key: Option<AlbumKey>,
     page_size: usize,
     worker_pending: bool,
+    worker_timed_out: bool,
     albums_total: Option<(QueryStamp, usize)>,
     tracks_total: Option<(QueryStamp, usize)>,
     selected: Option<AlbumKey>,
@@ -85,6 +86,7 @@ impl Default for AlbumModel {
             tracks_key: None,
             page_size: 1,
             worker_pending: false,
+            worker_timed_out: false,
             albums_total: None,
             tracks_total: None,
             selected: None,
@@ -303,6 +305,7 @@ impl AlbumModel {
             total.is_none_or(|(stamp, _)| stamp != count.stamp(self.revisions))
         });
         self.worker_pending = true;
+        self.worker_timed_out = false;
         let generation = self.generation();
         let ticket = if self.selected.is_some() {
             self.tracks_projection.ticket()
@@ -315,6 +318,27 @@ impl AlbumModel {
             generation,
             ticket,
         })
+    }
+
+    pub fn timeout(
+        &mut self,
+        query: &Query,
+        generation: u64,
+        response: QueryResponse,
+        current_revisions: QueryRevisions,
+    ) -> DataChange {
+        let data = self.sync_data(current_revisions);
+        // Timeout consumes this worker's publication rights, not its physical slot.
+        self.worker_timed_out = true;
+        if self.visible
+            && self
+                .active_projection()
+                .accepts(query, generation, current_revisions)
+            && let Err(error) = response.result
+        {
+            self.fail_page(error.to_string());
+        }
+        data
     }
 
     pub fn complete(
@@ -334,6 +358,9 @@ impl AlbumModel {
             published: Published::None,
             counts: None,
         };
+        if std::mem::take(&mut self.worker_timed_out) {
+            return completion;
+        }
         if !self.visible
             || !self
                 .active_projection()
@@ -536,6 +563,37 @@ mod tests {
             model.revisions,
             "wrong response",
         )
+    }
+
+    #[test]
+    fn timed_out_page_keeps_slot_and_never_publishes_late_rows_or_counts() {
+        for replacement in [false, true] {
+            let mut model = AlbumModel::default();
+            model.sync(true, QueryRevisions::default(), 2);
+            let first = model.prepare().unwrap();
+            model.timeout(
+                &first.query,
+                first.generation,
+                QueryResponse {
+                    revisions: model.revisions,
+                    result: Err(crate::response::QueryError::Message("timed out".into())),
+                },
+                model.revisions,
+            );
+            assert_eq!(model.albums.error(0), Some("timed out"));
+            assert!(model.prepare().is_none());
+            if replacement {
+                model.select(Some(key("latest")));
+            } else {
+                model.retry();
+            }
+            assert!(model.prepare().is_none());
+            let completion = finish(&mut model, first, 100);
+            assert_eq!(completion.published, Published::None);
+            assert_eq!(completion.counts, None);
+            assert!(model.albums_total.is_none());
+            assert!(model.prepare().is_some());
+        }
     }
 
     #[test]

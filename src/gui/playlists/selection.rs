@@ -370,6 +370,15 @@ impl EntrySelection {
         self.navigation_target = None;
         self.intent = None;
     }
+    fn timeout(&mut self, generation: u64, message: String) -> bool {
+        if !self.current(generation) {
+            return false;
+        }
+        // Retire publication rights, never the physical navigation/range/refresh gates.
+        self.cancel();
+        self.fail(message);
+        true
+    }
     #[cfg(test)]
     pub(in crate::gui) fn remove(&mut self, id: i64) {
         self.cancel();
@@ -876,6 +885,35 @@ impl Playlists {
             cx.notify();
         }
     }
+
+    fn entry_job_timeout(
+        &mut self,
+        playlist_id: i64,
+        generation: u64,
+        revision: u64,
+        metadata: u64,
+        response: crate::response::QueryResponse,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.refresh(cx);
+        if !self.entry_job_current(playlist_id, generation, revision, metadata) {
+            return false;
+        }
+        let Err(error) = response.result else {
+            return false;
+        };
+        let message = error.to_string();
+        if self
+            .browser
+            .playlist_selection_mut()
+            .timeout(generation, message.clone())
+        {
+            self.report_error(message, cx);
+            cx.notify();
+            return true;
+        }
+        false
+    }
     pub(in crate::gui) fn refresh_entry_selection(&mut self, cx: &mut Context<Self>) {
         self.browser.playlist_selection_mut().request_refresh();
         self.dispatch_entry_reconcile(cx);
@@ -916,9 +954,10 @@ impl Playlists {
                     let entry_ids = chunk.to_vec();
                     let ticket = ticket.clone();
                     let query = filter.clone();
-                    let response = cx
-                        .background_executor()
-                        .spawn(async move {
+                    let response = crate::gui::query::run(
+                        handle,
+                        cx,
+                        move |handle| {
                             handle.query_if_current(
                                 Query::PlaylistEntryLocations {
                                     query,
@@ -927,8 +966,21 @@ impl Playlists {
                                 },
                                 ticket,
                             )
-                        })
-                        .await;
+                        },
+                        |response, cx| {
+                            let _ = this.update(cx, |this, cx| {
+                                this.entry_job_timeout(
+                                    playlist_id,
+                                    generation,
+                                    revision,
+                                    library,
+                                    response,
+                                    cx,
+                                );
+                            });
+                        },
+                    )
+                    .await;
                     let result = match entry_query_result(
                         response,
                         playlist_id,
@@ -1104,9 +1156,10 @@ impl Playlists {
                     let scope = job.commit.scope;
                     let ticket = ticket.clone();
                     let query = filter.clone();
-                    let response = cx
-                        .background_executor()
-                        .spawn(async move {
+                    let response = crate::gui::query::run(
+                        handle,
+                        cx,
+                        move |handle| {
                             handle.query_if_current(
                                 Query::PlaylistEntries {
                                     query,
@@ -1116,8 +1169,27 @@ impl Playlists {
                                 },
                                 ticket,
                             )
-                        })
-                        .await;
+                        },
+                        |response, cx| {
+                            let _ = this.update(cx, |this, cx| {
+                                this.refresh(cx);
+                                if this.manual_intent_current(job.intent)
+                                    && this.playlist_navigation_scope() == Some(scope)
+                                    && this.entry_job_timeout(
+                                        scope.playlist_id,
+                                        generation,
+                                        scope.revision,
+                                        scope.metadata,
+                                        response,
+                                        cx,
+                                    )
+                                {
+                                    this.fail_manual_intent(job.intent, cx);
+                                }
+                            });
+                        },
+                    )
+                    .await;
                     let result = entry_query_result(
                         response,
                         scope.playlist_id,
@@ -1206,9 +1278,10 @@ impl Playlists {
             .ticket();
         let query = self.browser.playlists().entries().query.clone();
         cx.spawn(async move |this, cx| {
-            let response = cx
-                .background_executor()
-                .spawn(async move {
+            let response = crate::gui::query::run(
+                handle,
+                cx,
+                move |handle| {
                     handle.query_if_current(
                         Query::PlaylistEntries {
                             query,
@@ -1218,8 +1291,27 @@ impl Playlists {
                         },
                         ticket,
                     )
-                })
-                .await;
+                },
+                |response, cx| {
+                    let _ = this.update(cx, |this, cx| {
+                        this.refresh(cx);
+                        if this.manual_intent_current(intent)
+                            && this.playlist_navigation_scope() == Some(job.scope)
+                            && this.entry_job_timeout(
+                                job.scope.playlist_id,
+                                job.generation,
+                                job.scope.revision,
+                                job.scope.metadata,
+                                response,
+                                cx,
+                            )
+                        {
+                            this.fail_manual_intent(intent, cx);
+                        }
+                    });
+                },
+            )
+            .await;
             let _ = this.update(cx, |this, cx| {
                 this.refresh(cx);
                 let scope = this.playlist_navigation_scope();
@@ -1455,6 +1547,88 @@ mod tests {
         assert_eq!(selection.intent, Some(latest));
         selection.release_range_worker(running.commit.generation);
         assert_eq!(selection.take_navigation().unwrap().offset, 2);
+    }
+
+    #[test]
+    fn navigation_timeout_stops_loading_but_holds_gate_until_final_completion() {
+        let mut selection = EntrySelection::default();
+        let scope = navigation_scope();
+        assert!(navigate(&mut selection, scope, 10, true, false, false));
+        let running = selection.take_navigation().unwrap();
+        assert!(selection.timeout(running.generation, "timeout".into()));
+        assert!(!selection.busy);
+        assert_eq!(selection.error.as_deref(), Some("timeout"));
+        assert_eq!(selection.navigation_in_flight, Some(running));
+        selection.select(identity(1, 0), false);
+        assert!(navigate(&mut selection, scope, 10, true, false, false));
+        let latest = selection.navigation.unwrap();
+        assert!(!selection.timeout(running.generation, "obsolete timeout".into()));
+        assert!(selection.take_navigation().is_none());
+        assert_eq!(
+            selection.finish_navigation(
+                "unexpected",
+                running,
+                Some(scope),
+                QueryResponse {
+                    revisions: scope.revisions(),
+                    result: Err(QueryError::Message("timeout".into())),
+                },
+            ),
+            EntryNavigationEffect::None
+        );
+        assert!(selection.busy);
+        assert!(selection.error.is_none());
+        assert_eq!(selection.take_navigation(), Some(latest));
+    }
+
+    #[test]
+    fn range_timeout_preserves_selection_and_blocks_latest_until_retirement() {
+        let mut selection = EntrySelection::default();
+        let mut intents = crate::gui::coordination::manual_actions::ManualIntents::default();
+        let scope = navigation_scope();
+        selection.select(identity(1, 0), false);
+        let intent = intents.begin();
+        assert!(
+            selection
+                .begin_selection(intent, scope, identity(2, 1), true, false)
+                .is_none()
+        );
+        let running = selection.take_range().unwrap();
+        let generation = running.commit.generation;
+        assert!(selection.timeout(generation, "timeout".into()));
+        assert!(!selection.busy);
+        assert!(selection.contains(1));
+        assert_eq!(selection.error.as_deref(), Some("timeout"));
+        assert_eq!(selection.range_in_flight, Some(generation));
+        selection.begin_navigation(intents.begin(), scope, 3, false, false, false);
+        assert!(!selection.timeout(generation, "obsolete".into()));
+        assert!(!selection.finish_read(intent, generation));
+        assert!(selection.take_navigation().is_none());
+        selection.release_range_worker(generation);
+        assert!(selection.busy);
+        assert!(selection.error.is_none());
+        assert_eq!(selection.take_navigation().unwrap().offset, 3);
+    }
+
+    #[test]
+    fn refresh_timeout_retains_gate_and_coalesces_replacement_refresh() {
+        let mut selection = EntrySelection::default();
+        selection.select(identity(1, 0), false);
+        selection.request_refresh();
+        let (_, generation, _) = selection.prepare_refresh().unwrap();
+        assert!(selection.timeout(generation, "timeout".into()));
+        assert!(!selection.busy);
+        assert!(selection.refresh_in_flight);
+        assert_eq!(selection.error.as_deref(), Some("timeout"));
+        selection.request_refresh();
+        selection.request_refresh();
+        assert!(!selection.timeout(generation, "obsolete".into()));
+        assert!(selection.prepare_refresh().is_none());
+        assert!(selection.retire_refresh());
+        let (_, latest, _) = selection.prepare_refresh().unwrap();
+        assert_ne!(generation, latest);
+        assert!(selection.refresh_in_flight);
+        assert!(selection.prepare_refresh().is_none());
     }
 
     fn identity(id: i64, position: usize) -> EntryIdentity {

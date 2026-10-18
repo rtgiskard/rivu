@@ -112,6 +112,73 @@ fn cancellation_after_dispatch_waits_for_the_physical_reply() {
 }
 
 #[test]
+fn gui_timeout_notifies_without_retiring_and_discards_late_reply_or_disconnect() {
+    for disconnect in [false, true] {
+        let (handle, _analysis, requests) = display_fixture();
+        let (notice, notices) = bounded(1);
+        let handle = handle.with_query_timeout(move |response| notice.send(response).unwrap());
+        let mut epoch = QueryEpoch::default();
+        let ticket = epoch.ticket();
+        let (finished, completion) = bounded(1);
+        let worker = thread::spawn(move || {
+            finished
+                .send(handle.query_with_ticket(
+                    Query::Track { track_id: 1 },
+                    Some(ticket),
+                    true,
+                    Duration::ZERO,
+                ))
+                .unwrap();
+        });
+        let request = requests.recv().unwrap();
+        let notification = notices.recv().unwrap();
+        assert!(matches!(notification.result, Err(QueryError::Message(_))));
+        // Logical replacement/cancellation cannot complete the submitted worker.
+        epoch.cancel();
+        let latest = epoch.ticket();
+        assert!(latest.is_current());
+        assert!(completion.try_recv().is_err());
+        assert!(requests.try_recv().is_err());
+        if !disconnect {
+            request
+                .reply
+                .unwrap()
+                .send(CoreResponse::Query(QueryResponse {
+                    revisions: QueryRevisions::default(),
+                    result: Ok(ViewResponse::Track(None)),
+                }))
+                .unwrap();
+        } else {
+            drop(request);
+        }
+        let result = completion.recv().unwrap();
+        assert!(matches!(result.result, Err(QueryError::Message(_))));
+        assert!(notices.try_recv().is_err());
+        worker.join().unwrap();
+    }
+}
+
+#[test]
+fn non_gui_timeout_does_not_wait_for_physical_retirement_or_notify_gui() {
+    let (handle, _analysis, requests) = display_fixture();
+    let handle = handle.with_query_timeout(|_| panic!("non-GUI query notified GUI"));
+    let result =
+        handle.query_with_ticket(Query::Track { track_id: 1 }, None, false, Duration::ZERO);
+    assert!(matches!(result.result, Err(QueryError::Message(_))));
+    let request = requests.recv().unwrap();
+    assert!(
+        request
+            .reply
+            .unwrap()
+            .send(CoreResponse::Query(QueryResponse {
+                revisions: QueryRevisions::default(),
+                result: Ok(ViewResponse::Track(None)),
+            }))
+            .is_err()
+    );
+}
+
+#[test]
 fn directory_missing_query_composes_filters_ancestors_and_exact_pages() {
     use crate::model::DirectoryRow;
     let (directory, core) = fixture_with_database(Some(10.0), true);

@@ -31,9 +31,15 @@ and current-intent checks before publication.
 Queued directory demand alone does not invalidate the view; local forest
 publication and worker progress supply the notifications that resume rendering.
 
-The current Core response timeout is an exception to the physical-retirement
-boundary: a GUI read can finish waiting before its Core request has retired.
-See link:90_open_issues.adoc#_query_timeout_and_physical_worker_retirement[Query timeout and physical worker retirement].
+GUI query submission still has a two-second deadline; after submission, the
+12-second response deadline is a logical failure, not physical retirement.
+The feature stops that request's loading presentation and shows its error only
+while its demand is current. The background reader retains its physical slot
+until the actual Core reply or reply-channel disconnection, discarding any late
+payload. Retry, replacement, and cancellation cannot bypass that slot; only the
+latest retained demand may start after retirement. Retirement of a timed-out read
+cannot publish again or replace newer feedback. This GUI-only policy leaves
+non-GUI query deadlines, command acknowledgements, and IPC unchanged.
 
 The forest page is synthesized locally from configured roots, not another
 database query; root-count identity also includes those roots. Metadata-only

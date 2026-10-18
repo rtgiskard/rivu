@@ -533,6 +533,16 @@ impl LibraryBrowser {
         if self.range_selection.active == Some(token) {
             self.range_selection.active = None;
         }
+        self.publish_range(token, slice, response, revisions)
+    }
+
+    fn publish_range(
+        &mut self,
+        token: u64,
+        slice: &Slice,
+        response: QueryResponse,
+        revisions: QueryRevisions,
+    ) -> Result<(), SelectionError> {
         if !self.range_selection.accepts_completion(token) {
             return Ok(());
         }
@@ -722,14 +732,36 @@ impl Library {
                 let ticket = self.library.range_selection.projection.ticket();
                 let handle = self.context.handle().clone();
                 cx.spawn(async move |this, cx| {
-                    let response = cx
-                        .background_executor()
-                        .spawn(async move { handle.query_if_current(query, ticket) })
-                        .await;
+                    let mut timed_out = false;
+                    let response = crate::gui::query::run(
+                        handle,
+                        cx,
+                        move |handle| handle.query_if_current(query, ticket),
+                        |response, cx| {
+                            timed_out = true;
+                            let _ = this.update(cx, |this, cx| {
+                                this.refresh(cx);
+                                let revisions = this.state.query_revisions(None);
+                                if let Err(error) = this
+                                    .library
+                                    .publish_range(token, &slice, response, revisions)
+                                {
+                                    this.fail_selection(id, cx);
+                                    this.report_error(error.localize(&this.i18n), cx);
+                                }
+                                cx.notify();
+                            });
+                        },
+                    )
+                    .await;
                     let _ = this.update(cx, |this, cx| {
                         this.refresh(cx);
                         let revisions = this.state.query_revisions(None);
-                        if let Err(error) = this
+                        if timed_out {
+                            if this.library.range_selection.active == Some(token) {
+                                this.library.range_selection.active = None;
+                            }
+                        } else if let Err(error) = this
                             .library
                             .complete_range(token, &slice, response, revisions)
                         {
@@ -1844,6 +1876,58 @@ mod tests {
         library
             .start_range_selection(&LibraryNode::Track(30), 31, false, revisions(7, 3), 20)
             .unwrap();
+        assert!(matches!(
+            library.advance_range(revisions(7, 3), &roots).unwrap(),
+            RangeStep::Query { .. }
+        ));
+    }
+
+    #[test]
+    fn range_timeout_stops_loading_but_holds_batch_until_physical_completion() {
+        let (mut library, _, roots) = grouped(100, 20);
+        publish_row(&mut library, LibraryNode::Track(1), 2);
+        library
+            .start_range_selection(&LibraryNode::Track(30), 31, false, revisions(7, 3), 20)
+            .unwrap();
+        let RangeStep::Query { token, slice } =
+            library.advance_range(revisions(7, 3), &roots).unwrap()
+        else {
+            panic!("uncached range needs a batch")
+        };
+        assert!(
+            library
+                .publish_range(
+                    token,
+                    &slice,
+                    QueryResponse {
+                        revisions: revisions(7, 3),
+                        result: Err(crate::response::QueryError::Message("timeout".into())),
+                    },
+                    revisions(7, 3)
+                )
+                .is_err()
+        );
+        assert!(!library.range_pending());
+        assert_eq!(library.range_selection.active, Some(token));
+        library
+            .start_range_selection(&LibraryNode::Track(40), 41, false, revisions(7, 3), 20)
+            .unwrap();
+        assert!(matches!(
+            library.advance_range(revisions(7, 3), &roots).unwrap(),
+            RangeStep::Idle
+        ));
+        library
+            .complete_range(
+                token,
+                &slice,
+                QueryResponse {
+                    revisions: revisions(7, 3),
+                    result: Err(crate::response::QueryError::Message("late timeout".into())),
+                },
+                revisions(7, 3),
+            )
+            .unwrap();
+        assert_eq!(library.selected(), &HashSet::from([1]));
         assert!(matches!(
             library.advance_range(revisions(7, 3), &roots).unwrap(),
             RangeStep::Query { .. }

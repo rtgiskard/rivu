@@ -12,6 +12,8 @@ pub(in crate::gui) struct LibraryLocateState {
     projection: QueryProjection,
     // Logical cancellation never releases the physical ancestor worker.
     pub(in crate::gui) pending: bool,
+    pub(super) loading: bool,
+    queued: bool,
     pub(in crate::gui) notice: Option<(i64, LibraryLocateResult)>,
     pub(in crate::gui) reveal: Option<(i64, TreeBranch, usize)>,
     pub(in crate::gui) reveal_scrolled: bool,
@@ -22,6 +24,7 @@ pub(in crate::gui) struct LibraryLocateState {
 impl LibraryLocateState {
     pub(in crate::gui) fn invalidate(&mut self) {
         self.projection.cancel();
+        self.loading = false;
         self.notice = None;
         self.reveal = None;
         self.reveal_scrolled = false;
@@ -72,6 +75,10 @@ impl Library {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.begin_library_locate(cx);
+    }
+
+    fn begin_library_locate(&mut self, cx: &mut Context<Self>) {
         let Some(track) = self.state.current_track() else {
             return;
         };
@@ -87,7 +94,13 @@ impl Library {
             .find(|(_, root)| track.path.starts_with(root))
             .map(|(index, root)| (index, root.clone()));
         cx.emit(LibraryEvent::Reveal);
-        if !self.available || self.library.locate.pending {
+        if !self.available {
+            return;
+        }
+        if self.library.locate.pending {
+            self.library.locate.invalidate();
+            self.library.locate.queued = true;
+            cx.notify();
             return;
         }
         self.library.locate.invalidate();
@@ -121,6 +134,7 @@ impl Library {
         let ticket = self.library.locate.projection.ticket();
         let handle = self.context.handle().clone();
         self.library.locate.pending = true;
+        self.library.locate.loading = true;
         cx.spawn(async move |this, cx| {
             // One worker and one scalar query per ancestor; no full-library pages.
             let mut locations = Vec::new();
@@ -136,10 +150,24 @@ impl Library {
                 };
                 let handle = handle.clone();
                 let ticket = ticket.clone();
-                let response = cx
-                    .background_executor()
-                    .spawn(async move { handle.query_if_current(query, ticket) })
-                    .await;
+                let response = crate::gui::query::run(
+                    handle,
+                    cx,
+                    move |handle| handle.query_if_current(query, ticket),
+                    |response, cx| {
+                        let _ = this.update(cx, |this, cx| {
+                            this.refresh(cx);
+                            if request.accepts(this, response.revisions) {
+                                this.library.locate.invalidate();
+                                if let Err(error) = response.result {
+                                    this.report_error(error.to_string(), cx);
+                                }
+                                cx.notify();
+                            }
+                        });
+                    },
+                )
+                .await;
                 let current = this
                     .update(cx, |this, cx| {
                         this.refresh(cx);
@@ -223,6 +251,10 @@ impl Library {
             }
             let _ = this.update(cx, |this, cx| {
                 this.library.locate.pending = false;
+                this.library.locate.loading = false;
+                if std::mem::take(&mut this.library.locate.queued) {
+                    this.begin_library_locate(cx);
+                }
                 cx.notify();
             });
         })

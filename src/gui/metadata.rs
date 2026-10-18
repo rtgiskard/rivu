@@ -356,10 +356,30 @@ impl Metadata {
             {
                 return;
             }
-            let response = cx
-                .background_executor()
-                .spawn(async move { handle.query_if_current(read.query(), ticket) })
-                .await;
+            let response = super::query::run(
+                handle,
+                cx,
+                move |handle| handle.query_if_current(read.query(), ticket),
+                |response, cx| {
+                    let _ = this.update(cx, |this, cx| {
+                        this.refresh(cx);
+                        let environment = ReadEnvironment {
+                            visible: this.visible,
+                            revisions: this.state.query_revisions_for(&read.query()),
+                        };
+                        if this.metadata_read.timeout(
+                            read,
+                            &mut this.metadata,
+                            environment,
+                            response,
+                        ) {
+                            this.sync_metadata_inputs(cx);
+                            cx.notify();
+                        }
+                    });
+                },
+            )
+            .await;
             let _ = this.update(cx, |this, cx| {
                 this.refresh(cx);
                 let environment = ReadEnvironment {

@@ -54,25 +54,15 @@ documented in link:22_cache.adoc#_query_projection_retention[Query projection re
 
 == Query timeout and physical worker retirement
 
-Status: open, 2026-10-18.
+Status: resolved in implementation, 2026-10-19.
 
-In-process GUI reads wait at most 12 seconds for a Core response after successful
-submission. A timeout returns an error and runs the consumer's completion path,
-which releases its worker slot even though the Core request can remain queued or
-executing. This is an exception to the physical-retirement invariant in
+The 12-second GUI waiting deadline now delivers a logical error independently
+of the submitted reader's lifetime. Feature-local loading settles without
+releasing its physical worker slot. The original reply or disconnection retires
+that slot; late data and obsolete timeout feedback cannot publish, and only the
+latest retained demand may then start. Non-GUI query and command deadlines are
+unchanged. The ownership contract is documented in
 link:22_cache.adoc#_query_projection_retention[Query projection retention].
-The global Core queue remains bounded; the defect is premature feature-local
-slot release, not unbounded thread creation.
-
-An isolated SQLite write-lock experiment confirmed that a query can time out
-while queued operations remain pending. GUI slot release is established by code
-inspection, not a live GUI reproduction.
-
-Keep user-visible waiting feedback separate from physical retirement. A submitted
-read must retain its gate until the actual reply or disconnection; logical
-cancellation must still reject obsolete publication without interrupting a read
-already dispatched to Store. Verify a delayed reply beyond 12 seconds with demand
-replacement and cancellation before claiming this boundary is fixed.
 
 == Small visualization canvas feedback
 

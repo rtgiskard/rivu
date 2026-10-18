@@ -1085,7 +1085,7 @@ impl Library {
                     cx,
                     |this, window, cx| this.locate_playing_library(window, cx),
                 ),
-                self.state.current_track().is_none() || self.library.locate.pending,
+                self.state.current_track().is_none() || self.library.locate.loading,
             ))
             .child(icon_button(
                 ("library-view", panel_id),

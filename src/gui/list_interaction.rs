@@ -172,6 +172,14 @@ impl CollectionResolution {
         self.epoch.cancel();
     }
 
+    fn timeout(&mut self, read: &CollectionRead) -> bool {
+        if self.worker != Some(read.worker) || !read.ticket.is_current() {
+            return false;
+        }
+        self.cancel();
+        true
+    }
+
     fn finish(&mut self, read: &CollectionRead) -> bool {
         if self.worker != Some(read.worker) {
             return false;
@@ -306,6 +314,25 @@ impl GuiApp {
         read.ticket.is_current() && self.window_visible && !self.state.system.shutting_down
     }
 
+    fn timeout_content_resolution(
+        &mut self,
+        read: &CollectionRead,
+        response: crate::response::QueryResponse,
+        current: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.content_resolution.timeout(read) {
+            return;
+        }
+        if read.worker.owner == ResolutionOwner::Menu {
+            self.replace_content_menu(None, cx);
+        }
+        if current && self.window_visible && !self.state.system.shutting_down {
+            self.error = response.result.err().map(|error| error.to_string());
+            cx.notify();
+        }
+    }
+
     pub(super) fn replace_content_menu(
         &mut self,
         menu: Option<ContentMenu>,
@@ -424,17 +451,25 @@ impl GuiApp {
             let stamp = query.stamp(self.state.query_revisions(None));
             let handle = self.handle.clone();
             cx.spawn(async move |this, cx| {
-                let result = cx
-                    .background_executor()
-                    .spawn(async move {
+                let result = crate::gui::query::run(
+                    handle,
+                    cx,
+                    move |handle| {
                         resolve_album(
                             |query, ticket| handle.query_if_current(query, ticket),
                             key,
                             stamp,
                             &ticket,
                         )
-                    })
-                    .await;
+                    },
+                    |response, cx| {
+                        let _ = this.update(cx, |this, cx| {
+                            let current = guard.current(this);
+                            this.timeout_content_resolution(&read, response, current, cx);
+                        });
+                    },
+                )
+                .await;
                 let _ = this.update(cx, |this, cx| {
                     if !this.finish_content_resolution(&read, cx) {
                         return;
@@ -499,17 +534,33 @@ impl GuiApp {
                 };
                 let handle = self.handle.clone();
                 cx.spawn(async move |this, cx| {
-                    let result = cx
-                        .background_executor()
-                        .spawn(async move {
+                    let result = crate::gui::query::run(
+                        handle,
+                        cx,
+                        move |handle| {
                             resolve_album(
                                 |query, ticket| handle.query_if_current(query, ticket),
                                 key,
                                 stamp,
                                 &ticket,
                             )
-                        })
-                        .await;
+                        },
+                        |response, cx| {
+                            let _ = this.update(cx, |this, cx| {
+                                let target_current = match destination {
+                                    DragDestination::Playlist(id) => {
+                                        target_revision.is_some()
+                                            && this.state.library.playlist_entry_revisions.get(&id)
+                                                == target_revision.as_ref()
+                                    }
+                                    _ => true,
+                                };
+                                let current = guard.current(this) && target_current;
+                                this.timeout_content_resolution(&read, response, current, cx);
+                            });
+                        },
+                    )
+                    .await;
                     let _ = this.update(cx, |this, cx| {
                         if !this.finish_content_resolution(&read, cx) {
                             return;
@@ -909,17 +960,30 @@ impl GuiApp {
         let revisions = self.state.query_revisions(Some(playlist_id));
         let handle = self.handle.clone();
         cx.spawn(async move |this, cx| {
-            let result: anyhow::Result<Vec<i64>> = cx
-                .background_executor()
-                .spawn(async move {
+            let result: anyhow::Result<Vec<i64>> = crate::gui::query::run(
+                handle,
+                cx,
+                move |handle| {
                     resolve_playlist(
                         |query, ticket| handle.query_if_current(query, ticket),
                         playlist_id,
                         revisions,
                         &ticket,
                     )
-                })
-                .await;
+                },
+                |response, cx| {
+                    let _ = this.update(cx, |this, cx| {
+                        let current = this
+                            .state
+                            .library
+                            .playlist_entry_revisions
+                            .get(&playlist_id)
+                            == Some(&revision);
+                        this.timeout_content_resolution(&read, response, current, cx);
+                    });
+                },
+            )
+            .await;
             let _ = this.update(cx, |this, cx| {
                 if !this.finish_content_resolution(&read, cx) {
                     return;
@@ -956,6 +1020,91 @@ mod tests {
         response::{QueryError, QueryRevisions, ViewResponse},
     };
     use std::path::PathBuf;
+
+    #[test]
+    fn collection_timeout_retires_logical_owner_but_not_physical_worker() {
+        for owner in [
+            ResolutionOwner::Menu,
+            ResolutionOwner::AlbumDrop,
+            ResolutionOwner::PlaylistAppend,
+        ] {
+            let mut resolution = CollectionResolution::default();
+            let read = resolution.begin(owner).unwrap();
+            assert!(resolution.timeout(&read));
+            assert!(!read.ticket.is_current());
+            assert!(resolution.pending());
+            assert!(resolution.begin(owner).is_none());
+            assert!(!resolution.timeout(&read));
+            assert!(resolution.finish(&read));
+            let latest = resolution.begin(owner).unwrap();
+            assert!(!resolution.timeout(&read));
+            assert!(!resolution.finish(&read));
+            assert!(latest.ticket.is_current());
+            resolution.cancel();
+            assert!(!resolution.timeout(&latest));
+            assert!(resolution.pending());
+            assert!(resolution.finish(&latest));
+        }
+    }
+
+    #[test]
+    fn collection_timeout_during_pagination_discards_late_pages_and_partial_ids() {
+        let Query::AlbumTracks { key, .. } = album_query() else {
+            unreachable!()
+        };
+        let revisions = QueryRevisions::default();
+        for timeout_at in 1..=2 {
+            let mut resolution = CollectionResolution::default();
+            let read = resolution.begin(ResolutionOwner::AlbumDrop).unwrap();
+            let mut calls = 0;
+            let result = resolve_album(
+                |_, _| {
+                    calls += 1;
+                    if calls == timeout_at {
+                        assert!(resolution.timeout(&read));
+                        assert!(resolution.pending());
+                    }
+                    album_page(&[calls as i64], 2, revisions)
+                },
+                key.clone(),
+                album_query().stamp(revisions),
+                &read.ticket,
+            );
+            assert!(matches!(
+                result.unwrap_err().downcast_ref::<QueryError>(),
+                Some(QueryError::Cancelled)
+            ));
+            assert_eq!(calls, timeout_at);
+            assert!(resolution.pending());
+            assert!(resolution.finish(&read));
+
+            let read = resolution.begin(ResolutionOwner::PlaylistAppend).unwrap();
+            let mut calls = 0;
+            let result = resolve_playlist(
+                |_, _| {
+                    calls += 1;
+                    if calls == timeout_at {
+                        assert!(resolution.timeout(&read));
+                    }
+                    playlist_batch(
+                        &[calls as i64],
+                        (calls == 1).then(|| playlist_cursor(1)),
+                        revisions,
+                    )
+                },
+                7,
+                revisions,
+                &read.ticket,
+            );
+            assert!(matches!(
+                result.unwrap_err().downcast_ref::<QueryError>(),
+                Some(QueryError::Cancelled)
+            ));
+            assert_eq!(calls, timeout_at);
+            assert!(resolution.pending());
+            assert!(resolution.finish(&read));
+        }
+    }
 
     #[test]
     fn drag_freezes_exactly_once_and_preserves_occurrences() {

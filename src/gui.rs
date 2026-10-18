@@ -16,6 +16,7 @@ mod panels;
 mod playback;
 mod playlists;
 mod presentation;
+mod query;
 mod queue;
 mod scrolling;
 pub(crate) mod session;
@@ -220,6 +221,7 @@ pub(super) enum DragDestination {
 struct FullWaveformRequest {
     generation: u64,
     target: Option<FullWaveformTarget>,
+    worker: Option<u64>,
 }
 
 struct FullWaveformTarget {
@@ -258,6 +260,21 @@ impl FullWaveformRequest {
             cue_range: FullWaveformTarget::cue_range(track),
         });
         self.generation
+    }
+
+    fn reserve(&mut self) -> Option<(u64, i64)> {
+        if self.worker.is_some() {
+            return None;
+        }
+        let target = self.target.as_ref()?;
+        self.worker = Some(self.generation);
+        Some((self.generation, target.track_id))
+    }
+
+    fn retire(&mut self, generation: u64) {
+        if self.worker == Some(generation) {
+            self.worker = None;
+        }
     }
 
     fn invalidate(&mut self) {
@@ -1325,23 +1342,55 @@ impl GuiApp {
         else {
             return;
         };
-        let track_id = track.id;
-        let generation = self.full_waveform_request.begin(track);
+        self.full_waveform_request.begin(track);
         self.waveform.update(cx, |waveform, cx| {
             waveform.cancel_full_request(cx);
         });
+        self.dispatch_full_waveform_query(cx);
+    }
+
+    fn dispatch_full_waveform_query(&mut self, cx: &mut Context<Self>) {
+        let Some((generation, track_id)) = self.full_waveform_request.reserve() else {
+            return;
+        };
         let handle = self.handle.clone();
         let query = Query::Track { track_id };
         let stamp = query.stamp(self.state.query_revisions_for(&query));
         cx.spawn(async move |this, cx| {
-            let response = cx
-                .background_executor()
-                .spawn(async move { handle.query(Query::Track { track_id }) })
-                .await;
+            let response = query::run(
+                handle,
+                cx,
+                move |handle| handle.query_for_gui(Query::Track { track_id }),
+                |response, cx| {
+                    let _ = this.update(cx, |this, cx| {
+                        this.refresh(cx);
+                        this.sync_full_waveform_request(cx);
+                        if query.stamp(this.state.query_revisions_for(&query)) == stamp
+                            && this.full_waveform_request.accepts(
+                                generation,
+                                this.state
+                                    .current_track()
+                                    .or(this.metadata.read(cx).track()),
+                            )
+                            && let Err(error) = response.result
+                        {
+                            this.error = Some(error.to_string());
+                            this.full_waveform_request.invalidate();
+                            cx.notify();
+                        }
+                    });
+                },
+            )
+            .await;
             let _ = this.update(cx, |this, cx| {
                 // Core changes also arrive while hidden, without a rendered frame.
                 this.refresh(cx);
                 this.sync_full_waveform_request(cx);
+                this.full_waveform_request.retire(generation);
+                if this.full_waveform_request.generation != generation {
+                    this.dispatch_full_waveform_query(cx);
+                    return;
+                }
                 if query.stamp(response.revisions) != stamp
                     || query.stamp(this.state.query_revisions_for(&query)) != stamp
                 {

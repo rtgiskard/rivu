@@ -643,6 +643,26 @@ mod tests {
     }
 
     #[test]
+    fn waveform_query_timeout_and_replacement_keep_physical_reservation() {
+        let original = track(1, "original");
+        let latest = track(2, "latest");
+        let mut request = FullWaveformRequest::default();
+        let first = request.begin(&original);
+        assert_eq!(request.reserve(), Some((first, 1)));
+        // Logical timeout retires publication, not the submitted query slot.
+        request.invalidate();
+        assert!(!request.accepts(first, Some(&original)));
+        assert!(request.reserve().is_none());
+        let next = request.begin(&latest);
+        assert!(request.reserve().is_none());
+        request.retire(first);
+        assert_eq!(request.reserve(), Some((next, 2)));
+        request.retire(first);
+        assert!(request.reserve().is_none());
+        assert!(request.accepts(next, Some(&latest)));
+    }
+
+    #[test]
     fn explicit_waveform_queries_do_not_revive_after_target_or_still_mode_changes() {
         let original = track(1, "original");
         let other = track(2, "other");

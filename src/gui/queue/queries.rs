@@ -85,14 +85,37 @@ impl Queue {
             .clone()
             .expect("active locate query");
         cx.spawn(async move |this, cx| {
-            let response = cx
-                .background_executor()
-                .spawn(async move { handle.query_if_current(query, ticket) })
-                .await;
+            let mut timed_out = false;
+            let response = crate::gui::query::run(
+                handle,
+                cx,
+                move |handle| handle.query_if_current(query, ticket),
+                |response, cx| {
+                    timed_out = true;
+                    let _ = this.update(cx, |this, cx| {
+                        this.refresh(cx);
+                        if this.queue_locate_current(request)
+                            && this.model.locate.current(
+                                request,
+                                response.revisions,
+                                this.state.queue.current_id,
+                            )
+                        {
+                            this.model.locate.invalidate();
+                            if let Err(error) = response.result {
+                                cx.emit(QueueEvent::Error(error.to_string()));
+                            }
+                            cx.notify();
+                        }
+                    });
+                },
+            )
+            .await;
             let _ = this.update(cx, |this, cx| {
                 this.model.locate.release_worker(request);
                 this.refresh(cx);
-                if this.queue_locate_current(request)
+                if !timed_out
+                    && this.queue_locate_current(request)
                     && this.model.locate.current(
                         request,
                         response.revisions,
@@ -232,13 +255,33 @@ impl Queue {
                     let queue_ids = chunk.to_vec();
                     let ticket = ticket.clone();
                     let query = job.query.clone();
-                    let response = cx
-                        .background_executor()
-                        .spawn(async move {
+                    let response = crate::gui::query::run(
+                        handle,
+                        cx,
+                        move |handle| {
                             handle
                                 .query_if_current(Query::QueueEntries { query, queue_ids }, ticket)
-                        })
-                        .await;
+                        },
+                        |response, cx| {
+                            let _ = this.update(cx, |this, cx| {
+                                this.refresh(cx);
+                                if this
+                                    .model
+                                    .reconcile_current(&job, this.state.query_revisions(None))
+                                    && this.model.reconcile_current(&job, response.revisions)
+                                    && let Err(error) = response.result
+                                {
+                                    let error = error.to_string();
+                                    this.model.selection_error = Some(error.clone());
+                                    this.model.busy = false;
+                                    this.model.reconcile_projection.cancel();
+                                    cx.emit(QueueEvent::Error(error));
+                                    cx.notify();
+                                }
+                            });
+                        },
+                    )
+                    .await;
                     if (Query::QueueEntries {
                         query: job.query.clone(),
                         queue_ids: Vec::new(),
@@ -304,19 +347,38 @@ impl Queue {
         let handle = self.context.handle().clone();
         let ticket = self.model.page_projection.ticket();
         cx.spawn(async move |this, cx| {
-            let response = cx
-                .background_executor()
-                .spawn(async move { handle.query_if_current(query, ticket) })
-                .await;
+            let mut timed_out = false;
+            let response = crate::gui::query::run(
+                handle,
+                cx,
+                move |handle| handle.query_if_current(query, ticket),
+                |response, cx| {
+                    timed_out = true;
+                    let _ = this.update(cx, |this, cx| {
+                        this.refresh(cx);
+                        this.sync_queue(cx);
+                        this.model.accept_page(&request, generation, response, || {
+                            this.context.i18n.text("gl-queue-page-response").to_owned()
+                        });
+                        this.loading.finish(&(), generation);
+                        this.loading.schedule(cx, |this| &mut this.loading);
+                        cx.notify();
+                    });
+                },
+            )
+            .await;
             let _ = this.update(cx, |this, cx| {
                 this.loading.finish(&(), generation);
                 this.loading.schedule(cx, |this| &mut this.loading);
                 this.model.retire_page_worker();
                 this.refresh(cx);
                 this.sync_queue(cx);
-                this.model.accept_page(&request, generation, response, || {
-                    this.context.i18n.text("gl-queue-page-response").to_owned()
-                });
+                if !timed_out {
+                    this.model.accept_page(&request, generation, response, || {
+                        this.context.i18n.text("gl-queue-page-response").to_owned()
+                    });
+                }
+                this.demand_visible_page(cx);
                 cx.notify();
             });
         })
@@ -434,6 +496,25 @@ impl Queue {
         ));
     }
 
+    fn timeout_queue_selection(
+        &mut self,
+        job: &QueueJob,
+        response: crate::response::QueryResponse,
+        cx: &mut Context<Self>,
+    ) {
+        self.refresh(cx);
+        if self.queue_job_current(job)
+            && self.model.query().stamp(response.revisions) == job.stamp
+            && let Err(error) = response.result
+        {
+            let error = error.to_string();
+            self.model.finish_selection(job, Some(&error));
+            cx.emit(QueueEvent::SelectionFailed(job.intent));
+            cx.emit(QueueEvent::Error(error));
+            cx.notify();
+        }
+    }
+
     fn queue_job_current(&self, job: &QueueJob) -> bool {
         self.model.manual == Some(job.intent)
             && self.model.query().stamp(self.state.query_revisions(None)) == job.stamp
@@ -468,9 +549,10 @@ impl Queue {
                         let handle = handle.clone();
                         let ticket = ticket.clone();
                         let query = job.query.clone();
-                        let response = cx
-                            .background_executor()
-                            .spawn(async move {
+                        let response = crate::gui::query::run(
+                            handle,
+                            cx,
+                            move |handle| {
                                 handle.query_if_current(
                                     Query::QueuePage {
                                         query,
@@ -479,8 +561,14 @@ impl Queue {
                                     },
                                     ticket,
                                 )
-                            })
-                            .await;
+                            },
+                            |response, cx| {
+                                let _ = this.update(cx, |this, cx| {
+                                    this.timeout_queue_selection(&job, response, cx);
+                                });
+                            },
+                        )
+                        .await;
                         if (Query::QueuePage {
                             query: job.query.clone(),
                             offset: 0,
@@ -533,9 +621,10 @@ impl Queue {
                         let handle = handle.clone();
                         let ticket = ticket.clone();
                         let query = job.query.clone();
-                        let response = cx
-                            .background_executor()
-                            .spawn(async move {
+                        let response = crate::gui::query::run(
+                            handle,
+                            cx,
+                            move |handle| {
                                 handle.query_if_current(
                                     Query::QueuePage {
                                         query,
@@ -544,8 +633,14 @@ impl Queue {
                                     },
                                     ticket,
                                 )
-                            })
-                            .await;
+                            },
+                            |response, cx| {
+                                let _ = this.update(cx, |this, cx| {
+                                    this.timeout_queue_selection(&job, response, cx);
+                                });
+                            },
+                        )
+                        .await;
                         if (Query::QueuePage {
                             query: job.query.clone(),
                             offset: 0,

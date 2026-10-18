@@ -27,6 +27,7 @@ pub(in crate::gui) struct MetadataReadCoordinator {
 enum ReadWorker {
     Quiet(MetadataRead),
     Reading(MetadataRead),
+    TimedOut(MetadataRead),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -167,6 +168,27 @@ impl MetadataReadCoordinator {
         self.needs_refresh = self.selected.is_some();
     }
 
+    /// Logical failure changes only presentation; the submitted reader still owns
+    /// its slot until `finish`, even if Retry or another selection arrives.
+    pub(super) fn timeout(
+        &mut self,
+        read: MetadataRead,
+        session: &mut MetadataSession,
+        environment: ReadEnvironment,
+        response: QueryResponse,
+    ) -> bool {
+        if self.worker != Some(ReadWorker::Reading(read))
+            || !self.current(read, session, &environment)
+        {
+            return false;
+        }
+        let Err(error) = response.result else {
+            return false;
+        };
+        self.worker = Some(ReadWorker::TimedOut(read));
+        session.fail_load(read.token, error.to_string())
+    }
+
     /// Completion alone retires submitted I/O. Widget text is borrowed only here;
     /// the coordinator never stores a second draft or changes the session baseline.
     pub(super) fn finish(
@@ -178,6 +200,14 @@ impl MetadataReadCoordinator {
         draft: MetadataDraft<'_>,
         unexpected_response: impl FnOnce() -> String,
     ) -> ReadCompletion {
+        if self.worker == Some(ReadWorker::TimedOut(read)) {
+            self.worker = None;
+            return if self.needs_refresh {
+                ReadCompletion::Retired
+            } else {
+                ReadCompletion::Failed
+            };
+        }
         if self.worker != Some(ReadWorker::Reading(read)) {
             return ReadCompletion::Retired;
         }
@@ -252,6 +282,86 @@ mod tests {
     ) {
         session.select(id);
         owner.request(id, QueryRevisions::default(), now);
+    }
+
+    #[test]
+    fn timeout_settles_loading_but_retry_and_replacement_wait_for_retirement() {
+        use super::super::session::MetadataReadState;
+        for replacement in [false, true] {
+            let now = Instant::now();
+            let mut owner = MetadataReadCoordinator::default();
+            let mut session = MetadataSession::default();
+            request(&mut owner, &mut session, 1, now);
+            let first = owner.prepare(&mut session, true, now).unwrap();
+            assert!(owner.submit(first.read, &session, environment(true)));
+            assert!(owner.timeout(
+                first.read,
+                &mut session,
+                environment(true),
+                QueryResponse {
+                    revisions: QueryRevisions::default(),
+                    result: Err(QueryError::Message("timed out".into())),
+                }
+            ));
+            assert_eq!(
+                session.read_state(),
+                &MetadataReadState::Failed("timed out".into())
+            );
+            assert!(owner.prepare(&mut session, true, now).is_none());
+            request(
+                &mut owner,
+                &mut session,
+                if replacement { 2 } else { 1 },
+                now,
+            );
+            assert!(owner.prepare(&mut session, true, now).is_none());
+            assert!(matches!(
+                finish(&mut owner, &mut session, first.read, true),
+                ReadCompletion::Retired
+            ));
+            // The deliberately successful late reply did not replace timeout state.
+            assert_eq!(session.selected(), Some(if replacement { 2 } else { 1 }));
+            let next = owner.prepare(&mut session, true, now).unwrap();
+            assert_eq!(next.read.track_id, if replacement { 2 } else { 1 });
+            assert!(owner.submit(next.read, &session, environment(true)));
+            assert!(matches!(
+                finish(&mut owner, &mut session, next.read, true),
+                ReadCompletion::Loaded(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn obsolete_timeout_cannot_fail_replacement_or_release_reader() {
+        let now = Instant::now();
+        let mut owner = MetadataReadCoordinator::default();
+        let mut session = MetadataSession::default();
+        request(&mut owner, &mut session, 1, now);
+        let first = owner.prepare(&mut session, true, now).unwrap();
+        assert!(owner.submit(first.read, &session, environment(true)));
+        request(&mut owner, &mut session, 2, now);
+        assert!(!owner.timeout(
+            first.read,
+            &mut session,
+            environment(true),
+            QueryResponse {
+                revisions: QueryRevisions::default(),
+                result: Err(QueryError::Message("obsolete".into())),
+            }
+        ));
+        assert!(owner.prepare(&mut session, true, now).is_none());
+        assert!(matches!(
+            finish(&mut owner, &mut session, first.read, true),
+            ReadCompletion::Retired
+        ));
+        assert_eq!(
+            owner
+                .prepare(&mut session, true, now)
+                .unwrap()
+                .read
+                .track_id,
+            2
+        );
     }
 
     #[test]

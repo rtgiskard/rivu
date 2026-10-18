@@ -28,6 +28,7 @@ mod query_epoch;
 pub(crate) use query_epoch::{QueryEpoch, QueryTicket};
 
 type Wakeup = Arc<dyn Fn() + Send + Sync>;
+type QueryTimeout = Arc<dyn Fn(QueryResponse) + Send + Sync>;
 #[expect(
     clippy::large_enum_variant,
     reason = "Keep one-shot query replies inline instead of allocating a response box"
@@ -148,6 +149,8 @@ pub struct CoreHandle {
     sender: Sender<Request>,
     wakeup: Arc<RwLock<Option<Wakeup>>>,
     subscribers: Arc<RwLock<Vec<Sender<()>>>>,
+    // Window-scoped: cloning a GUI handle must not change IPC/CLI query policy.
+    query_timeout: Option<QueryTimeout>,
 }
 
 pub(crate) struct MprisServiceState {
@@ -242,15 +245,36 @@ impl CoreHandle {
     }
     /// Query metadata and rows are produced in the same Core dispatch.
     pub fn query(&self, query: Query) -> QueryResponse {
-        self.query_with_ticket(query, None)
+        self.query_with_ticket(query, None, false, Duration::from_secs(12))
+    }
+
+    /// Report GUI waiting failures without treating them as physical completion.
+    pub(crate) fn with_query_timeout(
+        mut self,
+        notify: impl Fn(QueryResponse) + Send + Sync + 'static,
+    ) -> Self {
+        self.query_timeout = Some(Arc::new(notify));
+        self
+    }
+
+    /// GUI reads retain their caller's physical slot until reply or disconnect.
+    pub(crate) fn query_for_gui(&self, query: Query) -> QueryResponse {
+        self.query_with_ticket(query, None, true, Duration::from_secs(12))
     }
 
     /// Cancel stale queued reads without interrupting an already executing read.
+    /// A timeout notifies the GUI, then drains and discards the actual reply.
     pub(crate) fn query_if_current(&self, query: Query, ticket: QueryTicket) -> QueryResponse {
-        self.query_with_ticket(query, Some(ticket))
+        self.query_with_ticket(query, Some(ticket), true, Duration::from_secs(12))
     }
 
-    fn query_with_ticket(&self, query: Query, ticket: Option<QueryTicket>) -> QueryResponse {
+    fn query_with_ticket(
+        &self,
+        query: Query,
+        ticket: Option<QueryTicket>,
+        physical_retirement: bool,
+        timeout: Duration,
+    ) -> QueryResponse {
         if ticket.as_ref().is_some_and(|ticket| !ticket.is_current()) {
             return QueryResponse {
                 revisions: self.state.read().query_revisions_for(&query),
@@ -259,17 +283,17 @@ impl CoreHandle {
         }
         let (tx, rx) = bounded(1);
         let request = Request {
-            operation: Operation::Query { query, ticket },
+            operation: Operation::Query {
+                query,
+                ticket: ticket.clone(),
+            },
             reply: Some(tx),
         };
         let response = self
             .sender
             .send_timeout(request, Duration::from_secs(2))
             .map_err(|error| format!("Core unavailable: {error}"))
-            .and_then(|()| {
-                rx.recv_timeout(Duration::from_secs(12))
-                    .map_err(|error| format!("Core response unavailable: {error}"))
-            });
+            .and_then(|()| self.receive_query(&rx, ticket.as_ref(), physical_retirement, timeout));
         match response {
             Ok(CoreResponse::Query(response)) => response,
             Ok(CoreResponse::Ack(_)) => unreachable!("query request returned Ack"),
@@ -277,6 +301,35 @@ impl CoreHandle {
                 revisions: self.state.read().query_revisions(),
                 result: Err(QueryError::Message(error)),
             },
+        }
+    }
+
+    fn receive_query(
+        &self,
+        receiver: &Receiver<CoreResponse>,
+        ticket: Option<&QueryTicket>,
+        physical_retirement: bool,
+        timeout: Duration,
+    ) -> std::result::Result<CoreResponse, String> {
+        match receiver.recv_timeout(timeout) {
+            Ok(response) => Ok(response),
+            Err(error) => {
+                let message = format!("Core response unavailable: {error}");
+                if physical_retirement && error == crossbeam_channel::RecvTimeoutError::Timeout {
+                    if ticket.is_none_or(QueryTicket::is_current)
+                        && let Some(notify) = &self.query_timeout
+                    {
+                        notify(QueryResponse {
+                            revisions: self.state.read().query_revisions(),
+                            result: Err(QueryError::Message(message.clone())),
+                        });
+                    }
+                    // The request still owns its Core queue/execution slot. Neither
+                    // timeout nor cancellation can retire it; never return late data.
+                    let _ = receiver.recv();
+                }
+                Err(message)
+            }
         }
     }
 
@@ -528,6 +581,7 @@ impl Runtime {
             sender,
             wakeup: wakeup.clone(),
             subscribers: subscribers.clone(),
+            query_timeout: None,
         };
         let worker_control = control.clone();
         let worker = thread::Builder::new()

@@ -382,17 +382,35 @@ impl AlbumBrowser {
         let handle = self.handle.clone();
         cx.spawn(async move |this, cx| {
             let worker_query = query.clone();
-            let (response, count_response) = cx
-                .background_executor()
-                .spawn(async move {
+            let (response, count_response) = super::query::run(
+                handle,
+                cx,
+                move |handle| {
                     let response = handle.query_if_current(worker_query, ticket.clone());
-                    let count = count_query.map(|query| {
-                        let response = handle.query_if_current(query.clone(), ticket);
-                        (query, response)
-                    });
+                    let count = response
+                        .result
+                        .is_ok()
+                        .then_some(count_query)
+                        .flatten()
+                        .map(|query| {
+                            let response = handle.query_if_current(query.clone(), ticket);
+                            (query, response)
+                        });
                     (response, count)
-                })
-                .await;
+                },
+                |response, cx| {
+                    let _ = this.update(cx, |this, cx| {
+                        this.loading_text.finish(&(), generation);
+                        this.loading_text
+                            .schedule(cx, |this| &mut this.loading_text);
+                        let revisions = this.handle.gui_snapshot().query_revisions(None);
+                        let data = this.model.timeout(&query, generation, response, revisions);
+                        this.apply_data_change(data, cx);
+                        cx.notify();
+                    });
+                },
+            )
+            .await;
             let _ = this.update(cx, |this, cx| {
                 this.loading_text.finish(&(), generation);
                 this.loading_text

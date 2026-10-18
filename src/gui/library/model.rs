@@ -58,6 +58,7 @@ struct SearchCounts {
     root_counts: std::collections::HashMap<std::path::PathBuf, (usize, usize)>,
 }
 
+#[derive(Clone)]
 pub(super) struct SearchCountRequest {
     pub(super) query: Query,
     pub(super) roots: Vec<std::path::PathBuf>,
@@ -165,6 +166,11 @@ impl LibraryBrowser {
             }),
         )
     }
+    pub(super) fn retire_search_counts(&mut self, request: &SearchCountRequest) {
+        if self.search_counts.worker == Some(request.generation) {
+            self.search_counts.worker = None;
+        }
+    }
 
     /// Completion releases its physical slot even when its payload is obsolete.
     /// A current failure is retained until explicit retry or changed demand.
@@ -180,6 +186,17 @@ impl LibraryBrowser {
             return false;
         }
         counts.worker = None;
+        self.publish_search_counts(&request, roots, revisions, result)
+    }
+
+    pub(super) fn publish_search_counts(
+        &mut self,
+        request: &SearchCountRequest,
+        roots: &[std::path::PathBuf],
+        revisions: QueryRevisions,
+        result: Option<SearchCountResult>,
+    ) -> bool {
+        let counts = &mut self.search_counts;
         let Query::LibraryRootPage {
             query,
             favorite,
@@ -695,6 +712,37 @@ mod tests {
             totals,
             roots: [(root.to_path_buf(), totals)].into_iter().collect(),
         }
+    }
+
+    #[test]
+    fn search_count_timeout_keeps_worker_until_latest_demand_can_run() {
+        let mut library = LibraryBrowser::default();
+        let roots = vec![std::path::PathBuf::from("/music")];
+        let revisions = QueryRevisions::default();
+        let old = library.prepare_search_counts(&roots, revisions).1.unwrap();
+        assert!(library.publish_search_counts(&old, &roots, revisions, None));
+        assert!(library.search_counts_pending());
+        assert!(library.prepare_search_counts(&roots, revisions).1.is_none());
+        for query in ["one", "latest"] {
+            library.refresh_search(query.into());
+            assert!(library.prepare_search_counts(&roots, revisions).1.is_none());
+        }
+        assert!(!library.publish_search_counts(&old, &roots, revisions, None));
+        assert!(!library.accept_search_counts(
+            old,
+            &roots,
+            revisions,
+            Some(search_count_result(&roots[0], (99, 99)))
+        ));
+        let latest = library.prepare_search_counts(&roots, revisions).1.unwrap();
+        assert!(library.accept_search_counts(
+            latest,
+            &roots,
+            revisions,
+            Some(search_count_result(&roots[0], (2, 3)))
+        ));
+        assert_eq!(library.search_counts(), Some((2, 3)));
+        assert!(!library.search_counts_pending());
     }
 
     #[test]

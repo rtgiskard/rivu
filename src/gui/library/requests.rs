@@ -174,6 +174,15 @@ impl Library {
         response: QueryResponse,
     ) -> Option<String> {
         self.requests.directory_workers.remove(&read.branch);
+        self.publish_directory_read(read, revisions, response)
+    }
+
+    pub(super) fn publish_directory_read(
+        &mut self,
+        read: &DirectoryRead,
+        revisions: QueryRevisions,
+        response: QueryResponse,
+    ) -> Option<String> {
         if !self.directory_read_current(read, revisions)
             || !self.library.projection.accepts(
                 &read.owner_query,
@@ -266,6 +275,20 @@ impl Library {
         response: QueryResponse,
     ) -> Option<String> {
         self.requests.root_count_workers.remove(&read.offset);
+        self.publish_root_count_read(&read, roots, revisions, response)
+    }
+
+    pub(super) fn retire_root_count_read(&mut self, read: &RootCountRead) {
+        self.requests.root_count_workers.remove(&read.offset);
+    }
+
+    pub(super) fn publish_root_count_read(
+        &mut self,
+        read: &RootCountRead,
+        roots: &[std::path::PathBuf],
+        revisions: QueryRevisions,
+        response: QueryResponse,
+    ) -> Option<String> {
         if !self
             .library
             .counts_current(read.generation, roots, revisions.structure)

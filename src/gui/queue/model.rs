@@ -626,6 +626,43 @@ mod tests {
         }
     }
     #[test]
+    fn timeout_page_publishes_failure_without_releasing_replacement_gate() {
+        let mut queue = queue(7);
+        let (request, generation) = queue.demand_page(0..10, 20).unwrap();
+        queue.accept_page(
+            &request,
+            generation,
+            crate::response::QueryResponse {
+                revisions: revisions(7),
+                result: Err(crate::response::QueryError::Message("timeout".into())),
+            },
+            || unreachable!(),
+        );
+        assert!(queue.page_worker);
+        assert_eq!(queue.rows.error(0), Some("timeout"));
+        queue.change_search(Some("one".into()));
+        queue.sync(revisions(7), 200_000);
+        assert!(queue.demand_page(0..10, 20).is_none());
+        queue.change_search(Some("latest".into()));
+        queue.sync(revisions(7), 200_000);
+        assert!(queue.demand_page(0..10, 20).is_none());
+        queue.retire_page_worker();
+        let (latest, _) = queue.demand_page(0..10, 20).unwrap();
+        assert!(matches!(latest, Query::QueuePage { query: Some(query), .. } if query == "latest"));
+        queue.accept_page(
+            &request,
+            generation,
+            crate::response::QueryResponse {
+                revisions: revisions(7),
+                result: Err(crate::response::QueryError::Message("obsolete".into())),
+            },
+            || unreachable!(),
+        );
+        assert!(queue.rows.error(0).is_none());
+        assert!(queue.page_worker);
+    }
+
+    #[test]
     fn filtered_queue_demands_matching_pages_and_keeps_occurrence_identity() {
         let mut queue = queue(7);
         let mut source = row(20, 400);

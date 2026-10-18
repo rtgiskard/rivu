@@ -561,6 +561,25 @@ impl PlaylistState {
         response: QueryResponse,
     ) -> Option<String> {
         self.requests.workers.remove(&read.kind);
+        self.publish_playlist_read(read, current, response)
+    }
+
+    /// Timeout ends publication/loading, but only final completion releases the worker.
+    pub(in crate::gui) fn timeout_playlist_read(
+        &mut self,
+        read: &ViewRead,
+        current: QueryRevisions,
+        response: QueryResponse,
+    ) -> Option<String> {
+        self.publish_playlist_read(read, current, response)
+    }
+
+    fn publish_playlist_read(
+        &mut self,
+        read: &ViewRead,
+        current: QueryRevisions,
+        response: QueryResponse,
+    ) -> Option<String> {
         if !self.requests.is_current(read.kind, read.generation) {
             return None;
         }
@@ -617,6 +636,93 @@ mod tests {
     use super::*;
     use crate::projection::GuiLibrarySnapshot;
     use std::sync::Arc;
+
+    #[test]
+    fn view_timeout_publishes_once_and_retains_every_lane_until_retirement() {
+        for kind in [
+            ViewRequestKind::Summaries,
+            ViewRequestKind::Entries,
+            ViewRequestKind::Selection,
+        ] {
+            let mut browser = PlaylistState::default();
+            let revisions = QueryRevisions::default();
+            browser.select_playlist(1, "one".into(), 0);
+            let prepared = match kind {
+                ViewRequestKind::Summaries => browser.request_playlist_summaries(0, 20, revisions),
+                ViewRequestKind::Entries => browser.request_playlist_entries(1, 0, 20, revisions),
+                ViewRequestKind::Selection => browser.prepare_playlist_lookup(revisions),
+            };
+            let (read, _) = prepared.into_read().unwrap();
+            let timeout = || QueryResponse {
+                revisions,
+                result: Err(crate::response::QueryError::Message("timeout".into())),
+            };
+            assert_eq!(
+                browser.timeout_playlist_read(&read, revisions, timeout()),
+                Some("timeout".into())
+            );
+            assert!(!browser.view_pending(kind));
+            assert!(browser.requests.workers.contains(&kind));
+            assert_eq!(
+                browser.complete_playlist_read(&read, revisions, timeout()),
+                None
+            );
+            assert!(!browser.requests.workers.contains(&kind));
+            assert!(!browser.view_pending(kind));
+            match kind {
+                ViewRequestKind::Summaries => {
+                    assert_eq!(browser.playlists.summaries().rows.error(0), Some("timeout"))
+                }
+                ViewRequestKind::Entries => {
+                    assert_eq!(browser.playlists.entries().rows.error(0), Some("timeout"))
+                }
+                ViewRequestKind::Selection => assert_eq!(browser.playlists.selected(), Some(1)),
+            }
+        }
+    }
+
+    #[test]
+    fn obsolete_view_timeout_and_final_return_preserve_latest_queued_demand() {
+        let mut browser = PlaylistState::default();
+        let revisions = QueryRevisions::default();
+        browser.select_playlist(1, "one".into(), 0);
+        let (read, _) = browser
+            .request_playlist_entries(1, 0, 20, revisions)
+            .into_read()
+            .unwrap();
+        let timeout = || QueryResponse {
+            revisions,
+            result: Err(crate::response::QueryError::Message("timeout".into())),
+        };
+        assert!(
+            browser
+                .timeout_playlist_read(&read, revisions, timeout())
+                .is_some()
+        );
+        browser.search_playlist_entries(Some("latest".into()));
+        let queued = browser.request_playlist_entries(1, 0, 20, revisions);
+        let generation = queued.pending_generation().unwrap();
+        assert!(queued.into_read().is_none());
+        assert_eq!(
+            browser.timeout_playlist_read(&read, revisions, timeout()),
+            None
+        );
+        assert!(browser.view_loading(ViewRequestKind::Entries, generation));
+        assert_eq!(browser.playlists.entries().rows.error(0), None);
+        assert_eq!(
+            browser.complete_playlist_read(&read, revisions, timeout()),
+            None
+        );
+        assert!(browser.view_loading(ViewRequestKind::Entries, generation));
+        assert_eq!(browser.playlists.entries().rows.error(0), None);
+        let (latest, _) = browser
+            .queued_playlist_read(ViewRequestKind::Entries, true, revisions)
+            .into_read()
+            .unwrap();
+        assert_eq!(latest.generation, generation);
+        assert_eq!(browser.playlists.entries().query.as_deref(), Some("latest"));
+    }
+
     #[test]
     fn search_replacement_keeps_worker_and_rejects_old_completion() {
         let mut browser = PlaylistState::default();

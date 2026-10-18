@@ -107,14 +107,35 @@ impl Library {
         let query = read.query.clone();
         let ticket = read.ticket.clone();
         cx.spawn(async move |this, cx| {
-            let response = cx
-                .background_executor()
-                .spawn(async move { handle.query_if_current(query, ticket) })
-                .await;
+            let mut timed_out = false;
+            let response = crate::gui::query::run(
+                handle,
+                cx,
+                move |handle| handle.query_if_current(query, ticket),
+                |response, cx| {
+                    timed_out = true;
+                    let _ = this.update(cx, |this, cx| {
+                        this.refresh(cx);
+                        let state = Rc::clone(&this.state);
+                        if let Some(error) = this.publish_root_count_read(
+                            &read,
+                            &state.system.config.library_roots,
+                            state.query_revisions(None),
+                            response,
+                        ) {
+                            this.report_error(error, cx);
+                        }
+                        cx.notify();
+                    });
+                },
+            )
+            .await;
             let _ = this.update(cx, |this, cx| {
                 this.refresh(cx);
                 let state = Rc::clone(&this.state);
-                if let Some(error) = this.complete_root_count_read(
+                if timed_out {
+                    this.retire_root_count_read(&read);
+                } else if let Some(error) = this.complete_root_count_read(
                     read,
                     &state.system.config.library_roots,
                     state.query_revisions(None),
@@ -146,15 +167,43 @@ impl Library {
         };
         let handle = self.context.handle().clone();
         cx.spawn(async move |this, cx| {
-            let (request, counts) = cx
-                .background_executor()
-                .spawn(async move {
+            let timeout_request = request.clone();
+            let mut timed_out = false;
+            let (request, counts) = crate::gui::query::run(
+                handle,
+                cx,
+                move |handle| {
                     let counts = library_search_counts(&handle, &request);
                     (request, counts)
-                })
-                .await;
+                },
+                |response, cx| {
+                    timed_out = true;
+                    let _ = this.update(cx, |this, cx| {
+                        this.refresh(cx);
+                        if this.library.publish_search_counts(
+                            &timeout_request,
+                            &this.state.system.config.library_roots,
+                            this.state.query_revisions(None),
+                            None,
+                        ) && let Err(error) = response.result
+                        {
+                            this.report_error(error.to_string(), cx);
+                        }
+                        cx.notify();
+                    });
+                },
+            )
+            .await;
             let _ = this.update(cx, |this, cx| {
                 this.refresh(cx);
+                if timed_out {
+                    this.library.retire_search_counts(&request);
+                    if this.demanded() {
+                        this.request_library_search_counts(cx);
+                    }
+                    cx.notify();
+                    return;
+                }
                 if this.library.accept_search_counts(
                     request,
                     &this.state.system.config.library_roots,
@@ -223,14 +272,34 @@ impl Library {
             }
             let query = read.query.clone();
             let ticket = read.ticket.clone();
-            let response = cx
-                .background_executor()
-                .spawn(async move { handle.query_if_current(query, ticket) })
-                .await;
+            let mut timed_out = false;
+            let response = crate::gui::query::run(
+                handle,
+                cx,
+                move |handle| handle.query_if_current(query, ticket),
+                |response, cx| {
+                    timed_out = true;
+                    let _ = this.update(cx, |this, cx| {
+                        this.refresh(cx);
+                        this.finish_loading_text(&read.branch, read.generation, cx);
+                        if let Some(error) = this.publish_directory_read(
+                            &read,
+                            this.state.query_revisions(None),
+                            response,
+                        ) {
+                            this.report_error(error, cx);
+                        }
+                        cx.notify();
+                    });
+                },
+            )
+            .await;
             let _ = this.update(cx, |this, cx| {
                 this.finish_loading_text(&read.branch, read.generation, cx);
                 this.refresh(cx);
-                if let Some(error) =
+                if timed_out {
+                    this.abandon_directory_read(&read);
+                } else if let Some(error) =
                     this.complete_directory_read(&read, this.state.query_revisions(None), response)
                 {
                     this.report_error(error, cx);

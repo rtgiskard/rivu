@@ -615,6 +615,10 @@ descendant expansion choices
 for reopening. Loading more rows does not clear selections or metadata drafts.
 Failed GUI loads offer a retry button that reloads data without rescanning files;
 TUI loads can be requested again by leaving and reopening the view.
+An accepted desktop query reports a waiting error after 12 seconds rather than
+loading indefinitely. A late result cannot replace that error or newer results.
+Retry or changed demand may still wait for the original read to finish; repeated
+requests do not start parallel reads for the same consumer.
 Pending keyboard navigation is cancelled when library data,
 filters, or batch size change; an old row index is never applied to the refreshed
 collection.

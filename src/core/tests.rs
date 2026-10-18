@@ -146,6 +146,7 @@ fn navigation_runtime(
         sender,
         wakeup: core.wakeup.clone(),
         subscribers: core.subscribers.clone(),
+        query_timeout: None,
     };
     let publications = Arc::new(Mutex::new(Vec::new()));
     let observed = publications.clone();
@@ -191,6 +192,7 @@ fn display_fixture() -> (
         sender,
         wakeup: Arc::new(RwLock::new(None)),
         subscribers: Arc::new(RwLock::new(Vec::new())),
+        query_timeout: None,
     };
     (handle, worker, receiver)
 }

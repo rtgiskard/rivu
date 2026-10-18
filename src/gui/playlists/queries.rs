@@ -108,10 +108,28 @@ impl Playlists {
             {
                 return;
             }
-            let response = cx
-                .background_executor()
-                .spawn(async move { handle.query_if_current(query, ticket) })
-                .await;
+            let response = crate::gui::query::run(
+                handle,
+                cx,
+                move |handle| handle.query_if_current(query, ticket),
+                |response, cx| {
+                    let _ = this.update(cx, |this, cx| {
+                        this.refresh(cx);
+                        let revisions = this
+                            .state
+                            .query_revisions(this.browser.playlists().entries().playlist_id);
+                        if let Some(error) = this
+                            .browser
+                            .timeout_playlist_read(&read, revisions, response)
+                        {
+                            this.finish_loading_text(&kind, generation, cx);
+                            this.report_error(error, cx);
+                        }
+                        cx.notify();
+                    });
+                },
+            )
+            .await;
             let _ = this.update(cx, |this, cx| {
                 this.finish_loading_text(&kind, generation, cx);
                 this.refresh(cx);
