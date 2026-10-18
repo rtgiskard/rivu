@@ -1,6 +1,18 @@
-use crate::base::{UI_INSET, floating_surface};
-use crate::{MENU_WIDTH, column, menu_item, theme::Palette};
+use crate::{
+    layout::{UI_INSET, column},
+    menu::{MENU_WIDTH, menu_item},
+    theme::Palette,
+};
 use gpui::{prelude::*, *};
+
+/// Opaque elevated material for menus, dropdowns, and tooltips only.
+pub(crate) fn floating_surface(theme: &'static Palette) -> Div {
+    div()
+        .bg(rgb(theme.control))
+        .border_1()
+        .border_color(rgb(theme.border))
+        .shadow_sm()
+}
 
 /// Modal material and pointer barrier. Dismissal and focus remain host policy.
 pub struct Dialog;

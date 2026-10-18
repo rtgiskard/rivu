@@ -1,9 +1,9 @@
 //! Expandable search field with caller-supplied labels and debounce policy.
 
 use super::{
-    icon_button,
+    control::icon_button,
     input::{Input, InputEvent},
-    row,
+    layout::row,
 };
 use gpui::{prelude::*, *};
 use std::time::Duration;

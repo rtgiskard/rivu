@@ -35,7 +35,8 @@ impl ScrollSource {
     }
 }
 
-pub(super) fn scrollable_area(
+/// Applies the same scrollbar and edge treatment to a standard scroll viewport.
+pub fn scrollable_area(
     id: impl Into<ElementId>,
     child: impl IntoElement,
     scroll: &Rc<gpui::ScrollHandle>,
