@@ -4,8 +4,8 @@ mod model;
 mod panel;
 
 use super::{
-    components::search::new_search, feature::FeatureContext, list_interaction::ContentMenuRequest,
-    manual_actions::ManualIntentId,
+    components::search::new_search, coordination::manual_actions::ManualIntentId,
+    feature::FeatureContext, list_interaction::ContentMenuRequest,
 };
 use crate::{
     model::{Command, PlaybackStatus},
@@ -65,7 +65,7 @@ impl EventEmitter<HistoryEvent> for History {}
 impl History {
     pub(super) fn new(context: FeatureContext, cx: &mut Context<Self>) -> Self {
         let state = context.snapshot();
-        let ui_font = super::fonts::resolve(&state.system.config.ui_font, cx);
+        let ui_font = super::appearance::fonts::resolve(&state.system.config.ui_font, cx);
         let search = cx.new(|cx| new_search(&context.i18n, cx));
         let subscription = cx.subscribe(&search, |this, _, event, cx| {
             let SearchEvent::Changed(query) = event;

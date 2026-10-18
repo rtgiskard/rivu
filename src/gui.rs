@@ -1,17 +1,16 @@
 mod album_artwork;
 mod album_browser;
+mod appearance;
 mod artwork;
 mod components;
 mod coordination;
 mod duplicates;
 mod feature;
-mod fonts;
 mod history;
 mod layout;
 mod library;
 mod list_interaction;
 mod loading;
-mod manual_actions;
 mod metadata;
 mod paged;
 mod panels;
@@ -19,13 +18,11 @@ mod playback;
 mod playlists;
 mod presentation;
 mod queue;
-mod queue_replace;
 mod scrolling;
 pub(crate) mod session;
 mod settings;
 mod shell;
 mod snapshot;
-mod theme;
 mod visualization;
 mod workspace;
 use crate::{
@@ -61,7 +58,7 @@ use url::Url;
 
 pub(crate) fn init(cx: &mut App) -> Result<()> {
     #[cfg(feature = "embed-nerd-font")]
-    fonts::register_symbols(cx)
+    appearance::fonts::register_symbols(cx)
         .map_err(|error| error.context("Could not load embedded icon font"))?;
     Input::init(cx);
     Ok(())
@@ -317,7 +314,7 @@ pub(super) struct GuiApp {
     metadata: Entity<metadata::Metadata>,
     duplicates: Entity<duplicates::Duplicates>,
     playback: Entity<playback::Playback>,
-    manual_intents: manual_actions::ManualIntents,
+    manual_intents: coordination::manual_actions::ManualIntents,
     shell: shell::WindowShell,
 
     error: Option<String>,
@@ -328,7 +325,7 @@ pub(super) struct GuiApp {
     artwork_panels: HashMap<u64, Entity<album_artwork::AlbumArtworkPanel>>,
     album_browsers: HashMap<u64, Entity<album_browser::AlbumBrowser>>,
     panel_views: HashMap<u64, Entity<shell::panels::PanelView>>,
-    queue_replace: Option<queue_replace::QueueReplacement>,
+    queue_replace: Option<coordination::queue_replace::QueueReplacement>,
     settings: Entity<settings::Settings>,
     presentation: Entity<presentation::Presentation>,
     layout_action: Option<layout::layout_manager::Action>,
@@ -658,7 +655,7 @@ impl GuiApp {
     ) -> Self {
         let snapshots = Rc::new(snapshot::SnapshotSource::new(handle.clone()));
         let state = snapshots.read();
-        theme::set_theme(state.system.config.ui_theme, cx);
+        appearance::theme::set_theme(state.system.config.ui_theme, cx);
         let localized_text = Rc::new(
             i18n.fixed_texts()
                 .map(|(id, text)| (id.to_owned(), SharedString::from(text.to_owned())))
@@ -672,8 +669,8 @@ impl GuiApp {
         let error = load_error
             .map(|error| i18n.format("shell-load-layouts-error", &[("error", error.into())]));
         workspace.save_error = error.clone();
-        let ui_font = fonts::resolve(&state.system.config.ui_font, cx);
-        fonts::publish(&ui_font, cx);
+        let ui_font = appearance::fonts::resolve(&state.system.config.ui_font, cx);
+        appearance::fonts::publish(&ui_font, cx);
         let layout_name =
             cx.new(|cx| Input::new("", i18n.text("shell-layout-name").to_owned(), cx));
         let mut subscriptions = Vec::new();
@@ -934,7 +931,7 @@ impl GuiApp {
             }),
             duplicates: cx.new(|cx| duplicates::Duplicates::new(feature_context.clone(), cx)),
             playback: cx.new(|cx| playback::Playback::new(feature_context, cx)),
-            manual_intents: manual_actions::ManualIntents::default(),
+            manual_intents: coordination::manual_actions::ManualIntents::default(),
             shell: shell::WindowShell::new(cx),
             error,
             queue_replace: None,
@@ -1113,11 +1110,11 @@ impl GuiApp {
         let appearance_changed = self.state.system.config.ui_font != state.system.config.ui_font
             || self.state.system.config.ui_theme != state.system.config.ui_theme;
         if self.state.system.config.ui_font != state.system.config.ui_font {
-            self.ui_font = fonts::resolve(&state.system.config.ui_font, cx);
-            fonts::publish(&self.ui_font, cx);
+            self.ui_font = appearance::fonts::resolve(&state.system.config.ui_font, cx);
+            appearance::fonts::publish(&self.ui_font, cx);
         }
         if self.state.system.config.ui_theme != state.system.config.ui_theme {
-            theme::set_theme(state.system.config.ui_theme, cx);
+            appearance::theme::set_theme(state.system.config.ui_theme, cx);
         }
         self.state = state;
         self.reconcile_features(cx);

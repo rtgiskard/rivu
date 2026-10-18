@@ -1,6 +1,6 @@
 //! Library projection and selection identities, independent of the window shell.
 use super::{DirectoryTree, LibraryNode, TreeBranch, selection::LibrarySelection};
-use crate::gui::manual_actions::ManualIntentId;
+use crate::gui::coordination::manual_actions::ManualIntentId;
 use crate::model::{DirectoryRow, LibrarySort, Page, Query};
 use crate::{projection::QueryProjection, response::QueryRevisions};
 use gpui::ScrollStrategy;

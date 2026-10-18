@@ -1342,8 +1342,8 @@ mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         cx.update(|cx| {
-            crate::gui::theme::set_theme(crate::theme::Theme::default(), cx);
-            crate::gui::fonts::publish(&gpui::font("sans-serif"), cx);
+            crate::gui::appearance::theme::set_theme(crate::theme::Theme::default(), cx);
+            crate::gui::appearance::fonts::publish(&gpui::font("sans-serif"), cx);
         });
         use super::super::{
             album_artwork::{AlbumArtwork, AlbumArtworkPanel},

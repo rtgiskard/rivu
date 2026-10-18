@@ -1,13 +1,13 @@
 //! History list rendering; all row closures target the History owner.
 
 use super::{History, HistoryEvent, HistorySort};
-use crate::gui::{components::search::set_search_counts, fonts::tabular_numbers};
+use crate::gui::{appearance::fonts::tabular_numbers, components::search::set_search_counts};
 use crate::model::{Command, PlaybackStatus};
 use chrono::{DateTime, Local};
 use gpui::{AnyElement, Context, Div, SharedString, Window, div, prelude::*, px, rgb};
 use rivu_ui::{
-    VirtualList, caption, column, compact_icon_button, hover_actions, icon_button,
-    list_panel_header, list_row, list_viewport, panel_surface, row, sortable_header,
+    VirtualList, caption, column, hover_actions, list_panel_header, list_row, list_viewport,
+    panel_surface, row, sortable_header,
 };
 use std::cell::RefCell;
 
@@ -72,35 +72,22 @@ impl History {
         favorite: bool,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<Div> {
-        let theme = rivu_ui::theme::palette(cx);
-        compact_icon_button(
-            theme,
-            icon_button(
-                id,
-                if favorite { "󰓎" } else { "󰓐" },
-                if favorite {
-                    self.tr("gl-unfavorite")
-                } else {
-                    self.tr("gl-favorite")
-                },
-                cx,
-                move |this, _, cx| {
-                    this.send(
-                        Command::SetFavorite {
-                            track_ids: vec![track_id],
-                            favorite: !favorite,
-                        },
-                        cx,
-                    );
-                },
-            ),
+        crate::gui::components::track::track_favorite_toggle(
+            id,
+            group,
+            favorite,
+            |key| self.tr(key),
+            cx,
+            move |this, _, cx| {
+                this.send(
+                    Command::SetFavorite {
+                        track_ids: vec![track_id],
+                        favorite: !favorite,
+                    },
+                    cx,
+                );
+            },
         )
-        .when(favorite, |view| view.text_color(rgb(theme.accent)))
-        .opacity(0.)
-        .group_hover(group, |style| style.opacity(1.))
-        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
-            cx.stop_propagation();
-        })
     }
 
     fn history_sort_button(
@@ -191,9 +178,14 @@ impl History {
                 measure(text, font)
             };
             // Keep space for either sort direction so sorting does not move columns.
-            let arrow = measure("󰁅".into(), gpui::font(crate::gui::fonts::SYMBOLS_FAMILY)).max(
-                measure("󰁝".into(), gpui::font(crate::gui::fonts::SYMBOLS_FAMILY)),
-            ) + rem_size * 0.25;
+            let arrow = measure(
+                "󰁅".into(),
+                gpui::font(crate::gui::appearance::fonts::SYMBOLS_FAMILY),
+            )
+            .max(measure(
+                "󰁝".into(),
+                gpui::font(crate::gui::appearance::fonts::SYMBOLS_FAMILY),
+            )) + rem_size * 0.25;
             let mut widths = [
                 text_width("#".into()),
                 text_width(self.tr("gl-play-count")) + arrow,

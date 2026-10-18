@@ -20,7 +20,7 @@ mod tests;
 use super::{
     UI_INSET,
     artwork::{Artwork, ArtworkImages, ArtworkLoader, ArtworkView},
-    components::{artwork_preview, metadata_item},
+    components::{artwork::artwork_preview, metadata::metadata_item},
     feature::FeatureContext,
     format_time,
 };
@@ -95,7 +95,7 @@ impl Metadata {
         cx: &mut Context<Self>,
     ) -> Self {
         let state = context.snapshot();
-        let ui_font = super::fonts::resolve(&state.system.config.ui_font, cx);
+        let ui_font = super::appearance::fonts::resolve(&state.system.config.ui_font, cx);
         let mut inputs = HashMap::new();
         let mut subscriptions = Vec::new();
         for (field, placeholder) in [
@@ -155,7 +155,7 @@ impl Metadata {
             || self.state.playback.status != state.playback.status
             || self.state.playback.last_heard_at != state.playback.last_heard_at;
         if self.state.system.config.ui_font != state.system.config.ui_font {
-            self.ui_font = super::fonts::resolve(&state.system.config.ui_font, cx);
+            self.ui_font = super::appearance::fonts::resolve(&state.system.config.ui_font, cx);
         }
         self.state = state;
         if query_changed {

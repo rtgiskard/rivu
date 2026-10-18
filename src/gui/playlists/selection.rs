@@ -3,7 +3,7 @@
 //! Metadata-only changes retry pending navigation without invalidating occurrence identities.
 //! The feature owns selection jobs; the window coordinates manual confirmation.
 use super::{PlaylistEvent, PlaylistSelectionRequest, Playlists};
-use crate::gui::manual_actions::ManualIntentId;
+use crate::gui::coordination::manual_actions::ManualIntentId;
 use crate::{
     model::{Command, Page, PlaylistEntryLocation, PlaylistEntryRow, Query},
     response::{PlaylistEntryRevision, QueryRevisions, ViewResponse},
@@ -1329,7 +1329,7 @@ mod tests {
         let EntryTarget::Offset(offset) = prepared.target else {
             panic!("navigation prepares an offset")
         };
-        let mut intents = crate::gui::manual_actions::ManualIntents::default();
+        let mut intents = crate::gui::coordination::manual_actions::ManualIntents::default();
         // Match the root boundary: freeze intent before cancellation, then dispatch.
         selection.cancel_manual();
         selection.begin_navigation(
@@ -1375,7 +1375,7 @@ mod tests {
 
     #[test]
     fn edges_and_select_all_supersede_pending_range_without_releasing_worker() {
-        use crate::gui::manual_actions::ManualIntents;
+        use crate::gui::coordination::manual_actions::ManualIntents;
         let scope = navigation_scope();
         for (request, expected, all) in [
             (PlaylistSelectionRequest::Edge { last: true }, 19, false),
@@ -1435,7 +1435,7 @@ mod tests {
     #[test]
     fn superseded_range_cannot_finish_latest_selection_or_release_its_gate() {
         let mut selection = EntrySelection::default();
-        let mut intents = crate::gui::manual_actions::ManualIntents::default();
+        let mut intents = crate::gui::coordination::manual_actions::ManualIntents::default();
         let scope = navigation_scope();
         selection.select(identity(1, 0), false);
         let old = intents.begin();
@@ -1576,7 +1576,7 @@ mod tests {
 
     #[test]
     fn metadata_only_navigation_change_retries_without_losing_selection_or_readiness() {
-        use crate::gui::manual_actions::ManualIntents;
+        use crate::gui::coordination::manual_actions::ManualIntents;
         let scope = navigation_scope();
         let changed = EntryNavigationScope {
             metadata: scope.metadata + 1,
@@ -1663,7 +1663,7 @@ mod tests {
 
     #[test]
     fn metadata_only_change_preserves_newer_navigation_target_intent_and_worker_gate() {
-        use crate::gui::manual_actions::ManualIntents;
+        use crate::gui::coordination::manual_actions::ManualIntents;
         let scope = navigation_scope();
         let changed = EntryNavigationScope {
             metadata: scope.metadata + 1,
@@ -1942,7 +1942,7 @@ mod tests {
     #[test]
     fn range_and_navigation_share_one_worker_even_after_cancellation() {
         use super::{EntryCommit, EntryRangeRequest};
-        use crate::gui::manual_actions::ManualIntents;
+        use crate::gui::coordination::manual_actions::ManualIntents;
         let scope = navigation_scope();
         let mut intents = ManualIntents::default();
         let mut selection = EntrySelection::default();
@@ -1991,7 +1991,7 @@ mod tests {
     fn select_all_navigation_establishes_first_occurrence_before_atomic_range_publication() {
         let scope = navigation_scope();
         let mut selection = EntrySelection::default();
-        let mut intents = crate::gui::manual_actions::ManualIntents::default();
+        let mut intents = crate::gui::coordination::manual_actions::ManualIntents::default();
         assert!(!selection.can_select_all(0));
         assert!(selection.can_select_all(5));
         selection.begin_navigation(intents.begin(), scope, 0, false, false, true);
@@ -2233,7 +2233,7 @@ mod tests {
     #[test]
     fn rejected_navigation_read_settles_only_its_current_intent() {
         let mut selection = EntrySelection::default();
-        let mut intents = crate::gui::manual_actions::ManualIntents::default();
+        let mut intents = crate::gui::coordination::manual_actions::ManualIntents::default();
         let scope = navigation_scope();
         let old = intents.begin();
         selection.begin_navigation(old, scope, 0, false, false, false);

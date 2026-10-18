@@ -132,7 +132,7 @@ impl GuiApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = rivu_ui::theme::palette(cx);
-        let mut content = column().gap_2().child(
+        let mut content = rivu_ui::Dialog::card(theme).gap_2().child(
             row()
                 .child(div().flex_1().text_lg().child(self.tr("shell-layouts")))
                 .child(
@@ -333,16 +333,8 @@ impl GuiApp {
                     .text_color(rgb(theme.error)),
             );
         }
-        div()
-            .id("layouts-modal")
+        rivu_ui::Dialog::backdrop("layouts-modal")
             .map(|surface| self.dialog_surface(surface))
-            .occlude()
-            .absolute()
-            .size_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(rgb(0x000000).alpha(0.58))
             .child(
                 content
                     .id("layouts-content")
@@ -350,11 +342,7 @@ impl GuiApp {
                     .max_w(relative(0.9))
                     .max_h(window.viewport_size().height * 0.9)
                     .overflow_y_scroll()
-                    .p(px(UI_INSET))
-                    .bg(rgb(theme.panel))
-                    .border_1()
-                    .border_color(rgb(theme.border))
-                    .rounded_md(),
+                    .p(px(UI_INSET)),
             )
             .into_any_element()
     }

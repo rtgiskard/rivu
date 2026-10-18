@@ -1,15 +1,15 @@
 //! Confirmation of commands that replace the playback queue, not playlist management.
-use super::*;
-use rivu_ui::{column, danger_control, icon_button, panel_header, row};
+use crate::gui::*;
+use rivu_ui::{danger_control, icon_button, panel_header, row};
 
 #[derive(Clone)]
-pub(super) enum QueueReplacement {
+pub(in crate::gui) enum QueueReplacement {
     Playlist { id: i64, name: String },
     Album(crate::model::AlbumKey),
 }
 
 impl GuiApp {
-    pub(super) fn request_album_play(
+    pub(in crate::gui) fn request_album_play(
         &mut self,
         key: crate::model::AlbumKey,
         cx: &mut Context<Self>,
@@ -17,7 +17,7 @@ impl GuiApp {
         self.request_queue_replace(QueueReplacement::Album(key), cx);
     }
 
-    pub(super) fn request_queue_replace(
+    pub(in crate::gui) fn request_queue_replace(
         &mut self,
         replacement: QueueReplacement,
         cx: &mut Context<Self>,
@@ -33,13 +33,17 @@ impl GuiApp {
         }
     }
 
-    pub(super) fn dismiss_queue_replace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(in crate::gui) fn dismiss_queue_replace(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.queue_replace = None;
         self.focus_layout(window, cx);
         cx.notify();
     }
 
-    pub(super) fn queue_replace_overlay(
+    pub(in crate::gui) fn queue_replace_overlay(
         &self,
         window: &Window,
         cx: &mut Context<Self>,
@@ -63,17 +67,13 @@ impl GuiApp {
         rivu_ui::Dialog::backdrop("queue-replace-modal")
             .map(|surface| self.dialog_surface(surface))
             .child(
-                column()
+                rivu_ui::Dialog::card(theme)
                     .id("queue-replace-card")
                     .w(gpui::rems(26.25))
                     .max_w(gpui::relative(0.9))
                     .max_h(window.viewport_size().height * 0.9)
                     .overflow_y_scroll()
                     .p(px(UI_INSET))
-                    .bg(rgb(theme.panel))
-                    .border_1()
-                    .border_color(rgb(theme.border))
-                    .rounded_md()
                     .child(panel_header(theme, title, detail).flex_shrink_0())
                     .child(
                         row()

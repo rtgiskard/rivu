@@ -4,7 +4,6 @@ use crate::gui::{chooser_path, chooser_result};
 use ashpd::desktop::file_chooser::SelectedFiles;
 use gpui::Stateful;
 use requests::ViewRequest;
-use rivu_ui::ButtonTooltip;
 use std::time::Instant;
 impl Playlists {
     pub(in crate::gui) fn apply_playlist_search(
@@ -301,38 +300,22 @@ impl Playlists {
         index: usize,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        let theme = rivu_ui::theme::palette(cx);
         let error = match kind {
             ViewRequestKind::Summaries => self.browser.playlists().summaries().rows.error(index),
             ViewRequestKind::Entries => self.browser.playlists().entries().rows.error(index),
             _ => None,
         };
-        list_row(theme, ("loading-row", index), false)
-            .child(
-                caption(
-                    theme,
-                    if error.is_some() {
-                        self.tr("shell-loading-failed")
-                    } else {
-                        self.tr("shell-loading")
-                    },
-                )
-                .when(!self.loading_text.show(&kind, error.is_some()), |text| {
-                    text.invisible()
-                }),
-            )
-            .when_some(error.map(str::to_owned), |row, error| {
-                row.tooltip(move |_, cx| {
-                    cx.new(|_| ButtonTooltip {
-                        text: error.clone().into(),
-                    })
-                    .into()
-                })
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.retry_view_page(kind, cx);
-                    cx.notify();
-                }))
-            })
+        crate::gui::components::loading::paged_loading_row(
+            ("loading-row", index),
+            error,
+            self.loading_text.show(&kind, error.is_some()),
+            |key| self.tr(key),
+            cx,
+            move |this, _, cx| {
+                this.retry_view_page(kind, cx);
+                cx.notify();
+            },
+        )
     }
     pub(super) fn track_favorite_toggle(
         &self,
@@ -342,34 +325,21 @@ impl Playlists {
         favorite: bool,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<Div> {
-        let theme = rivu_ui::theme::palette(cx);
-        compact_icon_button(
-            theme,
-            icon_button(
-                id,
-                if favorite { "󰓎" } else { "󰓐" },
-                if favorite {
-                    self.tr("gl-unfavorite")
-                } else {
-                    self.tr("gl-favorite")
-                },
-                cx,
-                move |this, _, cx| {
-                    this.send(
-                        Command::SetFavorite {
-                            track_ids: vec![track_id],
-                            favorite: !favorite,
-                        },
-                        cx,
-                    );
-                },
-            ),
+        crate::gui::components::track::track_favorite_toggle(
+            id,
+            group,
+            favorite,
+            |key| self.tr(key),
+            cx,
+            move |this, _, cx| {
+                this.send(
+                    Command::SetFavorite {
+                        track_ids: vec![track_id],
+                        favorite: !favorite,
+                    },
+                    cx,
+                );
+            },
         )
-        .when(favorite, |view| view.text_color(rgb(theme.accent)))
-        .opacity(0.)
-        .group_hover(group, |style| style.opacity(1.))
-        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
-            cx.stop_propagation();
-        })
     }
 }

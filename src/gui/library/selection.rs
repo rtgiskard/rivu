@@ -15,7 +15,7 @@ use std::{
     sync::Arc,
 };
 
-use crate::gui::manual_actions::ManualIntentId;
+use crate::gui::coordination::manual_actions::ManualIntentId;
 
 #[derive(Debug)]
 enum SelectionError {
@@ -846,7 +846,7 @@ mod tests {
             library.tree.focus_selection(&original, 0);
             assert!(library.expand_directory(&branch, true));
             library.prepare_directory(branch.clone(), 0, 256, 2);
-            let mut intents = crate::gui::manual_actions::ManualIntents::default();
+            let mut intents = crate::gui::coordination::manual_actions::ManualIntents::default();
             let id = intents.begin();
             assert!(library.navigate_tree_row(1).is_none());
             library.defer_manual_navigation(id);
@@ -933,7 +933,7 @@ mod tests {
         let next = library.manual_navigation_index().unwrap() + 1;
         library.cancel_manual_selection();
         assert!(library.navigate_tree_row(next).is_none());
-        let mut intents = crate::gui::manual_actions::ManualIntents::default();
+        let mut intents = crate::gui::coordination::manual_actions::ManualIntents::default();
         library.defer_manual_navigation(intents.begin());
         let next = library.manual_navigation_index().unwrap() + 1;
         library.cancel_manual_selection();

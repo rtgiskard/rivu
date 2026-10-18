@@ -8,7 +8,7 @@ use requests::ViewRequestKind;
 
 use super::{
     ListFocus, UI_INSET,
-    components::{row_text, track_list_row},
+    components::track::{row_text, track_list_row},
     library::LibraryDrag,
 };
 use crate::{gui::queue::QueueDrag, model::Command};
@@ -18,9 +18,9 @@ use crate::gui::list_interaction::TrackSource;
 use crate::gui::{
     BrowserFocus,
     components::search::{new_search, set_search_counts},
+    coordination::manual_actions::ManualIntentId,
     feature::FeatureContext,
     loading::LoadingText,
-    manual_actions::ManualIntentId,
 };
 use crate::projection::GuiSnapshot;
 use gpui::{App, Entity, EventEmitter, FocusHandle, Focusable, Subscription};
@@ -65,7 +65,7 @@ pub(in crate::gui) enum PlaylistEvent {
     FocusName,
     ClearMenus,
     CancelInteraction,
-    QueueReplace(RefCell<Option<crate::gui::queue_replace::QueueReplacement>>),
+    QueueReplace(RefCell<Option<crate::gui::coordination::queue_replace::QueueReplacement>>),
     AppendPlaylist(i64),
     ResolveLibrary(
         RefCell<Option<Vec<crate::gui::library::LibraryNode>>>,
@@ -487,7 +487,7 @@ impl Playlists {
     }
     fn request_queue_replace(
         &self,
-        replacement: crate::gui::queue_replace::QueueReplacement,
+        replacement: crate::gui::coordination::queue_replace::QueueReplacement,
         cx: &mut Context<Self>,
     ) {
         cx.emit(PlaylistEvent::QueueReplace(RefCell::new(Some(replacement))));
@@ -741,7 +741,10 @@ impl Playlists {
                         };
                         this.focus_layout(window, cx);
                         this.request_queue_replace(
-                            super::queue_replace::QueueReplacement::Playlist { id, name },
+                            super::coordination::queue_replace::QueueReplacement::Playlist {
+                                id,
+                                name,
+                            },
                             cx,
                         );
                     },
@@ -1111,7 +1114,7 @@ impl Playlists {
                                         }
                                         this.focus_layout(window, cx);
                                         this.request_queue_replace(
-                                            super::queue_replace::QueueReplacement::Playlist {
+                                            super::coordination::queue_replace::QueueReplacement::Playlist {
                                                 id,
                                                 name: play_name.to_string(),
                                             },

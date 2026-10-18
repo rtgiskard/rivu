@@ -1,7 +1,7 @@
 //! Playback controls own their Core commands; the window owns pointer arbitration.
 use super::{
+    appearance::fonts::tabular_numbers,
     feature::FeatureContext,
-    fonts::tabular_numbers,
     format_time,
     layout::interaction::{Dragging, SeekCommit},
 };
@@ -291,7 +291,7 @@ impl Playback {
                     .flex_shrink_0()
                     .text_lg()
                     .text_color(rgb(theme.muted))
-                    .font_family(super::fonts::SYMBOLS_FAMILY)
+                    .font_family(super::appearance::fonts::SYMBOLS_FAMILY)
                     .child("󰕾")
                     .tooltip({
                         let text = self.context.tr("gl-volume");

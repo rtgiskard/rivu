@@ -738,7 +738,8 @@ impl Settings {
                 .all_font_names()
                 .into_iter()
                 .filter(|family| {
-                    !generic.contains(&family.as_str()) && family != super::fonts::SYMBOLS_FAMILY
+                    !generic.contains(&family.as_str())
+                        && family != super::appearance::fonts::SYMBOLS_FAMILY
                 })
                 .map(FontOption::new),
         );
@@ -1362,7 +1363,7 @@ impl Settings {
                     .items_center()
                     .justify_center()
                     .cursor_pointer()
-                    .font_family(super::fonts::SYMBOLS_FAMILY)
+                    .font_family(super::appearance::fonts::SYMBOLS_FAMILY)
                     .child("󰅀")
                     .on_mouse_down(
                         MouseButton::Left,
@@ -3305,7 +3306,7 @@ mod tests {
             rivu_ui::theme::set_palette(Theme::default().palette(), cx);
             rivu_ui::theme::set_typography(
                 gpui::font("sans-serif"),
-                crate::gui::fonts::SYMBOLS_FAMILY,
+                crate::gui::appearance::fonts::SYMBOLS_FAMILY,
                 cx,
             );
         });

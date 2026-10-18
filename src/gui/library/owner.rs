@@ -5,13 +5,14 @@ use super::{
 };
 use crate::{
     gui::{
-        components::search::new_search, feature::FeatureContext, manual_actions::ManualIntentId,
+        components::search::new_search, coordination::manual_actions::ManualIntentId,
+        feature::FeatureContext,
     },
     model::{Command, DirectoryRow},
     projection::GuiSnapshot,
 };
 use gpui::{AnyElement, App, Context, SharedString, Window, prelude::*};
-use rivu_ui::{compact_icon_button, icon_button, search::SearchEvent};
+use rivu_ui::search::SearchEvent;
 use std::{cell::RefCell, rc::Rc, sync::Arc, time::Instant};
 
 // Position ticks and unrelated feature publications do not change this surface.
@@ -287,33 +288,22 @@ impl Library {
         favorite: bool,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
-        let theme = rivu_ui::theme::palette(cx);
-        compact_icon_button(
-            theme,
-            icon_button(
-                id,
-                if favorite { "󰓎" } else { "󰓐" },
-                self.tr(if favorite {
-                    "gl-unfavorite"
-                } else {
-                    "gl-favorite"
-                }),
-                cx,
-                move |this, _, cx| {
-                    this.send(
-                        Command::SetFavorite {
-                            track_ids: vec![track_id],
-                            favorite: !favorite,
-                        },
-                        cx,
-                    )
-                },
-            ),
+        crate::gui::components::track::track_favorite_toggle(
+            id,
+            group,
+            favorite,
+            |key| self.tr(key),
+            cx,
+            move |this, _, cx| {
+                this.send(
+                    Command::SetFavorite {
+                        track_ids: vec![track_id],
+                        favorite: !favorite,
+                    },
+                    cx,
+                )
+            },
         )
-        .when(favorite, |view| view.text_color(gpui::rgb(theme.accent)))
-        .opacity(0.)
-        .group_hover(group, |style| style.opacity(1.))
-        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
     }
 
     pub(super) fn choose_library_root(&mut self, cx: &mut Context<Self>) {

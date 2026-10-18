@@ -1,6 +1,6 @@
 use super::{PlaylistEvent, Playlists};
 use crate::{gui::UI_INSET, model::Command};
-use gpui::{AnyElement, Context, Focusable, Window, div, prelude::*, px, relative, rems, rgb};
+use gpui::{AnyElement, Context, Focusable, Window, div, prelude::*, px, relative, rems};
 use rivu_ui::{StatusKind, caption, column, form_field, icon_button, row, status_message};
 
 pub(in crate::gui) enum PlaylistNameAction {
@@ -186,17 +186,13 @@ impl Playlists {
         rivu_ui::Dialog::backdrop("playlist-name-modal")
             .map(|surface| self.dialog_surface(surface))
             .child(
-                column()
+                rivu_ui::Dialog::card(theme)
                     .id("playlist-name-card")
                     .w(rems(26.25))
                     .max_w(relative(0.9))
                     .max_h(window.viewport_size().height * 0.9)
                     .overflow_y_scroll()
                     .p(px(UI_INSET))
-                    .bg(rgb(theme.panel))
-                    .border_1()
-                    .border_color(rgb(theme.border))
-                    .rounded_md()
                     .child(content.flex_shrink_0()),
             )
             .into_any_element()

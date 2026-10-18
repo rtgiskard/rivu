@@ -1,31 +1,31 @@
 use gpui::{App, Font, FontFeatures, font};
 use std::sync::{Arc, LazyLock};
 
-pub(super) fn tabular_numbers() -> FontFeatures {
+pub(in crate::gui) fn tabular_numbers() -> FontFeatures {
     static FEATURES: LazyLock<FontFeatures> =
         LazyLock::new(|| FontFeatures(Arc::new(vec![("tnum".into(), 1)])));
     FEATURES.clone()
 }
 
 #[cfg(not(feature = "embed-nerd-font"))]
-pub(super) const SYMBOLS_FAMILY: &str = "Symbols Nerd Font Mono";
+pub(in crate::gui) const SYMBOLS_FAMILY: &str = "Symbols Nerd Font Mono";
 #[cfg(feature = "embed-nerd-font")]
-pub(super) const SYMBOLS_FAMILY: &str = env!("RIVU_EMBEDDED_SYMBOLS_FAMILY");
+pub(in crate::gui) const SYMBOLS_FAMILY: &str = env!("RIVU_EMBEDDED_SYMBOLS_FAMILY");
 
 #[cfg(feature = "embed-nerd-font")]
-pub(super) fn register_symbols(cx: &App) -> anyhow::Result<()> {
+pub(in crate::gui) fn register_symbols(cx: &App) -> anyhow::Result<()> {
     cx.text_system()
         .add_fonts(vec![std::borrow::Cow::Borrowed(include_bytes!(env!(
             "RIVU_EMBEDDED_SYMBOLS_FONT"
         )))])
 }
 
-pub(super) fn publish(font: &Font, cx: &mut App) {
+pub(in crate::gui) fn publish(font: &Font, cx: &mut App) {
     rivu_ui::theme::set_typography(font.clone(), SYMBOLS_FAMILY, cx);
 }
 
 /// Resolve only at startup or when the saved setting changes, never while painting.
-pub(super) fn resolve(requested: &str, cx: &App) -> Font {
+pub(in crate::gui) fn resolve(requested: &str, cx: &App) -> Font {
     let requested = requested.trim();
     let requested = if requested.is_empty() {
         "sans-serif"

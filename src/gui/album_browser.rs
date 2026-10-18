@@ -14,7 +14,7 @@ use super::{
     artwork::{Artwork, ArtworkImages, ArtworkLoader, ArtworkView},
     components::{
         search::{new_search, set_search_counts},
-        track_list_row,
+        track::track_list_row,
     },
     format_time,
     list_interaction::{ContentDrag, ContentMenuRequest, TrackSource},
@@ -1288,7 +1288,7 @@ impl Render for AlbumBrowser {
                                         theme,
                                         track.duration.map_or_else(|| "—".into(), format_time),
                                     )
-                                    .font_features(super::fonts::tabular_numbers())
+                                    .font_features(super::appearance::fonts::tabular_numbers())
                                     .w(rems(4.))
                                     .flex_shrink_0()
                                     .text_right(),

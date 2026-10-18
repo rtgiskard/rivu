@@ -1,4 +1,7 @@
 //! Window coordination of feature intents; feature models and workers remain owner-local.
+pub(super) mod manual_actions;
+pub(super) mod queue_replace;
+
 use super::*;
 use manual_actions::ManualAction;
 

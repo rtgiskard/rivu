@@ -2,10 +2,7 @@
 use super::*;
 use crate::gui::{components::search::new_search, feature::FeatureContext, loading::LoadingText};
 use crate::projection::GuiSnapshot;
-use rivu_ui::{
-    list_row,
-    search::{SearchEvent, SearchField},
-};
+use rivu_ui::search::{SearchEvent, SearchField};
 use std::{cell::RefCell, rc::Rc};
 
 #[derive(Clone, Copy)]
@@ -335,33 +332,22 @@ impl Queue {
         favorite: bool,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<Div> {
-        let theme = rivu_ui::theme::palette(cx);
-        compact_icon_button(
-            theme,
-            icon_button(
-                id,
-                if favorite { "󰓎" } else { "󰓐" },
-                self.tr(if favorite {
-                    "gl-unfavorite"
-                } else {
-                    "gl-favorite"
-                }),
-                cx,
-                move |this, _, cx| {
-                    this.send(
-                        Command::SetFavorite {
-                            track_ids: vec![track_id],
-                            favorite: !favorite,
-                        },
-                        cx,
-                    )
-                },
-            ),
+        crate::gui::components::track::track_favorite_toggle(
+            id,
+            group,
+            favorite,
+            |key| self.tr(key),
+            cx,
+            move |this, _, cx| {
+                this.send(
+                    Command::SetFavorite {
+                        track_ids: vec![track_id],
+                        favorite: !favorite,
+                    },
+                    cx,
+                )
+            },
         )
-        .when(favorite, |view| view.text_color(rgb(theme.accent)))
-        .opacity(0.)
-        .group_hover(group, |style| style.opacity(1.))
-        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
     }
 
     pub(super) fn paged_loading_row(
@@ -369,33 +355,17 @@ impl Queue {
         index: usize,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<Div> {
-        let theme = rivu_ui::theme::palette(cx);
         let error = self.model.rows.error(index);
-        list_row(theme, ("loading-row", index), false)
-            .child(
-                caption(
-                    theme,
-                    self.tr(if error.is_some() {
-                        "shell-loading-failed"
-                    } else {
-                        "shell-loading"
-                    }),
-                )
-                .when(!self.loading.show(&(), error.is_some()), |text| {
-                    text.invisible()
-                }),
-            )
-            .when_some(error.map(str::to_owned), |row, error| {
-                row.tooltip(move |_, cx| {
-                    cx.new(|_| ButtonTooltip {
-                        text: error.clone().into(),
-                    })
-                    .into()
-                })
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.retry_queue_page(cx);
-                    cx.notify();
-                }))
-            })
+        crate::gui::components::loading::paged_loading_row(
+            ("loading-row", index),
+            error,
+            self.loading.show(&(), error.is_some()),
+            |key| self.tr(key),
+            cx,
+            |this, _, cx| {
+                this.retry_queue_page(cx);
+                cx.notify();
+            },
+        )
     }
 }

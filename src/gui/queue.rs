@@ -9,10 +9,10 @@
 //! coordinator receives typed cross-feature intents for confirmation and metadata.
 //! Physical page retirement precedes snapshot reconciliation, then publication.
 
-use super::manual_actions::ManualIntentId;
+use super::coordination::manual_actions::ManualIntentId;
 use super::*;
 use super::{
-    components::{search::set_search_counts, track_list_row},
+    components::{search::set_search_counts, track::track_list_row},
     library::LibraryDrag,
     playlists::PlaylistDrag,
 };
@@ -1384,7 +1384,7 @@ mod tests {
     #[test]
     fn cancelled_worker_retains_gate_and_selection_until_latest_job_can_start() {
         use super::QueueTarget;
-        use crate::gui::manual_actions::ManualIntents;
+        use crate::gui::coordination::manual_actions::ManualIntents;
         let mut intents = ManualIntents::default();
         let mut queue = queue(0);
         queue.select(identity(1, 0), false);
@@ -1411,7 +1411,7 @@ mod tests {
 
     #[test]
     fn ready_queue_navigation_keeps_desired_offset_until_confirmation_or_cancellation() {
-        use crate::gui::manual_actions::ManualIntents;
+        use crate::gui::coordination::manual_actions::ManualIntents;
         let mut intents = ManualIntents::default();
         let mut queue = queue(0);
         queue.select(identity(1, 0), false);

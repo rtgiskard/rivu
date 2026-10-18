@@ -1,74 +1,6 @@
-pub(crate) mod search;
-
-use super::fonts;
-
-use super::UI_INSET;
+use crate::gui::appearance::fonts;
 use gpui::{Div, ElementId, SharedString, Stateful, div, prelude::*, rgb};
-use rivu_ui::{caption, column, list_row, row, row_tooltip};
-pub(super) fn visualization_status(message: impl Into<SharedString>) -> Div {
-    div()
-        .w_full()
-        .p(gpui::px(UI_INSET))
-        .text_sm()
-        .text_color(rgb(0xb1bbc5))
-        .child(message.into())
-}
-
-/// Label/value row with a label width shared by its metadata column.
-pub(crate) fn metadata_item(
-    theme: &'static rivu_ui::theme::Palette,
-    label: impl Into<SharedString>,
-    value: impl Into<SharedString>,
-    label_width: gpui::Pixels,
-    copy: Option<Stateful<Div>>,
-) -> Div {
-    row()
-        .items_baseline()
-        .group("metadata-field")
-        .gap(gpui::rems(1.))
-        .flex_1()
-        .min_w_0()
-        .child(caption(theme, label).w(label_width).flex_shrink_0())
-        .child(
-            row()
-                .flex_1()
-                .min_w_0()
-                .gap_1()
-                .child(
-                    div()
-                        .flex_initial()
-                        .min_w_0()
-                        .text_sm()
-                        .truncate()
-                        .child(value.into()),
-                )
-                .child(div().w(gpui::rems(1.4)).flex_shrink_0().children(copy)),
-        )
-}
-
-/// Full-row artwork with a centered preview occupying 70% of the card content.
-pub(crate) fn artwork_preview(
-    theme: &'static rivu_ui::theme::Palette,
-    label: impl Into<SharedString>,
-    image: impl IntoElement,
-    aspect_ratio: Option<f32>,
-) -> Div {
-    column()
-        .w_full()
-        .gap_2()
-        .child(caption(theme, label))
-        .child(
-            div().flex().justify_center().child(
-                div()
-                    .relative()
-                    .w(gpui::relative(0.7))
-                    .flex_shrink_0()
-                    .when_some(aspect_ratio, |view, ratio| view.aspect_ratio(ratio))
-                    .child(div().absolute().size_full().child(image)),
-            ),
-        )
-}
-
+use rivu_ui::{caption, column, list_row, row_tooltip};
 /// Numbered track row shared by album, playlist, and queue views.
 pub(crate) fn track_list_row(
     theme: &'static rivu_ui::theme::Palette,
@@ -135,4 +67,34 @@ fn track_row_text(
         )
         .child(caption(theme, detail.clone()).truncate());
     row_tooltip(view, title, detail)
+}
+
+/// Hover-only favorite action; the caller owns the command and current state.
+pub(in crate::gui) fn track_favorite_toggle<T: 'static>(
+    id: impl Into<ElementId>,
+    group: &'static str,
+    favorite: bool,
+    text: impl Fn(&str) -> SharedString,
+    cx: &mut gpui::Context<T>,
+    action: impl Fn(&mut T, &mut gpui::Window, &mut gpui::Context<T>) + 'static,
+) -> Stateful<Div> {
+    let theme = rivu_ui::theme::palette(cx);
+    rivu_ui::compact_icon_button(
+        theme,
+        rivu_ui::icon_button(
+            id,
+            if favorite { "󰓎" } else { "󰓐" },
+            text(if favorite {
+                "gl-unfavorite"
+            } else {
+                "gl-favorite"
+            }),
+            cx,
+            action,
+        ),
+    )
+    .when(favorite, |view| view.text_color(rgb(theme.accent)))
+    .opacity(0.)
+    .group_hover(group, |style| style.opacity(1.))
+    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
 }

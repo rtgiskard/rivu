@@ -177,6 +177,27 @@ GUI composition layer supplies track rows, metadata/artwork presentation, and
 localized search labels and count formatting. Consumers import generic controls
 directly from `rivu_ui`; there is no compatibility facade through the application.
 
+Source modules follow those ownership boundaries. Within `rivu-ui`, controls,
+focus navigation, layouts, menus, row presentation and overlays have separate
+implementation modules; the crate root explicitly exports their public API.
+There is no catch-all base module. Input, choices, search and virtual lists keep
+their own state and rendering modules.
+
+Within `src/gui`, `appearance` adapts host fonts and themes, `components` contains
+Rivu-specific track, metadata, artwork and search compositions, and `coordination`
+owns cross-feature manual intents and queue-replacement confirmation. Moving
+confirmation code there does not transfer its state from GuiApp to a feature.
+Existing feature directories retain their models, requests, editors and views;
+shared presentation does not absorb business ownership.
+
+Track compositions share the favorite action's icon, tooltip, hover visibility
+and pointer isolation; feature owners still send the command for the current
+track. Page-placeholder compositions share loading/failure presentation and
+register a retry click only while an error is displayed. Owners supply the
+error, delayed-text visibility and retry callback, retaining request identity,
+failure recovery and notification responsibility. These compositions do not own
+records, timers or asynchronous work.
+
 Hosts install an immutable `theme::Palette` with `theme::set_palette`, publish a
 resolved text font and icon family with `theme::set_typography`, and call
 `input::Input::init` before showing controls. Appearance is application-scoped;

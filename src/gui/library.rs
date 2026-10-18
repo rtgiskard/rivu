@@ -29,10 +29,10 @@ pub(in crate::gui) enum LibraryEvent {
     Select(LibraryRowRequest),
     Navigate(usize),
     Ready(
-        super::manual_actions::ManualIntentId,
+        super::coordination::manual_actions::ManualIntentId,
         std::cell::RefCell<Option<LibraryCommit>>,
     ),
-    Failed(super::manual_actions::ManualIntentId),
+    Failed(super::coordination::manual_actions::ManualIntentId),
     SelectionChanged(Option<i64>),
     SearchChanged,
     Focus,
@@ -60,7 +60,7 @@ pub(in crate::gui) struct Library {
     visible: bool,
     available: bool,
     focused: bool,
-    selection_intent: Option<super::manual_actions::ManualIntentId>,
+    selection_intent: Option<super::coordination::manual_actions::ManualIntentId>,
     _search_subscription: gpui::Subscription,
 }
 
@@ -170,7 +170,7 @@ fn track_columns(
                 cell.max_w(gpui::rems(6.0)).flex_initial().min_w_0()
             }
             LibraryColumn::Duration | LibraryColumn::Bitrate => cell
-                .font_features(super::fonts::tabular_numbers())
+                .font_features(super::appearance::fonts::tabular_numbers())
                 .flex_shrink_0(),
             LibraryColumn::Codec => cell.flex_shrink_0(),
         });
@@ -263,7 +263,7 @@ impl Render for LibraryDragPreview {
                 .child(
                     div()
                         .flex_shrink_0()
-                        .font_family(super::fonts::SYMBOLS_FAMILY)
+                        .font_family(super::appearance::fonts::SYMBOLS_FAMILY)
                         .child(self.icon),
                 )
                 .child(div().min_w_0().truncate().child(self.label.clone())),
@@ -376,7 +376,7 @@ impl Library {
 
     pub(in crate::gui) fn prepare_tree_row(
         &mut self,
-        id: super::manual_actions::ManualIntentId,
+        id: super::coordination::manual_actions::ManualIntentId,
         index: usize,
         cx: &mut Context<Self>,
     ) {
@@ -668,7 +668,7 @@ impl Library {
                                 div()
                                     .flex_shrink_0()
                                     .text_sm()
-                                    .font_family(super::fonts::SYMBOLS_FAMILY)
+                                    .font_family(super::appearance::fonts::SYMBOLS_FAMILY)
                                     .child(if let Some(branch) = &visible.branch {
                                         if this.library.tree().expanded(branch) {
                                             "󰝰"
@@ -708,7 +708,7 @@ impl Library {
                                             div()
                                                 .flex_shrink_0()
                                                 .text_sm()
-                                                .font_family(super::fonts::SYMBOLS_FAMILY)
+                                                .font_family(super::appearance::fonts::SYMBOLS_FAMILY)
                                                 .text_color(gpui::rgb(theme.error))
                                                 .child("󰩋"),
                                         )
@@ -720,9 +720,9 @@ impl Library {
                                     row()
                                         .gap_1()
                                         .flex_shrink_0()
-                                        .child(rivu_ui::caption(theme, "󰎇").font_family(super::fonts::SYMBOLS_FAMILY))
+                                        .child(rivu_ui::caption(theme, "󰎇").font_family(super::appearance::fonts::SYMBOLS_FAMILY))
                                         .child(rivu_ui::caption(theme, count)
-                                            .font_features(super::fonts::tabular_numbers())),
+                                            .font_features(super::appearance::fonts::tabular_numbers())),
                                 )
                             });
                         let name_cell = div()
@@ -1297,7 +1297,7 @@ mod library_root_tests {
             rivu_ui::theme::set_palette(crate::theme::Theme::default().palette(), cx);
             rivu_ui::theme::set_typography(
                 gpui::font("sans-serif"),
-                crate::gui::fonts::SYMBOLS_FAMILY,
+                crate::gui::appearance::fonts::SYMBOLS_FAMILY,
                 cx,
             );
         });

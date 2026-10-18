@@ -3,9 +3,9 @@
 //! owns only cross-feature intent identity and the window's confirmation dialog.
 //! Refresh reconciles owners before a frozen target is validated or a draft discarded.
 
-use super::{GuiApp, UI_INSET};
-use gpui::{AnyElement, Context, prelude::*, px, rgb};
-use rivu_ui::{column, icon_button, panel_header, row};
+use crate::gui::{GuiApp, UI_INSET};
+use gpui::{AnyElement, Context, prelude::*, px};
+use rivu_ui::{icon_button, panel_header, row};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::gui) struct ManualIntentId(u64);
@@ -69,11 +69,11 @@ impl ManualIntents {
 }
 
 pub(in crate::gui) enum ManualAction {
-    Library(super::library::selection::LibraryCommit),
-    Playlist(super::playlists::selection::EntryCommit),
-    Queue(super::queue::QueueCommit),
+    Library(crate::gui::library::selection::LibraryCommit),
+    Playlist(crate::gui::playlists::selection::EntryCommit),
+    Queue(crate::gui::queue::QueueCommit),
     History {
-        commit: super::history::HistoryCommit,
+        commit: crate::gui::history::HistoryCommit,
         structure_revision: u64,
     },
     Clear,
@@ -99,7 +99,7 @@ impl GuiApp {
         id
     }
 
-    pub(super) fn invalidate_manual_intent(&mut self, cx: &mut Context<Self>) {
+    pub(in crate::gui) fn invalidate_manual_intent(&mut self, cx: &mut Context<Self>) {
         let id = self.begin_manual_intent(cx);
         self.settle_manual_intent(id, cx);
     }
@@ -118,7 +118,11 @@ impl GuiApp {
         }
     }
 
-    pub(super) fn settle_manual_intent(&mut self, id: ManualIntentId, cx: &mut Context<Self>) {
+    pub(in crate::gui) fn settle_manual_intent(
+        &mut self,
+        id: ManualIntentId,
+        cx: &mut Context<Self>,
+    ) {
         let confirmation_open = self.manual_confirmation_open();
         if self.manual_intents.settle(id) {
             self.reconcile_manual_follow(cx);
@@ -128,7 +132,7 @@ impl GuiApp {
         }
     }
 
-    pub(super) fn reconcile_manual_follow(&mut self, cx: &mut Context<Self>) {
+    pub(in crate::gui) fn reconcile_manual_follow(&mut self, cx: &mut Context<Self>) {
         // A clean notification can be held behind preparation or confirmation.
         // Every non-commit terminal transition releases that barrier; metadata
         // still owns protection and explicit-track versus playback-follow policy.
@@ -195,16 +199,16 @@ impl GuiApp {
         cx.notify();
     }
 
-    pub(super) fn manual_confirmation_open(&self) -> bool {
+    pub(in crate::gui) fn manual_confirmation_open(&self) -> bool {
         self.manual_intents.pending.is_some()
     }
 
-    pub(super) fn cancel_manual_action(&mut self, cx: &mut Context<Self>) {
+    pub(in crate::gui) fn cancel_manual_action(&mut self, cx: &mut Context<Self>) {
         self.invalidate_manual_intent(cx);
         cx.notify();
     }
 
-    pub(super) fn resume_manual_action(&mut self, discard: bool, cx: &mut Context<Self>) {
+    pub(in crate::gui) fn resume_manual_action(&mut self, discard: bool, cx: &mut Context<Self>) {
         self.refresh(cx);
         let Some((id, action)) = self.manual_intents.pending.as_ref() else {
             return;
@@ -283,12 +287,12 @@ impl GuiApp {
         cx.notify();
     }
 
-    pub(super) fn request_clear_selection(&mut self, cx: &mut Context<Self>) {
+    pub(in crate::gui) fn request_clear_selection(&mut self, cx: &mut Context<Self>) {
         let id = self.begin_manual_intent(cx);
         self.ready_manual_action(id, ManualAction::Clear, cx);
     }
 
-    pub(super) fn render_manual_confirmation(
+    pub(in crate::gui) fn render_manual_confirmation(
         &mut self,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
@@ -303,15 +307,11 @@ impl GuiApp {
             rivu_ui::Dialog::backdrop("metadata-confirmation-modal")
                 .map(|surface| self.shell.scope().surface(surface))
                 .child(
-                    column()
+                    rivu_ui::Dialog::card(theme)
                         .id("metadata-confirmation-card")
                         .w(gpui::rems(26.25))
                         .max_w(gpui::relative(0.9))
                         .p(px(UI_INSET))
-                        .bg(rgb(theme.panel))
-                        .border_1()
-                        .border_color(rgb(theme.border))
-                        .rounded_md()
                         .child(panel_header(
                             theme,
                             self.tr("gl-metadata-discard-title"),
