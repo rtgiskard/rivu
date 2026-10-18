@@ -330,8 +330,7 @@ pub(super) struct GuiApp {
     layout_action: Option<layout::layout_manager::Action>,
     panel_menu: Option<PanelMenu>,
     content_menu: Option<list_interaction::ContentMenu>,
-    content_generation: u64,
-    content_resolution: bool,
+    content_resolution: list_interaction::CollectionResolution,
     waveform: Entity<visualization::Waveform>,
     full_waveform_request: FullWaveformRequest,
     window_visible: bool,
@@ -961,8 +960,7 @@ impl GuiApp {
             layout_action: None,
             panel_menu: None,
             content_menu: None,
-            content_generation: 0,
-            content_resolution: false,
+            content_resolution: list_interaction::CollectionResolution::default(),
             waveform,
             full_waveform_request: FullWaveformRequest::default(),
             window_visible: window.is_visible(),
@@ -981,6 +979,7 @@ impl GuiApp {
         app.shell.layout_focus().focus(window, cx);
         window
             .observe_release(&cx.entity(), cx, |this: &mut Self, window, cx| {
+                this.content_resolution.cancel();
                 this.release_display_resources(window, cx);
             })
             .detach();
@@ -1049,7 +1048,7 @@ impl GuiApp {
         self.apply_interaction_cancellation(cancellation, cx);
         self.panel_menu = None;
         self.replace_content_menu(None, cx);
-        self.content_generation = self.content_generation.wrapping_add(1);
+        self.content_resolution.cancel();
         cx.notify();
     }
 
@@ -1071,7 +1070,7 @@ impl GuiApp {
         self.apply_interaction_cancellation(cancellation, cx);
         self.panel_menu = None;
         self.replace_content_menu(None, cx);
-        self.content_generation = self.content_generation.wrapping_add(1);
+        self.content_resolution.cancel();
         self.set_browser_focus(None, cx);
         for view in self.panel_views.values() {
             view.update(cx, |_, cx| cx.notify());
@@ -1084,6 +1083,9 @@ impl GuiApp {
             return;
         }
         let state = self.snapshots.read();
+        if state.system.shutting_down && !self.state.system.shutting_down {
+            self.content_resolution.cancel();
+        }
         let changed = state.revisions.changed_since(self.state.revisions);
         let same_track = match (&state.current_track, &self.state.current_track) {
             (Some(next), Some(previous)) => Arc::ptr_eq(next, previous),

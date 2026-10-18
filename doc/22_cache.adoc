@@ -145,6 +145,18 @@ read that has passed dispatch, cancels another owner, or replays a write. Hiding
 a window updates owner demand immediately, without waiting for another Core
 publication or render, and retires pending page and explicit Details reads without
 discarding retained rows or drafts. Completion still owns every submitted gate.
+
+Album menu resolution, album drops, and playlist-to-queue collection reads share
+one collection-resolution owner. Closing or replacing a menu cancels only its
+menu read; hiding the window, shutdown, or owner destruction cancels the current
+collection read. Each page checks its owner epoch before and after the Core
+query, so cancellation stops further pagination and discards even a final page
+that arrives after cancellation. Already dispatched SQL is not interrupted.
+Cancellation retains the physical worker gate until that worker completes;
+only its matching completion can release the gate. No partial collection is
+published, and successful results still require current source and destination
+revisions.
+
 Album searches, Playlist pages, and explicit Details selections retain the latest
 demand's absolute quiet deadline independently of a submitted worker. Replacement
 renews that deadline; redispatch, hiding, and completion consume only its remaining
