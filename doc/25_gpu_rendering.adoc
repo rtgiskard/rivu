@@ -530,6 +530,14 @@ Scene culling, overlap ordering and MSAA composition use a separate conservative
 footprint covering endpoint extents and stroke expansion at the current scale,
 intersected with the content mask. Endpoints outside the unit square and strokes
 crossing placement edges remain visible wherever that mask permits.
+All finite normalized endpoints remain admissible, including values near the
+`f32` limit. Ordinary segments retain direct direction normalization. Distant
+endpoints take a shader-only power-of-two scaling and viewport-rebasing path,
+before stroke extrusion, to avoid overflow and loss of physical stroke width.
+This arithmetic-path threshold does not restrict publication coordinates or add
+CPU geometry copies, allocations, uploads or draws; masks, butt caps and layer
+composition keep the same semantics.
+
 
 Spectrogram packs at most 32 numerical columns and their independent x intervals
 into each immutable field tile. Intervals are relative to the tile's own earliest
@@ -544,6 +552,11 @@ performance guarantee for arbitrary panel counts and sampling heights.
 Below-floor and missing cells are opaque black independently of all 1024 palette
 samples, so weak positive Tokyo Night values retain its first color. Real gaps,
 startup window expansion, pooling and frequency sampling keep their existing meaning.
+For logarithmic columns, the floor is palette coordinate zero at
+`10 * log10(value) = -db_range`, not scalar zero. Floor detection shares the
+mapping calculation with palette selection; values above it retain the first
+palette color even when nearest-sample quantization still selects index zero.
+Ordinary non-column fields keep palette-zero behavior at and below the floor.
 
 Column intervals retain a one-logical-pixel minimum width, which can extend past
 the placement's right edge. The inherited content mask, not the placement bounds,

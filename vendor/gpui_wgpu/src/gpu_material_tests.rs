@@ -97,6 +97,79 @@ fn pixel(image: &image::RgbaImage, x: u32, y: u32, expected: [u8; 4]) {
 }
 
 #[test]
+fn logarithmic_columns_keep_floor_distinct_from_palette_sample_zero() -> anyhow::Result<()> {
+    let mut renderer = WgpuHeadlessRenderer::new()?;
+    let palette = GpuPalette::new(&[[1.0, 0.0, 0.0, 1.0], [0.0, 0.0, 1.0, 1.0]], 2)?;
+    let intervals: Vec<_> = (0..9)
+        .map(|i| [i as f32 / 9.0, (i + 1) as f32 / 9.0])
+        .collect();
+    for db_range in [20.0_f32, 60.0, 120.0] {
+        let floor = 10.0_f32.powf(-db_range / 10.0);
+        let values = [
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            -1.0,
+            0.0,
+            floor * 0.5,
+            floor,
+            floor * 1.01,
+            1.0,
+        ];
+        let params = GpuFieldParams {
+            mapping: GpuValueMapping::Logarithmic { db_range },
+        };
+        for columns in [false, true] {
+            let frame = if columns {
+                GpuFrame::field_columns(&intervals, 1, &values, palette.clone(), params, limits())?
+            } else {
+                GpuFrame::field(9, 1, &values, palette.clone(), params, limits())?
+            };
+            let mut scene = Scene::default();
+            scene.insert_primitive(draw(GpuSource::Fixed(frame), bounds(0.0, 0.0, 9.0, 1.0)));
+            scene.finish();
+            let actual = renderer.render_scene_to_image(&scene, size(9, 1))?;
+            for i in 0..9 {
+                let expected = if i == 8 {
+                    BLUE
+                } else if columns && i <= 6 {
+                    BLACK
+                } else {
+                    RED
+                };
+                pixel(&actual, i, 0, expected);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn linear_columns_keep_above_floor_colors_when_coordinate_underflows() -> anyhow::Result<()> {
+    let mut renderer = WgpuHeadlessRenderer::new()?;
+    let frame = GpuFrame::field_columns(
+        &[[0.0, 0.5], [0.5, 1.0]],
+        1,
+        &[0.0, f32::MIN_POSITIVE],
+        GpuPalette::new(&[[1.0, 0.0, 0.0, 1.0]], 1)?,
+        GpuFieldParams {
+            mapping: GpuValueMapping::Linear {
+                min: 0.0,
+                max: f32::MAX,
+            },
+        },
+        limits(),
+    )?;
+    let mut scene = Scene::default();
+    scene.insert_primitive(draw(GpuSource::Fixed(frame), bounds(0.0, 0.0, 2.0, 1.0)));
+    scene.finish();
+    let actual = renderer.render_scene_to_image(&scene, size(2, 1))?;
+    pixel(&actual, 0, 0, BLACK);
+    pixel(&actual, 1, 0, RED);
+    Ok(())
+}
+
+#[test]
 fn numerical_column_minimum_width_survives_clip_and_later_quad() -> anyhow::Result<()> {
     let mut renderer = WgpuHeadlessRenderer::new()?;
     let columns = GpuFrame::field_columns(
@@ -1588,6 +1661,127 @@ fn segment_frame(
         GpuPalette::new(&[color], 1)?,
         limits(),
     )
+}
+
+fn segment_numerics_image(
+    renderer: &mut WgpuHeadlessRenderer,
+    endpoints: [f32; 4],
+) -> anyhow::Result<image::RgbaImage> {
+    let viewport = bounds(0.0, 0.0, 32.0, 16.0);
+    let publication = segment_frame(endpoints, 4.0, [1.0, 0.0, 0.0, 1.0])?;
+    let mut scene = Scene::default();
+    scene.insert_primitive(quad(viewport, gpui::black()));
+    scene.insert_primitive(draw(GpuSource::Fixed(publication), viewport));
+    scene.finish();
+    renderer.render_scene_to_image(&scene, size(32, 16))
+}
+
+#[test]
+fn gpu_segments_keep_huge_finite_strokes_visible() -> anyhow::Result<()> {
+    let mut renderer = WgpuHeadlessRenderer::new()?;
+    // 1e20/1e30 overflow squared lengths, 1e37 overflows the physical
+    // difference, and MAX overflows the physical endpoint multiplication.
+    for extent in [1.0e20, 1.0e30, 1.0e37, f32::MAX] {
+        for (endpoints, reference) in [
+            ([-extent, 0.5, extent, 0.5], [-1.0, 0.5, 2.0, 0.5]),
+            ([0.5, -extent, 0.5, extent], [0.5, -1.0, 0.5, 2.0]),
+            ([-extent, -extent, extent, extent], [-1.0, -1.0, 2.0, 2.0]),
+            (
+                [-extent, -extent, extent * 0.5, extent * 0.5],
+                [-1.0, -1.0, 2.0, 2.0],
+            ),
+            ([-extent, extent, extent, -extent], [-1.0, 1.0, 2.0, -2.0]),
+            ([0.25, 0.5, extent, 0.5], [0.25, 0.5, 2.0, 0.5]),
+            ([0.5, 0.25, 0.5, extent], [0.5, 0.25, 0.5, 2.0]),
+        ] {
+            let expected = segment_numerics_image(&mut renderer, reference)?;
+            assert!(expected.pixels().any(|pixel| pixel.0[0] != 0));
+            for endpoints in [
+                endpoints,
+                [endpoints[2], endpoints[3], endpoints[0], endpoints[1]],
+            ] {
+                let actual = segment_numerics_image(&mut renderer, endpoints)?;
+                for y in 0..16 {
+                    for x in 0..32 {
+                        pixel(&actual, x, y, expected.get_pixel(x, y).0);
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn gpu_segments_keep_huge_offscreen_and_zero_length_strokes_invisible() -> anyhow::Result<()> {
+    let mut renderer = WgpuHeadlessRenderer::new()?;
+    for extent in [1.0e20, 1.0e30, 1.0e37, f32::MAX] {
+        for endpoints in [
+            [extent * 0.5, 0.5, extent, 0.5],
+            [0.5, extent * 0.5, 0.5, extent],
+            [-extent, 2.0, extent, 2.0],
+            [2.0, -extent, 2.0, extent],
+            [extent; 4],
+            [0.5; 4],
+        ] {
+            let actual = segment_numerics_image(&mut renderer, endpoints)?;
+            for y in 0..16 {
+                for x in 0..32 {
+                    pixel(&actual, x, y, BLACK);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn gpu_segments_keep_huge_layers_scale_and_mask() -> anyhow::Result<()> {
+    let mut renderer = WgpuHeadlessRenderer::new()?;
+    let viewport = bounds(0.0, 0.0, 64.0, 32.0);
+    for scale in [1.0, 2.0] {
+        let mut render = |extent: f32| -> anyhow::Result<image::RgbaImage> {
+            let publication = GpuFrame::segments(
+                &[gpui::GpuSegment {
+                    endpoints: [-extent, 0.5, extent, 0.5],
+                    color: 0,
+                }],
+                &[
+                    gpui::GpuStrokeLayer {
+                        width: 8.0,
+                        palette_offset: 0,
+                    },
+                    gpui::GpuStrokeLayer {
+                        width: 2.0,
+                        palette_offset: 1,
+                    },
+                ],
+                GpuPalette::new(&[[1.0, 0.0, 0.0, 1.0], [0.0, 0.0, 1.0, 1.0]], 2)?,
+                limits(),
+            )?;
+            let mut record = draw(GpuSource::Fixed(publication), bounds(16.0, 8.0, 32.0, 16.0));
+            record.scale_factor = scale;
+            record.content_mask.bounds = bounds(8.0, 10.0, 40.0, 12.0);
+            let mut scene = Scene::default();
+            scene.insert_primitive(quad(viewport, gpui::black()));
+            scene.insert_primitive(record);
+            scene.finish();
+            renderer.render_scene_to_image(&scene, size(64, 32))
+        };
+        let expected = render(2.0)?;
+        let actual = render(f32::MAX)?;
+        for y in 0..32 {
+            for x in 0..64 {
+                pixel(&actual, x, y, expected.get_pixel(x, y).0);
+            }
+        }
+        pixel(&actual, 20, 15, BLUE);
+        pixel(&actual, 20, 13, RED);
+        pixel(&actual, 7, 15, BLACK);
+        pixel(&actual, 48, 15, BLACK);
+        pixel(&actual, 20, 9, BLACK);
+    }
+    Ok(())
 }
 
 #[test]
