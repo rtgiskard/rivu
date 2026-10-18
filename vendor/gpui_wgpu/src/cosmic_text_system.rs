@@ -1,19 +1,27 @@
+#[cfg(target_os = "linux")]
+use crate::fontconfig::{FontconfigCandidate, FontconfigResolver, FontconfigStyle};
 use anyhow::{Context as _, Ok, Result};
+#[cfg(target_os = "linux")]
+use collections::HashSet;
 use collections::HashMap;
 use cosmic_text::{
     Attrs, AttrsList, Ellipsize, Family, Font as CosmicTextFont,
     FontFeatures as CosmicFontFeatures, FontSystem, ShapeBuffer, ShapeLine, Stretch, Style, Weight,
 };
+#[cfg(test)]
+use gpui::FontFallbacks;
 use gpui::{
-    Bounds, DevicePixels, FallbackFontClass, Font, FontFallbacks, FontFeatures, FontId,
-    FontMetrics, FontRun, GlyphId, IsZero as _, LineLayout, MissingGlyph, MissingGlyphSink, Pixels,
-    PlatformTextSystem, RenderGlyphParams, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ShapedGlyph,
-    ShapedRun, SharedString, Size, TextRenderingMode, point, size,
+    Bounds, DevicePixels, FallbackFontClass, Font, FontFeatures, FontId, FontMetrics, FontRun,
+    GlyphId, IsZero as _, LineLayout, MissingGlyph, MissingGlyphSink, Pixels, PlatformTextSystem,
+    RenderGlyphParams, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ShapedGlyph, ShapedRun,
+    SharedString, Size, TextRenderingMode, point, size,
 };
 
 use itertools::Itertools;
 use parking_lot::RwLock;
 use smallvec::SmallVec;
+#[cfg(target_os = "linux")]
+use std::path::PathBuf;
 use std::{borrow::Cow, ops::Range, sync::Arc};
 use swash::{
     scale::{Render, ScaleContext, Source, StrikeWith},
@@ -24,26 +32,12 @@ use unicode_segmentation::UnicodeSegmentation;
 pub struct CosmicTextSystem(RwLock<CosmicTextSystemState>);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct FontKey {
-    family: SharedString,
-    features: FontFeatures,
-    fallbacks: Option<FontFallbacks>,
-}
-
-impl FontKey {
-    fn new(family: SharedString, features: FontFeatures, fallbacks: Option<FontFallbacks>) -> Self {
-        Self {
-            family,
-            features,
-            fallbacks,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct LoadedFontKey {
     database_id: cosmic_text::fontdb::ID,
-    font: FontKey,
+    features: FontFeatures,
+    fallback_chain: SmallVec<[(FontId, SharedString); 4]>,
+    /// System resolution needs the original requested family, weight, and style.
+    system_request: Option<Font>,
 }
 
 struct CosmicTextSystemState {
@@ -51,18 +45,22 @@ struct CosmicTextSystemState {
     scratch: ShapeBuffer,
     swash_scale_context: ScaleContext,
     pending_glyph_images: HashMap<RenderGlyphParams, swash::scale::image::Image>,
-    /// Contains all already loaded fonts, including all faces. Indexed by `FontId`.
+    /// Contains selected faces and native shaping fallbacks. Indexed by `FontId`.
     loaded_fonts: Vec<LoadedFont>,
     loaded_font_ids_by_key: HashMap<LoadedFontKey, FontId>,
-    /// Caches the `FontId`s associated with a specific family to avoid iterating the font database
-    /// for every font face in a family.
-    font_ids_by_family_cache: HashMap<FontKey, SmallVec<[FontId; 4]>>,
+    /// Primary requests require usable Latin metrics; fallback-only requests do not.
+    font_ids_by_request: HashMap<(Font, bool), FontId>,
+    #[cfg(target_os = "linux")]
+    fontconfig: Option<Result<FontconfigResolver, String>>,
+    #[cfg(target_os = "linux")]
+    fontconfig_face_ids: HashMap<PathBuf, HashMap<u32, Option<cosmic_text::fontdb::ID>>>,
     system_font_fallback: String,
     missing_glyph_sink: Option<Arc<dyn MissingGlyphSink>>,
 }
 
 struct LoadedFont {
     font: Arc<CosmicTextFont>,
+    request: Font,
     features: CosmicFontFeatures,
     is_known_emoji_font: bool,
     /// resolved at load time so `layout_line` shares one chain across faces.
@@ -138,7 +136,11 @@ impl CosmicTextSystem {
             pending_glyph_images: HashMap::default(),
             loaded_fonts: Vec::new(),
             loaded_font_ids_by_key: HashMap::default(),
-            font_ids_by_family_cache: HashMap::default(),
+            font_ids_by_request: HashMap::default(),
+            #[cfg(target_os = "linux")]
+            fontconfig: None,
+            #[cfg(target_os = "linux")]
+            fontconfig_face_ids: HashMap::default(),
             system_font_fallback: system_font_fallback.to_string(),
             missing_glyph_sink: None,
         }))
@@ -157,7 +159,11 @@ impl CosmicTextSystem {
             pending_glyph_images: HashMap::default(),
             loaded_fonts: Vec::new(),
             loaded_font_ids_by_key: HashMap::default(),
-            font_ids_by_family_cache: HashMap::default(),
+            font_ids_by_request: HashMap::default(),
+            #[cfg(target_os = "linux")]
+            fontconfig: None,
+            #[cfg(target_os = "linux")]
+            fontconfig_face_ids: HashMap::default(),
             system_font_fallback: system_font_fallback.to_string(),
             missing_glyph_sink: None,
         }))
@@ -189,23 +195,9 @@ impl PlatformTextSystem for CosmicTextSystem {
 
     fn font_id(&self, font: &Font) -> Result<FontId> {
         let mut state = self.0.write();
-        let key = FontKey::new(
-            font.family.clone(),
-            font.features.clone(),
-            font.fallbacks.clone(),
-        );
-        let candidates = if let Some(font_ids) = state.font_ids_by_family_cache.get(&key) {
-            font_ids.as_slice()
-        } else {
-            let font_ids =
-                state.load_family(&font.family, &font.features, font.fallbacks.as_ref())?;
-            state.font_ids_by_family_cache.insert(key.clone(), font_ids);
-            state.font_ids_by_family_cache[&key].as_ref()
-        };
-
-        let ix = find_best_match(font, candidates, &state)?;
-
-        Ok(candidates[ix])
+        state
+            .load_family(font, true)?
+            .context("requested font family contains no font matching the other parameters")
     }
 
     fn prewarm_fonts(&self, font_ids: &[FontId]) {
@@ -308,6 +300,207 @@ impl CosmicTextSystemState {
             fallback_chain: Arc::clone(&loaded_font.user_fallback_chain),
         })
     }
+    fn face_attributes<'a>(
+        &self,
+        font_id: FontId,
+        family_name: &'a str,
+        properties: &'a FontMatchProperties,
+    ) -> Attrs<'a> {
+        let attributes = properties.attributes(font_id, family_name);
+        match self
+            .font_system
+            .db()
+            .face(self.loaded_font(font_id).font.id())
+        {
+            Some(face) => attributes
+                .stretch(face.stretch)
+                .style(face.style)
+                .weight(face.weight),
+            None => attributes,
+        }
+    }
+
+    /// Resolves text-specific fallback before shaping. The registered font's
+    /// explicit chain remains immutable and platform fonts stay lazy.
+    fn prepare_font(&mut self, font_id: FontId, text: &str) -> Option<FontMatchProperties> {
+        let properties = self.font_match_properties(font_id)?;
+        #[cfg(target_os = "linux")]
+        {
+            let mut properties = properties;
+            if let Err(error) = self.prepare_system_fallbacks(font_id, text, &mut properties) {
+                log::warn!("could not prepare system font fallback: {error:#}");
+            }
+            Some(properties)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = text;
+            Some(properties)
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn prepare_system_fallbacks(
+        &mut self,
+        primary: FontId,
+        text: &str,
+        properties: &mut FontMatchProperties,
+    ) -> Result<()> {
+        let request = &self.loaded_font(primary).request;
+        let Some(_) = request
+            .fallbacks
+            .as_ref()
+            .and_then(|fallbacks| fallbacks.system_family(&request.family))
+        else {
+            return Ok(());
+        };
+        let uncovered = |character: char| {
+            needs_glyph_coverage(character)
+                && !charmap_covers(&self.loaded_fonts, primary, character)
+                && !properties
+                    .fallback_chain
+                    .iter()
+                    .any(|(id, _)| charmap_covers(&self.loaded_fonts, *id, character))
+        };
+        let (missing_text, mut remaining) = missing_fallback_coverage(text, uncovered);
+        if missing_text.is_empty() {
+            return Ok(());
+        }
+
+        let request = request.clone();
+        let family = request
+            .fallbacks
+            .as_ref()
+            .and_then(|fallbacks| fallbacks.system_family(&request.family))
+            .context("system fallback request disappeared")?;
+        let style = match request.style {
+            gpui::FontStyle::Normal => FontconfigStyle::Normal,
+            gpui::FontStyle::Italic => FontconfigStyle::Italic,
+            gpui::FontStyle::Oblique => FontconfigStyle::Oblique,
+        };
+        let resolver = self
+            .fontconfig
+            .get_or_insert_with(|| FontconfigResolver::new().map_err(|error| error.to_string()));
+        let resolver = resolver
+            .as_mut()
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        let candidates = resolver.resolve(
+            family,
+            self.font_system.locale(),
+            request.weight.0 as u16,
+            style,
+            &missing_text,
+        )?;
+        self.append_system_fallbacks(primary, &request, &candidates, &mut remaining, properties);
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn append_system_fallbacks(
+        &mut self,
+        primary: FontId,
+        request: &Font,
+        candidates: &[FontconfigCandidate],
+        remaining: &mut Vec<char>,
+        properties: &mut FontMatchProperties,
+    ) {
+        let mut chain = properties.fallback_chain.to_vec();
+        let mut selected_faces: HashSet<_> = chain
+            .iter()
+            .map(|(id, _)| self.loaded_font(*id).font.id())
+            .collect();
+        selected_faces.insert(self.loaded_font(primary).font.id());
+        for candidate in candidates {
+            let database_id = match self.fontconfig_face_id(candidate) {
+                Result::Ok(Some(id)) => id,
+                Result::Ok(None) => continue,
+                Err(error) => {
+                    log::warn!("could not register system fallback {candidate:?}: {error:#}");
+                    continue;
+                }
+            };
+            if selected_faces.contains(&database_id) {
+                continue;
+            }
+            let Some(face) = self.font_system.db().face(database_id) else {
+                continue;
+            };
+            let Some((family, _)) = face.families.first() else {
+                continue;
+            };
+            let family: SharedString = family.clone().into();
+            let fallback_request = Font {
+                family: family.clone(),
+                fallbacks: None,
+                ..request.clone()
+            };
+            match self.load_face(database_id, &fallback_request, false) {
+                Result::Ok(Some(font_id)) => {
+                    selected_faces.insert(database_id);
+                    chain.push((font_id, family));
+                    remaining.retain(|&character| {
+                        !charmap_covers(&self.loaded_fonts, font_id, character)
+                    });
+                    if remaining.is_empty() {
+                        break;
+                    }
+                }
+                Result::Ok(None) => {}
+                Err(error) => {
+                    log::warn!("could not load system fallback {candidate:?}: {error:#}");
+                }
+            }
+        }
+        properties.fallback_chain = Arc::from(chain);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn fontconfig_face_id(
+        &mut self,
+        candidate: &FontconfigCandidate,
+    ) -> Result<Option<cosmic_text::fontdb::ID>> {
+        if let Some(&id) = self
+            .fontconfig_face_ids
+            .get(&candidate.file)
+            .and_then(|faces| faces.get(&candidate.index))
+        {
+            return Ok(id);
+        }
+        // FC_INDEX packs a named-instance index in the high bits. fontdb has
+        // collection faces only, so map the base face, never the packed value.
+        // Named-instance coordinates beyond cosmic's weight/style matching are
+        // not representable in fontdb; this intentionally uses the base face.
+        let index = candidate.index & 0xffff;
+        let matching_face = |face: &cosmic_text::fontdb::FaceInfo| {
+            face.index == index
+                && match &face.source {
+                    cosmic_text::fontdb::Source::File(path)
+                    | cosmic_text::fontdb::Source::SharedFile(path, _) => path == &candidate.file,
+                    cosmic_text::fontdb::Source::Binary(_) => false,
+                }
+        };
+        let mut id = self
+            .font_system
+            .db()
+            .faces()
+            .find(|face| matching_face(face))
+            .map(|face| face.id);
+        if id.is_none() {
+            self.font_system.db_mut().load_font_file(&candidate.file)?;
+            self.font_ids_by_request.clear();
+            id = self
+                .font_system
+                .db()
+                .faces()
+                .find(|face| matching_face(face))
+                .map(|face| face.id);
+        }
+        self.fontconfig_face_ids
+            .entry(candidate.file.clone())
+            .or_default()
+            .insert(candidate.index, id);
+        Ok(id)
+    }
 
     fn prewarm_fonts(&mut self, font_ids: &[FontId]) {
         for &font_id in font_ids {
@@ -319,7 +512,8 @@ impl CosmicTextSystemState {
             self.font_system.get_font_matches(&primary_attributes);
 
             for (fallback_id, fallback_name) in &*properties.fallback_chain {
-                let fallback_attributes = properties.attributes(*fallback_id, fallback_name);
+                let fallback_attributes =
+                    self.face_attributes(*fallback_id, fallback_name, &properties);
                 self.font_system.get_font_matches(&fallback_attributes);
             }
         }
@@ -327,7 +521,7 @@ impl CosmicTextSystemState {
 
     #[profiling::function]
     fn add_fonts(&mut self, fonts: Vec<Cow<'static, [u8]>>) -> Result<()> {
-        self.font_ids_by_family_cache.clear();
+        self.font_ids_by_request.clear();
         let db = self.font_system.db_mut();
         for bytes in fonts {
             db.load_font_source(cosmic_text::fontdb::Source::Binary(Arc::new(bytes)));
@@ -336,114 +530,111 @@ impl CosmicTextSystemState {
     }
 
     #[profiling::function]
-    fn load_family(
-        &mut self,
-        name: &str,
-        features: &FontFeatures,
-        fallbacks: Option<&FontFallbacks>,
-    ) -> Result<SmallVec<[FontId; 4]>> {
-        let loaded_font_key = FontKey::new(
-            SharedString::from(name.to_owned()),
-            features.clone(),
-            fallbacks.cloned(),
-        );
+    fn load_family(&mut self, request: &Font, primary: bool) -> Result<Option<FontId>> {
+        let request_key = (request.clone(), primary);
+        if let Some(&font_id) = self.font_ids_by_request.get(&request_key) {
+            return Ok(Some(font_id));
+        }
 
-        // recurse with `fallbacks = None` so a fallback family cannot pull in
-        // another chain. missing fallback families are dropped so a typo in
-        // settings still lets the primary family load.
-        let user_fallback_chain: Arc<[(FontId, SharedString)]> = match fallbacks {
-            Some(fallbacks) if !fallbacks.fallback_list().is_empty() => {
-                let mut chain: Vec<(FontId, SharedString)> = Vec::new();
-                for fallback_name in fallbacks.fallback_list() {
-                    let fb_key = FontKey::new(
-                        SharedString::from(fallback_name.clone()),
-                        features.clone(),
-                        None,
-                    );
-                    let fb_ids = if let Some(cached) = self.font_ids_by_family_cache.get(&fb_key) {
-                        cached.clone()
-                    } else {
-                        let loaded = self.load_family(fallback_name, features, None)?;
-                        self.font_ids_by_family_cache
-                            .insert(fb_key.clone(), loaded.clone());
-                        loaded
-                    };
-                    let Some(&fb_id) = fb_ids.first() else {
-                        continue;
-                    };
-                    let db_id = self.loaded_fonts[fb_id.0].font.id();
-                    if let Some(face) = self.font_system.db().face(db_id)
-                        && let Some(family) = face.families.first()
-                    {
-                        chain.push((fb_id, SharedString::from(family.0.clone())));
-                    }
-                }
-                Arc::from(chain)
-            }
-            _ => Arc::from(Vec::new()),
-        };
-
-        let name = gpui::font_name_with_fallbacks(name, &self.system_font_fallback);
-
-        let families = self
+        let name = gpui::font_name_with_fallbacks(&request.family, &self.system_font_fallback);
+        let mut candidates = self
             .font_system
             .db()
             .faces()
-            .filter(|face| face.families.iter().any(|family| *name == family.0))
-            .map(|face| (face.id, face.post_script_name.clone()))
+            .filter(|face| face.families.iter().any(|family| name == family.0))
+            .map(|face| face.id)
             .collect::<SmallVec<[_; 4]>>();
-
-        let cosmic_features = cosmic_font_features(features)?;
-
-        let mut loaded_font_ids = SmallVec::new();
-        for (database_id, postscript_name) in families {
-            let key = LoadedFontKey {
-                database_id,
-                font: loaded_font_key.clone(),
-            };
-            if let Some(&font_id) = self.loaded_font_ids_by_key.get(&key) {
-                self.loaded_fonts[font_id.0].user_fallback_chain = Arc::clone(&user_fallback_chain);
-                loaded_font_ids.push(font_id);
-                continue;
+        while !candidates.is_empty() {
+            let ix = find_best_match(request, &candidates, self.font_system.db())?;
+            if let Some(font_id) = self.load_face(candidates[ix], request, primary)? {
+                self.font_ids_by_request.insert(request_key, font_id);
+                return Ok(Some(font_id));
             }
-
-            let font = self
-                .font_system
-                .get_font(database_id, cosmic_text::Weight::NORMAL)
-                .context("Could not load font")?;
-
-            // HACK: To let the storybook run and render Windows caption icons. We should actually do better font fallback.
-            let allowed_bad_font_names = [
-                "SegoeFluentIcons", // NOTE: Segoe fluent icons postscript name is inconsistent
-                "Segoe Fluent Icons",
-            ];
-
-            // This only decides whether a face can be a primary font. The
-            // editor measures layout with the width of 'm' and would panic
-            // without it.
-            //
-            // Don't remove the face from the font database. Arabic, Devanagari
-            // and emoji fonts often have no Latin glyphs, and they are exactly
-            // what cosmic-text falls back to when the primary font lacks a
-            // glyph.
-            if font.as_swash().charmap().map('m') == 0
-                && !allowed_bad_font_names.contains(&postscript_name.as_str())
-            {
-                continue;
-            };
-
-            let font_id = FontId(self.loaded_fonts.len());
-            loaded_font_ids.push(font_id);
-            self.loaded_fonts.push(LoadedFont {
-                font,
-                features: cosmic_features.clone(),
-                is_known_emoji_font: check_is_known_emoji_font(&postscript_name),
-                user_fallback_chain: Arc::clone(&user_fallback_chain),
-            });
-            self.loaded_font_ids_by_key.insert(key, font_id);
+            candidates.remove(ix);
         }
 
-        Ok(loaded_font_ids)
+        Ok(None)
+    }
+
+    /// Loads one already-selected database face. Fallback-only faces need not
+    /// provide the Latin metrics required of a primary font.
+    fn load_face(
+        &mut self,
+        database_id: cosmic_text::fontdb::ID,
+        request: &Font,
+        primary: bool,
+    ) -> Result<Option<FontId>> {
+        let font = self
+            .font_system
+            .get_font(database_id, cosmic_text::Weight::NORMAL)
+            .context("Could not load font")?;
+        let face = self
+            .font_system
+            .db()
+            .face(database_id)
+            .context("font face not found in database")?;
+
+        // Primary fonts supply the editor's 'm' advance. Fallback-only
+        // faces may be Arabic, Devanagari, or emoji without any Latin.
+        // Keep the caption-icon exception used by the storybook.
+        let allowed_bad_font_names = ["SegoeFluentIcons", "Segoe Fluent Icons"];
+        if primary
+            && font.as_swash().charmap().map('m') == 0
+            && !allowed_bad_font_names.contains(&face.post_script_name.as_str())
+        {
+            return Ok(None);
+        }
+        let is_known_emoji_font = check_is_known_emoji_font(&face.post_script_name);
+
+        // Resolve each explicit family with the same weight and style as
+        // the request, without letting it recursively inherit the chain.
+        // A system-family descriptor has an empty explicit list and stays lazy.
+        let mut chain = SmallVec::new();
+        if let Some(fallbacks) = &request.fallbacks {
+            for fallback_name in fallbacks.fallback_list() {
+                let fallback = Font {
+                    family: fallback_name.clone().into(),
+                    fallbacks: None,
+                    ..request.clone()
+                };
+                let Some(fallback_id) = self.load_family(&fallback, false)? else {
+                    continue;
+                };
+                let fallback_database_id = self.loaded_font(fallback_id).font.id();
+                if let Some(face) = self.font_system.db().face(fallback_database_id)
+                    && let Some(family) = face.families.first()
+                {
+                    chain.push((fallback_id, SharedString::from(family.0.clone())));
+                }
+            }
+        }
+        let key = LoadedFontKey {
+            database_id,
+            features: request.features.clone(),
+            fallback_chain: chain,
+            system_request: request
+                .fallbacks
+                .as_ref()
+                .and_then(|fallbacks| fallbacks.system_family(&request.family))
+                .map(|_| request.clone()),
+        };
+        let font_id = if let Some(&font_id) = self.loaded_font_ids_by_key.get(&key) {
+            font_id
+        } else {
+            let cosmic_features = cosmic_font_features(&request.features)?;
+            let fallback_chain = Arc::from(key.fallback_chain.as_slice());
+            let font_id = FontId(self.loaded_fonts.len());
+            self.loaded_fonts.push(LoadedFont {
+                font,
+                request: request.clone(),
+                features: cosmic_features,
+                is_known_emoji_font,
+                user_fallback_chain: fallback_chain,
+            });
+            self.loaded_font_ids_by_key.insert(key, font_id);
+            font_id
+        };
+        Ok(Some(font_id))
     }
 
     fn advance(&self, font_id: FontId, glyph_id: GlyphId) -> Result<Size<f32>> {
@@ -585,6 +776,12 @@ impl CosmicTextSystemState {
             let font_id = FontId(self.loaded_fonts.len());
             self.loaded_fonts.push(LoadedFont {
                 font,
+                request: gpui::font(
+                    face.families
+                        .first()
+                        .map(|family| family.0.clone())
+                        .unwrap_or_default(),
+                ),
                 features: CosmicFontFeatures::new(),
                 is_known_emoji_font: check_is_known_emoji_font(&face.post_script_name),
                 user_fallback_chain: Arc::from(Vec::new()),
@@ -701,7 +898,7 @@ impl CosmicTextSystemState {
         for run in font_runs {
             let run_end = offs + run.len;
 
-            let Some(properties) = self.font_match_properties(run.font_id) else {
+            let Some(properties) = self.prepare_font(run.font_id, &text[offs..run_end]) else {
                 offs = run_end;
                 continue;
             };
@@ -710,7 +907,9 @@ impl CosmicTextSystemState {
             let fallback_attrs: SmallVec<[Attrs<'_>; 4]> = properties
                 .fallback_chain
                 .iter()
-                .map(|(font_id, family_name)| properties.attributes(*font_id, family_name))
+                .map(|(font_id, family_name)| {
+                    self.face_attributes(*font_id, family_name, &properties)
+                })
                 .collect();
 
             let spans = if properties.fallback_chain.is_empty() {
@@ -966,17 +1165,14 @@ fn clip_font_runs(font_runs: &[FontRun], range: Range<usize>) -> SmallVec<[FontR
 #[cfg(feature = "font-kit")]
 fn find_best_match(
     font: &Font,
-    candidates: &[FontId],
-    state: &CosmicTextSystemState,
+    candidates: &[cosmic_text::fontdb::ID],
+    database: &cosmic_text::fontdb::Database,
 ) -> Result<usize> {
     let candidate_properties = candidates
         .iter()
-        .map(|font_id| {
-            let database_id = state.loaded_font(*font_id).font.id();
-            let face_info = state
-                .font_system
-                .db()
-                .face(database_id)
+        .map(|database_id| {
+            let face_info = database
+                .face(*database_id)
                 .context("font face not found in database")?;
             Ok(face_info_into_properties(face_info))
         })
@@ -992,8 +1188,8 @@ fn find_best_match(
 #[cfg(not(feature = "font-kit"))]
 fn find_best_match(
     font: &Font,
-    candidates: &[FontId],
-    state: &CosmicTextSystemState,
+    candidates: &[cosmic_text::fontdb::ID],
+    database: &cosmic_text::fontdb::Database,
 ) -> Result<usize> {
     if candidates.is_empty() {
         anyhow::bail!("requested font family contains no font matching the other parameters");
@@ -1011,12 +1207,9 @@ fn find_best_match(
     let mut best_index = 0;
     let mut best_score = u32::MAX;
 
-    for (index, font_id) in candidates.iter().enumerate() {
-        let database_id = state.loaded_font(*font_id).font.id();
-        let face_info = state
-            .font_system
-            .db()
-            .face(database_id)
+    for (index, database_id) in candidates.iter().enumerate() {
+        let face_info = database
+            .face(*database_id)
             .context("font face not found in database")?;
 
         let is_italic = matches!(
@@ -1077,8 +1270,25 @@ fn compute_run_spans(
     let mut span_font_id = primary;
     for (grapheme_idx, grapheme) in run_text.grapheme_indices(true) {
         let abs = run_offset + grapheme_idx;
-        let ch = grapheme.chars().next().unwrap_or('\0');
-        let next_slot = pick_covering_slot(ch, span_slot, primary, fallback_chain, covers);
+        let covers_grapheme = |font_id| {
+            grapheme
+                .chars()
+                .filter(|character| needs_glyph_coverage(*character))
+                .all(|character| covers(font_id, character))
+        };
+        let next_slot = if covers_grapheme(primary) {
+            None
+        } else {
+            fallback_chain
+                .iter()
+                .position(|(font_id, _)| covers_grapheme(*font_id))
+                .or_else(|| {
+                    // If no face covers the complete cluster, keep its base
+                    // together and leave final fallback to cosmic-text.
+                    let ch = grapheme.chars().next().unwrap_or('\0');
+                    pick_covering_slot(ch, primary, fallback_chain, covers)
+                })
+        };
         if next_slot == span_slot {
             continue;
         }
@@ -1118,25 +1328,44 @@ fn slot_font_id(
 
 fn pick_covering_slot(
     ch: char,
-    current: Option<usize>,
     primary: FontId,
     fallback_chain: &[(FontId, SharedString)],
     covers: &impl Fn(FontId, char) -> bool,
 ) -> Option<usize> {
-    if (ch as u32) <= 0x7F {
-        return None;
-    }
     if covers(primary, ch) {
         return None;
     }
-    let current_id = slot_font_id(current, primary, fallback_chain);
-    if covers(current_id, ch) {
-        return current;
-    }
-
     fallback_chain
         .iter()
         .position(|(fb_id, _)| covers(*fb_id, ch))
+}
+
+/// Joiners and variation selectors affect shaping without requiring separate
+/// cmap glyphs. Keep them in the text, but do not reject a face for their absence.
+fn needs_glyph_coverage(character: char) -> bool {
+    !character.is_control()
+        && !matches!(character, '\u{200c}' | '\u{200d}' | '\u{fe00}'..='\u{fe0f}' | '\u{e0100}'..='\u{e01ef}')
+}
+
+/// Keep whole missing graphemes for Fontconfig, but only track uncovered
+/// required scalars when checking each newly loaded candidate.
+#[cfg(target_os = "linux")]
+fn missing_fallback_coverage(
+    text: &str,
+    mut uncovered: impl FnMut(char) -> bool,
+) -> (String, Vec<char>) {
+    let mut missing_text = String::new();
+    let mut remaining = Vec::new();
+    for grapheme in text.graphemes(true) {
+        let previous_len = remaining.len();
+        remaining.extend(grapheme.chars().filter(|&character| uncovered(character)));
+        if remaining.len() != previous_len {
+            missing_text.push_str(grapheme);
+        }
+    }
+    remaining.sort_unstable();
+    remaining.dedup();
+    (missing_text, remaining)
 }
 
 fn charmap_covers(loaded_fonts: &[LoadedFont], id: FontId, ch: char) -> bool {
@@ -1254,6 +1483,7 @@ mod tests {
     const IBM_PLEX: &[u8] =
         include_bytes!("../../../tests/fixtures/fonts/ibm-plex-sans/IBMPlexSans-Regular.ttf");
     const LILEX: &[u8] = include_bytes!("../../../tests/fixtures/fonts/lilex/Lilex-Regular.ttf");
+    const LILEX_BOLD: &[u8] = include_bytes!("../../../tests/fixtures/fonts/lilex/Lilex-Bold.ttf");
 
     /// Every code point of `Bidi_Class=B`, each of which starts a new bidi
     /// paragraph and so can split one line into mixed-direction paragraphs.
@@ -1290,6 +1520,341 @@ mod tests {
             );
         }
         Ok(())
+    }
+
+    #[test]
+    fn loads_only_the_selected_face_and_reuses_requests() -> Result<()> {
+        let text_system = CosmicTextSystem::new_without_system_fonts("Lilex");
+        text_system.add_fonts(vec![Cow::Borrowed(LILEX), Cow::Borrowed(LILEX_BOLD)])?;
+        let regular = gpui::font("Lilex");
+        let regular_id = text_system.font_id(&regular)?;
+        assert_eq!(text_system.0.read().loaded_fonts.len(), 1);
+        let bold_id = text_system.font_id(&regular.clone().bold())?;
+        assert_ne!(regular_id, bold_id);
+        assert_eq!(text_system.0.read().loaded_fonts.len(), 2);
+        assert_eq!(text_system.font_id(&regular)?, regular_id);
+        assert_eq!(text_system.font_id(&regular.bold())?, bold_id);
+        assert_eq!(text_system.0.read().loaded_fonts.len(), 2);
+        assert_eq!(
+            text_system.font_weight_and_style(bold_id)?,
+            (gpui::FontWeight::BOLD, gpui::FontStyle::Normal),
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_fallbacks_match_request_and_never_overwrite_another_chain() -> Result<()> {
+        let text_system = text_system()?;
+        text_system.add_fonts(vec![Cow::Borrowed(LILEX), Cow::Borrowed(LILEX_BOLD)])?;
+        let regular = Font {
+            fallbacks: Some(FontFallbacks::from_fonts(vec![
+                "missing family".into(),
+                "Lilex".into(),
+            ])),
+            ..gpui::font("IBM Plex Sans")
+        };
+        let bold = regular.clone().bold();
+        let regular_id = text_system.font_id(&regular)?;
+        let bold_id = text_system.font_id(&bold)?;
+        assert_ne!(regular_id, bold_id);
+        let plain_id = text_system.font_id(&gpui::font("IBM Plex Sans"))?;
+        assert_ne!(regular_id, plain_id);
+        let mut state = text_system.0.write();
+        let regular_chain = Arc::clone(&state.loaded_font(regular_id).user_fallback_chain);
+        let bold_chain = Arc::clone(&state.loaded_font(bold_id).user_fallback_chain);
+        assert_eq!(regular_chain.len(), 1);
+        assert_eq!(bold_chain.len(), 1);
+        assert_ne!(regular_chain[0].0, bold_chain[0].0);
+        assert!(state.loaded_font(plain_id).user_fallback_chain.is_empty());
+        let regular_face = state
+            .font_system
+            .db()
+            .face(state.loaded_font(regular_chain[0].0).font.id())
+            .unwrap();
+        let bold_face = state
+            .font_system
+            .db()
+            .face(state.loaded_font(bold_chain[0].0).font.id())
+            .unwrap();
+        assert_eq!(regular_face.weight, Weight::NORMAL);
+        assert_eq!(bold_face.weight, Weight::BOLD);
+        let properties = state.font_match_properties(bold_id).unwrap();
+        assert_eq!(properties.weight, Weight::NORMAL);
+        let fallback_attributes =
+            state.face_attributes(bold_chain[0].0, &bold_chain[0].1, &properties);
+        assert_eq!(fallback_attributes.weight, Weight::BOLD);
+        assert_eq!(state.load_family(&regular, true)?, Some(regular_id));
+        assert_eq!(
+            &*state.loaded_font(regular_id).user_fallback_chain,
+            &*regular_chain
+        );
+        assert_eq!(
+            &*state.loaded_font(bold_id).user_fallback_chain,
+            &*bold_chain
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_fallback_uses_matching_style_and_selected_stretch() -> Result<()> {
+        let text_system = text_system()?;
+        text_system.add_fonts(vec![Cow::Borrowed(LILEX)])?;
+        let mut state = text_system.0.write();
+        // Matching operates on metadata, so share the tracked face bytes while
+        // representing normal and italic faces with a non-primary stretch.
+        let mut normal = state
+            .font_system
+            .db()
+            .faces()
+            .find(|face| face.families.iter().any(|family| family.0 == "Lilex"))
+            .unwrap()
+            .clone();
+        state.font_system.db_mut().remove_face(normal.id);
+        normal.stretch = Stretch::SemiCondensed;
+        let mut italic = normal.clone();
+        italic.style = Style::Italic;
+        state.font_system.db_mut().push_face_info(normal);
+        let italic_id = state.font_system.db_mut().push_face_info(italic);
+        let request = Font {
+            fallbacks: Some(FontFallbacks::from_fonts(vec!["Lilex".into()])),
+            ..gpui::font("IBM Plex Sans").italic()
+        };
+        let primary_id = state.load_family(&request, true)?.unwrap();
+        let properties = state.font_match_properties(primary_id).unwrap();
+        let (fallback_id, family) = &properties.fallback_chain[0];
+        assert_eq!(state.loaded_font(*fallback_id).font.id(), italic_id);
+        assert_eq!(properties.style, Style::Normal);
+        assert_eq!(properties.stretch, Stretch::Normal);
+        let attributes = state.face_attributes(*fallback_id, family, &properties);
+        assert_eq!(attributes.style, Style::Italic);
+        assert_eq!(attributes.stretch, Stretch::SemiCondensed);
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn fontconfig_file_mapping_registers_only_requested_face_metadata() -> Result<()> {
+        let text_system = CosmicTextSystem::new_without_system_fonts("Lilex");
+        let candidate = FontconfigCandidate {
+            file: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/fixtures/fonts/lilex/Lilex-Regular.ttf"),
+            index: 0,
+        };
+        let mut state = text_system.0.write();
+        let id = state.fontconfig_face_id(&candidate)?.unwrap();
+        assert_eq!(state.font_system.db().faces().count(), 1);
+        assert!(state.loaded_fonts.is_empty());
+        let named_instance = FontconfigCandidate {
+            index: 1 << 16,
+            ..candidate
+        };
+        assert_eq!(state.fontconfig_face_id(&named_instance)?, Some(id));
+        assert_eq!(state.font_system.db().faces().count(), 1);
+        let font_id = state.load_face(id, &gpui::font("Lilex"), false)?.unwrap();
+        assert_eq!(state.loaded_font(font_id).font.id(), id);
+        assert_eq!(state.loaded_fonts.len(), 1);
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn missing_coverage_keeps_graphemes_and_tracks_only_required_scalars() {
+        let (text, remaining) = missing_fallback_coverage(
+            "a\u{301}a\u{301} \u{1f469}\u{200d}\u{1f4bb}\u{fe0f}\n",
+            |character| needs_glyph_coverage(character) && character != 'a' && character != ' ',
+        );
+        assert_eq!(text, "a\u{301}a\u{301}\u{1f469}\u{200d}\u{1f4bb}\u{fe0f}");
+        assert_eq!(remaining, ['\u{301}', '\u{1f469}', '\u{1f4bb}']);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn system_candidates_preserve_successes_across_mapping_and_loading_failures() -> Result<()> {
+        let text_system = text_system()?;
+        let primary = text_system.font_id(&gpui::font("IBM Plex Sans"))?;
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let regular = FontconfigCandidate {
+            file: root.join("../../tests/fixtures/fonts/lilex/Lilex-Regular.ttf"),
+            index: 0,
+        };
+        let bold = FontconfigCandidate {
+            file: root.join("../../tests/fixtures/fonts/lilex/Lilex-Bold.ttf"),
+            index: 0,
+        };
+        // Neither path can be a file: its parent is the regular fixture file.
+        let mapping_failure = FontconfigCandidate {
+            file: regular.file.join("missing-metadata"),
+            index: 0,
+        };
+        let loading_failure = FontconfigCandidate {
+            file: regular.file.join("missing-font-data"),
+            index: 0,
+        };
+        let mut state = text_system.0.write();
+        let mut unloadable = state.font_system.db().faces().next().unwrap().clone();
+        unloadable.source = cosmic_text::fontdb::Source::File(loading_failure.file.clone());
+        state.font_system.db_mut().push_face_info(unloadable);
+        let mut properties = state.font_match_properties(primary).unwrap();
+        let request = gpui::font("IBM Plex Sans");
+        let mut remaining = vec!['m', '\u{10ffff}'];
+        state.append_system_fallbacks(
+            primary,
+            &request,
+            &[regular.clone(), mapping_failure, loading_failure, bold.clone()],
+            &mut remaining,
+            &mut properties,
+        );
+        assert_eq!(remaining, ['\u{10ffff}']);
+        assert_eq!(properties.fallback_chain.len(), 2);
+        let regular_id = state.fontconfig_face_id(&regular)?.unwrap();
+        let bold_id = state.fontconfig_face_id(&bold)?.unwrap();
+        assert_eq!(state.loaded_font(properties.fallback_chain[0].0).font.id(), regular_id);
+        assert_eq!(state.loaded_font(properties.fallback_chain[1].0).font.id(), bold_id);
+
+        // A covered requirement stops before loading later ordered candidates.
+        let mut properties = state.font_match_properties(primary).unwrap();
+        let mut remaining = vec!['m'];
+        state.append_system_fallbacks(
+            primary,
+            &request,
+            &[regular, bold],
+            &mut remaining,
+            &mut properties,
+        );
+        assert!(remaining.is_empty());
+        assert_eq!(properties.fallback_chain.len(), 1);
+        assert_eq!(state.loaded_font(properties.fallback_chain[0].0).font.id(), regular_id);
+        Ok(())
+    }
+
+    #[test]
+    fn features_keep_distinct_loaded_entries() -> Result<()> {
+        let text_system = text_system()?;
+        let regular = gpui::font("IBM Plex Sans");
+        let plain_id = text_system.font_id(&regular)?;
+        let no_ligatures = Font {
+            features: FontFeatures::disable_ligatures(),
+            ..regular.clone()
+        };
+        let feature_id = text_system.font_id(&no_ligatures)?;
+        assert_ne!(plain_id, feature_id);
+        let state = text_system.0.read();
+        assert_eq!(
+            state.loaded_font(plain_id).font.id(),
+            state.loaded_font(feature_id).font.id()
+        );
+        assert_eq!(
+            state.loaded_font(plain_id).features,
+            cosmic_font_features(&regular.features)?
+        );
+        assert_eq!(
+            state.loaded_font(feature_id).features,
+            cosmic_font_features(&no_ligatures.features)?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn fallback_only_face_does_not_require_primary_latin_metrics() -> Result<()> {
+        // Make the tracked fixture's cmap empty, retaining its real metadata,
+        // metrics, and outlines. No external or installed font is needed.
+        let mut no_latin = LILEX.to_vec();
+        let table_count = u16::from_be_bytes(no_latin[4..6].try_into().unwrap()) as usize;
+        let cmap_offset = no_latin[12..12 + table_count * 16]
+            .chunks_exact(16)
+            .find(|record| &record[..4] == b"cmap")
+            .map(|record| u32::from_be_bytes(record[8..12].try_into().unwrap()) as usize)
+            .unwrap();
+        no_latin[cmap_offset + 2..cmap_offset + 4].copy_from_slice(&0u16.to_be_bytes());
+        let text_system = text_system()?;
+        text_system.add_fonts(vec![Cow::Owned(no_latin)])?;
+        let mut state = text_system.0.write();
+        let fallback = gpui::font("Lilex");
+        let fallback_id = state.load_family(&fallback, false)?.unwrap();
+        assert!(!charmap_covers(&state.loaded_fonts, fallback_id, 'm'));
+        assert_eq!(state.load_family(&fallback, true)?, None);
+        let primary = Font {
+            fallbacks: Some(FontFallbacks::from_fonts(vec!["Lilex".into()])),
+            ..gpui::font("IBM Plex Sans")
+        };
+        let primary_id = state.load_family(&primary, true)?.unwrap();
+        assert!(charmap_covers(&state.loaded_fonts, primary_id, 'm'));
+        assert_eq!(
+            state.loaded_font(primary_id).user_fallback_chain[0].0,
+            fallback_id
+        );
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn system_fallback_is_lazy_and_keeps_source_style_identity() -> Result<()> {
+        let text_system = text_system()?;
+        text_system.add_fonts(vec![Cow::Borrowed(LILEX)])?;
+        let descriptor = FontFallbacks::from_system_family("sans-serif", "IBM Plex Sans");
+        let regular = Font {
+            fallbacks: Some(descriptor.clone()),
+            ..gpui::font("IBM Plex Sans")
+        };
+        let regular_id = text_system.font_id(&regular)?;
+        let bold_id = text_system.font_id(&regular.bold())?;
+        assert_ne!(regular_id, bold_id);
+        let independent = Font {
+            fallbacks: Some(descriptor),
+            ..gpui::font("Lilex")
+        };
+        let independent_id = text_system.font_id(&independent)?;
+        let mut state = text_system.0.write();
+        assert!(state.fontconfig.is_none());
+        assert_eq!(
+            state.loaded_font(bold_id).request.weight,
+            gpui::FontWeight::BOLD
+        );
+        assert!(state.loaded_font(regular_id).user_fallback_chain.is_empty());
+        assert!(state.prepare_font(regular_id, "readable Latin").is_some());
+        // An icon-family override inherits the descriptor but not system fallback.
+        assert!(state.prepare_font(independent_id, "\u{10ffff}").is_some());
+        assert!(state.fontconfig.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn complete_grapheme_fallback_precedes_partially_covering_primary() {
+        let fb = chain(&[1]);
+        for (text, base, missing) in [
+            ("a\u{301}", 'a', '\u{301}'),
+            ("a\u{301}\u{fe0f}", 'a', '\u{301}'),
+            ("\u{1f469}\u{200d}\u{1f4bb}", '\u{1f469}', '\u{1f4bb}'),
+        ] {
+            let covers = |id: FontId, ch: char| {
+                (id == fid(0) && ch == base) || (id == fid(1) && (ch == base || ch == missing))
+            };
+            assert_eq!(
+                compute_run_spans(text, 0, text.len(), fid(0), &fb, &covers),
+                [span(0, text.len(), Some(0), fid(1))]
+                    .into_iter()
+                    .collect::<SmallVec<[RunSpan; 4]>>(),
+                "{text:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn ordered_fallbacks_do_not_prefer_a_previous_later_face() {
+        let fb = chain(&[1, 2]);
+        let covers = |id: FontId, ch: char| {
+            (id == fid(2) && ch == '字') || ((id == fid(1) || id == fid(2)) && ch == '体')
+        };
+        assert_eq!(
+            compute_run_spans("字体", 0, "字体".len(), fid(0), &fb, &covers),
+            [span(0, 3, Some(1), fid(2)), span(3, 6, Some(0), fid(1))]
+                .into_iter()
+                .collect::<SmallVec<[RunSpan; 4]>>(),
+        );
+        assert_eq!(
+            pick_covering_slot('?', fid(0), &fb, &|id, _| id == fid(1)),
+            Some(0)
+        );
     }
 
     fn layout_text(text_system: &CosmicTextSystem, text: &str) -> Result<LineLayout> {
@@ -1631,14 +2196,11 @@ mod tests {
     }
 
     #[test]
-    fn primary_wins_over_current_fallback_when_primary_covers() {
+    fn primary_wins_when_primary_covers() {
         let primary = fid(0);
         let fb = chain(&[1, 2]);
         let covers = |id: FontId, _: char| id == fid(0) || id == fid(1);
-        assert_eq!(
-            pick_covering_slot('a', Some(0), primary, &fb, &covers),
-            None
-        );
+        assert_eq!(pick_covering_slot('a', primary, &fb, &covers), None);
     }
 
     #[test]
@@ -1646,7 +2208,7 @@ mod tests {
         let primary = fid(0);
         let fb = chain(&[1]);
         let covers = |_: FontId, _: char| true;
-        assert_eq!(pick_covering_slot('a', None, primary, &fb, &covers), None);
+        assert_eq!(pick_covering_slot('a', primary, &fb, &covers), None);
     }
 
     #[test]
@@ -1655,10 +2217,7 @@ mod tests {
         let fb = chain(&[1, 2, 3]);
         // only fallback 2 at index 1 covers.
         let covers = |id: FontId, _: char| id == fid(2);
-        assert_eq!(
-            pick_covering_slot('字', None, primary, &fb, &covers),
-            Some(1)
-        );
+        assert_eq!(pick_covering_slot('字', primary, &fb, &covers), Some(1));
     }
 
     #[test]
@@ -1668,10 +2227,7 @@ mod tests {
         let covers = |_: FontId, _: char| false;
         // nothing covers. return `None` so the `cosmic-text` built in script
         // fallback can take over during shaping.
-        assert_eq!(
-            pick_covering_slot('\u{1F600}', Some(1), primary, &fb, &covers),
-            None
-        );
+        assert_eq!(pick_covering_slot('\u{1F600}', primary, &fb, &covers), None);
     }
 
     #[test]
@@ -1679,7 +2235,7 @@ mod tests {
         let primary = fid(0);
         let fb: SmallVec<[(FontId, SharedString); 4]> = SmallVec::new();
         let covers = |_: FontId, _: char| false;
-        assert_eq!(pick_covering_slot('a', None, primary, &fb, &covers), None);
+        assert_eq!(pick_covering_slot('a', primary, &fb, &covers), None);
     }
 
     #[test]

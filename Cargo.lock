@@ -2508,6 +2508,7 @@ dependencies = [
  "unicode-segmentation",
  "web-sys",
  "wgpu",
+ "yeslogic-fontconfig-sys",
  "zed-font-kit",
 ]
 

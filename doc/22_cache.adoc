@@ -554,12 +554,25 @@ measure or reclaim decoded images; the encoded 8 MiB limit is not a pixel budget
 Font retention is independent of `visualizations.cache` and Still Mode.
 Primary-font selection and fallback behavior are documented in
 link:01_config.adoc[Configuration and layout]. Rivu resolves the primary family
-at startup or when its saved setting changes, not during painting. It leaves
-missing-glyph fallback to the native GPUI/cosmic-text backend rather than
-providing an explicit fallback list: that backend eagerly loads explicit
-candidates. This avoids unnecessary application-directed loading and a local
-font-backend fork, but does not enforce Fontconfig ordering beyond the primary
-family.
+at startup or when its saved setting changes, not during painting. The Linux
+backend resolves missing characters from actual text through Fontconfig and
+loads individual selected faces, preserving candidate rank rather than preferring
+the face with the most coverage. Native shaping fallback remains the final step.
+A candidate that cannot be registered or loaded is logged and skipped without
+discarding earlier successful candidates or changing the remaining order.
+Fontconfig metadata is retained by the resolver; first-use matching and loading
+can block text preparation. This does not promise lower total startup RSS or
+latency: reduced font-file residency can be offset by matching metadata and caches.
+
+Successful candidate results, including no coverage, share a 64-entry FIFO with
+at most 64 KiB of aggregate request-key bytes and 1 MiB of aggregate candidate
+storage (face-record sizes plus owned path capacities). Hits do not refresh FIFO
+age. These are owned-storage accounting budgets, not a total allocation or RSS
+limit: allocator overhead, Fontconfig metadata, externally held candidate results,
+and loaded font data are not included. Oversized requests or results are returned
+normally, without memoization or truncation; failed requests are not cached.
+Keys include the original family, locale, weight, style, and actual missing text.
+Changing base text size alone does not resolve font families again.
 
 Icon text selects a separate symbol family, independent of the UI text font.
 Without `embed-nerd-font`, that family is `Symbols Nerd Font Mono`. With the

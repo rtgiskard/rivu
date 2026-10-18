@@ -1,4 +1,6 @@
 mod cosmic_text_system;
+#[cfg(target_os = "linux")]
+mod fontconfig;
 mod gpu_material;
 mod wgpu_atlas;
 mod wgpu_context;
