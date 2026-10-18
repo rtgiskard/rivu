@@ -357,6 +357,8 @@ remains text. Custom family names are accepted.
 Names must contain no control characters and occupy at most 128 UTF-8 bytes.
 Family names use Fontconfig system and user rules
 (`~/.config/fontconfig/fonts.conf`) to select the primary family.
+Localized family aliases are matched to names supported by the GUI, so the
+same font remains selected across terminal and desktop language environments.
 Missing text glyphs use native fallback, which does not guarantee Fontconfig's
 custom fallback order. Restart the GUI after changing Fontconfig rules.
 

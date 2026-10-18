@@ -32,41 +32,38 @@ pub(in crate::gui) fn resolve(requested: &str, cx: &App) -> Font {
     } else {
         requested
     };
-    match system_family(requested) {
-        Ok(primary) => {
-            // Only select the primary family. Explicit fallback lists make GPUI
-            // eagerly load every candidate; leave missing glyphs to its backend.
-            if cx.text_system().all_font_names().contains(&primary) {
-                return font(primary);
-            }
-            tracing::warn!(requested, primary, "Fontconfig family unavailable in GPUI");
-        }
+    let available = cx.text_system().all_font_names();
+    match system_family(requested, &available) {
+        // Explicit fallback lists eagerly load every candidate in GPUI; leave
+        // missing glyphs to its backend and select only the matched family.
+        Ok(primary) => return font(primary),
         Err(error) => tracing::warn!(requested, %error, "Cannot resolve system UI font"),
     }
     font("sans-serif")
 }
 
 #[cfg(target_os = "linux")]
-fn system_family(requested: &str) -> anyhow::Result<String> {
+struct Pattern(*mut fontconfig_sys::FcPattern);
+
+#[cfg(target_os = "linux")]
+impl Drop for Pattern {
+    fn drop(&mut self) {
+        // SAFETY: Pattern owns a live Fontconfig pattern.
+        unsafe { fontconfig_sys::FcPatternDestroy(self.0) }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn system_family(requested: &str, available: &[String]) -> anyhow::Result<String> {
     use anyhow::{Context, ensure};
     use fontconfig_sys::*;
-    use std::{
-        ffi::{CStr, CString},
-        ptr,
-    };
+    use std::ffi::CString;
 
     struct Config(*mut FcConfig);
     impl Drop for Config {
         fn drop(&mut self) {
             // SAFETY: this guard owns a live config returned by Fontconfig.
             unsafe { FcConfigDestroy(self.0) }
-        }
-    }
-    struct Pattern(*mut FcPattern);
-    impl Drop for Pattern {
-        fn drop(&mut self) {
-            // SAFETY: this guard owns a live pattern returned by Fontconfig.
-            unsafe { FcPatternDestroy(self.0) }
         }
     }
 
@@ -93,17 +90,79 @@ fn system_family(requested: &str) -> anyhow::Result<String> {
         let matched = FcFontMatch(config.0, pattern.0, &mut result);
         ensure!(!matched.is_null(), "Fontconfig returned no matching font");
         let matched = Pattern(matched);
-        let mut name = ptr::null_mut();
-        ensure!(
-            FcPatternGetString(matched.0, c"family".as_ptr(), 0, &mut name) == FcResultMatch
-                && !name.is_null(),
-            "Fontconfig returned no family name"
-        );
-        Ok(CStr::from_ptr(name.cast()).to_string_lossy().into_owned())
+        available_family(&matched, available)
     }
 }
 
 #[cfg(not(target_os = "linux"))]
-fn system_family(requested: &str) -> anyhow::Result<String> {
-    Ok(requested.to_owned())
+fn system_family(requested: &str, available: &[String]) -> anyhow::Result<String> {
+    available
+        .iter()
+        .find(|name| name.as_str() == requested)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("Requested font family unavailable in GPUI"))
+}
+
+#[cfg(target_os = "linux")]
+fn available_family(pattern: &Pattern, available: &[String]) -> anyhow::Result<String> {
+    use fontconfig_sys::*;
+    use std::{ffi::CStr, ptr};
+
+    // Fontconfig orders localized aliases by locale; GPUI lists one name per
+    // face. Match every alias before declaring the resolved font unavailable.
+    for index in 0.. {
+        let mut name = ptr::null_mut();
+        // SAFETY: Pattern remains live and owns each returned family string.
+        let result = unsafe { FcPatternGetString(pattern.0, c"family".as_ptr(), index, &mut name) };
+        if result != FcResultMatch {
+            break;
+        }
+        anyhow::ensure!(!name.is_null(), "Fontconfig returned a null family name");
+        // SAFETY: a successful FcPatternGetString returns a terminated string.
+        let name = unsafe { CStr::from_ptr(name.cast()) }.to_string_lossy();
+        if let Some(canonical) = available
+            .iter()
+            .find(|candidate| candidate.as_str() == name)
+        {
+            return Ok(canonical.clone());
+        }
+    }
+    anyhow::bail!("Fontconfig family unavailable in GPUI")
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+    use fontconfig_sys::*;
+    use std::ffi::CString;
+
+    fn pattern(families: &[&str]) -> Pattern {
+        // SAFETY: each string is copied into the owned pattern by Fontconfig.
+        unsafe {
+            let raw = FcPatternCreate();
+            assert!(!raw.is_null());
+            let pattern = Pattern(raw);
+            for family in families {
+                let family = CString::new(*family).unwrap();
+                assert_ne!(
+                    FcPatternAddString(pattern.0, c"family".as_ptr(), family.as_ptr().cast()),
+                    0
+                );
+            }
+            pattern
+        }
+    }
+
+    #[test]
+    fn localized_alias_order_does_not_hide_an_available_font() {
+        let available = vec!["Example Sans".to_owned()];
+        for aliases in [["示例字体", "Example Sans"], ["Example Sans", "示例字体"]] {
+            assert_eq!(
+                available_family(&pattern(&aliases), &available).unwrap(),
+                "Example Sans"
+            );
+        }
+        assert!(available_family(&pattern(&["示例字体"]), &available).is_err());
+        assert!(available_family(&pattern(&[]), &available).is_err());
+    }
 }
