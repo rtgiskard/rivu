@@ -138,6 +138,7 @@ file_group!(Interface, InterfaceView {
     confirm_queue_replace => confirm_queue_replace: bool,
     page_size => page_size: u32,
     artwork_decode_budget_mb => artwork_decode_budget_mb: u32,
+    gpu_material_budget_mb => gpu_material_budget_mb: u32,
     library_columns => library_columns: LibraryColumns,
     font => ui_font: String,
     scale => ui_scale: f32,

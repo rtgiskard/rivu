@@ -11,6 +11,7 @@ ownership are described in link:23_visuals.adoc#_stereo_analysis_styles[Stereo a
 Spectrum now consumes rectangle and Path publications; its palette sampling and
 ownership are described in link:23_visuals.adoc#_spectrum[Spectrum rendering].
 Fractal Beams/Flow publish shared segment endpoints with ordered stroke layers.
+Spectrogram publishes numerical column fields at their actual retained time intervals.
 The general `Program`, generated-schema interfaces and remaining consumer migrations
 below remain proposals. The agreed safety and platform boundaries remain binding.
 
@@ -509,18 +510,33 @@ immutable existing tessellated path. Rectangle segmentation and bottom-to-top pa
 retain their initial behavior. Palette samples are straight-alpha sRGB values;
 their interpolation is in sRGB numerical space. Bounds, clip, scale and inherited
 opacity belong to each scene placement, independently of shared content.
-Density/Spatial, all Spectrum styles and Fractal Beams/Flow use this interface. The old
-rectangle-only publication API and specialized textured-path interface are removed.
+Density/Spatial, all Spectrum styles, Fractal Beams/Flow and Spectrogram use this
+interface. The old rectangle-only publication API and specialized textured-path interface are removed.
 
 Segments use butt caps and ordinary source-over blending in the shared MSAA
-intermediate. One immutable endpoint array is uploaded once and reused by ordered
-layers with logical-pixel widths and palette-index offsets; no union, grouping
+intermediate. Each immutable frame's endpoint array is uploaded once and reused
+across that frame's ordered layers, with logical-pixel widths and palette-index offsets; no union, grouping
 compositor or feedback buffer is introduced. Zero-length segments draw nothing.
 Fractal simulation and accepted audio time remain application-owned. Publications
 change only with accepted geometry or display parameters, not repaint or resize;
 hiding releases application display storage. The application retains the original
 three light layers, intensity/color buckets and drawing order. Fine antialiasing
 differences are accepted rather than reproducing CPU tessellation pixel for pixel.
+
+Spectrogram packs at most 32 numerical columns and their independent x intervals
+into each immutable field tile. Intervals are relative to the tile's own earliest
+start and latest sample time, not the moving history window. Scrolling updates
+only placement; a changed bucket resamples its tile directly from the retained
+frequency levels. No per-column sampled frame is retained. The reusable packing
+scratch holds at most 32 columns of f32 rows, plus eight bytes per interval;
+unchanged tiles retain their immutable publication and GPU upload.
+At 3600 history columns this is 113 draws per panel rather than 3600. Existing
+renderer byte and in-flight resource budgets still apply; this is not a memory or
+performance guarantee for arbitrary panel counts and sampling heights.
+Below-floor and missing cells are opaque black independently of all 1024 palette
+samples, so weak positive Tokyo Night values retain its first color. Real gaps,
+startup window expansion, pooling and frequency sampling keep their existing meaning.
+
 
 Frame construction validates geometry, palette, parameters and explicit caller
 capacities before copying payloads. A process-unique, checked monotonic frame ID
@@ -570,13 +586,20 @@ records are coalesced into one summary when the failure categories change; a
 successful or empty frame resets that episode. Persistent failures do not log once
 per drawing record or once per repaint.
 
-Experimental limits per unified renderer are 32 MiB of charged buffer capacity,
+The unified renderer defaults to 64 MiB of shared charged buffer capacity,
 8,192 allocation charges, 4,096 drawing records per frame and eight outstanding
 completion callbacks. Buffer bytes and allocation counts conservatively charge two
 initialization copies, including after completion; these are admission accounting
 limits, not measured VRAM or a budget for the entire GPUI window. CPU payload
-capacities are supplied separately by the caller. Keep these limits adjustable
-until real consumers establish appropriate product budgets.
+capacities are supplied separately by the caller. A host sets the per-window limit
+with `Window::set_gpu_material_budget` before drawing; the window's two scenes
+retain it across clear and replay. Rivu applies `interface.gpu_material_budget_mb`
+when creating its GUI, and retains that value for Spectrogram sampling until restart.
+Spectrogram targets at most one eighth of that budget for one numerical payload
+including column intervals: two history generations, each charged for two copies,
+then consume at most half the shared limit. The remainder is headroom, not a hard
+reservation. Additional unfinished generations can still encounter ordinary
+per-upload admission pressure; existing uploaded tiles remain drawable.
 
 The GPU cache retains only weak CPU ownership. Clearing a dynamic slot releases
 its CPU content once existing snapshots finish; fixed scene records deliberately
@@ -687,8 +710,8 @@ not break adjacency. This conservative linear scan preserves individually resolv
 MSAA overlap and backend-specific fractional edge coverage without quadratic tests.
 
 This extraction is still a closed set of schemas, not arbitrary shader authoring
-or generated ABI tooling. Density/Spatial, all Spectrum styles and Fractal Beams/Flow
-have migrated; Spectrogram and Waveform retain their independent image-retirement paths.
+or generated ABI tooling. Density/Spatial, Spectrum, Fractal Beams/Flow and Spectrogram
+have migrated; Waveform retains its independent image-retirement path.
 
 ==== Unified field and path measurements
 
@@ -826,7 +849,7 @@ in link:25_gpu_rendering_benchmark.json[the benchmark record].
 
 === Remaining consumers and integrated delivery
 
-Migrate Spectrogram and Waveform with their distinct geometry and reuse patterns.
+Migrate Waveform with its distinct geometry and reuse patterns.
 Remove only intermediates and retirement paths made obsolete by the cutover.
 Retain algorithm state and unrelated artwork behavior.
 

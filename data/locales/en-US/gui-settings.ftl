@@ -70,7 +70,7 @@ settings-spectrum-bar-width-hint = 1–20; used with automatic bar count
 settings-spectrum-bar-count-hint = 1–512; 0 = automatic, using bar width and gap
 settings-spectrum-bar-gravity-hint = 0–500; 0 snaps after hold without smoothing; rise is immediate
 settings-spectrum-smoothing-hint = 0–1000; bypassed at gravity 0; rise is immediate
-settings-spectrogram-history-hint = 1–120; limited by panel width and analysis rate
+settings-spectrogram-history-hint = 1–60; limited by panel width and analysis rate
 settings-spectrogram-source-scale-hint = 0.4–1.4; relative to the tallest visible panel
 settings-spectrogram-frequency-rows-hint = 64–4096; with or without interpolation; adds no FFT detail
 settings-waveform-glow-hint = 0–2; 0 = off

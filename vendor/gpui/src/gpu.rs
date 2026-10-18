@@ -317,6 +317,8 @@ pub enum GpuContent {
         values: Box<[f32]>,
         /// Mapping belonging to this same publication.
         params: GpuFieldParams,
+        /// Optional independent x intervals, one per column, in placement coordinates.
+        intervals: Option<Box<[[f32; 2]]>>,
     },
     /// Immutable existing path snapshot; its tessellated coverage is preserved.
     Path {
@@ -432,6 +434,42 @@ impl GpuFrame {
                 height,
                 values: copy_slice(values)?,
                 params,
+                intervals: None,
+            },
+            palette,
+        )
+    }
+
+    /// Draw all numerical columns as instances, retaining gaps between intervals.
+    /// Intervals are relative to complete draw bounds. Width has a one-logical-pixel
+    /// minimum. Values at/below the mapping floor and nonfinite cells draw opaque
+    /// black independently of the palette; positive mapped values retain sample zero.
+    pub fn field_columns(
+        intervals: &[[f32; 2]],
+        height: u32,
+        values: &[f32],
+        palette: Arc<GpuPalette>,
+        params: GpuFieldParams,
+        limits: GpuLimits,
+    ) -> Result<Arc<Self>> {
+        let width = u32::try_from(intervals.len())?;
+        limits.palette(&palette)?;
+        limits.field(width, height, values.len())?;
+        params.mapping.validate()?;
+        for interval in intervals {
+            validate_range(*interval)?;
+            ensure!(
+                interval[0] <= interval[1],
+                "GPU column interval is reversed"
+            );
+        }
+        Self::new(
+            GpuContent::Field {
+                width,
+                height,
+                values: copy_slice(values)?,
+                params,
+                intervals: Some(copy_slice(intervals)?),
             },
             palette,
         )

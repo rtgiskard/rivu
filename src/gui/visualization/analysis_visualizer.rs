@@ -1020,6 +1020,7 @@ mod tests {
                 height,
                 values,
                 params,
+                ..
             } = first.content()
             else {
                 panic!("analysis must publish a numerical field");

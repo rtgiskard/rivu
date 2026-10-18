@@ -654,6 +654,9 @@ impl GuiApp {
     ) -> Self {
         let snapshots = Rc::new(snapshot::SnapshotSource::new(handle.clone()));
         let state = snapshots.read();
+        window
+            .set_gpu_material_budget(state.system.config.gpu_material_budget_bytes())
+            .expect("validated GPU material budget");
         appearance::theme::set_theme(state.system.config.ui_theme, cx);
         let localized_text = Rc::new(
             i18n.fixed_texts()

@@ -383,7 +383,6 @@ impl Presentation {
     /// Called by the shell's first paint, after every panel's prepaint. Keeping
     /// this hook outside panel render also retires images after panel removal.
     pub(super) fn finish_paint(&self, window: &mut Window, cx: &mut Context<Self>) {
-        self.visuals.release_retired(window);
         self.waveform
             .read(cx)
             .image_releaser()
@@ -415,7 +414,6 @@ impl Presentation {
         self.waveform.update(cx, |waveform, cx| {
             waveform.retain_panels(&[], cx);
         });
-        self.visuals.release_all_images(window);
         self.waveform
             .read(cx)
             .image_releaser()

@@ -6,18 +6,16 @@
 //! frames are max-pooled so narrow transients survive; Spectrum separately
 //! retains the latest frame. The available history expands until that dynamic
 //! limit; unavailable history is left blank, including long gaps in publication.
-//! Replaced images are explicitly removed from the window's atlas. History and
-//! its derived storage are released when no Spectrogram panel is visible.
-//! Range and axis changes remap cached levels even while paused; style changes
-//! redraw Spectrum in place. Unchanged buckets reuse their GPU image.
-//! Spectrogram image rows use half the active panel height, never fewer than
-//! the visible source frequency points, and remain capped by configuration.
+//! History and derived numerical publications are released when no Spectrogram
+//! panel is visible. Range and axis changes remap cached levels while paused;
+//! unchanged buckets reuse immutable GPU fields. Sampling rows follow panel height
+//! and visible frequency points, capped by configuration and the startup GPU budget.
 use crate::i18n::Localizer;
 
 use gpui::{
-    AnyElement, App, Bounds, GpuFrame, GpuLimits, GpuPalette, GpuPathParams, GpuRectangle,
-    GpuRectangleParams, GpuSource, PathBuilder, Pixels, Point, RenderImage, SharedString,
-    TextAlign, Window, canvas, div, fill, point, prelude::*, px, rgb, size,
+    AnyElement, App, Bounds, GpuFieldParams, GpuFrame, GpuLimits, GpuPalette, GpuPathParams,
+    GpuRectangle, GpuRectangleParams, GpuSource, GpuValueMapping, PathBuilder, Pixels, Point,
+    SharedString, TextAlign, Window, canvas, div, fill, point, prelude::*, px, rgb, size,
 };
 use std::{
     cell::{OnceCell, RefCell},
@@ -76,6 +74,7 @@ pub(super) struct PaletteLut {
     palette: VisualizationPalette,
     colors: [[u8; 3]; PALETTE_LUT_SIZE],
     spectrum_gpu_palette: OnceCell<Result<Arc<GpuPalette>, String>>,
+    spectrogram_gpu_palette: OnceCell<Result<Arc<GpuPalette>, String>>,
 }
 
 impl PaletteLut {
@@ -87,6 +86,7 @@ impl PaletteLut {
                 gradient(fraction, palette_stops(palette))
             }),
             spectrum_gpu_palette: OnceCell::new(),
+            spectrogram_gpu_palette: OnceCell::new(),
         }
     }
 
@@ -103,6 +103,18 @@ impl PaletteLut {
                 });
                 GpuPalette::new(&colors, SPECTRUM_GPU_PALETTE_SIZE)
                     .map_err(|error| format!("Cannot create spectrum GPU palette: {error}"))
+            })
+            .clone()
+    }
+
+    fn spectrogram_gpu_palette(&self) -> Result<Arc<GpuPalette>, String> {
+        self.spectrogram_gpu_palette
+            .get_or_init(|| {
+                let colors: [[f32; 4]; PALETTE_LUT_SIZE] = std::array::from_fn(|index| {
+                    let [r, g, b] = self.colors[index];
+                    [r, g, b, 255].map(|v| v as f32 / 255.0)
+                });
+                GpuPalette::new(&colors, PALETTE_LUT_SIZE).map_err(|error| error.to_string())
             })
             .clone()
     }
@@ -131,13 +143,22 @@ pub(super) fn active_palette_lut(palette: VisualizationPalette) -> Rc<PaletteLut
     })
 }
 
+const SPECTROGRAM_TILE_COLUMNS: usize = 32;
+type SpectrogramTileKey = [Option<(u64, Duration, Duration)>; SPECTROGRAM_TILE_COLUMNS];
+struct SpectrogramTile {
+    key: SpectrogramTileKey,
+    start: Duration,
+    end: Duration,
+    publication: Arc<GpuFrame>,
+}
+
 #[derive(Default)]
 struct Column {
     levels: Vec<f32>,
     sample_time: Option<Duration>,
     bucket_start: Option<Duration>,
     interval_start: Duration,
-    image: Option<Arc<RenderImage>>,
+    revision: u64,
     generation: u64,
     source_generation: Option<u64>,
 }
@@ -153,7 +174,8 @@ fn history_fraction(time: Duration, latest: Duration, history: Duration) -> f32 
     if history.is_zero() {
         return 1.0;
     }
-    (1.0 - latest.saturating_sub(time).as_secs_f32() / history.as_secs_f32()).clamp(0.0, 1.0)
+    // Tiles can straddle the visible window; clipping must not stretch their gaps.
+    (1.0 + (time.as_secs_f64() - latest.as_secs_f64()) / history.as_secs_f64()) as f32
 }
 
 fn history_column_count(history_seconds: u32, analysis_fps: u32) -> usize {
@@ -175,6 +197,29 @@ fn spectrogram_source_height(
     pixel_rows
         .max(source_rows.max(1))
         .min(usize::try_from(max_rows.max(1)).unwrap_or(usize::MAX))
+}
+
+#[cfg(test)]
+mod sampling_budget_tests {
+    use super::*;
+    #[test]
+    fn maximum_history_reduces_rows_without_changing_time_resolution() {
+        assert_eq!(history_column_count(60, 60), 3600);
+        assert_eq!(spectrogram_budget_rows(3600, 64 * 1024 * 1024), 580);
+        assert_eq!(spectrogram_budget_rows(3600, 16 * 1024 * 1024), 143);
+        assert!(spectrogram_budget_rows(400, 64 * 1024 * 1024) >= 4096);
+    }
+}
+
+// Half the shared budget remains available for other content and placements.
+// The other half accommodates two complete history generations, each charged
+// for both its immutable buffer and initialization copy. This is a sampling
+// target, not a reservation or a guarantee for arbitrary pending updates.
+fn spectrogram_budget_rows(columns: usize, budget_bytes: u64) -> usize {
+    let per_column = budget_bytes / 8 / columns.max(1) as u64;
+    usize::try_from(per_column.saturating_sub(8) / 4)
+        .unwrap_or(usize::MAX)
+        .max(1)
 }
 
 fn visual_canvas_has_room(size: gpui::Size<Pixels>) -> bool {
@@ -241,7 +286,10 @@ struct VisualData {
     spectrum_bins: Vec<Range<usize>>,
     heat_samples: Vec<HeatSample>,
     heat_sample_generation: u64,
-    spectrogram_image_height: usize,
+    spectrogram_sample_height: usize,
+    material_budget_bytes: Option<u64>,
+    spectrogram_tiles: Vec<Option<SpectrogramTile>>,
+    tile_values: Vec<f32>,
     columns: Vec<Column>,
     latest_levels: Vec<f32>,
     peaks: Vec<f32>,
@@ -292,8 +340,6 @@ struct VisualData {
     len: usize,
     latest: Option<usize>,
     latest_sample_time: Option<Duration>,
-    retired: Vec<Arc<RenderImage>>,
-    pending_images: Vec<Arc<RenderImage>>,
     error: Option<String>,
 }
 
@@ -321,7 +367,10 @@ impl Visuals {
                 heat_samples: Vec::new(),
                 spectrogram_panel_sizes: HashMap::new(),
                 spectrogram_panel_height: 0,
-                spectrogram_image_height: 0,
+                spectrogram_sample_height: 0,
+                material_budget_bytes: None,
+                spectrogram_tiles: Vec::new(),
+                tile_values: Vec::new(),
                 columns: Vec::new(),
                 latest_levels: Vec::new(),
                 peaks: Vec::new(),
@@ -373,8 +422,6 @@ impl Visuals {
                 len: 0,
                 latest: None,
                 latest_sample_time: None,
-                retired: Vec::new(),
-                pending_images: Vec::new(),
                 error: None,
             })),
         }
@@ -417,6 +464,8 @@ impl Visuals {
 
     pub(in crate::gui) fn configure(&mut self, config: &Config) -> bool {
         let mut data = self.data.borrow_mut();
+        data.material_budget_bytes
+            .get_or_insert(config.gpu_material_budget_bytes());
         let spectrum_db_range = config.spectrum_db_range();
         let spectrogram_db_range = config.spectrogram_db_range();
         let configured_history_columns =
@@ -509,7 +558,7 @@ impl Visuals {
             data.last_update = None;
             data.envelope_initialized = false;
         } else if heat_changed {
-            data.invalidate_images();
+            data.invalidate_spectrogram();
         }
         let levels = if data.spectrum_peaks {
             &data.peaks
@@ -544,7 +593,7 @@ impl Visuals {
         let sample_rate_changed = data.sample_rate != frame.sample_rate;
         data.sample_rate = frame.sample_rate;
         if sample_rate_changed || data.frequencies != frame.frequencies_hz {
-            data.invalidate_images();
+            data.invalidate_spectrogram();
             data.stream_generation = data.stream_generation.wrapping_add(1);
             data.latest_levels.clear();
             data.envelope_initialized = false;
@@ -685,50 +734,6 @@ impl Visuals {
     // history once here, never while individual panels are painting it.
     pub(in crate::gui) fn finish_prepaint(&self) -> bool {
         self.data.borrow_mut().finish_prepaint()
-    }
-
-    pub(in crate::gui) fn release_retired(&self, window: &mut Window) {
-        let mut data = self.data.borrow_mut();
-        data.release_images(|image| {
-            window
-                .drop_image(image)
-                .map_err(|error| format!("Cannot release visualization image: {error}"))
-        });
-        if !data.retired.is_empty() {
-            let visuals = self.clone();
-            // Retirement needs a frame boundary, not another content redraw.
-            window.on_next_frame(move |window, _| {
-                visuals.data.borrow_mut().release_images(|image| {
-                    window
-                        .drop_image(image)
-                        .map_err(|error| format!("Cannot release visualization image: {error}"))
-                });
-            });
-        }
-    }
-
-    pub(in crate::gui) fn release_all_images(&self, window: &mut Window) {
-        let mut data = self.data.borrow_mut();
-        let mut failure = None;
-        let VisualData {
-            columns,
-            retired,
-            pending_images,
-            ..
-        } = &mut *data;
-        for image in columns
-            .iter_mut()
-            .filter_map(|column| column.image.take())
-            .chain(retired.drain(..))
-            .chain(pending_images.drain(..))
-        {
-            if let Err(error) = window.drop_image(image) {
-                failure = Some(format!("Cannot release visualization image: {error}"));
-            }
-        }
-        if let Some(error) = failure {
-            data.report_error(error);
-        }
     }
 
     fn view(
@@ -973,8 +978,8 @@ impl VisualData {
         self.columns[index].generation = self.stream_generation;
         self.columns[index].source_generation = self.source_generation;
         self.columns[index].sample_time = Some(time);
-        if changed && let Some(image) = self.columns[index].image.take() {
-            self.retired.push(image);
+        if changed {
+            self.columns[index].revision = self.columns[index].revision.wrapping_add(1);
         }
         self.latest = Some(index);
     }
@@ -1001,12 +1006,8 @@ impl VisualData {
             let index = (oldest + skip + offset) % old_capacity;
             *column = std::mem::take(&mut old_columns[index]);
         }
-        for mut column in old_columns {
-            if let Some(image) = column.image.take() {
-                self.retired.push(image);
-            }
-        }
         self.columns = columns;
+        self.spectrogram_tiles.clear();
         self.history_columns = new_columns;
         self.len = keep;
         self.head = keep % new_columns;
@@ -1022,19 +1023,15 @@ impl VisualData {
         self.spectrum_geometry.clear();
         self.heat_samples.clear();
         self.heat_sample_generation = 0;
-        self.spectrogram_image_height = 0;
-        self.invalidate_images();
+        self.spectrogram_sample_height = 0;
+        self.invalidate_spectrogram();
     }
-    fn invalidate_images(&mut self) {
-        for column in &mut self.columns {
-            if let Some(image) = column.image.take() {
-                self.retired.push(image);
-            }
-        }
+    fn invalidate_spectrogram(&mut self) {
+        self.spectrogram_tiles.clear();
     }
 
     fn clear_history(&mut self) {
-        self.invalidate_images();
+        self.invalidate_spectrogram();
         for column in &mut self.columns {
             column.levels.clear();
             column.sample_time = None;
@@ -1044,7 +1041,7 @@ impl VisualData {
         self.len = 0;
         self.latest = None;
         self.latest_sample_time = None;
-        self.spectrogram_image_height = 0;
+        self.spectrogram_sample_height = 0;
         self.heat_samples.clear();
         self.heat_sample_generation = 0;
     }
@@ -1055,6 +1052,8 @@ impl VisualData {
         self.history_columns = 0;
         self.spectrogram_panel_height = 0;
         self.heat_samples = Vec::new();
+        self.spectrogram_tiles = Vec::new();
+        self.tile_values = Vec::new();
     }
 
     fn history_window(&self, latest: Duration) -> Duration {
@@ -1110,17 +1109,6 @@ impl VisualData {
             eprintln!("rivu visualization: {error}");
             self.error = Some(error);
         }
-    }
-
-    fn release_images(&mut self, mut release: impl FnMut(Arc<RenderImage>) -> Result<(), String>) {
-        // Called once per window frame, even with no analysis panels. Pending
-        // uncached images survive one complete intervening frame in the atlas.
-        while let Some(image) = self.retired.pop() {
-            if let Err(error) = release(image) {
-                self.report_error(error);
-            }
-        }
-        self.retired.append(&mut self.pending_images);
     }
 
     fn spectrum_render_range(&self) -> Option<(usize, usize, f32, f32)> {
@@ -1554,22 +1542,6 @@ impl VisualData {
         Ok(())
     }
 
-    fn build_spectrogram_image(&self, levels: &[f32], height: u32) -> Arc<RenderImage> {
-        let mut pixels = image::RgbaImage::new(1, height);
-        for (row, sample) in self.heat_samples.iter().enumerate() {
-            let level = sample_heat_level_at(levels, *sample, self.spectrogram_interpolate);
-            let intensity =
-                ((level + self.spectrogram_db_range) / self.spectrogram_db_range).clamp(0.0, 1.0);
-            let [red, green, blue] = if intensity > 0.0 {
-                self.palette_lut.lookup_rgb(intensity)
-            } else {
-                [0, 0, 0]
-            };
-            pixels.put_pixel(0, row as u32, image::Rgba([blue, green, red, 255]));
-        }
-        Arc::new(RenderImage::new([image::Frame::new(pixels)]))
-    }
-
     fn paint_spectrogram(
         &mut self,
         bounds: Bounds<Pixels>,
@@ -1601,67 +1573,122 @@ impl VisualData {
             source_rows,
             self.spectrogram_interpolation_points,
             self.spectrogram_sampling_points_scale,
-        );
-        let height_u32 = u32::try_from(height)
-            .map_err(|_| "Spectrogram image height exceeds GPU image dimensions".to_string())?;
+        )
+        .min(spectrogram_budget_rows(
+            self.history_columns,
+            self.material_budget_bytes
+                .expect("configured visualization budget"),
+        ));
         if !self.visualization_cache
-            || self.spectrogram_image_height != height
+            || self.spectrogram_sample_height != height
             || self.heat_sample_generation != self.stream_generation
         {
-            self.invalidate_images();
-            self.spectrogram_image_height = height;
+            self.invalidate_spectrogram();
+            self.spectrogram_sample_height = height;
             self.heat_samples = build_heat_samples(&self.frequencies, low, high, height);
             self.heat_sample_generation = self.stream_generation;
         }
-        for index in 0..self.history_columns {
-            let Some(sample_time) = self.columns[index].sample_time else {
-                continue;
-            };
-            if sample_time < start_time || sample_time > latest_time {
+        let tiles = self.history_columns.div_ceil(SPECTROGRAM_TILE_COLUMNS);
+        self.spectrogram_tiles.resize_with(tiles, || None);
+        for tile_index in 0..tiles {
+            let first = tile_index * SPECTROGRAM_TILE_COLUMNS;
+            let last = (first + SPECTROGRAM_TILE_COLUMNS).min(self.history_columns);
+            let mut key: SpectrogramTileKey = [None; SPECTROGRAM_TILE_COLUMNS];
+            let mut start = Duration::MAX;
+            let mut end = Duration::ZERO;
+            for index in first..last {
+                let Some(time) = self.columns[index].sample_time else {
+                    continue;
+                };
+                let column = &self.columns[index];
+                if column.generation != self.stream_generation {
+                    continue;
+                }
+                key[index - first] = Some((column.revision, column.interval_start, time));
+                start = start.min(column.interval_start);
+                end = end.max(time);
+            }
+            if start == Duration::MAX {
                 continue;
             }
-            if self.columns[index].generation != self.stream_generation
-                && self.columns[index].image.is_none()
+            if self.spectrogram_tiles[tile_index]
+                .as_ref()
+                .is_none_or(|tile| tile.key != key)
             {
+                let count = key.iter().flatten().count();
+                let span = end.saturating_sub(start).as_secs_f64().max(1e-9);
+                let mut intervals = [[0.0; 2]; SPECTROGRAM_TILE_COLUMNS];
+                self.tile_values.clear();
+                self.tile_values.resize(count * height, 0.0);
+                let mut offset = 0;
+                for (local, entry) in key.iter().enumerate() {
+                    let Some((_, left, right)) = entry else {
+                        continue;
+                    };
+                    intervals[offset] = [
+                        left.saturating_sub(start).as_secs_f64(),
+                        right.saturating_sub(start).as_secs_f64(),
+                    ]
+                    .map(|value| (value / span) as f32);
+                    sample_spectrogram_column(
+                        &self.columns[first + local].levels,
+                        &self.heat_samples,
+                        self.spectrogram_interpolate,
+                        &mut self.tile_values,
+                        count,
+                        offset,
+                    );
+                    offset += 1;
+                }
+                let publication = GpuFrame::field_columns(
+                    &intervals[..count],
+                    height as u32,
+                    &self.tile_values,
+                    self.palette_lut.spectrogram_gpu_palette()?,
+                    GpuFieldParams {
+                        mapping: GpuValueMapping::Linear {
+                            min: -self.spectrogram_db_range,
+                            max: 0.0,
+                        },
+                    },
+                    GpuLimits {
+                        max_field_width: SPECTROGRAM_TILE_COLUMNS as u32,
+                        max_field_height: height as u32,
+                        max_field_cells: SPECTROGRAM_TILE_COLUMNS * height,
+                        max_palette_colors: PALETTE_LUT_SIZE,
+                        ..Default::default()
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+                self.spectrogram_tiles[tile_index] = Some(SpectrogramTile {
+                    key,
+                    start,
+                    end,
+                    publication,
+                });
+            }
+            let tile = self.spectrogram_tiles[tile_index].as_ref().unwrap();
+            if tile.end < start_time || tile.start > latest_time {
                 continue;
             }
-            let image = if self.visualization_cache {
-                if self.columns[index].image.is_none() {
-                    let image =
-                        self.build_spectrogram_image(&self.columns[index].levels, height_u32);
-                    self.columns[index].image = Some(image);
-                }
-                self.columns[index].image.as_ref().map(Arc::clone)
-            } else {
-                Some(self.build_spectrogram_image(&self.columns[index].levels, height_u32))
-            };
-            let right = history_fraction(sample_time, latest_time, history);
-            let left = history_fraction(self.columns[index].interval_start, latest_time, history);
-            let width = (plot.size.width * (right - left)).max(px(1.0));
-            let column_bounds = Bounds::new(
+            let span = history.as_secs_f64();
+            let left = history_fraction(tile.start, latest_time, history);
+            let width = (tile.end.saturating_sub(tile.start).as_secs_f64() / span) as f32;
+            let bounds = Bounds::new(
                 point(plot.left() + plot.size.width * left, plot.top()),
-                size(width, plot.size.height),
+                size((plot.size.width * width).max(px(1.0)), plot.size.height),
             );
-            if let Some(image) = image {
-                let result = window.paint_image(
-                    column_bounds,
-                    column_bounds,
-                    px(0.0).into(),
-                    Arc::clone(&image),
-                    0,
-                    false,
-                );
-                if !self.visualization_cache {
-                    self.pending_images.push(image);
-                }
-                result
-                    .map_err(|error| format!("Cannot upload/paint spectrogram image: {error}"))?;
-            }
+            window
+                .with_content_mask(Some(gpui::ContentMask { bounds: plot }), |window| {
+                    window.paint_gpu(bounds, GpuSource::Fixed(tile.publication.clone()))
+                })
+                .map_err(|error| format!("Cannot paint spectrogram tile: {error}"))?;
         }
         if !self.visualization_cache {
             self.heat_samples.clear();
             self.heat_sample_generation = 0;
-            self.spectrogram_image_height = 0;
+            self.spectrogram_sample_height = 0;
+            self.spectrogram_tiles.clear();
         }
         if self.spectrogram_show_labels {
             paint_aligned_label(
@@ -1897,6 +1924,19 @@ fn sample_heat_level(
         return f32::NEG_INFINITY;
     };
     sample_heat_level_at(levels, sample, interpolate)
+}
+
+fn sample_spectrogram_column(
+    levels: &[f32],
+    samples: &[HeatSample],
+    interpolate: bool,
+    values: &mut [f32],
+    stride: usize,
+    column: usize,
+) {
+    for (row, sample) in samples.iter().enumerate() {
+        values[row * stride + column] = sample_heat_level_at(levels, *sample, interpolate);
+    }
 }
 
 fn sample_heat_level_at(levels: &[f32], sample: HeatSample, interpolate: bool) -> f32 {
@@ -2614,14 +2654,14 @@ mod tests {
             visuals.retain_spectrogram_panels(&[1]);
             visuals.configure(&Config {
                 analysis_fps: fps,
-                spectrogram_history_seconds: 120,
+                spectrogram_history_seconds: 60,
                 ..Config::default()
             });
             for step in 1..=240 * fps {
                 visuals.update(&frame(step as f64 / fps as f64, -30.0));
             }
             let data = visuals.data.borrow();
-            assert_eq!(data.len, history_column_count(120, fps));
+            assert_eq!(data.len, history_column_count(60, fps));
             let oldest = data
                 .columns
                 .iter()
@@ -2629,10 +2669,10 @@ mod tests {
                 .min()
                 .unwrap();
             let newest = data.latest_sample_time.unwrap();
-            assert!(newest - oldest >= Duration::from_secs(119));
-            assert!(newest - oldest <= Duration::from_secs(120));
+            assert!(newest - oldest >= Duration::from_secs(59));
+            assert!(newest - oldest <= Duration::from_secs(60));
             assert_eq!(
-                history_fraction(newest, newest, Duration::from_secs(120)),
+                history_fraction(newest, newest, Duration::from_secs(60)),
                 1.0
             );
         }
@@ -2661,6 +2701,11 @@ mod tests {
         assert_eq!(visuals.data.borrow().len, 1);
         visuals.update(&frame(1.2, -30.0));
         assert_eq!(visuals.data.borrow().len, 2);
+        {
+            let mut data = visuals.data.borrow_mut();
+            data.spectrogram_tiles.resize_with(3, || None);
+            data.tile_values.resize(1024, 1.0);
+        }
 
         visuals.retain_spectrogram_panels(&[]);
         for cache in [false, true] {
@@ -2671,6 +2716,8 @@ mod tests {
             let data = visuals.data.borrow();
             assert_eq!(data.columns.capacity(), 0);
             assert_eq!(data.heat_samples.capacity(), 0);
+            assert_eq!(data.spectrogram_tiles.capacity(), 0);
+            assert_eq!(data.tile_values.capacity(), 0);
             assert_eq!(data.history_columns, 0);
             assert_eq!(data.len, 0);
             assert_eq!(data.latest_levels, vec![-40.0; 4]);
@@ -2812,39 +2859,12 @@ mod tests {
     }
 
     #[test]
-    fn removed_spectrogram_images_release_without_panel_repaint_and_pending_waits_a_frame() {
-        let mut visuals = configured_visuals();
-        visuals.update(&frame(1.0, -30.0));
-        let image = Arc::new(RenderImage::new([image::Frame::new(
-            image::RgbaImage::new(1, 1),
-        )]));
-        let cached = Arc::downgrade(&image);
-        visuals.data.borrow_mut().columns[0].image = Some(image);
-        visuals.retain_spectrogram_panels(&[]);
-        assert!(cached.upgrade().is_some());
-        visuals.data.borrow_mut().release_images(|_| Ok(()));
-        assert!(cached.upgrade().is_none());
-        let image = Arc::new(RenderImage::new([image::Frame::new(
-            image::RgbaImage::new(1, 1),
-        )]));
-        let pending = Arc::downgrade(&image);
-        visuals.data.borrow_mut().pending_images.push(image);
-        visuals
-            .data
-            .borrow_mut()
-            .release_images(|_| panic!("released before complete frame"));
-        assert!(pending.upgrade().is_some());
-        visuals.data.borrow_mut().release_images(|_| Ok(()));
-        assert!(pending.upgrade().is_none());
-    }
-
-    #[test]
     fn disabled_views_drop_history_and_rebuild_only_after_enabling() {
         for config in [
             Config::default(),
             Config {
                 analysis_fps: 5,
-                spectrogram_history_seconds: 120,
+                spectrogram_history_seconds: 60,
                 ..Config::default()
             },
         ] {
@@ -2879,36 +2899,6 @@ mod tests {
     }
 
     #[test]
-    fn disabling_retires_cached_images_without_shortening_pending_lifetime() {
-        let mut visuals = configured_visuals();
-        visuals.update(&frame(1.0, -30.0));
-        let image = Arc::new(RenderImage::new([image::Frame::new(
-            image::RgbaImage::new(1, 1),
-        )]));
-        let cached = Arc::downgrade(&image);
-        visuals.data.borrow_mut().columns[0].image = Some(image);
-        let image = Arc::new(RenderImage::new([image::Frame::new(
-            image::RgbaImage::new(1, 1),
-        )]));
-        let pending = Arc::downgrade(&image);
-        visuals.data.borrow_mut().pending_images.push(image);
-        visuals.set_enabled(false);
-        visuals.set_enabled(false);
-        assert!(cached.upgrade().is_some());
-        assert!(pending.upgrade().is_some());
-        let mut released = 0;
-        visuals.data.borrow_mut().release_images(|_| {
-            released += 1;
-            Ok(())
-        });
-        assert_eq!(released, 1);
-        assert!(cached.upgrade().is_none());
-        assert!(pending.upgrade().is_some());
-        visuals.data.borrow_mut().release_images(|_| Ok(()));
-        assert!(pending.upgrade().is_none());
-    }
-
-    #[test]
     fn history_window_grows_with_continuous_audio_until_limit() {
         let mut visuals = configured_visuals();
         visuals.update(&frame(1.0, -30.0));
@@ -2937,7 +2927,7 @@ mod tests {
         let mut visuals = Visuals::new();
         visuals.retain_spectrogram_panels(&[1]);
         visuals.configure(&Config {
-            spectrogram_history_seconds: 120,
+            spectrogram_history_seconds: 60,
             spectrum_peaks: false,
             ..Config::default()
         });
@@ -2957,8 +2947,8 @@ mod tests {
             (history_fraction(
                 Duration::ZERO,
                 Duration::from_secs(1),
-                Duration::from_secs(120)
-            ) - 119.0 / 120.0)
+                Duration::from_secs(60)
+            ) - 59.0 / 60.0)
                 .abs()
                 < 0.00001
         );
@@ -2991,10 +2981,6 @@ mod tests {
         let mut visuals = configured_visuals();
         let mut config = Config::default();
         visuals.update(&frame(1.0, -30.0));
-        let image = Arc::new(RenderImage::new([image::Frame::new(
-            image::RgbaImage::new(1, 1),
-        )]));
-        visuals.data.borrow_mut().columns[0].image = Some(Arc::clone(&image));
         config.spectrum_db_range = Some(40.0);
         visuals.configure(&config);
         {
@@ -3002,12 +2988,10 @@ mod tests {
             assert_eq!(data.visible_range().unwrap().2, 20.0);
             assert_eq!(data.spectrum_range().unwrap().2, 20.0);
             assert_eq!(data.spectrogram_db_range, 70.0);
-            assert!(Arc::ptr_eq(data.columns[0].image.as_ref().unwrap(), &image));
         }
         config.spectrogram_db_range = Some(100.0);
         visuals.configure(&config);
         let data = visuals.data.borrow();
-        assert!(data.columns[0].image.is_none());
         assert_eq!(data.columns[0].levels, vec![-30.0; 4]);
         assert_eq!(data.len, 1);
     }
@@ -3025,9 +3009,7 @@ mod tests {
                 visuals.retain_spectrogram_panels(&[1]);
                 visuals.configure(&config);
                 visuals.update(&frame(1.0, -30.0));
-                let image = visuals.data.borrow().build_spectrogram_image(&[-30.0], 1);
                 let revision = visuals.data.borrow().spectrum_geometry_revision;
-                visuals.data.borrow_mut().columns[0].image = Some(Arc::clone(&image));
 
                 config.visualization_db_range = 100.0;
                 visuals.configure(&config);
@@ -3037,11 +3019,6 @@ mod tests {
                     data.spectrogram_db_range,
                     spectrogram_override.unwrap_or(100.0)
                 );
-                if spectrogram_override.is_some() {
-                    assert!(Arc::ptr_eq(data.columns[0].image.as_ref().unwrap(), &image));
-                } else {
-                    assert!(data.columns[0].image.is_none());
-                }
                 assert_eq!(data.len, 1);
                 assert_eq!(data.columns[0].levels, vec![-30.0; 4]);
                 assert_eq!(data.latest_levels, vec![-30.0; 4]);
@@ -3055,15 +3032,12 @@ mod tests {
     fn radial_range_override_does_not_invalidate_spectrum_or_spectrogram() {
         let mut visuals = configured_visuals();
         visuals.update(&frame(1.0, -30.0));
-        let image = visuals.data.borrow().build_spectrogram_image(&[-30.0], 1);
         let revision = visuals.data.borrow().spectrum_geometry_revision;
-        visuals.data.borrow_mut().columns[0].image = Some(Arc::clone(&image));
         visuals.configure(&Config {
             audio_visualizer_db_range: Some(40.0),
             ..Config::default()
         });
         let data = visuals.data.borrow();
-        assert!(Arc::ptr_eq(data.columns[0].image.as_ref().unwrap(), &image));
         assert_eq!(data.spectrum_geometry_revision, revision);
         assert_eq!(data.latest_levels, vec![-30.0; 4]);
         assert_eq!(data.columns[0].levels, vec![-30.0; 4]);
@@ -3248,6 +3222,48 @@ mod tests {
                 Duration::from_secs(5),
             ]
         );
+    }
+
+    #[test]
+    fn spectrogram_tile_sampling_preserves_rows_columns_and_missing_values() {
+        let samples = [
+            HeatSample {
+                left: 0,
+                right: 0,
+                fraction: 0.0,
+            },
+            HeatSample {
+                left: 0,
+                right: 1,
+                fraction: 0.25,
+            },
+            HeatSample {
+                left: 1,
+                right: 1,
+                fraction: 0.0,
+            },
+        ];
+        for (interpolate, expected) in [
+            (true, [-80.0, -10.0, -65.0, -7.5, -20.0, 0.0]),
+            (false, [-80.0, -10.0, -80.0, -10.0, -20.0, 0.0]),
+        ] {
+            let mut values = [0.0; 6];
+            sample_spectrogram_column(&[-80.0, -20.0], &samples, interpolate, &mut values, 2, 0);
+            sample_spectrogram_column(&[-10.0, 0.0], &samples, interpolate, &mut values, 2, 1);
+            assert_eq!(values, expected);
+            sample_spectrogram_column(&[], &samples, interpolate, &mut values, 2, 0);
+            assert_eq!(
+                values,
+                [
+                    f32::NEG_INFINITY,
+                    -10.0,
+                    f32::NEG_INFINITY,
+                    expected[3],
+                    f32::NEG_INFINITY,
+                    0.0
+                ]
+            );
+        }
     }
 
     #[test]

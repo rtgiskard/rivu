@@ -285,6 +285,8 @@ pub struct Config {
     pub page_size: u32,
     /// Retained decoded real-cover frames per cover, in MiB.
     pub artwork_decode_budget_mb: u32,
+    /// Shared GPU material-buffer admission budget, applied at GUI startup.
+    pub gpu_material_budget_mb: u32,
     pub library_columns: LibraryColumns,
     /// Startup presentation language: auto, en-US, or zh-CN.
     pub ui_language: String,
@@ -412,6 +414,7 @@ config_patch! {
     log_retention_weeks: u32,
     page_size: u32,
     artwork_decode_budget_mb: u32,
+    gpu_material_budget_mb: u32,
     library_columns: LibraryColumns,
     ui_language: String,
     ui_theme: Theme,
@@ -497,6 +500,7 @@ impl Default for Config {
             log_retention_weeks: 4,
             page_size: DEFAULT_PAGE_SIZE,
             artwork_decode_budget_mb: 64,
+            gpu_material_budget_mb: 64,
             library_columns: LibraryColumns::default(),
             ui_language: "auto".to_owned(),
             ui_theme: Theme::default(),
@@ -606,6 +610,10 @@ impl Config {
         Ok(config)
     }
 
+    pub(crate) fn gpu_material_budget_bytes(&self) -> u64 {
+        u64::from(self.gpu_material_budget_mb) * 1024 * 1024
+    }
+
     pub fn validate(&self) -> Result<()> {
         let mut roots = self
             .library_roots
@@ -660,6 +668,10 @@ impl Config {
             matches!(self.media_read_buffer_mb, 1 | 2 | 4 | 8 | 16),
             "playback.media_read_buffer_mb must be one of 1, 2, 4, 8, or 16 MiB; got {}",
             self.media_read_buffer_mb
+        );
+        ensure!(
+            (16..=1024).contains(&self.gpu_material_budget_mb),
+            "interface.gpu_material_budget_mb must be between 16 and 1024 MiB"
         );
         ensure!(
             (1..=1024).contains(&self.artwork_decode_budget_mb),
@@ -797,8 +809,8 @@ impl Config {
             "visualizations.spectrogram.sampling_points_scale must be between 0.4 and 1.4"
         );
         ensure!(
-            (1..=120).contains(&self.spectrogram_history_seconds),
-            "visualizations.spectrogram.history_seconds must be between 1 and 120 seconds"
+            (1..=60).contains(&self.spectrogram_history_seconds),
+            "visualizations.spectrogram.history_seconds must be between 1 and 60 seconds"
         );
         ensure!(
             (64..=4096).contains(&self.spectrogram_interpolation_points),
@@ -1504,6 +1516,7 @@ mod tests {
             album_artwork_direction: AlbumArtworkDirection::Counterclockwise,
             album_artwork_fps: 120,
             artwork_decode_budget_mb: 128,
+            gpu_material_budget_mb: 64,
             visualization_cache: false,
             page_size: 32,
         };
@@ -1803,7 +1816,7 @@ mod tests {
                 spectrum_bar_hold_ms: if high { 2000 } else { 0 },
                 spectrum_bar_gravity: if high { 500.0 } else { 0.0 },
                 spectrum_smoothing_ms: if high { 1000 } else { 0 },
-                spectrogram_history_seconds: if high { 120 } else { 1 },
+                spectrogram_history_seconds: if high { 60 } else { 1 },
                 spectrogram_interpolation_points: if high { 4096 } else { 64 },
                 waveform_glow: if high { 2.0 } else { 0.0 },
                 waveform_rms_gain: if high { 3.0 } else { 0.0 },
@@ -1819,6 +1832,39 @@ mod tests {
             config.save(&path).unwrap();
             assert_eq!(Config::load(&path).unwrap(), config);
         }
+    }
+
+    #[test]
+    fn gpu_budget_and_history_limits_validate_and_round_trip() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        for budget in [16, 64, 1024] {
+            let config = Config {
+                gpu_material_budget_mb: budget,
+                spectrogram_history_seconds: 60,
+                ..Config::default()
+            };
+            config.save(&path).unwrap();
+            assert_eq!(Config::load(&path).unwrap(), config);
+        }
+        for budget in [0, 15, 1025, u32::MAX] {
+            assert!(
+                Config {
+                    gpu_material_budget_mb: budget,
+                    ..Config::default()
+                }
+                .validate()
+                .is_err()
+            );
+        }
+        assert!(
+            Config {
+                spectrogram_history_seconds: 61,
+                ..Config::default()
+            }
+            .validate()
+            .is_err()
+        );
     }
 
     #[test]

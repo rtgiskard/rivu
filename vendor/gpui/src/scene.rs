@@ -48,6 +48,9 @@ pub struct Scene {
     pub quads: Vec<Quad>,
     pub paths: Vec<Path<ScaledPixels>>,
     pub gpu_draws: Vec<GpuDraw>,
+    /// Shared charged material-buffer budget; None preserves the renderer setting.
+    /// Preserved when scene contents are cleared or replayed.
+    pub gpu_material_budget: Option<u64>,
     pub underlines: Vec<Underline>,
     pub monochrome_sprites: Vec<MonochromeSprite>,
     pub subpixel_sprites: Vec<SubpixelSprite>,

@@ -97,6 +97,218 @@ fn pixel(image: &image::RgbaImage, x: u32, y: u32, expected: [u8; 4]) {
 }
 
 #[test]
+fn numerical_column_batches_keep_7200_columns_in_two_panels() -> anyhow::Result<()> {
+    let mut renderer = WgpuHeadlessRenderer::new()?;
+    let palette = GpuPalette::new(&[[1.0, 0.0, 0.0, 1.0]], 1)?;
+    let intervals: [[f32; 2]; 32] =
+        std::array::from_fn(|i| [i as f32 / 32.0, (i + 1) as f32 / 32.0]);
+    let limits = GpuLimits {
+        max_field_width: 32,
+        max_field_height: 1,
+        max_field_cells: 32,
+        max_palette_colors: 1,
+        ..Default::default()
+    };
+    let mut scene = Scene::default();
+    scene.insert_primitive(quad(bounds(0.0, 0.0, 7200.0, 8.0), gpui::black()));
+    for offset in (0..7200).step_by(32) {
+        let publication = GpuFrame::field_columns(
+            &intervals,
+            1,
+            &[1.0; 32],
+            palette.clone(),
+            GpuFieldParams {
+                mapping: GpuValueMapping::Linear { min: 0.0, max: 1.0 },
+            },
+            limits,
+        )?;
+        for y in [0.0, 4.0] {
+            scene.insert_primitive(draw(
+                GpuSource::Fixed(publication.clone()),
+                bounds(offset as f32, y, 32.0, 4.0),
+            ));
+        }
+    }
+    scene.finish();
+    let image = renderer.render_scene_to_image(&scene, size(7200, 8))?;
+    for y in [1, 5] {
+        for x in [0, 31, 32, 2048, 4095, 4096, 7199] {
+            pixel(&image, x, y, RED);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn numerical_history_high_rows_fit_shared_budget_and_reuse_between_panels() -> anyhow::Result<()> {
+    let mut renderer = WgpuHeadlessRenderer::new()?;
+    let palette = GpuPalette::new(&[[1.0, 0.0, 0.0, 1.0]], 1)?;
+    let mut scene = Scene::default();
+    scene.gpu_material_budget = Some(64 * 1024 * 1024);
+    let mut old_frames = Vec::new();
+    for offset in (0..3600).step_by(32) {
+        let columns = (3600 - offset).min(32);
+        let intervals: Vec<_> = (0..columns)
+            .map(|i| [i as f32 / columns as f32, (i + 1) as f32 / columns as f32])
+            .collect();
+        let publication = GpuFrame::field_columns(
+            &intervals,
+            580,
+            &vec![1.0; columns * 580],
+            palette.clone(),
+            GpuFieldParams {
+                mapping: GpuValueMapping::Linear { min: 0.0, max: 1.0 },
+            },
+            GpuLimits {
+                max_field_width: 32,
+                max_field_height: 580,
+                max_field_cells: 32 * 580,
+                max_palette_colors: 1,
+                ..Default::default()
+            },
+        )?;
+        for y in [0.0, 4.0] {
+            scene.insert_primitive(draw(
+                GpuSource::Fixed(publication.clone()),
+                bounds(offset as f32, y, columns as f32, 4.0),
+            ));
+        }
+        old_frames.push(publication);
+    }
+    scene.finish();
+    let image = renderer.render_scene_to_image(&scene, size(3600, 8))?;
+    for y in [0, 3, 4, 7] {
+        for x in [0, 31, 32, 3583, 3584, 3599] {
+            pixel(&image, x, y, RED);
+        }
+    }
+    assert_eq!(renderer.core.resources.materials.stats().0, 113);
+    renderer.render_scene_to_image(&scene, size(3600, 8))?;
+    assert_eq!(renderer.core.resources.materials.stats().3, 113);
+    // Keep every old upload wanted while admitting a completely new history.
+    // Holding CPU Arcs alone would not prevent retirement of completed uploads.
+    scene.clear();
+    let blue = GpuPalette::new(&[[0.0, 0.0, 1.0, 1.0]], 1)?;
+    for (index, old) in old_frames.into_iter().enumerate() {
+        let gpui::GpuContent::Field {
+            width,
+            height,
+            values,
+            intervals: Some(intervals),
+            params,
+        } = old.content()
+        else {
+            unreachable!()
+        };
+        let new = GpuFrame::field_columns(
+            intervals,
+            *height,
+            values,
+            blue.clone(),
+            *params,
+            GpuLimits {
+                max_field_width: 32,
+                max_field_height: 580,
+                max_field_cells: 32 * 580,
+                max_palette_colors: 1,
+                ..Default::default()
+            },
+        )?;
+        let width = *width as f32;
+        scene.insert_primitive(draw(
+            GpuSource::Fixed(old),
+            bounds((index * 32) as f32, 0.0, width, 4.0),
+        ));
+        scene.insert_primitive(draw(
+            GpuSource::Fixed(new),
+            bounds((index * 32) as f32, 4.0, width, 4.0),
+        ));
+    }
+    scene.finish();
+    let image = renderer.render_scene_to_image(&scene, size(3600, 8))?;
+    for x in [0, 31, 32, 3583, 3584, 3599] {
+        pixel(&image, x, 1, RED);
+        pixel(&image, x, 5, BLUE);
+    }
+    assert_eq!(renderer.core.resources.materials.stats().0, 226);
+    Ok(())
+}
+
+#[test]
+fn column_upload_pressure_keeps_uploaded_history_drawable() -> anyhow::Result<()> {
+    let mut renderer = WgpuHeadlessRenderer::new()?;
+    let palette = GpuPalette::new(&[[1.0, 0.0, 0.0, 1.0]], 1)?;
+    let limits = GpuLimits {
+        max_field_width: 1,
+        max_field_height: 256,
+        max_field_cells: 256,
+        max_palette_colors: 1,
+        ..Default::default()
+    };
+    let params = GpuFieldParams {
+        mapping: GpuValueMapping::Linear { min: 0.0, max: 1.0 },
+    };
+    let old = GpuFrame::field_columns(&[[0.0, 1.0]], 1, &[1.0], palette.clone(), params, limits)?;
+    let new = GpuFrame::field_columns(&[[0.0, 1.0]], 256, &[1.0; 256], palette, params, limits)?;
+    let mut scene = Scene::default();
+    scene.gpu_material_budget = Some(1024);
+    scene.insert_primitive(draw(
+        GpuSource::Fixed(old.clone()),
+        bounds(0.0, 0.0, 4.0, 4.0),
+    ));
+    scene.finish();
+    renderer.render_scene_to_image(&scene, size(8, 4))?;
+    scene.clear();
+    scene.insert_primitive(quad(bounds(0.0, 0.0, 8.0, 4.0), gpui::blue()));
+    scene.insert_primitive(draw(GpuSource::Fixed(old), bounds(0.0, 0.0, 4.0, 4.0)));
+    scene.insert_primitive(draw(GpuSource::Fixed(new), bounds(4.0, 0.0, 4.0, 4.0)));
+    scene.finish();
+    let image = renderer.render_scene_to_image(&scene, size(8, 4))?;
+    pixel(&image, 1, 1, RED);
+    pixel(&image, 6, 1, BLUE);
+    Ok(())
+}
+
+#[test]
+fn numerical_columns_keep_gaps_floor_and_lowest_valid_palette_color() -> anyhow::Result<()> {
+    let mut renderer = WgpuHeadlessRenderer::new()?;
+    let palette = GpuPalette::new(
+        &[[65.0 / 255.0, 72.0 / 255.0, 110.0 / 255.0, 1.0], [1.0; 4]],
+        2,
+    )?;
+    let publication = GpuFrame::field_columns(
+        &[[0.0, 0.25], [0.5, 0.75], [0.8, 1.0]],
+        1,
+        &[-1.0, -0.999999, f32::NAN],
+        palette,
+        GpuFieldParams {
+            mapping: GpuValueMapping::Linear {
+                min: -1.0,
+                max: 0.0,
+            },
+        },
+        GpuLimits {
+            max_field_width: 3,
+            max_field_height: 1,
+            max_field_cells: 3,
+            max_palette_colors: 2,
+            ..Default::default()
+        },
+    )?;
+    let extent = bounds(0.0, 0.0, 32.0, 4.0);
+    let mut scene = Scene::default();
+    scene.insert_primitive(quad(extent, gpui::black()));
+    scene.insert_primitive(draw(GpuSource::Fixed(publication), extent));
+    scene.finish();
+    let image = renderer.render_scene_to_image(&scene, size(32, 4))?;
+    pixel(&image, 3, 2, BLACK);
+    pixel(&image, 12, 2, BLACK);
+    pixel(&image, 20, 2, [65, 72, 110, 255]);
+    pixel(&image, 29, 2, BLACK);
+    Ok(())
+}
+
+#[test]
 fn segment_admission_bounds_indices_and_preserves_publication_on_failure() {
     use gpui::{GpuSchema, GpuSegment, GpuStrokeLayer};
     const LIMITS: GpuLimits = GpuLimits {

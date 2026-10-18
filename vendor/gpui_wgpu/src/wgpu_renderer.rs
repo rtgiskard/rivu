@@ -1558,6 +1558,9 @@ impl WgpuRendererCore {
                 )
             })?;
         self.prepare_texture_bind_groups(scene);
+        self.resources
+            .materials
+            .configure_budget(scene.gpu_material_budget);
         let materials =
             self.resources
                 .materials

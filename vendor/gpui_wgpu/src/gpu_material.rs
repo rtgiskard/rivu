@@ -21,7 +21,45 @@ const PALETTE_STRIDE: u64 = 16;
 const PLACEMENT_SIZE: u64 = 112;
 // Charge an initialization staging copy even after upload completion.
 const INITIALIZATION_COPIES: u64 = 2;
-const MAX_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_BYTES: u64 = 64 * 1024 * 1024;
+
+fn material_bytes_admitted(used: u64, additional: u64, limit: u64) -> bool {
+    additional
+        .checked_mul(INITIALIZATION_COPIES)
+        .and_then(|charge| used.checked_add(charge))
+        .is_some_and(|total| total <= limit)
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+    #[test]
+    fn initialized_uploads_account_for_resident_generations_and_overflow() {
+        let full_resolution = 3600 * (4096 * 4 + 8);
+        assert!(!material_bytes_admitted(
+            0,
+            full_resolution,
+            64 * 1024 * 1024
+        ));
+        let sampled = 3600 * (580 * 4 + 8);
+        assert!(material_bytes_admitted(0, sampled, 16 * 1024 * 1024));
+        assert!(material_bytes_admitted(
+            sampled * 2,
+            sampled,
+            32 * 1024 * 1024
+        ));
+        assert!(material_bytes_admitted(
+            32 * 1024 * 1024,
+            sampled * 2,
+            64 * 1024 * 1024
+        ));
+        assert!(material_bytes_admitted(60, 2, 64));
+        assert!(!material_bytes_admitted(61, 2, 64));
+        assert!(!material_bytes_admitted(65, 0, 64));
+        assert!(!material_bytes_admitted(0, u64::MAX, u64::MAX));
+        assert!(!material_bytes_admitted(u64::MAX, 1, u64::MAX));
+    }
+}
 const MAX_ALLOCATIONS: usize = 8192;
 const MAX_DRAWS: usize = 4096;
 const MAX_PENDING_SUBMISSIONS: u64 = 8;
@@ -274,8 +312,14 @@ impl MaterialRenderer {
             pipeline_counts: [0; 4],
         }
     }
+    pub(crate) fn configure_budget(&mut self, bytes: Option<u64>) {
+        if let Some(bytes) = bytes {
+            self.byte_limit = bytes;
+        }
+    }
+
     fn can_allocate(&self, bytes: u64, count: usize) -> bool {
-        bytes <= self.byte_limit.saturating_sub(self.bytes) / INITIALIZATION_COPIES
+        material_bytes_admitted(self.bytes, bytes, self.byte_limit)
             && (self.uploads.len() + self.palettes.len() + self.placements.len() + count)
                 * INITIALIZATION_COPIES as usize
                 <= self.allocation_limit
@@ -500,7 +544,11 @@ impl MaterialRenderer {
             GpuContent::Rectangles { rectangles, .. } => {
                 (rectangles.len() as u64).checked_mul(RECTANGLE_STRIDE)
             }
-            GpuContent::Field { values, .. } => (values.len() as u64).checked_mul(4),
+            GpuContent::Field {
+                values, intervals, ..
+            } => (values.len() as u64)
+                .checked_mul(4)
+                .and_then(|n| n.checked_add(intervals.as_ref().map_or(0, |v| v.len() as u64 * 8))),
             GpuContent::Path { path, .. } => (path.vertices.len() as u64).checked_mul(PATH_STRIDE),
             GpuContent::Segments { segments, layers } => {
                 (segments.len() as u64).checked_mul(32).and_then(|n| {
@@ -626,7 +674,20 @@ fn draw_counts(frame: &GpuFrame) -> (u32, u32, MaterialKind) {
         GpuContent::Rectangles { rectangles, .. } => {
             (rectangles.len() as u32, 6, MaterialKind::Rectangles)
         }
-        GpuContent::Field { values, .. } => (u32::from(!values.is_empty()), 6, MaterialKind::Field),
+        GpuContent::Field {
+            values,
+            width,
+            intervals,
+            ..
+        } => (
+            if intervals.is_some() && !values.is_empty() {
+                *width
+            } else {
+                u32::from(!values.is_empty())
+            },
+            6,
+            MaterialKind::Field,
+        ),
         GpuContent::Segments { segments, layers } => (
             (segments.len() * layers.len()) as u32,
             6,
@@ -700,7 +761,18 @@ fn encode_frame(bytes: &mut wgpu::WriteOnly<'_, [u8]>, frame: &GpuFrame) {
                 put_u32(bytes, offset + 16, segment.color);
             }
         }
-        GpuContent::Field { values, .. } => put_floats(bytes, 0, values),
+        GpuContent::Field {
+            values, intervals, ..
+        } => {
+            let mut offset = 0;
+            if let Some(intervals) = intervals {
+                for interval in intervals.iter() {
+                    put_floats(bytes, offset, interval);
+                    offset += 8;
+                }
+            }
+            put_floats(bytes, offset, values);
+        }
         GpuContent::Path { path, .. } => {
             for (index, vertex) in path.vertices.iter().enumerate() {
                 put_floats(
@@ -766,6 +838,7 @@ fn encode_placement(
             width,
             height,
             params,
+            intervals,
             ..
         } => {
             let (min, range, logarithmic) = match params.mapping {
@@ -776,6 +849,7 @@ fn encode_placement(
             put_u32(bytes, 80, *width);
             put_u32(bytes, 84, *height);
             put_u32(bytes, 88, logarithmic as u32);
+            put_u32(bytes, 92, intervals.is_some() as u32);
             1
         }
         GpuContent::Segments { segments, layers } => {

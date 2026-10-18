@@ -4827,12 +4827,24 @@ impl Window {
             .insert_primitive(path.scale(scale_factor));
     }
 
+    /// Set this window's shared GPU material-buffer byte budget before drawing.
+    /// Includes initialization charges and uploads awaiting GPU completion;
+    /// excludes image atlases and render targets. Both frame scenes retain it.
+    pub fn set_gpu_material_budget(&mut self, bytes: u64) -> Result<()> {
+        anyhow::ensure!(bytes > 0, "GPU material budget must be positive");
+        self.next_frame.scene.gpu_material_budget = Some(bytes);
+        self.rendered_frame.scene.gpu_material_budget = Some(bytes);
+        Ok(())
+    }
+
     /// Record a bounded GPU publication at the current z-index.
     ///
     /// Bounds, clipping and inherited opacity are captured independently of the
     /// immutable content. Dynamic sources are resolved once per renderer frame,
     /// not here. Field sampling spans the full bounds; path vertices map from the
     /// original full path bounds without copying or scaling their shared array.
+    /// Segment endpoints map across the full bounds; stroke widths stay in logical
+    /// pixels. Independent field-column intervals retain gaps within those bounds.
     /// Publication does not schedule repaint. Native Metal is unsupported.
     pub fn paint_gpu(&mut self, bounds: Bounds<Pixels>, source: crate::GpuSource) -> Result<()> {
         self.invalidator.debug_assert_paint();

@@ -540,6 +540,7 @@ fn concurrent_snapshots_never_mix_dimensions_values_palette_or_parameters() {
                 height,
                 values,
                 params,
+                ..
             } = snapshot.content()
             else {
                 panic!("expected field")

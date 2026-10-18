@@ -39,10 +39,15 @@ fn quad_vertex(vertex: u32, instance: u32) -> VertexOutput {
         let origin = vec2<f32>(data_float(offset), data_float(offset + 1u)) * placement.bounds.zw;
         let extent = vec2<f32>(data_float(offset + 2u), data_float(offset + 3u)) * placement.bounds.zw;
         pixel = placement.bounds.xy + origin + local * extent;
+    } else if placement.config.x == 1u && placement.field.w != 0u {
+        let left = data_float(instance * 2u) * placement.bounds.z;
+        let right = data_float(instance * 2u + 1u) * placement.bounds.z;
+        pixel.x = placement.bounds.x + left + local.x * max(right - left, placement.scale);
     }
     var output: VertexOutput;
     output.position = screen_position(pixel);
-    output.local = local;
+    output.local = select(local, vec2<f32>((f32(instance) + 0.5) / f32(placement.field.x), local.y),
+        placement.config.x == 1u && placement.field.w != 0u);
     output.instance = instance;
     return output;
 }
@@ -121,11 +126,16 @@ fn nearest_palette(value: f32) -> vec4<f32> {
 }
 fn field_value(position: vec2<i32>) -> u32 {
     let clamped = vec2<u32>(clamp(position, vec2<i32>(0), vec2<i32>(placement.field.xy) - vec2<i32>(1)));
-    return data[clamped.y * placement.field.x + clamped.x];
+    return data[placement.field.w * placement.field.x * 2u + clamped.y * placement.field.x + clamped.x];
 }
 fn field_palette(bits: u32) -> vec4<f32> {
-    if (bits & 0x7f800000u) == 0x7f800000u { return palette[0u]; }
-    return nearest_palette(bitcast<f32>(bits));
+    let nonfinite = (bits & 0x7f800000u) == 0x7f800000u;
+    let value = bitcast<f32>(bits);
+    if placement.field.w != 0u && (nonfinite || value <= placement.params.x) {
+        return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    }
+    if nonfinite { return palette[0u]; }
+    return nearest_palette(value);
 }
 fn field_color(uv: vec2<f32>) -> vec4<f32> {
     let position = uv * vec2<f32>(placement.field.xy) - vec2<f32>(0.5);

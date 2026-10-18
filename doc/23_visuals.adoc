@@ -66,8 +66,7 @@ Ordinary fills and transformed image sprites retain their independent paths.
 
 Color images clamp linear texture sampling to their atlas tile's first and last
 texel centers. This prevents neighboring images from bleeding into magnified
-edges, including Spectrogram's one-pixel-wide history columns, without adding
-atlas padding or disabling interpolation.
+edges without adding atlas padding or disabling interpolation.
 
 Artwork styles change composition, not acquisition or signal analysis. Card
 rotates the full square cover, rounded frame, and shadow together, reserving
@@ -162,10 +161,9 @@ business updates permit a single refresh without starting an idle clock.
 Only affected visual panel entities are invalidated by analysis or waveform
 updates. Cached scenes retain their measured panel dimensions until geometry or
 visibility changes. Shared Spectrogram geometry changes invalidate sibling
-scenes before retired images can be reused. Disabling visualization caching also
-disables scene caching for these panels because transient renderer images cannot
-outlive their retirement boundary. Playback, commands, and shutdown remain
-independent of presentation.
+scenes so every panel uses the current history dimensions. Disabling visualization
+caching also disables scene caching for these panels. Playback, commands, and
+shutdown remain independent of presentation.
 
 A reliable Hidden notification cancels frame scheduling and disables analysis.
 Without that notification, compositor-throttled frames reduce analysis demand
@@ -396,7 +394,7 @@ the benefit is removing CPU coloring, not automatically reducing upload bytes.
 
 == Spectrogram
 
-Spectrogram maps retained frequency history to colored image columns. Stable
+Spectrogram maps retained frequency history to colored columns. Stable
 history is a natural reuse boundary: newly accepted audio changes recent
 columns without requiring the entire visible history to be rebuilt. Frames that
 share a time bucket are max-pooled rather than averaged, retaining short
@@ -404,10 +402,10 @@ transients without storing every frame. Display mapping can recolor compatible
 retained frequency data without re-running audio analysis. A gap starts a new
 interval instead of drawing new audio across the missing time.
 
-History width and image resolution bound retained resources. Increasing display
+History width and sampling resolution bound retained resources. Increasing display
 resolution does not create additional FFT information. Multiple panels share
 history rather than maintaining competing copies; the cache document describes
-capacity changes and image retirement.
+capacity changes and numerical publication lifetime.
 
 == Generative light
 
@@ -449,7 +447,7 @@ that query. Once decoding starts, ordinary metadata changes do not cancel it:
 the source, saved-hint, request-generation, and suspension checks described under
 <<_waveform,Waveform>> govern pending and completed previews.
 
-Spectrum tessellation and Spectrogram image upload/paint failures are surfaced
+Spectrum tessellation and Spectrogram GPU publication/paint failures are surfaced
 as visualization errors. Stereo-analysis publication/paint failures are reported separately.
 These rendering failures do not issue playback commands or make the audio
 callback wait for graphics. Very small plots can omit geometry rather than
