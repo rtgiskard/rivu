@@ -369,6 +369,11 @@ The pinned Symphonia 0.6.1 metadata and container patches under `vendor/` enforc
 admission before frame, chunk, attachment, or metadata-packet allocation rather
 than relying on a check after decoding the complete payload.
 
+Matroska DocType and CodecId are structural identifiers, independent of the
+exhaustible metadata allowance. Their encoded payloads have a separate 1 KiB
+limit. Oversized declarations are format errors rejected before payload reading
+or allocation, not skipped metadata or truncated identifiers.
+
 These are metadata admission bounds, not total process-memory or I/O-time
 limits. Audio packets, codec state, FFmpeg reads, and decoded image pixels have
 separate costs. The encoded-image admission limit does not bound decoded pixels.

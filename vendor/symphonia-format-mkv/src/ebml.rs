@@ -10,6 +10,9 @@ use std::io::SeekFrom;
 use symphonia_core::io::{MediaSource, ReadBytes, SeekBuffered};
 use symphonia_core::util::bits::sign_extend_leq64_to_i64;
 
+/// Structural identifiers have a separate bound and never consume metadata admission.
+const MAX_IDENTIFIER_BYTES: u64 = 1024;
+
 /// `EbmlError` provides an enumeration of all possible EBML iterator errors.
 #[non_exhaustive]
 #[derive(Debug)]
@@ -804,23 +807,36 @@ impl<R: ReadEbml, S: EbmlSchema> EbmlIterator<R, S> {
     /// `None`.
     pub(crate) fn read_string(&mut self) -> Result<Option<String>> {
         let size = self.current_or_err()?.data_size.ok_or(EbmlError::UnknownElementDataSize)?;
-        if !usize::try_from(size).ok().is_some_and(symphonia_metadata::budget::text) {
+        let Some(size) = usize::try_from(size)
+            .ok()
+            .filter(|&size| symphonia_metadata::budget::text(size))
+        else {
             self.skip_data()?;
             // Required metadata strings must not turn a budget rejection into a media error.
             return Ok(Some(String::new()));
-        }
-        self.read_string_unbudgeted()
+        };
+        self.read_string_data(size)
     }
 
-    /// Structural identifiers are not user metadata and must remain available to the demuxer.
-    pub(crate) fn read_string_unbudgeted(&mut self) -> Result<Option<String>> {
+    /// Read a structural identifier without consuming the exhaustible metadata allowance.
+    /// Reject oversized declarations before reading or allocating their payload.
+    pub(crate) fn read_identifier(&mut self) -> Result<Option<String>> {
+        let size = self.current_or_err()?.data_size.ok_or(EbmlError::UnknownElementDataSize)?;
+        if size > MAX_IDENTIFIER_BYTES {
+            return Err(EbmlError::ElementError("mkv: structural identifier exceeds size limit"));
+        }
+        let size = usize::try_from(size).map_err(|_| EbmlError::UnexpectedElementDataSize)?;
+        self.read_string_data(size)
+    }
+
+    /// Decode a string after its caller has admitted the payload size.
+    fn read_string_data(&mut self, size: usize) -> Result<Option<String>> {
         let element = self.current_or_err()?;
 
         match element.element_info {
             Some(info) => match info.data_type() {
                 EbmlDataType::Master => Err(EbmlError::ExpectedNonMasterElement),
                 EbmlDataType::String => {
-                    let size = element.data_size.ok_or(EbmlError::UnknownElementDataSize)? as usize;
                     match size {
                         0 => {
                             self.discard_current();
@@ -1025,13 +1041,118 @@ fn read_vint<R: ReadBytes>(mut reader: R) -> Result<(u64, u8)> {
 mod tests {
     use symphonia_core::common::Limit;
     use symphonia_core::io::{BufReader, MediaSourceStream};
-    use symphonia_core::meta::MetadataOptions;
+    use symphonia_core::meta::{MetadataOptions, RawValue};
     use symphonia_metadata::budget::Scope;
 
     use crate::schema::{MkvElement, MkvSchema};
-    use crate::segment::{AttachmentsElement, TagsElement};
+    use crate::segment::{AttachmentsElement, EbmlHeaderElement, TagsElement, TrackElement};
 
-    use super::{EbmlIterator, read_element_id, read_signed_vint, read_unsigned_vint};
+    use super::{
+        EbmlError, EbmlIterator, MAX_IDENTIFIER_BYTES, read_element_id, read_signed_vint,
+        read_unsigned_vint,
+    };
+
+    fn element_header(id: &[u8], size: u64) -> Vec<u8> {
+        assert!(size < (1 << 56) - 1);
+        let mut data = id.to_vec();
+        data.extend_from_slice(&((1 << 56) | size).to_be_bytes());
+        data
+    }
+
+    fn element(id: &[u8], payload: &[u8]) -> Vec<u8> {
+        let mut data = element_header(id, payload.len() as u64);
+        data.extend_from_slice(payload);
+        data
+    }
+
+    fn iterator(data: Vec<u8>) -> EbmlIterator<MediaSourceStream<'static>, MkvSchema> {
+        let stream = MediaSourceStream::new(Box::new(std::io::Cursor::new(data)), Default::default());
+        EbmlIterator::new(stream, MkvSchema, None)
+    }
+
+    #[test]
+    fn oversized_identifiers_fail_before_payload_read() {
+        for size in [MAX_IDENTIFIER_BYTES + 1, 1 << 40, (1 << 56) - 128] {
+            // Only headers are present. Reading any payload would return an I/O error,
+            // not the required format error, and could first allocate the declared size.
+            let child = element_header(&[0x42, 0x82], size);
+            let mut data = element_header(&[0x1a, 0x45, 0xdf, 0xa3], child.len() as u64 + size);
+            data.extend_from_slice(&child);
+            let mut it = iterator(data);
+            it.next_header().unwrap().unwrap();
+            assert!(matches!(
+                it.read_master_element::<EbmlHeaderElement>(),
+                Err(EbmlError::ElementError(_))
+            ));
+            assert_eq!(it.pos(), 12 + child.len() as u64);
+
+            let mut data = element_header(&[0x86], size);
+            // Preserve each parent's declared extent while omitting the codec payload.
+            for id in [&[0xae][..], &[0x16, 0x54, 0xae, 0x6b], &[0x18, 0x53, 0x80, 0x67]] {
+                let mut parent = element_header(id, data.len() as u64 + size);
+                parent.extend_from_slice(&data);
+                data = parent;
+            }
+            let header_bytes = data.len() as u64;
+            let mut it = iterator(data);
+            for _ in 0..2 {
+                it.next_header().unwrap().unwrap();
+                it.push_element().unwrap();
+            }
+            it.next_header().unwrap().unwrap();
+            assert!(matches!(
+                it.read_master_element::<TrackElement>(),
+                Err(EbmlError::ElementError(_))
+            ));
+            assert_eq!(it.pos(), header_bytes);
+        }
+    }
+
+    #[test]
+    fn structural_identifiers_survive_exhausted_metadata_budget() {
+        for (doc_type, codec_id) in [("matroska", "A_FLAC"), ("webm", "A_OPUS")] {
+            let _scope = Scope::new(MetadataOptions::default().limit_tag_bytes(Limit::Maximum(0)));
+            // Exhaust object admission as well as disabling non-empty metadata text.
+            while symphonia_metadata::budget::text(0) {}
+            let mut data = element(&[0x1a, 0x45, 0xdf, 0xa3], &element(&[0x42, 0x82], doc_type.as_bytes()));
+            let mut track = element(&[0xd7], &[1]);
+            track.extend(element(&[0x73, 0xc5], &[1]));
+            track.extend(element(&[0x86], codec_id.as_bytes()));
+            let tracks = element(&[0x16, 0x54, 0xae, 0x6b], &element(&[0xae], &track));
+            data.extend(element(&[0x18, 0x53, 0x80, 0x67], &tracks));
+            let mut it = iterator(data);
+            it.next_header().unwrap().unwrap();
+            assert_eq!(it.read_master_element::<EbmlHeaderElement>().unwrap().doc_type, doc_type);
+            for _ in 0..2 {
+                it.next_header().unwrap().unwrap();
+                it.push_element().unwrap();
+            }
+            it.next_header().unwrap().unwrap();
+            assert_eq!(it.read_master_element::<TrackElement>().unwrap().codec_id, codec_id);
+            assert!(!symphonia_metadata::budget::text(0));
+        }
+    }
+
+    #[test]
+    fn long_metadata_text_uses_metadata_limit_not_identifier_limit() {
+        let text = "x".repeat(MAX_IDENTIFIER_BYTES as usize + 1);
+        for limit in [text.len(), text.len() - 1] {
+            let _scope = Scope::new(MetadataOptions::default().limit_tag_bytes(Limit::Maximum(limit)));
+            let mut simple_tag = element(&[0x45, 0xa3], b"TITLE");
+            simple_tag.extend(element(&[0x44, 0x87], text.as_bytes()));
+            let tag = element(&[0x73, 0x73], &element(&[0x67, 0xc8], &simple_tag));
+            let tags = element(&[0x12, 0x54, 0xc3, 0x67], &tag);
+            let mut it = iterator(element(&[0x18, 0x53, 0x80, 0x67], &tags));
+            it.next_header().unwrap().unwrap();
+            it.push_element().unwrap();
+            it.next_header().unwrap().unwrap();
+            let tags = it.read_metadata_master::<TagsElement>().unwrap().unwrap();
+            let Some(RawValue::String(value)) = &tags.tags[0].simple_tags[0].value else {
+                panic!("expected metadata text");
+            };
+            assert_eq!(value.as_str(), if limit == text.len() { text.as_str() } else { "" });
+        }
+    }
 
     #[test]
     fn rejected_metadata_leaves_audio_binary_intact() {

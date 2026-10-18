@@ -415,7 +415,7 @@ impl EbmlElement<MkvSchema> for TrackElement {
                 }
                 MkvElement::CodecId => {
                     // Mandatory element. No schema-defined default.
-                    codec_id = Some(it.read_string_unbudgeted()?.unwrap_or_default());
+                    codec_id = Some(it.read_identifier()?.unwrap_or_default());
                 }
                 MkvElement::CodecPrivate => {
                     // Non-mandatory element.
@@ -899,7 +899,7 @@ impl EbmlElement<MkvSchema> for EbmlHeaderElement {
                 }
                 MkvElement::DocType => {
                     // Mandatory element. No schema-defined default.
-                    doc_type = it.read_string_unbudgeted()?;
+                    doc_type = it.read_identifier()?;
                 }
                 MkvElement::DocTypeVersion => {
                     // Mandatory element. Not not be 0. Schema-defined default is 1.
