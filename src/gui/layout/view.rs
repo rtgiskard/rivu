@@ -332,6 +332,7 @@ impl GuiApp {
                                 theme.secondary
                             }))
                             .on_click(cx.listener(move |this, event, window, cx| {
+                                this.cancel_interaction(window, cx);
                                 this.workspace.layouts.current_mut().activate(panel_id);
                                 this.search_panel = Some(panel_id);
                                 if matches!(event, gpui::ClickEvent::Mouse(_)) {

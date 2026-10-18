@@ -246,6 +246,11 @@ impl LayoutInteraction {
             .map_or(1., |geometry| f64::from(geometry.scale_factor))
     }
 
+    /// Rolled-back split bounds must not feed a subsequent structural edit.
+    pub(in crate::gui) fn invalidate_measurements(&mut self) {
+        self.measurements.borrow_mut().invalidate();
+    }
+
     /// Invoke before processing pointer input as well as before rendering.
     /// Bounds notifications can precede repaint; old canvas handles are rejected.
     pub(in crate::gui) fn synchronize_geometry(

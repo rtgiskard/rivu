@@ -288,8 +288,14 @@ callbacks from an old epoch cannot repopulate the current bounds cache. Escape,
 focus loss, and geometry changes cancel a separator preview and restore its
 original boundary; cancellation never requests persistence. Layout replacement
 discards old interaction state without applying its rollback to the new tree.
-Activating Library cancels the current pointer interaction before saving the
-active tab, so its shortcut cannot persist a separator preview.
+Activating a native panel tab (including keyboard activation), Library, or Queue
+cancels the current pointer interaction and restores its original split boundary
+before changing and publishing the active tab. The session snapshot therefore
+cannot retain an uncommitted separator preview. Completed separator drags still
+publish their committed boundary normally.
+Rolling back a separator also invalidates its measured preview geometry, so a
+subsequent panel removal cannot reapply the cancelled ratio while reconciling
+region sizes.
 
 Snapping selects feasible candidates in this priority order:
 

@@ -135,6 +135,7 @@ impl Workspace {
     pub(super) fn restore_interaction(&mut self, cancellation: &Cancellation) {
         if cancellation.split.is_some() {
             cancellation.restore_split(self.layouts.current_mut());
+            self.interaction.invalidate_measurements();
         }
     }
 
@@ -318,6 +319,111 @@ mod tests {
         assert_eq!(boundaries, &[0.5]);
         assert!(!workspace.layouts.current().locked);
         assert_eq!(save.handle().snapshot().0, workspace.layouts);
+    }
+
+    #[test]
+    fn removal_cannot_republish_cancelled_split_measurements() {
+        let (_directory, save, mut workspace) = fixture();
+        let geometry = DockGeometry {
+            viewport: size(px(804.), px(400.)),
+            scale_factor: 1.,
+            ui_scale: 1.,
+        };
+        workspace.interaction.synchronize_geometry(geometry);
+        begin_split(&mut workspace);
+        let panel = workspace.layouts.current_mut().add("history", Some(2));
+        for (id, x, width) in [(1, 0., 804.), (2, 0., 560.), (4, 564., 240.)] {
+            workspace
+                .interaction
+                .measurement_handle(Measured::Node(id))
+                .record(
+                    Bounds::new(point(px(x), px(0.)), size(px(width), px(400.))),
+                    geometry,
+                );
+        }
+        let stale = workspace.interaction.measurement_handle(Measured::Node(2));
+        let cancellation = workspace.interaction.cancel();
+        workspace.restore_interaction(&cancellation);
+        stale.record(
+            Bounds::new(point(px(0.), px(0.)), size(px(560.), px(400.))),
+            geometry,
+        );
+        assert!(workspace.interaction.measurements().is_empty());
+        let sizes = workspace
+            .interaction
+            .measurements()
+            .iter()
+            .filter_map(|(key, bounds)| {
+                let Measured::Node(id) = key else { return None };
+                Some((
+                    *id,
+                    (
+                        f64::from(f32::from(bounds.size.width)),
+                        f64::from(f32::from(bounds.size.height)),
+                    ),
+                ))
+            })
+            .collect();
+        let sizes = super::super::layout::layout_geometry::edit_sizes(
+            workspace.layouts.current().root.as_ref().unwrap(),
+            sizes,
+            panel,
+            None,
+            4.,
+        );
+        assert!(workspace.layouts.current_mut().remove(panel));
+        workspace
+            .layouts
+            .current_mut()
+            .preserve_region_sizes(&sizes, 4.);
+        workspace.reconcile_structure();
+        let (visualizer, artwork) = defaults();
+        workspace.persist(visualizer, artwork);
+        let retained = save.handle().snapshot().0;
+        let Node::Split { boundaries, .. } = retained.current().root.as_ref().unwrap() else {
+            panic!("split fixture");
+        };
+        assert_eq!(boundaries, &[0.5]);
+        assert!(!retained.current().contains_panel(panel));
+    }
+
+    #[test]
+    fn tab_publication_retains_rollback_but_preserves_completed_split() {
+        for commit in [false, true] {
+            let (_directory, save, mut workspace) = fixture();
+            begin_split(&mut workspace);
+            let panel = workspace.layouts.current_mut().add("history", Some(2));
+            workspace.layouts.current_mut().activate(3);
+            if commit {
+                assert!(matches!(
+                    workspace.interaction.finish_drag(),
+                    super::super::layout::interaction::DragCommit::PersistSplit
+                ));
+            }
+
+            // Native tab activation cancels and restores before changing the
+            // active panel or publishing to the session owner.
+            let cancellation = workspace.interaction.cancel();
+            workspace.restore_interaction(&cancellation);
+            workspace.layouts.current_mut().activate(panel);
+            let (visualizer, artwork) = defaults();
+            workspace.persist(visualizer, artwork);
+            let retained = save.handle().snapshot().0;
+            assert!(workspace.panel_demand("history", true));
+
+            // A later Escape must not be needed to repair the retained snapshot.
+            let cancellation = workspace.interaction.cancel();
+            workspace.restore_interaction(&cancellation);
+            assert_eq!(retained, workspace.layouts);
+            let (reopened, error) = Workspace::new(save.handle(), visualizer, artwork);
+            assert!(error.is_none());
+            assert!(reopened.panel_demand("history", true));
+            let Node::Split { boundaries, .. } = reopened.layouts.current().root.as_ref().unwrap()
+            else {
+                panic!("split fixture");
+            };
+            assert_eq!(boundaries, &[if commit { 0.7 } else { 0.5 }]);
+        }
     }
 
     #[test]
