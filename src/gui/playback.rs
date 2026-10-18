@@ -543,10 +543,14 @@ impl Playback {
                 Dragging::Volume(_) => "gl-volume-level",
                 Dragging::Split(_) => unreachable!("split handles are not playback sliders"),
             }))
-            .border_1()
-            .border_color(gpui::transparent_black())
             .rounded_sm()
-            .focus(|style| style.border_color(rgb(theme.accent)))
+            .focus_visible(|style| {
+                style.shadow(vec![
+                    gpui::BoxShadow::new(px(0.), px(0.), rgb(theme.accent).into())
+                        .spread_radius(px(1.))
+                        .inset(),
+                ])
+            })
             .group("playback-slider")
             .relative()
             .h(px(20.))
