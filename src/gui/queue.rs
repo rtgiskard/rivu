@@ -1964,7 +1964,7 @@ impl Queue {
                                     ("queue-entry", id),
                                     ("queue-entry-text", id),
                                     (title, detail),
-                                    index,
+                                    position,
                                     playing,
                                     this.model.contains(&id),
                                 )

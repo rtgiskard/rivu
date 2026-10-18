@@ -1346,7 +1346,7 @@ impl Playlists {
                                 ("playlist-entry", id as u64),
                                 ("playlist-entry-text", id as u64),
                                 (title, detail),
-                                index,
+                                e.position,
                                 this.state
                                     .current_track()
                                     .is_some_and(|track| track.id == track_id),

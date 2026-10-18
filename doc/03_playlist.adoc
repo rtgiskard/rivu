@@ -119,8 +119,10 @@ batch favorites, and transfers to Queue or playlists.
 
 Playlist catalogs, entries, and track-menu playlist selectors
 load rows automatically while scrolling. Entry numbering and drag reordering use
-absolute playlist positions. Scrolling away preserves selected entry identities,
-not their metadata pages. See link:02_library.adoc#_paged_views[Library] for
+absolute playlist positions. Filtering Queue or playlist entries keeps their
+original position numbers rather than renumbering the matching rows. Scrolling
+away preserves selected entry identities, not their metadata pages.
+See link:02_library.adoc#_paged_views[Library] for
 scrolling and query failure behavior. Switching playlists clears track selection.
 Deleting the selected playlist from another client clears its selection on
 refresh. Empty playlists and unloaded pages do not imply deletion.
