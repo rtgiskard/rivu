@@ -1863,7 +1863,7 @@ impl<Backend: AtlasBackend> AtlasState<Backend> {
         self.low_glyph_demand_frames = 0;
 
         // This scan occurs only after sustained low demand, never on a normal
-        // paint/cache hit. Include color glyphs and textured paths as well.
+        // paint/cache hit. Include color glyphs as well.
         let live_pages: FxHashSet<_> = scene
             .monochrome_sprites
             .iter()
@@ -1879,12 +1879,6 @@ impl<Backend: AtlasBackend> AtlasState<Backend> {
                     .polychrome_sprites
                     .iter()
                     .map(|sprite| sprite.tile.texture_id),
-            )
-            .chain(
-                scene
-                    .paths
-                    .iter()
-                    .filter_map(|path| path.texture.map(|tile| tile.texture_id)),
             )
             .collect();
         let backend = &mut self.backend;

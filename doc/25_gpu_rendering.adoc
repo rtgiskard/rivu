@@ -8,7 +8,7 @@ Design baseline, 2026-10-18. The fixed-schema rectangle, numerical-field and
 existing-path slice described under <<_internal_led_vertical_slice>> is implemented.
 Density/Spatial now consume numerical fields; their authoritative behavior and
 ownership are described in link:23_visuals.adoc#_stereo_analysis_styles[Stereo analysis styles].
-Spectrum Bars/LED now consume rectangle publications; their palette sampling and
+Spectrum now consumes rectangle and Path publications; its palette sampling and
 ownership are described in link:23_visuals.adoc#_spectrum[Spectrum rendering].
 The general `Program`, generated-schema interfaces and remaining consumer migrations
 below remain proposals. The agreed safety and platform boundaries remain binding.
@@ -508,9 +508,8 @@ tessellated path. Rectangle segmentation and bottom-to-top palette coordinates
 retain their initial behavior. Palette samples are straight-alpha sRGB values;
 their interpolation is in sRGB numerical space. Bounds, clip, scale and inherited
 opacity belong to each scene placement, independently of shared content.
-Density/Spatial and Spectrum Bars/LED use this interface. The old rectangle-only
-publication/recording API is removed; the still-used textured-path interface
-remains independent.
+Density/Spatial and all Spectrum styles use this interface. The old
+rectangle-only publication API and specialized textured-path interface are removed.
 
 Frame construction validates geometry, palette, parameters and explicit caller
 capacities before copying payloads. A process-unique, checked monotonic frame ID
@@ -677,7 +676,7 @@ not break adjacency. This conservative linear scan preserves individually resolv
 MSAA overlap and backend-specific fractional edge coverage without quadratic tests.
 
 This extraction is still a closed set of schemas, not arbitrary shader authoring
-or generated ABI tooling. Density/Spatial and Spectrum Bars/LED have migrated;
+or generated ABI tooling. Density/Spatial and all Spectrum styles have migrated;
 remaining consumers and their independent image-retirement paths are unchanged.
 
 ==== Unified field and path measurements
@@ -816,12 +815,9 @@ in link:25_gpu_rendering_benchmark.json[the benchmark record].
 
 === Remaining consumers and integrated delivery
 
-Migrate Spectrum Outline/Line/Solid, fractals, Spectrogram and Waveform with their
-distinct geometry and reuse patterns.
-Remove only intermediates and retirement paths made obsolete by the cutover.
-Retain algorithm state and unrelated artwork behavior. If the unified path
-material fully replaces `paint_path_with_texture`, migrate all callers and remove
-the obsolete specialized path.
+Migrate fractals, Spectrogram and Waveform with their distinct geometry and reuse
+patterns. Remove only intermediates and retirement paths made obsolete by the
+cutover. Retain algorithm state and unrelated artwork behavior.
 
 The slices divide integration risk, not final scope. Generic supporting modules
 belong with GPUI/WGPU; application programs and palette definitions belong near the

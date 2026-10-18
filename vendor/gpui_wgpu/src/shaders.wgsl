@@ -1052,10 +1052,6 @@ struct PathRasterizationVertex {
     st_position: vec2<f32>,
     color: Background,
     bounds: Bounds,
-    texture_bounds: Bounds,
-    texture_tile_bounds: Bounds,
-    opacity: f32,
-    pad: f32,
 }
 
 
@@ -1080,24 +1076,6 @@ fn vs_path_rasterization(@builtin(vertex_index) vertex_id: u32) -> PathRasteriza
     return out;
 }
 
-
-@fragment
-fn fs_path_rasterization_textured(input: PathRasterizationVarying) -> @location(0) vec4<f32> {
-    let alpha = path_coverage(input.st_position, dpdx(input.st_position), dpdy(input.st_position));
-    let v = load_path_vertex(input.vertex_id);
-    let unit_position = clamp((input.position.xy - v.texture_bounds.origin) / v.texture_bounds.size,
-        vec2<f32>(0.0), vec2<f32>(1.0));
-    let tile_min = v.texture_tile_bounds.origin + vec2<f32>(0.5);
-    let tile_max = v.texture_tile_bounds.origin + v.texture_tile_bounds.size - vec2<f32>(0.5);
-    let tile_position = clamp(v.texture_tile_bounds.origin + unit_position * v.texture_tile_bounds.size,
-        tile_min, tile_max) / vec2<f32>(textureDimensions(t_sprite, 0));
-    let color = textureSampleLevel(t_sprite, s_sprite, tile_position, 0.0);
-    if (any(input.clip_distances < vec4<f32>(0.0))) {
-        return vec4<f32>(0.0);
-    }
-    let coverage = color.a * alpha * v.opacity;
-    return vec4<f32>(color.rgb * coverage, coverage);
-}
 
 @fragment
 fn fs_path_rasterization(input: PathRasterizationVarying) -> @location(0) vec4<f32> {

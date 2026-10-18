@@ -116,10 +116,6 @@ struct PathRasterizationVertex {
     st_position: Point<f32>,
     color: Background,
     bounds: Bounds<ScaledPixels>,
-    texture_bounds: Bounds<ScaledPixels>,
-    texture_tile_bounds: Bounds<ScaledPixels>,
-    opacity: f32,
-    pad: f32,
 }
 
 pub struct WgpuSurfaceConfig {
@@ -138,7 +134,6 @@ struct WgpuPipelines {
     quads: wgpu::RenderPipeline,
     shadows: wgpu::RenderPipeline,
     path_rasterization: wgpu::RenderPipeline,
-    path_rasterization_textured: wgpu::RenderPipeline,
     paths: wgpu::RenderPipeline,
     underlines: wgpu::RenderPipeline,
     mono_sprites: wgpu::RenderPipeline,
@@ -840,23 +835,6 @@ impl WgpuRendererCore {
             &shader_module,
         );
 
-        let path_rasterization_textured = create_pipeline(
-            "path_rasterization_textured",
-            "vs_path_rasterization",
-            "fs_path_rasterization_textured",
-            &layouts.globals,
-            &layouts.instances,
-            Some(&layouts.texture),
-            wgpu::PrimitiveTopology::TriangleList,
-            &[Some(wgpu::ColorTargetState {
-                format: surface_format,
-                blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-            path_sample_count,
-            &shader_module,
-        );
-
         let paths_blend = wgpu::BlendState {
             color: wgpu::BlendComponent {
                 src_factor: wgpu::BlendFactor::One,
@@ -977,7 +955,6 @@ impl WgpuRendererCore {
             quads,
             shadows,
             path_rasterization,
-            path_rasterization_textured,
             paths,
             underlines,
             mono_sprites,
@@ -1882,13 +1859,6 @@ impl WgpuRendererCore {
                 texture_ids.push(texture_id);
             }
         }
-        for path in &scene.paths {
-            if let Some(tile) = path.texture {
-                if !texture_ids.contains(&tile.texture_id) {
-                    texture_ids.push(tile.texture_id);
-                }
-            }
-        }
 
         self.resources_mut()
             .atlas_texture_bind_groups
@@ -2123,23 +2093,12 @@ impl WgpuRendererCore {
         self.path_vertices.clear();
         for path in paths {
             let bounds = path.clipped_bounds();
-            let texture_tile_bounds = path
-                .texture
-                .map(|tile| Bounds {
-                    origin: tile.bounds.origin.map(|p| ScaledPixels(p.0 as f32)),
-                    size: tile.bounds.size.map(|p| ScaledPixels(p.0 as f32)),
-                })
-                .unwrap_or_default();
             self.path_vertices
                 .extend(path.vertices.iter().map(|v| PathRasterizationVertex {
                     xy_position: v.xy_position,
                     st_position: v.st_position,
                     color: path.color,
                     bounds,
-                    texture_bounds: path.bounds,
-                    texture_tile_bounds,
-                    opacity: path.texture_opacity,
-                    pad: 0.0,
                 }));
         }
 
@@ -2152,6 +2111,7 @@ impl WgpuRendererCore {
         // grow. Restore scratch even on upload failure; neither transport retains
         // a borrow after write_instance_binding returns.
         let mut vertices = std::mem::take(&mut self.path_vertices);
+        let vertex_count = vertices.len() as u32;
         let vertex_binding = self.write_instance_binding(
             "path_rasterization_bind_group",
             instance_offset,
@@ -2194,32 +2154,11 @@ impl WgpuRendererCore {
 
             pass.set_bind_group(0, &resources.path_globals_bind_group, &[]);
             pass.set_bind_group(1, &vertex_binding.bind_group, &[]);
-            // Preserve submission order when switching between atlas textures and
-            // plain fills. Plain fills use a pipeline with no texture binding.
-            let mut vertex_start = vertex_binding.first_instance;
-            let mut paths = paths.iter().peekable();
-            while let Some(path) = paths.next() {
-                let texture_id = path.texture.map(|tile| tile.texture_id);
-                let mut vertex_end = vertex_start + path.vertices.len() as u32;
-                while let Some(next) = paths.peek() {
-                    if next.texture.map(|tile| tile.texture_id) != texture_id {
-                        break;
-                    }
-                    vertex_end += next.vertices.len() as u32;
-                    paths.next();
-                }
-                if let Some(texture_id) = texture_id {
-                    if let Some(texture) = resources.atlas_texture_bind_groups.get(&texture_id) {
-                        pass.set_pipeline(&resources.pipelines.path_rasterization_textured);
-                        pass.set_bind_group(2, &texture.bind_group, &[]);
-                        pass.draw(vertex_start..vertex_end, 0..1);
-                    }
-                } else {
-                    pass.set_pipeline(&resources.pipelines.path_rasterization);
-                    pass.draw(vertex_start..vertex_end, 0..1);
-                }
-                vertex_start = vertex_end;
-            }
+            pass.set_pipeline(&resources.pipelines.path_rasterization);
+            pass.draw(
+                vertex_binding.first_instance..vertex_binding.first_instance + vertex_count,
+                0..1,
+            );
         }
 
         Ok(true)
@@ -3457,15 +3396,13 @@ mod tests {
     #[test]
     fn scaled_paths_replay_sorted_layers_across_reused_raster_batches() -> anyhow::Result<()> {
         let mut renderer = WgpuHeadlessRenderer::new()?;
-        let tile = image_tile(&renderer, 22, 1, 1, &[255, 0, 0, 255])?;
         let mut logical = Path::new(gpui::point(gpui::px(0.), gpui::px(0.)));
         for (x, y) in [(8., 0.), (8., 8.), (0., 8.), (0., 0.)] {
             logical.line_to(gpui::point(gpui::px(x), gpui::px(y)));
         }
-        let mut textured = logical.scale(2.);
-        textured.texture = Some(tile);
-        textured.texture_opacity = 0.5;
-        textured.content_mask.bounds = solid_quad(4., 0., 8., 16., gpui::blue()).bounds;
+        let mut scaled = logical.scale(2.);
+        scaled.color = Background::from(gpui::blue()).opacity(0.5);
+        scaled.content_mask.bounds = solid_quad(4., 0., 8., 16., gpui::blue()).bounds;
         let mut plain = rectangle_path(16., 0., 16., 16.);
         plain.color = gpui::red().into();
         let bounds = solid_quad(0., 0., 32., 16., gpui::blue()).bounds;
@@ -3474,7 +3411,7 @@ mod tests {
         source.push_layer(bounds);
         source.insert_primitive(solid_quad(24., 0., 4., 16., gpui::blue()));
         source.push_layer(bounds);
-        source.insert_primitive(textured);
+        source.insert_primitive(scaled);
         source.pop_layer();
         source.pop_layer();
         source.insert_primitive(plain);
@@ -3513,39 +3450,6 @@ mod tests {
             assert_eq!(renderer.core.path_sprites.as_ptr(), sprite_scratch);
             assert!(renderer.core.path_sprites.is_empty());
             assert!(renderer.core.path_vertices.is_empty());
-        }
-        Ok(())
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn textured_path_preserves_mapping_mask_opacity_and_plain_fills() -> anyhow::Result<()> {
-        let mut renderer = WgpuHeadlessRenderer::new()?;
-        let ramp = [
-            0, 0, 255, 255, 0, 0, 255, 255, 0, 255, 0, 255, 0, 255, 0, 255, 255, 0, 0, 255, 255, 0,
-            0, 255, 255, 255, 255, 255, 255, 255, 255, 255,
-        ];
-        let tile = image_tile(&renderer, 1, 1, 8, &ramp)?;
-        assert_eq!(tile, image_tile(&renderer, 1, 1, 8, &ramp)?);
-        let mut textured = rectangle_path(0.0, 0.0, 32.0, 32.0);
-        textured.texture = Some(tile);
-        textured.texture_opacity = 0.5;
-        textured.content_mask.bounds = solid_quad(8.0, 0.0, 16.0, 32.0, gpui::red()).bounds;
-        let mut plain = rectangle_path(32.0, 0.0, 16.0, 32.0);
-        plain.color = gpui::red().into();
-        let mut scene = Scene::default();
-        scene.insert_primitive(textured);
-        scene.insert_primitive(plain);
-        scene.finish();
-        for _ in 0..2 {
-            let image = renderer.render_scene_to_image(&scene, device_size(48, 32))?;
-            assert_pixel(&image, 16, 4, [128, 0, 0, 255]);
-            assert_pixel(&image, 16, 12, [0, 128, 0, 255]);
-            assert_pixel(&image, 16, 20, [0, 0, 128, 255]);
-            assert_pixel(&image, 16, 28, [128, 128, 128, 255]);
-            assert_pixel(&image, 4, 12, BLACK);
-            assert_pixel(&image, 28, 12, BLACK);
-            assert_pixel(&image, 40, 12, RED);
         }
         Ok(())
     }
@@ -3595,19 +3499,7 @@ mod tests {
     }
 
     #[test]
-    fn textured_path_and_sprite_layouts_match_shader_offsets() {
-        assert_eq!(
-            std::mem::offset_of!(PathRasterizationVertex, texture_bounds),
-            26 * 4
-        );
-        assert_eq!(
-            std::mem::offset_of!(PathRasterizationVertex, texture_tile_bounds),
-            30 * 4
-        );
-        assert_eq!(
-            std::mem::offset_of!(PathRasterizationVertex, opacity),
-            34 * 4
-        );
+    fn sprite_layout_matches_shader_offsets() {
         assert_eq!(
             std::mem::offset_of!(PolychromeSprite, transformation),
             24 * 4
@@ -3723,7 +3615,7 @@ mod tests {
     fn webgl_record_sizes_match_shader_word_strides() {
         assert_eq!(std::mem::size_of::<Quad>(), 40 * 4);
         assert_eq!(std::mem::size_of::<Shadow>(), 28 * 4);
-        assert_eq!(std::mem::size_of::<PathRasterizationVertex>(), 36 * 4);
+        assert_eq!(std::mem::size_of::<PathRasterizationVertex>(), 26 * 4);
         assert_eq!(std::mem::size_of::<PathSprite>(), 4 * 4);
         assert_eq!(std::mem::size_of::<Underline>(), 16 * 4);
         assert_eq!(std::mem::size_of::<MonochromeSprite>(), 28 * 4);

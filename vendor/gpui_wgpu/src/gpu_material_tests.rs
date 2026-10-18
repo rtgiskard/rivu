@@ -182,14 +182,16 @@ fn gpu_rectangles_fractional_edges_and_adjacent_segments_match_paths() -> anyhow
     let mut renderer = WgpuHeadlessRenderer::new()?;
     for segmented in [false, true] {
         for scale in [1.0, 1.25, 1.5, 2.0] {
-            let rectangles = [(4.25, 1.0), (5.25, 1.0), (8.25, 0.25)].map(|(x, width)| {
-                GpuRectangle {
+            let rectangles =
+                [(4.25, 1.0), (5.25, 1.0), (8.25, 0.25)].map(|(x, width)| GpuRectangle {
                     bounds: [x / 16.0, 2.25 / 16.0, width / 16.0, 7.25 / 16.0],
                     palette_range: [0.0, 1.0],
-                }
-            });
+                });
             let params = if segmented {
-                GpuRectangleParams { cell_height: 3.0, cell_gap: 2.0 }
+                GpuRectangleParams {
+                    cell_height: 3.0,
+                    cell_gap: 2.0,
+                }
             } else {
                 GpuRectangleParams::default()
             };
@@ -227,10 +229,21 @@ fn gpu_rectangles_fractional_edges_and_adjacent_segments_match_paths() -> anyhow
             scene.finish();
             let expected = renderer.render_scene_to_image(&scene, size(32, 32))?;
             for (actual, expected) in actual.pixels().zip(expected.pixels()) {
-                assert!(actual.0.iter().zip(expected.0).all(|(a, e)| a.abs_diff(e) <= 3),
-                    "segmented={segmented} scale={scale}: {actual:?} != {expected:?}");
+                assert!(
+                    actual
+                        .0
+                        .iter()
+                        .zip(expected.0)
+                        .all(|(a, e)| a.abs_diff(e) <= 3),
+                    "segmented={segmented} scale={scale}: {actual:?} != {expected:?}"
+                );
             }
-            pixel(&actual, (5.25 * scale) as u32, (8.0 * scale) as u32, [255; 4]);
+            pixel(
+                &actual,
+                (5.25 * scale) as u32,
+                (8.0 * scale) as u32,
+                [255; 4],
+            );
         }
     }
     Ok(())

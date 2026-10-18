@@ -45,9 +45,15 @@ struct PlacementAllocation {
     last_submission: u64,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum MaterialKind { Rectangles, Field, Path }
+enum MaterialKind {
+    Rectangles,
+    Field,
+    Path,
+}
 impl MaterialKind {
-    fn multisampled(self) -> bool { self != Self::Field }
+    fn multisampled(self) -> bool {
+        self != Self::Field
+    }
 }
 struct Program {
     pipelines: [Option<wgpu::RenderPipeline>; 3],
@@ -64,7 +70,9 @@ pub(crate) struct PreparedDraw {
     kind: MaterialKind,
 }
 impl PreparedDraw {
-    pub(crate) fn multisampled(&self) -> bool { self.kind.multisampled() }
+    pub(crate) fn multisampled(&self) -> bool {
+        self.kind.multisampled()
+    }
 }
 pub(crate) type PreparedMaterials = FxHashMap<usize, PreparedDraw>;
 pub(crate) struct MaterialRenderer {
@@ -213,7 +221,11 @@ impl MaterialRenderer {
                 primitive: Default::default(),
                 depth_stencil: None,
                 multisample: wgpu::MultisampleState {
-                    count: if kind.multisampled() { self.path_samples } else { 1 },
+                    count: if kind.multisampled() {
+                        self.path_samples
+                    } else {
+                        1
+                    },
                     ..Default::default()
                 },
                 multiview_mask: None,
@@ -597,7 +609,9 @@ impl MaterialRenderer {
 }
 fn draw_counts(frame: &GpuFrame) -> (u32, u32, MaterialKind) {
     match frame.content() {
-        GpuContent::Rectangles { rectangles, .. } => (rectangles.len() as u32, 6, MaterialKind::Rectangles),
+        GpuContent::Rectangles { rectangles, .. } => {
+            (rectangles.len() as u32, 6, MaterialKind::Rectangles)
+        }
         GpuContent::Field { values, .. } => (u32::from(!values.is_empty()), 6, MaterialKind::Field),
         GpuContent::Path { path, .. } => (
             u32::from(

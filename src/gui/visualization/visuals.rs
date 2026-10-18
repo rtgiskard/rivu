@@ -15,9 +15,9 @@
 use crate::i18n::Localizer;
 
 use gpui::{
-    AnyElement, App, Bounds, GpuFrame, GpuLimits, GpuPalette, GpuRectangle, GpuRectangleParams,
-    GpuSource, Path, PathBuilder, Pixels, Point, RenderImage, SharedString, TextAlign, Window,
-    canvas, div, fill, point, prelude::*, px, rgb, size,
+    AnyElement, App, Bounds, GpuFrame, GpuLimits, GpuPalette, GpuPathParams, GpuRectangle,
+    GpuRectangleParams, GpuSource, PathBuilder, Pixels, Point, RenderImage, SharedString,
+    TextAlign, Window, canvas, div, fill, point, prelude::*, px, rgb, size,
 };
 use std::{
     cell::{OnceCell, RefCell},
@@ -70,33 +70,22 @@ fn visible_palette_fraction(palette: VisualizationPalette, fraction: f32) -> f32
 }
 
 const PALETTE_LUT_SIZE: usize = 1024;
-// Texture filtering has half-texel knots; this uniform grid includes every knot.
-const SPECTRUM_GPU_PALETTE_SIZE: usize = 2 * PALETTE_LUT_SIZE + 1;
+const SPECTRUM_GPU_PALETTE_SIZE: usize = PALETTE_LUT_SIZE;
 
 pub(super) struct PaletteLut {
     palette: VisualizationPalette,
     colors: [[u8; 3]; PALETTE_LUT_SIZE],
-    spectrum_ramp: Arc<RenderImage>,
     spectrum_gpu_palette: OnceCell<Result<Arc<GpuPalette>, String>>,
 }
 
 impl PaletteLut {
     fn new(palette: VisualizationPalette) -> Self {
-        let pixels = image::RgbaImage::from_fn(1, PALETTE_LUT_SIZE as u32, |_, row| {
-            let fraction = 1.0 - row as f32 / (PALETTE_LUT_SIZE - 1) as f32;
-            let [red, green, blue] = gradient(
-                visible_palette_fraction(palette, fraction),
-                palette_stops(palette),
-            );
-            image::Rgba([blue, green, red, 255])
-        });
         Self {
             palette,
             colors: std::array::from_fn(|index| {
                 let fraction = index as f32 / (PALETTE_LUT_SIZE - 1) as f32;
                 gradient(fraction, palette_stops(palette))
             }),
-            spectrum_ramp: Arc::new(RenderImage::new([image::Frame::new(pixels)])),
             spectrum_gpu_palette: OnceCell::new(),
         }
     }
@@ -104,33 +93,13 @@ impl PaletteLut {
     fn spectrum_gpu_palette(&self) -> Result<Arc<GpuPalette>, String> {
         self.spectrum_gpu_palette
             .get_or_init(|| {
-                let bytes = self
-                    .spectrum_ramp
-                    .as_bytes(0)
-                    .ok_or_else(|| "Cannot read spectrum gradient samples".to_owned())?;
-                // The old texture samples clamp(t * N - 0.5, 0, N - 1), whereas
-                // GpuPalette samples t * (M - 1). At M = 2N + 1, odd entries are
-                // the original texels and even interiors are their exact midpoints.
-                // Reverse top-to-bottom BGRA into bottom-to-top numerical RGBA.
-                let color = |index: usize| {
-                    let offset = (PALETTE_LUT_SIZE - 1 - index) * 4;
-                    [
-                        bytes[offset + 2],
-                        bytes[offset + 1],
-                        bytes[offset],
-                        bytes[offset + 3],
-                    ]
-                    .map(|channel| channel as f32 / 255.0)
-                };
                 let colors: [[f32; 4]; SPECTRUM_GPU_PALETTE_SIZE] = std::array::from_fn(|index| {
-                    let position =
-                        (index as f32 * 0.5 - 0.5).clamp(0.0, (PALETTE_LUT_SIZE - 1) as f32);
-                    let lower = position as usize;
-                    let a = color(lower);
-                    let b = color((lower + 1).min(PALETTE_LUT_SIZE - 1));
-                    std::array::from_fn(|channel| {
-                        a[channel] + (b[channel] - a[channel]) * position.fract()
-                    })
+                    let fraction = index as f32 / (SPECTRUM_GPU_PALETTE_SIZE - 1) as f32;
+                    let [red, green, blue] = gradient(
+                        visible_palette_fraction(self.palette, fraction),
+                        palette_stops(self.palette),
+                    );
+                    [red, green, blue, 255].map(|channel| channel as f32 / 255.0)
                 });
                 GpuPalette::new(&colors, SPECTRUM_GPU_PALETTE_SIZE)
                     .map_err(|error| format!("Cannot create spectrum GPU palette: {error}"))
@@ -251,33 +220,11 @@ struct SpectrumGroupingKey {
     high: f32,
 }
 
-#[derive(Clone)]
-enum SpectrumBody {
-    Path(Path<Pixels>),
-    Rectangles(Arc<GpuFrame>),
-}
-
-impl SpectrumBody {
-    fn paint(
-        self,
-        plot: Bounds<Pixels>,
-        window: &mut Window,
-        palette: &PaletteLut,
-    ) -> Result<(), String> {
-        match self {
-            Self::Path(path) => paint_spectrum_path(path, plot, window, palette),
-            Self::Rectangles(frame) => window
-                .paint_gpu(plot, GpuSource::Fixed(frame))
-                .map_err(|error| format!("Cannot paint spectrum GPU rectangles: {error}")),
-        }
-    }
-}
-
 struct SpectrumGeometry {
     key: Option<SpectrumGeometryKey>,
     grouping_key: SpectrumGroupingKey,
     bins: Vec<Range<usize>>,
-    body: Option<SpectrumBody>,
+    body: Option<Arc<GpuFrame>>,
 }
 
 struct VisualData {
@@ -521,8 +468,6 @@ impl Visuals {
             || data.spectrogram_interpolation_points != config.spectrogram_interpolation_points
             || data.spectrogram_sampling_points_scale != config.spectrogram_sampling_points_scale;
         if palette_changed {
-            let old_ramp = Arc::clone(&data.palette_lut.spectrum_ramp);
-            data.retired.push(old_ramp);
             data.palette_lut = active_palette_lut(config.visual_palette);
         }
         data.visual_background = config.visual_background.rgb();
@@ -765,7 +710,6 @@ impl Visuals {
     pub(in crate::gui) fn release_all_images(&self, window: &mut Window) {
         let mut data = self.data.borrow_mut();
         let mut failure = None;
-        let spectrum_ramp = Arc::clone(&data.palette_lut.spectrum_ramp);
         let VisualData {
             columns,
             retired,
@@ -777,7 +721,6 @@ impl Visuals {
             .filter_map(|column| column.image.take())
             .chain(retired.drain(..))
             .chain(pending_images.drain(..))
-            .chain(std::iter::once(spectrum_ramp))
         {
             if let Err(error) = window.drop_image(image) {
                 failure = Some(format!("Cannot release visualization image: {error}"));
@@ -1249,7 +1192,7 @@ impl VisualData {
         bars: usize,
         low: f32,
         high: f32,
-    ) -> Result<Option<SpectrumBody>, String> {
+    ) -> Result<Option<Arc<GpuFrame>>, String> {
         self.prepare_spectrum_bins(panel_id, bars, low, high);
         let geometry_key = SpectrumGeometryKey {
             origin: plot.origin,
@@ -1281,13 +1224,18 @@ impl VisualData {
         let bottom = plot.bottom();
         let top = plot.top();
         let continuous = matches!(style, SpectrumStyle::Line | SpectrumStyle::Solid);
-        let rectangles = matches!(style, SpectrumStyle::Bars | SpectrumStyle::Led);
+        let rectangles = !continuous;
+        let rectangle_capacity = if style == SpectrumStyle::Outline {
+            bars * 4
+        } else {
+            bars
+        };
         if continuous {
             // Reserve once before the point loop; clear retains capacity for later frames.
             self.spectrum_points.reserve(bars);
         }
         if rectangles {
-            self.spectrum_rectangles.reserve(bars);
+            self.spectrum_rectangles.reserve(rectangle_capacity);
         }
         // Fill contours share clockwise winding. NonZero keeps overlapping
         // body regions filled instead of cutting even-odd holes.
@@ -1357,29 +1305,32 @@ impl VisualData {
                         });
                     }
                     SpectrumStyle::Outline => {
-                        let shape_path = shape_path.as_mut().unwrap();
                         let height = bar_height.max(px(1.0)).min(plot.size.height);
                         let edge = px(1.0).min(width * 0.5).min(height * 0.5);
-                        append_rect(
-                            shape_path,
+                        append_spectrum_rectangle(
+                            &mut self.spectrum_rectangles,
+                            plot,
                             Bounds::new(point(x, bottom - height), size(width, edge)),
                         );
                         if height > edge {
-                            append_rect(
-                                shape_path,
+                            append_spectrum_rectangle(
+                                &mut self.spectrum_rectangles,
+                                plot,
                                 Bounds::new(point(x, bottom - edge), size(width, edge)),
                             );
                         }
                         if height > edge * 2.0 {
-                            append_rect(
-                                shape_path,
+                            append_spectrum_rectangle(
+                                &mut self.spectrum_rectangles,
+                                plot,
                                 Bounds::new(
                                     point(x, bottom - height + edge),
                                     size(edge, height - edge * 2.0),
                                 ),
                             );
-                            append_rect(
-                                shape_path,
+                            append_spectrum_rectangle(
+                                &mut self.spectrum_rectangles,
+                                plot,
                                 Bounds::new(
                                     point(x + width - edge, bottom - height + edge),
                                     size(edge, height - edge * 2.0),
@@ -1419,17 +1370,36 @@ impl VisualData {
                 self.palette_lut.spectrum_gpu_palette()?,
                 params,
                 GpuLimits {
-                    max_rectangles: bars,
+                    max_rectangles: rectangle_capacity,
                     max_palette_colors: SPECTRUM_GPU_PALETTE_SIZE,
                     ..GpuLimits::default()
                 },
             )
             .map_err(|error| format!("Cannot create spectrum GPU rectangles: {error}"))?;
-            Some(SpectrumBody::Rectangles(frame))
+            Some(frame)
         } else {
-            Some(SpectrumBody::Path(shape_path.unwrap().build().map_err(
-                |error| format!("Cannot tessellate spectrum: {error}"),
-            )?))
+            let mut path = shape_path
+                .unwrap()
+                .build()
+                .map_err(|error| format!("Cannot tessellate spectrum: {error}"))?;
+            // Geometry and palette stay in the full plot domain, not the body's bounds.
+            path.bounds = plot;
+            // The existing builder consumes at most MAX_SPECTRUM_BARS points;
+            // publish its complete tessellation without padding or truncation.
+            let path_vertices = path.vertices.len();
+            Some(
+                GpuFrame::path(
+                    Arc::new(path),
+                    self.palette_lut.spectrum_gpu_palette()?,
+                    GpuPathParams::default(),
+                    GpuLimits {
+                        max_path_vertices: path_vertices,
+                        max_palette_colors: SPECTRUM_GPU_PALETTE_SIZE,
+                        ..GpuLimits::default()
+                    },
+                )
+                .map_err(|error| format!("Cannot create spectrum GPU path: {error}"))?,
+            )
         };
         // Only immutable publications, never mutable scratch, enter panel caches.
         self.spectrum_rectangles.clear();
@@ -1506,7 +1476,9 @@ impl VisualData {
             Some(gpui::ContentMask { bounds: plot }),
             |window| -> Result<(), String> {
                 if let Some(body) = self.prepare_spectrum_body(panel_id, plot, bars, low, high)? {
-                    body.paint(plot, window, self.palette_lut.as_ref())?;
+                    window
+                        .paint_gpu(plot, GpuSource::Fixed(body))
+                        .map_err(|error| format!("Cannot paint spectrum GPU body: {error}"))?;
                 }
                 Ok(())
             },
@@ -1853,24 +1825,23 @@ fn append_spectrum_shape(
     }
 }
 
-fn append_rect(path: &mut PathBuilder, bounds: Bounds<Pixels>) {
-    path.move_to(bounds.origin);
-    path.line_to(point(bounds.right(), bounds.top()));
-    path.line_to(point(bounds.right(), bounds.bottom()));
-    path.line_to(point(bounds.left(), bounds.bottom()));
-    path.close();
-}
-
-fn paint_spectrum_path(
-    mut path: Path<Pixels>,
+fn append_spectrum_rectangle(
+    rectangles: &mut Vec<GpuRectangle>,
     plot: Bounds<Pixels>,
-    window: &mut Window,
-    palette: &PaletteLut,
-) -> Result<(), String> {
-    path.bounds = plot;
-    window
-        .paint_path_with_texture(path, Arc::clone(&palette.spectrum_ramp))
-        .map_err(|error| format!("Cannot upload/paint spectrum gradient: {error}"))
+    bounds: Bounds<Pixels>,
+) {
+    let x = ((bounds.left() - plot.left()) / plot.size.width).clamp(0.0, 1.0);
+    let y = ((bounds.top() - plot.top()) / plot.size.height).clamp(0.0, 1.0);
+    let height = (bounds.size.height / plot.size.height).min(1.0 - y);
+    rectangles.push(GpuRectangle {
+        bounds: [
+            x,
+            y,
+            (bounds.size.width / plot.size.width).min(1.0 - x),
+            height,
+        ],
+        palette_range: [1.0 - y - height, 1.0 - y],
+    });
 }
 
 fn stop_color([red, green, blue]: [u8; 3]) -> u32 {
@@ -2134,7 +2105,7 @@ mod tests {
         panel: u64,
         width: f32,
         height: f32,
-    ) -> Option<SpectrumBody> {
+    ) -> Option<Arc<GpuFrame>> {
         let mut data = visuals.data.borrow_mut();
         let (_, _, low, high) = data.spectrum_render_range().unwrap();
         let bars = spectrum_bar_count(
@@ -2154,10 +2125,106 @@ mod tests {
         .unwrap()
     }
 
-    fn rectangle_frame(body: Option<SpectrumBody>) -> Arc<GpuFrame> {
-        match body {
-            Some(SpectrumBody::Rectangles(frame)) => frame,
-            _ => panic!("expected procedural spectrum rectangles"),
+    fn rectangle_frame(body: Option<Arc<GpuFrame>>) -> Arc<GpuFrame> {
+        let frame = body.expect("expected spectrum body");
+        assert!(matches!(
+            frame.content(),
+            gpui::GpuContent::Rectangles { .. }
+        ));
+        frame
+    }
+
+    #[test]
+    fn gpu_spectrum_continuous_partial_height_preserves_geometry_and_plot_domain() {
+        for style in [SpectrumStyle::Line, SpectrumStyle::Solid] {
+            for interpolate in [false, true] {
+                let mut visuals = configured_visuals();
+                visuals.configure(&Config {
+                    spectrum_style: style,
+                    spectrum_interpolate: interpolate,
+                    spectrum_db_range: Some(100.0),
+                    spectrum_bars: 4,
+                    ..Config::default()
+                });
+                visuals.update(&frame(1.0, -75.0));
+                let body = prepared_body(&visuals, 1, 100.0, 100.0).unwrap();
+                let gpui::GpuContent::Path { path, params } = body.content() else {
+                    panic!("expected path")
+                };
+                let plot = Bounds::new(point(px(13.25), px(21.5)), size(px(100.0), px(100.0)));
+                assert_eq!(path.bounds, plot);
+                assert_eq!(params.palette_range, [0.0, 1.0]);
+                assert!(!path.vertices.is_empty());
+                let minimum_y = path
+                    .vertices
+                    .iter()
+                    .map(|vertex| vertex.xy_position.y)
+                    .fold(plot.bottom(), |a, b| a.min(b));
+                // A quarter-height signal stays in the lower plot region; it must
+                // not be stretched to the ceiling by a geometry-local domain.
+                assert!(minimum_y > plot.top() + plot.size.height * 0.5);
+                assert!(minimum_y < plot.bottom() - plot.size.height * 0.2);
+                assert!(
+                    path.vertices
+                        .iter()
+                        .all(|vertex| vertex.xy_position.y <= plot.bottom() + px(1.0))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gpu_spectrum_outline_preserves_nonoverlapping_edges_and_palette_domain() {
+        for height in [0.125, 1.0, 2.0, 25.0, 100.0] {
+            let mut visuals = configured_visuals();
+            visuals.configure(&Config {
+                spectrum_style: SpectrumStyle::Outline,
+                spectrum_db_range: Some(100.0),
+                spectrum_bars: 4,
+                spectrum_gap: 2.0,
+                ..Config::default()
+            });
+            visuals.update(&frame(1.0, height - 100.0));
+            let body = rectangle_frame(prepared_body(&visuals, 1, 100.0, 100.0));
+            let gpui::GpuContent::Rectangles { rectangles, params } = body.content() else {
+                unreachable!()
+            };
+            assert_eq!(params.cell_height, 0.0);
+            let height = height.max(1.0);
+            let edge = 1.0_f32.min(height * 0.5);
+            let count = if height > 2.0 * edge { 4 } else { 2 };
+            assert_eq!(rectangles.len(), 4 * count);
+            for (bar, edges) in rectangles.chunks(count).enumerate() {
+                let x = (bar as f32 * 25.0 + 1.0) / 100.0;
+                let mut expected = vec![
+                    [x, 1.0 - height / 100.0, 0.23, edge / 100.0],
+                    [x, 1.0 - edge / 100.0, 0.23, edge / 100.0],
+                ];
+                if count == 4 {
+                    expected.push([
+                        x,
+                        1.0 - (height - edge) / 100.0,
+                        edge / 100.0,
+                        (height - 2.0 * edge) / 100.0,
+                    ]);
+                    expected.push([
+                        x + (23.0 - edge) / 100.0,
+                        1.0 - (height - edge) / 100.0,
+                        edge / 100.0,
+                        (height - 2.0 * edge) / 100.0,
+                    ]);
+                }
+                for (edge, expected) in edges.iter().zip(expected) {
+                    for (actual, expected) in edge.bounds.iter().zip(expected) {
+                        assert!((actual - expected).abs() < 1e-6);
+                    }
+                    assert!(
+                        (edge.palette_range[0] - (1.0 - edge.bounds[1] - edge.bounds[3])).abs()
+                            < 1e-6
+                    );
+                    assert!((edge.palette_range[1] - (1.0 - edge.bounds[1])).abs() < 1e-6);
+                }
+            }
         }
     }
 
@@ -2219,6 +2286,34 @@ mod tests {
                     assert_eq!(rectangle.palette_range, [0.0, actual_height]);
                 }
                 assert!(visuals.data.borrow().spectrum_rectangles.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn gpu_spectrum_outline_caps_dense_fractional_instances() {
+        for width in [3.125, 7.25, 1200.375, 4096.125] {
+            let mut visuals = configured_visuals();
+            visuals.configure(&Config {
+                spectrum_style: SpectrumStyle::Outline,
+                spectrum_bars: u32::MAX,
+                spectrum_gap: 10.0,
+                spectrum_interpolate: true,
+                ..Config::default()
+            });
+            visuals.update(&frame(1.0, 0.0));
+            let frame = rectangle_frame(prepared_body(&visuals, 1, width, 77.125));
+            let gpui::GpuContent::Rectangles { rectangles, .. } = frame.content() else {
+                unreachable!()
+            };
+            assert_eq!(
+                rectangles.len(),
+                4 * (width.floor() as usize).min(MAX_SPECTRUM_BARS)
+            );
+            for rectangle in rectangles {
+                let [x, y, w, h] = rectangle.bounds;
+                assert!(x >= 0.0 && y >= 0.0 && w > 0.0 && h > 0.0);
+                assert!(x + w <= 1.0 && y + h <= 1.0);
             }
         }
     }
@@ -2323,9 +2418,14 @@ mod tests {
         ] {
             config.spectrum_style = style;
             visuals.configure(&config);
-            assert!(matches!(
-                prepared_body(&visuals, 1, 100.0, 101.0),
-                Some(SpectrumBody::Path(_))
+            let body = prepared_body(&visuals, 1, 100.0, 101.0).unwrap();
+            assert_eq!(
+                matches!(body.content(), gpui::GpuContent::Rectangles { .. }),
+                style == SpectrumStyle::Outline
+            );
+            assert!(Arc::ptr_eq(
+                &body,
+                &prepared_body(&visuals, 1, 100.0, 101.0).unwrap()
             ));
         }
         config.spectrum_style = SpectrumStyle::Bars;
@@ -2383,43 +2483,6 @@ mod tests {
     }
 
     #[test]
-    fn gpu_spectrum_palette_matches_old_texture_filter_including_half_texels() {
-        for palette in [
-            VisualizationPalette::Deadbeef,
-            VisualizationPalette::TokyoNight,
-        ] {
-            let lut = PaletteLut::new(palette);
-            assert!(lut.spectrum_gpu_palette.get().is_none());
-            let gpu = lut.spectrum_gpu_palette().unwrap();
-            assert!(Arc::ptr_eq(&gpu, &lut.spectrum_gpu_palette().unwrap()));
-            let bytes = lut.spectrum_ramp.as_bytes(0).unwrap();
-            let colors = gpu.colors();
-            // Cover texel centers, clamped end regions, and off-knot positions.
-            for step in 0..=8192 {
-                let fraction = step as f32 / 8192.0;
-                let old_position = ((1.0 - fraction) * PALETTE_LUT_SIZE as f32 - 0.5)
-                    .clamp(0.0, (PALETTE_LUT_SIZE - 1) as f32);
-                let row = old_position.floor() as usize;
-                let next = (row + 1).min(PALETTE_LUT_SIZE - 1);
-                let position = fraction * (colors.len() - 1) as f32;
-                let lower = position.floor() as usize;
-                let upper = (lower + 1).min(colors.len() - 1);
-                for (channel, bgra) in [2, 1, 0, 3].into_iter().enumerate() {
-                    let a = bytes[row * 4 + bgra] as f32 / 255.0;
-                    let b = bytes[next * 4 + bgra] as f32 / 255.0;
-                    let expected = a + (b - a) * old_position.fract();
-                    let actual = colors[lower][channel]
-                        + (colors[upper][channel] - colors[lower][channel]) * position.fract();
-                    assert!(
-                        (actual - expected).abs() < 2e-7,
-                        "palette mismatch at {fraction}"
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
     fn gpu_spectrum_palette_failure_propagates_without_path_fallback() {
         let mut visuals = configured_visuals();
         visuals.configure(&Config {
@@ -2470,74 +2533,19 @@ mod tests {
     }
 
     #[test]
-    fn spectrum_ramp_samples_cubic_visible_domain_top_to_bottom_in_bgra() {
+    fn spectrum_palette_retains_visible_floor_and_high_energy_colors() {
         for palette in [
             VisualizationPalette::Deadbeef,
             VisualizationPalette::TokyoNight,
         ] {
             let lut = PaletteLut::new(palette);
-            let bytes = lut.spectrum_ramp.as_bytes(0).unwrap();
-            assert_eq!(bytes.len(), PALETTE_LUT_SIZE * 4);
-            for (row, pixel) in bytes.as_chunks::<4>().0.iter().enumerate() {
-                let fraction = 1.0 - row as f32 / (PALETTE_LUT_SIZE - 1) as f32;
-                let mapped = match palette {
-                    VisualizationPalette::Deadbeef => 0.06 + 0.94 * fraction,
-                    VisualizationPalette::TokyoNight => fraction,
-                };
-                let [red, green, blue] = gradient(mapped, palette_stops(palette));
-                assert_eq!(pixel, &[blue, green, red, 255]);
-            }
-            let stops = palette_stops(palette);
-            let [red, green, blue] = stops.last().unwrap().1;
-            assert_eq!(&bytes[..4], &[blue, green, red, 255]);
-            let [red, green, blue] = match palette {
-                VisualizationPalette::Deadbeef => DEADBEEF_STOPS[1].1,
-                VisualizationPalette::TokyoNight => TOKYO_NIGHT_STOPS[0].1,
-            };
-            assert_eq!(&bytes[bytes.len() - 4..], &[blue, green, red, 255]);
-            assert_ne!([red, green, blue], [0, 0, 0]);
+            let gpu = lut.spectrum_gpu_palette().unwrap();
+            let colors = gpu.colors();
+            assert!(colors.iter().all(|color| color[3] == 1.0));
+            assert!(colors[0][2] > colors[0][0]);
+            assert!(colors[colors.len() - 1][0] > colors[0][0]);
+            assert!(colors[0][..3].iter().any(|channel| *channel > 0.0));
         }
-    }
-
-    #[test]
-    fn spectrum_ramp_is_reused_until_palette_replacement_and_retired_at_frame_boundary() {
-        let mut visuals = configured_visuals();
-        let old_ramp = Arc::downgrade(&visuals.data.borrow().palette_lut.spectrum_ramp);
-        let mut config = Config {
-            spectrum_db_range: Some(40.0),
-            visualization_cache: false,
-            ..Config::default()
-        };
-        visuals.configure(&config);
-        {
-            let data = visuals.data.borrow();
-            assert!(Arc::ptr_eq(
-                &old_ramp.upgrade().unwrap(),
-                &data.palette_lut.spectrum_ramp,
-            ));
-            assert!(data.retired.is_empty());
-        }
-        config.visual_palette = match config.visual_palette {
-            VisualizationPalette::Deadbeef => VisualizationPalette::TokyoNight,
-            VisualizationPalette::TokyoNight => VisualizationPalette::Deadbeef,
-        };
-        visuals.configure(&config);
-        {
-            let data = visuals.data.borrow();
-            assert!(Arc::ptr_eq(&old_ramp.upgrade().unwrap(), &data.retired[0]));
-            assert!(!Arc::ptr_eq(
-                &data.retired[0],
-                &data.palette_lut.spectrum_ramp
-            ));
-        }
-        let mut released = 0;
-        visuals.data.borrow_mut().release_images(|image| {
-            assert!(Arc::ptr_eq(&old_ramp.upgrade().unwrap(), &image));
-            released += 1;
-            Ok(())
-        });
-        assert_eq!(released, 1);
-        assert!(old_ramp.upgrade().is_none());
     }
 
     fn frame(time: f64, level: f32) -> AnalysisFrame {

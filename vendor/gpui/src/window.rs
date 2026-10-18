@@ -4822,58 +4822,9 @@ impl Window {
         path.content_mask = content_mask;
         let color: Background = color.into();
         path.color = color.opacity(opacity);
-        path.texture = None;
         self.next_frame
             .scene
             .insert_primitive(path.scale(scale_factor));
-    }
-
-    /// Fill a path with frame zero of a caller-owned image on WGPU backends.
-    ///
-    /// The texture spans `path.bounds`, independent of the screen-space content
-    /// mask, and is linearly sampled with coordinates clamped to its texel centers.
-    /// Path antialiasing and element opacity are preserved. Keep the image alive
-    /// while paints can be replayed, and release its atlas entry with `drop_image`
-    /// under the same ownership rules as `paint_image`. Repeated calls reuse the
-    /// image's atlas tile. Native Metal backends return an unsupported error.
-    pub fn paint_path_with_texture(
-        &mut self,
-        mut path: Path<Pixels>,
-        texture: Arc<RenderImage>,
-    ) -> Result<()> {
-        self.invalidator.debug_assert_paint();
-        anyhow::ensure!(
-            !cfg!(any(target_os = "macos", target_os = "ios")),
-            "textured paths require a WGPU backend"
-        );
-        anyhow::ensure!(
-            texture.frame_count() > 0,
-            "path texture has no image frames"
-        );
-        if path.bounds.is_empty() || path.vertices.is_empty() {
-            return Ok(());
-        }
-        let params = RenderImageParams {
-            image_id: texture.id,
-            frame_index: 0,
-        };
-        let tile = self
-            .sprite_atlas
-            .get_or_insert_with(params.into(), &mut || {
-                Ok(Some((
-                    texture.size(0),
-                    Cow::Borrowed(texture.as_bytes(0).unwrap()),
-                )))
-            })?
-            .expect("Callback above only returns Some");
-        path.texture = Some(tile);
-        path.texture_opacity = self.element_opacity();
-        path.content_mask = self.content_mask();
-        let scale_factor = self.scale_factor();
-        self.next_frame
-            .scene
-            .insert_primitive(path.scale(scale_factor));
-        Ok(())
     }
 
     /// Record a bounded GPU publication at the current z-index.
@@ -4883,11 +4834,7 @@ impl Window {
     /// not here. Field sampling spans the full bounds; path vertices map from the
     /// original full path bounds without copying or scaling their shared array.
     /// Publication does not schedule repaint. Native Metal is unsupported.
-    pub fn paint_gpu(
-        &mut self,
-        bounds: Bounds<Pixels>,
-        source: crate::GpuSource,
-    ) -> Result<()> {
+    pub fn paint_gpu(&mut self, bounds: Bounds<Pixels>, source: crate::GpuSource) -> Result<()> {
         self.invalidator.debug_assert_paint();
         let batch = crate::GpuDraw::from_logical(
             bounds,
@@ -8115,11 +8062,8 @@ mod tests {
     #[test]
     fn oversized_tooltips_and_tiny_viewports_have_nonnegative_origins() {
         for viewport in [size(px(0.), px(0.)), size(px(10.), px(10.))] {
-            let bounds = super::tooltip_bounds(
-                point(px(5.), px(5.)),
-                size(px(200.), px(400.)),
-                viewport,
-            );
+            let bounds =
+                super::tooltip_bounds(point(px(5.), px(5.)), size(px(200.), px(400.)), viewport);
             assert_eq!(bounds.origin, Point::default());
         }
     }

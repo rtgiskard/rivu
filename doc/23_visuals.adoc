@@ -25,14 +25,14 @@ https://github.com/zed-industries/zed/tree/df48a139ce9c292738b523252c12f044697e6
 under the upstream Apache-2.0 license. The remaining GPUI platform crates and
 standalone manifests retain that pinned dependency baseline. This is a
 maintained rendering capability patch, not a framework replacement or upgrade.
-The extensions add centered image transforms and caller-owned path textures on
+The extensions add centered image transforms and shared GPU materials on
 Rivu's Linux/WGPU rendering path. Existing untransformed images and ordinary
 path backgrounds retain their existing behavior.
 The vendor patch also contains experimental fixed-schema rectangle, numerical-field
 and existing-path drawing through one shared publication and recording interface;
 see the link:25_gpu_rendering.adoc#_internal_led_vertical_slice[GPU rendering slice].
 Stereo Density and Spatial Spectrum use the numerical-field material, and
-Spectrum Bars/LED use rectangle instances. Other visualizers retain their
+Spectrum uses rectangle and Path publications. Other visualizers retain their
 existing rendering paths.
 
 Run `cargo test --manifest-path vendor/gpui_wgpu/Cargo.toml --lib` to exercise
@@ -56,20 +56,13 @@ the already-cropped sprite. Rounded clipping follows image-local coordinates;
 the surrounding content mask remains in screen coordinates. No rotated pixel
 buffers or angle-indexed image cache are created. `Img` forwards its existing
 transformation matrix through image painting to the WGPU sprite shader.
-`Window::paint_path_with_texture` fills actual path geometry from a caller-owned
-`RenderImage`, mapping it to `path.bounds` while preserving coverage and opacity.
-Spectrum requires the full authored cubic palette: approximating it with a plain
-two-stop fill changes its transitions, while masked palette intervals multiply
-path submissions.
-Spectrum's mapping and bounded ramp ownership are described in <<_spectrum,Spectrum>>.
+Spectrum fills its geometry with the shared GPU palette material. Its full
+authored cubic palette is retained rather than approximated by two stops or
+repeated masked submissions; see <<_spectrum,Spectrum>>.
 
-Rust scene records, WGPU pipeline/bindings, and WGSL/WebGL shader layouts change
-together so transforms and path texture coordinates reach the fragment shader
-consistently. Textured paths reuse the image atlas, path antialiasing, opacity,
-and intermediate compositing. Adjacent paths with the same atlas texture can
-batch without changing submission order; plain fills keep their untextured
-pipeline. Palette generation and image retirement remain the caller's existing
-window owner's responsibility, not the renderer's.
+Rust scene records, WGPU pipelines, and shader layouts change together. Spectrum
+no longer uses a gradient image, atlas tile or specialized textured-Path API.
+Ordinary fills and transformed image sprites retain their independent paths.
 
 Color images clamp linear texture sampling to their atlas tile's first and last
 texel centers. This prevents neighboring images from bleeding into magnified
@@ -298,12 +291,14 @@ for less repeated rendering of an otherwise unchanged waveform.
 Spectrum Bars and LED submit compact GPU rectangle instances: one rectangle per
 visible display slot. LED uses a bottom-aligned 3-pixel segment and 2-pixel gap
 pattern in logical coordinates, including the partial segment at the body's top,
-rather than tessellating every segment on the CPU. Outline, Line, and Solid retain
-their batched Path bodies and one-column gradient texture.
+rather than tessellating every segment on the CPU. Outline uses up to four
+nonoverlapping edge rectangles per visible slot. Line and Solid retain their
+curve and fill geometry through the shared GPU Path material.
 
-Both routes normalize the gradient to the common plot bounds, with the strongest
-color at the top and the visible minimum at the bottom. They retain the full
-authored cubic palette mapping, not a two-color approximation or duplicated,
+All styles normalize the gradient to the full plot bounds, with the strongest
+color at the top and the visible minimum at the bottom. A curve below the plot's
+ceiling neither stretches to fill it nor acquires a local-height gradient.
+The full authored cubic palette mapping is retained, not a two-color approximation or duplicated,
 masked palette intervals.
 
 Waveform and Spectrum exclude DeaDBeeF's initial black-to-deep-blue interval:
@@ -321,19 +316,15 @@ body. They are not connected into a curve, and the body cache does not own their
 geometry. This preserves their transient-marker meaning while keeping body
 reuse separate from Peak rendering.
 
-The shared `PaletteLut` owns a bounded 1 by 1024 BGRA ramp, constructed once when
-the active palette changes and reused across Spectrum panels and repaints,
-including when geometry caching is disabled. Range, dimensions, and style
-changes alter geometry or the plot mapping, not the ramp. Palette replacement
-queues the old image through the visualization owner's existing frame-boundary
-retirement mechanism; closing the window explicitly drops the current ramp and
-all retired images from its atlas. The active LUT retains the CPU ramp for reuse.
-Bars and LED lazily create one shared 2049-entry floating-point GPU palette from
-that ramp. Original texels and interpolated midpoints reproduce the old
-texel-center-clamped, piecewise-linear sampling function; simply sampling 1024
-colors from endpoint to endpoint would shift its knots by half a texel. This
-adds 32,784 bytes of CPU color payload per active palette, plus renderer-owned
-backing when used. Rectangles use the renderer's existing MSAA intermediate;
+The shared `PaletteLut` lazily owns one 1024-entry floating-point GPU palette,
+reused across Spectrum panels and repaints, including when geometry caching is
+disabled. Range, dimensions, and style changes alter geometry or plot mapping,
+not the palette. Samples span the visible authored palette domain directly.
+The retained CPU color payload is 16,384 bytes per active palette, plus
+renderer-owned backing when used. Minor sampling differences from the old
+texture are accepted; its half-texel knots are not reconstructed.
+No Spectrum gradient image or image-atlas retirement remains.
+Rectangles use the renderer's existing MSAA intermediate;
 coverage is evaluated per sample, so adjacent zero-gap columns do not darken
 one another through overlapping alpha edge ramps. This includes an intermediate
 draw and resolve rather than assuming a direct single-sample draw is equivalent.

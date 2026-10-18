@@ -917,10 +917,6 @@ pub struct Path<P: Clone + Debug + Default + PartialEq> {
     /// Shared geometry; use `Arc::make_mut` before editing a cloned path.
     pub vertices: Arc<Vec<PathVertex<P>>>,
     pub color: Background,
-    /// Atlas tile used as a normalized fill texture, when present.
-    pub texture: Option<AtlasTile>,
-    /// Element opacity for a textured fill.
-    pub texture_opacity: f32,
     start: Point<P>,
     current: Point<P>,
     contour_count: usize,
@@ -941,8 +937,6 @@ impl Path<Pixels> {
             },
             content_mask: Default::default(),
             color: Default::default(),
-            texture: None,
-            texture_opacity: 1.0,
             contour_count: 0,
         }
     }
@@ -967,8 +961,6 @@ impl Path<Pixels> {
             current: self.current.scale(factor),
             contour_count: self.contour_count,
             color: self.color,
-            texture: self.texture,
-            texture_opacity: self.texture_opacity,
         }
     }
 
@@ -1107,7 +1099,6 @@ mod reclamation_tests {
         cached.id = PathId(7);
         cached.order = 9;
         cached.color = crate::red().into();
-        cached.texture_opacity = 0.375;
         Arc::make_mut(&mut cached.vertices)[0].content_mask = cached.content_mask;
         let snapshot = cached.clone();
         assert!(Arc::ptr_eq(&snapshot.vertices, &cached.vertices));
@@ -1119,7 +1110,6 @@ mod reclamation_tests {
         assert_eq!(scaled.start, cached.start.scale(1.5));
         assert_eq!(scaled.current, cached.current.scale(1.5));
         assert_eq!(scaled.color, cached.color);
-        assert_eq!(scaled.texture_opacity, 0.375);
         assert_eq!(scaled.vertices.len(), cached.vertices.len());
         for (actual, original) in scaled.vertices.iter().zip(cached.vertices.iter()) {
             assert_eq!(actual.xy_position, original.xy_position.scale(1.5));

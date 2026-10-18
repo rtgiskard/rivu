@@ -269,7 +269,7 @@ pub enum GpuContent {
     Path {
         /// Original logical coordinates, normalized from `path.bounds` onto the
         /// recorded draw bounds. Paint does not copy or scale this vertex array.
-        /// Embedded path color, texture, order and masks are not used; draw-level
+        /// Embedded path color, order and masks are not used; draw-level
         /// material, opacity, clipping and ordering are authoritative.
         path: Arc<Path<Pixels>>,
         /// Material parameters over the full original mapping bounds.
