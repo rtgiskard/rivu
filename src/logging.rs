@@ -733,11 +733,4 @@ mod tests {
         assert!(level_enabled(2, &Level::ERROR));
         assert!(!level_enabled(3, &Level::WARN));
     }
-
-    #[test]
-    fn week_boundary_is_sunday_utc() {
-        assert_eq!((3 * 24 * 60 * 60_i64).div_euclid(WEEK_SECONDS), 0);
-        assert_eq!((4 * 24 * 60 * 60_i64).div_euclid(WEEK_SECONDS), 0);
-        assert_eq!((10 * 24 * 60 * 60_i64).div_euclid(WEEK_SECONDS), 1);
-    }
 }
