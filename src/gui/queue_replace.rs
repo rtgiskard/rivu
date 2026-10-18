@@ -23,7 +23,8 @@ impl GuiApp {
         cx: &mut Context<Self>,
     ) {
         self.refresh(cx);
-        self.playlist_action = None;
+        self.playlists
+            .update(cx, |playlists, cx| playlists.clear_action(cx));
         if self.state.system.config.confirm_queue_replace && self.state.queue.total > 0 {
             self.queue_replace = Some(replacement);
             cx.notify();

@@ -1,9 +1,11 @@
 //! Window-owned explicit actions and their metadata confirmation barrier.
+//! Feature owners prepare, validate, and commit their selections; this coordinator
+//! owns only cross-feature intent identity and the window's confirmation dialog.
+//! Refresh reconciles owners before a frozen target is validated or a draft discarded.
 
 use super::{
-    Field, GuiApp, UI_INSET,
+    GuiApp, UI_INSET,
     components::{column, icon_button, panel_header, row},
-    metadata::session::{MetadataDraft, MetadataValues},
 };
 use gpui::{AnyElement, Context, prelude::*, px, rgb};
 
@@ -62,11 +64,11 @@ impl ManualIntents {
 }
 
 pub(in crate::gui) enum ManualAction {
-    Library(super::browser::selection::LibraryCommit),
+    Library(super::library::selection::LibraryCommit),
     Playlist(super::playlists::selection::EntryCommit),
     Queue(super::queue::QueueCommit),
     History {
-        commit: super::browser::HistoryCommit,
+        commit: super::history::HistoryCommit,
         structure_revision: u64,
     },
     Clear,
@@ -76,9 +78,14 @@ pub(in crate::gui) enum ManualAction {
 }
 
 impl GuiApp {
-    pub(in crate::gui) fn begin_manual_intent(&mut self) -> ManualIntentId {
+    pub(in crate::gui) fn begin_manual_intent(&mut self, cx: &mut Context<Self>) -> ManualIntentId {
         let id = self.manual_intents.begin();
-        self.browser.cancel_manual_selection();
+        self.library
+            .update(cx, |library, _| library.cancel_selection());
+        self.queue
+            .update(cx, |queue, cx| queue.cancel_selection(cx));
+        self.playlists
+            .update(cx, |playlists, _| playlists.cancel_selection());
         id
     }
 
@@ -90,25 +97,25 @@ impl GuiApp {
         self.manual_intents.reject(id);
     }
 
-    fn manual_action_valid(&self, action: &ManualAction) -> bool {
+    fn manual_action_valid(&self, action: &ManualAction, cx: &gpui::App) -> bool {
         match action {
-            ManualAction::Library(commit) => self.library_commit_valid(commit),
-            ManualAction::Playlist(commit) => self.entry_commit_valid(commit),
-            ManualAction::Queue(commit) => self.queue_commit_valid(commit),
+            ManualAction::Library(commit) => self.library.read(cx).library_commit_valid(commit),
+            ManualAction::Playlist(commit) => self.playlists.read(cx).entry_commit_valid(commit),
+            ManualAction::Queue(commit) => self.queue.read(cx).queue_commit_valid(commit),
             ManualAction::History {
                 commit,
                 structure_revision,
-            } => {
-                *structure_revision == self.state.library.structure_revision
-                    && self.browser.history.commit_valid(commit)
-            }
+            } => self
+                .history
+                .read(cx)
+                .commit_valid(commit, *structure_revision),
             _ => true,
         }
     }
 
-    fn manual_action_target(&self, action: &ManualAction) -> Option<i64> {
+    fn manual_action_target(&self, action: &ManualAction, cx: &gpui::App) -> Option<i64> {
         match action {
-            ManualAction::Library(commit) => self.library_commit_target(commit),
+            ManualAction::Library(commit) => self.library.read(cx).library_commit_target(commit),
             ManualAction::Playlist(commit) => Some(commit.target.track_id),
             ManualAction::Queue(commit) => Some(commit.target.track_id),
             ManualAction::History { commit, .. } => Some(commit.track_id),
@@ -126,20 +133,15 @@ impl GuiApp {
         if !self.manual_intent_current(id) {
             return;
         }
-        if !self.manual_action_valid(&action) {
+        if !self.manual_action_valid(&action, cx) {
             self.manual_intents.reject(id);
             self.reject_stale_manual_action(cx);
             return;
         }
-        let draft = MetadataDraft {
-            title: self.inputs[&Field::Title].read(cx).text(),
-            artist: self.inputs[&Field::Artist].read(cx).text(),
-            album: self.inputs[&Field::Album].read(cx).text(),
-            decoder_hint: self.metadata_decoder_hint,
-        };
         let protected = self
             .metadata
-            .needs_confirmation(self.manual_action_target(&action), draft);
+            .read(cx)
+            .needs_confirmation(self.manual_action_target(&action, cx), cx);
         if let Some(action) = self.manual_intents.offer(id, action, protected) {
             self.commit_manual_action(action, cx);
         } else {
@@ -157,7 +159,7 @@ impl GuiApp {
     }
 
     pub(super) fn cancel_manual_action(&mut self, cx: &mut Context<Self>) {
-        self.begin_manual_intent();
+        self.begin_manual_intent(cx);
         cx.notify();
     }
 
@@ -167,13 +169,13 @@ impl GuiApp {
         };
         self.refresh(cx);
         // Validate the frozen target before touching the original editor or draft.
-        if !self.manual_action_valid(&action) {
+        if !self.manual_action_valid(&action, cx) {
             self.reject_stale_manual_action(cx);
             return;
         }
         if discard {
-            self.metadata.discard_draft();
-            self.set_metadata_values(MetadataValues::default(), cx);
+            self.metadata
+                .update(cx, |metadata, cx| metadata.discard(cx));
         }
         self.commit_manual_action(action, cx);
         cx.notify();
@@ -185,17 +187,34 @@ impl GuiApp {
 
     fn commit_manual_action(&mut self, action: ManualAction, cx: &mut Context<Self>) {
         match action {
-            ManualAction::Library(commit) => self.commit_library_selection(commit, cx),
-            ManualAction::Playlist(commit) => self.commit_entry_selection(commit, cx),
-            ManualAction::Queue(commit) => self.commit_queue_selection(commit, cx),
-            ManualAction::History { commit, .. } => self.commit_history_selection(commit, cx),
+            ManualAction::Library(commit) => self.library.update(cx, |library, cx| {
+                library.commit_library_selection(commit, cx);
+            }),
+            ManualAction::Playlist(commit) => self.playlists.update(cx, |playlists, cx| {
+                playlists.commit_entry_selection(commit, cx);
+            }),
+            ManualAction::Queue(commit) => self.queue.update(cx, |queue, cx| {
+                queue.commit_queue_selection(commit, cx);
+            }),
+            ManualAction::History { commit, .. } => self.history.update(cx, |history, cx| {
+                history.commit_selection(commit, cx);
+            }),
             ManualAction::Clear => {
-                self.browser.clear_selection();
-                self.clear_metadata_selection(cx);
+                self.library
+                    .update(cx, |library, cx| library.clear_selection(cx));
+                self.queue.update(cx, |queue, cx| queue.clear_selection(cx));
+                self.playlists
+                    .update(cx, |playlists, cx| playlists.clear_selection(cx));
+                self.history
+                    .update(cx, |history, cx| history.clear_selection(cx));
+                self.metadata
+                    .update(cx, |metadata, cx| metadata.clear_selection(cx));
             }
             ManualAction::ReloadPlayback => {
-                self.metadata.discard_draft();
-                self.clear_metadata_selection(cx);
+                self.metadata.update(cx, |metadata, cx| {
+                    metadata.discard(cx);
+                    metadata.clear_selection(cx);
+                });
             }
             ManualAction::Close(window) => {
                 cx.defer(move |cx| {
@@ -208,7 +227,7 @@ impl GuiApp {
     }
 
     pub(super) fn request_clear_selection(&mut self, cx: &mut Context<Self>) {
-        let id = self.begin_manual_intent();
+        let id = self.begin_manual_intent(cx);
         self.ready_manual_action(id, ManualAction::Clear, cx);
     }
 
@@ -218,7 +237,7 @@ impl GuiApp {
     ) -> Option<AnyElement> {
         let theme = crate::gui::theme::palette(cx);
         self.manual_intents.pending.as_ref()?;
-        let detail = if self.metadata.saving() {
+        let detail = if self.metadata.read(cx).saving() {
             self.i18n.text("gl-metadata-discard-saving")
         } else {
             self.i18n.text("gl-metadata-discard-note")

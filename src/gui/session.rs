@@ -152,7 +152,7 @@ impl GuiApp {
     }
 
     pub(super) fn request_close_window(&mut self, window: &Window, cx: &mut Context<Self>) {
-        let id = self.begin_manual_intent();
+        let id = self.begin_manual_intent(cx);
         self.ready_manual_action(
             id,
             super::manual_actions::ManualAction::Close(window.window_handle()),
@@ -161,7 +161,7 @@ impl GuiApp {
     }
 
     pub(super) fn request_quit(&mut self, cx: &mut Context<Self>) {
-        let id = self.begin_manual_intent();
+        let id = self.begin_manual_intent(cx);
         self.ready_manual_action(id, super::manual_actions::ManualAction::Quit, cx);
     }
 

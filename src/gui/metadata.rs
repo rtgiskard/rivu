@@ -1,6 +1,6 @@
 //! One metadata edit session follows either an explicit selection or playback.
 //!
-//! Input entities hold tag drafts; the window holds the decoder hint enum draft. A loaded
+//! The feature owns tag input entities and the decoder hint draft. A loaded
 //! track supplies display details; its refresh must not move a dirty edit's
 //! baseline. Identity epochs reject responses and save acknowledgements from a
 //! previous selection, including a switch away and back to the same track.
@@ -10,57 +10,256 @@
 //! Manual changes defer the whole selection operation behind one confirmation;
 //! no browser selection is mutated until Discard (or a clean save) resolves it.
 
+mod artwork;
 mod read;
-pub(in crate::gui) use read::MetadataReadCoordinator;
-
 pub(in crate::gui) mod session;
 
 use super::{
-    Field, GuiApp, UI_INSET,
+    UI_INSET,
+    artwork::{Artwork, ArtworkImages, ArtworkLoader, ArtworkView},
     components::{
-        active_control, artwork_preview, button, caption, column, disabled_control, icon_button,
+        active_control, artwork_preview, button, caption, column, disabled_control, form_field,
+        icon_button,
+        input::{Input, InputEvent},
         metadata_item, panel_surface, row, section_group,
     },
+    feature::FeatureContext,
     format_time,
-    manual_actions::ManualAction,
 };
-use crate::model::{Command, DecoderHint, Query};
-use gpui::{AnyElement, App, Context, Div, SharedString, Window, div, prelude::*, px, rgb};
-use read::{MetadataReadTask, ReadCompletion, ReadEnvironment};
-use session::{MetadataAvailability, MetadataDraft, MetadataReadState, MetadataValues};
-use std::time::Instant;
+use crate::{
+    artwork::ArtworkManager,
+    model::{Command, DecoderHint, PlaybackStatus, Query, Track},
+    projection::GuiSnapshot,
+};
+use chrono::{DateTime, Local};
+use gpui::{
+    AnyElement, App, Context, Div, Entity, EventEmitter, Font, SharedString, Subscription, Window,
+    div, prelude::*, px, rgb,
+};
+use read::{MetadataReadCoordinator, MetadataReadTask, ReadCompletion, ReadEnvironment};
+use session::{
+    MetadataAvailability, MetadataDraft, MetadataReadState, MetadataSession, MetadataValues,
+};
+use std::{collections::HashMap, rc::Rc, sync::Arc, time::Instant};
 
-impl GuiApp {
-    pub(super) fn metadata_protected(&self, cx: &App) -> bool {
-        self.metadata.saving() || self.metadata_dirty(cx)
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Field {
+    Title,
+    Artist,
+    Album,
+}
+
+pub(in crate::gui) enum MetadataEvent {
+    ReloadPlaybackRequested,
+    /// The coordinator resumes a pending action; only a completed save follows playback
+    /// when no confirmation is pending. A no-op Save must not introduce that transition.
+    ResumeManualAction {
+        resume_follow: bool,
+    },
+    TrackChanged,
+    Error(String),
+}
+
+pub(in crate::gui) struct SavedHintChanged(pub Track);
+
+/// One editor per window. Hiding never drops a draft or transfers it to another window.
+pub(in crate::gui) struct Metadata {
+    context: FeatureContext,
+    state: Rc<GuiSnapshot>,
+    metadata: MetadataSession,
+    metadata_read: MetadataReadCoordinator,
+    inputs: HashMap<Field, Entity<Input>>,
+    metadata_decoder_hint: DecoderHint,
+    visible: bool,
+    error: Option<String>,
+    ui_font: Font,
+    artwork_manager: Arc<ArtworkManager>,
+    artwork_loader: ArtworkLoader,
+    artwork_view: ArtworkView,
+    default_album: Entity<Artwork>,
+    _subscriptions: Vec<Subscription>,
+}
+
+impl EventEmitter<MetadataEvent> for Metadata {}
+impl EventEmitter<SavedHintChanged> for Metadata {}
+
+impl Metadata {
+    pub(in crate::gui) fn new(
+        context: FeatureContext,
+        artwork_manager: Arc<ArtworkManager>,
+        artwork_images: ArtworkImages,
+        default_album: Entity<Artwork>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let state = context.snapshot();
+        let ui_font = super::fonts::resolve(&state.system.config.ui_font, cx);
+        let mut inputs = HashMap::new();
+        let mut subscriptions = Vec::new();
+        for (field, placeholder) in [
+            (Field::Title, "shell-title"),
+            (Field::Artist, "shell-artist"),
+            (Field::Album, "shell-album"),
+        ] {
+            let input = cx.new(|cx| Input::new("", context.tr(placeholder), cx));
+            subscriptions.push(cx.subscribe(&input, |_, _, event, cx| {
+                if matches!(event, InputEvent::Changed { .. }) {
+                    cx.notify();
+                }
+            }));
+            inputs.insert(field, input);
+        }
+        let mut this = Self {
+            context,
+            state,
+            metadata: MetadataSession::default(),
+            metadata_read: MetadataReadCoordinator::default(),
+            inputs,
+            metadata_decoder_hint: DecoderHint::default(),
+            visible: false,
+            error: None,
+            ui_font,
+            artwork_manager,
+            artwork_loader: ArtworkLoader::default(),
+            artwork_view: ArtworkView::new(artwork_images),
+            default_album,
+            _subscriptions: subscriptions,
+        };
+        this.sync_metadata_default(cx);
+        this
     }
 
-    pub(super) fn metadata_dirty(&self, cx: &App) -> bool {
-        self.metadata.dirty(MetadataDraft {
+    fn tr(&self, id: &str) -> SharedString {
+        self.context.tr(id)
+    }
+
+    pub(in crate::gui) fn reconcile(&mut self, state: Rc<GuiSnapshot>, cx: &mut Context<Self>) {
+        if Rc::ptr_eq(&self.state, &state) {
+            return;
+        }
+        let current_changed = match (&self.state.current_track, &state.current_track) {
+            (Some(previous), Some(next)) => !Arc::ptr_eq(previous, next),
+            (None, None) => false,
+            _ => true,
+        };
+        let query_changed = self.metadata.selected().is_some_and(|track_id| {
+            let query = Query::Track { track_id };
+            query.stamp(self.state.query_revisions_for(&query))
+                != query.stamp(state.query_revisions_for(&query))
+        });
+        let display_changed = current_changed
+            || query_changed
+            || !Arc::ptr_eq(&self.state.system.config, &state.system.config)
+            || self.state.playback.status != state.playback.status
+            || self.state.playback.last_heard_at != state.playback.last_heard_at;
+        if self.state.system.config.ui_font != state.system.config.ui_font {
+            self.ui_font = super::fonts::resolve(&state.system.config.ui_font, cx);
+        }
+        self.state = state;
+        if query_changed {
+            self.sync_metadata_query();
+        }
+        if current_changed {
+            self.sync_metadata_default(cx);
+        }
+        if display_changed {
+            cx.notify();
+        }
+    }
+
+    fn refresh(&mut self, cx: &mut Context<Self>) {
+        self.reconcile(self.context.snapshot(), cx);
+    }
+
+    /// Panel demand is separate from editor identity and window-hide cancellation.
+    pub(in crate::gui) fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        if self.visible == visible {
+            return;
+        }
+        self.visible = visible;
+        if visible {
+            self.refresh(cx);
+            self.demand_metadata(cx);
+        }
+        cx.notify();
+    }
+
+    pub(in crate::gui) fn input_focused(&self, window: &Window, cx: &App) -> bool {
+        self.inputs
+            .values()
+            .any(|input| input.read(cx).is_focused(window))
+    }
+
+    pub(in crate::gui) fn dismiss_input_composition(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.inputs
+            .values()
+            .find(|input| input.read(cx).is_focused(window))
+            .is_some_and(|input| input.update(cx, |input, cx| input.dismiss_composition(cx)))
+    }
+
+    pub(in crate::gui) fn protected(&self, cx: &App) -> bool {
+        self.metadata.saving() || self.dirty(cx)
+    }
+
+    pub(in crate::gui) fn dirty(&self, cx: &App) -> bool {
+        self.metadata.dirty(self.draft(cx))
+    }
+
+    pub(in crate::gui) fn needs_confirmation(&self, target: Option<i64>, cx: &App) -> bool {
+        self.metadata.needs_confirmation(target, self.draft(cx))
+    }
+
+    pub(in crate::gui) fn saving(&self) -> bool {
+        self.metadata.saving()
+    }
+
+    pub(in crate::gui) fn track(&self) -> Option<&Track> {
+        self.metadata.track()
+    }
+
+    pub(in crate::gui) fn track_snapshot(&self) -> Option<Arc<Track>> {
+        self.metadata.track_snapshot()
+    }
+
+    pub(in crate::gui) fn discard(&mut self, cx: &mut Context<Self>) {
+        self.metadata.discard_draft();
+        self.set_metadata_values(MetadataValues::default(), cx);
+        cx.notify();
+    }
+
+    fn draft<'a>(&self, cx: &'a App) -> MetadataDraft<'a> {
+        MetadataDraft {
             title: self.inputs[&Field::Title].read(cx).text(),
             artist: self.inputs[&Field::Artist].read(cx).text(),
             album: self.inputs[&Field::Album].read(cx).text(),
             decoder_hint: self.metadata_decoder_hint,
-        })
-    }
-
-    pub(super) fn sync_metadata_inputs(&mut self, cx: &mut Context<Self>) {
-        let enabled = self.metadata.editable();
-        for field in [Field::Title, Field::Artist, Field::Album] {
-            self.inputs[&field].update(cx, |input, cx| input.set_enabled(enabled, cx));
         }
     }
 
-    pub(super) fn set_metadata_values(&mut self, values: MetadataValues, cx: &mut Context<Self>) {
-        self.set_value(Field::Title, values.title, cx);
-        self.set_value(Field::Artist, values.artist, cx);
-        self.set_value(Field::Album, values.album, cx);
+    fn sync_metadata_inputs(&mut self, cx: &mut Context<Self>) {
+        let enabled = self.metadata.editable();
+        for input in self.inputs.values() {
+            input.update(cx, |input, cx| input.set_enabled(enabled, cx));
+        }
+    }
+
+    fn set_metadata_values(&mut self, values: MetadataValues, cx: &mut Context<Self>) {
+        for (field, value) in [
+            (Field::Title, values.title),
+            (Field::Artist, values.artist),
+            (Field::Album, values.album),
+        ] {
+            self.inputs[&field].update(cx, |input, cx| input.set_text(value, cx));
+        }
         self.metadata_decoder_hint = values.decoder_hint;
         self.sync_metadata_inputs(cx);
     }
 
-    pub(super) fn request_track(&mut self, id: i64, cx: &mut Context<Self>) {
-        debug_assert!(self.metadata.identity() == Some(id) || !self.metadata_protected(cx));
+    pub(in crate::gui) fn request_track(&mut self, id: i64, cx: &mut Context<Self>) {
+        debug_assert!(self.metadata.identity() == Some(id) || !self.protected(cx));
         if self.metadata.select(id) {
             self.set_metadata_values(MetadataValues::default(), cx);
         }
@@ -68,14 +267,14 @@ impl GuiApp {
         self.metadata_read
             .request(id, self.state.query_revisions_for(&query), Instant::now());
         self.demand_metadata(cx);
+        cx.notify();
     }
 
-    pub(super) fn reload_playback_metadata(&mut self, cx: &mut Context<Self>) {
-        let id = self.begin_manual_intent();
-        self.ready_manual_action(id, ManualAction::ReloadPlayback, cx);
+    fn reload_playback_metadata(&mut self, cx: &mut Context<Self>) {
+        cx.emit(MetadataEvent::ReloadPlaybackRequested);
     }
 
-    pub(super) fn sync_metadata_query(&mut self) {
+    fn sync_metadata_query(&mut self) {
         let selected = self.metadata.selected();
         let revisions = selected.map_or_else(Default::default, |track_id| {
             self.state.query_revisions_for(&Query::Track { track_id })
@@ -83,19 +282,19 @@ impl GuiApp {
         self.metadata_read.sync(selected, revisions, Instant::now());
     }
 
-    pub(super) fn cancel_metadata_read(&mut self) {
+    /// Called on window hide, not on ordinary panel demand changes.
+    pub(in crate::gui) fn cancel_read(&mut self) {
         self.metadata_read.cancel();
     }
 
-    pub(super) fn demand_metadata(&mut self, cx: &mut Context<Self>) {
-        let visible = self.panel_demand("metadata");
-        let Some(task) = self
-            .metadata_read
-            .prepare(&mut self.metadata, visible, Instant::now())
+    fn demand_metadata(&mut self, cx: &mut Context<Self>) {
+        let Some(task) =
+            self.metadata_read
+                .prepare(&mut self.metadata, self.visible, Instant::now())
         else {
             return;
         };
-        self.sync_full_waveform_request();
+        cx.emit(MetadataEvent::TrackChanged);
         self.sync_metadata_inputs(cx);
         self.run_metadata_read(task, cx);
     }
@@ -106,15 +305,14 @@ impl GuiApp {
             delay,
             ticket,
         } = task;
-        let handle = self.handle.clone();
+        let handle = self.context.handle().clone();
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(delay).await;
             if !this
                 .update(cx, |this, cx| {
                     this.refresh(cx);
-                    this.sync_metadata_query();
                     let environment = ReadEnvironment {
-                        visible: this.panel_demand("metadata"),
+                        visible: this.visible,
                         revisions: this.state.query_revisions_for(&read.query()),
                     };
                     let submit = this.metadata_read.submit(read, &this.metadata, environment);
@@ -134,32 +332,26 @@ impl GuiApp {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.refresh(cx);
-                this.sync_metadata_query();
                 let environment = ReadEnvironment {
-                    visible: this.panel_demand("metadata"),
+                    visible: this.visible,
                     revisions: this.state.query_revisions_for(&read.query()),
                 };
-                let draft = MetadataDraft {
-                    title: this.inputs[&Field::Title].read(cx).text(),
-                    artist: this.inputs[&Field::Artist].read(cx).text(),
-                    album: this.inputs[&Field::Album].read(cx).text(),
-                    decoder_hint: this.metadata_decoder_hint,
-                };
+                let draft = this.draft(cx);
                 match this.metadata_read.finish(
                     read,
                     &mut this.metadata,
                     environment,
                     response,
                     draft,
-                    || this.i18n.text("gl-metadata-load-failed").into(),
+                    || this.context.i18n.text("gl-metadata-load-failed").into(),
                 ) {
                     ReadCompletion::Retired => this.demand_metadata(cx),
                     ReadCompletion::Loaded(values) => {
                         if let Some(values) = values {
                             this.set_metadata_values(values, cx);
                         }
-                        this.resume_metadata_follow(cx);
-                        this.sync_waveform(cx);
+                        this.resume_follow(cx);
+                        cx.emit(MetadataEvent::TrackChanged);
                     }
                     ReadCompletion::Failed => {}
                 }
@@ -170,21 +362,17 @@ impl GuiApp {
         .detach();
     }
 
-    pub(super) fn clear_metadata_selection(&mut self, cx: &mut Context<Self>) {
+    pub(in crate::gui) fn clear_selection(&mut self, cx: &mut Context<Self>) {
         self.metadata.clear_selection();
         self.set_metadata_values(MetadataValues::default(), cx);
         self.sync_metadata_default(cx);
         self.sync_metadata_query();
-        self.sync_waveform(cx);
+        cx.emit(MetadataEvent::TrackChanged);
+        cx.notify();
     }
 
-    pub(super) fn sync_metadata_default(&mut self, cx: &mut Context<Self>) {
-        let draft = MetadataDraft {
-            title: self.inputs[&Field::Title].read(cx).text(),
-            artist: self.inputs[&Field::Artist].read(cx).text(),
-            album: self.inputs[&Field::Album].read(cx).text(),
-            decoder_hint: self.metadata_decoder_hint,
-        };
+    fn sync_metadata_default(&mut self, cx: &mut Context<Self>) {
+        let draft = self.draft(cx);
         if let Some(values) = self
             .metadata
             .sync_playback(self.state.current_track(), draft)
@@ -194,75 +382,67 @@ impl GuiApp {
         self.sync_metadata_inputs(cx);
     }
 
-    fn resume_metadata_follow(&mut self, cx: &mut Context<Self>) {
+    pub(in crate::gui) fn resume_follow(&mut self, cx: &mut Context<Self>) {
         if self.metadata.selected().is_none()
             && self.metadata.identity() != self.state.current_track().map(|track| track.id)
-            && !matches!(
-                self.metadata.read_state(),
-                session::MetadataReadState::Pending(_)
-            )
+            && !matches!(self.metadata.read_state(), MetadataReadState::Pending(_))
         {
             self.sync_metadata_default(cx);
+            cx.notify();
         }
     }
 
-    pub(super) fn save_metadata(&mut self, cx: &mut Context<Self>) {
+    pub(in crate::gui) fn save(&mut self, cx: &mut Context<Self>) {
+        let draft = self.draft(cx);
         let values = MetadataValues {
-            title: self.value(Field::Title, cx),
-            artist: self.value(Field::Artist, cx),
-            album: self.value(Field::Album, cx),
-            decoder_hint: self.metadata_decoder_hint,
+            title: draft.title.to_owned(),
+            artist: draft.artist.to_owned(),
+            album: draft.album.to_owned(),
+            decoder_hint: draft.decoder_hint,
         };
         let Some((token, command)) = self.metadata.begin_save(values.as_draft()) else {
-            if !self.metadata.saving() && !self.metadata_dirty(cx) {
-                self.resume_manual_action(false, cx);
+            if !self.metadata.saving() && !self.dirty(cx) {
+                cx.emit(MetadataEvent::ResumeManualAction {
+                    resume_follow: false,
+                });
             }
             return;
         };
         let hint_change = self.metadata.submitted_hint_change(&command);
-        let handle = self.handle.clone();
+        let handle = self.context.handle().clone();
         cx.spawn(async move |this, cx| {
             let ack = cx
                 .background_executor()
                 .spawn(async move { handle.request_ack(command) })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                // A successful save changes the scan source even after editor selection moved.
+                // A committed source change survives editor selection/discard.
                 if ack.ok
-                    && let Some(track) = hint_change.as_ref()
+                    && let Some(track) = hint_change
                 {
-                    this.full_waveform_request.saved_hint_changed(track);
-                    this.waveform.update(cx, |waveform, cx| {
-                        waveform.saved_hint_changed(track, cx);
-                    });
+                    cx.emit(SavedHintChanged(track));
                 }
                 if !this.metadata.complete_save(token, values, ack.ok) {
                     return;
                 }
                 if ack.ok {
-                    // Acknowledging only the submitted baseline leaves later edits
-                    // dirty. Resume the latest desired operation only when clean.
-                    if !this.metadata_dirty(cx) {
-                        let draft = MetadataDraft {
-                            title: this.inputs[&Field::Title].read(cx).text(),
-                            artist: this.inputs[&Field::Artist].read(cx).text(),
-                            album: this.inputs[&Field::Album].read(cx).text(),
-                            decoder_hint: this.metadata_decoder_hint,
-                        };
+                    // Only the submitted baseline is acknowledged; newer edits remain protected.
+                    if !this.dirty(cx) {
+                        let draft = this.draft(cx);
                         if let Some(values) = this.metadata.reconcile_clean(draft) {
                             this.set_metadata_values(values, cx);
                         }
-                        if this.manual_confirmation_open() {
-                            this.resume_manual_action(false, cx);
-                        } else {
-                            this.resume_metadata_follow(cx);
-                        }
+                        cx.emit(MetadataEvent::ResumeManualAction {
+                            resume_follow: true,
+                        });
                     }
-                    this.sync_waveform(cx);
+                    cx.emit(MetadataEvent::TrackChanged);
                 } else {
-                    this.error = Some(
-                        ack.error
-                            .unwrap_or_else(|| this.i18n.text("gl-metadata-save-failed").into()),
+                    this.report_error(
+                        ack.error.unwrap_or_else(|| {
+                            this.context.i18n.text("gl-metadata-save-failed").into()
+                        }),
+                        cx,
                     );
                 }
                 cx.notify();
@@ -271,13 +451,78 @@ impl GuiApp {
         .detach();
         cx.notify();
     }
+
+    fn report_error(&mut self, error: String, cx: &mut Context<Self>) {
+        self.error = Some(error.clone());
+        cx.emit(MetadataEvent::Error(error));
+    }
+
+    fn send(&mut self, command: Command, cx: &mut Context<Self>) {
+        if let Err(error) = self.context.handle().send(command) {
+            self.report_error(format!("{error:#}"), cx);
+        }
+        cx.notify();
+    }
+
+    fn panel_field(
+        &self,
+        theme: &'static crate::theme::Palette,
+        field: Field,
+        label: SharedString,
+    ) -> Div {
+        form_field(theme, label, self.inputs[&field].clone())
+    }
+
+    fn last_played_text(&self, track_id: i64, stored_at: Option<i64>) -> String {
+        let current = self
+            .state
+            .current_track()
+            .is_some_and(|track| track.id == track_id);
+        if current
+            && self.state.playback.status == PlaybackStatus::Playing
+            && self.state.playback.last_heard_at.is_some()
+        {
+            return self.context.i18n.text("gl-played-now").into();
+        }
+        let played_at = if current && self.state.playback.status == PlaybackStatus::Paused {
+            self.state.playback.last_heard_at
+        } else {
+            stored_at
+        };
+        match played_at.and_then(|time| DateTime::from_timestamp(time, 0)) {
+            Some(time) => self.context.i18n.format(
+                "gl-played-at",
+                &[
+                    (
+                        "time",
+                        time.with_timezone(&Local)
+                            .format("%Y-%m-%d %H:%M:%S")
+                            .to_string()
+                            .into(),
+                    ),
+                    (
+                        "paused",
+                        usize::from(
+                            current && self.state.playback.status == PlaybackStatus::Paused,
+                        )
+                        .into(),
+                    ),
+                ],
+            ),
+            None => self.context.i18n.text("gl-played-none").into(),
+        }
+    }
+
+    pub(in crate::gui) fn release_render_images(&self, window: &mut Window, cx: &mut App) {
+        self.artwork_view.release_all_images(window, cx);
+    }
 }
 
 fn metadata_copy(
     label: SharedString,
     value: SharedString,
     hint: Option<SharedString>,
-    cx: &mut Context<GuiApp>,
+    cx: &mut Context<Metadata>,
 ) -> Option<gpui::Stateful<Div>> {
     let hint = hint.filter(|_| !value.is_empty() && value.as_ref() != "—")?;
     let theme = super::theme::palette(cx);
@@ -302,7 +547,7 @@ fn metadata_rows(
     rows: impl IntoIterator<Item = [(SharedString, SharedString); 2]>,
     label_widths: [gpui::Pixels; 2],
     copy_hint: Option<SharedString>,
-    cx: &mut Context<GuiApp>,
+    cx: &mut Context<Metadata>,
 ) -> Div {
     column()
         .gap_1()
@@ -344,8 +589,8 @@ fn metadata_group(
     section_group(theme, title, content)
 }
 
-impl GuiApp {
-    pub(super) fn metadata_panel(
+impl Metadata {
+    pub(in crate::gui) fn render_panel(
         &mut self,
         panel_id: u64,
         window: &mut Window,
@@ -366,7 +611,7 @@ impl GuiApp {
         let favorite = track.is_some_and(|track| track.favorite);
         let editable = self.metadata.editable();
         let editor_identity = self.metadata.editor_identity();
-        let protected = self.metadata_protected(cx);
+        let protected = self.protected(cx);
         let can_save = self.metadata.can_save(MetadataDraft {
             title: self.inputs[&Field::Title].read(cx).text(),
             artist: self.inputs[&Field::Artist].read(cx).text(),
@@ -380,14 +625,17 @@ impl GuiApp {
         let placeholder: SharedString = self.tr("gl-not-loaded");
         let copy_hint = track.map(|_| self.tr("gl-copy-value"));
         let presence_status = match self.metadata.availability() {
-            MetadataAvailability::Unknown if identity.is_none() => self.i18n.text("gl-no-track"),
-            MetadataAvailability::Unknown => self.i18n.text("gl-details-not-loaded"),
-            MetadataAvailability::Present(_) => self.i18n.text("gl-ready"),
-            MetadataAvailability::Unavailable(_) => self.i18n.text("gl-track-unavailable"),
+            MetadataAvailability::Unknown if identity.is_none() => {
+                self.context.i18n.text("gl-no-track")
+            }
+            MetadataAvailability::Unknown => self.context.i18n.text("gl-details-not-loaded"),
+            MetadataAvailability::Present(_) => self.context.i18n.text("gl-ready"),
+            MetadataAvailability::Unavailable(_) => self.context.i18n.text("gl-track-unavailable"),
         };
         let status: SharedString = match self.metadata.read_state() {
             MetadataReadState::Idle => presence_status.to_owned().into(),
             MetadataReadState::Pending(_) => self
+                .context
                 .i18n
                 .format(
                     "gl-details-loading-status",
@@ -395,6 +643,7 @@ impl GuiApp {
                 )
                 .into(),
             MetadataReadState::Failed(error) => self
+                .context
                 .i18n
                 .format(
                     "gl-details-failed-status",
@@ -405,25 +654,30 @@ impl GuiApp {
                 )
                 .into(),
             MetadataReadState::WrongTrack => self
+                .context
                 .i18n
                 .format(
                     "gl-details-failed-status",
                     &[
                         ("status", presence_status.into()),
-                        ("error", self.i18n.text("gl-metadata-wrong-track").into()),
+                        (
+                            "error",
+                            self.context.i18n.text("gl-metadata-wrong-track").into(),
+                        ),
                     ],
                 )
                 .into(),
         };
         let status: SharedString = if protected {
-            self.i18n
+            self.context
+                .i18n
                 .format(
                     "gl-details-protected-status",
                     &[
                         ("status", (status.as_ref()).into()),
                         (
                             "draft",
-                            (self.i18n.text(if self.metadata.saving() {
+                            (self.context.i18n.text(if self.metadata.saving() {
                                 "gl-metadata-saving"
                             } else {
                                 "gl-unsaved"
@@ -438,9 +692,10 @@ impl GuiApp {
             status
         };
         let heading = self.metadata.selected().or(id).map_or_else(
-            || self.i18n.text("gl-track-details").to_owned(),
+            || self.context.i18n.text("gl-track-details").to_owned(),
             |id| {
-                self.i18n
+                self.context
+                    .i18n
                     .format("gl-track-id", &[("id", (id.to_string()).into())])
             },
         );
@@ -646,7 +901,11 @@ impl GuiApp {
             .filter(|track| track.missing)
             .map(|track| track.path.to_string_lossy().into_owned().into())
             .unwrap_or_else(|| file[0][0].1.clone());
-        let scroll = self.workspace.scroll_views.borrow_mut().content(("metadata", panel_id));
+        let scroll = self
+            .context
+            .scroll
+            .borrow_mut()
+            .content(("metadata", panel_id));
         let details = div()
             .id(("metadata-details", panel_id))
             .flex()
@@ -726,7 +985,7 @@ impl GuiApp {
                                                         if this.metadata.editor_identity()
                                                             == editor_identity
                                                         {
-                                                            this.save_metadata(cx);
+                                                            this.save(cx);
                                                         }
                                                     },
                                                 ),

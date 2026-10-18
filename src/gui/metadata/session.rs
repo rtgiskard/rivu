@@ -6,6 +6,7 @@
 //! after leaving and reopening the same track or discarding it.
 
 use crate::model::{Command, DecoderHint, Track};
+use std::sync::Arc;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(in crate::gui) struct MetadataValues {
@@ -68,8 +69,8 @@ pub(in crate::gui) struct SaveToken {
 pub(in crate::gui) enum MetadataAvailability {
     #[default]
     Unknown,
-    Present(Track),
-    Unavailable(Option<Track>),
+    Present(Arc<Track>),
+    Unavailable(Option<Arc<Track>>),
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -112,7 +113,16 @@ impl MetadataSession {
     pub(in crate::gui) fn track(&self) -> Option<&Track> {
         match &self.availability {
             MetadataAvailability::Present(track) => Some(track),
-            MetadataAvailability::Unavailable(track) => track.as_ref(),
+            MetadataAvailability::Unavailable(track) => track.as_deref(),
+            MetadataAvailability::Unknown => None,
+        }
+    }
+
+    /// Share accepted details with presentation consumers without copying per frame.
+    pub(in crate::gui) fn track_snapshot(&self) -> Option<Arc<Track>> {
+        match &self.availability {
+            MetadataAvailability::Present(track) => Some(Arc::clone(track)),
+            MetadataAvailability::Unavailable(track) => track.clone(),
             MetadataAvailability::Unknown => None,
         }
     }
@@ -287,7 +297,7 @@ impl MetadataSession {
         if let Some(values) = values.as_ref() {
             self.baseline = Some(values.clone());
         }
-        self.availability = MetadataAvailability::Present(track);
+        self.availability = MetadataAvailability::Present(Arc::new(track));
         values
     }
 
@@ -388,6 +398,7 @@ impl MetadataSession {
                 MetadataAvailability::Unknown => None,
             };
             if let (Some(track), Some(baseline)) = (track, self.baseline.as_ref()) {
+                let track = Arc::make_mut(track);
                 // Refreshes may have updated untouched fields while saving. Acknowledge
                 // only the submitted patch, keeping later edits and unrelated data intact.
                 if values.title != baseline.title {
@@ -530,6 +541,27 @@ mod tests {
         session
             .accept_load(token, Some(track(id, title)), values("").as_draft())
             .unwrap()
+    }
+
+    #[test]
+    fn shared_track_snapshots_are_stable_across_save_and_selection() {
+        let mut session = MetadataSession::default();
+        load(&mut session, 1, "original");
+        let original = session.track_snapshot().unwrap();
+        assert!(Arc::ptr_eq(&original, &session.track_snapshot().unwrap()));
+
+        let submitted = values("saved");
+        let (token, _) = session.begin_save(submitted.as_draft()).unwrap();
+        assert!(session.complete_save(token, submitted, true));
+        let saved = session.track_snapshot().unwrap();
+        assert_eq!(original.title, "original");
+        assert_eq!(saved.title, "saved");
+        assert!(!Arc::ptr_eq(&original, &saved));
+
+        session.clear_selection();
+        assert!(session.track_snapshot().is_none());
+        assert_eq!(saved.id, 1);
+        assert_eq!(saved.title, "saved");
     }
 
     #[test]

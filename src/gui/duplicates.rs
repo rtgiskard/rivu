@@ -1,17 +1,19 @@
-//! DuplicateReview owns synchronous transitions and physical query gates; GuiApp
-//! runs effects, and Core retains relocation workers and task IDs (never UI joins).
+//! Duplicates owns review state, query gates, commands and dialog rendering.
+//! Core retains relocation workers and task IDs; dismissal never joins a worker.
 
-use super::*;
+use super::{components, feature::FeatureContext, format_time};
 use crate::gui::components::{
     ButtonTooltip, StatusKind, active_control, button, caption, column, icon_button, panel_header,
     panel_toolbar, row, status_message,
 };
 use crate::{
-    model::{Page, RelocationPhase, RelocationTaskStatus},
-    projection::QueryProjection,
+    model::{Command, Page, Query, RelocationPhase, RelocationTaskStatus},
+    projection::{GuiSnapshot, QueryProjection},
     response::{Ack, QueryResponse, QueryRevisions, ViewResponse},
     store::{DuplicateGroup, DuplicateMember},
 };
+use gpui::{prelude::*, *};
+use std::{rc::Rc, time::Duration};
 
 const GROUP_PAGE: usize = 12;
 const MEMBER_PAGE: usize = 8;
@@ -51,9 +53,29 @@ struct ReviewRead {
 
 type SelectedMembers = Option<(QueryResponse, Vec<Option<bool>>)>;
 
+pub(super) enum DuplicatesEvent {
+    RestoreFocus,
+}
+
+/// Window-local operation owner. Async continuations hold only a weak feature
+/// entity, while their Core handle survives long enough to cancel late starts.
+pub(super) struct Duplicates {
+    context: FeatureContext,
+    state: Rc<GuiSnapshot>,
+    duplicate_review: DuplicateReview,
+}
+
+impl EventEmitter<DuplicatesEvent> for Duplicates {}
+
+impl Drop for Duplicates {
+    fn drop(&mut self) {
+        self.cancel_duplicate_task();
+    }
+}
+
 #[derive(Default)]
-pub(super) struct DuplicateReview {
-    pub(super) open: bool,
+struct DuplicateReview {
+    open: bool,
     epoch: u64,
     groups_projection: QueryProjection,
     members_projection: QueryProjection,
@@ -590,34 +612,64 @@ impl DuplicateReview {
     }
 }
 
-impl GuiApp {
-    pub(super) fn open_duplicate_review(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.cancel_interaction(window, cx);
-        if let Some(id) = self.duplicate_review.open(self.state.query_revisions(None)) {
-            let _ = self.handle.send(Command::CancelRelocation { id });
+impl Duplicates {
+    pub(super) fn new(context: FeatureContext, _cx: &mut Context<Self>) -> Self {
+        Self {
+            state: context.snapshot(),
+            context,
+            duplicate_review: DuplicateReview::default(),
         }
-        self.panel_menu = None;
-        self.shell.dismiss(shell::Surface::AppMenu);
-        self.shell.dismiss(shell::Surface::PanelCatalog);
+    }
+
+    fn tr(&self, key: &str) -> SharedString {
+        self.context.tr(key)
+    }
+
+    pub(super) fn reconcile(&mut self, state: Rc<GuiSnapshot>, cx: &mut Context<Self>) {
+        self.state = state;
+        self.sync_duplicate_review(cx);
+    }
+
+    fn refresh_snapshot(&mut self, cx: &mut Context<Self>) {
+        let state = self.context.snapshot();
+        if !Rc::ptr_eq(&self.state, &state) {
+            self.reconcile(state, cx);
+        }
+    }
+
+    pub(super) fn is_open(&self) -> bool {
+        self.duplicate_review.open
+    }
+
+    pub(super) fn open(&mut self, cx: &mut Context<Self>) {
+        self.state = self.context.snapshot();
+        if let Some(id) = self.duplicate_review.open(self.state.query_revisions(None)) {
+            let _ = self.context.handle().send(Command::CancelRelocation { id });
+        }
         self.start_duplicate_groups(cx);
         cx.notify();
     }
 
-    pub(super) fn close_duplicate_review(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn dismiss(&mut self, cx: &mut Context<Self>) {
+        if !self.is_open() {
+            return;
+        }
         if let Some(id) = self.duplicate_review.close() {
-            let _ = self.handle.send(Command::CancelRelocation { id });
+            let _ = self.context.handle().send(Command::CancelRelocation { id });
         }
-        if self.shell.is_open(shell::Surface::Settings) {
-            self.settings.focus_handle(cx).focus(window, cx);
-        } else {
-            self.focus_layout(window, cx);
-        }
+        cx.emit(DuplicatesEvent::RestoreFocus);
         cx.notify();
     }
 
-    pub(super) fn cancel_duplicate_task(&self) {
+    /// The modal consumes routed keys; Escape dismisses rather than cancelling
+    /// just the current verification, matching the dialog close control.
+    pub(super) fn handle_cancel(&mut self, cx: &mut Context<Self>) {
+        self.dismiss(cx);
+    }
+
+    fn cancel_duplicate_task(&self) {
         if let Some(id) = self.duplicate_review.task_id() {
-            let _ = self.handle.send(Command::CancelRelocation { id });
+            let _ = self.context.handle().send(Command::CancelRelocation { id });
         }
     }
 
@@ -637,7 +689,7 @@ impl GuiApp {
         else {
             return;
         };
-        let handle = self.handle.clone();
+        let handle = self.context.handle().clone();
         cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(Duration::from_millis(80))
@@ -667,7 +719,7 @@ impl GuiApp {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.duplicate_review.groups_worker_finished();
-                this.refresh(cx);
+                this.refresh_snapshot(cx);
                 if !this.duplicate_review.accept_groups(
                     epoch,
                     &query,
@@ -711,7 +763,7 @@ impl GuiApp {
         else {
             return;
         };
-        let handle = self.handle.clone();
+        let handle = self.context.handle().clone();
         cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(Duration::from_millis(80))
@@ -770,7 +822,7 @@ impl GuiApp {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.duplicate_review.members_worker_finished();
-                this.refresh(cx);
+                this.refresh_snapshot(cx);
                 if !this.duplicate_review.accept_members(
                     epoch,
                     &query,
@@ -787,7 +839,7 @@ impl GuiApp {
         .detach();
     }
 
-    pub(super) fn sync_duplicate_review(&mut self, cx: &mut Context<Self>) {
+    fn sync_duplicate_review(&mut self, cx: &mut Context<Self>) {
         let data_changed = self
             .duplicate_review
             .sync_queries(self.state.query_revisions(None));
@@ -819,7 +871,7 @@ impl GuiApp {
         let Some(epoch) = self.duplicate_review.begin_task_read(id) else {
             return;
         };
-        let handle = self.handle.clone();
+        let handle = self.context.handle().clone();
         cx.spawn(async move |this, cx| {
             let response = cx
                 .background_executor()
@@ -828,7 +880,7 @@ impl GuiApp {
             let _ = this.update(cx, |this, cx| {
                 match this.duplicate_review.accept_task_read(epoch, id, response) {
                     TaskReadOutcome::Finished => {
-                        this.refresh(cx);
+                        this.refresh_snapshot(cx);
                         this.sync_duplicate_review(cx);
                     }
                     TaskReadOutcome::Failed => this.sync_duplicate_review(cx),
@@ -841,11 +893,11 @@ impl GuiApp {
     }
 
     fn submit_duplicate_action(&mut self, independent: bool, cx: &mut Context<Self>) {
-        self.refresh(cx);
+        self.refresh_snapshot(cx);
         let Some((epoch, command)) = self.duplicate_review.submit(independent) else {
             return;
         };
-        let handle = self.handle.clone();
+        let handle = self.context.handle().clone();
         cx.spawn(async move |this, cx| {
             let ack_handle = handle.clone();
             let ack = cx
@@ -858,14 +910,14 @@ impl GuiApp {
                     if !this.duplicate_review.accept_ack(epoch, independent, ack) {
                         return false;
                     }
-                    this.refresh(cx);
+                    this.refresh_snapshot(cx);
                     this.duplicate_review.finish_ack_refresh();
                     this.sync_duplicate_review(cx);
                     cx.notify();
                     true
                 })
                 .unwrap_or(false);
-            // Closing/replacing the root can precede the start acknowledgement.
+            // Closing/replacing the owner can precede the start acknowledgement.
             if !accepted && let Some(id) = relocation_id {
                 let _ = handle.send(Command::CancelRelocation { id });
             }
@@ -878,13 +930,14 @@ impl GuiApp {
         let Some(id) = self.duplicate_review.cancellable_task() else {
             return;
         };
-        let result = self.handle.send(Command::CancelRelocation { id });
+        let result = self.context.handle().send(Command::CancelRelocation { id });
         self.duplicate_review.accept_cancel(id, result);
         cx.notify();
     }
 
-    pub(super) fn duplicate_review_dialog(
+    pub(super) fn render_modal(
         &self,
+        surface: gpui::Stateful<Div>,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -923,7 +976,7 @@ impl GuiApp {
                                 .gap_1()
                                 .child(
                                     div().text_sm().truncate().child(
-                                        self.i18n.format(
+                                        self.context.i18n.format(
                                             "gl-duplicate-group-count",
                                             &[
                                                 (
@@ -940,7 +993,7 @@ impl GuiApp {
                                 .child(
                                     caption(
                                         theme,
-                                        self.i18n.format(
+                                        self.context.i18n.format(
                                             "gl-duplicate-presence-count",
                                             &[
                                                 ("missing", (group.missing_members).into()),
@@ -989,7 +1042,7 @@ impl GuiApp {
             members = members.child(
                 caption(
                     theme,
-                    self.i18n.format(
+                    self.context.i18n.format(
                         "gl-cached-fingerprint",
                         &[("fingerprint", (fingerprint.as_str()).into())],
                     ),
@@ -998,6 +1051,7 @@ impl GuiApp {
                 .truncate()
                 .tooltip({
                     let text: gpui::SharedString = self
+                        .context
                         .i18n
                         .format(
                             "gl-cached-fingerprint-note",
@@ -1047,9 +1101,9 @@ impl GuiApp {
             let selectable_target = selectable_target(member);
             let id = track.id;
             let existence = match member.exists {
-                Some(true) => self.i18n.text("gl-exists-now"),
-                Some(false) => self.i18n.text("gl-absent-now"),
-                None => self.i18n.text("gl-existence-unknown"),
+                Some(true) => self.context.i18n.text("gl-exists-now"),
+                Some(false) => self.context.i18n.text("gl-absent-now"),
+                None => self.context.i18n.text("gl-existence-unknown"),
             };
             let last_played = track
                 .last_played
@@ -1059,7 +1113,7 @@ impl GuiApp {
                         .format("%Y-%m-%d %H:%M:%S")
                         .to_string()
                 })
-                .unwrap_or_else(|| self.i18n.text("gl-never").into());
+                .unwrap_or_else(|| self.context.i18n.text("gl-never").into());
             let mut card = column()
                 .flex_shrink_0()
                 .min_w_0()
@@ -1090,14 +1144,14 @@ impl GuiApp {
                 )
                 .child(caption(
                     theme,
-                    self.i18n.format(
+                    self.context.i18n.format(
                         "gl-member-presence",
                         &[
                             ("id", (id.to_string()).into()),
                             ("existence", (existence).into()),
                             (
                                 "scan",
-                                (self.i18n.text(if track.missing {
+                                (self.context.i18n.text(if track.missing {
                                     "gl-scan-missing"
                                 } else {
                                     "gl-scan-present"
@@ -1109,7 +1163,7 @@ impl GuiApp {
                 ))
                 .child(caption(
                     theme,
-                    self.i18n.format(
+                    self.context.i18n.format(
                         "gl-member-file-data",
                         &[
                             ("size", (value.file_size.to_string()).into()),
@@ -1119,14 +1173,14 @@ impl GuiApp {
                 ))
                 .child(caption(
                     theme,
-                    self.i18n.format(
+                    self.context.i18n.format(
                         "gl-member-title",
                         &[("title", (track.title.as_str()).into())],
                     ),
                 ))
                 .child(caption(
                     theme,
-                    self.i18n.format(
+                    self.context.i18n.format(
                         "gl-member-metadata",
                         &[
                             (
@@ -1160,19 +1214,21 @@ impl GuiApp {
                 ))
                 .child(caption(
                     theme,
-                    self.i18n.format(
+                    self.context.i18n.format(
                         "gl-member-user-state",
                         &[
                             (
                                 "favorite",
-                                (self
-                                    .i18n
-                                    .text(if track.favorite { "gl-yes" } else { "gl-no" }))
+                                (self.context.i18n.text(if track.favorite {
+                                    "gl-yes"
+                                } else {
+                                    "gl-no"
+                                }))
                                 .into(),
                             ),
                             (
                                 "overrides",
-                                (self.i18n.text(if value.has_overrides {
+                                (self.context.i18n.text(if value.has_overrides {
                                     "gl-yes"
                                 } else {
                                     "gl-no"
@@ -1186,14 +1242,14 @@ impl GuiApp {
                 ))
                 .child(caption(
                     theme,
-                    self.i18n.format(
+                    self.context.i18n.format(
                         "gl-member-references",
                         &[
                             ("playlists", (value.playlist_references).into()),
                             ("queue", (value.queue_references).into()),
                             (
                                 "role",
-                                (self.i18n.text(if value.independent {
+                                (self.context.i18n.text(if value.independent {
                                     "gl-independent-role"
                                 } else {
                                     "gl-eligible-role"
@@ -1260,7 +1316,7 @@ impl GuiApp {
         if let Some(source) = &review.source {
             decisions = decisions.child(caption(
                 theme,
-                self.i18n.format(
+                self.context.i18n.format(
                     "gl-source-identity",
                     &[
                         ("id", (source.track.id.to_string()).into()),
@@ -1272,7 +1328,7 @@ impl GuiApp {
         if let Some(target) = &review.target {
             decisions = decisions.child(caption(
                 theme,
-                self.i18n.format(
+                self.context.i18n.format(
                     "gl-target-identity",
                     &[
                         ("id", (target.track.id.to_string()).into()),
@@ -1363,9 +1419,9 @@ impl GuiApp {
         if let Some(feedback) = &review.feedback {
             let (message, kind) = match feedback {
                 ReviewFeedback::Text(message, kind) => (message.clone(), *kind),
-                ReviewFeedback::Localized(key, kind) => (self.i18n.text(key).into(), *kind),
+                ReviewFeedback::Localized(key, kind) => (self.context.i18n.text(key).into(), *kind),
                 ReviewFeedback::ReadFailed(error) => (
-                    self.i18n.format(
+                    self.context.i18n.format(
                         "gl-verification-read-failed",
                         &[("error", error.as_str().into())],
                     ),
@@ -1374,128 +1430,124 @@ impl GuiApp {
             };
             decisions = decisions.child(status_message(theme, message, kind));
         }
-        crate::gui::components::modal_backdrop("duplicate-review-modal")
-            .map(|surface| self.dialog_surface(surface))
-            .child(
-                column()
-                    .id("duplicate-review-card")
-                    .w(relative(0.94))
-                    .max_h(window.viewport_size().height * 0.92)
-                    .min_w_0()
-                    .min_h_0()
-                    .p_3()
-                    .gap_2()
-                    .overflow_y_scroll()
-                    .bg(rgb(theme.panel))
-                    .border_1()
-                    .border_color(rgb(theme.border))
-                    .rounded_md()
-                    .child(
-                        row()
-                            .flex_shrink_0()
-                            .child(div().flex_1().min_w_0().child(panel_header(
-                                theme,
-                                self.tr("gl-same-files-title"),
-                                self.tr("gl-same-files-note"),
-                            )))
-                            .child(components::disabled_control(
-                                theme,
-                                components::quiet_icon_button(
-                                    theme,
-                                    icon_button(
-                                        "review-refresh",
-                                        "󰑐",
-                                        self.tr("gl-refresh-groups"),
-                                        cx,
-                                        |this, _, cx| {
-                                            if this
-                                                .duplicate_review
-                                                .reset(this.state.query_revisions(None))
-                                            {
-                                                this.start_duplicate_groups(cx);
-                                                cx.notify();
-                                            }
-                                        },
-                                    ),
-                                ),
-                                busy,
-                            ))
-                            .child(components::quiet_icon_button(
+        surface.child(
+            column()
+                .id("duplicate-review-card")
+                .w(relative(0.94))
+                .max_h(window.viewport_size().height * 0.92)
+                .min_w_0()
+                .min_h_0()
+                .p_3()
+                .gap_2()
+                .overflow_y_scroll()
+                .bg(rgb(theme.panel))
+                .border_1()
+                .border_color(rgb(theme.border))
+                .rounded_md()
+                .child(
+                    row()
+                        .flex_shrink_0()
+                        .child(div().flex_1().min_w_0().child(panel_header(
+                            theme,
+                            self.tr("gl-same-files-title"),
+                            self.tr("gl-same-files-note"),
+                        )))
+                        .child(components::disabled_control(
+                            theme,
+                            components::quiet_icon_button(
                                 theme,
                                 icon_button(
-                                    "review-close",
-                                    "",
-                                    self.tr("gl-close-review"),
+                                    "review-refresh",
+                                    "󰑐",
+                                    self.tr("gl-refresh-groups"),
                                     cx,
-                                    |this, window, cx| this.close_duplicate_review(window, cx),
+                                    |this, _, cx| {
+                                        if this
+                                            .duplicate_review
+                                            .reset(this.state.query_revisions(None))
+                                        {
+                                            this.start_duplicate_groups(cx);
+                                            cx.notify();
+                                        }
+                                    },
                                 ),
-                            )),
-                    )
-                    .child(
-                        row()
-                            .flex_shrink(1.)
-                            .min_h_0()
-                            .items_stretch()
-                            .child(
-                                column()
-                                    .w(relative(0.30))
-                                    .min_w_0()
-                                    .min_h_0()
-                                    .gap_2()
-                                    .child(
-                                        caption(theme, self.tr("gl-same-content-groups"))
-                                            .flex_shrink_0(),
-                                    )
-                                    .child(
-                                        column()
-                                            .id("duplicate-groups-scroll")
-                                            .flex_1()
-                                            .min_h_0()
-                                            .overflow_y_scroll()
-                                            .child(groups),
-                                    )
-                                    .child(group_pager),
-                            )
-                            .child(
-                                column()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .min_h_0()
-                                    .gap_2()
-                                    .child(caption(theme, self.tr("gl-file-roles")).flex_shrink_0())
-                                    .child(
-                                        column()
-                                            .id("duplicate-members-scroll")
-                                            .flex_1()
-                                            .min_w_0()
-                                            .min_h_0()
-                                            .overflow_y_scroll()
-                                            .child(members),
-                                    )
-                                    .when(review.fingerprint.is_some(), |pane| {
-                                        pane.child(self.review_pager(
-                                            false,
-                                            review.members_offset,
-                                            review.members_total,
-                                            MEMBER_PAGE,
-                                            busy || review.members_loading || review.confirming,
-                                            cx,
-                                        ))
-                                    }),
                             ),
-                    )
-                    .child(
-                        column()
-                            .id("review-decisions")
-                            .flex_shrink_0()
-                            .max_h(
-                                (window.rem_size() * 14.).min(window.viewport_size().height * 0.35),
-                            )
-                            .overflow_y_scroll()
-                            .child(decisions.flex_shrink_0()),
-                    )
-                    .child(caption(theme, self.tr("gl-cached-hash-note")).flex_shrink_0()),
-            )
+                            busy,
+                        ))
+                        .child(components::quiet_icon_button(
+                            theme,
+                            icon_button(
+                                "review-close",
+                                "",
+                                self.tr("gl-close-review"),
+                                cx,
+                                |this, _, cx| this.dismiss(cx),
+                            ),
+                        )),
+                )
+                .child(
+                    row()
+                        .flex_shrink(1.)
+                        .min_h_0()
+                        .items_stretch()
+                        .child(
+                            column()
+                                .w(relative(0.30))
+                                .min_w_0()
+                                .min_h_0()
+                                .gap_2()
+                                .child(
+                                    caption(theme, self.tr("gl-same-content-groups"))
+                                        .flex_shrink_0(),
+                                )
+                                .child(
+                                    column()
+                                        .id("duplicate-groups-scroll")
+                                        .flex_1()
+                                        .min_h_0()
+                                        .overflow_y_scroll()
+                                        .child(groups),
+                                )
+                                .child(group_pager),
+                        )
+                        .child(
+                            column()
+                                .flex_1()
+                                .min_w_0()
+                                .min_h_0()
+                                .gap_2()
+                                .child(caption(theme, self.tr("gl-file-roles")).flex_shrink_0())
+                                .child(
+                                    column()
+                                        .id("duplicate-members-scroll")
+                                        .flex_1()
+                                        .min_w_0()
+                                        .min_h_0()
+                                        .overflow_y_scroll()
+                                        .child(members),
+                                )
+                                .when(review.fingerprint.is_some(), |pane| {
+                                    pane.child(self.review_pager(
+                                        false,
+                                        review.members_offset,
+                                        review.members_total,
+                                        MEMBER_PAGE,
+                                        busy || review.members_loading || review.confirming,
+                                        cx,
+                                    ))
+                                }),
+                        ),
+                )
+                .child(
+                    column()
+                        .id("review-decisions")
+                        .flex_shrink_0()
+                        .max_h((window.rem_size() * 14.).min(window.viewport_size().height * 0.35))
+                        .overflow_y_scroll()
+                        .child(decisions.flex_shrink_0()),
+                )
+                .child(caption(theme, self.tr("gl-cached-hash-note")).flex_shrink_0()),
+        )
     }
 
     fn review_pager(
@@ -1510,7 +1562,7 @@ impl GuiApp {
         let theme = crate::gui::theme::palette(cx);
         let mut pager = panel_toolbar().flex_shrink_0().child(caption(
             theme,
-            self.i18n.format(
+            self.context.i18n.format(
                 "gl-page-range",
                 &[
                     ("start", (if total == 0 { 0 } else { offset + 1 }).into()),

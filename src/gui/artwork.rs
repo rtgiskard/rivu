@@ -18,8 +18,6 @@ use gpui::{
     div, img, prelude::*, rgb,
 };
 
-use super::GuiApp;
-
 mod decode;
 
 #[derive(Default)]
@@ -535,59 +533,6 @@ impl ArtworkLoader {
         }
         self.active = Some(identity);
         Some(pending)
-    }
-}
-
-impl GuiApp {
-    pub(super) fn prepare_artwork(&mut self, cx: &mut Context<Self>) {
-        self.artwork_view.replace(
-            self.metadata
-                .track()
-                .and_then(|track| self.artwork_manager.cached(track))
-                .filter(|artwork| !artwork.is_placeholder()),
-            cx,
-        );
-        let current = self
-            .metadata
-            .track()
-            .filter(|track| !self.artwork_manager.is_loaded(track));
-        if let Some(track) = self.artwork_loader.prepare(current) {
-            self.start_artwork(track, cx);
-        }
-    }
-
-    fn start_artwork(&mut self, track: Track, cx: &mut Context<Self>) {
-        let identity = ArtworkIdentity::for_track(&track);
-        let manager = Arc::clone(&self.artwork_manager);
-        cx.spawn(async move |this, cx| {
-            let loaded = cx
-                .background_executor()
-                .spawn(async move { manager.load(&track) })
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                // The URI always comes from the selected track's cache entry;
-                // an old completion can warm the cache, never replace the view.
-                if this
-                    .metadata
-                    .track()
-                    .is_some_and(|track| identity.matches(track))
-                {
-                    this.artwork_view
-                        .replace(loaded.filter(|artwork| !artwork.is_placeholder()), cx);
-                    cx.notify();
-                }
-                let current = this
-                    .metadata
-                    .track()
-                    .filter(|track| !this.artwork_manager.is_loaded(track));
-                if let Some(next) = this.artwork_loader.finish(&identity, current) {
-                    this.start_artwork(next, cx);
-                } else {
-                    this.prepare_artwork(cx);
-                }
-            });
-        })
-        .detach();
     }
 }
 
