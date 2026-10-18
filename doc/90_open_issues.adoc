@@ -26,3 +26,29 @@ at the time of investigation. Revisit when a compatible published release
 includes it; verify successful selection, cancellation, and absence of this
 warning without suppressing other logs.
 
+== Queue feedback while waiting for a query worker
+
+Status: deferred, 2026-10-18. Do not change waiting-feedback policy as part of
+the current keyboard-accessibility and stale-loading-presentation fixes.
+
+Queue loading text starts its 150 ms delay when a page query is submitted.
+After a search replacement or a window hide/reopen, current demand may wait
+behind an obsolete physical worker. During that interval, unloaded rows can
+have no loading text. This concerns database query scheduling, not tracks
+waiting for playback. The interval is established by code inspection; it has
+not been reproduced as a live GUI failure.
+
+The physical worker retains its slot until completion. Completion releases
+the slot and notifies the view; deferred viewport demand can then submit the
+current query without additional user input. This is not a confirmed permanent
+loading stall. Retiring the previous search's loading token remains a separate
+correctness fix and must not restore obsolete presentation to fill the gap.
+
+Revisit only after deciding whether loading text should cover logical waiting
+as well as submitted requests. If so, keep presentation identity and elapsed
+delay with the current demand: obsolete completion must not clear it, submission
+must not restart its delay, and no second worker may bypass the occupied slot.
+Verify a hide/reopen and search replacement with an outstanding query longer
+than 150 ms, and retain explicit retry for failed pages. Existing ownership is
+documented in link:22_cache.adoc#_query_projection_retention[Query projection retention].
+

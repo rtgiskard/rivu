@@ -20,6 +20,7 @@ impl Queue {
         self.model.change_search(query);
         self.context.scroll.borrow_mut().scroll_list_to("queue", 0);
         self.sync_queue(cx);
+        self.retain_loading(cx);
         self.ensure_queue_range(0..1, cx);
         cx.notify();
     }
