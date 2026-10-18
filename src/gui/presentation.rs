@@ -380,13 +380,8 @@ impl Presentation {
         }
     }
 
-    /// Called by the shell's first paint, after every panel's prepaint. Keeping
-    /// this hook outside panel render also retires images after panel removal.
-    pub(super) fn finish_paint(&self, window: &mut Window, cx: &mut Context<Self>) {
-        self.waveform
-            .read(cx)
-            .image_releaser()
-            .release_retired(window);
+    /// Called by the shell's first paint, after every panel's prepaint.
+    pub(super) fn finish_paint(&self, _window: &mut Window, cx: &mut Context<Self>) {
         if self.visuals.finish_prepaint() {
             // A resized panel can alter history shared by cached siblings.
             // Repaint them before the next retirement boundary.
@@ -398,8 +393,8 @@ impl Presentation {
         }
     }
 
-    /// Hidden/destroyed windows cannot rely on another paint for retirement.
-    pub(super) fn release_render_images(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Release display publications when the window is hidden or destroyed.
+    pub(super) fn release_render_images(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.visible = false;
         self.cancel_clock();
         self.demand = DisplayDemand::default();
@@ -414,10 +409,6 @@ impl Presentation {
         self.waveform.update(cx, |waveform, cx| {
             waveform.retain_panels(&[], cx);
         });
-        self.waveform
-            .read(cx)
-            .image_releaser()
-            .release_all_images(window);
     }
 }
 

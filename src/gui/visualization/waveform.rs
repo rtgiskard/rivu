@@ -23,9 +23,9 @@ use std::{
 };
 
 use gpui::{
-    AnyElement, Bounds, Context, EventEmitter, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, Point, RenderImage, SharedString, Window, canvas, div, fill, point,
-    prelude::*, px, rgb, size,
+    AnyElement, Bounds, Context, EventEmitter, GpuFrame, GpuLimits, GpuRectangle,
+    GpuRectangleParams, GpuSource, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    Pixels, Point, SharedString, Window, canvas, div, fill, point, prelude::*, px, rgb, size,
 };
 use parking_lot::RwLock;
 
@@ -94,7 +94,7 @@ struct Tile {
     x_start: u32,
     x_end: u32,
     fingerprint: u64,
-    image: Arc<RenderImage>,
+    frame: Arc<GpuFrame>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -136,10 +136,8 @@ struct LayerKey {
 #[derive(Default)]
 struct WaveformPlot {
     columns: HashMap<u64, Columns>,
-    retired: Vec<Arc<RenderImage>>,
-    pending_images: Vec<Arc<RenderImage>>,
-    paint_tiles: Vec<(u32, u32, Arc<RenderImage>)>,
-    retire_scratch: Vec<Arc<RenderImage>>,
+    paint_tiles: Vec<(u32, u32, Arc<GpuFrame>)>,
+    rectangles: Vec<GpuRectangle>,
 }
 
 fn waveform_level(value: f32, gain: f32, gamma: f32) -> f32 {
@@ -196,51 +194,6 @@ fn tile_columns(x_start: u32, x_end: u32, width: u32, count: usize) -> std::ops:
     (first as usize).min(count)..(end as usize).min(count)
 }
 
-/// Called once at the start of a window frame, even when no waveform is visible.
-/// Uncached images survive a full subsequent frame in the pending queue.
-/// Removed cached tiles are released at the next window-frame boundary.
-#[derive(Clone)]
-pub(in crate::gui) struct WaveformImageRelease(Rc<RefCell<WaveformPlot>>);
-
-impl WaveformImageRelease {
-    pub(in crate::gui) fn release_retired(&self, window: &mut Window) {
-        let mut plot = self.0.borrow_mut();
-        plot.release_images(|image| {
-            let _ = window.drop_image(image);
-        });
-        if !plot.retired.is_empty() {
-            let plot = Rc::clone(&self.0);
-            window.on_next_frame(move |window, _| {
-                plot.borrow_mut().release_images(|image| {
-                    let _ = window.drop_image(image);
-                });
-            });
-        }
-    }
-
-    pub(in crate::gui) fn release_all_images(&self, window: &mut Window) {
-        let mut plot = self.0.borrow_mut();
-        plot.paint_tiles.clear();
-        let WaveformPlot {
-            columns,
-            retired,
-            pending_images,
-            retire_scratch,
-            ..
-        } = &mut *plot;
-        for image in columns
-            .values_mut()
-            .flat_map(|columns| columns.tiles.drain(..).map(|tile| tile.image))
-            .chain(retired.drain(..))
-            .chain(pending_images.drain(..))
-            .chain(retire_scratch.drain(..))
-        {
-            let _ = window.drop_image(image);
-        }
-        columns.clear();
-    }
-}
-
 fn tile_fingerprint(values: &[WaveformColumn], start: usize, end: usize) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     for column in &values[start..end] {
@@ -258,14 +211,7 @@ fn tile_fingerprint(values: &[WaveformColumn], start: usize, end: usize) -> u64 
 
 impl WaveformPlot {
     fn retain_panels(&mut self, mut keep: impl FnMut(u64) -> bool) {
-        let retired = &mut self.retired;
-        self.columns.retain(|id, columns| {
-            if keep(*id) {
-                return true;
-            }
-            retired.extend(columns.tiles.drain(..).map(|tile| tile.image));
-            false
-        });
+        self.columns.retain(|id, _| keep(*id));
         self.paint_tiles.clear();
     }
 
@@ -274,27 +220,18 @@ impl WaveformPlot {
         for columns in self.columns.values_mut() {
             columns.values.clear();
             columns.layer_key = None;
-            for tile in columns.tiles.drain(..) {
-                self.retired.push(tile.image);
-            }
+            columns.tiles.clear();
+            columns.tile_revision = None;
         }
     }
 
     fn finish_paint(&mut self, cache_enabled: bool) {
         if !cache_enabled {
-            self.pending_images
-                .extend(self.paint_tiles.drain(..).map(|(_, _, image)| image));
             self.clear_cache();
         } else {
             self.paint_tiles.clear();
         }
-    }
-
-    fn release_images(&mut self, mut release: impl FnMut(Arc<RenderImage>)) {
-        while let Some(image) = self.retired.pop() {
-            release(image);
-        }
-        self.retired.append(&mut self.pending_images);
+        self.rectangles.clear();
     }
 
     fn update_tiles(
@@ -303,18 +240,17 @@ impl WaveformPlot {
         key: LayerKey,
         cache_enabled: bool,
         palette: &super::visuals::PaletteLut,
-    ) {
+    ) -> Result<(), String> {
         self.paint_tiles.clear();
         let columns = self.columns.get_mut(&panel_id).unwrap();
         if columns.values.is_empty() {
-            return;
+            return Ok(());
         }
         let unchanged = cache_enabled
             && columns.layer_key.as_ref() == Some(&key)
             && columns.tile_revision == Some(columns.revision);
         if !cache_enabled || columns.layer_key.as_ref() != Some(&key) {
-            self.retire_scratch
-                .extend(columns.tiles.drain(..).map(|tile| tile.image));
+            columns.tiles.clear();
         }
         let tile_count = key.width.div_ceil(WAVEFORM_TILE_WIDTH) as usize;
         for tile_index in 0..tile_count {
@@ -336,37 +272,37 @@ impl WaveformPlot {
                 self.paint_tiles.push((
                     x_start,
                     x_end,
-                    Arc::clone(&columns.tiles[tile_index].image),
+                    Arc::clone(&columns.tiles[tile_index].frame),
                 ));
                 continue;
             }
-            let image = Self::build_tile(
+            let frame = Self::build_tile(
                 &columns.values,
                 x_start,
                 x_end,
                 key.width,
                 key.height,
                 palette,
-            );
+                &mut self.rectangles,
+            )?;
             if cache_enabled {
                 let tile = Tile {
                     x_start,
                     x_end,
                     fingerprint,
-                    image: Arc::clone(&image),
+                    frame: Arc::clone(&frame),
                 };
                 if tile_index < columns.tiles.len() {
-                    self.retire_scratch
-                        .push(std::mem::replace(&mut columns.tiles[tile_index], tile).image);
+                    columns.tiles[tile_index] = tile;
                 } else {
                     columns.tiles.push(tile);
                 }
             }
-            self.paint_tiles.push((x_start, x_end, image));
+            self.paint_tiles.push((x_start, x_end, frame));
         }
         columns.layer_key = cache_enabled.then_some(key);
         columns.tile_revision = cache_enabled.then_some(columns.revision);
-        self.retired.append(&mut self.retire_scratch);
+        Ok(())
     }
 
     fn build_tile(
@@ -376,67 +312,66 @@ impl WaveformPlot {
         width: u32,
         height: u32,
         palette: &super::visuals::PaletteLut,
-    ) -> Arc<RenderImage> {
-        let mut pixels = image::RgbaImage::new(x_end - x_start, height);
+        rectangles: &mut Vec<GpuRectangle>,
+    ) -> Result<Arc<GpuFrame>, String> {
+        rectangles.clear();
+        let gpu_palette = palette.waveform_gpu_palette()?;
+        let tile_width = (x_end - x_start) as f32;
         let center = height as f32 * 0.5;
-        let range = tile_columns(x_start, x_end, width, values.len());
-        // Keep the center subdued and near-neutral; only the RMS edge carries
-        // the column's full palette color. This does not change amplitude mapping.
-        let floor = palette.lookup_mapped_rgb(0.0);
-        let neutral = floor.iter().map(|&channel| u32::from(channel)).sum::<u32>() / 3;
-        let low_color = floor.map(|channel| ((u32::from(channel) + 3 * neutral) / 6) as u8);
-        for column in range {
-            let WaveformColumn {
-                left_rms,
-                left_peak,
-                right_rms,
-                right_peak,
-            } = values[column];
-            let x0 = (column as u32 * width / values.len() as u32).max(x_start);
-            let x1 = (((column + 1) as u32 * width) / values.len() as u32).min(x_end);
-            if x0 >= x1 {
-                continue;
-            }
-            for (level, upper) in [(left_rms, true), (right_rms, false)] {
-                let Some(level) = level else { continue };
-                let height_px = (center * level).max(1.0);
-                let start = if upper { center - height_px } else { center };
-                let end = if upper { center } else { center + height_px };
-                let rms_color = palette.lookup_mapped_rgb(waveform_color_level(level));
-                for y in (start.floor() as u32)..(end.ceil() as u32).min(height) {
-                    let t = ((y as f32 + 0.5 - start) / (end - start)).clamp(0.0, 1.0);
-                    let t = if upper { 1.0 - t } else { t };
-                    let color = image::Rgba([
-                        (low_color[2] as f32 + (rms_color[2] as f32 - low_color[2] as f32) * t)
-                            as u8,
-                        (low_color[1] as f32 + (rms_color[1] as f32 - low_color[1] as f32) * t)
-                            as u8,
-                        (low_color[0] as f32 + (rms_color[0] as f32 - low_color[0] as f32) * t)
-                            as u8,
-                        255,
-                    ]);
-                    for x in x0..x1 {
-                        pixels.put_pixel(x - x_start, y, color);
-                    }
+        if tile_width > 0.0 && height > 0 {
+            for column in tile_columns(x_start, x_end, width, values.len()) {
+                let WaveformColumn {
+                    left_rms,
+                    left_peak,
+                    right_rms,
+                    right_peak,
+                } = values[column];
+                let x0 = (column as u32 * width / values.len() as u32).max(x_start);
+                let x1 = (((column + 1) as u32 * width) / values.len() as u32).min(x_end);
+                if x0 >= x1 {
+                    continue;
                 }
-            }
-            for (level, upper) in [(left_peak, true), (right_peak, false)] {
-                let Some(level) = level else { continue };
-                let y = if upper {
-                    center - (center * level).max(1.0)
-                } else {
-                    center + (center * level).max(1.0)
-                };
-                if height != 0 {
+                let x = (x0 - x_start) as f32 / tile_width;
+                let w = ((x1 - x0) as f32 / tile_width).min(1.0 - x);
+                for (level, upper) in [(left_rms, true), (right_rms, false)] {
+                    let Some(level) = level else { continue };
+                    let extent = (center * level).max(1.0).min(center);
+                    let start = if upper { center - extent } else { center };
+                    let [low, high] = palette.waveform_gpu_range(waveform_color_level(level));
+                    rectangles.push(GpuRectangle {
+                        bounds: [x, start / height as f32, w, extent / height as f32],
+                        palette_range: if upper { [low, high] } else { [high, low] },
+                    });
+                }
+                for (level, upper) in [(left_peak, true), (right_peak, false)] {
+                    let Some(level) = level else { continue };
+                    let extent = (center * level).max(1.0);
+                    let y = if upper {
+                        center - extent
+                    } else {
+                        center + extent
+                    };
                     let y = (y.round() as u32).min(height - 1);
-                    let [red, green, blue] = palette.lookup_mapped_rgb(waveform_color_level(level));
-                    for x in x0..x1 {
-                        pixels.put_pixel(x - x_start, y, image::Rgba([blue, green, red, 255]));
-                    }
+                    let high = palette.waveform_gpu_range(waveform_color_level(level))[1];
+                    rectangles.push(GpuRectangle {
+                        bounds: [x, y as f32 / height as f32, w, 1.0 / height as f32],
+                        palette_range: [high, high],
+                    });
                 }
             }
         }
-        Arc::new(RenderImage::new([image::Frame::new(pixels)]))
+        let max_palette_colors = gpu_palette.colors().len();
+        GpuFrame::rectangles(
+            rectangles,
+            gpu_palette,
+            GpuRectangleParams::default(),
+            GpuLimits {
+                max_rectangles: tile_columns(x_start, x_end, width, values.len()).len() * 4,
+                max_palette_colors,
+                ..Default::default()
+            },
+        )
+        .map_err(|error| error.to_string())
     }
     #[cfg(test)]
     fn columns(&mut self, panel_id: u64, width: usize, frame: &WaveformFrame) -> &[WaveformColumn] {
@@ -611,10 +546,6 @@ pub(in crate::gui) struct Waveform {
 }
 
 impl Waveform {
-    pub(in crate::gui) fn image_releaser(&self) -> WaveformImageRelease {
-        WaveformImageRelease(Rc::clone(&self.plot))
-    }
-
     pub(in crate::gui) fn new(shared: Arc<RwLock<WaveformFrame>>) -> Self {
         Self {
             enabled: true,
@@ -651,8 +582,7 @@ impl Waveform {
         plot.retain_panels(|_| false);
         plot.columns = HashMap::new();
         plot.paint_tiles = Vec::new();
-        let mut scratch = std::mem::take(&mut plot.retire_scratch);
-        plot.retired.append(&mut scratch);
+        plot.rectangles = Vec::new();
         drop(plot);
         *self.interaction.borrow_mut() = WaveformInteraction::default();
         self.cancel_seek();
@@ -1090,6 +1020,8 @@ impl Waveform {
         let waveform = Rc::clone(&self.plot);
         let palette = super::visuals::active_palette_lut(config.visual_palette);
         let config_palette = config.visual_palette;
+        let error_i18n = Arc::clone(i18n);
+        let error_theme = config.ui_theme.palette();
         let water = rgb(config.waveform_cursor_color.rgb());
         let background = rgb(config.visual_background.rgb());
         let glow = config.waveform_glow;
@@ -1137,7 +1069,7 @@ impl Waveform {
                                     entry.0 = plot.unwrap_or_default();
                                 }
                             },
-                            move |bounds, _, window, _| {
+                            move |bounds, _, window, cx| {
                                 window.paint_quad(fill(bounds, background));
                                 if bounds.size.width <= px(16.0)
                                     || bounds.size.height <= px(if labels { 32.0 } else { 16.0 })
@@ -1193,25 +1125,47 @@ impl Waveform {
                                     peak_gamma: peak_gamma.to_bits(),
                                     palette: config_palette,
                                 };
-                                waveform.update_tiles(panel_id, key, cache_enabled, &palette);
-                                for (x_start, x_end, image) in &waveform.paint_tiles {
-                                    let tile_bounds = Bounds::new(
-                                        point(plot.left() + px(*x_start as f32), plot.top()),
-                                        size(px((*x_end - *x_start) as f32), plot.size.height),
-                                    );
-                                    window
-                                        .paint_image(
-                                            tile_bounds,
-                                            tile_bounds,
-                                            px(0.0).into(),
-                                            Arc::clone(image),
-                                            0,
-                                            false,
-                                        )
-                                        .map_err(|_| ())
-                                        .ok();
-                                }
+                                let result = (|| {
+                                    waveform.update_tiles(
+                                        panel_id,
+                                        key,
+                                        cache_enabled,
+                                        &palette,
+                                    )?;
+                                    for (x_start, x_end, frame) in &waveform.paint_tiles {
+                                        let tile_bounds = Bounds::new(
+                                            point(plot.left() + px(*x_start as f32), plot.top()),
+                                            size(px((*x_end - *x_start) as f32), plot.size.height),
+                                        );
+                                        window
+                                            .paint_gpu(
+                                                tile_bounds,
+                                                GpuSource::Fixed(Arc::clone(frame)),
+                                            )
+                                            .map_err(|error| error.to_string())?;
+                                    }
+                                    Ok::<(), String>(())
+                                })();
                                 waveform.finish_paint(cache_enabled);
+                                if let Err(error) = result {
+                                    window.paint_quad(fill(
+                                        Bounds::new(plot.origin, size(plot.size.width, px(22.0))),
+                                        rgb(error_theme.error_bg),
+                                    ));
+                                    super::visuals::paint_label(
+                                        error_i18n
+                                            .format(
+                                                "visual-error",
+                                                &[("error", error.as_str().into())],
+                                            )
+                                            .into(),
+                                        plot.origin + point(px(6.0), px(3.0)),
+                                        error_theme.error,
+                                        window,
+                                        cx,
+                                    );
+                                    return;
+                                }
                                 if let Some(fraction) = progress {
                                     // Slow periodic easing gives the droplet a deliberate rhythm;
                                     // it never snaps at a cycle boundary.
@@ -1330,79 +1284,63 @@ impl Drop for Waveform {
 mod tests {
     use crate::gui::layout::interaction::{DragCommit, LayoutInteraction, SeekCommit};
     #[test]
-    fn waveform_tiles_preserve_palette_channels_and_dark_center() {
+    fn rms_gradient_uses_only_center_and_amplitude_colors() {
         let palette = super::super::visuals::active_palette_lut(
             crate::config::VisualizationPalette::Deadbeef,
         );
-        let image = WaveformPlot::build_tile(
-            &[
-                WaveformColumn {
-                    left_rms: Some(0.5),
-                    left_peak: Some(0.9),
-                    right_rms: Some(0.5),
-                    right_peak: Some(0.9),
-                },
-                WaveformColumn {
-                    left_rms: None,
-                    left_peak: Some(0.9),
-                    right_rms: None,
-                    right_peak: Some(0.9),
-                },
-            ],
-            0,
-            2,
-            2,
-            100,
-            &palette,
+        let columns = [WaveformColumn {
+            left_rms: Some(0.5),
+            right_rms: Some(0.5),
+            left_peak: None,
+            right_peak: None,
+        }];
+        let frame =
+            WaveformPlot::build_tile(&columns, 0, 1, 1, 100, &palette, &mut Vec::new()).unwrap();
+        let gpui::GpuContent::Rectangles { rectangles, .. } = frame.content() else {
+            panic!("expected rectangles")
+        };
+        let colors = frame.palette().colors();
+        let index = |coordinate: f32| (coordinate * (colors.len() - 1) as f32).round() as usize;
+        let [low, high] = rectangles[0].palette_range.map(index);
+        assert_eq!(
+            high,
+            low + 1,
+            "gradient must not traverse other palette colors"
         );
-        let bytes = image.as_bytes(0).unwrap();
-        // GPUI consumes BGRA, even though image::RgbaImage names its channels RGBA.
-        let pixel = |x: usize, y: usize| &bytes[(y * 2 + x) * 4..(y * 2 + x + 1) * 4];
-        for (edge_y, center_y, peak_y) in [(26, 49, 5), (73, 50, 95)] {
-            let edge = pixel(0, edge_y);
-            let center = pixel(0, center_y);
-            assert!(edge[0] > edge[2], "moderate RMS must remain blue, not red");
-            let brightness = |p: &[u8]| p[..3].iter().map(|&c| u32::from(c)).sum::<u32>();
-            assert!(
-                brightness(center) < brightness(edge),
-                "gradient must darken toward the center"
-            );
-            for x in 0..2 {
-                let peak = pixel(x, peak_y);
-                assert!(
-                    peak[2] > peak[0],
-                    "strong Peak must retain its warm palette color"
-                );
-                assert_eq!(peak[3], 255);
-            }
-        }
-        assert_eq!(pixel(1, 49)[3], 0, "Peak-only data must not invent RMS");
+        assert_eq!(rectangles[1].palette_range.map(index), [high, low]);
+        let expected = palette.lookup_mapped_rgb(waveform_color_level(0.5));
+        assert_eq!(
+            colors[high],
+            [expected[0], expected[1], expected[2], 255].map(|value| f32::from(value) / 255.0)
+        );
+        assert!(colors[low][..3].iter().sum::<f32>() < colors[high][..3].iter().sum::<f32>());
     }
 
     #[test]
-    fn full_and_near_full_stereo_peaks_reach_valid_edge_pixels() {
+    fn full_stereo_peaks_remain_within_short_and_tall_panels() {
         let palette = super::super::visuals::active_palette_lut(
             crate::config::VisualizationPalette::Deadbeef,
         );
-        let levels = [1.0, 0.999];
-        let columns = levels.map(|level| WaveformColumn {
+        let columns = [1.0, 0.999].map(|level| WaveformColumn {
             left_rms: None,
-            left_peak: Some(level),
             right_rms: None,
+            left_peak: Some(level),
             right_peak: Some(level),
         });
         for height in [1, 2, 99, 100] {
-            let image = WaveformPlot::build_tile(&columns, 0, 2, 2, height, &palette);
-            let bytes = image.as_bytes(0).unwrap();
-            for (x, level) in levels.into_iter().enumerate() {
-                let [red, green, blue] = palette.lookup_mapped_rgb(waveform_color_level(level));
-                for y in [0, height as usize - 1] {
-                    let offset = (y * 2 + x) * 4;
-                    assert_eq!(&bytes[offset..offset + 4], &[blue, green, red, 255]);
-                }
-                if height > 2 {
-                    let center = (height as usize / 2 * 2 + x) * 4;
-                    assert_eq!(bytes[center + 3], 0, "Peak-only data must not invent RMS");
+            let frame =
+                WaveformPlot::build_tile(&columns, 0, 2, 2, height, &palette, &mut Vec::new())
+                    .unwrap();
+            let gpui::GpuContent::Rectangles { rectangles, .. } = frame.content() else {
+                panic!("expected rectangles")
+            };
+            for peaks in rectangles.as_chunks::<2>().0 {
+                assert_eq!(peaks[0].bounds[1], 0.0);
+                assert!((peaks[1].bounds[1] + peaks[1].bounds[3] - 1.0).abs() < 1e-6);
+                assert_eq!(peaks[0].bounds[3], 1.0 / height as f32);
+                assert_eq!(peaks[1].bounds[3], 1.0 / height as f32);
+                for peak in peaks {
+                    assert_eq!(peak.palette_range[0], peak.palette_range[1]);
                 }
             }
         }
@@ -1429,25 +1367,27 @@ mod tests {
             },
             true,
             &palette,
-        );
-        let tile = Arc::downgrade(&plot.columns[&1].tiles[0].image);
+        )
+        .unwrap();
+        let tile = Arc::downgrade(&plot.columns[&1].tiles[0].frame);
+        let scene = Arc::clone(&plot.columns[&1].tiles[0].frame);
         plot.retain_panels(|_| false);
         assert!(plot.columns.is_empty());
-        assert!(tile.upgrade().is_some());
-        let mut released = 0;
-        plot.release_images(|_| released += 1);
-        assert_eq!(released, 4);
+        assert!(
+            tile.upgrade().is_some(),
+            "a captured scene must survive panel removal"
+        );
+        drop(scene);
         assert!(tile.upgrade().is_none());
     }
 
     #[test]
-    fn uncached_waveform_images_survive_one_boundary_then_retire() {
+    fn uncached_waveform_releases_publications_after_scene_completion() {
         let mut plot = WaveformPlot::default();
         let data = frame(vec![Some(0.25); 100]);
         let palette = super::super::visuals::active_palette_lut(
             crate::config::VisualizationPalette::Deadbeef,
         );
-        let mut previous = std::collections::HashSet::new();
         for _ in 0..32 {
             plot.columns_with_cache(
                 1,
@@ -1473,23 +1413,17 @@ mod tests {
                 },
                 false,
                 &palette,
-            );
-            let painted: std::collections::HashSet<_> = plot
-                .paint_tiles
-                .iter()
-                .map(|(_, _, image)| image.id)
-                .collect();
-            assert_eq!(painted.len(), 4);
+            )
+            .unwrap();
+            let scene = Arc::clone(&plot.paint_tiles[0].2);
+            let weak = Arc::downgrade(&scene);
             plot.finish_paint(false);
-            let mut released = std::collections::HashSet::new();
-            plot.release_images(|image| assert!(released.insert(image.id)));
-            assert_eq!(released, previous);
-            previous = painted;
+            assert!(plot.paint_tiles.is_empty());
+            assert!(plot.columns[&1].values.is_empty());
+            assert!(weak.upgrade().is_some());
+            drop(scene);
+            assert!(weak.upgrade().is_none());
         }
-        let mut released = std::collections::HashSet::new();
-        plot.release_images(|image| assert!(released.insert(image.id)));
-        assert_eq!(released, previous);
-        plot.release_images(|_| panic!("image retired twice"));
     }
 
     #[test]
@@ -1510,11 +1444,11 @@ mod tests {
                 palette: crate::config::VisualizationPalette::Deadbeef,
             };
             plot.columns(1, count, &data);
-            plot.update_tiles(1, key(&data), true, &palette);
+            plot.update_tiles(1, key(&data), true, &palette).unwrap();
             let before: Vec<_> = plot.columns[&1]
                 .tiles
                 .iter()
-                .map(|tile| Arc::clone(&tile.image))
+                .map(|tile| Arc::clone(&tile.frame))
                 .collect();
             data.peaks[changed_column] = Some(0.75);
             data.rms[changed_column] = Some(0.75);
@@ -1522,24 +1456,24 @@ mod tests {
             data.left_rms[changed_column] = Some(0.75);
             data.revision += 1;
             plot.columns(1, count, &data);
-            plot.update_tiles(1, key(&data), true, &palette);
+            plot.update_tiles(1, key(&data), true, &palette).unwrap();
             for (index, image) in before.iter().enumerate() {
                 assert_eq!(
-                    Arc::ptr_eq(image, &plot.columns[&1].tiles[index].image),
+                    Arc::ptr_eq(image, &plot.columns[&1].tiles[index].frame),
                     !changed_tiles.contains(&index)
                 );
             }
             let before: Vec<_> = plot.columns[&1]
                 .tiles
                 .iter()
-                .map(|tile| Arc::clone(&tile.image))
+                .map(|tile| Arc::clone(&tile.frame))
                 .collect();
-            plot.update_tiles(1, key(&data), true, &palette);
+            plot.update_tiles(1, key(&data), true, &palette).unwrap();
             assert!(
                 before
                     .iter()
                     .zip(&plot.columns[&1].tiles)
-                    .all(|(image, tile)| Arc::ptr_eq(image, &tile.image))
+                    .all(|(image, tile)| Arc::ptr_eq(image, &tile.frame))
             );
         }
     }
@@ -1881,24 +1815,10 @@ mod tests {
                 },
                 true,
                 &palette,
-            );
-            Arc::downgrade(&plot.columns[&1].tiles[0].image)
+            )
+            .unwrap();
+            Arc::downgrade(&plot.columns[&1].tiles[0].frame)
         };
-        let image = WaveformPlot::build_tile(
-            &[WaveformColumn {
-                left_rms: Some(0.2),
-                left_peak: Some(0.3),
-                right_rms: None,
-                right_peak: None,
-            }],
-            0,
-            1,
-            1,
-            10,
-            &palette,
-        );
-        let pending = Arc::downgrade(&image);
-        waveform.plot.borrow_mut().pending_images.push(image);
         waveform.dragging = true;
         {
             let mut interaction = waveform.interaction.borrow_mut();
@@ -1919,15 +1839,10 @@ mod tests {
         assert!(waveform.revision.is_none());
         assert!(waveform.source.is_none());
         {
-            let mut plot = waveform.plot.borrow_mut();
+            let plot = waveform.plot.borrow();
             assert_eq!(plot.columns.capacity(), 0);
             assert_eq!(plot.paint_tiles.capacity(), 0);
-            assert!(cached.upgrade().is_some());
-            plot.release_images(drop);
             assert!(cached.upgrade().is_none());
-            assert!(pending.upgrade().is_some());
-            plot.release_images(drop);
-            assert!(pending.upgrade().is_none());
         }
         waveform.set_enabled(true);
         assert!(waveform.manual.is_none());
@@ -1991,8 +1906,9 @@ mod tests {
                 },
                 true,
                 &palette,
-            );
-            Arc::downgrade(&plot.columns[&1].tiles[0].image)
+            )
+            .unwrap();
+            Arc::downgrade(&plot.columns[&1].tiles[0].frame)
         };
         {
             let mut shared = waveform.shared.write();
@@ -2013,17 +1929,10 @@ mod tests {
         assert!(waveform.manual.is_none());
         assert!(waveform.manual_error.is_none());
         {
-            let mut plot = waveform.plot.borrow_mut();
+            let plot = waveform.plot.borrow();
             assert!(plot.columns[&1].values.is_empty());
             assert!(plot.columns[&1].tiles.is_empty());
             assert!(plot.paint_tiles.is_empty());
-            assert!(
-                cached.upgrade().is_some(),
-                "images must survive until the frame boundary"
-            );
-            let mut released = 0;
-            plot.release_images(|_| released += 1);
-            assert_eq!(released, 4);
             assert!(cached.upgrade().is_none());
         }
         assert!(!waveform.sync_state(Some(&track)));

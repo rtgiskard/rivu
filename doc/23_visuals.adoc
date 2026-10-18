@@ -279,10 +279,16 @@ does not change the height represented by the amplitude mapping.
 
 A single shared vertical gradient would be cheaper to batch, but would assign
 the same color to equal heights across columns and weaken those differences.
-The design keeps per-column color fidelity without quantizing the palette.
-Static RMS and Peak layers are cached as image tiles, while the playback cursor
-and glow remain dynamic. This trades image memory and rebuild work on changes
-for less repeated rendering of an otherwise unchanged waveform.
+Each immutable tile instead publishes up to two RMS rectangles and two Peak
+rectangles per column. A shared palette stores adjacent center/endpoint color
+pairs for all existing 1024 amplitude-color samples. Each RMS rectangle interpolates
+only within its pair, preserving linear RGB mixing rather than traversing the
+intermediate palette colors; Peak uses the endpoint directly.
+Unchanged tiles retain publication identity so the renderer reuses their GPU
+buffers. Height changes rebuild normalized geometry; cursor and glow remain
+dynamic. The application no longer rasterizes colored images or retires their
+atlas entries. Buffer admission and completion-aware retirement use the shared
+GPU material budget described in link:22_cache.adoc[Caching and Resource Lifecycles].
 
 == Spectrum
 
@@ -447,8 +453,8 @@ that query. Once decoding starts, ordinary metadata changes do not cancel it:
 the source, saved-hint, request-generation, and suspension checks described under
 <<_waveform,Waveform>> govern pending and completed previews.
 
-Spectrum tessellation and Spectrogram GPU publication/paint failures are surfaced
-as visualization errors. Stereo-analysis publication/paint failures are reported separately.
+Spectrum tessellation and Waveform/Spectrogram GPU publication/paint failures are
+surfaced as visualization errors. Stereo-analysis publication/paint failures are reported separately.
 These rendering failures do not issue playback commands or make the audio
 callback wait for graphics. Very small plots can omit geometry rather than
 attempting invalid dimensions.

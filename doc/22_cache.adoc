@@ -174,7 +174,7 @@ palette mapping, or playback state. Settings and display controls are documented
 in link:01_config.adoc[Configuration and layout]; signal continuity and rendering
 rationale are explained in link:23_visuals.adoc[Visualization Rendering Design].
 
-The policy covers Waveform display columns and static images, Spectrum body
+The policy covers Waveform display columns and rectangle publications, Spectrum body
 geometry, and Spectrogram numerical column publications. Audio Visualizer styles are independent:
 radial styles do not retain reusable graphics, stereo analysis styles retain
 their own result images, and generative styles retain simulation state. The
@@ -183,8 +183,7 @@ setting does not control those resources, album artwork, or font caches.
 Disabling the cache bypasses reusable graphics, not the underlying audio data
 or Spectrogram history. Peak hold, smoothing, and display calculations retain
 the same meaning. Re-enabling it requires an initial rebuild before reuse
-resumes. Temporary images still remain alive long enough for their submitted
-scene to render safely.
+resumes. Submitted publications remain alive while their scenes reference them.
 
 Still Mode is a destructive suspension, not another cache policy: it stops
 visualization demand and discards results as well as derived graphics. Its
@@ -196,11 +195,13 @@ have already been submitted still follow the retirement boundary below.
 
 ==== Waveform
 
-Waveform separates display-column aggregation from static image caching.
+Waveform separates display-column aggregation from immutable GPU rectangle tiles.
 Unchanged data and display mapping reuse the columns; incremental waveform
-updates rebuild only affected image tiles. Playback cursor movement does not
-invalidate the static waveform. Source, dimensions, amplitude mapping, and
-palette changes rebuild the affected derived data.
+updates replace only affected tiles. Playback cursor movement does not invalidate
+the static waveform. Source, dimensions, amplitude mapping, and palette changes
+rebuild the affected derived data. The renderer reuses uploaded buffers by
+publication identity and owns completion-aware retirement; the application does
+not retain colored pixel tiles or an image retirement queue.
 
 ==== Spectrum
 
@@ -249,8 +250,9 @@ Caches are local to current panel owners or bounded shared history, not an
 unbounded record of earlier render states. Hiding a window releases Spectrogram
 history and stereo/generative results; it does not necessarily drop the active
 Spectrum panels' geometry or waveform previews. Base waveform storage is bounded
-independently of its derived images; see link:23_visuals.adoc#_waveform[Waveform].
-Derived image memory grows with panel dimensions and panel count.
+independently of its display publications; see link:23_visuals.adoc#_waveform[Waveform].
+Waveform rectangle payloads grow with display-column count and panel count,
+not panel pixel area; height changes rebuild geometry without adding rows of pixels.
 Spectrum uses at most 2000 display slots, further limited by drawable width.
 Bars and LED store at most one rectangle per visible slot; LED density increases
 fragment work rather than the number of stored body rectangles.
@@ -292,27 +294,16 @@ reclaimed on a later draw after completion, or on renderer destruction, not by a
 application retirement callback or a forced cleanup frame. These are payload counts,
 not total process memory or physical VRAM limits.
 
-An image cannot be dropped merely because the application has stopped reusing
-it: a submitted scene can still reference it. Replaced cached waveform images
-retire at a subsequent window-frame boundary; transient uncached waveform images
-survive a complete intervening frame. Clearing uncached waveform
-graphics transfers submitted tiles to retirement before discarding reusable data,
-so every upload retains an explicit release owner. Retirement runs from the root
-window independently of panel
-visibility. Final cleanup uses a frame callback without invalidating content,
-including in Still Mode with analysis frame scheduling inactive. Uncached image creation
-therefore cannot drive its own redraw loop. The last submitted scene retains its
-images until replacement or window closure. This retains temporary memory longer
-than immediate release, but keeps scene ownership valid.
-
 === Design tradeoffs
 
 Caching avoids repeated aggregation, geometry construction, and image creation,
 but does not eliminate scene submission or rendering. All Spectrum styles reuse
 renderer-owned backing for unchanged publications. Changed Line/Solid bodies still
 require curve generation and tessellation; changed Bars/Outline/LED bodies require
-a bounded rectangle payload. Spectrogram submits retained numerical column fields,
-with renderer-owned upload lifetime rather than application image retirement.
+a bounded rectangle payload. Waveform also submits bounded rectangle tiles, with
+a shared paired-color palette preserving each column's RMS gradient. Spectrogram
+submits retained numerical column fields. These publications use renderer-owned
+upload lifetime rather than application image retirement.
 Disabling reuse reduces retained graphics memory at the cost of rebuilding that work.
 
 Correct invalidation takes precedence over reuse: source or display changes

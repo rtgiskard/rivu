@@ -75,6 +75,7 @@ pub(super) struct PaletteLut {
     colors: [[u8; 3]; PALETTE_LUT_SIZE],
     spectrum_gpu_palette: OnceCell<Result<Arc<GpuPalette>, String>>,
     spectrogram_gpu_palette: OnceCell<Result<Arc<GpuPalette>, String>>,
+    waveform_gpu_palette: OnceCell<Result<Arc<GpuPalette>, String>>,
 }
 
 impl PaletteLut {
@@ -87,6 +88,7 @@ impl PaletteLut {
             }),
             spectrum_gpu_palette: OnceCell::new(),
             spectrogram_gpu_palette: OnceCell::new(),
+            waveform_gpu_palette: OnceCell::new(),
         }
     }
 
@@ -117,6 +119,34 @@ impl PaletteLut {
                 GpuPalette::new(&colors, PALETTE_LUT_SIZE).map_err(|error| error.to_string())
             })
             .clone()
+    }
+
+    // Adjacent pairs keep each RMS ramp a two-color RGB mix, not a palette sweep.
+    pub(super) fn waveform_gpu_palette(&self) -> Result<Arc<GpuPalette>, String> {
+        self.waveform_gpu_palette
+            .get_or_init(|| {
+                let floor = self.lookup_mapped_rgb(0.0);
+                let neutral = floor.iter().map(|&v| u32::from(v)).sum::<u32>() / 3;
+                let low = floor.map(|v| ((u32::from(v) + 3 * neutral) / 6) as u8);
+                let colors: Vec<_> = self
+                    .colors
+                    .iter()
+                    .flat_map(|&high| [low, high])
+                    .map(|[r, g, b]| [r, g, b, 255].map(|v| f32::from(v) / 255.0))
+                    .collect();
+                GpuPalette::new(&colors, PALETTE_LUT_SIZE * 2).map_err(|error| error.to_string())
+            })
+            .clone()
+    }
+
+    pub(super) fn waveform_gpu_range(&self, fraction: f32) -> [f32; 2] {
+        let mapped = visible_palette_fraction(self.palette, fraction);
+        let index = (mapped.clamp(0.0, 1.0) * (PALETTE_LUT_SIZE - 1) as f32).round() as usize;
+        let denominator = (PALETTE_LUT_SIZE * 2 - 1) as f32;
+        [
+            (index * 2) as f32 / denominator,
+            (index * 2 + 1) as f32 / denominator,
+        ]
     }
 
     pub(super) fn lookup_rgb(&self, fraction: f32) -> [u8; 3] {
@@ -2099,7 +2129,7 @@ fn note_label(frequency: f32) -> SharedString {
     format!("{}{octave}", NAMES[midi.rem_euclid(12) as usize]).into()
 }
 
-fn paint_label(
+pub(super) fn paint_label(
     text: SharedString,
     origin: Point<Pixels>,
     color: u32,
