@@ -27,15 +27,20 @@ use unicode_segmentation::UnicodeSegmentation;
 
 const INPUT_LINE_HEIGHT: f32 = 20.;
 const INPUT_VERTICAL_PADDING: f32 = 7.;
-const INPUT_CONTENT_HEIGHT: f32 = INPUT_LINE_HEIGHT + 2. * INPUT_VERTICAL_PADDING;
 
 /// Align a bordered control with a standalone [`Input`] at every UI scale.
 /// The existing border stays unscaled; embedded inputs retain their parent geometry.
-pub fn input_aligned_control(control: gpui::Stateful<gpui::Div>) -> gpui::Stateful<gpui::Div> {
+pub fn input_aligned_control(
+    control: gpui::Stateful<gpui::Div>,
+    cx: &App,
+) -> gpui::Stateful<gpui::Div> {
+    let scale = crate::theme::font_size_scale(cx);
     control
         .h_auto()
         .min_h_0()
-        .line_height(gpui::rems(INPUT_LINE_HEIGHT / 16.))
+        .font_size_scale(1.)
+        .text_size(gpui::rems(14. * scale / 16.))
+        .line_height(gpui::rems(INPUT_LINE_HEIGHT * scale / 16.))
         .py(gpui::rems(INPUT_VERTICAL_PADDING / 16.))
 }
 
@@ -850,7 +855,7 @@ impl Element for InputElement {
         } else {
             vec![run]
         };
-        let font_size = style.font_size.to_pixels(window.rem_size());
+        let font_size = style.font_size_in_pixels(window.rem_size());
         let line = window
             .text_system()
             .shape_line(display_text, font_size, &runs, None);
@@ -1020,6 +1025,7 @@ impl Render for Input {
         let theme = crate::theme::palette(cx);
         let focused = self.enabled && self.focus_handle.is_focused(window);
         let scale = window.rem_size() / px(16.);
+        let typography_scale = crate::theme::font_size_scale(cx);
         let accessibility = self.accessibility.clone();
         let placeholder = self.placeholder.clone();
         let content = self.content.clone();
@@ -1141,6 +1147,7 @@ impl Render for Input {
             })
             .text_color(rgb(theme.text))
             .when(!self.enabled, |view| view.text_color(rgb(theme.disabled)))
+            .font_size_scale(typography_scale)
             .line_height(px(INPUT_LINE_HEIGHT) * scale)
             .text_size(px(14.) * scale)
             .child(
@@ -1153,7 +1160,9 @@ impl Render for Input {
                         view.flex().items_center().h_full().min_w(gpui::rems(1.5))
                     })
                     .when(!self.embedded, |view| {
-                        view.h(px(INPUT_CONTENT_HEIGHT) * scale)
+                        view.h(px(
+                            INPUT_LINE_HEIGHT * typography_scale + 2. * INPUT_VERTICAL_PADDING
+                        ) * scale)
                             .py(px(INPUT_VERTICAL_PADDING) * scale)
                     })
                     .pr(self.trailing_space * scale)
@@ -1246,6 +1255,33 @@ mod tests {
         })
         .unwrap();
         (input, other, handle)
+    }
+
+    #[test]
+    fn live_font_size_updates_input_shaping_and_content_height() {
+        let mut cx = gpui::TestAppContext::single();
+        cx.update(crate::theme::init_test);
+        let (input, _, handle) = selection_fixture(&mut cx);
+        for font_size in [11, 18, 8] {
+            cx.update(|cx| {
+                crate::theme::set_typography(gpui::font("sans-serif"), "sans-serif", font_size, cx)
+            });
+            cx.run_until_parked();
+            cx.update_window(handle, |_, window, cx| {
+                window.draw(cx).clear(cx);
+                let field = input.read(cx);
+                let line = field.last_layout.as_ref().unwrap();
+                let logical_px = font_size as f32 * (4. / 3.);
+                assert!((f32::from(line.font_size) - logical_px).abs() < 0.001);
+                assert!(
+                    field.last_bounds.unwrap().size.height
+                        >= px(INPUT_LINE_HEIGHT * logical_px / 14.).round()
+                );
+                assert!(field.last_bounds.unwrap().size.height >= line.ascent + line.descent);
+                assert_eq!(window.rem_size(), px(16.));
+            })
+            .unwrap();
+        }
     }
 
     fn dispatch_pointer(
@@ -1727,5 +1763,96 @@ mod tests {
             });
         })
         .unwrap();
+    }
+
+    #[test]
+    fn aligned_controls_follow_input_height_across_font_and_interface_scales() {
+        struct Controls {
+            input: Entity<Input>,
+            heights: std::rc::Rc<std::cell::Cell<[Pixels; 4]>>,
+        }
+        impl Render for Controls {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let measure = |index, child: gpui::AnyElement| {
+                    let heights = self.heights.clone();
+                    div()
+                        .relative()
+                        .w(gpui::rems(12.))
+                        .flex_shrink_0()
+                        .child(child)
+                        .child(
+                            gpui::canvas(
+                                move |bounds, _, _| {
+                                    let mut values = heights.get();
+                                    values[index] = bounds.size.height;
+                                    heights.set(values);
+                                },
+                                |_, _, _, _| {},
+                            )
+                            .absolute()
+                            .size_full(),
+                        )
+                };
+                let theme = crate::theme::palette(cx);
+                let button = crate::button("aligned-text", "Apply", cx, |_, _, _| {});
+                let icon = crate::icon_button("aligned-icon", "+", "Toggle", cx, |_, _, _| {});
+                let dropdown =
+                    crate::dropdown_trigger(theme, "aligned-dropdown", "Choice", false, cx);
+                div()
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .items_start()
+                    .font_size_scale(crate::theme::font_size_scale(cx))
+                    .child(measure(0, self.input.clone().into_any_element()))
+                    .child(measure(
+                        1,
+                        input_aligned_control(button, cx).into_any_element(),
+                    ))
+                    .child(measure(
+                        2,
+                        input_aligned_control(icon, cx).into_any_element(),
+                    ))
+                    .child(measure(
+                        3,
+                        input_aligned_control(dropdown, cx).into_any_element(),
+                    ))
+            }
+        }
+        let mut cx = gpui::TestAppContext::single();
+        cx.update(crate::theme::init_test);
+        let heights = std::rc::Rc::new(std::cell::Cell::new([px(0.); 4]));
+        let window = cx.add_window({
+            let heights = heights.clone();
+            move |_, cx| Controls {
+                input: cx.new(|cx| Input::new("Size", "24", "", cx)),
+                heights,
+            }
+        });
+        for interface_scale in [0.75, 1., 1.5, 2.] {
+            for font_size in [8, 11, 18] {
+                cx.update(|cx| {
+                    crate::theme::set_typography(
+                        gpui::font("sans-serif"),
+                        "sans-serif",
+                        font_size,
+                        cx,
+                    )
+                });
+                cx.update_window(window.into(), |_, window, cx| {
+                    window.set_rem_size(px(16. * interface_scale));
+                    window.draw(cx).clear(cx);
+                })
+                .unwrap();
+                let [input, button, icon, dropdown] = heights.get();
+                assert!(input > px(font_size as f32 * (4. / 3.) * interface_scale));
+                for control in [button, icon, dropdown] {
+                    assert!(
+                        (f32::from(input - control)).abs() <= 1.,
+                        "font={font_size}, scale={interface_scale}: input={input:?}, control={control:?}"
+                    );
+                }
+            }
+        }
     }
 }

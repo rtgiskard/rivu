@@ -21,6 +21,7 @@ settings-artwork-decode-budget-hint = 1–1024 MiB/张，应用后更新当前�
 settings-gpu-material-budget-mib = GPU 缓冲共享预算（MiB）
 settings-gpu-material-budget-hint = 16–1024 MiB，默认 64；重启 GUI 后生效。计入初始化与待完成上传，不代表总显存
 settings-font-family = 字体
+settings-base-font-size-pt = 基准字号（pt）
 settings-interface-scale = 界面缩放
 settings-layout-grid-spacing-px = 布局网格间距 (px)
 settings-analysis-rate-hz = 分析频率 (Hz)

@@ -4,7 +4,7 @@ use crate::{
     list::VirtualList,
     menu::POPOVER_MAX_REMS,
     overlay::text_tooltip,
-    row::{DROPDOWN_ROW_REMS, dropdown_row},
+    row::{DROPDOWN_ROW_REMS, dropdown_row, dropdown_row_height},
     surface::Popover,
     theme::palette,
 };
@@ -148,7 +148,15 @@ impl<T> ChoiceState<T> {
                     "pageup" | "pagedown" => {
                         if let Some(index) = self.selected_index() {
                             let height = self.scroll.0.borrow().base_handle.bounds().size.height;
-                            let row_height = DROPDOWN_ROW_REMS * f32::from(window.rem_size());
+                            let count = self.candidates.filtered().count().max(1);
+                            let row_height = self
+                                .scroll
+                                .0
+                                .borrow()
+                                .last_item_size
+                                .map(|size| f32::from(size.contents.height) / count as f32)
+                                .filter(|height| *height > 0.)
+                                .unwrap_or(DROPDOWN_ROW_REMS * f32::from(window.rem_size()));
                             let visible =
                                 ((f32::from(height) / row_height).floor() as usize).max(1);
                             self.candidates.select_index(if key == "pagedown" {
@@ -220,14 +228,14 @@ impl ChoicePopup {
         let count = choices.candidates.filtered().count();
         let selected = choices.selected_index();
         let revision = choices.revision;
-        let height = (count as f32 * DROPDOWN_ROW_REMS * f32::from(window.rem_size()))
+        let height = (count as f32 * f32::from(dropdown_row_height(window, cx)))
             .min(f32::from(window.rem_size()) * POPOVER_MAX_REMS)
             .min(f32::from(window.viewport_size().height) * 0.45);
         let list = VirtualList::new(
             self.id.clone(),
             count,
             &choices.scroll,
-            cx.processor(move |owner, range: std::ops::Range<usize>, _, cx| {
+            cx.processor(move |owner, range: std::ops::Range<usize>, window, cx| {
                 let choices = state(owner);
                 // The list calls this later for measurement and prepaint. Never combine
                 // a popup's captured revision/geometry with replacement candidates.
@@ -247,6 +255,7 @@ impl ChoicePopup {
                                 selected == Some(index),
                                 label,
                             )
+                            .h(dropdown_row_height(window, cx))
                             .role(Role::ListBoxOption)
                             .aria_label(hint.clone())
                             .aria_selected(selected == Some(index))

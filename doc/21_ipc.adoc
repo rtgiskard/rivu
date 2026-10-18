@@ -445,6 +445,7 @@ Response types:
 Wire enum variant and field order are part of the binary schema. Incompatible
 schema changes require a new protocol version and coordinated client and host
 updates; there is no obligation to preserve earlier schemas.
+The current protocol version is `2`; hosts and clients must both use this version.
 
 == Revisions and watching
 

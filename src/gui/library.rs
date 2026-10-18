@@ -264,6 +264,7 @@ impl Render for LibraryDragPreview {
                     div()
                         .flex_shrink_0()
                         .font_family(super::appearance::fonts::SYMBOLS_FAMILY)
+                        .font_size_scale(1.)
                         .child(self.icon),
                 )
                 .child(div().min_w_0().truncate().child(self.label.clone())),
@@ -522,7 +523,7 @@ impl Library {
         // Local forest acceptance must notify after prepaint to redraw the loaded rows.
         let demand_owner = cx.entity().downgrade();
         let view = list_viewport(
-            VirtualList::new(("library-directory-tree", panel_id), row_count, scroll, cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
+            VirtualList::new(("library-directory-tree", panel_id), row_count, scroll, cx.processor(move |this, range: std::ops::Range<usize>, window, cx| {
                 let playing_track = this.state.current_track()
                     .filter(|_| this.state.playback.status == crate::model::PlaybackStatus::Playing)
                     .map(|track| track.id);
@@ -547,6 +548,7 @@ impl Library {
                                     0,
                                     false,
                                 )
+                                .h(rivu_ui::tree_row_height(window, cx))
                                 .gap_0()
                                 .overflow_hidden()
                                 .child(
@@ -669,6 +671,7 @@ impl Library {
                                     .flex_shrink_0()
                                     .text_sm()
                                     .font_family(super::appearance::fonts::SYMBOLS_FAMILY)
+                                    .font_size_scale(1.)
                                     .child(if let Some(branch) = &visible.branch {
                                         if this.library.tree().expanded(branch) {
                                             "󰝰"
@@ -709,6 +712,7 @@ impl Library {
                                                 .flex_shrink_0()
                                                 .text_sm()
                                                 .font_family(super::appearance::fonts::SYMBOLS_FAMILY)
+                                                .font_size_scale(1.)
                                                 .text_color(gpui::rgb(theme.error))
                                                 .child("󰩋"),
                                         )
@@ -720,7 +724,7 @@ impl Library {
                                     row()
                                         .gap_1()
                                         .flex_shrink_0()
-                                        .child(rivu_ui::caption(theme, "󰎇").font_family(super::appearance::fonts::SYMBOLS_FAMILY))
+                                        .child(rivu_ui::caption(theme, "󰎇").font_family(super::appearance::fonts::SYMBOLS_FAMILY).font_size_scale(1.))
                                         .child(rivu_ui::caption(theme, count)
                                             .font_features(super::appearance::fonts::tabular_numbers())),
                                 )
@@ -761,6 +765,7 @@ impl Library {
                                 0,
                                 selected,
                             )
+                            .h(rivu_ui::tree_row_height(window, cx))
                             .gap_0()
                             .overflow_hidden()
                             .group("library-track-row")
@@ -999,7 +1004,7 @@ impl Library {
             .flex_shrink_0()
             .child(
                 row()
-                    .h(gpui::rems(2.))
+                    .min_h(gpui::rems(2.))
                     .flex_shrink_0()
                     .child(caption(theme, header_text).flex_1().min_w_0().truncate())
                     .child(dismiss),
@@ -1008,7 +1013,7 @@ impl Library {
             .child(
                 caption(theme, path.clone())
                     .id(("scan-path", panel_id))
-                    .h(gpui::rems(1.25))
+                    .min_h(gpui::rems(1.25))
                     .flex_shrink_0()
                     .min_w_0()
                     .truncate()
@@ -1017,7 +1022,7 @@ impl Library {
             .child(
                 caption(theme, message.clone())
                     .id(("scan-message", panel_id))
-                    .h(gpui::rems(1.25))
+                    .min_h(gpui::rems(1.25))
                     .flex_shrink_0()
                     .min_w_0()
                     .truncate()
@@ -1295,6 +1300,7 @@ mod library_root_tests {
             rivu_ui::theme::set_typography(
                 gpui::font("sans-serif"),
                 crate::gui::appearance::fonts::SYMBOLS_FAMILY,
+                12,
                 cx,
             );
         });

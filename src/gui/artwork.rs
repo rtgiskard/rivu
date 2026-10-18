@@ -1343,7 +1343,7 @@ mod tests {
     ) {
         cx.update(|cx| {
             crate::gui::appearance::theme::set_theme(crate::theme::Theme::default(), cx);
-            crate::gui::appearance::fonts::publish(&gpui::font("sans-serif"), cx);
+            crate::gui::appearance::fonts::publish(&gpui::font("sans-serif"), 12, cx);
         });
         use super::super::{
             album_artwork::{AlbumArtwork, AlbumArtworkPanel},

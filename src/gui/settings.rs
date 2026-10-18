@@ -96,6 +96,7 @@ enum Field {
     ArtworkDecodeBudget,
     GpuMaterialBudget,
     Font,
+    FontSize,
     Scale,
     LayoutSnapGrid,
     Fps,
@@ -144,6 +145,7 @@ impl Field {
             Self::ArtworkDecodeBudget => "settings-artwork-decode-budget-mib",
             Self::GpuMaterialBudget => "settings-gpu-material-budget-mib",
             Self::Font => "settings-font-family",
+            Self::FontSize => "settings-base-font-size-pt",
             Self::Scale => "settings-interface-scale",
             Self::LayoutSnapGrid => "settings-layout-grid-spacing-px",
             Self::Fps => "settings-analysis-rate-hz",
@@ -216,6 +218,7 @@ impl Field {
             Self::ArtworkDecodeBudget => settings.tr("settings-artwork-decode-budget-hint"),
             Self::GpuMaterialBudget => settings.tr("settings-gpu-material-budget-hint"),
             Self::Font => "".into(),
+            Self::FontSize => "8–18 pt".into(),
             Self::Scale => "0.75–2.".into(),
             Self::LayoutSnapGrid => settings.tr("settings-layout-grid-hint"),
             Self::Fps => settings.tr("settings-analysis-rate-hint"),
@@ -275,7 +278,7 @@ fn icon_button(
     cx: &mut Context<Settings>,
     action: impl Fn(&mut Settings, &mut Window, &mut Context<Settings>) + 'static,
 ) -> Stateful<Div> {
-    input_aligned_control(common_icon_button(id, icon, hint, cx, action))
+    input_aligned_control(common_icon_button(id, icon, hint, cx, action), cx)
 }
 
 fn dropdown_button(
@@ -286,16 +289,19 @@ fn dropdown_button(
     cx: &mut Context<Settings>,
     action: impl Fn(&mut Settings, &mut Window, &mut Context<Settings>) + 'static,
 ) -> Stateful<Div> {
-    input_aligned_control(activate_control(
-        dropdown_trigger(palette(cx), id, label, expanded, cx)
-            .role(Role::ComboBox)
-            .aria_label(name),
+    input_aligned_control(
+        activate_control(
+            dropdown_trigger(palette(cx), id, label, expanded, cx)
+                .role(Role::ComboBox)
+                .aria_label(name),
+            cx,
+            move |this, window, cx| {
+                action(this, window, cx);
+                cx.notify();
+            },
+        ),
         cx,
-        move |this, window, cx| {
-            action(this, window, cx);
-            cx.notify();
-        },
-    ))
+    )
 }
 fn visual_switch(
     i18n: &Localizer,
@@ -320,24 +326,27 @@ fn visual_switch(
     } else {
         format!("{label} ({hint})").into()
     };
-    input_aligned_control(rivu_ui::toggle_button(
-        id,
-        icon,
-        format!(
-            "{label}: {}",
-            i18n.text(if enabled {
-                "settings-on"
-            } else {
-                "settings-off"
-            })
+    input_aligned_control(
+        rivu_ui::toggle_button(
+            id,
+            icon,
+            format!(
+                "{label}: {}",
+                i18n.text(if enabled {
+                    "settings-on"
+                } else {
+                    "settings-off"
+                })
+            ),
+            enabled,
+            cx,
+            move |this, cx| {
+                toggle(&mut this.model.draft);
+                this.sync_field_enabled(cx);
+            },
         ),
-        enabled,
         cx,
-        move |this, cx| {
-            toggle(&mut this.model.draft);
-            this.sync_field_enabled(cx);
-        },
-    ))
+    )
 }
 
 fn settings_group(
@@ -479,6 +488,7 @@ pub(super) struct Settings {
     ffmpeg_status: String,
     mpris_status: String,
     ui_scale: f32,
+    ui_font_size: u32,
     scope: FocusScope,
     active: bool,
     measured: Rc<RefCell<HashMap<Measured, Bounds<Pixels>>>>,
@@ -552,6 +562,7 @@ impl Settings {
             ffmpeg_status,
             mpris_status,
             ui_scale,
+            ui_font_size: config.ui_font_size,
             scope: FocusScope::new(cx),
             active: false,
             measured: Rc::new(RefCell::new(HashMap::new())),
@@ -576,14 +587,15 @@ impl Settings {
         ffmpeg_status: &str,
         mpris_status: &str,
         ui_scale: f32,
+        ui_font_size: u32,
         cx: &mut Context<Self>,
     ) {
         let devices_changed = !Arc::ptr_eq(&self.devices, devices) && self.devices != *devices;
-        let scale_changed = self.ui_scale != ui_scale;
+        let scale_changed = self.ui_scale != ui_scale || self.ui_font_size != ui_font_size;
         let changed = devices_changed
             || self.ffmpeg_status != ffmpeg_status
             || self.mpris_status != mpris_status
-            || self.ui_scale != ui_scale;
+            || scale_changed;
         if !changed {
             return;
         }
@@ -593,6 +605,7 @@ impl Settings {
         self.mpris_status.clear();
         self.mpris_status.push_str(mpris_status);
         self.ui_scale = ui_scale;
+        self.ui_font_size = ui_font_size;
         if scale_changed || (devices_changed && self.dropdown_anchor == Measured::Device) {
             self.dropdown.close();
         }
@@ -661,6 +674,7 @@ impl Settings {
             Field::ArtworkDecodeBudget,
             Field::GpuMaterialBudget,
             Field::Font,
+            Field::FontSize,
             Field::Scale,
             Field::LayoutSnapGrid,
             Field::Fps,
@@ -947,6 +961,12 @@ impl Settings {
         self.font_value = self.model.draft.ui_font.clone();
         self.set_value(Field::Font, self.model.draft.ui_font.clone(), unchanged, cx);
         self.set_value(
+            Field::FontSize,
+            self.model.draft.ui_font_size.to_string(),
+            unchanged,
+            cx,
+        );
+        self.set_value(
             Field::Scale,
             self.model.draft.ui_scale.to_string(),
             unchanged,
@@ -1205,6 +1225,7 @@ impl Settings {
         if config.ui_font.is_empty() {
             config.ui_font = "sans-serif".to_owned();
         }
+        config.ui_font_size = self.number(Field::FontSize, cx)?;
         config.ui_scale = self.number(Field::Scale, cx)?;
         config.layout_snap_grid_px = self.number(Field::LayoutSnapGrid, cx)?;
         config.analysis_fps = self.number(Field::Fps, cx)?;
@@ -1400,6 +1421,7 @@ impl Settings {
                     .justify_center()
                     .cursor_pointer()
                     .font_family(super::appearance::fonts::SYMBOLS_FAMILY)
+                    .font_size_scale(1.)
                     .child("󰅀")
                     .on_mouse_down(
                         MouseButton::Left,
@@ -1991,6 +2013,7 @@ mod tests {
             rivu_ui::theme::set_typography(
                 gpui::font("sans-serif"),
                 crate::gui::appearance::fonts::SYMBOLS_FAMILY,
+                12,
                 cx,
             );
         });

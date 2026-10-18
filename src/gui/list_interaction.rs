@@ -792,7 +792,7 @@ impl GuiApp {
                 ));
             }
             let count = self.playlists.read(cx).catalog_len();
-            let height = (window.rem_size() * rivu_ui::LIST_ROW_REMS * count.max(1) as f32)
+            let height = (rivu_ui::list_row_height(window, cx) * count.max(1) as f32)
                 .min(window.rem_size() * POPOVER_MAX_REMS)
                 .min(window.viewport_size().height * 0.5);
             menu = menu
@@ -801,7 +801,7 @@ impl GuiApp {
                         "content-playlist-targets",
                         count,
                         &state.playlist_scroll,
-                        cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
+                        cx.processor(|this, range: std::ops::Range<usize>, window, cx| {
                             range
                                 .map(|index| {
                                     let Some((id, name)) = this
@@ -815,7 +815,7 @@ impl GuiApp {
                                             .update(cx, |playlists, cx| {
                                                 playlists.catalog_loading_row(index, cx)
                                             })
-                                            .h(gpui::rems(rivu_ui::LIST_ROW_REMS));
+                                            .h(rivu_ui::list_row_height(window, cx));
                                     };
                                     rivu_ui::activate_control(
                                         rivu_ui::menu_item_style(
@@ -829,7 +829,7 @@ impl GuiApp {
                                             this.content_action(ContentAction::Playlist(id), cx)
                                         },
                                     )
-                                    .h(gpui::rems(rivu_ui::LIST_ROW_REMS))
+                                    .h(rivu_ui::list_row_height(window, cx))
                                 })
                                 .collect::<Vec<_>>()
                         }),

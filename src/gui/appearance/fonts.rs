@@ -20,8 +20,8 @@ pub(in crate::gui) fn register_symbols(cx: &App) -> anyhow::Result<()> {
         )))])
 }
 
-pub(in crate::gui) fn publish(font: &Font, cx: &mut App) {
-    rivu_ui::theme::set_typography(font.clone(), SYMBOLS_FAMILY, cx);
+pub(in crate::gui) fn publish(font: &Font, font_size: u32, cx: &mut App) {
+    rivu_ui::theme::set_typography(font.clone(), SYMBOLS_FAMILY, font_size, cx);
 }
 
 /// Resolve only at startup or when the saved setting changes, never while painting.
@@ -34,9 +34,18 @@ pub(in crate::gui) fn resolve(requested: &str, cx: &App) -> Font {
     };
     let available = cx.text_system().all_font_names();
     match system_family(requested, &available) {
-        // Explicit fallback lists eagerly load every candidate in GPUI; leave
-        // missing glyphs to its backend and select only the matched family.
-        Ok(primary) => return font(primary),
+        Ok(primary) => {
+            let resolved = font(primary);
+            #[cfg(target_os = "linux")]
+            let resolved = Font {
+                fallbacks: Some(gpui::FontFallbacks::from_system_family(
+                    requested.to_owned(),
+                    resolved.family.clone(),
+                )),
+                ..resolved
+            };
+            return resolved;
+        }
         Err(error) => tracing::warn!(requested, %error, "Cannot resolve system UI font"),
     }
     font("sans-serif")

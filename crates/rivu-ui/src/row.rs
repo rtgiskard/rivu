@@ -62,8 +62,33 @@ pub fn dropdown_row(
         .child(div().flex_1().min_w_0().truncate().child(label.into()))
 }
 
-pub fn list_row_height(window: &Window) -> gpui::Pixels {
-    window.rem_size() * LIST_ROW_REMS
+/// Uniform two-line row height, growing only when text no longer fits the geometry.
+pub fn list_row_height(window: &Window, cx: &gpui::App) -> gpui::Pixels {
+    let scale = crate::theme::font_size_scale(cx);
+    let line_height = |font_rems| {
+        (gpui::phi().to_pixels(gpui::rems(font_rems).into(), window.rem_size()) * scale).round()
+    };
+    (window.rem_size() * LIST_ROW_REMS).max(line_height(0.875) + line_height(0.75) + gpui::px(2.))
+}
+
+/// Uniform single-line option height; borders remain physical layout pixels.
+pub(crate) fn dropdown_row_height(window: &Window, cx: &gpui::App) -> gpui::Pixels {
+    (window.rem_size() * DROPDOWN_ROW_REMS).max(
+        (gpui::phi().to_pixels(gpui::rems(0.875).into(), window.rem_size())
+            * crate::theme::font_size_scale(cx))
+        .round()
+            + gpui::px(2.),
+    )
+}
+
+/// Uniform tree height, accommodating the root's 14px text and row borders.
+pub fn tree_row_height(window: &Window, cx: &gpui::App) -> gpui::Pixels {
+    (window.rem_size() * 1.75).max(
+        (gpui::phi().to_pixels(gpui::rems(0.875).into(), window.rem_size())
+            * crate::theme::font_size_scale(cx))
+        .round()
+            + gpui::px(2.),
+    )
 }
 
 /// Shared row geometry and idle background; each caller owns its single hover style.

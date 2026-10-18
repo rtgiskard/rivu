@@ -459,6 +459,7 @@ impl Settings {
                 this.open_setting_dropdown(items, selected);
             },
         )
+        .tooltip(text_tooltip(self.tr("settings-language-restart")))
         .relative()
         .child(self.measurement(Measured::Language, cx));
         let theme = dropdown_button(
@@ -487,29 +488,27 @@ impl Settings {
             self.tr("settings-appearance-layout"),
             column()
                 .gap_2()
-                .child(form_field(colors, self.tr("settings-theme"), theme))
-                .child(
-                    column()
-                        .gap_1()
-                        .child(
-                            row()
-                                .flex_wrap()
-                                .gap_2()
-                                .child(caption(colors, self.tr("settings-language")))
-                                .child(caption(colors, self.tr("settings-language-restart"))),
-                        )
-                        .child(language),
-                )
+                .child(two_column(
+                    form_field(colors, self.tr("settings-theme"), theme),
+                    div(),
+                ))
+                .child(two_column(
+                    form_field(colors, self.tr("settings-language"), language),
+                    div(),
+                ))
                 .child(two_column(
                     self.font_control(cx).min_w(rems(180. / 16.)),
-                    self.field(Field::Scale, cx).min_w(rems(180. / 16.)),
+                    self.field(Field::FontSize, cx).min_w(rems(180. / 16.)),
                 ))
-                .child(self.layout_settings(cx)),
+                .child(two_column(
+                    self.field(Field::Scale, cx).min_w(rems(180. / 16.)),
+                    self.layout_settings(cx),
+                )),
         )
     }
 
     pub(super) fn layout_settings(&mut self, cx: &mut Context<Self>) -> Div {
-        column().child(two_column(
+        column().child(
             Field::LayoutSnapGrid.form(
                 palette(cx),
                 self,
@@ -531,8 +530,7 @@ impl Settings {
                         |draft| draft.layout_snap_enabled = !draft.layout_snap_enabled,
                     )),
             ),
-            div(),
-        ))
+        )
     }
 
     pub(super) fn desktop_settings(&mut self, cx: &mut Context<Self>) -> Div {

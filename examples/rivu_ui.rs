@@ -232,7 +232,7 @@ impl Render for Showcase {
                 .child(disabled_control(colors, button("action", "Action", cx, |this,_,cx| { this.clicks += 1; cx.notify(); }), !self.enabled))
                 .child(active_control(colors, quiet_icon_button(colors, icon_button("quiet", "✓", "Quiet selected action", cx, |this,_,cx| { this.checked = !this.checked; cx.notify(); })),self.checked))
                 .child(compact_icon_button(colors, icon_button("compact", "+", "Compact inline action", cx, |this,_,cx| { this.clicks += 1; cx.notify(); })))
-                .child(input_aligned_control(button("aligned", "Input-aligned", cx, |this,_,cx| { this.clicks += 1; cx.notify(); })))
+                .child(input_aligned_control(button("aligned", "Input-aligned", cx, |this,_,cx| { this.clicks += 1; cx.notify(); }), cx))
                 .child(format!("Activations: {}",self.clicks)))
             .child(checkbox("enabled", "Enable action and editor", self.enabled, true, cx, |this,next,cx| {
                 this.enabled = next; this.input.update(cx,|input,cx| input.set_enabled(next,cx));
@@ -300,7 +300,7 @@ impl Render for Showcase {
 fn main() {
     gpui_platform::application().run(|cx| {
         theme::set_palette(&DARK, cx);
-        theme::set_typography(gpui::font("sans-serif"), "Symbols Nerd Font Mono", cx);
+        theme::set_typography(gpui::font("sans-serif"), "Symbols Nerd Font Mono", 12, cx);
         Input::init(cx);
         let bounds = Bounds::centered(None, size(px(1000.), px(820.)), cx);
         cx.open_window(

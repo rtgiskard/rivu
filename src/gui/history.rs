@@ -109,8 +109,14 @@ impl History {
         let labels_changed = self.state.playback.status != state.playback.status
             || self.state.current_track().map(|track| track.id)
                 != state.current_track().map(|track| track.id);
+        let typography_changed = self.state.system.config.ui_font_size
+            != state.system.config.ui_font_size
+            || self.state.system.config.ui_scale != state.system.config.ui_scale;
+        if typography_changed {
+            self.column_widths = None;
+        }
         self.state = state;
-        if changed || labels_changed {
+        if changed || labels_changed || typography_changed {
             cx.notify();
         }
     }

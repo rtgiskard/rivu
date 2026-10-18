@@ -46,6 +46,7 @@ impl Render for GuiApp {
             .bg(rgb(theme.bg))
             .text_color(rgb(theme.text))
             .text_size(px(14. * self.state.system.config.ui_scale))
+            .font_size_scale(rivu_ui::theme::font_size_scale(cx))
             .font(self.ui_font.clone())
             .track_focus(self.shell.layout_focus())
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {

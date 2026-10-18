@@ -21,6 +21,7 @@ settings-artwork-decode-budget-hint = 1–1024 MiB per cover. Apply updates open
 settings-gpu-material-budget-mib = Shared GPU buffer budget (MiB)
 settings-gpu-material-budget-hint = 16–1024 MiB; default 64. Restart the GUI to apply. Includes initialization and pending uploads, not total GPU memory
 settings-font-family = Font family
+settings-base-font-size-pt = Base font size (pt)
 settings-interface-scale = Interface scale
 settings-layout-grid-spacing-px = Layout grid spacing (px)
 settings-analysis-rate-hz = Analysis rate (Hz)

@@ -288,6 +288,7 @@ mod tests {
             rivu_ui::theme::set_typography(
                 gpui::font("sans-serif"),
                 crate::gui::appearance::fonts::SYMBOLS_FAMILY,
+                12,
                 cx,
             );
         });

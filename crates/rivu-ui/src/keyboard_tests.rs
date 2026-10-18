@@ -233,10 +233,122 @@ fn independent_overlay_roots_render_after_live_typography_changes() {
     cx.update(|cx| {
         let mut font = gpui::font("sans-serif");
         font.weight = gpui::FontWeight::BOLD;
-        crate::theme::set_typography(font.clone(), "updated-icons", cx);
+        crate::theme::set_typography(font.clone(), "updated-icons", 24, cx);
         assert_eq!(crate::theme::font(cx), &font);
         assert_eq!(crate::theme::icon_family(cx).as_ref(), "updated-icons");
     });
     draw(&mut cx, tooltip.into());
     draw(&mut cx, drag.into());
+}
+
+struct TypographySamples {
+    base: gpui::TextLayout,
+    small: gpui::TextLayout,
+    large: gpui::TextLayout,
+    icon: gpui::TextLayout,
+    tooltip: gpui::TextLayout,
+    row_title: gpui::TextLayout,
+    row_detail: gpui::TextLayout,
+    row_bounds: std::rc::Rc<std::cell::Cell<gpui::Bounds<gpui::Pixels>>>,
+}
+
+impl Render for TypographySamples {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let base = gpui::StyledText::new("Base");
+        let small = gpui::StyledText::new("Small");
+        let large = gpui::StyledText::new("Large");
+        let icon = gpui::StyledText::new("I");
+        let tooltip = gpui::StyledText::new("Tooltip");
+        let row_title = gpui::StyledText::new("Title");
+        let row_detail = gpui::StyledText::new("Detail");
+        self.row_title = row_title.layout().clone();
+        self.row_detail = row_detail.layout().clone();
+        let row_bounds = self.row_bounds.clone();
+        self.base = base.layout().clone();
+        self.small = small.layout().clone();
+        self.large = large.layout().clone();
+        self.icon = icon.layout().clone();
+        self.tooltip = tooltip.layout().clone();
+        div()
+            .flex()
+            .flex_col()
+            .text_size(gpui::px(14.))
+            .font(crate::theme::font(cx).clone())
+            .font_size_scale(crate::theme::font_size_scale(cx))
+            .child(base)
+            .child(div().text_xs().child(small))
+            .child(div().text_lg().child(large))
+            .child(crate::icon("", cx).text_sm().child(icon))
+            .child(crate::tooltip_surface(window, cx, 22.5).child(tooltip))
+            .child(
+                crate::list_row(crate::theme::palette(cx), "sized-row", false)
+                    .relative()
+                    .h(crate::list_row_height(window, cx))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_0()
+                            .child(div().text_sm().child(row_title))
+                            .child(div().text_xs().child(row_detail)),
+                    )
+                    .child(
+                        gpui::canvas(
+                            move |bounds, _, _| {
+                                row_bounds.set(bounds);
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .size_full(),
+                    ),
+            )
+    }
+}
+
+#[test]
+fn live_base_size_preserves_hierarchy_icons_and_rem_geometry() {
+    let mut cx = TestAppContext::single();
+    cx.update(crate::theme::init_test);
+    let window = cx.add_window(|_, _| TypographySamples {
+        base: Default::default(),
+        small: Default::default(),
+        large: Default::default(),
+        icon: Default::default(),
+        tooltip: Default::default(),
+        row_title: Default::default(),
+        row_detail: Default::default(),
+        row_bounds: Default::default(),
+    });
+    for size in [11, 18, 8] {
+        cx.update(|cx| {
+            crate::theme::set_typography(gpui::font("sans-serif"), "sans-serif", size, cx)
+        });
+        draw(&mut cx, window.into());
+        cx.update_window(window.into(), |view, window, cx| {
+            let entity = view.downcast::<TypographySamples>().unwrap();
+            let samples = entity.read(cx);
+            let font_size =
+                |layout: &gpui::TextLayout| f32::from(layout.line_layouts()[0].font_size());
+            let approx = |actual: f32, expected: f32| {
+                assert!((actual - expected).abs() < 0.001, "{actual} != {expected}")
+            };
+            let logical_px = size as f32 * (4. / 3.);
+            approx(font_size(&samples.base), logical_px);
+            approx(font_size(&samples.small), 12. * logical_px / 14.);
+            approx(font_size(&samples.large), 18. * logical_px / 14.);
+            approx(font_size(&samples.tooltip), logical_px);
+            approx(font_size(&samples.icon), 14.);
+            assert_eq!(window.rem_size(), gpui::px(16.));
+            assert!(samples.base.line_height() >= gpui::px(logical_px));
+            let bounds = samples.row_bounds.get();
+            assert!(samples.row_title.bounds().top() >= bounds.top());
+            assert!(samples.row_detail.bounds().bottom() <= bounds.bottom());
+            assert!(
+                bounds.size.height
+                    >= samples.row_title.line_height() + samples.row_detail.line_height()
+            );
+        })
+        .unwrap();
+    }
 }

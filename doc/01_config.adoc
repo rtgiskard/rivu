@@ -32,6 +32,7 @@ volume_percent = 70
 
 [interface]
 font = "sans-serif"
+font_size = 11
 theme = "rivu_dark"
 
 [logging]
@@ -359,12 +360,25 @@ Family names use Fontconfig system and user rules
 (`~/.config/fontconfig/fonts.conf`) to select the primary family.
 Localized family aliases are matched to names supported by the GUI, so the
 same font remains selected across terminal and desktop language environments.
-Missing text glyphs use native fallback, which does not guarantee Fontconfig's
-custom fallback order. Restart the GUI after changing Fontconfig rules.
+For missing text glyphs, Linux selects additional faces in Fontconfig's effective
+matching order for the actual text, before native fallback. Only selected faces
+are loaded; an entire fallback family or candidate list is not preloaded.
+First use of a new font can take longer; matching results and loaded fonts are
+reused. Loaded fonts may remain cached until exit. Complex shaping and named
+variable-font instances are not guaranteed to reproduce every Fontconfig rule.
+Restart the GUI after changing Fontconfig rules.
 
 Fontconfig hinting, subpixel, and synthetic-bold settings do not control GUI
 rendering. If the requested primary family cannot be resolved or is unavailable
 to the GUI, Rivu logs a warning and uses `sans-serif`.
+
+`interface.font_size` is the desktop base text size in points (pt) before
+interface scaling: an integer from `8` to `18`, default `11`. The settings field
+uses the same unit. One point maps to `4/3` logical pixels at the nominal 96 DPI,
+so the default is approximately `14.67` logical pixels. Titles and secondary
+text retain their size hierarchy; icons and visualization chart annotations have
+independent sizes. Apply the setting to update open windows. It does not change
+terminal text sizes or replace `interface.scale` for control spacing and geometry.
 
 `interface.scale` accepts finite values from `0.75` to `2.0` (default `1.0`) and
 adjusts desktop controls and list density independently of the desktop's display scaling. Menus and editor dialogs

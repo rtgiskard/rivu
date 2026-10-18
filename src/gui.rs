@@ -688,7 +688,7 @@ impl GuiApp {
             .map(|error| i18n.format("shell-load-layouts-error", &[("error", error.into())]));
         workspace.save_error = error.clone();
         let ui_font = appearance::fonts::resolve(&state.system.config.ui_font, cx);
-        appearance::fonts::publish(&ui_font, cx);
+        appearance::fonts::publish(&ui_font, state.system.config.ui_font_size, cx);
         let layout_name = cx.new(|cx| {
             Input::new(
                 i18n.text("shell-layout-name").to_owned(),
@@ -1119,6 +1119,7 @@ impl GuiApp {
             || self.state.system.ffmpeg_status != state.system.ffmpeg_status
             || self.state.system.mpris_status != state.system.mpris_status
             || self.state.system.config.ui_scale != state.system.config.ui_scale
+            || self.state.system.config.ui_font_size != state.system.config.ui_font_size
         {
             self.settings.update(cx, |settings, cx| {
                 settings.sync_runtime(
@@ -1126,6 +1127,7 @@ impl GuiApp {
                     &state.system.ffmpeg_status,
                     &state.system.mpris_status,
                     state.system.config.ui_scale,
+                    state.system.config.ui_font_size,
                     cx,
                 );
             });
@@ -1134,11 +1136,17 @@ impl GuiApp {
             && !state.system.config.waveform_seek_enabled;
         let still_mode_changed =
             self.state.system.config.still_mode != state.system.config.still_mode;
-        let appearance_changed = self.state.system.config.ui_font != state.system.config.ui_font
+        let font_changed = self.state.system.config.ui_font != state.system.config.ui_font;
+        let font_size_changed =
+            self.state.system.config.ui_font_size != state.system.config.ui_font_size;
+        let appearance_changed = font_changed
+            || font_size_changed
             || self.state.system.config.ui_theme != state.system.config.ui_theme;
-        if self.state.system.config.ui_font != state.system.config.ui_font {
+        if font_changed {
             self.ui_font = appearance::fonts::resolve(&state.system.config.ui_font, cx);
-            appearance::fonts::publish(&self.ui_font, cx);
+        }
+        if font_changed || font_size_changed {
+            appearance::fonts::publish(&self.ui_font, state.system.config.ui_font_size, cx);
         }
         if self.state.system.config.ui_theme != state.system.config.ui_theme {
             appearance::theme::set_theme(state.system.config.ui_theme, cx);

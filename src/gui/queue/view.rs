@@ -12,9 +12,9 @@ use crate::{
 };
 use gpui::{AnyElement, Context, Div, EntityId, SharedString, Window, prelude::*, px, rgb};
 use rivu_ui::{
-    LIST_ROW_REMS, StatusKind, VirtualList, button, caption, compact_icon_button, disabled_control,
-    hover_actions, icon_button, list_panel_header, list_viewport, panel_surface, panel_toolbar,
-    row, status_message,
+    StatusKind, VirtualList, button, caption, compact_icon_button, disabled_control, hover_actions,
+    icon_button, list_panel_header, list_viewport, panel_surface, panel_toolbar, row,
+    status_message,
 };
 use std::cell::RefCell;
 
@@ -286,13 +286,13 @@ impl Queue {
                     ("queue-rows", panel_id),
                     self.model.rows.len(),
                     &scroll,
-                    cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
+                    cx.processor(move |this, range: std::ops::Range<usize>, window, cx| {
                         range
                             .map(|index| {
                                 let Some(entry) = this.model.rows.get(index) else {
                                     return this
                                         .paged_loading_row(index, cx)
-                                        .h(gpui::rems(LIST_ROW_REMS));
+                                        .h(rivu_ui::list_row_height(window, cx));
                                 };
                                 let id = entry.id;
                                 let track_id = entry.track_id;
@@ -320,6 +320,7 @@ impl Queue {
                                     playing,
                                     this.model.contains(&id),
                                 )
+                                .h(rivu_ui::list_row_height(window, cx))
                                 .when(this.queue_locate_emphasized(id), |row| {
                                     row.border_1()
                                         .border_color(rgb(theme.accent))

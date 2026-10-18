@@ -390,6 +390,7 @@ impl Playback {
                     .text_lg()
                     .text_color(rgb(theme.muted))
                     .font_family(super::appearance::fonts::SYMBOLS_FAMILY)
+                    .font_size_scale(1.)
                     .child("󰕾")
                     .tooltip({
                         let text = self.context.tr("gl-volume");

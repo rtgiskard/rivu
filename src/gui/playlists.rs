@@ -1002,7 +1002,7 @@ impl Playlists {
                 search.clear_counts(cx);
             }
         });
-        let row_height = list_row_height(window);
+        let row_height = list_row_height(window, cx);
         let playlist_id = self.browser.playlists().selected();
         let selection_entry = self.browser.playlists().selected_entry();
         let selection_unavailable = !self.browser.playlists().track_selection.ready();
@@ -1064,7 +1064,7 @@ impl Playlists {
                         let Some(p) = this.browser.playlists().summaries().rows.get(index) else {
                             return this
                                 .paged_loading_row(ViewRequestKind::Summaries, index, cx)
-                                .h(gpui::rems(LIST_ROW_REMS))
+                                .h(list_row_height(window, cx))
                                 .into_any_element();
                         };
                         let id = p.id;
@@ -1078,6 +1078,7 @@ impl Playlists {
                             ("playlist", id as u64),
                             this.browser.playlists().selected() == Some(id),
                         )
+                        .h(list_row_height(window, cx))
                         .when(
                             (this.focused && this.layout_focus.is_focused(window))
                                 && this.browser.focus() == Some(super::BrowserFocus::Playlists)
@@ -1294,7 +1295,7 @@ impl Playlists {
                             let Some(e) = this.browser.playlists().entries().rows.get(index) else {
                                 return this
                                     .paged_loading_row(ViewRequestKind::Entries, index, cx)
-                                    .h(gpui::rems(LIST_ROW_REMS))
+                                    .h(list_row_height(window, cx))
                                     .into_any_element();
                             };
                             let id = e.id;
@@ -1337,6 +1338,7 @@ impl Playlists {
                                     .is_some_and(|track| track.id == track_id),
                                 this.browser.playlists().track_selection.contains(id),
                             )
+                            .h(list_row_height(window, cx))
                             .when(
                                 (this.focused && this.layout_focus.is_focused(window))
                                     && this.browser.focus()

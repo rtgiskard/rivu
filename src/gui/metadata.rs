@@ -948,7 +948,12 @@ impl Metadata {
                     };
                     window
                         .text_system()
-                        .shape_line(label.clone(), window.rem_size() * 0.75, &[run], None)
+                        .shape_line(
+                            label.clone(),
+                            window.rem_size() * 0.75 * rivu_ui::theme::font_size_scale(cx),
+                            &[run],
+                            None,
+                        )
                         .width()
                         .ceil()
                 })
@@ -1070,7 +1075,7 @@ impl Metadata {
                                 div()
                                     .id(("metadata-status", panel_id))
                                     .min_w_0()
-                                    .h(gpui::rems(1.25))
+                                    .min_h(gpui::rems(1.25))
                                     .child(
                                         caption(theme, status.clone())
                                             .text_xs()

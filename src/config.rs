@@ -326,6 +326,8 @@ config_fields! {
     pub ui_theme: Theme,
     /// UI font family; defaults to sans-serif, including empty saved values.
     pub ui_font: String,
+    /// Base UI font size in points, independent of interface scaling.
+    pub ui_font_size: u32,
     pub ui_scale: f32,
     pub layout_snap_enabled: bool,
     /// Layout snap grid spacing in logical pixels before interface scaling.
@@ -427,6 +429,7 @@ impl Default for Config {
             ui_language: "auto".to_owned(),
             ui_theme: Theme::default(),
             ui_font: "sans-serif".to_owned(),
+            ui_font_size: 11,
             ui_scale: 1.0,
             layout_snap_enabled: true,
             layout_snap_grid_px: 16,
@@ -551,6 +554,11 @@ impl Config {
         ensure!(
             self.ui_font.len() <= 128 && !self.ui_font.chars().any(char::is_control),
             "interface.font must be at most 128 characters without control characters"
+        );
+        ensure!(
+            (8..=18).contains(&self.ui_font_size),
+            "interface.font_size must be between 8 and 18 pt (inclusive); got {}",
+            self.ui_font_size
         );
         ensure!(
             self.ui_scale.is_finite() && (0.75..=2.0).contains(&self.ui_scale),

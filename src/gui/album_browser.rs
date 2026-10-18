@@ -23,8 +23,8 @@ use super::{
     scrolling::ScrollViews,
 };
 use rivu_ui::{
-    ButtonTooltip, LIST_ROW_REMS, VirtualList, caption, column, compact_icon_button, icon_button,
-    panel_surface, row,
+    ButtonTooltip, VirtualList, caption, column, compact_icon_button, icon_button, panel_surface,
+    row,
     search::{SearchEvent, SearchField},
 };
 
@@ -64,10 +64,11 @@ struct AlbumGridLayout {
     artwork_size: Pixels,
     metadata_lift: Pixels,
     row_height: Pixels,
+    typography_scale: f32,
 }
 
 impl AlbumGridLayout {
-    fn measured(width: Pixels, rem: Pixels) -> Self {
+    fn measured(width: Pixels, rem: Pixels, typography_scale: f32) -> Self {
         let columns = ((width / rem) / 12.).floor().max(1.) as usize;
         let card_width = (width - rem * 0.5 * columns.saturating_sub(1) as f32) / columns as f32;
         let artwork_size = (card_width - rem).max(px(0.));
@@ -76,9 +77,11 @@ impl AlbumGridLayout {
             columns,
             artwork_size,
             metadata_lift,
+            typography_scale,
             // Cover, three metadata lines, card padding and the grid-row gap;
             // metadata follows the fade's upper edge as its coverage increases.
-            row_height: artwork_size + rem * 5.125 - metadata_lift,
+            row_height: artwork_size + rem * (5.125 + 3.625 * (typography_scale - 1.).max(0.))
+                - metadata_lift,
         }
     }
 }
@@ -243,7 +246,11 @@ impl AlbumBrowser {
             covers: BTreeMap::new(),
             loader: ArtworkLoader::default(),
             demand: 0..0,
-            grid_layout: AlbumGridLayout::measured(px(192.), px(16.)),
+            grid_layout: AlbumGridLayout::measured(
+                px(192.),
+                px(16.),
+                rivu_ui::theme::font_size_scale(cx),
+            ),
             grid_scroll: UniformListScrollHandle::new(),
             track_scroll: UniformListScrollHandle::new(),
             grid_anchor: None,
@@ -826,7 +833,7 @@ impl AlbumBrowser {
                     .relative()
                     .mt(-self.grid_layout.metadata_lift)
                     .w_full()
-                    .h(rems(1.25))
+                    .h(rems(1.25 * self.grid_layout.typography_scale.max(1.)))
                     .line_height(rems(1.25))
                     .flex_shrink_0()
                     .text_sm()
@@ -853,7 +860,7 @@ impl AlbumBrowser {
                 .w_full()
                 .text_center()
                 .truncate()
-                .h(rems(1.125))
+                .h(rems(1.125 * self.grid_layout.typography_scale.max(1.)))
                 .line_height(rems(1.125))
                 .flex_shrink_0(),
             )
@@ -865,7 +872,7 @@ impl AlbumBrowser {
                 )
                 .w_full()
                 .text_center()
-                .h(rems(1.25))
+                .h(rems(1.25 * self.grid_layout.typography_scale.max(1.)))
                 .line_height(rems(1.25))
                 .truncate()
                 .flex()
@@ -1026,13 +1033,13 @@ impl Render for AlbumBrowser {
                     "album-tracks",
                     self.model.tracks().len(),
                     &self.track_scroll,
-                    cx.processor(|this, range: Range<usize>, _, cx| {
+                    cx.processor(|this, range: Range<usize>, window, cx| {
                         range
                             .map(|index| {
                                 let Some(track) = this.model.tracks().get(index) else {
                                     return this
                                         .loading_row(index, cx)
-                                        .h(rems(LIST_ROW_REMS))
+                                        .h(rivu_ui::list_row_height(window, cx))
                                         .w_full()
                                         .p_2()
                                         .into_any_element();
@@ -1058,6 +1065,7 @@ impl Render for AlbumBrowser {
                                         && this.playback_status == PlaybackStatus::Playing,
                                     false,
                                 )
+                                .h(rivu_ui::list_row_height(window, cx))
                                 .group("album-track-row")
                                 .line_height(rems(1.125))
                                 .relative()
@@ -1220,8 +1228,11 @@ impl Render for AlbumBrowser {
                         canvas(
                             |_, _, _| (),
                             move |bounds, _, window, cx| {
-                                let measured =
-                                    AlbumGridLayout::measured(bounds.size.width, window.rem_size());
+                                let measured = AlbumGridLayout::measured(
+                                    bounds.size.width,
+                                    window.rem_size(),
+                                    rivu_ui::theme::font_size_scale(cx),
+                                );
                                 if measured == layout {
                                     return;
                                 }

@@ -540,6 +540,12 @@ pub trait Styled: Sized {
         self
     }
 
+    /// Sets the inherited typography scale without scaling layout dimensions.
+    fn font_size_scale(mut self, scale: f32) -> Self {
+        self.text_style().font_size_scale = Some(scale);
+        self
+    }
+
     /// Sets the text size to 'extra small'.
     /// [Docs](https://tailwindcss.com/docs/font-size#setting-the-font-size)
     fn text_xs(mut self) -> Self {

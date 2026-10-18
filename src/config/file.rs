@@ -141,6 +141,7 @@ file_group!(Interface, InterfaceView {
     gpu_material_budget_mb => gpu_material_budget_mb: u32,
     library_columns => library_columns: LibraryColumns,
     font => ui_font: String,
+    font_size => ui_font_size: u32,
     scale => ui_scale: f32,
     layout_snap_enabled => layout_snap_enabled: bool,
     layout_snap_grid_px => layout_snap_grid_px: u32,

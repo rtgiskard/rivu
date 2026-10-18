@@ -31,6 +31,7 @@ impl Global for ActivePalette {}
 struct Typography {
     font: Font,
     icons: SharedString,
+    font_size: u32,
 }
 impl Global for Typography {}
 
@@ -51,21 +52,35 @@ pub fn palette(cx: &App) -> &'static Palette {
 }
 
 /// Publish resolved fonts at startup and whenever host typography changes.
+/// `font_size` is in points; 1pt maps to 4/3 logical pixels before UI scaling.
 /// Independent tooltip and drag roots read this current value on every render.
-pub fn set_typography(font: Font, icons: impl Into<SharedString>, cx: &mut App) {
+pub fn set_typography(font: Font, icons: impl Into<SharedString>, font_size: u32, cx: &mut App) {
     let icons = icons.into();
-    if cx
-        .try_global::<Typography>()
-        .is_some_and(|current| current.font == font && current.icons == icons)
-    {
+    if cx.try_global::<Typography>().is_some_and(|current| {
+        current.font == font && current.icons == icons && current.font_size == font_size
+    }) {
         return;
     }
-    cx.set_global(Typography { font, icons });
+    cx.set_global(Typography {
+        font,
+        icons,
+        font_size,
+    });
     cx.refresh_windows();
 }
 
 pub fn font(cx: &App) -> &Font {
     &cx.global::<Typography>().font
+}
+
+/// Configured base text size in points, independent of the host's UI scale.
+pub fn font_size(cx: &App) -> u32 {
+    cx.global::<Typography>().font_size
+}
+
+/// Preserve the existing typography hierarchy relative to its 14px base.
+pub fn font_size_scale(cx: &App) -> f32 {
+    font_size(cx) as f32 * (4. / 3.) / 14.
 }
 
 pub fn icon_family(cx: &App) -> SharedString {
@@ -96,5 +111,5 @@ pub(crate) fn init_test(cx: &mut App) {
         warning: 0xffdd80,
     };
     set_palette(&PALETTE, cx);
-    set_typography(gpui::font("sans-serif"), "sans-serif", cx);
+    set_typography(gpui::font("sans-serif"), "sans-serif", 14, cx);
 }

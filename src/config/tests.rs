@@ -530,6 +530,7 @@ fn save_reload_replaces_file_and_leaves_no_temporary_files() {
             bitrate: true,
         },
         ui_font: "Noto Sans".to_owned(),
+        ui_font_size: 18,
         ui_language: "zh-CN".to_owned(),
         ui_theme: Theme::TokyoNight,
         ui_scale: 1.5,
@@ -669,6 +670,70 @@ fn scan_min_duration_patch_preserves_concurrent_unedited_settings() {
     ConfigPatch::between(&draft, &baseline).apply_to(&mut latest);
     assert_eq!(latest.scan_min_duration_secs, 0);
     assert_eq!(latest.scan_max_depth, 7);
+}
+
+#[test]
+fn base_font_size_defaults_round_trips_and_rejects_invalid_values() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    fs::write(&path, "[interface]\nfont = 'Noto Sans'\nscale = 1.5\n").unwrap();
+    assert_eq!(Config::load(&path).unwrap().ui_font_size, 11);
+
+    for size in [8, 11, 18] {
+        let config = Config {
+            ui_font_size: size,
+            ui_scale: 1.5,
+            ..Config::default()
+        };
+        config.save(&path).unwrap();
+        assert_eq!(Config::load(&path).unwrap(), config);
+        let saved = fs::read_to_string(&path).unwrap();
+        let document: toml::Value = toml::from_str(&saved).unwrap();
+        assert_eq!(
+            document["interface"]["font_size"].as_integer(),
+            Some(i64::from(size))
+        );
+        for invalid_size in [0, 7, 19, u32::MAX] {
+            let invalid = Config {
+                ui_font_size: invalid_size,
+                ..config.clone()
+            };
+            let error = invalid.save(&path).unwrap_err();
+            assert!(format!("{error:#}").contains("interface.font_size"));
+            assert_eq!(fs::read_to_string(&path).unwrap(), saved);
+        }
+    }
+
+    for value in ["7", "19", "-1", "11.5", "'11'", "true", "4294967296"] {
+        fs::write(&path, format!("interface.font_size = {value}\n")).unwrap();
+        assert!(Config::load(&path).is_err(), "accepted font size {value}");
+    }
+}
+
+#[test]
+fn base_font_size_patch_preserves_owner_changes() {
+    let baseline = Config::default();
+    let draft = Config {
+        ui_font_size: 18,
+        ..baseline.clone()
+    };
+    let mut latest = Config {
+        ui_scale: 1.5,
+        ui_font: "Noto Sans".to_owned(),
+        volume: 0.25,
+        ..baseline.clone()
+    };
+    let expected = Config {
+        ui_font_size: 18,
+        ..latest.clone()
+    };
+    ConfigPatch::between(&baseline, &draft).apply_to(&mut latest);
+    assert_eq!(latest, expected);
+    ConfigPatch::between(&draft, &baseline).apply_to(&mut latest);
+    assert_eq!(latest.ui_font_size, 11);
+    assert_eq!(latest.ui_scale, 1.5);
+    assert_eq!(latest.ui_font, "Noto Sans");
+    assert_eq!(latest.volume, 0.25);
 }
 
 #[test]

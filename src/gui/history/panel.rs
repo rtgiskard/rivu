@@ -17,6 +17,7 @@ pub(super) struct HistoryColumnWidths {
     source: std::sync::Arc<Vec<crate::model::HistoryEntry>>,
     font: gpui::Font,
     rem_size: gpui::Pixels,
+    font_size_scale: f32,
     times: TimeWidths,
     playback: Option<(i64, PlaybackStatus, Option<i64>)>,
     playback_text: Option<SharedString>,
@@ -185,7 +186,8 @@ impl History {
                 });
         let source = &self.state.library.history;
         let rem_size = window.rem_size();
-        let measure = |text: SharedString, font: gpui::Font| {
+        let font_size_scale = rivu_ui::theme::font_size_scale(cx);
+        let measure = |text: SharedString, font: gpui::Font, size_scale: f32| {
             let run = gpui::TextRun {
                 len: text.len(),
                 font,
@@ -196,29 +198,32 @@ impl History {
             };
             window
                 .text_system()
-                .shape_line(text, rem_size * 0.75, &[run], None)
+                .shape_line(text, rem_size * 0.75 * size_scale, &[run], None)
                 .width()
                 .ceil()
         };
-        let text_width = |text: SharedString| measure(text, self.ui_font.clone());
+        let text_width = |text: SharedString| measure(text, self.ui_font.clone(), font_size_scale);
         let numeric_width = |text: SharedString| {
             let mut font = self.ui_font.clone();
             font.features = tabular_numbers();
-            measure(text, font)
+            measure(text, font, font_size_scale)
         };
         if !self.column_widths.as_ref().is_some_and(|cache| {
             std::sync::Arc::ptr_eq(&cache.source, source)
                 && cache.font == self.ui_font
                 && cache.rem_size == rem_size
+                && cache.font_size_scale == font_size_scale
         }) {
             // Keep space for either sort direction so sorting does not move columns.
             let arrow = measure(
                 "󰁅".into(),
                 gpui::font(crate::gui::appearance::fonts::SYMBOLS_FAMILY),
+                1.,
             )
             .max(measure(
                 "󰁝".into(),
                 gpui::font(crate::gui::appearance::fonts::SYMBOLS_FAMILY),
+                1.,
             )) + rem_size * 0.25;
             let mut widths = [
                 text_width("#".into()),
@@ -237,6 +242,7 @@ impl History {
                 source: std::sync::Arc::clone(source),
                 font: self.ui_font.clone(),
                 rem_size,
+                font_size_scale,
                 times,
                 playback: None,
                 playback_text: None,
@@ -271,7 +277,8 @@ impl History {
             .gap_0()
             .px_2()
             .py_1()
-            .h(gpui::rems(2.625))
+            .h_auto()
+            .min_h(gpui::rems(2.625))
             .flex_shrink_0()
             .min_w_0()
             .overflow_hidden()
@@ -332,7 +339,7 @@ impl History {
                 })).p_3())
             })
             .child(list_viewport(
-                column().size_full().child(header).child(VirtualList::new(("history-rows", panel_id), history_len, &scroll, cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
+                column().size_full().child(header).child(VirtualList::new(("history-rows", panel_id), history_len, &scroll, cx.processor(move |this, range: std::ops::Range<usize>, window, cx| {
                     range
                         .filter_map(|index| {
                             let item = this.model.get(index)?;
@@ -357,6 +364,7 @@ impl History {
                                     ("history-entry", id as u64),
                                     selected,
                                 )
+                                .h(rivu_ui::list_row_height(window, cx))
                                 .gap_0()
                                 .group("history-track-row")
                                 .relative()

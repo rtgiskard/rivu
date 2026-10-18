@@ -129,6 +129,7 @@ pub fn sortable_header<T: 'static>(
                 div()
                     .flex_shrink_0()
                     .font_family(crate::theme::icon_family(cx))
+                    .font_size_scale(1.)
                     .child(if descending { "󰁅" } else { "󰁝" }),
             )
         });
@@ -141,6 +142,7 @@ pub fn sortable_header<T: 'static>(
 }
 
 /// Icon button with the Nerd symbol font and shared tooltip behavior.
+/// Control text sizing is overridable; the glyph resets the base-text scale.
 pub fn icon_button<T: 'static>(
     id: impl Into<ElementId>,
     icon: impl Into<SharedString>,
@@ -158,8 +160,8 @@ pub fn icon_button<T: 'static>(
         cx,
         action,
     )
-    .text_size(gpui::rems(1.))
     .size(gpui::rems(2.))
+    .text_size(gpui::rems(1.))
     .p_0()
     .flex()
     .items_center()
@@ -278,6 +280,8 @@ pub fn dropdown_trigger(
                 .flex_shrink_0()
                 .text_color(rgb(theme.muted))
                 .font_family(crate::theme::icon_family(cx))
+                .font_size_scale(1.)
+                .text_size(gpui::rems(0.875))
                 .child("󰅀"),
         )
 }
@@ -294,6 +298,7 @@ pub fn compact_icon_button(
 pub fn icon(glyph: impl Into<SharedString>, cx: &gpui::App) -> Div {
     div()
         .font_family(crate::theme::icon_family(cx))
+        .font_size_scale(1.)
         .flex_shrink_0()
         .child(glyph.into())
 }

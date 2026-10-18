@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-pub(super) const PROTOCOL_VERSION: u8 = 1;
+pub(super) const PROTOCOL_VERSION: u8 = 2;
 pub(super) const MAX_REQUEST: usize = 4 * 1024 * 1024;
 pub(super) const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 pub(super) const MAX_CLIENTS: usize = 16;
@@ -1198,6 +1198,7 @@ pub(super) struct WireConfig {
     /// Artist, album, duration, codec, bitrate in fixed wire order.
     library_columns: [bool; 5],
     ui_font: String,
+    ui_font_size: u32,
     ui_language: String,
     ui_theme: crate::theme::Theme,
     ui_scale: f32,
@@ -1290,6 +1291,7 @@ impl From<&crate::config::Config> for WireConfig {
                 value.library_columns.bitrate,
             ],
             ui_font: value.ui_font.clone(),
+            ui_font_size: value.ui_font_size,
             ui_language: value.ui_language.clone(),
             ui_theme: value.ui_theme,
             ui_scale: value.ui_scale,
@@ -1384,6 +1386,7 @@ impl From<WireConfig> for crate::config::Config {
                 bitrate: value.library_columns[4],
             },
             ui_font: value.ui_font,
+            ui_font_size: value.ui_font_size,
             ui_language: value.ui_language,
             ui_theme: value.ui_theme,
             ui_scale: value.ui_scale,

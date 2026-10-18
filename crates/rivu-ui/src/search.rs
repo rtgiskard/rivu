@@ -190,13 +190,14 @@ impl SearchField {
 impl Render for SearchField {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = crate::theme::palette(cx);
+        let height = gpui::rems((1.25 * crate::theme::font_size_scale(cx)).max(2.));
         let visible =
             self.expanded || !self.input.read(cx).text().is_empty() || self.query.is_some();
         let focused = self.input_focused(window, cx);
         if !visible {
             return row()
                 .track_focus(&self.focus_handle)
-                .h(gpui::rems(2.))
+                .h(height)
                 .flex_shrink_0()
                 .child(icon_button(
                     "search-toggle",
@@ -260,9 +261,9 @@ impl Render for SearchField {
         let control = row()
             .track_focus(&self.focus_handle)
             .min_w_0()
-            .h(gpui::rems(2.))
-            .min_h(gpui::rems(2.))
-            .max_h(gpui::rems(2.))
+            .h(height)
+            .min_h(height)
+            .max_h(height)
             .w(gpui::rems(14.))
             .flex_basis(gpui::rems(2.))
             .flex_shrink(1.)

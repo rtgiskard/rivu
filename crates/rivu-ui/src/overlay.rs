@@ -56,6 +56,7 @@ pub fn tooltip_surface(window: &Window, cx: &gpui::App, max_width_rems: f32) -> 
         .py_1()
         .rounded_md()
         .font(overlay_font(cx))
+        .font_size_scale(crate::theme::font_size_scale(cx))
         .text_sm()
         .text_color(rgb(theme.text))
         .whitespace_normal()
@@ -95,6 +96,7 @@ pub fn drag_preview_surface(window: &Window, cx: &gpui::App) -> Div {
         .bg(rgb(theme.panel))
         .rounded_sm()
         .font(overlay_font(cx))
+        .font_size_scale(crate::theme::font_size_scale(cx))
         .text_sm()
         .text_color(rgb(theme.text))
 }

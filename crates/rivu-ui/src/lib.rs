@@ -39,7 +39,7 @@ pub use overlay::{
 };
 pub use row::{
     DROPDOWN_ROW_REMS, LIST_ROW_REMS, dropdown_row, hover_actions, list_row, list_row_height,
-    row_background, tree_row, two_line_text,
+    row_background, tree_row, tree_row_height, two_line_text,
 };
 pub use scrollbar::scrollable_area;
 pub use surface::{Dialog, Popover, checked_menu_item};

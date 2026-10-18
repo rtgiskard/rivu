@@ -39,6 +39,7 @@ pub fn menu_back<T: 'static>(
     menu_item(id, "", cx, action)
         .aria_label(label.clone())
         .font_family(crate::theme::icon_family(cx))
+        .font_size_scale(1.)
         .tooltip(text_tooltip(label))
 }
 

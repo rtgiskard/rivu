@@ -451,6 +451,9 @@ pub struct TextStyle {
     /// The font size to use, in pixels or rems.
     pub font_size: AbsoluteLength,
 
+    /// Inherited typography scale, independent of rem-based layout geometry.
+    pub font_size_scale: f32,
+
     /// The line height to use, in pixels or fractions
     pub line_height: DefiniteLength,
 
@@ -491,6 +494,7 @@ impl Default for TextStyle {
             font_features: FontFeatures::default(),
             font_fallbacks: None,
             font_size: rems(1.).into(),
+            font_size_scale: 1.,
             line_height: phi(),
             font_weight: FontWeight::default(),
             font_style: FontStyle::default(),
@@ -550,9 +554,14 @@ impl TextStyle {
         }
     }
 
+    /// Resolve the effective font size without changing rem-based geometry.
+    pub fn font_size_in_pixels(&self, rem_size: Pixels) -> Pixels {
+        self.font_size.to_pixels(rem_size) * self.font_size_scale
+    }
+
     /// Returns the rounded line height in pixels.
     pub fn line_height_in_pixels(&self, rem_size: Pixels) -> Pixels {
-        self.line_height.to_pixels(self.font_size, rem_size).round()
+        (self.line_height.to_pixels(self.font_size, rem_size) * self.font_size_scale).round()
     }
 
     /// Convert this text style into a [`TextRun`], for the given length of the text.

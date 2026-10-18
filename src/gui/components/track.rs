@@ -24,7 +24,9 @@ pub(crate) fn track_list_row(
                 } else {
                     theme.secondary
                 }))
-                .when(playing, |view| view.font_family(fonts::SYMBOLS_FAMILY))
+                .when(playing, |view| {
+                    view.font_family(fonts::SYMBOLS_FAMILY).font_size_scale(1.)
+                })
                 .child(if playing {
                     "".to_owned()
                 } else {

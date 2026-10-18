@@ -27,6 +27,7 @@ fn display_changed(previous: &GuiSnapshot, next: &GuiSnapshot) -> bool {
         || previous_config.ui_theme != next_config.ui_theme
         || previous_config.ui_font != next_config.ui_font
         || previous_config.ui_scale != next_config.ui_scale
+        || previous_config.ui_font_size != next_config.ui_font_size
         || previous.current_track().map(|track| track.id)
             != next.current_track().map(|track| track.id)
         || previous.playback.status != next.playback.status
