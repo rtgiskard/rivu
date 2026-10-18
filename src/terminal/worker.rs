@@ -252,6 +252,7 @@ pub(super) enum QueryKind {
     Playlists,
     Playlist(i64),
     PlaylistSelection { playlist_id: i64, entry_id: i64 },
+    Track(i64),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -270,6 +271,7 @@ impl QueryKind {
 
     fn into_query(self, offset: usize, limit: usize) -> Query {
         match self {
+            QueryKind::Track(track_id) => Query::Track { track_id },
             QueryKind::Queue => Query::QueuePage {
                 query: None,
                 offset,

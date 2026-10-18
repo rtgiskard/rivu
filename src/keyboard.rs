@@ -358,6 +358,7 @@ pub(crate) fn bindings(context: Context) -> impl Iterator<Item = &'static Bindin
 
 pub(crate) struct HelpRow {
     pub description: &'static str,
+    pub action: Action,
     contexts: u16,
 }
 
@@ -406,6 +407,7 @@ pub(crate) fn help_rows(contexts: &[Context]) -> impl Iterator<Item = HelpRow> +
                 }))
             .then_some(HelpRow {
                 description: binding.description,
+                action: binding.action,
                 contexts,
             })
         })

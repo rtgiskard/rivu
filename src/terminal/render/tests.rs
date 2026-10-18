@@ -9,13 +9,7 @@ fn snapshot_theme_changes_recolor_main_help_and_details_without_changing_content
         let mut tui = TuiState::new(TuiSnapshot::default(), Arc::new(Localizer::new("en-US")));
         tui.ui.show_help = overlay == 1;
         if overlay == 2 {
-            tui.ui.details = Some(Details {
-                text: "Track details".into(),
-                wrapped: Vec::new(),
-                width: 0,
-                scroll: 0,
-                max_scroll: 0,
-            });
+            tui.ui.details_active = true;
         }
         let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
         terminal
@@ -35,9 +29,83 @@ fn snapshot_theme_changes_recolor_main_help_and_details_without_changing_content
             let cell = &terminal.backend().buffer()[(79, 11)];
             assert_eq!(cell.bg, colors.bg);
             if overlay == 2 {
-                assert_eq!(terminal.backend().buffer()[(0, 1)].fg, colors.text);
+                assert_eq!(terminal.backend().buffer()[(0, 2)].fg, colors.secondary);
             }
         }
+    }
+}
+
+#[test]
+fn details_preserve_missing_paths_unknowns_zeroes_and_responsive_order() {
+    let i18n = Localizer::new("en-US");
+    let colors = TerminalColors::new(crate::theme::Theme::default());
+    for width in [40, 96] {
+        let mut details = Details {
+            target: Some(2),
+            source_label: "terminal-queue",
+            state: DetailState::Ready(Box::new(full_track(2))),
+            ..Details::default()
+        };
+        let mut terminal = Terminal::new(TestBackend::new(width, 100)).unwrap();
+        terminal
+            .draw(|frame| draw_details(frame, frame.area(), &mut details, &i18n, colors))
+            .unwrap();
+        let text = terminal_text(&terminal);
+        assert!(text.contains("/music/夜航.flac"));
+        assert!(text.contains("≈ 1200 kbps"));
+        assert!(text.contains("96000 Hz"));
+        assert!(text.contains("—"));
+        let buffer = terminal.backend().buffer();
+        let locate = |needle: &str| {
+            (0..100)
+                .find_map(|y| {
+                    let row: String = (0..width).map(|x| buffer[(x, y)].symbol()).collect();
+                    row.find(needle).map(|x| (x, y))
+                })
+                .unwrap()
+        };
+        let disc = locate("Disc");
+        let track = locate("Track");
+        if width >= 90 {
+            assert_eq!(disc.1, track.1);
+            assert!(disc.0 < track.0);
+        } else {
+            assert!(disc.1 < track.1);
+        }
+        let missing = locate("Missing");
+        assert_eq!(buffer[(missing.0 as u16, missing.1)].fg, colors.warning);
+        let count = locate("Play count");
+        assert_eq!(buffer[(count.0 as u16, count.1 + 1)].symbol(), "0");
+    }
+    let text = "夜航e\u{301}👩‍🚀/".repeat(12);
+    for width in [2, 7, 40] {
+        let wrapped = wrap_details(&text, width);
+        assert_eq!(wrapped.concat(), text);
+        assert!(
+            wrapped
+                .iter()
+                .all(|line| Span::raw(line.as_str()).width() <= width)
+        );
+        assert!(wrapped.iter().all(|line| !line.starts_with('\u{301}')));
+    }
+}
+
+#[test]
+fn help_hierarchy_wraps_and_scrolls_read_only_in_current_context() {
+    for (language, width) in [("en-US", 96), ("zh-CN", 28)] {
+        let mut ui = UiState::new(Arc::new(Localizer::new(language)));
+        ui.show_help = true;
+        let state = TuiSnapshot::default();
+        let mut terminal = Terminal::new(TestBackend::new(width, 18)).unwrap();
+        terminal.draw(|frame| draw(frame, &state, &mut ui)).unwrap();
+        assert!(ui.help_max_scroll > 0);
+        assert!(help_bindings(KeyboardContext::TuiQueue).any(|row| row.action == Action::Details));
+        ui.key_action(KeyEvent::from(KeyCode::End), &state);
+        terminal.draw(|frame| draw(frame, &state, &mut ui)).unwrap();
+        assert!(ui.help_scroll > 0);
+        assert!(ui.show_help && !ui.details_active);
+        ui.key_action(KeyEvent::from(KeyCode::Esc), &state);
+        assert!(!ui.show_help && !ui.details_active);
     }
 }
 

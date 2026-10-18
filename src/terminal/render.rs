@@ -96,6 +96,501 @@ fn wrap_details(text: &str, width: usize) -> Vec<String> {
     lines
 }
 
+fn detail_value(value: &str, colors: TerminalColors) -> Span<'static> {
+    if value.is_empty() {
+        Span::styled("—", Style::default().fg(colors.secondary))
+    } else {
+        Span::styled(value.to_owned(), Style::default().fg(colors.text))
+    }
+}
+
+fn detail_field(
+    label: &str,
+    value: &str,
+    width: usize,
+    colors: TerminalColors,
+) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from(Span::styled(
+        label.to_owned(),
+        Style::default().fg(colors.secondary),
+    ))];
+    if value.is_empty() {
+        lines.push(Line::from(detail_value(value, colors)));
+    } else {
+        lines.extend(
+            wrap_details(value, width)
+                .into_iter()
+                .map(|line| Line::from(Span::styled(line, Style::default().fg(colors.text)))),
+        );
+    }
+    lines
+}
+
+fn detail_fields(
+    lines: &mut Vec<Line<'static>>,
+    fields: &[(&str, String)],
+    width: usize,
+    i18n: &Localizer,
+    colors: TerminalColors,
+) {
+    for pair in fields.chunks(if width >= 90 { 2 } else { 1 }) {
+        if pair.len() == 2 {
+            let left_width = width / 2;
+            let left = detail_field(
+                i18n.text(pair[0].0),
+                &pair[0].1,
+                left_width.saturating_sub(2),
+                colors,
+            );
+            let right = detail_field(i18n.text(pair[1].0), &pair[1].1, width - left_width, colors);
+            for index in 0..left.len().max(right.len()) {
+                let mut row = left.get(index).cloned().unwrap_or_default();
+                let padding = left_width.saturating_sub(row.width());
+                row.spans.push(Span::raw(" ".repeat(padding)));
+                if let Some(other) = right.get(index) {
+                    row.spans.extend(other.spans.iter().cloned());
+                }
+                lines.push(row);
+            }
+        } else {
+            lines.extend(detail_field(
+                i18n.text(pair[0].0),
+                &pair[0].1,
+                width,
+                colors,
+            ));
+        }
+        lines.push(Line::default());
+    }
+}
+
+fn page_body(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    title: &str,
+    colors: TerminalColors,
+) -> Rect {
+    let rows = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .split(area);
+    frame.render_widget(
+        Paragraph::new(title.to_owned()).style(
+            Style::default()
+                .fg(colors.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        rows[0],
+    );
+    frame.render_widget(
+        Block::default()
+            .borders(Borders::BOTTOM)
+            .border_style(Style::default().fg(colors.structure_border)),
+        rows[1],
+    );
+    rows[2]
+}
+
+fn draw_details(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    details: &mut Details,
+    i18n: &Localizer,
+    colors: TerminalColors,
+) {
+    let area = page_body(frame, area, i18n.text("terminal-details"), colors);
+    let width = area.width as usize;
+    let mut lines = Vec::new();
+    if let Some(id) = details.target {
+        if let DetailState::Ready(track) = &details.state {
+            let title = if track.title.is_empty() {
+                "—"
+            } else {
+                &track.title
+            };
+            for line in wrap_details(title, width) {
+                lines.push(Line::from(Span::styled(
+                    line,
+                    Style::default()
+                        .fg(if track.title.is_empty() {
+                            colors.secondary
+                        } else {
+                            colors.text
+                        })
+                        .add_modifier(Modifier::BOLD),
+                )));
+            }
+        }
+        lines.push(Line::from(Span::styled(
+            format!("{} · ID {id}", i18n.text(details.source_label)),
+            Style::default().fg(colors.secondary),
+        )));
+    }
+    match &details.state {
+        DetailState::Container(text) => {
+            lines.extend(wrap_details(text, width).into_iter().map(|line| {
+                Line::from(Span::styled(
+                    line,
+                    Style::default()
+                        .fg(colors.text)
+                        .add_modifier(Modifier::BOLD),
+                ))
+            }));
+            lines.push(Line::from(Span::styled(
+                i18n.text(details.source_label).to_owned(),
+                Style::default().fg(colors.secondary),
+            )));
+        }
+        _ if details.target.is_none() => {
+            lines.extend(
+                wrap_details(i18n.text("terminal-details-no-target"), width)
+                    .into_iter()
+                    .map(|line| {
+                        Line::from(Span::styled(line, Style::default().fg(colors.secondary)))
+                    }),
+            );
+        }
+        DetailState::Loading => lines.push(Line::from(Span::styled(
+            i18n.text("terminal-details-loading").to_owned(),
+            Style::default().fg(colors.secondary),
+        ))),
+        DetailState::Removed => lines.push(Line::from(Span::styled(
+            i18n.text("terminal-details-removed").to_owned(),
+            Style::default().fg(colors.warning),
+        ))),
+        DetailState::Error(error) => {
+            lines.extend(
+                wrap_details(error, width)
+                    .into_iter()
+                    .map(|line| Line::from(Span::styled(line, Style::default().fg(colors.error)))),
+            );
+        }
+        DetailState::Ready(track) => {
+            let mut status = vec![Span::styled(
+                i18n.text(if track.missing {
+                    "gl-missing"
+                } else {
+                    "gl-ready"
+                })
+                .to_owned(),
+                Style::default().fg(if track.missing {
+                    colors.warning
+                } else {
+                    colors.secondary
+                }),
+            )];
+            if track.favorite {
+                status.push(Span::styled(
+                    format!(" · 󰓎 {}", i18n.text("terminal-favorite")),
+                    Style::default().fg(colors.accent),
+                ));
+            }
+            lines.push(Line::from(status));
+            let group = |lines: &mut Vec<Line<'static>>, label: &str| {
+                lines.push(Line::default());
+                lines.push(Line::from(Span::styled(
+                    i18n.text(label).to_owned(),
+                    Style::default().fg(colors.accent),
+                )));
+            };
+            group(&mut lines, "terminal-details-tags");
+            for (label, value) in [("gl-artist", &track.artist), ("gl-album", &track.album)] {
+                lines.extend(detail_field(i18n.text(label), value, width, colors));
+                lines.push(Line::default());
+            }
+            detail_fields(
+                &mut lines,
+                &[
+                    (
+                        "gl-disc",
+                        track.disc_number.map(|n| n.to_string()).unwrap_or_default(),
+                    ),
+                    (
+                        "gl-track",
+                        track
+                            .track_number
+                            .map(|n| n.to_string())
+                            .unwrap_or_default(),
+                    ),
+                    ("gl-release", track.release_date.clone().unwrap_or_default()),
+                ],
+                width,
+                i18n,
+                colors,
+            );
+            group(&mut lines, "terminal-details-audio");
+            detail_fields(
+                &mut lines,
+                &[
+                    ("gl-codec", track.codec.to_ascii_lowercase()),
+                    (
+                        "gl-sample-rate",
+                        if track.sample_rate == 0 {
+                            String::new()
+                        } else {
+                            format!("{} Hz", track.sample_rate)
+                        },
+                    ),
+                    (
+                        "gl-channels",
+                        if track.channels == 0 {
+                            String::new()
+                        } else {
+                            track.channels.to_string()
+                        },
+                    ),
+                    (
+                        "gl-duration",
+                        track.duration.map(fmt_time).unwrap_or_default(),
+                    ),
+                    (
+                        "gl-bitrate",
+                        track
+                            .bitrate_bps
+                            .map(|n| {
+                                format!(
+                                    "{}{:.0} kbps",
+                                    if track.bitrate_exact { "" } else { "≈ " },
+                                    n as f64 / 1000.0
+                                )
+                            })
+                            .unwrap_or_default(),
+                    ),
+                    (
+                        "gl-bits-sample",
+                        track
+                            .bits_per_sample
+                            .map(|n| n.to_string())
+                            .unwrap_or_default(),
+                    ),
+                ],
+                width,
+                i18n,
+                colors,
+            );
+            group(&mut lines, "gl-file");
+            lines.extend(detail_field(
+                i18n.text("gl-file-path"),
+                &track.path.to_string_lossy(),
+                width,
+                colors,
+            ));
+            lines.push(Line::default());
+            let decoder = match track.decoder_hint {
+                crate::model::DecoderHint::Auto => i18n.text("gl-auto"),
+                crate::model::DecoderHint::Native => i18n.text("gl-native"),
+                crate::model::DecoderHint::Ffmpeg => "FFmpeg",
+            };
+            lines.extend(detail_field(
+                i18n.text("gl-decoder-hint"),
+                decoder,
+                width,
+                colors,
+            ));
+            group(&mut lines, "terminal-details-history");
+            detail_fields(
+                &mut lines,
+                &[
+                    ("gl-play-count", track.play_count.to_string()),
+                    (
+                        "gl-last-played",
+                        track
+                            .last_played
+                            .and_then(|time| chrono::DateTime::from_timestamp(time, 0))
+                            .map(|time| {
+                                time.with_timezone(&chrono::Local)
+                                    .format("%Y-%m-%d %H:%M:%S")
+                                    .to_string()
+                            })
+                            .unwrap_or_default(),
+                    ),
+                ],
+                width,
+                i18n,
+                colors,
+            );
+        }
+    }
+    details.max_scroll = lines.len().saturating_sub(area.height as usize);
+    details.scroll = details.scroll.min(details.max_scroll);
+    frame.render_widget(
+        Paragraph::new(
+            lines
+                .into_iter()
+                .skip(details.scroll)
+                .take(area.height as usize)
+                .collect::<Vec<_>>(),
+        ),
+        area,
+    );
+}
+
+fn help_group(action: Action) -> usize {
+    match action {
+        Action::Help | Action::Close => 3,
+        Action::Traverse
+        | Action::Up
+        | Action::Down
+        | Action::First
+        | Action::Last
+        | Action::PageUp
+        | Action::PageDown
+        | Action::Activate
+        | Action::Expand
+        | Action::Parent
+        | Action::Cancel => 0,
+        Action::Toggle
+        | Action::Next
+        | Action::Previous
+        | Action::VolumeDown
+        | Action::VolumeUp
+        | Action::Repeat
+        | Action::Shuffle
+        | Action::SeekBackward
+        | Action::SeekForward
+        | Action::SeekStart
+        | Action::SeekEnd => 1,
+        _ => 2,
+    }
+}
+
+fn help_order(action: Action) -> u8 {
+    match action {
+        Action::Traverse | Action::Toggle | Action::Search | Action::Help => 0,
+        Action::Up | Action::Down | Action::Next | Action::Previous | Action::Details => 1,
+        Action::PageUp
+        | Action::PageDown
+        | Action::SeekBackward
+        | Action::SeekForward
+        | Action::Backspace => 2,
+        Action::First | Action::Last | Action::SeekStart | Action::SeekEnd | Action::Enqueue => 3,
+        Action::Expand | Action::VolumeDown | Action::VolumeUp | Action::Favorite => 4,
+        Action::Activate | Action::Repeat | Action::Remove => 5,
+        Action::Parent | Action::Shuffle => 6,
+        _ => 7,
+    }
+}
+
+fn draw_help(frame: &mut ratatui::Frame<'_>, area: Rect, ui: &mut UiState, colors: TerminalColors) {
+    let context = ui.keyboard_context();
+    let context_label = match context {
+        KeyboardContext::TuiQueue => "terminal-queue",
+        KeyboardContext::TuiPlaylists | KeyboardContext::TuiPlaylistTracks => "terminal-playlists",
+        KeyboardContext::TuiSearchQuery | KeyboardContext::TuiSearchResults => "terminal-search",
+        _ => "terminal-library",
+    };
+    let title = format!(
+        "{} — {}",
+        ui.i18n.text("terminal-keys"),
+        ui.i18n.text(context_label)
+    );
+    let body = page_body(frame, area, &title, colors);
+    let rows = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(body);
+    let inner = rows[0];
+    frame.render_widget(
+        Paragraph::new(ui.i18n.text("terminal-help-footer"))
+            .style(Style::default().fg(colors.secondary)),
+        rows[1],
+    );
+    ui.page_size = inner.height.max(1) as usize;
+    let width = inner.width as usize;
+    let mut bindings: Vec<_> = help_bindings(context).collect();
+    bindings.sort_by_key(|binding| help_order(binding.action));
+    let key_width = bindings
+        .iter()
+        .map(|binding| Span::raw(binding.label()).width())
+        .max()
+        .unwrap_or(0);
+    let indent = 2.min(width.saturating_sub(1));
+    let columns = width >= indent + key_width + 10;
+    let description_indent = if columns {
+        indent + key_width + 2
+    } else {
+        (indent + 2).min(width.saturating_sub(1))
+    };
+    let mut lines = Vec::new();
+    for (group, label) in [
+        "terminal-help-navigation",
+        "terminal-help-playback",
+        "terminal-help-page",
+        "terminal-help-exit",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if !bindings
+            .iter()
+            .any(|binding| help_group(binding.action) == group)
+        {
+            continue;
+        }
+        lines.push(Line::from(Span::styled(
+            ui.i18n.text(label).to_owned(),
+            Style::default()
+                .fg(colors.accent)
+                .add_modifier(Modifier::BOLD),
+        )));
+        for binding in bindings
+            .iter()
+            .filter(|binding| help_group(binding.action) == group)
+        {
+            let key = binding.label();
+            let descriptions = wrap_details(
+                ui.i18n.text(binding.description),
+                width.saturating_sub(description_indent).max(1),
+            );
+            if columns {
+                for (index, description) in descriptions.into_iter().enumerate() {
+                    let prefix = if index == 0 {
+                        format!(
+                            "{}{}{}",
+                            " ".repeat(indent),
+                            key,
+                            " ".repeat(
+                                key_width.saturating_sub(Span::raw(key.as_str()).width()) + 2
+                            )
+                        )
+                    } else {
+                        " ".repeat(description_indent)
+                    };
+                    lines.push(Line::from(vec![
+                        Span::styled(prefix, Style::default().fg(colors.text)),
+                        Span::styled(description, Style::default().fg(colors.secondary)),
+                    ]));
+                }
+            } else {
+                for part in wrap_details(&key, width.saturating_sub(indent).max(1)) {
+                    lines.push(Line::from(Span::styled(
+                        format!("{}{part}", " ".repeat(indent)),
+                        Style::default().fg(colors.text),
+                    )));
+                }
+                for description in descriptions {
+                    lines.push(Line::from(Span::styled(
+                        format!("{}{description}", " ".repeat(description_indent)),
+                        Style::default().fg(colors.secondary),
+                    )));
+                }
+            }
+        }
+        lines.push(Line::default());
+    }
+    ui.help_max_scroll = lines.len().saturating_sub(inner.height as usize);
+    ui.help_scroll = ui.help_scroll.min(ui.help_max_scroll);
+    frame.render_widget(
+        Paragraph::new(
+            lines
+                .into_iter()
+                .skip(ui.help_scroll)
+                .take(inner.height as usize)
+                .collect::<Vec<_>>(),
+        ),
+        inner,
+    );
+}
+
 pub(super) fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut UiState) {
     let colors = TerminalColors::new(state.system.ui_theme);
     let area = frame.area();
@@ -103,55 +598,13 @@ pub(super) fn draw(frame: &mut ratatui::Frame<'_>, state: &TuiSnapshot, ui: &mut
         Block::default().style(Style::default().fg(colors.text).bg(colors.bg)),
         area,
     );
-    if let Some(details) = &mut ui.details {
-        let block = Block::default()
-            .title(ui.i18n.text("terminal-details"))
-            .borders(Borders::TOP | Borders::BOTTOM)
-            .border_style(Style::default().fg(colors.border))
-            .title_style(Style::default().fg(colors.accent));
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-        if details.width != inner.width {
-            details.wrapped = wrap_details(&details.text, inner.width as usize);
-            details.width = inner.width;
-        }
-        details.max_scroll = details.wrapped.len().saturating_sub(inner.height as usize);
-        details.scroll = details.scroll.min(details.max_scroll);
-        ui.page_size = inner.height.max(1) as usize;
-        let lines: Vec<_> = details
-            .wrapped
-            .iter()
-            .skip(details.scroll)
-            .take(inner.height as usize)
-            .map(|line| Line::from(line.as_str()))
-            .collect();
-        frame.render_widget(Paragraph::new(lines), inner);
+    if ui.details_active {
+        draw_details(frame, area, &mut ui.details, &ui.i18n, colors);
+        ui.page_size = area.height.saturating_sub(2).max(1) as usize;
         return;
     }
     if ui.show_help {
-        let context = ui.keyboard_context();
-        let items = help_bindings(context).map(|binding| {
-            ListItem::new(Line::from(vec![
-                Span::styled(
-                    format!("{:<22}", binding.label()),
-                    Style::default().fg(colors.accent),
-                ),
-                Span::raw(ui.i18n.text(binding.description)),
-            ]))
-        });
-        ui.page_size = area.height.saturating_sub(2).max(1) as usize;
-        let mut block = Block::default()
-            .title(ui.i18n.text("terminal-keys"))
-            .title_style(Style::default().fg(colors.accent))
-            .border_style(Style::default().fg(colors.border))
-            .borders(Borders::TOP | Borders::BOTTOM);
-        if context == KeyboardContext::TuiSearchQuery {
-            block = block.title_bottom(ui.i18n.text("keyboard-query-input"));
-        }
-        let list = List::new(items)
-            .block(block)
-            .highlight_style(list_selection_style(colors));
-        frame.render_stateful_widget(list, area, &mut ui.help_selection);
+        draw_help(frame, area, ui, colors);
         return;
     }
     let area = area.inner(ratatui::layout::Margin::new(1, 0));
@@ -797,7 +1250,7 @@ fn draw_playlists(
                         ("count", playlist.entry_count.into()),
                     ],
                 )),
-                "󰲋",
+                "󰲸",
             )
         },
         i18n,

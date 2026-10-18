@@ -1,7 +1,7 @@
 mod render;
 mod worker;
 
-use render::{RowContent, draw, draw_loading, fmt_time, track_label};
+use render::{draw, draw_loading, track_label};
 use worker::{
     QueryKind, QueryRequest, QueryResult, Watcher, spawn_command_worker, spawn_query_worker,
     spawn_watcher,
@@ -395,12 +395,24 @@ struct Notice {
     expires_at: Instant,
 }
 
+#[derive(Default)]
 struct Details {
-    text: String,
-    wrapped: Vec<String>,
-    width: u16,
+    target: Option<i64>,
+    source_label: &'static str,
+    state: DetailState,
+    stamp: Option<crate::model::QueryStamp>,
     scroll: usize,
     max_scroll: usize,
+}
+
+#[derive(Default)]
+enum DetailState {
+    #[default]
+    Loading,
+    Ready(Box<crate::model::Track>),
+    Removed,
+    Error(String),
+    Container(String),
 }
 
 #[derive(Default)]
@@ -532,11 +544,13 @@ struct UiState {
     queue_anchor: Option<u64>,
     queue_selected_id: Option<u64>,
     show_help: bool,
-    help_selection: ListState,
+    help_max_scroll: usize,
+    help_scroll: usize,
     message: Option<Notice>,
     // Started only after the initial IPC snapshot; None is permanently dismissed.
     startup_hint_deadline: Option<Instant>,
-    details: Option<Details>,
+    details: Details,
+    details_active: bool,
     requested: Option<QueryRequest>,
     projection: QueryProjection,
     failed_request: Option<QueryRequest>,
@@ -555,10 +569,12 @@ impl UiState {
             queue_anchor: None,
             queue_selected_id: None,
             show_help: false,
-            help_selection: ListState::default(),
+            help_max_scroll: 0,
+            help_scroll: 0,
             message: None,
             startup_hint_deadline: Some(Instant::now() + Duration::from_secs(5)),
-            details: None,
+            details: Details::default(),
+            details_active: false,
             requested: None,
             projection: QueryProjection::default(),
             failed_request: None,
@@ -592,6 +608,28 @@ impl UiState {
     }
 
     fn query_request(&mut self, state: &TuiSnapshot) -> Option<QueryRequest> {
+        if self.details_active {
+            let kind = QueryKind::Track(self.details.target?);
+            let query = kind.query(0, 1);
+            let revisions = state.query_revisions(None).for_query(
+                &query,
+                &state.library.playlist_entry_revisions,
+                &state.library.metadata_revisions,
+            );
+            let stamp = query.stamp(revisions);
+            if self.details.stamp == Some(stamp) {
+                return None;
+            }
+            self.details.state = DetailState::Loading;
+            self.projection.sync(&query, revisions);
+            return Some(QueryRequest {
+                kind,
+                offset: 0,
+                limit: 1,
+                generation: self.projection.generation(),
+                stamp,
+            });
+        }
         if let View::Search(search) = &mut self.view
             && search.apply_pending(Instant::now())
         {
@@ -669,6 +707,12 @@ impl UiState {
             Err(error) => {
                 self.requested = None;
                 self.failed_request = Some(request.clone());
+                if self.details_active {
+                    self.details.stamp = Some(request.stamp);
+                    self.details.state = DetailState::Error(error);
+                    self.mark_local_change();
+                    return true;
+                }
                 self.set_notice(error, NoticeKind::Error);
                 return true;
             }
@@ -679,6 +723,19 @@ impl UiState {
         {
             self.requested = None;
             return false;
+        }
+        if self.details_active {
+            self.details.state = match result.view {
+                ViewResponse::Track(Some(track)) if Some(track.id) == self.details.target => {
+                    DetailState::Ready(Box::new(track))
+                }
+                ViewResponse::Track(None) => DetailState::Removed,
+                _ => DetailState::Error(self.i18n.text("terminal-unexpected-response").into()),
+            };
+            self.details.stamp = Some(request.stamp);
+            self.requested = None;
+            self.mark_local_change();
+            return true;
         }
         match (&mut self.view, result.view) {
             (View::Queue, ViewResponse::QueuePage(page)) if request.kind == QueryKind::Queue => {
@@ -764,60 +821,47 @@ impl UiState {
     }
 
     fn open_details(&mut self) {
-        let row = match &self.view {
-            View::Queue => self
-                .queue
-                .selected()
-                .map(|row| RowContent::track(&row.track)),
-            View::Search(search) => search.results.selected().map(RowContent::track),
-            View::PlaylistDetail { detail, .. } => {
-                detail.entries.selected().map(RowContent::playlist)
-            }
-            View::Tree(tree) => tree.entries.selected().map(|entry| match entry {
-                DirectoryRow::Track(track) => RowContent::track(track),
-                DirectoryRow::Directory { path } => RowContent::label(path.to_string_lossy(), "󰉋"),
-            }),
-            View::Playlists(playlists) => playlists
-                .selected()
-                .map(|playlist| RowContent::label(Cow::Borrowed(&playlist.name), "󰲋")),
+        let (target, source_label, container) = match &self.view {
+            View::Queue => (
+                self.queue.selected().map(|row| row.track.id),
+                "terminal-queue",
+                None,
+            ),
+            View::Search(search) => (
+                search.results.selected().map(|track| track.id),
+                "terminal-search",
+                None,
+            ),
+            View::PlaylistDetail { detail, .. } => (
+                detail.entries.selected().map(|entry| entry.track_id),
+                "terminal-playlists",
+                None,
+            ),
+            View::Tree(tree) => match tree.entries.selected() {
+                Some(DirectoryRow::Track(track)) => (Some(track.id), "terminal-library", None),
+                Some(DirectoryRow::Directory { path }) => (
+                    None,
+                    "terminal-library",
+                    Some(path.to_string_lossy().into_owned()),
+                ),
+                None => (None, "terminal-library", None),
+            },
+            View::Playlists(playlists) => (
+                None,
+                "terminal-playlists",
+                playlists.selected().map(|playlist| playlist.name.clone()),
+            ),
         };
-        let Some(row) = row else {
-            return;
+        self.details = Details {
+            target,
+            source_label,
+            state: container.map_or(DetailState::Loading, DetailState::Container),
+            ..Details::default()
         };
-        let mut text = row.title.into_owned();
-        for (label, value) in [("gl-artist", row.artist), ("gl-album", row.album)] {
-            if !value.is_empty() {
-                text.push_str(&format!("\n\n{}\n{value}", self.i18n.text(label)));
-            }
-        }
-        if !row.codec.is_empty() {
-            text.push_str(&format!(
-                "\n\n{}\n{}",
-                self.i18n.text("gl-codec"),
-                row.codec.to_ascii_lowercase()
-            ));
-        }
-        if let Some(duration) = row.duration {
-            text.push_str(&format!(
-                "\n\n{}\n{}",
-                self.i18n.text("gl-duration"),
-                fmt_time(duration)
-            ));
-        }
-        if row.favorite {
-            text.push_str(&format!("\n\n󰓎 {}", self.i18n.text("terminal-favorite")));
-        }
-        if row.missing {
-            text.push_str(&format!("\n\n󰩋 {}", self.i18n.text("gl-missing")));
-        }
+        self.details_active = true;
         self.startup_hint_deadline = None;
-        self.details = Some(Details {
-            text,
-            wrapped: Vec::new(),
-            width: 0,
-            scroll: 0,
-            max_scroll: 0,
-        });
+        self.cancel_query();
+        self.mark_local_change();
     }
 
     fn set_notice(&mut self, text: String, kind: NoticeKind) {
@@ -950,11 +994,13 @@ impl UiState {
         if resolve_key(key, KeyboardContext::TuiHelp) == Some(Action::Close) {
             return KeyAction::Quit;
         }
-        let context = self.keyboard_context();
-        if let Some(details) = &mut self.details {
-            let action = resolve_key(key, KeyboardContext::TuiHelp);
-            match action {
-                Some(Action::Cancel) => self.details = None,
+        if self.details_active {
+            let details = &mut self.details;
+            match resolve_key(key, KeyboardContext::TuiHelp) {
+                Some(Action::Cancel) => {
+                    self.details_active = false;
+                    self.cancel_query();
+                }
                 Some(Action::Up) => details.scroll = details.scroll.saturating_sub(1),
                 Some(Action::Down) => {
                     details.scroll = details.scroll.saturating_add(1).min(details.max_scroll)
@@ -975,24 +1021,26 @@ impl UiState {
             self.mark_local_change();
             return KeyAction::Ignored;
         }
+        let context = self.keyboard_context();
         if self.show_help {
             let action = resolve_key(key, KeyboardContext::TuiHelp);
-            let len = help_bindings(context).count();
             match action {
                 Some(Action::Help | Action::Cancel) => self.show_help = false,
-                Some(Action::Up | Action::Down) => {
-                    move_selection(&mut self.help_selection, len, action == Some(Action::Down));
+                Some(Action::Up) => self.help_scroll = self.help_scroll.saturating_sub(1),
+                Some(Action::Down) => {
+                    self.help_scroll = self.help_scroll.saturating_add(1).min(self.help_max_scroll)
                 }
-                Some(Action::PageUp | Action::PageDown) => {
-                    move_selection_page(
-                        &mut self.help_selection,
-                        len,
-                        self.page_size,
-                        action == Some(Action::PageDown),
-                    );
+                Some(Action::PageUp) => {
+                    self.help_scroll = self.help_scroll.saturating_sub(self.page_size)
                 }
-                Some(Action::First) => self.help_selection.select((len != 0).then_some(0)),
-                Some(Action::Last) => self.help_selection.select(len.checked_sub(1)),
+                Some(Action::PageDown) => {
+                    self.help_scroll = self
+                        .help_scroll
+                        .saturating_add(self.page_size)
+                        .min(self.help_max_scroll)
+                }
+                Some(Action::First) => self.help_scroll = 0,
+                Some(Action::Last) => self.help_scroll = self.help_max_scroll,
                 _ => return KeyAction::Ignored,
             }
             self.mark_local_change();
@@ -1028,14 +1076,13 @@ impl UiState {
         match action {
             Action::Help => {
                 self.show_help = true;
-                self.help_selection = ListState::default().with_selected(Some(0));
+                self.help_scroll = 0;
                 self.mark_local_change();
                 return KeyAction::Ignored;
             }
             Action::Close => return KeyAction::Quit,
             Action::Details => {
                 self.open_details();
-                self.mark_local_change();
                 return KeyAction::Ignored;
             }
             Action::Favorite => {

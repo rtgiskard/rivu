@@ -131,35 +131,29 @@ fn favorite_targets_only_selected_track_and_respects_input_ownership() {
 }
 
 #[test]
-fn details_capture_full_metadata_and_own_keys_without_mutation() {
-    let state = TuiSnapshot::default();
+fn details_pin_search_target_reject_late_reads_and_restore_source() {
+    let state = query_snapshot();
     let mut ui = UiState::default();
-    let mut row = track(0);
-    row.title = "Long full title 夜航 ".repeat(15);
-    row.album = "End-of-details album".into();
-    ui.queue.set_viewport(2);
-    ui.queue.insert(
-        0,
-        2,
-        1,
-        vec![QueueRow {
-            id: 17,
-            track_id: row.id,
-            position: 0,
-            offset: 0,
-            track: row.clone(),
-        }],
-    );
+    let mut search = LibrarySearch {
+        query: "夜航".into(),
+        applied_query: "夜航".into(),
+        focus: SearchFocus::Results,
+        ..LibrarySearch::default()
+    };
+    search.results.set_viewport(2);
+    search.results.insert(0, 2, 2, vec![track(1), track(2)]);
+    search.results.selection.select(Some(1));
+    ui.view = View::Search(search);
     ui.key_action(KeyEvent::from(KeyCode::Char('i')), &state);
-    assert!(ui.details.as_ref().unwrap().text.contains(&row.title));
-    let mut terminal = Terminal::new(TestBackend::new(40, 8)).unwrap();
-    terminal.draw(|frame| draw(frame, &state, &mut ui)).unwrap();
+    assert!(ui.details_active);
+    let old = ui.query_request(&state).unwrap();
+    assert_eq!(old.kind, QueryKind::Track(2));
     for key in [
         KeyCode::Delete,
         KeyCode::Enter,
+        KeyCode::Char('m'),
+        KeyCode::Char('i'),
         KeyCode::Char(' '),
-        KeyCode::Char('/'),
-        KeyCode::F(1),
         KeyCode::Tab,
         KeyCode::BackTab,
     ] {
@@ -167,18 +161,94 @@ fn details_capture_full_metadata_and_own_keys_without_mutation() {
             ui.key_action(KeyEvent::from(key), &state),
             KeyAction::Ignored
         ));
-        assert!(ui.details.is_some());
+        assert!(ui.details_active);
     }
+    assert!(ui.apply_query(
+        &state,
+        &old,
+        Ok(QueryResult {
+            revisions: state.query_revisions(None).for_query(
+                &old.query(),
+                &state.library.playlist_entry_revisions,
+                &state.library.metadata_revisions
+            ),
+            view: ViewResponse::Track(Some(full_track(2)))
+        })
+    ));
+    let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+    terminal.draw(|frame| draw(frame, &state, &mut ui)).unwrap();
     ui.key_action(KeyEvent::from(KeyCode::End), &state);
     terminal.draw(|frame| draw(frame, &state, &mut ui)).unwrap();
-    assert!(terminal_text(&terminal).contains(&row.album));
+    assert!(terminal_text(&terminal).contains("Play count"));
     ui.key_action(KeyEvent::from(KeyCode::Esc), &state);
-    assert!(ui.details.is_none());
-    assert_eq!(ui.queue.selected().unwrap().id, 17);
-    assert!(matches!(
-        ui.key_action(KeyEvent::from(KeyCode::Delete), &state),
-        KeyAction::Command(Command::RemoveQueue { queue_id: 17 })
+    let View::Search(search) = &ui.view else {
+        panic!("search source lost")
+    };
+    assert_eq!(search.query, "夜航");
+    assert!(search.focus == SearchFocus::Results);
+    assert_eq!(search.results.selected().unwrap().id, 2);
+    ui.key_action(KeyEvent::from(KeyCode::Tab), &state);
+    assert!(
+        matches!(&ui.view, View::Search(search) if search.focus == SearchFocus::Query && search.query == "夜航")
+    );
+    ui.key_action(KeyEvent::from(KeyCode::BackTab), &state);
+    ui.key_action(KeyEvent::from(KeyCode::Up), &state);
+    ui.key_action(KeyEvent::from(KeyCode::Char('i')), &state);
+    let current = ui.query_request(&state).unwrap();
+    assert_eq!(current.kind, QueryKind::Track(1));
+    assert!(!ui.apply_query(
+        &state,
+        &old,
+        Ok(QueryResult {
+            revisions: state.query_revisions(None),
+            view: ViewResponse::Track(None)
+        })
     ));
+    assert!(ui.apply_query(
+        &state,
+        &current,
+        Ok(QueryResult {
+            revisions: state.query_revisions(None).for_query(
+                &current.query(),
+                &state.library.playlist_entry_revisions,
+                &state.library.metadata_revisions
+            ),
+            view: ViewResponse::Track(None)
+        })
+    ));
+    assert!(matches!(ui.details.state, DetailState::Removed));
+    ui.details.stamp = None;
+    let failed = ui.query_request(&state).unwrap();
+    assert!(ui.apply_query(&state, &failed, Err("read failed".into())));
+    assert!(matches!(&ui.details.state, DetailState::Error(error) if error == "read failed"));
+    assert!(ui.query_request(&state).is_none());
+}
+
+pub(super) fn full_track(id: i64) -> crate::model::Track {
+    crate::model::Track {
+        id,
+        path: "/music/夜航.flac".into(),
+        fingerprint: None,
+        cue: None,
+        title: "夜航 e\u{301}".repeat(12),
+        artist: "Artist".repeat(15),
+        album: "Album".repeat(15),
+        duration: Some(125.0),
+        codec: "flac".into(),
+        channels: 2,
+        sample_rate: 96000,
+        bitrate_bps: Some(1200000),
+        bitrate_exact: false,
+        track_number: Some(3),
+        disc_number: Some(1),
+        bits_per_sample: Some(24),
+        release_date: Some("2026-10".into()),
+        favorite: true,
+        decoder_hint: crate::model::DecoderHint::Native,
+        missing: true,
+        play_count: 0,
+        last_played: None,
+    }
 }
 
 #[test]
@@ -365,6 +435,7 @@ pub(super) fn track(index: usize) -> LibraryRow {
 pub(super) fn response(request: &QueryRequest, total: usize) -> QueryResult {
     let indices = request.offset..(request.offset + request.limit).min(total);
     let view = match &request.kind {
+        QueryKind::Track(_) => panic!("track reads need explicit metadata"),
         QueryKind::Queue => ViewResponse::QueuePage(Page {
             total,
             rows: indices
@@ -1356,13 +1427,7 @@ fn interrupt_exits_editors_and_overlays_without_dispatching_core_commands() {
             ..UiState::default()
         },
         UiState {
-            details: Some(Details {
-                text: "metadata".into(),
-                wrapped: Vec::new(),
-                width: 0,
-                scroll: 0,
-                max_scroll: 0,
-            }),
+            details_active: true,
             ..UiState::default()
         },
     ];
@@ -1589,4 +1654,35 @@ fn playlist_removal_targets_the_selected_entry_only() {
         ui.key_action(KeyEvent::from(KeyCode::Char('d')), &state),
         KeyAction::Ignored
     ));
+}
+
+#[test]
+fn details_containers_are_not_tracks_and_query_editor_owns_i() {
+    let state = query_snapshot();
+    let mut ui = UiState::default();
+    let mut playlists = PagedList::default();
+    playlists.set_viewport(1);
+    playlists.insert(
+        0,
+        1,
+        1,
+        vec![PlaylistSummary {
+            id: 9,
+            name: "Full playlist name 夜航".into(),
+            entry_count: 2,
+        }],
+    );
+    ui.view = View::Playlists(playlists);
+    ui.key_action(KeyEvent::from(KeyCode::Char('i')), &state);
+    assert!(ui.details_active);
+    assert!(ui.details.target.is_none());
+    assert!(
+        matches!(&ui.details.state, DetailState::Container(name) if name == "Full playlist name 夜航")
+    );
+    assert!(ui.query_request(&state).is_none());
+    ui.key_action(KeyEvent::from(KeyCode::Esc), &state);
+    ui.view = View::Search(LibrarySearch::default());
+    ui.key_action(KeyEvent::from(KeyCode::Char('i')), &state);
+    assert!(!ui.details_active);
+    assert!(matches!(&ui.view, View::Search(search) if search.query == "i"));
 }

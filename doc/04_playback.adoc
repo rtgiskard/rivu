@@ -275,11 +275,20 @@ Exiting the client locally does not stop the core or playback.
 The current top tab is highlighted and bold. Switching retains each page's
 selection and scroll position, including an open playlist or library directory.
 Help and track-details overlays keep navigation inside the overlay.
+Help groups the canonical current-context bindings under Navigation, Playback,
+Current page, and Help / exit, omitting empty groups. Bold group headings are
+unindented; binding rows have a two-cell indent. Key/description columns align
+by terminal display cells; narrow screens stack descriptions with a hanging
+indent. Help is read-only with no selected-row highlight: scrolling accounts for
+headings and wrapped lines. Its fixed title identifies the current context.
+Details and Keys use a plain title row followed by the same structural separator
+as the main page, without nested boxes or cards.
 `/` opens Library search. Navigation, playback, removal, and help keys:
 <<keyboard-controls,Keyboard controls>>.
 
 In Search, `Tab`/`Shift+Tab` switches between the query and results. `Enter` from
-the query focuses results; on a result it plays the track. Typing appends to the
+the query focuses results; on a result it plays the track. `Esc` from results
+returns to the query; from the query it returns to Queue. Typing appends to the
 query, and Backspace removes its last character. The visible text follows the
 query's end when it exceeds the available width. The query owns printable
 characters, including `?`; F1 still opens help. Playback keys apply after
@@ -317,11 +326,28 @@ relative to their list header. These insets reduce the width available for colum
 narrow windows still clip content to fit. Entering Library directories does not
 add indentation or tree branches.
 
-Outside the query editor, `i` opens read-only details for the selected loaded item,
-including full text hidden by the list's width. Details retain that metadata until
-closed; Up/Down, PageUp/PageDown, and Home/End scroll it, and Esc closes it without
-changing the underlying selection. Playback and removal keys do not operate the
-list while details are open.
+Outside the query editor, `i` opens read-only details for the corresponding
+selected item. A real track is read in full from Queue, Library, Search results,
+or playlist tracks; playback changes never replace this target. Folders and
+playlist containers show their full path/name without pretending to be tracks.
+With no selected track or container, details explain where to select one.
+`Esc` closes details and preserves the source selection and scroll position.
+There are exactly three top-level tabs; Details is not a fourth tab.
+
+The summary shows the full title once, source and ID, favorite, and availability.
+One scrollable body presents Tags (artist, album, disc/track numbers and release),
+Audio (codec, sample rate, channels, duration, bitrate and source bit depth), File
+(path and decoder hint), and Playback history (play count and last played).
+Paths remain visible even for missing files. Unknown values use `—`, zero play
+counts remain `0`, and estimated bitrates use `≈`. Loading, failed reads, removed
+tracks, and no target have distinct states. Full text wraps by grapheme cell width;
+short fields pair at 90 body cells or wider and stack below that width.
+Labels and unknowns are secondary, values normal, headings/favorites accent,
+missing files warning, and failures error-colored using the current theme.
+Up/Down, PageUp/PageDown, and Home/End scroll Details. Playback, activation,
+tab-switching and removal keys do not operate the underlying list while the
+overlay is open. There is no tag editor, decoder toggle, artwork, or additional
+playback progress. Closing the overlay restores the unchanged main playback area.
 
 Without a current track, the playback line shows only an idle message; with a
 current track, it retains the playing, paused, or stopped symbol and track title.
