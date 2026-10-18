@@ -110,18 +110,21 @@ fn detail_field(
     width: usize,
     colors: TerminalColors,
 ) -> Vec<Line<'static>> {
-    let mut lines = vec![Line::from(Span::styled(
-        label.to_owned(),
-        Style::default().fg(colors.secondary),
-    ))];
-    if value.is_empty() {
-        lines.push(Line::from(detail_value(value, colors)));
-    } else {
-        lines.extend(
-            wrap_details(value, width)
-                .into_iter()
-                .map(|line| Line::from(Span::styled(line, Style::default().fg(colors.text)))),
-        );
+    let label_indent = width.min(2);
+    let value_indent = width.min(4);
+    let mut lines = Vec::new();
+    for line in wrap_details(label, width.saturating_sub(label_indent)) {
+        lines.push(Line::from(vec![
+            Span::raw(" ".repeat(label_indent)),
+            Span::styled(line, Style::default().fg(colors.secondary)),
+        ]));
+    }
+    let value = if value.is_empty() { "—" } else { value };
+    for line in wrap_details(value, width.saturating_sub(value_indent)) {
+        lines.push(Line::from(vec![
+            Span::raw(" ".repeat(value_indent)),
+            detail_value(&line, colors),
+        ]));
     }
     lines
 }
@@ -133,16 +136,17 @@ fn detail_fields(
     i18n: &Localizer,
     colors: TerminalColors,
 ) {
-    for pair in fields.chunks(if width >= 90 { 2 } else { 1 }) {
+    const COLUMN_WIDTH: usize = 36;
+    const COLUMN_GAP: usize = 2;
+    for pair in fields.chunks(if width >= COLUMN_WIDTH * 2 + COLUMN_GAP {
+        2
+    } else {
+        1
+    }) {
         if pair.len() == 2 {
-            let left_width = width / 2;
-            let left = detail_field(
-                i18n.text(pair[0].0),
-                &pair[0].1,
-                left_width.saturating_sub(2),
-                colors,
-            );
-            let right = detail_field(i18n.text(pair[1].0), &pair[1].1, width - left_width, colors);
+            let left_width = COLUMN_WIDTH + COLUMN_GAP;
+            let left = detail_field(i18n.text(pair[0].0), &pair[0].1, COLUMN_WIDTH, colors);
+            let right = detail_field(i18n.text(pair[1].0), &pair[1].1, COLUMN_WIDTH, colors);
             for index in 0..left.len().max(right.len()) {
                 let mut row = left.get(index).cloned().unwrap_or_default();
                 let padding = left_width.saturating_sub(row.width());
@@ -156,7 +160,7 @@ fn detail_fields(
             lines.extend(detail_field(
                 i18n.text(pair[0].0),
                 &pair[0].1,
-                width,
+                width.min(COLUMN_WIDTH),
                 colors,
             ));
         }

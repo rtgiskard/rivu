@@ -360,7 +360,10 @@ Audio (codec, sample rate, channels, duration, bitrate and source bit depth), Fi
 Paths remain visible even for missing files. Unknown values use `—`, zero play
 counts remain `0`, and estimated bitrates use `≈`. Loading, failed reads, removed
 tracks, and no target have distinct states. Full text wraps by grapheme cell width;
-short fields pair at 90 body cells or wider and stack below that width.
+Short fields use columns of at most 36 cells, including a two-cell label indent
+and four-cell value/continuation indent. Two columns have a two-cell gap and
+require at least 74 body cells; narrower bodies stack fields. Group headings
+remain unindented, and paths retain the full body width.
 Labels and unknowns are secondary, values normal, headings/favorites accent,
 missing files warning, and failures error-colored using the current theme.
 Up/Down, PageUp/PageDown, and Home/End scroll Details. Playback, activation,

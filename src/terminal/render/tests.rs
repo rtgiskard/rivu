@@ -39,7 +39,7 @@ fn snapshot_theme_changes_recolor_main_help_and_details_without_changing_content
 fn details_preserve_missing_paths_unknowns_zeroes_and_responsive_order() {
     let i18n = Localizer::new("en-US");
     let colors = TerminalColors::new(crate::theme::Theme::default());
-    for width in [40, 96] {
+    for width in [40, 73, 74, 96, 120] {
         let mut details = Details {
             target: Some(2),
             source_label: "terminal-queue",
@@ -66,16 +66,17 @@ fn details_preserve_missing_paths_unknowns_zeroes_and_responsive_order() {
         };
         let disc = locate("Disc");
         let track = locate("Track");
-        if width >= 90 {
+        assert_eq!(disc.0, 2);
+        if width >= 74 {
             assert_eq!(disc.1, track.1);
-            assert!(disc.0 < track.0);
+            assert_eq!(track.0, 40);
         } else {
             assert!(disc.1 < track.1);
         }
         let missing = locate("Missing");
         assert_eq!(buffer[(missing.0 as u16, missing.1)].fg, colors.warning);
         let count = locate("Play count");
-        assert_eq!(buffer[(count.0 as u16, count.1 + 1)].symbol(), "0");
+        assert_eq!(buffer[(count.0 as u16 + 2, count.1 + 1)].symbol(), "0");
     }
     let text = "夜航e\u{301}👩‍🚀/".repeat(12);
     for width in [2, 7, 40] {
