@@ -21,6 +21,7 @@ pub use control::{
 };
 pub use dropdown::{DropdownItem, DropdownState};
 pub use focus::{FocusScope, context_menu_key, dropdown_key, tab_key};
+pub use input::input_aligned_control;
 pub use layout::{
     StatusKind, caption, column, form_field, list_panel_header, list_viewport, panel_header,
     panel_surface, panel_toolbar, row, section_group, status_message, two_column,

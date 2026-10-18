@@ -41,6 +41,20 @@ impl Dialog {
             .border_color(rgb(theme.border))
             .rounded_md()
     }
+
+    /// A padded, viewport-bounded scroll card; the caller chooses its width.
+    pub fn scroll_card(
+        theme: &'static Palette,
+        id: impl Into<ElementId>,
+        window: &Window,
+    ) -> Stateful<Div> {
+        Self::card(theme)
+            .id(id)
+            .max_w(relative(0.9))
+            .max_h(window.viewport_size().height * 0.9)
+            .overflow_y_scroll()
+            .p(px(UI_INSET))
+    }
 }
 
 /// Elevated surface shells; none implicitly dismiss or change focus.

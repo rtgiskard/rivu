@@ -21,6 +21,20 @@ use gpui::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 
+const INPUT_LINE_HEIGHT: f32 = 20.;
+const INPUT_VERTICAL_PADDING: f32 = 7.;
+const INPUT_CONTENT_HEIGHT: f32 = INPUT_LINE_HEIGHT + 2. * INPUT_VERTICAL_PADDING;
+
+/// Align a bordered control with a standalone [`Input`] at every UI scale.
+/// The existing border stays unscaled; embedded inputs retain their parent geometry.
+pub fn input_aligned_control(control: gpui::Stateful<gpui::Div>) -> gpui::Stateful<gpui::Div> {
+    control
+        .h_auto()
+        .min_h_0()
+        .line_height(gpui::rems(INPUT_LINE_HEIGHT / 16.))
+        .py(gpui::rems(INPUT_VERTICAL_PADDING / 16.))
+}
+
 actions!(
     input,
     [
@@ -933,7 +947,7 @@ impl Render for Input {
             })
             .text_color(rgb(theme.text))
             .when(!self.enabled, |view| view.text_color(rgb(theme.disabled)))
-            .line_height(px(20.) * scale)
+            .line_height(px(INPUT_LINE_HEIGHT) * scale)
             .text_size(px(14.) * scale)
             .child(
                 div()
@@ -945,7 +959,8 @@ impl Render for Input {
                         view.flex().items_center().h_full().min_w(gpui::rems(1.5))
                     })
                     .when(!self.embedded, |view| {
-                        view.h(px(34.) * scale).py(px(7.) * scale)
+                        view.h(px(INPUT_CONTENT_HEIGHT) * scale)
+                            .py(px(INPUT_VERTICAL_PADDING) * scale)
                     })
                     .pr(self.trailing_space * scale)
                     .child(InputElement { input: cx.entity() }),
