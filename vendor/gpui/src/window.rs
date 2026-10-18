@@ -50,7 +50,6 @@ use std::{
     any::{Any, TypeId},
     borrow::Cow,
     cell::{Cell, RefCell},
-    cmp,
     fmt::{Debug, Display},
     hash::{Hash, Hasher},
     marker::PhantomData,
@@ -965,6 +964,46 @@ impl TooltipId {
 pub(crate) struct TooltipBounds {
     id: TooltipId,
     bounds: Bounds<Pixels>,
+}
+
+// Keep the deployed position stable and avoid the cursor before clamping to the viewport.
+fn tooltip_bounds(
+    mouse_position: Point<Pixels>,
+    tooltip_size: Size<Pixels>,
+    viewport_size: Size<Pixels>,
+) -> Bounds<Pixels> {
+    let margin = px(8.);
+    let above_gap = px(8.);
+    let cursor_gap = px(16.);
+    let min_x = margin.min((viewport_size.width - tooltip_size.width).max(Pixels::ZERO));
+    let min_y = margin.min((viewport_size.height - tooltip_size.height).max(Pixels::ZERO));
+    let max_x = (viewport_size.width - tooltip_size.width - margin).max(min_x);
+    let max_y = (viewport_size.height - tooltip_size.height - margin).max(min_y);
+    let above = mouse_position.y - above_gap - tooltip_size.height;
+    let below = mouse_position.y + cursor_gap;
+    let right = mouse_position.x + cursor_gap;
+    let left = mouse_position.x - cursor_gap - tooltip_size.width;
+    let mut origin = point(mouse_position.x.clamp(min_x, max_x), above);
+
+    if above < min_y {
+        if below <= max_y {
+            origin.y = below;
+        } else if right <= max_x {
+            // Tall tooltips can still avoid the cursor by moving beside it.
+            origin = point(right, mouse_position.y.clamp(min_y, max_y));
+        } else if left >= min_x {
+            origin = point(left, mouse_position.y.clamp(min_y, max_y));
+        } else {
+            // Neither side fits: show as much content as possible on the roomier side.
+            origin.y = if above - min_y >= max_y - below {
+                above
+            } else {
+                below
+            };
+        }
+    }
+    origin.y = origin.y.clamp(min_y, max_y);
+    Bounds::new(origin, tooltip_size)
 }
 
 #[derive(Clone)]
@@ -3864,36 +3903,7 @@ impl Window {
             let mouse_position = tooltip_request.tooltip.mouse_position;
             let tooltip_size = element.layout_as_root(AvailableSpace::min_size(), self, cx);
 
-            let mut tooltip_bounds =
-                Bounds::new(mouse_position + point(px(1.), px(1.)), tooltip_size);
-            let window_bounds = Bounds {
-                origin: Point::default(),
-                size: self.viewport_size(),
-            };
-
-            if tooltip_bounds.right() > window_bounds.right() {
-                let new_x = mouse_position.x - tooltip_bounds.size.width - px(1.);
-                if new_x >= Pixels::ZERO {
-                    tooltip_bounds.origin.x = new_x;
-                } else {
-                    tooltip_bounds.origin.x = cmp::max(
-                        Pixels::ZERO,
-                        tooltip_bounds.origin.x - tooltip_bounds.right() - window_bounds.right(),
-                    );
-                }
-            }
-
-            if tooltip_bounds.bottom() > window_bounds.bottom() {
-                let new_y = mouse_position.y - tooltip_bounds.size.height - px(1.);
-                if new_y >= Pixels::ZERO {
-                    tooltip_bounds.origin.y = new_y;
-                } else {
-                    tooltip_bounds.origin.y = cmp::max(
-                        Pixels::ZERO,
-                        tooltip_bounds.origin.y - tooltip_bounds.bottom() - window_bounds.bottom(),
-                    );
-                }
-            }
+            let tooltip_bounds = tooltip_bounds(mouse_position, tooltip_size, self.viewport_size());
 
             // It's possible for an element to have an active tooltip while not being painted (e.g.
             // via the `visible_on_hover` method). Since mouse listeners are not active in this
@@ -8033,6 +8043,59 @@ mod tests {
         TouchId, TouchPhase, Underline, UnderlineStyle, Window, WindowAppearance, WindowOptions,
         canvas, div, hsla, point, px, size,
     };
+
+    #[test]
+    fn tooltips_avoid_the_cursor_and_stay_inside_viewport_edges() {
+        let viewport = size(px(800.), px(600.));
+        let tooltip = size(px(200.), px(80.));
+        for mouse in [
+            point(px(0.), px(0.)),
+            point(px(799.), px(0.)),
+            point(px(0.), px(599.)),
+            point(px(799.), px(599.)),
+            point(px(400.), px(300.)),
+        ] {
+            let bounds = super::tooltip_bounds(mouse, tooltip, viewport);
+            assert!(bounds.left() > Pixels::ZERO);
+            assert!(bounds.top() > Pixels::ZERO);
+            assert!(bounds.right() < viewport.width);
+            assert!(bounds.bottom() < viewport.height);
+            assert!(!bounds.contains(&mouse));
+            if mouse.y >= viewport.height / 2. {
+                assert!(bounds.bottom() < mouse.y);
+            } else {
+                assert!(bounds.top() > mouse.y);
+            }
+        }
+    }
+
+    #[test]
+    fn tall_tooltips_use_horizontal_space_before_overlapping_the_cursor() {
+        let viewport = size(px(800.), px(600.));
+        for mouse in [point(px(100.), px(300.)), point(px(700.), px(300.))] {
+            let bounds = super::tooltip_bounds(mouse, size(px(200.), px(400.)), viewport);
+            assert!(!bounds.contains(&mouse));
+            assert!(bounds.top() > Pixels::ZERO);
+            assert!(bounds.bottom() < viewport.height);
+            if mouse.x < viewport.width / 2. {
+                assert!(bounds.left() > mouse.x);
+            } else {
+                assert!(bounds.right() < mouse.x);
+            }
+        }
+    }
+
+    #[test]
+    fn oversized_tooltips_and_tiny_viewports_have_nonnegative_origins() {
+        for viewport in [size(px(0.), px(0.)), size(px(10.), px(10.))] {
+            let bounds = super::tooltip_bounds(
+                point(px(5.), px(5.)),
+                size(px(200.), px(400.)),
+                viewport,
+            );
+            assert_eq!(bounds.origin, Point::default());
+        }
+    }
 
     #[cfg(feature = "profiler")]
     #[gpui::test]

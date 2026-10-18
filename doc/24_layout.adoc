@@ -75,6 +75,15 @@ Each list heading reserves at least 3 rem within its header row. Its title and
 count each stay on one line and truncate independently when space is limited;
 expanding search does not turn either into a multi-line block.
 
+Tooltip placement belongs to the vendored GPUI window overlay, shared by action
+and row hints. It uses the pointer position captured when the hint opens, not
+the live pointer position. Prefer above with 8 logical pixels of clearance;
+fall back below with 16 pixels and keep an 8-pixel viewport inset. If a tall
+hint fits neither vertically, try either horizontal side with the same clearance
+before clamping on the roomier vertical side. Oversized content can still exceed
+the viewport; placement does not truncate text or change the existing show/hide
+lifecycle.
+
 
 Panel instance preferences belong to the layout and survive docking and
 duplication. Missing artwork options initialize from configuration once;
