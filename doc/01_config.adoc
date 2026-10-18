@@ -508,12 +508,15 @@ edits to that content also skips the write. A missing or invalid file is written
 on the next sync or orderly exit, even if no layout edits were made.
 
 Without a saved layout collection, Rivu starts in `Default` and also provides
-`Album` and `Visual`. Default keeps artwork, playback, browsing, queue, and a
-frequency view visible; Album emphasizes the cover and album browser; Visual
-provides a large visualization canvas with a queue. Alternative browsers and
-plots share tabs rather than all running visibly at once. The initial selection
-is Library and Spectrum in Default, Albums in Album, and Audio Visualizer in
-Visual. Built-in layouts start locked and use the same global configuration.
+`Album` and `Visual`. Default opens Library in the main browsing region and
+Queue beside it; Albums, Playlists, and Recent tracks are alternative browser
+tabs, and Track details shares the side region with Queue. Below them, a cover
+sits beside Spectrum above playback controls. These three bottom panels hide
+their tab bars. Album starts with Albums and adds a cover above
+the side region; its standalone cover also hides its tab bar. Visual starts
+with Audio Visualizer, with Spectrum, Spectrogram, and Waveform available as
+tabs. Album and Visual retain playback below the main content. Built-in layouts
+start locked and use the same global configuration.
 
 Existing layout collections are loaded unchanged. To make another layout,
 duplicate an existing layout and edit the copy. Renaming or deleting an initial

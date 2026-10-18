@@ -23,9 +23,13 @@ restore them on a later switch. Renaming the active layout or deleting an
 inactive one does not replace the active panel tree.
 
 The initial collection contains three ordinary, editable layouts, with Default
-active. Default favors concurrent browsing and Queue access, Album favors the
-cover and album browser, and Visual favors a large plot canvas. Competing
-browsers and plots share tabs rather than all demanding work simultaneously.
+active. Default gives the main region to tabbed browsing and a side region to
+Queue or Details. Its lower region places artwork beside a column containing
+Spectrum above transport. Album starts with album browsing and adds a cover
+above the side region. Visual gives its main region to one selected plot.
+Competing browsers and plots share tabs. Default's bottom panels and Album's
+standalone artwork hide their headers. Header visibility is independent of the
+layout lock.
 
 Templates construct only panel trees and instance-option slots; existing
 initialization supplies missing artwork/visualizer options from configuration.
@@ -37,8 +41,8 @@ apply only at collection creation or explicit template creation. Initial tab
 selection and template controls are documented in
 link:01_config.adoc#_layout[Configuration and layout].
 
-Visualization sizing uses the actual content canvas, after the 1.75rem tab row,
-panel borders, and 8px content insets. A canvas at most 64px wide or 40px high
+Visualization sizing uses the actual content canvas, after any visible 1.75rem
+tab row, panel borders, and 8px content insets. A canvas at most 64px wide or 40px high
 shows an `Enlarge panel` hint instead of an unreadable plot or unexplained blank
 background; the hint remains accessible through its tooltip and scrolling.
 Spectrum omits axis labels below 78px canvas height rather than overlapping its

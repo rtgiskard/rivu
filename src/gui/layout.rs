@@ -112,7 +112,7 @@ impl LayoutTemplate {
     }
 
     fn layout(self) -> Layout {
-        fn tabs(id: u64, kinds: &[&str]) -> Node {
+        fn tabs(id: u64, kinds: &[&str], show_tab_bar: bool) -> Node {
             Node::Tabs {
                 id,
                 panels: kinds
@@ -121,7 +121,7 @@ impl LayoutTemplate {
                     .map(|(index, kind)| Panel {
                         id: id + 1 + index as u64,
                         kind: (*kind).into(),
-                        show_tab_bar: true,
+                        show_tab_bar,
                         audio_visualizer: None,
                         album_artwork: None,
                     })
@@ -137,68 +137,79 @@ impl LayoutTemplate {
                 children,
             }
         }
-        let (children, next_id) = match self {
+        // Templates describe new workspaces only; loading never merges these
+        // defaults into a saved tree. Browsing leads, playback stays at the foot.
+        let (content, transport, main_boundary, next_id) = match self {
             Self::Default => (
-                vec![
-                    split(
-                        2,
-                        Axis::Horizontal,
-                        0.22,
-                        vec![tabs(3, &["album_artwork"]), tabs(5, &["transport"])],
-                    ),
-                    split(
-                        7,
-                        Axis::Horizontal,
-                        0.60,
-                        vec![
-                            tabs(8, &["library", "albums", "playlists"]),
-                            split(
-                                12,
-                                Axis::Vertical,
-                                0.60,
-                                vec![tabs(13, &["queue"]), tabs(15, &["spectrum", "spectrogram"])],
-                            ),
-                        ],
-                    ),
-                ],
-                18,
+                split(
+                    2,
+                    Axis::Horizontal,
+                    0.72,
+                    vec![
+                        tabs(3, &["library", "albums", "playlists", "history"], true),
+                        tabs(8, &["queue", "metadata"], true),
+                    ],
+                ),
+                split(
+                    11,
+                    Axis::Horizontal,
+                    0.21,
+                    vec![
+                        tabs(12, &["album_artwork"], false),
+                        split(
+                            14,
+                            Axis::Vertical,
+                            0.38,
+                            vec![
+                                tabs(15, &["spectrum"], false),
+                                tabs(17, &["transport"], false),
+                            ],
+                        ),
+                    ],
+                ),
+                0.64,
+                19,
             ),
             Self::Album => (
-                vec![
-                    tabs(2, &["transport"]),
-                    split(
-                        4,
-                        Axis::Horizontal,
-                        0.35,
-                        vec![
-                            tabs(5, &["album_artwork"]),
-                            tabs(7, &["albums", "queue", "metadata"]),
-                        ],
-                    ),
-                ],
-                11,
+                split(
+                    2,
+                    Axis::Horizontal,
+                    0.72,
+                    vec![
+                        tabs(3, &["albums", "library", "playlists", "history"], true),
+                        split(
+                            8,
+                            Axis::Vertical,
+                            0.55,
+                            vec![
+                                tabs(9, &["album_artwork"], false),
+                                tabs(11, &["queue", "metadata"], true),
+                            ],
+                        ),
+                    ],
+                ),
+                tabs(14, &["transport"], true),
+                0.74,
+                16,
             ),
             Self::Visual => (
-                vec![
-                    tabs(2, &["transport"]),
-                    split(
-                        4,
-                        Axis::Horizontal,
-                        0.70,
-                        vec![
-                            tabs(
-                                5,
-                                &["audio_visualizer", "spectrum", "spectrogram", "waveform"],
-                            ),
-                            tabs(10, &["queue"]),
-                        ],
-                    ),
-                ],
-                12,
+                tabs(
+                    2,
+                    &["audio_visualizer", "spectrum", "spectrogram", "waveform"],
+                    true,
+                ),
+                tabs(7, &["transport"], true),
+                0.74,
+                9,
             ),
         };
         Layout {
-            root: Some(split(1, Axis::Vertical, 0.28, children)),
+            root: Some(split(
+                1,
+                Axis::Vertical,
+                main_boundary,
+                vec![content, transport],
+            )),
             next_id,
             locked: true,
         }
