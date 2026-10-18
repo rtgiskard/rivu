@@ -649,6 +649,34 @@ fn metadata_map(track: Option<&TrackMetadata>) -> Metadata {
     metadata
 }
 
+/// Keep the publisher's metadata cache tied to the selected track snapshot,
+/// including path-only scans that do not change the queue's row revision.
+fn refresh_metadata(
+    previous: &MprisSnapshot,
+    current: &MprisSnapshot,
+    metadata: &mut Option<TrackMetadata>,
+    artwork: &ArtworkManager,
+) -> bool {
+    let track_changed = match (&previous.current_track, &current.current_track) {
+        (Some(previous), Some(current)) => !Arc::ptr_eq(previous, current),
+        (None, None) => false,
+        _ => true,
+    };
+    if !track_changed
+        && previous.queue.current_id == current.queue.current_id
+        && previous.playback.duration == current.playback.duration
+        && previous.queue.current_position.is_some() == current.queue.current_position.is_some()
+    {
+        return false;
+    }
+    let next = TrackMetadata::from_snapshot(current, artwork);
+    if *metadata == next {
+        return false;
+    }
+    *metadata = next;
+    true
+}
+
 /// Cold probes run only on the existing publisher. Re-read playback after the
 /// blocking load: a completion may warm the cache but never publish stale art.
 fn publish_artwork(
@@ -727,16 +755,8 @@ fn publish_changes(
     if previous.playback.volume != current.playback.volume {
         changed.insert("Volume", f64::from(current.playback.volume).into());
     }
-    // Arc comparisons avoid rebuilding metadata on ordinary audio clock ticks.
-    if previous.queue.current_id != current.queue.current_id
-        || previous.playback.duration != current.playback.duration
-        || previous.queue.revision != current.queue.revision
-    {
-        let next = TrackMetadata::from_snapshot(current, artwork);
-        if *metadata != next {
-            changed.insert("Metadata", Value::from(metadata_map(next.as_ref())));
-            *metadata = next;
-        }
+    if refresh_metadata(previous, current, metadata, artwork) {
+        changed.insert("Metadata", Value::from(metadata_map(metadata.as_ref())));
     }
     // Queue navigation depends on ordering, selection and repeat/shuffle,
     // not the audio clock; do not walk the queue on each position update.
@@ -878,6 +898,87 @@ mod tests {
         state.current_track = Some(Arc::new(replacement));
         assert!(TrackMetadata::from_snapshot(&state, &artwork).is_some());
         assert!(!artwork.is_loaded(state.current_track().unwrap()));
+    }
+
+    #[test]
+    fn metadata_notification_follows_path_changes_without_queue_revision_changes() {
+        let directory = tempfile::tempdir().unwrap();
+        let artwork = ArtworkManager::new(directory.path());
+        let previous = MprisSnapshot {
+            queue: QueueState {
+                total: 1,
+                current_id: Some(1),
+                current_position: Some(0),
+                revision: 2,
+            },
+            current_track: Some(Arc::new(track(7))),
+            playback: PlaybackState::default(),
+            shutting_down: false,
+        };
+        let mut metadata = TrackMetadata::from_snapshot(&previous, &artwork);
+        let mut current = previous.clone();
+        current.playback.position = 5.0;
+        assert!(!refresh_metadata(
+            &previous,
+            &current,
+            &mut metadata,
+            &artwork
+        ));
+
+        Arc::make_mut(current.current_track.as_mut().unwrap()).path =
+            PathBuf::from("/music/moved/7.flac");
+        assert!(refresh_metadata(
+            &previous,
+            &current,
+            &mut metadata,
+            &artwork
+        ));
+        let notification = metadata_map(metadata.as_ref());
+        assert_eq!(
+            <&str>::try_from(&notification["xesam:url"]).unwrap(),
+            "file:///music/moved/7.flac"
+        );
+
+        // Replacing a snapshot without changing its public metadata is quiet.
+        let mut unchanged = current.clone();
+        Arc::make_mut(unchanged.current_track.as_mut().unwrap()).favorite = true;
+        assert!(!refresh_metadata(
+            &current,
+            &unchanged,
+            &mut metadata,
+            &artwork
+        ));
+
+        let mut reordered = current.clone();
+        reordered.queue.revision += 1;
+        reordered.queue.total = 2;
+        reordered.queue.current_position = Some(1);
+        assert!(!refresh_metadata(
+            &current,
+            &reordered,
+            &mut metadata,
+            &artwork
+        ));
+
+        let mut unavailable = reordered.clone();
+        unavailable.queue.current_position = None;
+        assert!(refresh_metadata(
+            &reordered,
+            &unavailable,
+            &mut metadata,
+            &artwork
+        ));
+        assert!(metadata.is_none());
+        assert!(refresh_metadata(
+            &unavailable,
+            &reordered,
+            &mut metadata,
+            &artwork
+        ));
+        assert_eq!(
+            <&str>::try_from(&metadata_map(metadata.as_ref())["xesam:url"]).unwrap(),
+            "file:///music/moved/7.flac"
+        );
     }
 
     #[test]

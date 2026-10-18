@@ -254,6 +254,13 @@ completed connection starts publishing only if MPRIS is still enabled and the
 core is not shutting down. Failed attempts wait for a later off/on transition,
 not a retry timer; registration never blocks the first window.
 
+MPRIS metadata follows the selected track's immutable snapshot as well as its
+queue occurrence, selection validity and playback duration. A scan that changes
+only its path or content identity can invalidate metadata without changing the
+queue's row revision. The publisher compares exposed metadata values before
+sending a change signal; ordinary audio-clock updates and unrelated queue
+revisions do not rebuild it.
+
 The same App owns the headless `serve` instance. The process logging subscriber
 is installed once; file-writer lifetime belongs to App, while Core receives only
 a configuration control handle. Logging prepares a candidate writer before
