@@ -33,6 +33,7 @@ pub struct SearchField {
     timer: Option<Task<()>>,
     counts: Option<(usize, usize)>,
     _subscription: Subscription,
+    blur_subscription: Option<Subscription>,
 }
 
 impl EventEmitter<SearchEvent> for SearchField {}
@@ -60,6 +61,7 @@ impl SearchField {
             timer: None,
             counts: None,
             _subscription: subscription,
+            blur_subscription: None,
         }
     }
 
@@ -96,6 +98,16 @@ impl SearchField {
     }
 
     pub fn focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.blur_subscription.is_none() {
+            let input_focus = self.input.focus_handle(cx);
+            let subscription = cx.on_blur(&input_focus, window, |this, _, cx| {
+                if this.expanded && this.input.read(cx).text().is_empty() {
+                    this.expanded = false;
+                    cx.notify();
+                }
+            });
+            self.blur_subscription = Some(subscription);
+        }
         if !self.expanded {
             self.expansion = self.expansion.wrapping_add(1);
             self.expanded = true;
@@ -332,6 +344,96 @@ mod tests {
         })
         .unwrap();
         assert_eq!(remaining.borrow().unwrap(), collapsed);
+    }
+
+    struct SearchWithOutsideFocus {
+        search: Entity<SearchField>,
+        outside: FocusHandle,
+    }
+
+    impl Render for SearchWithOutsideFocus {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .child(self.search.clone())
+                .child(div().track_focus(&self.outside).size(gpui::px(32.)))
+        }
+    }
+
+    #[test]
+    fn empty_search_collapses_on_input_blur_without_cancelling_nonempty_queries() {
+        let mut cx = TestAppContext::single();
+        cx.update(crate::theme::init_test);
+        let delay = Duration::from_millis(100);
+        let search = cx.update(|cx| {
+            cx.new(|cx| {
+                SearchField::new(
+                    SearchLabels {
+                        name: "Search".into(),
+                        placeholder: "Search".into(),
+                        toggle: "Search".into(),
+                        clear: "Clear".into(),
+                    },
+                    delay,
+                    cx,
+                )
+            })
+        });
+        let outside = cx.update(|cx| cx.focus_handle());
+        let window = cx.add_window({
+            let search = search.clone();
+            let outside = outside.clone();
+            move |_, _| SearchWithOutsideFocus { search, outside }
+        });
+        let handle = window.into();
+        cx.update_window(handle, |_, window, _| window.activate_window())
+            .unwrap();
+        cx.run_until_parked();
+        let focus = |cx: &mut TestAppContext| {
+            cx.update_window(handle, |_, window, cx| {
+                search.update(cx, |search, cx| search.focus(window, cx));
+                window.draw(cx).clear(cx);
+            })
+            .unwrap();
+            cx.run_until_parked();
+        };
+        let blur = |cx: &mut TestAppContext| {
+            cx.update_window(handle, |_, window, cx| {
+                outside.focus(window, cx);
+                window.draw(cx).clear(cx);
+            })
+            .unwrap();
+            cx.run_until_parked();
+        };
+        focus(&mut cx);
+        blur(&mut cx);
+        assert!(!cx.read(|cx| search.read(cx).expanded));
+
+        focus(&mut cx);
+        cx.update_window(handle, |_, window, cx| {
+            search.update(cx, |search, cx| {
+                search.input.update(cx, |input, cx| {
+                    input.replace_text_in_range(None, "needle", window, cx);
+                });
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        blur(&mut cx);
+        assert!(cx.read(|cx| search.read(cx).expanded));
+        cx.executor().advance_clock(delay);
+        cx.run_until_parked();
+        assert_eq!(
+            cx.read(|cx| search.read(cx).query.clone()),
+            Some("needle".into())
+        );
+
+        focus(&mut cx);
+        cx.update(|cx| search.update(cx, |search, cx| search.clear(cx)));
+        assert!(cx.read(|cx| search.read(cx).expanded));
+        blur(&mut cx);
+        assert!(!cx.read(|cx| search.read(cx).expanded));
+        assert_eq!(cx.read(|cx| search.read(cx).query.clone()), None);
     }
 
     #[test]
