@@ -4,11 +4,12 @@
 
 == Status and decision boundaries
 
-Design baseline, 2026-10-18. The vendor-only fixed-schema rectangle slice described
-under <<_internal_led_vertical_slice>> is implemented. The general `Program`,
-generated-schema interfaces and consumer migrations below remain proposals, not
-available APIs. Implementation details may change as subsequent consumers expose
-different requirements; the agreed safety and platform boundaries remain binding.
+Design baseline, 2026-10-18. The vendor-only fixed-schema rectangle, numerical-field
+and existing-path slice described under <<_internal_led_vertical_slice>> is
+implemented. The general `Program`, generated-schema interfaces and consumer
+migrations below remain proposals, not available APIs. Implementation details may
+change as subsequent consumers expose different requirements; the agreed safety
+and platform boundaries remain binding.
 
 The application supplies compact parameters and meaningful numerical data. The
 GPU generates geometry and pixels. GPUI owns the common drawing, upload, storage,
@@ -408,11 +409,11 @@ Preserve these distinct visual models:
   curves, including transparent empty cells.
 
 Interpolating scalar values before color mapping is not equivalent to interpolating
-already mapped colors. Programs must express the intended order. A scalar-field
-replacement for an existing enlarged image may need to map neighboring source
-samples separately and then interpolate colors. Preserve source resolution,
-endpoint sampling and meaningful rounding unless an evaluated visual tradeoff
-explicitly changes them.
+already mapped colors. The implemented numerical-field material has one fixed
+order: map each of four neighboring source samples, quantize each palette index,
+then bilinearly interpolate straight RGBA colors. It has no scalar-first mode.
+Preserve source resolution, endpoint sampling and meaningful rounding unless an
+evaluated visual tradeoff explicitly changes them.
 
 == Consumer migration
 
@@ -498,48 +499,59 @@ This is a vertical implementation, not the final public API. Its private special
 entry point must not become a permanent parallel convention.
 
 The current vendor implementation exposes the deliberately experimental
-`GpuRectangleFrame`, `GpuRectangleState`, `GpuRectangleSource` and
-`Window::paint_gpu_rectangles` for integration work. It records normalized
-rectangles, bottom-to-top palette coordinates and solid or bottom-aligned segmented
-fill. Palette samples are straight-alpha sRGB values; their interpolation is in
-sRGB numerical space. Bounds, clip, scale and inherited opacity belong to each
-scene placement, independently of the shared content. No application visualizer
-has migrated to this entry point, and it does not replace the existing textured
-path interface.
+`GpuPalette`, `GpuFrame`, schema-stable `GpuState`, `GpuSource` and
+`Window::paint_gpu` for integration work. One recording entry accepts normalized
+rectangle instances, row-major numerical fields or an immutable existing
+tessellated path. Rectangle segmentation and bottom-to-top palette coordinates
+retain their initial behavior. Palette samples are straight-alpha sRGB values;
+their interpolation is in sRGB numerical space. Bounds, clip, scale and inherited
+opacity belong to each scene placement, independently of shared content. No
+application visualizer has migrated. The old rectangle-only publication/recording
+API is removed; the still-used textured-path interface remains independent.
 
 Frame construction validates geometry, palette, parameters and explicit caller
 capacities before copying payloads. A process-unique, checked monotonic frame ID
 keys device-local uploads; allocator addresses are not content identities.
+For frequent raw updates, `GpuState::publish_rectangles` and `publish_field` check
+the slot's fixed schema and capacities before allocating/copying a new snapshot.
+Construction stays outside the publication lock, and failure preserves the old
+publication or cleared state. `publish(frame)` instead attaches an already built
+immutable snapshot for sharing with other slots or fixed scenes; its caller has
+already paid construction costs under that frame's limits. It does not promise
+admission under a narrower slot's limits before the caller constructs the frame.
 Fixed sources retain their publication. Dynamic sources retain a revocable slot;
 the renderer captures each slot once per frame, including an empty/revoked result.
-`publish` and `clear` require one synchronous owner to serialize mutations;
+Publication and `clear` require one synchronous owner to serialize mutations;
 concurrent snapshot readers are supported. `clear` is not cancellation of a
-concurrently preparing publication. Neither operation schedules a frame.
+concurrently preparing publication. These operations do not schedule frames.
 Placement and clip bounds are validated after scaling before a paint is recorded;
 non-finite coordinates, negative dimensions and overflowing extents are rejected.
 
 The fixed WGSL layout has explicit little-endian scalar encoders and zeroed
 padding, checked structurally with the matching Naga version. This is not the
-general ABI generator. The WGPU program is created on first nonempty use, not
-when an unrelated window opens. Immutable content uploads are reused by all
-placements of that frame and by static replay. Per-placement uniforms are currently
-allocated for each prepared draw, and each newly published frame encodes its full
-rectangle and palette payload; this prototype does not yet provide independent
-palette revisions, reusable upload pages or partial-field updates.
+general ABI generator. Shared shader/layout preparation is lazy. The ordinary
+rectangle/field pipeline and the MSAA path pipeline are created independently,
+only after a valid draw passes upload/placement admission; replay reuses them.
+An unused geometry pipeline is not compiled merely because another geometry is
+drawn. Immutable content uploads are reused by all
+placements of that frame and by static replay. Independently identified immutable
+palettes are shared across geometry kinds and publications. Per-placement uniforms
+are still prepared per draw; a new field publication copies/uploads the complete
+numeric payload. There are no reusable upload pages or partial-field updates.
 
 GPU buffers are initialized through WGPU's write-only mapped view, never by
 reinterpreting the Rust model or overwriting an older revision. Completion
 watermarks retain charges for both active and retired buffers. The owner of frame
 preparation also finalizes failed pre-submit recordings through the renderer's
 existing queue-flush path, so a failed later path draw cannot strand a provisional
-submission. Unsupported capabilities and rectangle capacity pressure are reported
+submission. Unsupported capabilities and material capacity pressure are reported
 and omit the affected drawing without preventing unrelated controls from rendering.
 Capability failure is reported once per device-local program attempt. Other skipped
 records are coalesced into one summary when the failure categories change; a
 successful or empty frame resets that episode. Persistent failures do not log once
 per drawing record or once per repaint.
 
-Experimental limits per rectangle renderer are 32 MiB of charged buffer capacity,
+Experimental limits per unified renderer are 32 MiB of charged buffer capacity,
 8,192 allocation charges, 4,096 drawing records per frame and eight outstanding
 completion callbacks. Buffer bytes and allocation counts conservatively charge two
 initialization copies, including after completion; these are admission accounting
@@ -552,10 +564,13 @@ its CPU content once existing snapshots finish; fixed scene records deliberately
 remain replayable until invalidated. No cleanup frame or background polling is
 introduced. Completed storage omitted from a later scene is reclaimed on draw,
 including an empty scene; window/device destruction drops the renderer's ownership.
-Ordinary scenes with no rectangle resources do not perform extension-specific
+Ordinary scenes with no extension resources do not perform extension-specific
 device polling. Native Metal remains explicitly unsupported.
 
 ==== Initial comparative measurements
+
+The measurements in this subsection describe the rectangle-only predecessor and
+its recorded source hashes, not the subsequently unified field/path renderer.
 
 Measured on 2026-10-18 using Radeon 780M / RADV Vulkan, Rust 1.99.0 and an
 optimized release build with thin LTO. The baseline is the current LED drawing
@@ -626,10 +641,118 @@ results to total player CPU usage or frame rate.
 
 === Different consumers and interface extraction
 
-Add Density to exercise numerical fields and existing path coloring to exercise
-geometry/material reuse. Extract the common program/state/resource contracts and
-schema tooling from these actual requirements. Migrate the initial slice and remove
-its superseded entry point rather than retaining compatibility aliases.
+The vendor interface now covers numerical fields and existing path coloring,
+alongside rectangles, without introducing application analysis or style state.
+Fields use explicit linear or logarithmic scalar-to-palette mapping. Coordinates
+use `uv * extent - 0.5` and clamp neighboring indices; empty extents emit no draw,
+and one-cell dimensions repeat their only sample. Nonfinite values map to the
+first palette sample; logarithmic mapping treats nonpositive values likewise.
+Each neighbor selects `floor(coordinate * (palette_length - 1) + 0.5)` before
+straight RGBA interpolation. Moving coloring into the shader does not eliminate
+its cost: enlarged or static draws still evaluate four mappings per output fragment.
+The field upload remains four bytes per source cell, just like the old BGRA image;
+the intended benefit is removing CPU recoloring, not automatically reducing bytes.
+
+Paths reuse existing tessellated vertices and coverage coordinates, not a filled
+bounding rectangle. Their original bounds map into the recorded placement bounds;
+the palette spans those full bounds, independently of clipping. Embedded path
+color, texture, order and content mask do not override the material or scene
+placement. Palette ownership is shared; path geometry remains immutable.
+Adjacent paths within one scene GPU batch share a rasterization/resolve pass only
+when their clipped composite bounds are integer-pixel aligned and do not intersect
+the accumulated clipped union. Each draw retains its own bindings and scissor;
+the union is composited once. A non-path, missing prepared draw, overlap, fractional
+edge or actual scene batch boundary ends the run. Numeric order values alone do
+not break adjacency. This conservative linear scan preserves individually resolved
+MSAA overlap and backend-specific fractional edge coverage without quadratic tests.
+
+This extraction is still a closed set of schemas, not arbitrary shader authoring
+or generated ABI tooling. Existing application consumers and their retirement
+paths are unchanged.
+
+==== Unified field and path measurements
+
+Measured on 2026-10-18 using Radeon 780M / RADV Vulkan and Rust 1.99.0,
+release with thin LTO. Fields compare retained BGRA8 coloring/image drawing against
+fixed color-first numerical drawing. The source is 256 by 256 with a 256-sample
+palette and 70 dB logarithmic mapping. Outputs are 256 pixels square for native
+replay, 1,024 for static enlargement, 768 for continuous updates, and four 512-pixel
+panels sharing one publication. Resize alternates 768 and 576 pixels. Paths compare
+the same 1,024-point, 2-pixel stroke at 768 by 320 through the existing textured
+path and the new palette material; geometry generation is excluded from both.
+
+Five runs alternate baseline/candidate order, each retaining 20 frames after four
+warmups. Values are microseconds: median of run medians [minimum–maximum]. CPU
+update excludes shared signal/geometry generation; static cases generate no new
+input. Render/readback includes preparation, submission, completion and copying
+the result to CPU memory: it is not isolated GPU execution time.
+
+[cols="2,2,2,2,2",options="header"]
+|===
+|Workload |Baseline CPU update |Material CPU update |Baseline render + readback |Material render + readback
+|Field, native static |No update |No update |146.89 [142.82–151.21] |157.33 [154.28–190.41]
+|Field, 4x static enlargement |No update |No update |565.78 [558.97–571.86] |670.89 [670.71–681.19]
+|Field, continuous update |528.88 [528.03–532.66] |4.77 [4.67–4.90] |444.81 [438.90–479.38] |505.01 [500.14–549.93]
+|Field, four shared-data panels |528.40 [527.29–538.30] |5.13 [5.11–5.32] |636.29 [601.46–653.52] |738.41 [719.01–772.00]
+|Field, resize |0.29 [0.27–0.29] |0.34 [0.32–0.41] |321.38 [316.67–364.96] |379.46 [369.89–421.48]
+|Path, static replay |No update |No update |378.39 [373.86–389.33] |310.60 [301.90–317.39]
+|Path, changing geometry |3.79 [3.76–4.18] |4.35 [4.34–4.37] |405.66 [400.07–577.22] |355.90 [355.18–356.74]
+|===
+
+CPU field recoloring is removed, but static enlargement and resize render/readback
+are slower. Keep this cost explicit when choosing consumer migrations; these
+measurements do not justify a second sampling mode or an unmeasured color cache.
+Both field representations upload 262,144 bytes per changed source. The new
+256-sample palette adds 4,096 shared bytes, and each placement encodes 112 bytes.
+These are payload counts, not bus traffic or physical VRAM measurements. Existing
+path intermediate/MSAA textures remain outside the extension's buffer-only budget.
+
+Matched field outputs differ by at most 1/255 per channel. The path comparison
+has maximum difference 7/255, mean absolute difference 0.00338/255, with 58 of
+245,760 pixels exceeding 3/255. The continuous palette material is not bit-identical
+to existing BGRA texture sampling; consumer-specific palettes still need acceptance
+when migrated. No application visualizer changed in this slice.
+
+The `unified_material_slice` entry in
+link:25_gpu_rendering_benchmark.json[the raw benchmark record] contains samples,
+workload definitions, source hashes and limits. Its in-process first-use phase
+observations do not reset device or driver caches and are not cold-start results.
+
+
+==== Demand-specific preparation and path batching
+
+A separate comparison uses the pre-review compiled libraries as its baseline and
+identical probe source/compiler flags against the corrected libraries. It covers
+rectangle-first, field-first and path-first rendering, plus 32 disjoint 56-pixel
+path placements on a 512-by-256 target. Five fresh processes per workload/revision
+alternate baseline/candidate order. The driver cache is not cleared. Replay records
+20 frames after four warmups. Milliseconds below are median [minimum–maximum] of
+first-render samples or per-process replay medians:
+
+[cols="2,2,2",options="header"]
+|===
+|Workload |Before |Demand-local pipelines / safe path batches
+|Rectangle first render |3.023 [2.938–3.894] |2.852 [2.797–3.425]
+|Field first render |3.191 [3.096–3.615] |2.957 [2.920–3.256]
+|Path first render |3.194 [3.146–3.356] |3.081 [2.918–3.814]
+|32 disjoint paths, replay |2.652 [2.517–2.807] |0.570 [0.563–0.589]
+|===
+
+These render/readback values exclude device/renderer construction and initial CPU
+preparation, which are recorded separately in `review_corrections` in the raw
+benchmark record. Timing ranges overlap for individual first draws; removing an
+unused pipeline does not establish a universal complete-startup speedup. The
+multi-path replay improvement applies to the stated integer-aligned, disjoint
+workload. Conservative union checks may split additional batches; fractional and
+overlapping placements retain the individual route.
+
+All four probe outputs match the pre-review images byte-for-byte. Regression
+comparisons against individually resolved paths also require exact raw-image
+equality, including clipping, fractional placement, MSAA overlap and interleaving.
+A separate allocation smoke rejected a 262,144-byte field update with a largest
+allocation of 72 bytes during rejection, retaining the previous publication;
+validation-error allocation is not field payload copying. Probe-only headless
+entry points and font fixtures do not become production rendering dependencies.
 
 === Remaining consumers and integrated delivery
 
@@ -648,8 +771,9 @@ belongs in Cargo's `OUT_DIR`, with build artifacts under repository `.cache/`.
 
 == Verification and decision gates
 
-No performance outcome is established by this proposal. Verify the actual changed
-path, not merely compilation or reduced submission counts.
+Measured outcomes above apply only to their recorded workloads and source versions.
+Future consumers and changed rendering paths require their own runtime evidence;
+compilation or reduced submission counts alone do not establish a performance gain.
 
 [cols="1,3",options="header"]
 |===

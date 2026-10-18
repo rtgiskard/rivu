@@ -5,8 +5,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AtlasTextureId, AtlasTile, Background, Bounds, ContentMask, Corners, Edges, GpuRectangleBatch,
-    Hsla, Pixels, Point, Radians, ScaledPixels, Size, bounds_tree::BoundsTree, point,
+    AtlasTextureId, AtlasTile, Background, Bounds, ContentMask, Corners, Edges, GpuDraw, Hsla,
+    Pixels, Point, Radians, ScaledPixels, Size, bounds_tree::BoundsTree, point,
 };
 use std::{
     fmt::Debug,
@@ -47,7 +47,7 @@ pub struct Scene {
     pub shadows: Vec<Shadow>,
     pub quads: Vec<Quad>,
     pub paths: Vec<Path<ScaledPixels>>,
-    pub gpu_rectangles: Vec<GpuRectangleBatch>,
+    pub gpu_draws: Vec<GpuDraw>,
     pub underlines: Vec<Underline>,
     pub monochrome_sprites: Vec<MonochromeSprite>,
     pub subpixel_sprites: Vec<SubpixelSprite>,
@@ -69,7 +69,7 @@ impl Scene {
         self.primitive_bounds.clear();
         self.layer_stack.clear();
         self.paths.clear();
-        self.gpu_rectangles.clear();
+        self.gpu_draws.clear();
         self.shadows.clear();
         self.quads.clear();
         self.underlines.clear();
@@ -90,7 +90,7 @@ impl Scene {
                 paint_operations,
                 layer_stack,
                 paths,
-                gpu_rectangles,
+                gpu_draws,
                 shadows,
                 quads,
                 underlines,
@@ -156,9 +156,9 @@ impl Scene {
                 self.paths.push(path.clone());
             }
             #[cfg(not(target_os = "macos"))]
-            Primitive::GpuRectangles(batch) => {
+            Primitive::Gpu(batch) => {
                 batch.order = order;
-                self.gpu_rectangles.push(batch.clone());
+                self.gpu_draws.push(batch.clone());
             }
             Primitive::Underline(underline) => {
                 underline.order = order;
@@ -199,7 +199,7 @@ impl Scene {
         self.shadows.sort_by_key(|shadow| shadow.order);
         self.quads.sort_by_key(|quad| quad.order);
         self.paths.sort_by_key(|path| path.order);
-        self.gpu_rectangles.sort_by_key(|batch| batch.order);
+        self.gpu_draws.sort_by_key(|batch| batch.order);
         self.underlines.sort_by_key(|underline| underline.order);
         self.monochrome_sprites
             .sort_by_key(|sprite| (sprite.order, sprite.tile.tile_id));
@@ -226,9 +226,9 @@ impl Scene {
             paths_start: 0,
             paths_iter: self.paths.iter().peekable(),
             #[cfg(not(target_os = "macos"))]
-            gpu_rectangles_start: 0,
+            gpu_draws_start: 0,
             #[cfg(not(target_os = "macos"))]
-            gpu_rectangles_iter: self.gpu_rectangles.iter().peekable(),
+            gpu_draws_iter: self.gpu_draws.iter().peekable(),
             underlines_start: 0,
             underlines_iter: self.underlines.iter().peekable(),
             monochrome_sprites_start: 0,
@@ -257,7 +257,7 @@ pub(crate) enum PrimitiveKind {
     Quad,
     Path,
     #[cfg(not(target_os = "macos"))]
-    GpuRectangles,
+    Gpu,
     Underline,
     MonochromeSprite,
     SubpixelSprite,
@@ -278,7 +278,7 @@ pub enum Primitive {
     Quad(Quad),
     Path(Path<ScaledPixels>),
     #[cfg(not(target_os = "macos"))]
-    GpuRectangles(GpuRectangleBatch),
+    Gpu(GpuDraw),
     Underline(Underline),
     MonochromeSprite(MonochromeSprite),
     SubpixelSprite(SubpixelSprite),
@@ -294,7 +294,7 @@ impl Primitive {
             Primitive::Quad(quad) => &quad.bounds,
             Primitive::Path(path) => &path.bounds,
             #[cfg(not(target_os = "macos"))]
-            Primitive::GpuRectangles(batch) => &batch.bounds,
+            Primitive::Gpu(batch) => &batch.bounds,
             Primitive::Underline(underline) => &underline.bounds,
             Primitive::MonochromeSprite(sprite) => &sprite.bounds,
             Primitive::SubpixelSprite(sprite) => &sprite.bounds,
@@ -309,7 +309,7 @@ impl Primitive {
             Primitive::Quad(quad) => &quad.content_mask,
             Primitive::Path(path) => &path.content_mask,
             #[cfg(not(target_os = "macos"))]
-            Primitive::GpuRectangles(batch) => &batch.content_mask,
+            Primitive::Gpu(batch) => &batch.content_mask,
             Primitive::Underline(underline) => &underline.content_mask,
             Primitive::MonochromeSprite(sprite) => &sprite.content_mask,
             Primitive::SubpixelSprite(sprite) => &sprite.content_mask,
@@ -334,9 +334,9 @@ struct BatchIterator<'a> {
     paths_start: usize,
     paths_iter: Peekable<slice::Iter<'a, Path<ScaledPixels>>>,
     #[cfg(not(target_os = "macos"))]
-    gpu_rectangles_start: usize,
+    gpu_draws_start: usize,
     #[cfg(not(target_os = "macos"))]
-    gpu_rectangles_iter: Peekable<slice::Iter<'a, GpuRectangleBatch>>,
+    gpu_draws_iter: Peekable<slice::Iter<'a, GpuDraw>>,
     underlines_start: usize,
     underlines_iter: Peekable<slice::Iter<'a, Underline>>,
     monochrome_sprites_start: usize,
@@ -362,8 +362,8 @@ impl<'a> Iterator for BatchIterator<'a> {
             (self.paths_iter.peek().map(|q| q.order), PrimitiveKind::Path),
             #[cfg(not(target_os = "macos"))]
             (
-                self.gpu_rectangles_iter.peek().map(|batch| batch.order),
-                PrimitiveKind::GpuRectangles,
+                self.gpu_draws_iter.peek().map(|batch| batch.order),
+                PrimitiveKind::Gpu,
             ),
             (
                 self.underlines_iter.peek().map(|u| u.order),
@@ -440,19 +440,19 @@ impl<'a> Iterator for BatchIterator<'a> {
                 Some(PrimitiveBatch::Paths(paths_start..paths_end))
             }
             #[cfg(not(target_os = "macos"))]
-            PrimitiveKind::GpuRectangles => {
-                let start = self.gpu_rectangles_start;
+            PrimitiveKind::Gpu => {
+                let start = self.gpu_draws_start;
                 let mut end = start + 1;
-                self.gpu_rectangles_iter.next();
+                self.gpu_draws_iter.next();
                 while self
-                    .gpu_rectangles_iter
+                    .gpu_draws_iter
                     .next_if(|batch| (batch.order, batch_kind) < max_order_and_kind)
                     .is_some()
                 {
                     end += 1;
                 }
-                self.gpu_rectangles_start = end;
-                Some(PrimitiveBatch::GpuRectangles(start..end))
+                self.gpu_draws_start = end;
+                Some(PrimitiveBatch::Gpu(start..end))
             }
             PrimitiveKind::Underline => {
                 let underlines_start = self.underlines_start;
@@ -563,7 +563,7 @@ pub enum PrimitiveBatch {
     Quads(Range<usize>),
     Paths(Range<usize>),
     #[cfg(not(target_os = "macos"))]
-    GpuRectangles(Range<usize>),
+    Gpu(Range<usize>),
     Underlines(Range<usize>),
     MonochromeSprites {
         texture_id: AtlasTextureId,
@@ -589,7 +589,7 @@ impl PrimitiveBatch {
             Self::Quads(range) => format!("quads ({})", range.len()),
             Self::Paths(range) => format!("paths ({})", range.len()),
             #[cfg(not(target_os = "macos"))]
-            Self::GpuRectangles(range) => format!("GPU rectangles ({})", range.len()),
+            Self::Gpu(range) => format!("GPU drawings ({})", range.len()),
             Self::Underlines(range) => format!("underlines ({})", range.len()),
             Self::MonochromeSprites { texture_id, range } => {
                 format!(

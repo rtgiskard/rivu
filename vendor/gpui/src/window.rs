@@ -4876,20 +4876,20 @@ impl Window {
         Ok(())
     }
 
-    /// Record experimental procedural rectangle content at the current z-index.
+    /// Record a bounded GPU publication at the current z-index.
     ///
     /// Bounds, clipping and inherited opacity are captured independently of the
-    /// immutable content. Dynamic sources are resolved by the renderer, not here.
-    /// This only records a paint; publication does not schedule a frame. Native
-    /// Metal backends return an explicit unsupported error.
-    #[doc(hidden)]
-    pub fn paint_gpu_rectangles(
+    /// immutable content. Dynamic sources are resolved once per renderer frame,
+    /// not here. Field sampling spans the full bounds; path vertices map from the
+    /// original full path bounds without copying or scaling their shared array.
+    /// Publication does not schedule repaint. Native Metal is unsupported.
+    pub fn paint_gpu(
         &mut self,
         bounds: Bounds<Pixels>,
-        source: crate::GpuRectangleSource,
+        source: crate::GpuSource,
     ) -> Result<()> {
         self.invalidator.debug_assert_paint();
-        let batch = crate::GpuRectangleBatch::from_logical(
+        let batch = crate::GpuDraw::from_logical(
             bounds,
             self.content_mask(),
             self.element_opacity(),

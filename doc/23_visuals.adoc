@@ -28,14 +28,15 @@ maintained rendering capability patch, not a framework replacement or upgrade.
 The extensions add centered image transforms and caller-owned path textures on
 Rivu's Linux/WGPU rendering path. Existing untransformed images and ordinary
 path backgrounds retain their existing behavior.
-The vendor patch also contains a fixed-schema parameterized rectangle program for
-the link:25_gpu_rendering.adoc#_internal_led_vertical_slice[initial GPU rendering slice].
-It is an experimental integration entry point, not a migrated application visualizer.
+The vendor patch also contains experimental fixed-schema rectangle, numerical-field
+and existing-path drawing through one shared publication and recording interface;
+see the link:25_gpu_rendering.adoc#_internal_led_vertical_slice[GPU rendering slice].
+No application visualizer has migrated to this interface.
 
 Run `cargo test --manifest-path vendor/gpui_wgpu/Cargo.toml --lib` to exercise
 the patched shader and headless GPU regressions in their isolated test workspace.
 The companion GPUI workspace runs publication/replay regressions with
-`cargo test --manifest-path vendor/gpui/Cargo.toml --lib gpu_rectangles --no-default-features`
+`cargo test --manifest-path vendor/gpui/Cargo.toml --lib gpu::tests --no-default-features`
 and existing scene regressions with
 `cargo test --manifest-path vendor/gpui/Cargo.toml --lib scene::reclamation_tests --no-default-features`.
 Compilation also requires the pinned upstream `assets/fonts/lilex` and

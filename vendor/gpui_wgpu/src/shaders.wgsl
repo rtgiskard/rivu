@@ -1080,14 +1080,6 @@ fn vs_path_rasterization(@builtin(vertex_index) vertex_id: u32) -> PathRasteriza
     return out;
 }
 
-fn path_coverage(st_position: vec2<f32>, dx: vec2<f32>, dy: vec2<f32>) -> f32 {
-    if (length(vec2<f32>(dx.x, dy.x)) < 0.001) {
-        return 1.0;
-    }
-    let gradient = 2.0 * st_position.xx * vec2<f32>(dx.x, dy.x) - vec2<f32>(dx.y, dy.y);
-    let f = st_position.x * st_position.x - st_position.y;
-    return saturate(0.5 - f / length(gradient));
-}
 
 @fragment
 fn fs_path_rasterization_textured(input: PathRasterizationVarying) -> @location(0) vec4<f32> {

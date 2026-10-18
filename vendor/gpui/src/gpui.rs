@@ -26,8 +26,7 @@ pub(crate) use platform_scheduler::PlatformScheduler;
 mod geometry;
 mod gestures;
 mod global;
-#[doc(hidden)]
-mod gpu_rectangles;
+mod gpu;
 mod input;
 mod inspector;
 mod interactive;
@@ -185,8 +184,7 @@ macro_rules! bench_main {
         $crate::bench_main!(allocator = ::std::alloc::System; $($groups)*);
     };
 }
-#[doc(hidden)]
-pub use gpu_rectangles::*;
+pub use gpu::*;
 pub use gpui_shared_string::*;
 pub use gpui_util::arc_cow::ArcCow;
 pub use http_client;

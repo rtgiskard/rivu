@@ -1,4 +1,4 @@
-use crate::gpu_rectangles::RectangleRenderer;
+use crate::gpu_material::{MaterialRenderer, PreparedMaterials};
 use crate::{CompositorGpuHint, DeviceErrorState, WgpuAtlas, WgpuContext};
 use anyhow::{Context as _, Result};
 use bytemuck::{Pod, Zeroable};
@@ -28,6 +28,7 @@ const INSTANCE_TEXTURE_TEXEL_SIZE: u64 = 16;
 /// logic plus the storage-buffer instance transport.
 const STORAGE_BUFFER_SHADERS: &str = concat!(
     include_str!("shaders.wgsl"),
+    include_str!("path_coverage.wgsl"),
     include_str!("shaders_storage.wgsl"),
 );
 
@@ -35,6 +36,7 @@ const STORAGE_BUFFER_SHADERS: &str = concat!(
 /// logic plus the texture-based instance transport.
 const WEBGL_SHADERS: &str = concat!(
     include_str!("shaders.wgsl"),
+    include_str!("path_coverage.wgsl"),
     include_str!("shaders_webgl.wgsl"),
 );
 
@@ -44,6 +46,7 @@ const WEBGL_SHADERS: &str = concat!(
 const SUBPIXEL_SHADERS: &str = concat!(
     "enable dual_source_blending;\n",
     include_str!("shaders.wgsl"),
+    include_str!("path_coverage.wgsl"),
     include_str!("shaders_storage.wgsl"),
     include_str!("shaders_subpixel.wgsl"),
 );
@@ -192,7 +195,7 @@ struct WgpuResources {
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
     pipelines: WgpuPipelines,
-    rectangles: RectangleRenderer,
+    materials: MaterialRenderer,
     bind_group_layouts: WgpuBindGroupLayouts,
     atlas_sampler: wgpu::Sampler,
     atlas_texture_bind_groups: FxHashMap<AtlasTextureId, CachedTextureBindGroup>,
@@ -1380,7 +1383,12 @@ impl WgpuRendererCore {
 
         Self {
             resources: WgpuResources {
-                rectangles: RectangleRenderer::new(&device, target_format, alpha_mode),
+                materials: MaterialRenderer::new(
+                    &device,
+                    target_format,
+                    alpha_mode,
+                    rendering_params.path_sample_count,
+                ),
                 device,
                 queue,
                 pipelines,
@@ -1540,7 +1548,7 @@ impl WgpuRendererCore {
                 self.low_path_sprite_frames = 0;
                 self.low_path_sprite_peak = 0;
                 self.resources.queue.submit(std::iter::empty());
-                self.resources.rectangles.submitted(&self.resources.queue);
+                self.resources.materials.submitted(&self.resources.queue);
             })
     }
 
@@ -1573,10 +1581,10 @@ impl WgpuRendererCore {
                 )
             })?;
         self.prepare_texture_bind_groups(scene);
-        let rectangles =
+        let materials =
             self.resources
-                .rectangles
-                .prepare(&self.resources.device, &scene.gpu_rectangles, size);
+                .materials
+                .prepare(&self.resources.device, &scene.gpu_draws, size);
 
         let mut encoder =
             self.resources()
@@ -1604,10 +1612,73 @@ impl WgpuRendererCore {
             for batch in scene.batches() {
                 match batch {
                     #[cfg(not(target_os = "macos"))]
-                    PrimitiveBatch::GpuRectangles(range) => {
-                        for index in range {
-                            if let Some(draw) = rectangles.get(&index) {
-                                self.resources.rectangles.draw(draw, &mut pass);
+                    PrimitiveBatch::Gpu(range) => {
+                        let mut indices = range.peekable();
+                        while let Some(index) = indices.next() {
+                            let Some(draw) = materials.get(&index) else {
+                                continue;
+                            };
+                            if draw.is_path {
+                                let record = &scene.gpu_draws[index];
+                                let mut bounds =
+                                    record.bounds.intersect(&record.content_mask.bounds);
+                                let mut paths = index..index + 1;
+                                // The scene batch already excludes intervening primitives.
+                                // Overlapping paths must resolve separately: blending MSAA
+                                // samples together is not blending individually resolved paths.
+                                // One conservative clipped union keeps this scan linear, and
+                                // integer bounds let each draw retain its exact composite area.
+                                if Self::gpu_path_bounds_are_integer(bounds) {
+                                    while let Some(&next_index) = indices.peek() {
+                                        let Some(next) = materials.get(&next_index) else {
+                                            break;
+                                        };
+                                        if !next.is_path {
+                                            break;
+                                        }
+                                        let record = &scene.gpu_draws[next_index];
+                                        let next_bounds =
+                                            record.bounds.intersect(&record.content_mask.bounds);
+                                        if !Self::gpu_path_bounds_are_integer(next_bounds)
+                                            || bounds.intersects(&next_bounds)
+                                        {
+                                            break;
+                                        }
+                                        bounds = bounds.union(&next_bounds);
+                                        paths.end = next_index + 1;
+                                        indices.next();
+                                    }
+                                }
+                                drop(pass);
+                                self.draw_gpu_paths_to_intermediate(
+                                    &mut encoder,
+                                    &materials,
+                                    &scene.gpu_draws,
+                                    paths,
+                                    size,
+                                );
+                                pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                    label: Some("main_pass_after_gpu_path"),
+                                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                        view: frame_view,
+                                        resolve_target: None,
+                                        ops: wgpu::Operations {
+                                            load: wgpu::LoadOp::Load,
+                                            store: wgpu::StoreOp::Store,
+                                        },
+                                        depth_slice: None,
+                                    })],
+                                    depth_stencil_attachment: None,
+                                    ..Default::default()
+                                });
+                                paths_rasterized = true;
+                                self.draw_gpu_paths_from_intermediate(
+                                    bounds,
+                                    &mut instance_offset,
+                                    &mut pass,
+                                )?;
+                            } else {
+                                self.resources.materials.draw(draw, &mut pass);
                             }
                         }
                     }
@@ -1716,7 +1787,7 @@ impl WgpuRendererCore {
             .resources()
             .queue
             .submit(std::iter::once(encoder.finish()));
-        self.resources.rectangles.submitted(&self.resources.queue);
+        self.resources.materials.submitted(&self.resources.queue);
         self.maintain_instance_data_capacity(instance_offset, frame_start_capacity);
         Self::maintain_path_scratch_capacity(
             &mut self.path_vertices,
@@ -1908,15 +1979,92 @@ impl WgpuRendererCore {
         }
     }
 
+    // Fractional composite edges depend on the backend's subpixel rasterization.
+    // Leave them as individual passes instead of approximating their pixel area.
+    fn gpu_path_bounds_are_integer(bounds: Bounds<ScaledPixels>) -> bool {
+        let end = bounds.bottom_right();
+        bounds.origin.x.0.fract() == 0.0
+            && bounds.origin.y.0.fract() == 0.0
+            && end.x.0.fract() == 0.0
+            && end.y.0.fract() == 0.0
+    }
+
+    fn draw_gpu_paths_to_intermediate(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        materials: &PreparedMaterials,
+        records: &[gpui::GpuDraw],
+        range: Range<usize>,
+        size: Size<DevicePixels>,
+    ) {
+        self.ensure_intermediate_textures(size);
+        let resources = self.resources();
+        let Some(view) = resources.path_intermediate_view.as_ref() else {
+            return;
+        };
+        let (target, resolve) = resources
+            .path_msaa_view
+            .as_ref()
+            .map_or((view, None), |msaa| (msaa, Some(view)));
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("GPU palette path rasterization"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                resolve_target: resolve,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+                depth_slice: None,
+            })],
+            depth_stencil_attachment: None,
+            ..Default::default()
+        });
+        let grouped = range.len() > 1;
+        let viewport = Bounds {
+            origin: Point::default(),
+            size: size.map(ScaledPixels::from),
+        };
+        for index in range {
+            if grouped {
+                let record = &records[index];
+                // Keep each path's original composite footprint. Without this,
+                // a union sprite could expose edge samples outside that footprint.
+                let bounds = record
+                    .bounds
+                    .intersect(&record.content_mask.bounds)
+                    .intersect(&viewport);
+                if bounds.is_empty() {
+                    continue;
+                }
+                pass.set_scissor_rect(
+                    bounds.origin.x.0 as u32,
+                    bounds.origin.y.0 as u32,
+                    bounds.size.width.0 as u32,
+                    bounds.size.height.0 as u32,
+                );
+            }
+            resources.materials.draw(&materials[&index], &mut pass);
+        }
+    }
+
+    fn draw_gpu_paths_from_intermediate(
+        &mut self,
+        bounds: Bounds<ScaledPixels>,
+        instance_offset: &mut u64,
+        pass: &mut wgpu::RenderPass<'_>,
+    ) -> Result<()> {
+        self.path_sprites.clear();
+        self.path_sprites.push(PathSprite { bounds });
+        self.composite_path_sprites(instance_offset, pass)
+    }
+
     fn draw_paths_from_intermediate(
         &mut self,
         paths: &[Path<ScaledPixels>],
         instance_offset: &mut u64,
         pass: &mut wgpu::RenderPass<'_>,
     ) -> Result<()> {
-        let Some(path_intermediate_view) = self.resources().path_intermediate_view.clone() else {
-            return Ok(());
-        };
         self.path_sprites.clear();
         let first_path = &paths[0];
         if paths.last().map(|p| &p.order) == Some(&first_path.order) {
@@ -1930,6 +2078,17 @@ impl WgpuRendererCore {
             }
             self.path_sprites.push(PathSprite { bounds });
         }
+        self.composite_path_sprites(instance_offset, pass)
+    }
+
+    fn composite_path_sprites(
+        &mut self,
+        instance_offset: &mut u64,
+        pass: &mut wgpu::RenderPass<'_>,
+    ) -> Result<()> {
+        let Some(path_intermediate_view) = self.resources().path_intermediate_view.clone() else {
+            return Ok(());
+        };
         let sprite_count = self.path_sprites.len() as u32;
         self.path_sprite_peak = self.path_sprite_peak.max(self.path_sprites.len());
         let mut sprites = std::mem::take(&mut self.path_sprites);
@@ -3692,5 +3851,5 @@ mod tests {
 }
 
 #[cfg(all(test, target_os = "linux"))]
-#[path = "gpu_rectangles_tests.rs"]
-mod rectangle_tests;
+#[path = "gpu_material_tests.rs"]
+mod material_tests;
