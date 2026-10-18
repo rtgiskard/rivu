@@ -68,6 +68,10 @@ the already-cropped sprite. Rounded clipping follows image-local coordinates;
 the surrounding content mask remains in screen coordinates. No rotated pixel
 buffers or angle-indexed image cache are created. `Img` forwards its existing
 transformation matrix through image painting to the WGPU sprite shader.
+Edge coverage uses the analytic local edge normal projected through screen-to-local
+coordinate derivatives, so scaling and rotation do not widen the antialiasing ramp
+in screen pixels. No additional sprite fields or transformed textures are needed.
+
 Spectrum fills its geometry with the shared GPU palette material. Its full
 authored cubic palette is retained rather than approximated by two stops or
 repeated masked submissions; see <<_spectrum,Spectrum>>.

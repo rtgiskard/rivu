@@ -582,6 +582,9 @@ by device-aligned dynamic offsets. Alignment padding and initialization copies
 remain charged until completion; this is not a retained high-water pool. A new
 field publication still copies/uploads the complete numeric payload. There are
 no reusable upload pages or partial-field updates.
+For N admitted draws, placement capacity is `(N - 1) * aligned_stride + 112` bytes;
+the stride rounds 112 bytes up to the device's uniform-offset alignment. Admission
+reserves the complete slab together with any new immutable data and palette.
 
 Rectangle edges and procedural segments use per-sample coverage in the existing
 Path intermediate. Adjacent zero-gap instances therefore do not blend two alpha
