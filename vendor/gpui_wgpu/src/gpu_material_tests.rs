@@ -97,6 +97,101 @@ fn pixel(image: &image::RgbaImage, x: u32, y: u32, expected: [u8; 4]) {
 }
 
 #[test]
+fn numerical_column_minimum_width_survives_clip_and_later_quad() -> anyhow::Result<()> {
+    let mut renderer = WgpuHeadlessRenderer::new()?;
+    let columns = GpuFrame::field_columns(
+        &[[0.9, 1.0]],
+        1,
+        &[1.0],
+        GpuPalette::new(&[[1.0, 0.0, 0.0, 1.0]], 1)?,
+        GpuFieldParams {
+            mapping: GpuValueMapping::Linear { min: 0.0, max: 1.0 },
+        },
+        limits(),
+    )?;
+    for scale in [1.0, 2.0] {
+        let viewport = bounds(0.0, 0.0, 8.0 * scale, 4.0 * scale);
+        let mapping = bounds(0.0, 0.0, 4.0 * scale, 4.0 * scale);
+        for mask in [bounds(4.0 * scale, 0.0, scale, 4.0 * scale), viewport] {
+            let mut record = draw(GpuSource::Fixed(columns.clone()), mapping);
+            record.scale_factor = scale;
+            record.content_mask.bounds = mask;
+            let mut scene = Scene::default();
+            scene.insert_primitive(quad(viewport, gpui::black()));
+            scene.insert_primitive(record);
+            scene.insert_primitive(quad(
+                bounds(4.0 * scale, 2.0 * scale, scale, 2.0 * scale),
+                gpui::blue(),
+            ));
+            scene.finish();
+            assert_eq!(scene.gpu_draws.len(), 1);
+            assert_eq!(scene.gpu_draws[0].bounds, mapping);
+            let actual = renderer
+                .render_scene_to_image(&scene, size((8.0 * scale) as i32, (4.0 * scale) as i32))?;
+            // Only minimum-width overflow reaches this pixel beyond placement.
+            pixel(&actual, (4.0 * scale) as u32, scale as u32, RED);
+            // A later ordinary primitive must sort after that same overflow.
+            pixel(&actual, (4.0 * scale) as u32, (3.0 * scale) as u32, BLUE);
+            pixel(&actual, (5.0 * scale) as u32, scale as u32, BLACK);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn cached_dynamic_field_can_switch_between_ordinary_and_columns() -> anyhow::Result<()> {
+    let mut renderer = WgpuHeadlessRenderer::new()?;
+    let palette = GpuPalette::new(&[[1.0, 0.0, 0.0, 1.0]], 1)?;
+    let params = GpuFieldParams {
+        mapping: GpuValueMapping::Linear { min: 0.0, max: 1.0 },
+    };
+    let ordinary = GpuFrame::field(1, 1, &[1.0], palette.clone(), params, limits())?;
+    let columns = GpuFrame::field_columns(&[[0.9, 1.0]], 1, &[1.0], palette, params, limits())?;
+    let state = GpuState::new(ordinary.clone(), limits())?;
+    let viewport = bounds(0.0, 0.0, 8.0, 4.0);
+    for mask in [bounds(4.0, 0.0, 1.0, 4.0), viewport] {
+        state.publish(ordinary.clone())?;
+        let mapping = bounds(0.0, 0.0, 4.0, 4.0);
+        let mut record = draw(GpuSource::Dynamic(state.clone()), mapping);
+        record.content_mask.bounds = mask;
+        let mut source = Scene::default();
+        source.insert_primitive(quad(viewport, gpui::black()));
+        source.insert_primitive(record);
+        source.insert_primitive(quad(bounds(4.0, 2.0, 1.0, 2.0), gpui::blue()));
+        source.finish();
+        assert_eq!(source.gpu_draws.len(), 1);
+        let mut cached = Scene::default();
+        cached.replay(0..source.len(), &source);
+        cached.finish();
+        // Neither recording nor replay sees columns. Both must retain their
+        // potential overflow and reserve ordering against the later quad.
+        assert_eq!(cached.gpu_draws.len(), 1);
+        for (publication, expected) in [
+            (ordinary.clone(), BLACK),
+            (columns.clone(), RED),
+            (ordinary.clone(), BLACK),
+            (columns.clone(), RED),
+        ] {
+            state.publish(publication)?;
+            let actual = renderer.render_scene_to_image(&cached, size(8, 4))?;
+            pixel(&actual, 4, 1, expected);
+            pixel(&actual, 4, 3, BLUE);
+            pixel(&actual, 5, 1, BLACK);
+            assert_eq!(cached.gpu_draws[0].bounds, mapping);
+        }
+        state.clear();
+        let actual = renderer.render_scene_to_image(&cached, size(8, 4))?;
+        pixel(&actual, 4, 1, BLACK);
+        pixel(&actual, 4, 3, BLUE);
+        state.publish(columns.clone())?;
+        let actual = renderer.render_scene_to_image(&cached, size(8, 4))?;
+        pixel(&actual, 4, 1, RED);
+        pixel(&actual, 4, 3, BLUE);
+    }
+    Ok(())
+}
+
+#[test]
 fn numerical_column_batches_keep_7200_columns_in_two_panels() -> anyhow::Result<()> {
     let mut renderer = WgpuHeadlessRenderer::new()?;
     let palette = GpuPalette::new(&[[1.0, 0.0, 0.0, 1.0]], 1)?;

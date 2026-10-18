@@ -340,6 +340,8 @@ pub struct GpuFrame {
     palette: Arc<GpuPalette>,
     // Cached at publication time, never rescanned during scene replay.
     segment_footprint: Option<([f32; 4], f32)>,
+    // Furthest column left edge; its one-logical-pixel minimum may exceed placement.
+    column_max_start: Option<f32>,
 }
 
 fn validate_range(range: [f32; 2]) -> Result<()> {
@@ -374,6 +376,7 @@ impl GpuFrame {
             content,
             palette,
             segment_footprint: None,
+            column_max_start: None,
         }))
     }
 
@@ -445,8 +448,10 @@ impl GpuFrame {
 
     /// Draw all numerical columns as instances, retaining gaps between intervals.
     /// Intervals are relative to complete draw bounds. Width has a one-logical-pixel
-    /// minimum. Values at/below the mapping floor and nonfinite cells draw opaque
-    /// black independently of the palette; positive mapped values retain sample zero.
+    /// minimum, which can extend past the placement's right edge and is clipped
+    /// only by the inherited mask. Values at/below the mapping floor and nonfinite
+    /// cells draw opaque black independently of the palette; positive mapped values
+    /// retain sample zero.
     pub fn field_columns(
         intervals: &[[f32; 2]],
         height: u32,
@@ -459,15 +464,18 @@ impl GpuFrame {
         limits.palette(&palette)?;
         limits.field(width, height, values.len())?;
         params.mapping.validate()?;
+        let mut max_start = None::<f32>;
         for interval in intervals {
             validate_range(*interval)?;
             ensure!(
                 interval[0] <= interval[1],
                 "GPU column interval is reversed"
             );
+            max_start = Some(max_start.unwrap_or(0.0).max(interval[0]));
         }
-        Self::new(
-            GpuContent::Field {
+        Ok(Arc::new(Self {
+            id: next_id(&NEXT_FRAME_ID)?,
+            content: GpuContent::Field {
                 width,
                 height,
                 values: copy_slice(values)?,
@@ -475,7 +483,9 @@ impl GpuFrame {
                 intervals: Some(copy_slice(intervals)?),
             },
             palette,
-        )
+            segment_footprint: None,
+            column_max_start: max_start,
+        }))
     }
 
     /// Retain an existing immutable path without copying its vertices.
@@ -561,6 +571,7 @@ impl GpuFrame {
             },
             palette,
             segment_footprint: Some((envelope, max_width)),
+            column_max_start: None,
         }))
     }
 
@@ -716,7 +727,7 @@ pub struct GpuDraw {
     pub content_mask: ContentMask<ScaledPixels>,
     /// Inherited element opacity, applied exactly once to sampled alpha.
     pub opacity: f32,
-    /// Logical-to-physical scale for rectangle segmentation and stroke widths.
+    /// Logical-to-physical scale for rectangle segmentation, columns and stroke widths.
     pub scale_factor: f32,
     /// Fixed or dynamically resolved complete content.
     pub source: GpuSource,
@@ -732,6 +743,10 @@ impl GpuDraw {
             GpuSource::Dynamic(state) if state.schema() == GpuSchema::Segments => {
                 self.content_mask.bounds
             }
+            GpuSource::Dynamic(state) if state.schema() == GpuSchema::Field => {
+                // An ordinary field can become columns without repainting this scene.
+                self.column_visible_bounds(1.0)
+            }
             GpuSource::Dynamic(_) => self.bounds.intersect(&self.content_mask.bounds),
         }
     }
@@ -739,6 +754,9 @@ impl GpuDraw {
     /// Footprint of the coherent frame captured by a renderer. Mapping remains
     /// `bounds`; only visibility, compositing and overlap use this envelope.
     pub fn visible_bounds_for(&self, frame: &GpuFrame) -> Bounds<ScaledPixels> {
+        if let Some(max_start) = frame.column_max_start {
+            return self.column_visible_bounds(max_start);
+        }
         let Some((endpoints, width)) = frame.segment_footprint else {
             return self.bounds.intersect(&self.content_mask.bounds);
         };
@@ -776,6 +794,21 @@ impl GpuDraw {
                 ScaledPixels((bottom - top) as f32),
             ),
         )
+    }
+
+    fn column_visible_bounds(&self, max_start: f32) -> Bounds<ScaledPixels> {
+        let mask = self.content_mask.bounds;
+        let mut visible = self.bounds.intersect(&mask);
+        // Match the shader's placement + left + minimum width, without changing
+        // the mapping bounds. All interval right edges are within placement.
+        let right =
+            (self.bounds.origin.x.0 + max_start * self.bounds.size.width.0 + self.scale_factor)
+                .max(self.bounds.right().0)
+                .min(mask.right().0);
+        let left = self.bounds.origin.x.0.max(mask.origin.x.0).min(right);
+        visible.origin.x = ScaledPixels(left);
+        visible.size.width = ScaledPixels(right - left);
+        visible
     }
 
     pub(crate) fn from_logical(

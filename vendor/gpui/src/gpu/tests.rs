@@ -579,6 +579,60 @@ fn clear_releases_content_but_preserves_captured_frames() {
 }
 
 #[test]
+fn column_footprints_include_minimum_width_without_changing_mapping() {
+    let ordinary = GpuFrame::field(1, 1, &[1.0], palette(), FIELD_PARAMS, LIMITS).unwrap();
+    let columns =
+        GpuFrame::field_columns(&[[0.9, 1.0]], 1, &[1.0], palette(), FIELD_PARAMS, LIMITS).unwrap();
+    let mapping = Bounds::new(
+        point(ScaledPixels(0.0), ScaledPixels(0.0)),
+        size(ScaledPixels(4.0), ScaledPixels(4.0)),
+    );
+    let mask = Bounds::new(
+        point(ScaledPixels(4.0), ScaledPixels(0.0)),
+        size(ScaledPixels(1.0), ScaledPixels(4.0)),
+    );
+    let mut draw = GpuDraw {
+        order: 0,
+        bounds: mapping,
+        content_mask: ContentMask { bounds: mask },
+        opacity: 1.0,
+        scale_factor: 1.0,
+        source: GpuSource::Fixed(columns.clone()),
+    };
+    let visible = draw.visible_bounds();
+    assert_eq!(visible.origin, mask.origin);
+    assert!((visible.size.width.0 - 0.6).abs() < 0.00001);
+    assert_eq!(visible.size.height, ScaledPixels(4.0));
+    assert_eq!(visible, draw.visible_bounds_for(&columns));
+    assert_eq!(draw.bounds, mapping);
+
+    let state = GpuState::new(ordinary.clone(), LIMITS).unwrap();
+    draw.source = GpuSource::Dynamic(state.clone());
+    // Scene bounds cannot depend on the currently published Field representation.
+    assert_eq!(draw.visible_bounds(), mask);
+    assert_eq!(
+        draw.visible_bounds_for(&ordinary).size.width,
+        ScaledPixels(0.0)
+    );
+    for publication in [columns.clone(), ordinary.clone(), columns.clone()] {
+        state.publish(publication.clone()).unwrap();
+        assert_eq!(draw.visible_bounds(), mask);
+        let captured = state.snapshot().unwrap();
+        assert_eq!(
+            draw.visible_bounds_for(&captured),
+            draw.visible_bounds_for(&publication)
+        );
+    }
+    state.clear();
+    assert_eq!(draw.visible_bounds(), mask);
+    // Already captured publications keep their own footprint after clear.
+    assert_eq!(draw.visible_bounds_for(&columns), visible);
+    draw.scale_factor = 2.0;
+    assert_eq!(draw.visible_bounds_for(&columns), mask);
+    assert_eq!(draw.bounds, mapping);
+}
+
+#[test]
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 fn native_backend_rejects_gpu_placements() {
     assert!(placement(GpuSource::Fixed(frame())).is_err());

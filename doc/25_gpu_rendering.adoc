@@ -545,6 +545,10 @@ Below-floor and missing cells are opaque black independently of all 1024 palette
 samples, so weak positive Tokyo Night values retain its first color. Real gaps,
 startup window expansion, pooling and frequency sampling keep their existing meaning.
 
+Column intervals retain a one-logical-pixel minimum width, which can extend past
+the placement's right edge. The inherited content mask, not the placement bounds,
+clips that extension. Scene culling and overlap ordering use a conservative
+footprint that includes it, independently of the unchanged mapping bounds.
 
 Frame construction validates geometry, palette, parameters and explicit caller
 capacities before copying payloads. A process-unique, checked monotonic frame ID
