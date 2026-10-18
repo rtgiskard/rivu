@@ -1,6 +1,5 @@
-use super::{TreeBranch, tree::TreeItem};
+use super::{Library, LibraryEvent, TreeBranch, tree::TreeItem};
 use crate::{
-    gui::GuiApp,
     model::{DirectoryRow, LibraryLocateResult, Query},
     projection::QueryProjection,
     response::{QueryRevisions, ViewResponse},
@@ -46,8 +45,8 @@ struct Request {
 }
 
 impl Request {
-    fn current(&self, app: &GuiApp) -> bool {
-        app.browser.library.locate.projection.accepts(
+    fn current(&self, app: &Library) -> bool {
+        app.library.locate.projection.accepts(
             &self.query,
             self.generation,
             app.state.query_revisions(None),
@@ -57,20 +56,20 @@ impl Request {
             .is_some_and(|track| track.id == self.track_id)
     }
 
-    fn accepts(&self, app: &GuiApp, revisions: QueryRevisions) -> bool {
+    fn accepts(&self, app: &Library, revisions: QueryRevisions) -> bool {
         self.current(app)
-            && app.browser.library.locate.projection.accepts(
-                &self.query,
-                self.generation,
-                revisions,
-            )
+            && app
+                .library
+                .locate
+                .projection
+                .accepts(&self.query, self.generation, revisions)
     }
 }
 
-impl GuiApp {
+impl Library {
     pub(in crate::gui) fn locate_playing_library(
         &mut self,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(track) = self.state.current_track() else {
@@ -87,31 +86,23 @@ impl GuiApp {
             .enumerate()
             .find(|(_, root)| track.path.starts_with(root))
             .map(|(index, root)| (index, root.clone()));
-        self.activate_library(window, cx, false);
-        if !self
-            .workspace
-            .layouts
-            .current()
-            .panels()
-            .iter()
-            .any(|panel| panel.kind == "library")
-            || self.browser.library.locate.pending
-        {
+        cx.emit(LibraryEvent::Reveal);
+        if !self.available || self.library.locate.pending {
             return;
         }
-        self.browser.library.locate.invalidate();
+        self.library.locate.invalidate();
         let Some((root_index, mut path)) = root else {
-            self.browser.library.locate.notice = Some((track_id, LibraryLocateResult::OutsideRoot));
+            self.library.locate.notice = Some((track_id, LibraryLocateResult::OutsideRoot));
             cx.notify();
             return;
         };
         let revisions = self.state.query_revisions(None);
-        let buffer = self.browser.library.buffer();
+        let buffer = self.library.buffer();
         let query = buffer.query.clone();
         let favorite = buffer.favorite;
         let missing = buffer.missing;
         let sort = buffer.sort;
-        let tree = self.browser.library.tree_active();
+        let tree = self.library.tree_active();
         let locate_query = Query::LibraryLocate {
             track_id,
             path: path.clone(),
@@ -121,15 +112,15 @@ impl GuiApp {
             missing,
             sort,
         };
-        self.browser.library.locate.sync(&locate_query, revisions);
+        self.library.locate.sync(&locate_query, revisions);
         let request = Request {
-            generation: self.browser.library.locate.projection.generation(),
+            generation: self.library.locate.projection.generation(),
             query: locate_query,
             track_id,
         };
-        let ticket = self.browser.library.locate.projection.ticket();
-        let handle = self.handle.clone();
-        self.browser.library.locate.pending = true;
+        let ticket = self.library.locate.projection.ticket();
+        let handle = self.context.handle().clone();
+        self.library.locate.pending = true;
         cx.spawn(async move |this, cx| {
             // One worker and one scalar query per ancestor; no full-library pages.
             let mut locations = Vec::new();
@@ -168,8 +159,9 @@ impl GuiApp {
                                     if !request.current(this) {
                                         return;
                                     }
-                                    this.error = Some(
+                                    this.report_error(
                                         this.i18n.text("gl-locate-library-inconsistent").to_owned(),
+                                        cx,
                                     );
                                     cx.notify();
                                 });
@@ -183,12 +175,10 @@ impl GuiApp {
                                 return;
                             }
                             let roots = &this.state.system.config.library_roots;
-                            if let Some((branch, offset)) = this
-                                .browser
-                                .library
-                                .reveal_playing(root_index, roots, &locations)
+                            if let Some((branch, offset)) =
+                                this.library.reveal_playing(root_index, roots, &locations)
                             {
-                                this.browser.library.locate.reveal =
+                                this.library.locate.reveal =
                                     Some((track_id, branch.clone(), offset));
                                 this.request_directory_page(branch, offset, cx);
                             }
@@ -201,7 +191,7 @@ impl GuiApp {
                             if !request.current(this) {
                                 return;
                             }
-                            this.browser.library.locate.notice = Some((track_id, result));
+                            this.library.locate.notice = Some((track_id, result));
                             cx.notify();
                         });
                         break;
@@ -211,7 +201,7 @@ impl GuiApp {
                             if !request.current(this) {
                                 return;
                             }
-                            this.error = Some(error.to_string());
+                            this.report_error(error.to_string(), cx);
                             cx.notify();
                         });
                         break;
@@ -221,8 +211,10 @@ impl GuiApp {
                             if !request.current(this) {
                                 return;
                             }
-                            this.error =
-                                Some(this.i18n.text("gl-locate-library-response").to_owned());
+                            this.report_error(
+                                this.i18n.text("gl-locate-library-response").to_owned(),
+                                cx,
+                            );
                             cx.notify();
                         });
                         break;
@@ -230,7 +222,7 @@ impl GuiApp {
                 }
             }
             let _ = this.update(cx, |this, cx| {
-                this.browser.library.locate.pending = false;
+                this.library.locate.pending = false;
                 cx.notify();
             });
         })
@@ -243,24 +235,18 @@ impl GuiApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let target = self
-            .browser
-            .library
-            .locate
-            .notice
-            .as_ref()
-            .map(|(id, _)| *id);
+        let target = self.library.locate.notice.as_ref().map(|(id, _)| *id);
         if target != self.state.current_track().map(|track| track.id) || target.is_none() {
-            self.browser.library.locate.notice = None;
+            self.library.locate.notice = None;
             cx.notify();
             return;
         }
         self.library_search
             .update(cx, |search, cx| search.clear(cx));
-        if self.browser.library.buffer().query.is_some() {
-            self.browser.library.clear_selection();
+        if self.library.buffer().query.is_some() {
+            self.library.clear_selection();
         }
-        self.browser.library.clear_locate_filters();
+        self.library.clear_locate_filters();
         self.request_directory_page(TreeBranch::default(), 0, cx);
         self.locate_playing_library(window, cx);
     }
@@ -270,10 +256,10 @@ impl GuiApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some((track_id, branch, offset)) = self.browser.library.locate.reveal.clone() else {
+        let Some((track_id, branch, offset)) = self.library.locate.reveal.clone() else {
             return;
         };
-        let Some(index) = self.browser.library.tree().location_index(&branch, offset) else {
+        let Some(index) = self.library.tree().location_index(&branch, offset) else {
             return;
         };
         if self
@@ -281,54 +267,53 @@ impl GuiApp {
             .current_track()
             .is_none_or(|track| track.id != track_id)
         {
-            self.browser.library.locate.reveal = None;
+            self.library.locate.reveal = None;
             return;
         }
-        let ready = matches!(self.browser.library.tree().item(index), Some(TreeItem::Entry(row))
+        let ready = matches!(self.library.tree().item(index), Some(TreeItem::Entry(row))
             if matches!(&row.row, DirectoryRow::Track(track) if track.id == track_id));
-        if !ready && self.browser.library.locate.reveal_scrolled {
+        if !ready && self.library.locate.reveal_scrolled {
             return;
         }
-        let generation = self.browser.library.locate.projection.generation();
+        let generation = self.library.locate.projection.generation();
         let entity = cx.entity().downgrade();
         window.defer(cx, move |_, cx| {
-            let _ = entity.update(cx, |this, cx| {
-                if this.browser.library.locate.projection.generation() == generation
-                    && this
-                        .state
-                        .current_track()
-                        .is_some_and(|track| track.id == track_id)
-                    && this.browser.library.locate.reveal.as_ref().is_some_and(
-                        |(id, target, position)| {
-                            *id == track_id && target == &branch && *position == offset
-                        },
-                    )
-                {
-                    this.browser.library.locate.reveal_scrolled = true;
-                    this.browser
-                        .library
-                        .tree()
-                        .scroll
-                        .scroll_to_item(index, ScrollStrategy::Nearest);
-                    if ready {
-                        this.browser.library.locate.reveal = None;
-                        this.browser.library.locate.highlight = Some((track_id, Instant::now()));
-                        this.browser.library.locate.highlight_task =
-                            Some(cx.spawn(async move |this, cx| {
-                                cx.background_executor().timer(Duration::from_secs(2)).await;
-                                let _ = this.update(cx, |this, cx| {
-                                    if this.browser.library.locate.projection.generation()
-                                        == generation
-                                    {
-                                        this.browser.library.locate.highlight = None;
-                                        cx.notify();
-                                    }
-                                });
-                            }));
+            let _ =
+                entity.update(cx, |this, cx| {
+                    if this.library.locate.projection.generation() == generation
+                        && this
+                            .state
+                            .current_track()
+                            .is_some_and(|track| track.id == track_id)
+                        && this.library.locate.reveal.as_ref().is_some_and(
+                            |(id, target, position)| {
+                                *id == track_id && target == &branch && *position == offset
+                            },
+                        )
+                    {
+                        this.library.locate.reveal_scrolled = true;
+                        this.library
+                            .tree()
+                            .scroll
+                            .scroll_to_item(index, ScrollStrategy::Nearest);
+                        if ready {
+                            this.library.locate.reveal = None;
+                            this.library.locate.highlight = Some((track_id, Instant::now()));
+                            this.library.locate.highlight_task =
+                                Some(cx.spawn(async move |this, cx| {
+                                    cx.background_executor().timer(Duration::from_secs(2)).await;
+                                    let _ = this.update(cx, |this, cx| {
+                                        if this.library.locate.projection.generation() == generation
+                                        {
+                                            this.library.locate.highlight = None;
+                                            cx.notify();
+                                        }
+                                    });
+                                }));
+                        }
+                        cx.notify();
                     }
-                    cx.notify();
-                }
-            });
+                });
         });
     }
 }

@@ -5,12 +5,11 @@
 //! selected occurrence. Hidden state sync does not demand metadata pages; failures
 //! remain parked until explicit retry. Now-playing locate never enters selection
 //! or metadata intent handling.
-//! Selection starts and completions belong to QueueSelection; window-wide intent,
-//! metadata confirmation, focus and scrolling remain with GuiApp.
-//! Search, snapshot reconciliation, retry and page publication are owner transitions.
-//! Physical page retirement precedes host refresh; publication follows that refresh.
+//! Queue owns search, input, rendering, queries and selection lifetimes; the window
+//! coordinator receives typed cross-feature intents for confirmation and metadata.
+//! Physical page retirement precedes snapshot reconciliation, then publication.
 
-use super::manual_actions::{ManualAction, ManualIntentId};
+use super::manual_actions::ManualIntentId;
 use super::*;
 use super::{
     components::{
@@ -27,6 +26,9 @@ use crate::{
     response::{QueryRevisions, ViewResponse},
 };
 use std::{ops::Range, time::Duration};
+
+mod owner;
+pub(super) use owner::{Queue, QueueEvent, QueueSelectionRequest};
 
 pub(in crate::gui) struct QueueCommit {
     stamp: QueryStamp,
@@ -213,9 +215,6 @@ pub(super) struct QueueSelection {
     locate: QueueLocate,
 }
 impl QueueSelection {
-    pub(super) fn rows(&self) -> &paged::PagedRows<QueueRow> {
-        &self.rows
-    }
     pub(super) fn len(&self) -> usize {
         self.selected.len()
     }
@@ -589,18 +588,14 @@ impl QueueSelection {
     }
 }
 
-impl GuiApp {
+impl Queue {
     pub(super) fn apply_queue_search(&mut self, query: Option<String>, cx: &mut Context<Self>) {
-        if self.browser.queue.query == query {
+        if self.model.query == query {
             return;
         }
-        self.begin_manual_intent();
-        if !self.metadata_protected(cx) {
-            self.clear_metadata_selection(cx);
-        }
-        self.content_menu = None;
-        self.browser.queue.change_search(query);
-        self.workspace.scroll_views.borrow_mut().scroll_list_to("queue", 0);
+        cx.emit(QueueEvent::SearchChanged);
+        self.model.change_search(query);
+        self.context.scroll.borrow_mut().scroll_list_to("queue", 0);
         self.sync_queue(cx);
         self.ensure_queue_range(0..1, cx);
         cx.notify();
@@ -610,16 +605,14 @@ impl GuiApp {
         let Some(id) = self.state.queue.current_id else {
             return;
         };
-        self.browser.queue.locate_filtered = None;
-        let filter = self.browser.queue.query.clone();
-        let request =
-            self.browser
-                .queue
-                .locate
-                .begin(id, filter.clone(), self.state.query_revisions(None));
+        self.model.locate_filtered = None;
+        let filter = self.model.query.clone();
+        let request = self
+            .model
+            .locate
+            .begin(id, filter.clone(), self.state.query_revisions(None));
         let position = self
-            .browser
-            .queue
+            .model
             .rows
             .iter()
             .find(|row| row.id == id)
@@ -631,7 +624,7 @@ impl GuiApp {
                     .flatten()
             });
         if let Some(position) = position {
-            self.browser.queue.locate.resolve(request, position);
+            self.model.locate.resolve(request, position);
             self.ensure_queue_range(position..position.saturating_add(1), cx);
         } else {
             self.dispatch_queue_locate(cx);
@@ -640,7 +633,7 @@ impl GuiApp {
     }
 
     fn queue_locate_current(&self, request: QueueLocateRequest) -> bool {
-        self.browser.queue.locate.current(
+        self.model.locate.current(
             request,
             self.state.query_revisions(None),
             self.state.queue.current_id,
@@ -648,18 +641,17 @@ impl GuiApp {
     }
 
     fn dispatch_queue_locate(&mut self, cx: &mut Context<Self>) {
-        let Some(request) = self.browser.queue.locate.take_job() else {
+        let Some(request) = self.model.locate.take_job() else {
             return;
         };
         if !self.queue_locate_current(request) {
-            self.browser.queue.locate.release_worker(request);
+            self.model.locate.release_worker(request);
             return;
         }
-        let handle = self.handle.clone();
-        let ticket = self.browser.queue.locate.projection.ticket();
+        let handle = self.context.handle().clone();
+        let ticket = self.model.locate.projection.ticket();
         let query = self
-            .browser
-            .queue
+            .model
             .locate
             .query
             .clone()
@@ -670,10 +662,10 @@ impl GuiApp {
                 .spawn(async move { handle.query_if_current(query, ticket) })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.browser.queue.locate.release_worker(request);
+                this.model.locate.release_worker(request);
                 this.refresh(cx);
                 if this.queue_locate_current(request)
-                    && this.browser.queue.locate.current(
+                    && this.model.locate.current(
                         request,
                         response.revisions,
                         this.state.queue.current_id,
@@ -682,22 +674,27 @@ impl GuiApp {
                     match response.result {
                         Ok(ViewResponse::QueueEntries(rows)) => {
                             if let Some(row) = rows.into_iter().find(|row| row.id == request.id) {
-                                this.browser.queue.locate.resolve(request, row.offset);
+                                this.model.locate.resolve(request, row.offset);
                                 this.ensure_queue_range(
                                     row.offset..row.offset.saturating_add(1),
                                     cx,
                                 );
-                            } else if this.browser.queue.query.is_some() {
-                                this.browser.queue.locate_filtered = Some(request.id);
+                            } else if this.model.query.is_some() {
+                                this.model.locate_filtered = Some(request.id);
                             } else {
-                                this.error =
-                                    Some(this.i18n.text("gl-queue-locate-missing").to_owned());
+                                cx.emit(QueueEvent::Error(
+                                    this.context.i18n.text("gl-queue-locate-missing").to_owned(),
+                                ));
                             }
                         }
-                        Err(error) => this.error = Some(error.to_string()),
+                        Err(error) => cx.emit(QueueEvent::Error(error.to_string())),
                         _ => {
-                            this.error =
-                                Some(this.i18n.text("gl-queue-locate-response").to_owned());
+                            cx.emit(QueueEvent::Error(
+                                this.context
+                                    .i18n
+                                    .text("gl-queue-locate-response")
+                                    .to_owned(),
+                            ));
                         }
                     }
                 }
@@ -713,33 +710,33 @@ impl GuiApp {
         scroll: &gpui::UniformListScrollHandle,
         cx: &mut Context<Self>,
     ) {
-        let Some(reveal) = self.browser.queue.locate.reveal else {
+        let Some(reveal) = self.model.locate.reveal else {
             return;
         };
         if !self.queue_locate_current(reveal.request) {
-            self.browser.queue.locate.invalidate();
+            self.model.locate.invalidate();
             return;
         }
         if reveal.scroll {
             scroll.scroll_to_item(reveal.position, gpui::ScrollStrategy::Nearest);
-            self.browser.queue.locate.reveal.as_mut().unwrap().scroll = false;
+            self.model.locate.reveal.as_mut().unwrap().scroll = false;
         }
-        let Some(row) = self.browser.queue.rows.get(reveal.position) else {
+        let Some(row) = self.model.rows.get(reveal.position) else {
             return;
         };
         let id = row.id;
-        self.browser.queue.locate.reveal = None;
+        self.model.locate.reveal = None;
         if id != reveal.request.id {
             return;
         }
         let request = reveal.request;
-        self.browser.queue.locate.emphasized = Some(request);
+        self.model.locate.emphasized = Some(request);
         let timer = cx.background_executor().timer(Duration::from_millis(1500));
-        self.browser.queue.locate.timer = Some(cx.spawn(async move |this, cx| {
+        self.model.locate.timer = Some(cx.spawn(async move |this, cx| {
             timer.await;
             let _ = this.update(cx, |this, cx| {
-                if this.browser.queue.locate.emphasized == Some(request) {
-                    this.browser.queue.locate.emphasized = None;
+                if this.model.locate.emphasized == Some(request) {
+                    this.model.locate.emphasized = None;
                     cx.notify();
                 }
             });
@@ -747,8 +744,7 @@ impl GuiApp {
     }
 
     pub(super) fn queue_locate_emphasized(&self, id: u64) -> bool {
-        self.browser
-            .queue
+        self.model
             .locate
             .emphasized
             .is_some_and(|request| request.id == id && self.queue_locate_current(request))
@@ -757,7 +753,7 @@ impl GuiApp {
     /// Reconcile authoritative queue state even while its pane is hidden. No page demand.
     pub(super) fn sync_queue(&mut self, cx: &mut Context<Self>) -> bool {
         let revisions = self.state.query_revisions(None);
-        if !self.browser.queue.sync(revisions, self.state.queue.total) {
+        if !self.model.sync(revisions, self.state.queue.total) {
             return false;
         }
         self.dispatch_queue_selection(cx);
@@ -767,8 +763,7 @@ impl GuiApp {
     /// Explicit retry of failed identity relocation; unchanged pages and locate survive.
     pub(super) fn refresh_queue(&mut self, cx: &mut Context<Self>) {
         if self
-            .browser
-            .queue
+            .model
             .retry_selection(self.state.query_revisions(None), self.state.queue.total)
         {
             self.dispatch_queue_selection(cx);
@@ -777,17 +772,16 @@ impl GuiApp {
 
     pub(super) fn retry_queue_page(&mut self, cx: &mut Context<Self>) {
         let range = self
-            .browser
-            .queue
+            .model
             .retry_page(self.state.query_revisions(None), self.state.queue.total);
         self.dispatch_queue_selection(cx);
         self.ensure_queue_range(range, cx);
     }
 
     fn dispatch_queue_reconcile(&mut self, job: QueueReconcileJob, cx: &mut Context<Self>) {
-        let handle = self.handle.clone();
-        let i18n = std::sync::Arc::clone(&self.i18n);
-        let ticket = self.browser.queue.reconcile_projection.ticket();
+        let handle = self.context.handle().clone();
+        let i18n = std::sync::Arc::clone(&self.context.i18n);
+        let ticket = self.model.reconcile_projection.ticket();
         cx.spawn(async move |this, cx| {
             let result: Result<Option<Vec<QueueIdentity>>, String> = async {
                 let mut selected = Vec::with_capacity(job.ids.len());
@@ -795,8 +789,7 @@ impl GuiApp {
                     if !this
                         .update(cx, |this, cx| {
                             this.refresh(cx);
-                            this.browser
-                                .queue
+                            this.model
                                 .reconcile_current(&job, this.state.query_revisions(None))
                         })
                         .unwrap_or(false)
@@ -835,18 +828,17 @@ impl GuiApp {
             }
             .await;
             let _ = this.update(cx, |this, cx| {
-                this.browser.queue.release_reconcile_worker(job.generation);
+                this.model.release_reconcile_worker(job.generation);
                 this.refresh(cx);
                 if this
-                    .browser
-                    .queue
+                    .model
                     .reconcile_current(&job, this.state.query_revisions(None))
                 {
                     match result {
-                        Ok(Some(selected)) => this.browser.queue.reconcile(selected),
+                        Ok(Some(selected)) => this.model.reconcile(selected),
                         Err(error) => {
-                            this.error = Some(error.clone());
-                            this.browser.queue.selection_error = Some(error);
+                            cx.emit(QueueEvent::Error(error.clone()));
+                            this.model.selection_error = Some(error);
                         }
                         Ok(None) => {
                             // A newer snapshot will schedule fresh reconciliation.
@@ -862,40 +854,33 @@ impl GuiApp {
 
     pub(super) fn ensure_queue_range(&mut self, range: Range<usize>, cx: &mut Context<Self>) {
         self.sync_queue(cx);
-        if !self.panel_demand("queue") {
+        if !self.visible {
             return;
         }
-        let limit = self.view_page_size();
-        let Some((query, generation)) = self.browser.queue.demand_page(range, limit) else {
+        let limit = self.state.system.config.page_size as usize;
+        let Some((query, generation)) = self.model.demand_page(range, limit) else {
             return;
         };
-        self.start_loading_text(
-            super::loading::LoadingOwner::View(ViewRequestKind::Queue),
-            generation,
-            cx,
-        );
+        self.loading
+            .begin((), generation, std::time::Instant::now());
+        self.loading.schedule(cx, |this| &mut this.loading);
         let request = query.clone();
-        let handle = self.handle.clone();
-        let ticket = self.browser.queue.page_projection.ticket();
+        let handle = self.context.handle().clone();
+        let ticket = self.model.page_projection.ticket();
         cx.spawn(async move |this, cx| {
             let response = cx
                 .background_executor()
                 .spawn(async move { handle.query_if_current(query, ticket) })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.finish_loading_text(
-                    &super::loading::LoadingOwner::View(ViewRequestKind::Queue),
-                    generation,
-                    cx,
-                );
-                this.browser.queue.retire_page_worker();
+                this.loading.finish(&(), generation);
+                this.loading.schedule(cx, |this| &mut this.loading);
+                this.model.retire_page_worker();
                 this.refresh(cx);
                 this.sync_queue(cx);
-                this.browser
-                    .queue
-                    .accept_page(&request, generation, response, || {
-                        this.i18n.text("gl-queue-page-response").to_owned()
-                    });
+                this.model.accept_page(&request, generation, response, || {
+                    this.context.i18n.text("gl-queue-page-response").to_owned()
+                });
                 cx.notify();
             });
         })
@@ -910,12 +895,11 @@ impl GuiApp {
         cx: &mut Context<Self>,
     ) {
         self.refresh(cx);
-        if self.browser.queue.busy && (shift || multi) {
+        if self.model.busy && (shift || multi) {
             return;
         }
         let Some(row) = self
-            .browser
-            .queue
+            .model
             .rows
             .iter()
             .find(|row| row.id == id)
@@ -923,26 +907,16 @@ impl GuiApp {
         else {
             return;
         };
-        let intent = self.begin_manual_intent();
-        let revisions = self.state.query_revisions(None);
-        if let Some(commit) = self
-            .browser
-            .queue
-            .begin_selection(intent, revisions, row, shift, multi)
-        {
-            self.ready_manual_action(intent, ManualAction::Queue(commit), cx);
-        } else {
-            self.dispatch_queue_selection(cx);
-        }
+        cx.emit(QueueEvent::SelectionRequested(QueueSelectionRequest::Row {
+            id: row.id,
+            shift,
+            multi,
+        }));
     }
 
     pub(in crate::gui) fn queue_commit_valid(&self, commit: &QueueCommit) -> bool {
-        self.browser
-            .queue
-            .query()
-            .stamp(self.state.query_revisions(None))
-            == commit.stamp
-            && self.browser.queue.current(commit.generation, commit.stamp)
+        self.model.query().stamp(self.state.query_revisions(None)) == commit.stamp
+            && self.model.current(commit.generation, commit.stamp)
     }
 
     pub(in crate::gui) fn commit_queue_selection(
@@ -953,7 +927,7 @@ impl GuiApp {
         if !self.queue_commit_valid(&commit) {
             return;
         }
-        let queue = &mut self.browser.queue;
+        let queue = &mut self.model;
         if let Some(rows) = commit.rows {
             queue.complete_range(
                 commit.generation,
@@ -966,26 +940,28 @@ impl GuiApp {
         } else {
             queue.select(commit.target, commit.multi);
         }
-        self.browser.focus_list(ListFocus::Queue);
-        self.request_track(commit.target.track_id, cx);
+        cx.emit(QueueEvent::SelectionCommitted {
+            track_id: commit.target.track_id,
+        });
         if commit.scroll {
-            self.workspace.scroll_views.borrow_mut().scroll_list_to("queue", commit.target.offset);
+            self.context
+                .scroll
+                .borrow_mut()
+                .scroll_list_to("queue", commit.target.offset);
         }
-        self.sync_waveform(cx);
         cx.notify();
     }
 
     pub(super) fn navigate_queue(&mut self, down: bool, cx: &mut Context<Self>) {
         self.refresh(cx);
-        let total = self.browser.queue.rows.len();
-        if total == 0 || (self.browser.queue.busy && self.browser.queue.navigation.is_none()) {
+        let total = self.model.rows.len();
+        if total == 0 || (self.model.busy && self.model.navigation.is_none()) {
             return;
         }
         let current = self
-            .browser
-            .queue
+            .model
             .navigation
-            .or_else(|| self.browser.queue.active().map(|row| row.offset));
+            .or_else(|| self.model.active().map(|row| row.offset));
         let offset = match current {
             Some(index) if down => index.saturating_add(1).min(total - 1),
             Some(index) => index.saturating_sub(1),
@@ -1000,8 +976,8 @@ impl GuiApp {
 
     pub(super) fn jump_queue_edge(&mut self, last: bool, cx: &mut Context<Self>) {
         self.refresh(cx);
-        let total = self.browser.queue.rows.len();
-        if total == 0 || (self.browser.queue.busy && self.browser.queue.navigation.is_none()) {
+        let total = self.model.rows.len();
+        if total == 0 || (self.model.busy && self.model.navigation.is_none()) {
             return;
         }
         self.start_queue_navigation(if last { total - 1 } else { 0 }, false, cx);
@@ -1009,50 +985,34 @@ impl GuiApp {
 
     pub(super) fn select_all_queue_entries(&mut self, cx: &mut Context<Self>) {
         self.refresh(cx);
-        if self
-            .browser
-            .queue
-            .rows
-            .total()
-            .is_some_and(|total| total > 0)
-            && self.browser.queue.ready()
-        {
+        if self.model.rows.total().is_some_and(|total| total > 0) && self.model.ready() {
             self.start_queue_navigation(0, true, cx);
         }
     }
 
     fn start_queue_navigation(&mut self, offset: usize, all: bool, cx: &mut Context<Self>) {
-        let intent = self.begin_manual_intent();
-        let revisions = self.state.query_revisions(None);
-        self.browser
-            .queue
-            .begin_navigation(intent, revisions, offset, all);
-        self.dispatch_queue_selection(cx);
-        cx.notify();
+        cx.emit(QueueEvent::SelectionRequested(
+            QueueSelectionRequest::Offset { offset, all },
+        ));
     }
 
     fn queue_job_current(&self, job: &QueueJob) -> bool {
-        self.manual_intent_current(job.intent)
-            && self
-                .browser
-                .queue
-                .query()
-                .stamp(self.state.query_revisions(None))
-                == job.stamp
-            && self.browser.queue.current(job.generation, job.stamp)
+        self.model.manual == Some(job.intent)
+            && self.model.query().stamp(self.state.query_revisions(None)) == job.stamp
+            && self.model.current(job.generation, job.stamp)
     }
 
     pub(super) fn dispatch_queue_selection(&mut self, cx: &mut Context<Self>) {
-        if let Some(job) = self.browser.queue.take_reconcile_job() {
+        if let Some(job) = self.model.take_reconcile_job() {
             self.dispatch_queue_reconcile(job, cx);
             return;
         }
-        let Some(job) = self.browser.queue.take_job() else {
+        let Some(job) = self.model.take_job() else {
             return;
         };
-        let handle = self.handle.clone();
-        let i18n = std::sync::Arc::clone(&self.i18n);
-        let ticket = self.browser.queue.projection.ticket();
+        let handle = self.context.handle().clone();
+        let i18n = std::sync::Arc::clone(&self.context.i18n);
+        let ticket = self.model.projection.ticket();
         cx.spawn(async move |this, cx| {
             let result: Result<Option<QueueCommit>, String> = async {
                 if !this
@@ -1189,21 +1149,21 @@ impl GuiApp {
             }
             .await;
             let _ = this.update(cx, |this, cx| {
-                this.browser.queue.release_worker(job.generation);
+                this.model.release_worker(job.generation);
                 this.refresh(cx);
                 if this.queue_job_current(&job)
-                    && this
-                        .browser
-                        .queue
-                        .finish_selection(&job, result.as_ref().err())
+                    && this.model.finish_selection(&job, result.as_ref().err())
                 {
                     match result {
                         Ok(Some(commit)) => {
-                            this.ready_manual_action(job.intent, ManualAction::Queue(commit), cx)
+                            cx.emit(QueueEvent::SelectionReady {
+                                intent: job.intent,
+                                commit: std::cell::RefCell::new(Some(commit)),
+                            });
                         }
                         Err(message) => {
-                            this.fail_manual_intent(job.intent);
-                            this.error = Some(message);
+                            cx.emit(QueueEvent::SelectionFailed(job.intent));
+                            cx.emit(QueueEvent::Error(message));
                         }
                         Ok(None) => {}
                     }
@@ -1679,9 +1639,9 @@ pub(super) struct QueueDrag {
 }
 
 impl QueueDrag {
-    pub(super) fn can_transfer(&self, app: &GuiApp, destination: DragDestination) -> bool {
+    pub(super) fn can_transfer(&self, queue_revision: u64, destination: DragDestination) -> bool {
         matches!(destination, DragDestination::Playlist(_))
-            && self.revision == app.state.queue.revision
+            && self.revision == queue_revision
             && self.entries.get().is_some_and(|rows| !rows.is_empty())
     }
 
@@ -1706,7 +1666,7 @@ impl QueueDrag {
     }
 }
 
-impl GuiApp {
+impl Queue {
     fn send_queue_row_action(&mut self, revision: u64, command: Command, cx: &mut Context<Self>) {
         self.refresh(cx);
         if self.state.queue.revision == revision {
@@ -1715,7 +1675,7 @@ impl GuiApp {
     }
 
     pub(super) fn selected_queue_ids_in_order(&self) -> Vec<u64> {
-        self.browser.queue.ordered_ids()
+        self.model.ordered_ids()
     }
 
     fn queue_drop_index(
@@ -1724,7 +1684,7 @@ impl GuiApp {
         target_id: Option<u64>,
         owner: gpui::EntityId,
     ) -> Option<usize> {
-        if self.browser.queue.query.is_some()
+        if self.model.query.is_some()
             || drag.owner != owner
             || drag.revision != self.state.queue.revision
         {
@@ -1732,8 +1692,7 @@ impl GuiApp {
         }
         let target = match target_id {
             Some(id) => Some(
-                self.browser
-                    .queue
+                self.model
                     .rows
                     .iter()
                     .find(|row| row.id == id)
@@ -1769,15 +1728,14 @@ impl GuiApp {
         );
     }
 
-    pub(super) fn queue_panel(
+    pub(super) fn render_panel(
         &mut self,
         panel_id: u64,
-        _tab_bar_visible: bool,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = crate::gui::theme::palette(cx);
-        let matched = self.browser.queue.rows.total();
+        let matched = self.model.rows.total();
         let total = self.state.queue.total;
         self.queue_search.update(cx, |search, cx| {
             if let Some(matched) = matched {
@@ -1786,11 +1744,11 @@ impl GuiApp {
                 search.clear_counts(cx);
             }
         });
-        let selection_count = self.browser.queue.len();
+        let selection_count = self.model.len();
         let header = list_panel_header(
             theme,
             self.tr("gl-queue"),
-            self.i18n.format(
+            self.context.i18n.format(
                 "gl-queue-count",
                 &[
                     ("total", (self.state.queue.total).into()),
@@ -1823,11 +1781,11 @@ impl GuiApp {
             .max_w(gpui::rems(20.5))
             .flex_shrink(1.);
         let (selection_message, selection_kind): (SharedString, _) =
-            if let Some(error) = &self.browser.queue.selection_error {
+            if let Some(error) = &self.model.selection_error {
                 (error.clone().into(), StatusKind::Error)
-            } else if self.browser.queue.busy {
+            } else if self.model.busy {
                 (
-                    self.i18n.text("gl-selection-loading").into(),
+                    self.context.i18n.text("gl-selection-loading").into(),
                     StatusKind::Info,
                 )
             } else {
@@ -1850,21 +1808,21 @@ impl GuiApp {
                         .into()
                     }),
             )
-            .when(self.browser.queue.selection_error.is_some(), |status| {
+            .when(self.model.selection_error.is_some(), |status| {
                 status.child(icon_button(
                     ("queue-selection-retry", panel_id),
                     "󰑐",
                     self.tr("gl-retry-selection"),
                     cx,
                     |this, _, cx| {
-                        if this.browser.queue.selection_error.is_some() {
+                        if this.model.selection_error.is_some() {
                             this.refresh_queue(cx);
                             cx.notify();
                         }
                     },
                 ))
             });
-        let scroll = self.workspace.scroll_views.borrow_mut().list(("queue", panel_id));
+        let scroll = self.context.scroll.borrow_mut().list(("queue", panel_id));
         self.reveal_queue_locate(&scroll, cx);
         let panel_drop_owner = cx.entity().downgrade();
         let list_drop_owner = panel_drop_owner.clone();
@@ -1906,8 +1864,7 @@ impl GuiApp {
             .drag_over::<PlaylistDrag>(|style, _, _, _| style.border_color(rgb(theme.accent)))
             .child(row().items_end().child(header).child(tools))
             .when(
-                self.browser
-                    .queue
+                self.model
                     .locate_filtered
                     .is_some_and(|id| Some(id) == self.state.queue.current_id),
                 |panel| {
@@ -1934,20 +1891,20 @@ impl GuiApp {
                 ))
             })
             .when(
-                self.browser.queue.busy || self.browser.queue.selection_error.is_some(),
+                self.model.busy || self.model.selection_error.is_some(),
                 |panel| panel.child(status),
             )
             .child(list_viewport(scrollable_list(
                 ("queue-scrollbar", panel_id),
                 uniform_list(
                     ("queue-rows", panel_id),
-                    self.browser.queue.rows.len(),
-                    cx.processor(move |this, range: std::ops::Range<usize>, window, cx| {
+                    self.model.rows.len(),
+                    cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
                         range
                             .map(|index| {
-                                let Some(entry) = this.browser.queue.rows.get(index) else {
+                                let Some(entry) = this.model.rows.get(index) else {
                                     return this
-                                        .paged_loading_row(ViewRequestKind::Queue, index, cx)
+                                        .paged_loading_row(index, cx)
                                         .h(gpui::rems(LIST_ROW_REMS));
                                 };
                                 let id = entry.id;
@@ -1960,7 +1917,7 @@ impl GuiApp {
                                 let playing = this.state.queue.current_id == Some(id);
                                 let drag_owner = cx.entity().downgrade();
                                 let drop_owner = drag_owner.clone();
-                                let drag_i18n = std::sync::Arc::clone(&this.i18n);
+                                let drag_i18n = std::sync::Arc::clone(&this.context.i18n);
                                 let drag = QueueDrag {
                                     owner: cx.entity().entity_id(),
                                     source: super::queue::QueueIdentity::from(entry),
@@ -1974,7 +1931,7 @@ impl GuiApp {
                                     (title, detail),
                                     index,
                                     playing,
-                                    this.browser.queue.contains(&id),
+                                    this.model.contains(&id),
                                 )
                                 .when(this.queue_locate_emphasized(id), |row| {
                                     row.border_1()
@@ -1982,14 +1939,8 @@ impl GuiApp {
                                         .bg(rgb(theme.highlight))
                                 })
                                 .when(
-                                    this.shell.layout_focus().is_focused(window)
-                                        && this.browser.focus()
-                                            == Some(super::BrowserFocus::List(ListFocus::Queue))
-                                        && this
-                                            .browser
-                                            .queue
-                                            .active()
-                                            .is_some_and(|row| row.id == id),
+                                    this.focused
+                                        && this.model.active().is_some_and(|row| row.id == id),
                                     |row| row.border_color(rgb(theme.accent)),
                                 )
                                 .group("queue-track-row")
@@ -1999,7 +1950,7 @@ impl GuiApp {
                                     hover_actions(
                                         theme,
                                         "queue-track-row",
-                                        this.browser.queue.contains(&id),
+                                        this.model.contains(&id),
                                     )
                                     .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
                                         cx.stop_propagation();
@@ -2099,20 +2050,17 @@ impl GuiApp {
                                 .on_mouse_down(
                                     gpui::MouseButton::Right,
                                     cx.listener(
-                                        move |this, event: &gpui::MouseDownEvent, window, cx| {
-                                            this.focus_layout(window, cx);
-                                            this.browser.focus_list(ListFocus::Queue);
-                                            if this.browser.queue.contains(&id)
-                                                && !this.browser.queue.ready()
-                                            {
+                                        move |this, event: &gpui::MouseDownEvent, _, cx| {
+                                            cx.emit(QueueEvent::FocusRequested);
+                                            if this.model.contains(&id) && !this.model.ready() {
                                                 cx.stop_propagation();
                                                 return;
                                             }
-                                            if !this.browser.queue.contains(&id) {
+                                            if !this.model.contains(&id) {
                                                 this.select_queue_entry(id, false, false, cx);
                                                 cx.notify();
                                             }
-                                            let rows = this.browser.queue.ordered();
+                                            let rows = this.model.ordered();
                                             let track_ids = if rows.iter().any(|row| row.id == id) {
                                                 rows.iter().map(|row| row.track_id).collect()
                                             } else {
@@ -2123,28 +2071,30 @@ impl GuiApp {
                                             } else {
                                                 vec![id]
                                             };
-                                            this.open_object_menu(
-                                                super::ContentMenuRequest {
-                                                    source: super::TrackSource::Tracks(track_ids),
-                                                    position: event.position,
-                                                    play: Some(Command::PlayQueue { queue_id: id }),
-                                                },
-                                                super::list_interaction::ContentGuard::Queue(
-                                                    revision,
-                                                ),
-                                                Some(Command::RemoveQueueEntries { queue_ids }),
-                                                None,
-                                                None,
-                                                cx,
-                                            );
+                                            cx.emit(QueueEvent::ContentMenu {
+                                                request: std::cell::RefCell::new(Some(
+                                                    super::ContentMenuRequest {
+                                                        source: super::TrackSource::Tracks(
+                                                            track_ids,
+                                                        ),
+                                                        position: event.position,
+                                                        play: Some(Command::PlayQueue {
+                                                            queue_id: id,
+                                                        }),
+                                                    },
+                                                )),
+                                                revision,
+                                                remove: std::cell::RefCell::new(Some(
+                                                    Command::RemoveQueueEntries { queue_ids },
+                                                )),
+                                            });
                                             cx.stop_propagation();
                                         },
                                     ),
                                 )
                                 .on_click(cx.listener(
-                                    move |this, event: &gpui::ClickEvent, window, cx| {
-                                        this.focus_layout(window, cx);
-                                        this.browser.focus_list(ListFocus::Queue);
+                                    move |this, event: &gpui::ClickEvent, _, cx| {
+                                        cx.emit(QueueEvent::FocusRequested);
                                         let modifiers = event.modifiers();
                                         this.select_queue_entry(
                                             id,
@@ -2158,9 +2108,9 @@ impl GuiApp {
                                     },
                                 ))
                                 .when(
-                                    this.browser.queue.ready()
-                                        && this.browser.queue.query.is_none()
-                                        && this.browser.queue.selection_error.is_none(),
+                                    this.model.ready()
+                                        && this.model.query.is_none()
+                                        && this.model.selection_error.is_none(),
                                     |row| {
                                         row.on_drag(drag, move |drag, _, window, cx| {
                                             super::components::begin_list_drag(window, cx);
@@ -2170,22 +2120,14 @@ impl GuiApp {
                                                         this.refresh(cx);
                                                         if drag.revision
                                                             != this.state.queue.revision
-                                                            || !this.browser.queue.ready()
-                                                            || this.browser.queue.query.is_some()
-                                                            || this
-                                                                .browser
-                                                                .queue
-                                                                .selection_error
-                                                                .is_some()
+                                                            || !this.model.ready()
+                                                            || this.model.query.is_some()
+                                                            || this.model.selection_error.is_some()
                                                         {
                                                             return Vec::new();
                                                         }
-                                                        if this
-                                                            .browser
-                                                            .queue
-                                                            .contains(&drag.source.id)
-                                                        {
-                                                            this.browser.queue.ordered()
+                                                        if this.model.contains(&drag.source.id) {
+                                                            this.model.ordered()
                                                         } else {
                                                             vec![drag.source]
                                                         }
@@ -2320,6 +2262,27 @@ mod queue_drag_tests {
             .collect();
         remaining.splice(index..index, selected);
         remaining
+    }
+
+    #[test]
+    fn queue_transfer_requires_current_initialized_occurrences_and_playlist_destination() {
+        let selected = drag(&[1, 3]);
+        assert!(selected.can_transfer(4, super::DragDestination::Playlist(7)));
+        assert!(!selected.can_transfer(5, super::DragDestination::Playlist(7)));
+        assert!(!selected.can_transfer(4, super::DragDestination::Queue));
+        assert_eq!(selected.track_ids(), vec![7, 7]);
+        let pending = QueueDrag {
+            owner: 1_u64.into(),
+            source: identity(1),
+            entries: Default::default(),
+            revision: 4,
+        };
+        assert!(!pending.can_transfer(4, super::DragDestination::Playlist(7)));
+        let empty = QueueDrag {
+            entries: std::cell::OnceCell::from(Vec::new()),
+            ..pending
+        };
+        assert!(!empty.can_transfer(4, super::DragDestination::Playlist(7)));
     }
 
     #[test]

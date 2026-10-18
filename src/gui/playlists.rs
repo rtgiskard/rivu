@@ -1,9 +1,13 @@
 //! Playlist catalog, occurrence rows, drag and management surfaces.
 pub(super) mod editor;
+mod model;
+mod queries;
+pub(super) mod requests;
 pub(super) mod selection;
+use requests::ViewRequestKind;
 
 use super::{
-    GuiApp, ListFocus, UI_INSET, ViewRequestKind,
+    ListFocus, UI_INSET,
     components::{
         LIST_ROW_REMS, StatusKind, caption, column, compact_icon_button, context_menu_container,
         danger_control, disabled_control, hover_actions, icon_button, list_panel_header, list_row,
@@ -17,6 +21,565 @@ use crate::{gui::queue::QueueDrag, model::Command};
 use gpui::{
     AnyElement, Context, Div, SharedString, Window, div, prelude::*, px, rgb, uniform_list,
 };
+
+use crate::gui::list_interaction::TrackSource;
+use crate::gui::{
+    BrowserFocus,
+    components::{
+        FocusScope,
+        input::{Input, InputEvent},
+        search::{ListSearch, SearchEvent},
+    },
+    feature::FeatureContext,
+    loading::LoadingText,
+    manual_actions::ManualIntentId,
+};
+use crate::projection::GuiSnapshot;
+use gpui::{App, Entity, EventEmitter, FocusHandle, Focusable, Subscription};
+use std::{cell::RefCell, rc::Rc, sync::Arc};
+
+#[derive(Clone, Copy)]
+pub(in crate::gui) enum PlaylistSelectionRequest {
+    Entry {
+        id: i64,
+        index: usize,
+        shift: bool,
+        multi: bool,
+    },
+    Navigate {
+        down: bool,
+        shift: bool,
+        multi: bool,
+    },
+    Edge {
+        last: bool,
+    },
+    All,
+}
+
+pub(in crate::gui) enum PlaylistEvent {
+    Selection(PlaylistSelectionRequest),
+    Ready(ManualIntentId, RefCell<Option<selection::EntryCommit>>),
+    Failed(ManualIntentId),
+    InvalidateManualIntent,
+    SearchChanged,
+    Metadata(i64),
+    Focus(Option<BrowserFocus>),
+    FocusName,
+    ClearMenus,
+    CancelInteraction,
+    QueueReplace(RefCell<Option<crate::gui::queue_replace::QueueReplacement>>),
+    AppendPlaylist(i64),
+    ResolveLibrary(
+        RefCell<Option<Vec<crate::gui::library::LibraryNode>>>,
+        crate::gui::DragDestination,
+    ),
+    Transfer(
+        RefCell<Option<crate::gui::list_interaction::TrackSource>>,
+        crate::gui::DragDestination,
+    ),
+    ContentMenu(RefCell<Option<PlaylistContentMenu>>),
+    Error(String),
+}
+
+pub(in crate::gui) struct PlaylistContentMenu {
+    pub(in crate::gui) request: crate::gui::ContentMenuRequest,
+    pub(in crate::gui) guard: crate::gui::list_interaction::ContentGuard,
+    pub(in crate::gui) remove: Option<Command>,
+}
+
+pub(in crate::gui) struct Playlists {
+    context: FeatureContext,
+    state: Rc<GuiSnapshot>,
+    i18n: Arc<crate::i18n::Localizer>,
+    browser: requests::PlaylistState,
+    playlist_search: Entity<ListSearch>,
+    playlist_entries_search: Entity<ListSearch>,
+    name_input: Entity<Input>,
+    playlist_editor: Option<editor::PlaylistEditor>,
+    playlist_action: Option<PlaylistAction>,
+    loading_text: LoadingText<ViewRequestKind>,
+    intent: Option<ManualIntentId>,
+    window_visible: bool,
+    panel_visible: bool,
+    menu_catalog_demand: bool,
+    library_selection_pending: bool,
+    content_resolution: bool,
+    focused: bool,
+    layout_focus: FocusHandle,
+    menu_scope: Option<FocusScope>,
+    dialog_scope: Option<FocusScope>,
+    _subscriptions: Vec<Subscription>,
+}
+impl EventEmitter<PlaylistEvent> for Playlists {}
+
+impl Playlists {
+    pub(in crate::gui) fn new(context: FeatureContext, cx: &mut Context<Self>) -> Self {
+        let i18n = context.i18n.clone();
+        let state = context.snapshot();
+        let playlist_search = cx.new(|cx| ListSearch::new(i18n.clone(), cx));
+        let playlist_entries_search = cx.new(|cx| ListSearch::new(i18n.clone(), cx));
+        let name_input =
+            cx.new(|cx| Input::new("", i18n.text("shell-playlist-name").to_owned(), cx));
+        let subscriptions = vec![
+            cx.subscribe(&playlist_search, |this, _, event, cx| {
+                let SearchEvent::Changed(query) = event;
+                this.apply_playlist_search(query.clone(), cx);
+            }),
+            cx.subscribe(&playlist_entries_search, |this, _, event, cx| {
+                let SearchEvent::Changed(query) = event;
+                this.apply_playlist_entries_search(query.clone(), cx);
+            }),
+            cx.subscribe(&name_input, |this, _, event, cx| {
+                if matches!(event, InputEvent::Submit) {
+                    this.submit_playlist_name(cx);
+                }
+                if matches!(event, InputEvent::Changed { .. }) {
+                    if let Some(editor) = this.playlist_editor.as_mut() {
+                        editor.error = None;
+                    }
+                    cx.notify();
+                }
+            }),
+        ];
+        let mut browser = requests::PlaylistState::default();
+        browser.configure_page_size(state.system.config.page_size as usize);
+        Self {
+            context,
+            state,
+            i18n,
+            browser,
+            playlist_search,
+            playlist_entries_search,
+            name_input,
+            playlist_editor: None,
+            playlist_action: None,
+            loading_text: Default::default(),
+            intent: None,
+            window_visible: true,
+            panel_visible: false,
+            menu_catalog_demand: false,
+            library_selection_pending: false,
+            content_resolution: false,
+            focused: false,
+            layout_focus: cx.focus_handle(),
+            menu_scope: None,
+            dialog_scope: None,
+            _subscriptions: subscriptions,
+        }
+    }
+
+    pub(in crate::gui) fn reconcile(&mut self, state: Rc<GuiSnapshot>, cx: &mut Context<Self>) {
+        if Rc::ptr_eq(&self.state, &state) {
+            return;
+        }
+        let changes = self
+            .browser
+            .playlists()
+            .refresh_changes(&self.state.library, &state.library);
+        let selected = self.browser.playlists().selected();
+        let changed = changes.summaries
+            || changes.entries
+            || self.state.system.config.page_size != state.system.config.page_size
+            || self.state.library.playlist_total != state.library.playlist_total
+            || self.state.current_track().map(|track| track.id)
+                != state.current_track().map(|track| track.id)
+            || self.state.system.shutting_down != state.system.shutting_down;
+        self.browser
+            .configure_page_size(state.system.config.page_size as usize);
+        self.browser.playlists.reconcile_selection();
+        if self
+            .browser
+            .playlists()
+            .selected()
+            .is_some_and(|id| !state.library.playlist_entry_revisions.contains_key(&id))
+        {
+            self.browser.remove_playlist_selection();
+        }
+        self.state = state;
+        let refresh_selection = self.browser.sync_entry_projection(
+            self.state
+                .query_revisions(self.browser.playlists().selected()),
+        );
+        self.browser.refresh_playlists(changes);
+        if refresh_selection {
+            self.dispatch_entry_reconcile(cx);
+        }
+        if changes.summaries && self.panel_demand("playlists") {
+            self.request_playlist_selection(cx);
+        }
+        self.sync_loading(cx);
+        if changed || refresh_selection || selected != self.browser.playlists().selected() {
+            cx.notify();
+        }
+    }
+
+    fn refresh(&mut self, cx: &mut Context<Self>) {
+        self.reconcile(self.context.snapshot(), cx);
+    }
+    fn tr(&self, id: &str) -> SharedString {
+        self.context.tr(id)
+    }
+    fn report_error(&self, message: String, cx: &mut Context<Self>) {
+        cx.emit(PlaylistEvent::Error(message));
+    }
+    fn send(&mut self, command: Command, cx: &mut Context<Self>) {
+        if let Err(error) = self.context.handle().send(command) {
+            self.report_error(format!("{error:#}"), cx);
+        }
+        self.refresh(cx);
+        cx.notify();
+    }
+    pub(in crate::gui) fn set_visibility(
+        &mut self,
+        window_visible: bool,
+        panel_visible: bool,
+        menu_catalog_demand: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let changed = (
+            self.window_visible,
+            self.panel_visible,
+            self.menu_catalog_demand,
+        ) != (window_visible, panel_visible, menu_catalog_demand);
+        self.window_visible = window_visible;
+        self.panel_visible = panel_visible;
+        self.menu_catalog_demand = menu_catalog_demand;
+        if !self.playlist_view_demand(ViewRequestKind::Summaries) {
+            self.browser
+                .cancel_playlist_read(ViewRequestKind::Summaries);
+        }
+        if !self.panel_demand("playlists") {
+            self.browser.cancel_playlist_read(ViewRequestKind::Entries);
+            self.browser
+                .cancel_playlist_read(ViewRequestKind::Selection);
+        }
+        self.sync_loading(cx);
+        if changed && self.playlist_view_demand(ViewRequestKind::Summaries) {
+            let visible = self.browser.playlists().summaries().rows.visible();
+            self.ensure_playlist_range(visible, cx);
+            if self.panel_demand("playlists") {
+                self.request_playlist_selection(cx);
+                let visible = self.browser.playlists().entries().rows.visible();
+                self.ensure_entry_range(visible, cx);
+            }
+        }
+    }
+    fn panel_demand(&self, _: &str) -> bool {
+        self.window_visible && self.panel_visible && !self.state.system.shutting_down
+    }
+    fn playlist_view_demand(&self, kind: ViewRequestKind) -> bool {
+        self.panel_demand("playlists")
+            || (kind == ViewRequestKind::Summaries
+                && self.window_visible
+                && self.menu_catalog_demand
+                && !self.state.system.shutting_down)
+    }
+    fn sync_loading(&mut self, cx: &mut Context<Self>) {
+        let visible = self.panel_demand("playlists");
+        let browser = &self.browser;
+        self.loading_text
+            .retain(|kind, token| visible && browser.view_loading(*kind, token));
+        self.loading_text
+            .schedule(cx, |this| &mut this.loading_text);
+    }
+    pub(in crate::gui) fn set_shell_context(
+        &mut self,
+        focus: FocusHandle,
+        menu_scope: Option<FocusScope>,
+        dialog_scope: Option<FocusScope>,
+        cx: &mut Context<Self>,
+    ) {
+        let changed = self.layout_focus != focus
+            || self.menu_scope.as_ref().map(FocusScope::handle)
+                != menu_scope.as_ref().map(FocusScope::handle)
+            || self.dialog_scope.as_ref().map(FocusScope::handle)
+                != dialog_scope.as_ref().map(FocusScope::handle);
+        self.layout_focus = focus;
+        self.menu_scope = menu_scope;
+        self.dialog_scope = dialog_scope;
+        if changed {
+            cx.notify();
+        }
+    }
+    pub(in crate::gui) fn set_transfer_state(
+        &mut self,
+        library_selection_pending: bool,
+        content_resolution: bool,
+    ) {
+        self.library_selection_pending = library_selection_pending;
+        self.content_resolution = content_resolution;
+    }
+    pub(in crate::gui) fn set_focused(&mut self, focused: bool, cx: &mut Context<Self>) {
+        if self.focused != focused {
+            self.focused = focused;
+            cx.notify();
+        }
+    }
+    pub(in crate::gui) fn cancel_window_reads(&mut self, cx: &mut Context<Self>) {
+        self.browser.cancel_window_reads();
+        self.loading_text.clear();
+        cx.notify();
+    }
+    fn focus_layout(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.layout_focus.focus(window, cx);
+        cx.emit(PlaylistEvent::Focus(None));
+    }
+    fn focus_list(&mut self, cx: &mut Context<Self>) {
+        self.focused = true;
+        self.browser.focus_list(ListFocus::PlaylistTracks);
+        cx.emit(PlaylistEvent::Focus(Some(BrowserFocus::List(
+            ListFocus::PlaylistTracks,
+        ))));
+    }
+    fn focus_catalog(&mut self, cx: &mut Context<Self>) {
+        self.focused = true;
+        self.browser.focus_playlists();
+        cx.emit(PlaylistEvent::Focus(Some(BrowserFocus::Playlists)));
+    }
+    fn menu_surface(&self, surface: gpui::Stateful<Div>) -> gpui::Stateful<Div> {
+        if let Some(scope) = &self.menu_scope {
+            scope.menu_surface(surface)
+        } else {
+            surface
+        }
+    }
+    fn dialog_surface(&self, surface: gpui::Stateful<Div>) -> gpui::Stateful<Div> {
+        if let Some(scope) = &self.dialog_scope {
+            scope.surface(surface)
+        } else {
+            surface
+        }
+    }
+    pub(in crate::gui) fn render_panel(
+        &mut self,
+        panel_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.playlists_panel(panel_id, window, cx)
+    }
+    pub(in crate::gui) fn focus_name(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.name_input.read(cx).focus_handle(cx).focus(window, cx);
+    }
+    pub(in crate::gui) fn clear_action(&mut self, cx: &mut Context<Self>) {
+        self.playlist_action = None;
+        cx.notify();
+    }
+    pub(in crate::gui) fn input_focused(&self, window: &Window, cx: &App) -> bool {
+        self.name_input.read(cx).is_focused(window)
+            || self.playlist_search.read(cx).input_focused(window, cx)
+            || self
+                .playlist_entries_search
+                .read(cx)
+                .input_focused(window, cx)
+    }
+    pub(in crate::gui) fn focus_search(
+        &mut self,
+        entries: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let search = if entries && self.browser.playlists().selected().is_some() {
+            &self.playlist_entries_search
+        } else {
+            &self.playlist_search
+        };
+        search.update(cx, |search, cx| search.focus(window, cx));
+    }
+    pub(in crate::gui) fn escape_search(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        for search in [&self.playlist_search, &self.playlist_entries_search] {
+            if search.read(cx).input_focused(window, cx) {
+                return search.update(cx, |search, cx| search.escape(window, cx));
+            }
+        }
+        false
+    }
+    pub(in crate::gui) fn cancel_selection(&mut self) {
+        self.intent = None;
+        self.browser.playlist_selection_mut().cancel_manual();
+    }
+    fn manual_intent_current(&self, intent: ManualIntentId) -> bool {
+        self.intent == Some(intent)
+    }
+    fn fail_manual_intent(&mut self, intent: ManualIntentId, cx: &mut Context<Self>) {
+        if self.intent == Some(intent) {
+            self.intent = None;
+            cx.emit(PlaylistEvent::Failed(intent));
+        }
+    }
+    fn ready_entry_selection(
+        &self,
+        intent: ManualIntentId,
+        commit: selection::EntryCommit,
+        cx: &mut Context<Self>,
+    ) {
+        cx.emit(PlaylistEvent::Ready(intent, RefCell::new(Some(commit))));
+    }
+    pub(in crate::gui) fn play_selection(&mut self, cx: &mut Context<Self>) {
+        if self.browser.playlists().track_selection.ready()
+            && let Some(row) = self.browser.playlists().track_selection.active
+        {
+            self.send(
+                Command::Play {
+                    track_id: row.track_id,
+                },
+                cx,
+            );
+        }
+    }
+    pub(in crate::gui) fn editor_open(&self) -> bool {
+        self.playlist_editor.is_some()
+    }
+    pub(in crate::gui) fn action(&self) -> Option<&PlaylistAction> {
+        self.playlist_action.as_ref()
+    }
+    pub(in crate::gui) fn clear_selection(&mut self, cx: &mut Context<Self>) {
+        self.cancel_selection();
+        self.browser.remove_playlist_selection();
+        cx.notify();
+    }
+    pub(in crate::gui) fn catalog_len(&self) -> usize {
+        self.browser.playlists().summaries().rows.len()
+    }
+    pub(in crate::gui) fn catalog_row(
+        &self,
+        index: usize,
+    ) -> Option<&crate::model::PlaylistSummary> {
+        self.browser.playlists().summaries().rows.get(index)
+    }
+    pub(in crate::gui) fn catalog_loading_row(
+        &self,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<Div> {
+        self.paged_loading_row(ViewRequestKind::Summaries, index, cx)
+    }
+    fn request_queue_replace(
+        &self,
+        replacement: crate::gui::queue_replace::QueueReplacement,
+        cx: &mut Context<Self>,
+    ) {
+        cx.emit(PlaylistEvent::QueueReplace(RefCell::new(Some(replacement))));
+    }
+    fn append_playlist_to_queue(&self, id: i64, cx: &mut Context<Self>) {
+        cx.emit(PlaylistEvent::AppendPlaylist(id));
+    }
+    fn open_object_menu(
+        &self,
+        request: crate::gui::ContentMenuRequest,
+        guard: crate::gui::list_interaction::ContentGuard,
+        remove: Option<Command>,
+        cx: &mut Context<Self>,
+    ) {
+        cx.emit(PlaylistEvent::ContentMenu(RefCell::new(Some(
+            PlaylistContentMenu {
+                request,
+                guard,
+                remove,
+            },
+        ))));
+    }
+    fn resolve_library_drag(
+        &self,
+        nodes: Vec<crate::gui::library::LibraryNode>,
+        destination: crate::gui::DragDestination,
+        cx: &mut Context<Self>,
+    ) {
+        cx.emit(PlaylistEvent::ResolveLibrary(
+            RefCell::new(Some(nodes)),
+            destination,
+        ));
+    }
+    fn drop_content(
+        &mut self,
+        drag: &crate::gui::ContentDrag,
+        destination: crate::gui::DragDestination,
+        cx: &mut Context<Self>,
+    ) {
+        self.refresh(cx);
+        if self.can_transfer_content(drag, destination)
+            && let Some(source) = drag.source()
+        {
+            cx.emit(PlaylistEvent::Transfer(
+                RefCell::new(Some(source.clone())),
+                destination,
+            ));
+        }
+    }
+    fn transfer_queue_drag(
+        &mut self,
+        drag: &QueueDrag,
+        destination: crate::gui::DragDestination,
+        cx: &mut Context<Self>,
+    ) {
+        self.refresh(cx);
+        if self.can_transfer_content(drag, destination) {
+            cx.emit(PlaylistEvent::Transfer(
+                RefCell::new(Some(TrackSource::Tracks(drag.track_ids()))),
+                destination,
+            ));
+        }
+    }
+    pub(in crate::gui) fn transfer_playlist_drag(
+        &mut self,
+        drag: &PlaylistDrag,
+        destination: crate::gui::DragDestination,
+        cx: &mut Context<Self>,
+    ) {
+        self.refresh(cx);
+        if !self.can_transfer_content(drag, destination) {
+            return;
+        }
+        if drag.targets_source(destination) {
+            self.move_playlist_entries(drag, None, cx);
+        } else {
+            cx.emit(PlaylistEvent::Transfer(
+                RefCell::new(Some(TrackSource::Tracks(drag.track_ids()))),
+                destination,
+            ));
+        }
+    }
+    fn can_transfer_content(
+        &self,
+        value: &dyn std::any::Any,
+        destination: crate::gui::DragDestination,
+    ) -> bool {
+        if let crate::gui::DragDestination::Playlist(id) = destination
+            && !self
+                .state
+                .library
+                .playlist_entry_revisions
+                .contains_key(&id)
+        {
+            return false;
+        }
+        if let Some(drag) = value.downcast_ref::<LibraryDrag>() {
+            return drag.can_resolve(&self.state, self.library_selection_pending);
+        }
+        if let Some(drag) = value.downcast_ref::<QueueDrag>() {
+            return drag.can_transfer(self.state.queue.revision, destination);
+        }
+        if let Some(drag) = value.downcast_ref::<PlaylistDrag>() {
+            return if drag.targets_source(destination) {
+                self.can_drop_playlist_entries(drag, None)
+            } else {
+                drag.can_transfer(&self.state, destination)
+            };
+        }
+        if let Some(drag) = value.downcast_ref::<crate::gui::ContentDrag>() {
+            return drag.source().is_some_and(|source| match source {
+                TrackSource::Tracks(ids) => !ids.is_empty(),
+                TrackSource::Album(_) => !self.content_resolution,
+            });
+        }
+        false
+    }
+}
 
 pub(super) struct PlaylistDrag {
     i18n: std::sync::Arc<crate::i18n::Localizer>,
@@ -35,15 +598,17 @@ impl PlaylistDrag {
         matches!(destination, super::DragDestination::Playlist(id) if id == self.playlist_id)
     }
 
-    pub(super) fn can_transfer(&self, app: &GuiApp, destination: super::DragDestination) -> bool {
-        if self.targets_source(destination) {
-            return app.can_drop_playlist_entries(self, None);
-        }
-        app.state
-            .library
-            .playlist_entry_revisions
-            .get(&self.playlist_id)
-            == Some(&self.revision)
+    pub(super) fn can_transfer(
+        &self,
+        state: &GuiSnapshot,
+        destination: super::DragDestination,
+    ) -> bool {
+        !self.targets_source(destination)
+            && state
+                .library
+                .playlist_entry_revisions
+                .get(&self.playlist_id)
+                == Some(&self.revision)
             && self.track_ids.get().is_some_and(|ids| !ids.is_empty())
     }
 
@@ -83,8 +648,12 @@ pub(super) enum PlaylistAction {
     Delete(PlaylistTarget),
 }
 
-impl GuiApp {
-    fn can_drop_playlist_entries(&self, drag: &PlaylistDrag, target: Option<i64>) -> bool {
+impl Playlists {
+    pub(in crate::gui) fn can_drop_playlist_entries(
+        &self,
+        drag: &PlaylistDrag,
+        target: Option<i64>,
+    ) -> bool {
         self.browser.playlists().selected() == Some(drag.playlist_id)
             && self.browser.playlists().entries().query.is_none()
             && self.browser.playlists().entries().playlist_id == Some(drag.playlist_id)
@@ -339,11 +908,7 @@ impl GuiApp {
                 .min_w_0()
                 .truncate()
                 .when(
-                    pending
-                        && !self.loading_text.show(
-                            &super::loading::LoadingOwner::View(kind),
-                            rows_error.is_some(),
-                        ),
+                    pending && !self.loading_text.show(&kind, rows_error.is_some()),
                     |text| text.invisible(),
                 )
                 .tooltip(move |_, cx| {
@@ -467,8 +1032,10 @@ impl GuiApp {
                 },
             ));
         let catalog_len = self.browser.playlists().summaries().rows.len();
-        self.workspace.scroll_views.borrow_mut().register_list(("playlist-catalog", panel_id),
-        &self.browser.playlists().summaries().scroll,);
+        self.context.scroll.borrow_mut().register_list(
+            ("playlist-catalog", panel_id),
+            &self.browser.playlists().summaries().scroll,
+        );
         let catalog = uniform_list(
             ("playlist-catalog", panel_id),
             catalog_len,
@@ -493,7 +1060,7 @@ impl GuiApp {
                             this.browser.playlists().selected() == Some(id),
                         )
                         .when(
-                            this.shell.layout_focus().is_focused(window)
+                            (this.focused && this.layout_focus.is_focused(window))
                                 && this.browser.focus() == Some(super::BrowserFocus::Playlists)
                                 && this.browser.playlists().selected() == Some(id),
                             |row| row.border_color(rgb(theme.accent)),
@@ -548,8 +1115,8 @@ impl GuiApp {
                                     cx,
                                     move |this, window, cx| {
                                         this.focus_layout(window, cx);
-                                        this.content_menu = None;
-                                        this.panel_menu = None;
+                                        cx.emit(PlaylistEvent::ClearMenus);
+
                                         this.playlist_action = Some(PlaylistAction::Menu(
                                             PlaylistTarget {
                                                 id,
@@ -571,9 +1138,9 @@ impl GuiApp {
                             gpui::MouseButton::Right,
                             cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
                                 this.focus_layout(window, cx);
-                                this.content_menu = None;
-                                this.panel_menu = None;
-                                this.browser.focus_playlists();
+                                cx.emit(PlaylistEvent::ClearMenus);
+
+                                this.focus_catalog(cx);
                                 this.select_playlist_container(
                                     id,
                                     context_name.to_string(),
@@ -593,7 +1160,7 @@ impl GuiApp {
                         )
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.focus_layout(window, cx);
-                            this.browser.focus_playlists();
+                            this.focus_catalog(cx);
                             this.select_playlist_container(id, name.to_string(), index, cx);
                             cx.notify();
                         }))
@@ -601,7 +1168,7 @@ impl GuiApp {
                             window.prevent_default();
                             cx.stop_propagation();
                             this.resolve_library_drag(
-                                drag.nodes(),
+                                drag.nodes().to_vec(),
                                 super::DragDestination::Playlist(id),
                                 cx,
                             );
@@ -685,9 +1252,7 @@ impl GuiApp {
                 panel_toolbar()
                     .on_mouse_down(
                         gpui::MouseButton::Left,
-                        cx.listener(|this, _, _, _| {
-                            this.browser.focus_list(ListFocus::PlaylistTracks)
-                        }),
+                        cx.listener(|this, _, _, cx| this.focus_list(cx)),
                     )
                     .child(div().flex_1().min_w_0().child(caption(
                         theme,
@@ -701,8 +1266,10 @@ impl GuiApp {
                     )))
                     .child(self.playlist_entries_search.clone()),
             );
-            self.workspace.scroll_views.borrow_mut().register_list(("playlist-entries", panel_id),
-            &self.browser.playlists().entries().scroll,);
+            self.context.scroll.borrow_mut().register_list(
+                ("playlist-entries", panel_id),
+                &self.browser.playlists().entries().scroll,
+            );
             let entries_len = self.browser.playlists().entries().rows.len();
             let entries = uniform_list(
                 ("playlist-entries", panel_id),
@@ -757,7 +1324,7 @@ impl GuiApp {
                                 this.browser.playlists().track_selection.contains(id),
                             )
                             .when(
-                                this.shell.layout_focus().is_focused(window)
+                                (this.focused && this.layout_focus.is_focused(window))
                                     && this.browser.focus()
                                         == Some(super::BrowserFocus::List(
                                             ListFocus::PlaylistTracks,
@@ -840,7 +1407,7 @@ impl GuiApp {
                                 gpui::MouseButton::Left,
                                 cx.listener(move |this, _, window, cx| {
                                     this.focus_layout(window, cx);
-                                    this.browser.focus_list(ListFocus::PlaylistTracks);
+                                    this.focus_list(cx);
                                 }),
                             )
                             .on_mouse_down(
@@ -848,7 +1415,7 @@ impl GuiApp {
                                 cx.listener(
                                     move |this, event: &gpui::MouseDownEvent, window, cx| {
                                         this.focus_layout(window, cx);
-                                        this.browser.focus_list(ListFocus::PlaylistTracks);
+                                        this.focus_list(cx);
                                         if this.browser.playlists().track_selection.contains(id)
                                             && !this.browser.playlists().track_selection.ready()
                                         {
@@ -872,7 +1439,7 @@ impl GuiApp {
                                         };
                                         this.open_object_menu(
                                             super::ContentMenuRequest {
-                                                source: super::TrackSource::Tracks(track_ids),
+                                                source: TrackSource::Tracks(track_ids),
                                                 position: event.position,
                                                 play: Some(Command::Play { track_id }),
                                             },
@@ -885,8 +1452,6 @@ impl GuiApp {
                                                 entry_ids,
                                                 expected_revision: revision,
                                             }),
-                                            None,
-                                            None,
                                             cx,
                                         );
                                         cx.stop_propagation();
@@ -896,7 +1461,7 @@ impl GuiApp {
                             .on_click(cx.listener(
                                 move |this, event: &gpui::ClickEvent, window, cx| {
                                     this.focus_layout(window, cx);
-                                    this.browser.focus_list(ListFocus::PlaylistTracks);
+                                    this.focus_list(cx);
                                     let modifiers = event.modifiers();
                                     this.select_playlist_entry(
                                         id,
@@ -1121,7 +1686,7 @@ impl GuiApp {
                 window.prevent_default();
                 if let Some(id) = this.browser.playlists().selected() {
                     this.resolve_library_drag(
-                        drag.nodes(),
+                        drag.nodes().to_vec(),
                         super::DragDestination::Playlist(id),
                         cx,
                     );
@@ -1199,7 +1764,7 @@ impl GuiApp {
                     )
                     .on_mouse_down(
                         gpui::MouseButton::Left,
-                        cx.listener(|this, _, _, _| this.browser.focus_playlists()),
+                        cx.listener(|this, _, _, cx| this.focus_catalog(cx)),
                     )
                     .child(self.playlist_search.clone())
                     .child(icon_button(

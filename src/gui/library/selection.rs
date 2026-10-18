@@ -1,10 +1,9 @@
-use super::LibraryBrowser;
+use super::{Library, LibraryBrowser, LibraryEvent};
 use crate::gui::library::{
     LibraryNode,
     tree::{TreeBranch, TreeRangeSpan},
 };
 use crate::{
-    gui::{GuiApp, ListFocus},
     model::{DirectoryRow, LibrarySort, Query, QueryStamp},
     projection::QueryProjection,
     response::{QueryResponse, QueryRevisions, ViewResponse},
@@ -16,7 +15,7 @@ use std::{
     sync::Arc,
 };
 
-use crate::gui::manual_actions::{ManualAction, ManualIntentId};
+use crate::gui::manual_actions::ManualIntentId;
 
 #[derive(Debug)]
 enum SelectionError {
@@ -412,7 +411,7 @@ impl LibraryBrowser {
             .map(|(span, child)| Slice::tree(span, Some(child)))
             .chain(spans.into_iter().map(|span| Slice::tree(span, None)))
             .collect();
-        if !self.tree_active {
+        if !self.tree_active() {
             for slice in &mut slices {
                 if let Source::Tree(branch) = &slice.source
                     && !branch.is_forest()
@@ -555,9 +554,9 @@ impl LibraryBrowser {
     }
 }
 
-impl GuiApp {
+impl Library {
     pub(in crate::gui) fn library_range_pending(&self) -> bool {
-        self.browser.library.range_pending()
+        self.library.range_pending()
     }
 
     pub(in crate::gui) fn select_library_row(
@@ -568,18 +567,13 @@ impl GuiApp {
         multi: bool,
         cx: &mut Context<Self>,
     ) {
-        let id = self.begin_manual_intent();
-        self.prepare_library_row(
-            id,
-            LibraryRowRequest {
-                node,
-                index,
-                shift,
-                multi,
-                scroll: false,
-            },
-            cx,
-        );
+        cx.emit(LibraryEvent::Select(LibraryRowRequest {
+            node,
+            index,
+            shift,
+            multi,
+            scroll: false,
+        }));
     }
 
     pub(in crate::gui) fn prepare_library_row(
@@ -588,9 +582,7 @@ impl GuiApp {
         request: LibraryRowRequest,
         cx: &mut Context<Self>,
     ) {
-        if !self.manual_intent_current(id) {
-            return;
-        }
+        self.selection_intent = Some(id);
         let LibraryRowRequest {
             node,
             index,
@@ -601,30 +593,29 @@ impl GuiApp {
         let revisions = self.state.query_revisions(None);
         if !shift {
             let commit = LibraryCommit {
-                scope: Scope::capture(&self.browser.library, revisions),
+                scope: Scope::capture(&self.library, revisions),
                 endpoint: node,
                 index,
                 selected: None,
                 multi,
                 scroll,
             };
-            self.ready_manual_action(id, ManualAction::Library(commit), cx);
+            self.ready_selection(id, commit, cx);
             return;
         }
         let page_size = self.view_page_size();
         match self
-            .browser
             .library
             .start_range_selection(&node, index, multi, revisions, page_size)
         {
             Ok(true) => {
-                self.browser.library.range_selection.intent = Some(id);
+                self.library.range_selection.intent = Some(id);
                 self.pump_library_range(cx);
             }
-            Ok(false) => self.fail_manual_intent(id),
+            Ok(false) => self.fail_selection(id, cx),
             Err(error) => {
-                self.fail_manual_intent(id);
-                self.error = Some(error.localize(&self.i18n));
+                self.fail_selection(id, cx);
+                self.report_error(error.localize(&self.i18n), cx);
             }
         }
         cx.notify();
@@ -633,7 +624,7 @@ impl GuiApp {
     pub(in crate::gui) fn library_commit_valid(&self, commit: &LibraryCommit) -> bool {
         commit
             .scope
-            .matches(&self.browser.library, self.state.query_revisions(None))
+            .matches(&self.library, self.state.query_revisions(None))
             && commit.index < commit.scope.total()
     }
 
@@ -650,8 +641,7 @@ impl GuiApp {
             }
             return tracks
                 .chain(
-                    self.browser
-                        .library
+                    self.library
                         .selected()
                         .iter()
                         .copied()
@@ -660,20 +650,17 @@ impl GuiApp {
                 .min();
         }
         match &commit.endpoint {
-            LibraryNode::Track(id)
-                if !commit.multi || !self.browser.library.selected().contains(id) =>
-            {
+            LibraryNode::Track(id) if !commit.multi || !self.library.selected().contains(id) => {
                 Some(*id)
             }
             LibraryNode::Track(id) => self
-                .browser
                 .library
                 .selected()
                 .iter()
                 .copied()
                 .filter(|other| other != id)
                 .min(),
-            _ if commit.multi => self.browser.library.selected().iter().copied().min(),
+            _ if commit.multi => self.library.selected().iter().copied().min(),
             _ => None,
         }
     }
@@ -683,28 +670,23 @@ impl GuiApp {
         commit: LibraryCommit,
         cx: &mut Context<Self>,
     ) {
-        let endpoint = self.browser.library.publish_selection(commit);
-        self.browser.focus_list(ListFocus::Library);
+        let endpoint = self.library.publish_selection(commit);
+        cx.emit(LibraryEvent::Focus);
         self.finish_library_selection(&endpoint, cx);
     }
 
     fn finish_library_selection(&mut self, endpoint: &LibraryNode, cx: &mut Context<Self>) {
         let focus = match endpoint {
-            LibraryNode::Track(id) if self.browser.library.selected().contains(id) => Some(*id),
-            _ => self.browser.library.selected().iter().copied().min(),
+            LibraryNode::Track(id) if self.library.selected().contains(id) => Some(*id),
+            _ => self.library.selected().iter().copied().min(),
         };
-        if let Some(id) = focus {
-            self.request_track(id, cx);
-        } else {
-            self.clear_metadata_selection(cx);
-        }
-        self.browser.library.remember_selection();
-        self.sync_waveform(cx);
+        cx.emit(LibraryEvent::SelectionChanged(focus));
+        self.library.remember_selection();
         cx.notify();
     }
 
     fn pump_library_range(&mut self, cx: &mut Context<Self>) {
-        let Some(id) = self.browser.library.range_selection.intent else {
+        let Some(id) = self.library.range_selection.intent else {
             return;
         };
         if !self.manual_intent_current(id) {
@@ -716,37 +698,34 @@ impl GuiApp {
     fn pump_library_range_unchecked(&mut self, id: ManualIntentId, cx: &mut Context<Self>) {
         let revisions = self.state.query_revisions(None);
         match self
-            .browser
             .library
             .advance_range(revisions, &self.state.system.config.library_roots)
         {
             Err(error) => {
-                self.fail_manual_intent(id);
-                self.error = Some(error.localize(&self.i18n));
+                self.fail_selection(id, cx);
+                self.report_error(error.localize(&self.i18n), cx);
                 cx.notify();
             }
             Ok(RangeStep::Idle) => {}
-            Ok(RangeStep::Selected(commit)) => {
-                self.ready_manual_action(id, ManualAction::Library(commit), cx)
-            }
+            Ok(RangeStep::Selected(commit)) => self.ready_selection(id, commit, cx),
             Ok(RangeStep::Query { token, slice }) => {
-                let query = self.browser.library.range_query(token, &slice);
-                let ticket = self.browser.library.range_selection.projection.ticket();
-                let handle = self.handle.clone();
+                let query = self.library.range_query(token, &slice);
+                let ticket = self.library.range_selection.projection.ticket();
+                let handle = self.context.handle().clone();
                 cx.spawn(async move |this, cx| {
                     let response = cx
                         .background_executor()
                         .spawn(async move { handle.query_if_current(query, ticket) })
                         .await;
                     let _ = this.update(cx, |this, cx| {
+                        this.refresh(cx);
                         let revisions = this.state.query_revisions(None);
                         if let Err(error) = this
-                            .browser
                             .library
                             .complete_range(token, &slice, response, revisions)
                         {
-                            this.fail_manual_intent(id);
-                            this.error = Some(error.localize(&this.i18n));
+                            this.fail_selection(id, cx);
+                            this.report_error(error.localize(&this.i18n), cx);
                         }
                         // A cancelled batch cannot apply or overlap its successor.
                         this.pump_library_range(cx);
@@ -762,7 +741,7 @@ impl GuiApp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gui::browser::merge_selection;
+    use crate::gui::library::model::merge_selection;
     use crate::model::{LibraryRow, Page};
 
     fn revisions(library: u64, structure: u64) -> QueryRevisions {

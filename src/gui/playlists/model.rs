@@ -1,6 +1,5 @@
 //! Playlist identities, bounded pages and scroll positions.
-//! Kept under `browser` so page lifecycle mutations are private to the aggregate
-//! that also owns request cancellation, publication and physical worker gates.
+//! Request lifetimes are owned by the playlist feature's paired request state.
 use crate::gui::{paged::PagedRows, playlists::selection};
 use crate::model::{Page, PlaylistEntryLocation, PlaylistEntryRow, PlaylistSummary, Query};
 use gpui::ScrollStrategy;
@@ -320,7 +319,7 @@ impl PlaylistBrowser {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gui::browser::BrowserState;
+    use crate::gui::playlists::requests::PlaylistState as BrowserState;
     use std::sync::Arc;
     fn summary(id: i64, entry_count: usize) -> PlaylistSummary {
         PlaylistSummary {

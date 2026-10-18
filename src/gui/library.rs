@@ -1,13 +1,17 @@
 mod locate;
+mod model;
+mod owner;
+mod queries;
+mod requests;
+pub(in crate::gui) mod selection;
 pub(super) mod tree;
 
 use super::{
-    GuiApp, ListFocus,
-    browser::selection::LibraryRowRequest,
     components::{
         active_control, button, caption, column, disabled_control, icon_button, list_panel_header,
         list_viewport, panel_surface, panel_toolbar, quiet_icon_button, row,
     },
+    feature::FeatureContext,
 };
 use crate::{
     config::{LibraryColumn, LibraryColumns},
@@ -22,6 +26,49 @@ use tree::TreeItem;
 pub(super) use tree::{BranchStatus, DirectoryTree, TreeBranch};
 
 pub(super) use locate::LibraryLocateState;
+use model::LibraryBrowser;
+use selection::{LibraryCommit, LibraryRowRequest};
+
+pub(in crate::gui) enum LibraryEvent {
+    Select(LibraryRowRequest),
+    Navigate(usize),
+    Ready(
+        super::manual_actions::ManualIntentId,
+        std::cell::RefCell<Option<LibraryCommit>>,
+    ),
+    Failed(super::manual_actions::ManualIntentId),
+    SelectionChanged(Option<i64>),
+    SearchChanged,
+    Focus,
+    Reveal,
+    ContentMenu(std::cell::RefCell<Option<LibraryMenuRequest>>),
+    Error(String),
+}
+
+pub(in crate::gui) struct LibraryMenuRequest {
+    pub(in crate::gui) request: super::ContentMenuRequest,
+    pub(in crate::gui) guard: super::list_interaction::ContentGuard,
+    pub(in crate::gui) remove: Option<Command>,
+    pub(in crate::gui) nodes: Option<Vec<LibraryNode>>,
+    pub(in crate::gui) root: Option<std::path::PathBuf>,
+}
+
+pub(in crate::gui) struct Library {
+    context: FeatureContext,
+    state: std::rc::Rc<crate::projection::GuiSnapshot>,
+    i18n: Arc<crate::i18n::Localizer>,
+    library: LibraryBrowser,
+    library_search: gpui::Entity<super::components::search::ListSearch>,
+    requests: requests::LibraryRequests,
+    loading_text: super::loading::LoadingText<TreeBranch>,
+    visible: bool,
+    available: bool,
+    focused: bool,
+    selection_intent: Option<super::manual_actions::ManualIntentId>,
+    _search_subscription: gpui::Subscription,
+}
+
+impl gpui::EventEmitter<LibraryEvent> for Library {}
 
 pub(super) fn track_detail(
     i18n: &crate::i18n::Localizer,
@@ -147,6 +194,14 @@ pub(super) struct LibraryDrag {
 }
 
 impl LibraryDrag {
+    pub(in crate::gui) fn can_resolve(
+        &self,
+        _snapshot: &crate::projection::GuiSnapshot,
+        selection_pending: bool,
+    ) -> bool {
+        !selection_pending && !self.nodes().is_empty()
+    }
+
     pub(super) fn nodes(&self) -> &[LibraryNode] {
         self.nodes
             .get()
@@ -255,11 +310,7 @@ fn tree_guides(
     guides
 }
 
-impl GuiApp {
-    pub(super) fn can_resolve_library_drag(&self, drag: &LibraryDrag) -> bool {
-        !self.library_range_pending() && !drag.nodes().is_empty()
-    }
-
+impl Library {
     pub(super) fn library_drag_track_ids(&self, nodes: &[LibraryNode]) -> Vec<i64> {
         let mut ids = nodes
             .iter()
@@ -270,8 +321,7 @@ impl GuiApp {
             .collect::<Vec<_>>();
         ids.sort_unstable_by_key(|id| {
             (
-                self.browser
-                    .library
+                self.library
                     .tree()
                     .index_of(&LibraryNode::Track(*id))
                     .unwrap_or(usize::MAX),
@@ -321,26 +371,26 @@ impl GuiApp {
     }
 
     fn selected_tree_index(&self) -> Option<usize> {
-        self.browser.library.tree().selected_index()
+        self.library.tree().selected_index()
     }
 
     fn select_tree_row(&mut self, index: usize, cx: &mut Context<Self>) {
-        let id = self.begin_manual_intent();
-        self.prepare_tree_row(id, index, cx);
+        cx.emit(LibraryEvent::Navigate(index));
     }
 
-    fn prepare_tree_row(
+    pub(in crate::gui) fn prepare_tree_row(
         &mut self,
         id: super::manual_actions::ManualIntentId,
         index: usize,
         cx: &mut Context<Self>,
     ) {
+        self.selection_intent = Some(id);
         if !self.manual_intent_current(id) {
             return;
         }
-        let Some(node) = self.browser.library.navigate_tree_row(index) else {
-            self.browser.library.defer_manual_navigation(id);
-            for (branch, offset) in self.browser.library.demand_directories(index..index + 1) {
+        let Some(node) = self.library.navigate_tree_row(index) else {
+            self.library.defer_manual_navigation(id);
+            for (branch, offset) in self.library.demand_directories(index..index + 1) {
                 self.request_directory_page(branch, offset, cx);
             }
             cx.notify();
@@ -365,14 +415,14 @@ impl GuiApp {
         expanded: bool,
         cx: &mut Context<Self>,
     ) {
-        if self.browser.library.expand_directory(branch, expanded) {
+        if self.library.expand_directory(branch, expanded) {
             self.request_directory_page(branch.clone(), 0, cx);
         }
         cx.notify();
     }
 
     pub(super) fn navigate_library_tree(&mut self, down: bool, cx: &mut Context<Self>) {
-        let count = self.browser.library.tree().row_count();
+        let count = self.library.tree().row_count();
         if count == 0 {
             return;
         }
@@ -382,17 +432,15 @@ impl GuiApp {
             None if down => 0,
             None => count - 1,
         };
-        let id = self.begin_manual_intent();
-        self.prepare_tree_row(id, index, cx);
+        self.select_tree_row(index, cx);
     }
 
     pub(super) fn jump_library_edge(&mut self, last: bool, cx: &mut Context<Self>) {
-        let count = self.browser.library.tree().row_count();
+        let count = self.library.tree().row_count();
         if count == 0 {
             return;
         }
-        let intent = self.begin_manual_intent();
-        self.prepare_tree_row(intent, if last { count - 1 } else { 0 }, cx);
+        self.select_tree_row(if last { count - 1 } else { 0 }, cx);
     }
 
     pub(super) fn activate_library_tree(&mut self, cx: &mut Context<Self>) {
@@ -402,17 +450,13 @@ impl GuiApp {
         let Some(index) = self.selected_tree_index() else {
             return;
         };
-        let Some(TreeItem::Entry(visible)) = self.browser.library.tree().item(index) else {
+        let Some(TreeItem::Entry(visible)) = self.library.tree().item(index) else {
             return;
         };
         match visible.row {
             DirectoryRow::Directory { .. } => {
                 let branch = visible.branch.expect("directory has an occurrence");
-                self.set_directory_expanded(
-                    &branch,
-                    !self.browser.library.tree().expanded(&branch),
-                    cx,
-                );
+                self.set_directory_expanded(&branch, !self.library.tree().expanded(&branch), cx);
             }
             DirectoryRow::Track(track) => self.send(Command::Play { track_id: track.id }, cx),
         }
@@ -422,7 +466,7 @@ impl GuiApp {
         let Some(index) = self.selected_tree_index() else {
             return;
         };
-        let Some(TreeItem::Entry(visible)) = self.browser.library.tree().item(index) else {
+        let Some(TreeItem::Entry(visible)) = self.library.tree().item(index) else {
             return;
         };
         let depth = visible.depth;
@@ -432,7 +476,7 @@ impl GuiApp {
                     && let Some(branch) = &visible.branch
                 {
                     self.set_directory_expanded(branch, false, cx);
-                } else if let Some(parent) = self.browser.library.tree().parent_index(index) {
+                } else if let Some(parent) = self.library.tree().parent_index(index) {
                     self.select_tree_row(parent, cx);
                 }
             }
@@ -440,9 +484,9 @@ impl GuiApp {
                 if let Some(branch) = &visible.branch {
                     if !visible.expanded {
                         self.set_directory_expanded(branch, true, cx);
-                    } else if matches!(&self.browser.library.tree().item(index + 1),
+                    } else if matches!(&self.library.tree().item(index + 1),
                         Some(TreeItem::Entry(next)) if next.depth > depth)
-                        || matches!(&self.browser.library.tree().item(index + 1),
+                        || matches!(&self.library.tree().item(index + 1),
                             Some(TreeItem::Placeholder { depth: next_depth, .. }) if *next_depth > depth)
                     {
                         self.select_tree_row(index + 1, cx);
@@ -461,8 +505,8 @@ impl GuiApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = crate::gui::theme::palette(cx);
-        let row_count = self.browser.library.tree().row_count();
-        let scroll = &self.browser.library.tree().scroll;
+        let row_count = self.library.tree().row_count();
+        let scroll = &self.library.tree().scroll;
         // Local forest acceptance must notify after prepaint to redraw the loaded rows.
         let demand_owner = cx.entity().downgrade();
         let view = list_viewport(
@@ -471,17 +515,16 @@ impl GuiApp {
             uniform_list(
                 ("library-directory-tree", panel_id),
                 row_count,
-                cx.processor(move |this, range: std::ops::Range<usize>, window, cx| {
+                cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
                     let playing_track = this.state.current_track()
                         .filter(|_| this.state.playback.status == crate::model::PlaybackStatus::Playing)
                         .map(|track| track.id);
-                    let focused_index = (this.shell.layout_focus().is_focused(window)
-                        && this.browser.focus() == Some(super::BrowserFocus::List(ListFocus::Library)))
-                        .then(|| this.browser.library.tree().selected_index())
+                    let focused_index = this.focused
+                        .then(|| this.library.tree().selected_index())
                         .flatten();
                     range
                         .filter_map(|index| {
-                            let item = this.browser.library.tree().item(index)?;
+                            let item = this.library.tree().item(index)?;
                             let visible = match item {
                                 TreeItem::Entry(visible) => visible,
                                 TreeItem::Placeholder {
@@ -506,14 +549,14 @@ impl GuiApp {
                                             .min_w_0()
                                             .h_full()
                                             .overflow_hidden()
-                                            .child(tree_guides(theme, this.browser.library.tree(), index))
+                                            .child(tree_guides(theme, this.library.tree(), index))
                                             .child(
                                                 row()
                                                     .h_full()
                                                     .pl(gpui::rems(depth as f32 * 1.25))
                                                     .child(
                                                         crate::gui::components::caption(theme, this.tr(if failed { "gl-unavailable" } else { "gl-loading" }))
-                                                            .when(!this.loading_text.show_branch(&branch, failed), |text| text.invisible())
+                                                            .when(!this.loading_text.show(&branch, failed), |text| text.invisible())
                                                             .min_w_0()
                                                             .truncate(),
                                                     )
@@ -525,7 +568,7 @@ impl GuiApp {
                                                                 this.tr("gl-retry-folder"),
                                                                 cx,
                                                                 move |this, _, cx| {
-                                                                    this.browser.library.retry_directory(&branch);
+                                                                    this.library.retry_directory(&branch);
                                                                     this.request_directory_page(branch.clone(), offset, cx);
                                                                 },
                                                             ))
@@ -574,7 +617,7 @@ impl GuiApp {
                             let selected = this.directory_row_selected(entry);
                             let id = node.clone();
                             let retry_counts = path.as_deref().is_some_and(|path| {
-                                this.browser.library.root_count_failed(path)
+                                this.library.root_count_failed(path)
                             });
                             let scan = path.clone().map(|scan_path| {
                                 let hint = if retry_counts {
@@ -588,14 +631,14 @@ impl GuiApp {
                                     hint,
                                     cx,
                                     move |this, _, cx| {
-                                        if this.browser.library.root_count_failed(&scan_path) {
-                                            this.browser.library.retry_root_counts();
+                                        if this.library.root_count_failed(&scan_path) {
+                                            this.library.retry_root_counts();
                                             this.request_root_counts(cx);
                                         } else {
                                             this.send(
                                                 Command::Scan {
                                                     paths: vec![scan_path.clone()],
-                                                    force: this.browser.library.force_scan(),
+                                                    force: this.library.force_scan(),
                                                 },
                                                 cx,
                                             );
@@ -620,7 +663,7 @@ impl GuiApp {
                                         .text_sm()
                                         .font_family(super::fonts::SYMBOLS_FAMILY)
                                         .child(if let Some(branch) = &visible.branch {
-                                            if this.browser.library.tree().expanded(branch) {
+                                            if this.library.tree().expanded(branch) {
                                                 "󰝰"
                                             } else {
                                                 "󰉋"
@@ -650,7 +693,7 @@ impl GuiApp {
                                         )
                                         .when(path.is_some() && !detail.is_empty(), |view| {
                                             view.child(crate::gui::components::caption(theme, detail.clone()).min_w_0().truncate()
-                                                .when(visible.status == BranchStatus::Loading && !visible.branch.as_ref().is_some_and(|branch| this.loading_text.show_branch(branch, false)), |text| text.invisible())
+                                                .when(visible.status == BranchStatus::Loading && !visible.branch.as_ref().is_some_and(|branch| this.loading_text.show(branch, false)), |text| text.invisible())
                                                 .text_overflow(gpui::TextOverflow::Truncate("..".into())))
                                         })
                                         .when(matches!(entry, DirectoryRow::Track(track) if track.missing), |view| {
@@ -665,7 +708,7 @@ impl GuiApp {
                                         }),
                                 )
                                 .when(visible.depth == 0 && path.is_some(), |view| {
-                                    let count = this.browser.library.root_count_label(path.as_deref().expect("root path"));
+                                    let count = this.library.root_count_label(path.as_deref().expect("root path"));
                                     view.child(
                                         row()
                                             .gap_1()
@@ -682,7 +725,7 @@ impl GuiApp {
                                 .h_full()
                                 .relative()
                                 .overflow_hidden()
-                                .child(tree_guides(theme, this.browser.library.tree(), index))
+                                .child(tree_guides(theme, this.library.tree(), index))
                                 .child(name_content)
                                 .when_some(scan, |view, scan| {
                                     view.child(
@@ -719,20 +762,19 @@ impl GuiApp {
                                     view.border_color(gpui::rgb(theme.accent))
                                 })
                                 .when(matches!(entry, DirectoryRow::Track(track)
-                                    if this.browser.library.locate.highlight.is_some_and(|(id, started)|
+                                    if this.library.locate.highlight.is_some_and(|(id, started)|
                                         id == track.id && started.elapsed() < std::time::Duration::from_secs(2))), |view| {
                                     view.bg(gpui::rgb(theme.highlight)).border_color(gpui::rgb(theme.accent))
                                 })
-                                .on_mouse_down(gpui::MouseButton::Right, cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
-                                    this.focus_layout(window, cx);
-                                    this.browser.focus_list(ListFocus::Library);
+                                .on_mouse_down(gpui::MouseButton::Right, cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                                    cx.emit(LibraryEvent::Focus);
                                     if this.library_range_pending() { cx.stop_propagation(); return; }
                                     let selected = match &menu_node {
-                                        LibraryNode::Track(id) => this.browser.library.selected().contains(id),
-                                        LibraryNode::Directory(_) => this.browser.library.selected_nodes().contains(&menu_node),
+                                        LibraryNode::Track(id) => this.library.selected().contains(id),
+                                        LibraryNode::Directory(_) => this.library.selected_nodes().contains(&menu_node),
                                     };
                                     if !selected { this.select_library_row(menu_node.clone(), index, false, false, cx); }
-                                    let nodes = this.browser.library.drag_nodes(&menu_node);
+                                    let nodes = this.library.drag_nodes(&menu_node);
                                     let track_ids = this.library_drag_track_ids(&nodes);
                                     let only_tracks = nodes.iter().all(|node| matches!(node, LibraryNode::Track(_)));
                                     let play = match &menu_node { LibraryNode::Track(track_id) => Some(Command::Play { track_id: *track_id }), _ => None };
@@ -789,7 +831,7 @@ impl GuiApp {
                                         super::components::begin_list_drag(window, cx);
                                         app.update(cx, |this, cx| {
                                             let nodes = drag.nodes.get_or_init(|| {
-                                                this.browser.library.drag_nodes(&drag.source)
+                                                this.library.drag_nodes(&drag.source)
                                             });
                                             cx.new(|_| {
                                                 LibraryDragPreview::new(&this.i18n, nodes, title.clone())
@@ -799,10 +841,9 @@ impl GuiApp {
                                 )
                             })
                             .on_click(cx.listener(
-                                move |this, event: &gpui::ClickEvent, window, cx| {
-                                    this.browser.library.cancel_navigation();
-                                    this.focus_layout(window, cx);
-                                    this.browser.focus_list(ListFocus::Library);
+                                move |this, event: &gpui::ClickEvent, _, cx| {
+                                    this.library.cancel_navigation();
+                                    cx.emit(LibraryEvent::Focus);
                                     match id.clone() {
                                         LibraryNode::Track(id) => {
                                             let modifiers = event.modifiers();
@@ -827,7 +868,7 @@ impl GuiApp {
                                                     .expect("directory occurrence");
                                                 this.set_directory_expanded(
                                                     branch,
-                                                    !this.browser.library.tree().expanded(branch),
+                                                    !this.library.tree().expanded(branch),
                                                     cx,
                                                 );
                                             }
@@ -851,14 +892,14 @@ impl GuiApp {
                 let owner = demand_owner.clone();
                 cx.defer(move |cx| {
                     let _ = owner.update(cx, |this, cx| {
-                        if !this.panel_demand("library") {
+                        if !this.demanded() {
                             return;
                         }
                         this.request_root_counts(cx);
-                        for (path, offset) in this.browser.library.demand_directories(range) {
+                        for (path, offset) in this.library.demand_directories(range) {
                             this.request_directory_page(path, offset, cx);
                         }
-                        if let Some((id, index)) = this.browser.library.take_ready_manual_navigation() {
+                        if let Some((id, index)) = this.library.take_ready_manual_navigation() {
                             this.prepare_tree_row(id, index, cx);
                         }
                     });
@@ -875,7 +916,7 @@ impl GuiApp {
     }
 }
 
-impl GuiApp {
+impl Library {
     fn library_scan_status(&self, panel_id: u64, cx: &mut Context<Self>) -> Div {
         let theme = crate::gui::theme::palette(cx);
         use crate::model::ScanPhase;
@@ -1001,16 +1042,14 @@ impl GuiApp {
     pub(super) fn library_panel(
         &mut self,
         panel_id: u64,
-        _tab_bar_visible: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = crate::gui::theme::palette(cx);
         self.finish_library_locate_render(window, cx);
-        let total = self.browser.library.tree().root_total();
+        let total = self.library.tree().root_total();
         let range_pending = self.library_range_pending();
         let selected_directories = self
-            .browser
             .library
             .selected_nodes()
             .iter()
@@ -1018,7 +1057,7 @@ impl GuiApp {
             .count();
         let selection_label = if range_pending {
             self.i18n.text("gl-selecting").to_owned()
-        } else if selected_directories > 0 && self.browser.library.selected().is_empty() {
+        } else if selected_directories > 0 && self.library.selected().is_empty() {
             self.i18n.format(
                 "gl-folders-selected",
                 &[("count", (selected_directories).into())],
@@ -1027,14 +1066,14 @@ impl GuiApp {
             self.i18n.format(
                 "gl-mixed-selected",
                 &[
-                    ("tracks", (self.browser.library.selected().len()).into()),
+                    ("tracks", (self.library.selected().len()).into()),
                     ("folders", (selected_directories).into()),
                 ],
             )
-        } else if !self.browser.library.selected().is_empty() {
+        } else if !self.library.selected().is_empty() {
             self.i18n.format(
                 "gl-tracks-selected",
-                &[("count", (self.browser.library.selected().len()).into())],
+                &[("count", (self.library.selected().len()).into())],
             )
         } else if let Some(total) = total {
             self.i18n
@@ -1065,16 +1104,16 @@ impl GuiApp {
                     cx,
                     |this, window, cx| this.locate_playing_library(window, cx),
                 ),
-                self.state.current_track().is_none() || self.browser.library.locate.pending,
+                self.state.current_track().is_none() || self.library.locate.pending,
             ))
             .child(icon_button(
                 ("library-view", panel_id),
-                if self.browser.library.tree_active() {
+                if self.library.tree_active() {
                     "󰉋"
                 } else {
                     "󰉢"
                 },
-                if self.browser.library.tree_active() {
+                if self.library.tree_active() {
                     self.tr("gl-flat-view")
                 } else {
                     self.tr("gl-tree-view")
@@ -1093,7 +1132,7 @@ impl GuiApp {
                         this.refresh_favorite_filter(cx);
                     },
                 ),
-                self.browser.library.favorites_only(),
+                self.library.favorites_only(),
             ))
             .child(active_control(
                 theme,
@@ -1103,29 +1142,29 @@ impl GuiApp {
                     self.tr("gl-filter-missing"),
                     cx,
                     |this, _, cx| {
-                        this.browser.library.toggle_missing();
+                        this.library.toggle_missing();
                         this.refresh_filter(cx);
                     },
                 ),
-                self.browser.library.missing_only(),
+                self.library.missing_only(),
             ))
             .child(active_control(
                 theme,
                 icon_button(
                     ("library-force-scan", panel_id),
                     "󱉶",
-                    if self.browser.library.force_scan() {
+                    if self.library.force_scan() {
                         self.tr("gl-force-on")
                     } else {
                         self.tr("gl-force-off")
                     },
                     cx,
                     |this, _, cx| {
-                        this.browser.library.toggle_force_scan();
+                        this.library.toggle_force_scan();
                         cx.notify();
                     },
                 ),
-                self.browser.library.force_scan(),
+                self.library.force_scan(),
             ))
             .child(icon_button(
                 ("library-add-root", panel_id),
@@ -1136,7 +1175,7 @@ impl GuiApp {
             ));
         let mut panel = panel_surface(("library-panel", panel_id))
             .child(row().items_end().child(heading).child(tools));
-        if let Some((track_id, result)) = &self.browser.library.locate.notice
+        if let Some((track_id, result)) = &self.library.locate.notice
             && self
                 .state
                 .current_track()
@@ -1171,12 +1210,14 @@ impl GuiApp {
         if self.state.system.scan_progress.is_some() || self.state.system.scanning {
             panel = panel.child(self.library_scan_status(panel_id, cx));
         }
-        self.workspace.scroll_views.borrow_mut().register_list(("library-projection", panel_id),
-        &self.browser.library.tree().scroll,);
+        self.context.scroll.borrow_mut().register_list(
+            ("library-projection", panel_id),
+            &self.library.tree().scroll,
+        );
         // Track counts describe contents, not the configured root projection.
         // Keep its viewport mounted so root changes can demand a fresh forest.
-        if let Some((0, total)) = self.browser.library.search_counts()
-            && (total != 0 || self.browser.library.tree().row_count() == 0)
+        if let Some((0, total)) = self.library.search_counts()
+            && (total != 0 || self.library.tree().row_count() == 0)
         {
             panel = panel.child(caption(
                 theme,
@@ -1196,14 +1237,11 @@ impl GuiApp {
 }
 #[cfg(test)]
 mod library_root_tests {
-    use super::GuiApp;
+    use super::{FeatureContext, Library};
     use crate::{
         config::Config,
         core::{CoreHandle, GuiConfigChange, Runtime},
-        gui::{
-            layout::{Node, Panel, save_owner::LayoutSaveOwner},
-            library::tree::TreeItem,
-        },
+        gui::library::tree::TreeItem,
         i18n::Localizer,
         model::{DirectoryRow, Query},
     };
@@ -1220,7 +1258,7 @@ mod library_root_tests {
         );
     }
 
-    fn draw_library(window: &mut VisualTestContext, app: &Entity<GuiApp>) {
+    fn draw_library(window: &mut VisualTestContext, app: &Entity<Library>) {
         // The first draw demands the forest; the second renders accepted roots
         // after the independently completed zero-track count.
         for _ in 0..2 {
@@ -1232,9 +1270,9 @@ mod library_root_tests {
         }
     }
 
-    fn assert_roots(window: &mut VisualTestContext, app: &Entity<GuiApp>, roots: &[PathBuf]) {
+    fn assert_roots(window: &mut VisualTestContext, app: &Entity<Library>, roots: &[PathBuf]) {
         app.update(&mut window.cx, |this, _| {
-            let tree = this.browser.library.tree();
+            let tree = this.library.tree();
             let rendered = (0..tree.row_count())
                 .map(|index| match tree.item(index) {
                     Some(TreeItem::Entry(row)) if row.depth == 0 => match row.row {
@@ -1245,7 +1283,7 @@ mod library_root_tests {
                 })
                 .collect::<Vec<_>>();
             assert_eq!(rendered, roots);
-            assert_eq!(this.browser.library.search_counts(), Some((0, 0)));
+            assert_eq!(this.library.search_counts(), Some((0, 0)));
             assert_eq!(this.state.library.track_total, 0);
             assert!(!this.state.system.scanning);
             assert!(this.state.system.scan_progress.is_none());
@@ -1268,47 +1306,27 @@ mod library_root_tests {
         .unwrap();
         let runtime = Runtime::start(directory.path(), &config_path).unwrap();
         settle_config(&runtime.handle);
-        let layouts = LayoutSaveOwner::new(directory.path().join("layouts.toml"));
-        // Finish initial layout persistence before installing GUI wakers.
-        let (mut initial_layouts, _) = layouts.handle().snapshot();
-        let config = runtime.handle.config_snapshot();
-        initial_layouts
-            .current_mut()
-            .initialize_audio_visualizers(config.as_ref().into());
-        initial_layouts
-            .current_mut()
-            .initialize_album_artworks(config.as_ref().into());
-        layouts.handle().submit(&initial_layouts);
-        layouts.flush().unwrap();
-        let artwork = Arc::new(crate::artwork::ArtworkManager::new(directory.path()));
-        let (app, window) = cx.add_window_view(|window, cx| {
-            GuiApp::new(
+        let i18n = Arc::new(Localizer::new("en-US"));
+        let labels = std::rc::Rc::new(
+            i18n.fixed_texts()
+                .map(|(id, text)| (id.to_owned(), gpui::SharedString::from(text.to_owned())))
+                .collect(),
+        );
+        let context = FeatureContext {
+            snapshots: std::rc::Rc::new(crate::gui::snapshot::SnapshotSource::new(
                 runtime.handle.clone(),
-                layouts.handle(),
-                artwork,
-                std::rc::Weak::new(),
-                Arc::new(Localizer::new("en-US")),
-                window,
-                cx,
-            )
-        });
+            )),
+            i18n,
+            labels,
+            scroll: Default::default(),
+        };
+        let (app, window) = cx.add_window_view(|_, cx| Library::new(context, cx));
         // Native worker threads cannot wake GPUI's deterministic scheduler.
         // FIFO Core barriers and draw_library's refresh own test synchronization.
         runtime.handle.set_wakeup(|| {});
-        layouts.handle().set_wakeup(|| {});
-        app.update(&mut window.cx, |this, _| {
-            this.window_visible = true;
-            this.workspace.layouts.current_mut().root = Some(Node::Tabs {
-                id: 1,
-                active: 2,
-                panels: vec![Panel {
-                    id: 2,
-                    kind: "library".into(),
-                    show_tab_bar: false,
-                    audio_visualizer: None,
-                    album_artwork: None,
-                }],
-            });
+        app.update(&mut window.cx, |this, cx| {
+            this.set_available(true);
+            this.set_visible(true, cx);
         });
         draw_library(window, &app);
         assert_roots(window, &app, &[]);

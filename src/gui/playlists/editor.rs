@@ -1,7 +1,9 @@
+use super::{PlaylistEvent, Playlists};
 use crate::gui::components::{
     StatusKind, caption, column, form_field, icon_button, row, status_message,
 };
-use crate::gui::*;
+use crate::{gui::UI_INSET, model::Command};
+use gpui::{AnyElement, Context, Focusable, Window, div, prelude::*, px, relative, rems, rgb};
 
 pub(in crate::gui) enum PlaylistNameAction {
     Create { track_ids: Vec<i64> },
@@ -15,7 +17,7 @@ pub(in crate::gui) struct PlaylistEditor {
     pub(in crate::gui) error: Option<String>,
 }
 
-impl GuiApp {
+impl Playlists {
     pub(in crate::gui) fn begin_playlist_name(
         &mut self,
         action: PlaylistNameAction,
@@ -26,18 +28,16 @@ impl GuiApp {
         if self.playlist_editor.is_some() {
             return;
         }
-        self.cancel_interaction(window, cx);
-        self.panel_menu = None;
-        self.set_value(Field::PlaylistName, name, cx);
+        cx.emit(PlaylistEvent::CancelInteraction);
+        cx.emit(PlaylistEvent::ClearMenus);
+        self.name_input
+            .update(cx, |input, cx| input.set_text(name, cx));
         self.playlist_editor = Some(PlaylistEditor {
             action,
             pending: false,
             error: None,
         });
-        self.input(Field::PlaylistName)
-            .read(cx)
-            .focus_handle(cx)
-            .focus(window, cx);
+        self.name_input.read(cx).focus_handle(cx).focus(window, cx);
         cx.notify();
     }
 
@@ -54,17 +54,14 @@ impl GuiApp {
             return;
         }
         self.playlist_editor = None;
-        self.set_value(Field::PlaylistName, "", cx);
+        self.name_input
+            .update(cx, |input, cx| input.set_text("", cx));
         self.focus_layout(window, cx);
         cx.notify();
     }
 
-    pub(in crate::gui) fn submit_playlist_name(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let name = self.value(Field::PlaylistName, cx).trim().to_owned();
+    pub(in crate::gui) fn submit_playlist_name(&mut self, cx: &mut Context<Self>) {
+        let name = self.name_input.read(cx).text().trim().to_owned();
         let Some(editor) = self.playlist_editor.as_mut() else {
             return;
         };
@@ -92,29 +89,27 @@ impl GuiApp {
         };
         editor.pending = true;
         editor.error = None;
-        self.focus_layout(window, cx);
-        let handle = self.handle.clone();
-        cx.spawn_in(window, async move |this, cx| {
+        cx.emit(PlaylistEvent::Focus(None));
+        let handle = self.context.handle().clone();
+        cx.spawn(async move |this, cx| {
             let ack = cx
                 .background_executor()
                 .spawn(async move { handle.request_ack(command) })
                 .await;
-            let _ = this.update_in(cx, |this, window, cx| {
+            let _ = this.update(cx, |this, cx| {
                 this.refresh(cx);
                 if ack.ok {
                     this.playlist_editor = None;
-                    this.set_value(Field::PlaylistName, "", cx);
-                    this.focus_layout(window, cx);
+                    this.name_input
+                        .update(cx, |input, cx| input.set_text("", cx));
+                    cx.emit(PlaylistEvent::Focus(None));
                 } else if let Some(editor) = this.playlist_editor.as_mut() {
                     editor.pending = false;
                     editor.error = Some(
                         ack.error
                             .unwrap_or_else(|| this.i18n.text("gl-playlist-save-failed").into()),
                     );
-                    this.input(Field::PlaylistName)
-                        .read(cx)
-                        .focus_handle(cx)
-                        .focus(window, cx);
+                    cx.emit(PlaylistEvent::FocusName);
                 }
                 cx.notify();
             });
@@ -156,7 +151,7 @@ impl GuiApp {
         }
         if editor.pending {
             content = content
-                .child(caption(theme, self.value(Field::PlaylistName, cx)))
+                .child(caption(theme, self.name_input.read(cx).text().to_owned()))
                 .child(status_message(
                     theme,
                     self.tr("gl-saving"),
@@ -166,7 +161,7 @@ impl GuiApp {
             content = content.child(form_field(
                 theme,
                 self.tr("gl-name"),
-                self.input(Field::PlaylistName),
+                self.name_input.clone(),
             ));
             if let Some(error) = &editor.error {
                 content = content.child(status_message(theme, error.clone(), StatusKind::Error));
@@ -186,7 +181,7 @@ impl GuiApp {
                         "",
                         submit,
                         cx,
-                        |this, window, cx| this.submit_playlist_name(window, cx),
+                        |this, _, cx| this.submit_playlist_name(cx),
                     )),
             );
         }
