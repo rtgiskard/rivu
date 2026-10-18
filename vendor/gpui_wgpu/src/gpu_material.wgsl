@@ -56,6 +56,31 @@ fn rectangle_vertex(@builtin(vertex_index) vertex: u32, @builtin(instance_index)
     return RectangleVertexOutput(value.position, value.local, value.instance);
 }
 @vertex
+fn segment_vertex(@builtin(vertex_index) vertex: u32, @builtin(instance_index) instance: u32) -> VertexOutput {
+    let layer = instance / placement.field.x;
+    let segment = instance % placement.field.x;
+    let offset = placement.field.y * 4u + segment * 8u;
+    let start = vec2<f32>(data_float(offset), data_float(offset + 1u)) * placement.bounds.zw;
+    let end = vec2<f32>(data_float(offset + 2u), data_float(offset + 3u)) * placement.bounds.zw;
+    let delta = end - start;
+    // Zero-length lines produce degenerate triangles, never NaNs or a square dot.
+    let normal = vec2<f32>(-delta.y, delta.x) / max(length(delta), 0.000001);
+    let corners = array<vec2<f32>, 6>(
+        vec2<f32>(0.0, -0.5), vec2<f32>(1.0, -0.5), vec2<f32>(0.0, 0.5),
+        vec2<f32>(0.0, 0.5), vec2<f32>(1.0, -0.5), vec2<f32>(1.0, 0.5));
+    let corner = corners[vertex];
+    let pixel = placement.bounds.xy + mix(start, end, corner.x)
+        + normal * corner.y * data_float(layer * 4u) * placement.scale;
+    return VertexOutput(screen_position(pixel), vec2<f32>(0.0),
+        data[offset + 4u] + data[layer * 4u + 1u]);
+}
+@fragment
+fn segment_fragment(input: VertexOutput) -> @location(0) vec4<f32> {
+    if clipped(input.position.xy) { discard; }
+    return finish_color(palette[input.instance], 1.0, true);
+}
+
+@vertex
 fn path_vertex(@builtin(vertex_index) vertex: u32) -> VertexOutput {
     let offset = vertex * 4u;
     let xy = vec2<f32>(data_float(offset), data_float(offset + 1u));

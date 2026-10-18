@@ -6,8 +6,8 @@ use crate::{
     config::{AudioVisualizerOptions, AudioVisualizerStyle, Config},
 };
 use gpui::{
-    AnyElement, App, Bounds, PathBuilder, Pixels, TextAlign, Window, canvas, div, fill, point,
-    prelude::*, px, rgb, size,
+    AnyElement, App, Bounds, GpuFrame, GpuLimits, GpuPalette, GpuSegment, GpuSource,
+    GpuStrokeLayer, Pixels, TextAlign, Window, canvas, div, fill, point, prelude::*, px, rgb, size,
 };
 use std::{cell::RefCell, rc::Rc, sync::Arc, time::Duration};
 
@@ -89,6 +89,10 @@ struct Data {
     drive: Drive,
     previous_energy: f32,
     scene: Option<Scene>,
+    gpu_frame: Option<Arc<GpuFrame>>,
+    gpu_palette: Option<Arc<GpuPalette>>,
+    gpu_segments: Vec<GpuSegment>,
+    gpu_error_reported: bool,
 }
 
 impl FractalVisualizer {
@@ -114,6 +118,10 @@ impl FractalVisualizer {
                 drive: Drive::default(),
                 previous_energy: 0.0,
                 scene: None,
+                gpu_frame: None,
+                gpu_palette: None,
+                gpu_segments: Vec::new(),
+                gpu_error_reported: false,
             })),
         }
     }
@@ -133,6 +141,9 @@ impl FractalVisualizer {
             || data.sensitivity != config.audio_visualizer_sensitivity
             || data.db_range != config.audio_visualizer_db_range()
             || data.bloom != config.audio_visualizer_bloom_intensity;
+        if data.colors != colors || data.bloom != config.audio_visualizer_bloom_intensity {
+            data.gpu_palette = None;
+        }
         data.settings = settings;
         data.colors = colors;
         data.background = config.visual_background.rgb();
@@ -141,6 +152,9 @@ impl FractalVisualizer {
         data.bloom = config.audio_visualizer_bloom_intensity;
         if reset {
             data.reset();
+        }
+        if changed && !reset {
+            data.publish();
         }
         changed
     }
@@ -151,6 +165,8 @@ impl FractalVisualizer {
         if data.visible != visible {
             data.visible = visible;
             data.scene = None;
+            data.gpu_segments = Vec::new();
+            data.gpu_palette = None;
             data.reset();
         }
         restored
@@ -198,6 +214,8 @@ impl FractalVisualizer {
 
 impl Data {
     fn reset(&mut self) {
+        self.gpu_frame = None;
+        self.gpu_segments.clear();
         self.source = None;
         self.last_time = None;
         self.drive = Drive::default();
@@ -207,6 +225,7 @@ impl Data {
         }
     }
 
+    #[cfg(test)]
     fn segments(&self) -> &[LightSegment] {
         self.scene.as_ref().map(Scene::segments).unwrap_or(&[])
     }
@@ -281,6 +300,119 @@ impl Data {
             None => {}
         }
         self.last_time = Some(frame.sample_time);
+        self.publish();
+    }
+
+    fn publish(&mut self) {
+        if !self.visible || self.scene.is_none() {
+            self.gpu_frame = None;
+            return;
+        }
+        let result = self.publication();
+        match result {
+            Ok(frame) => {
+                self.gpu_frame = Some(frame);
+                self.gpu_error_reported = false;
+            }
+            Err(error) => {
+                self.gpu_frame = None;
+                if !self.gpu_error_reported {
+                    eprintln!("rivu fractal GPU publication: {error:#}");
+                    self.gpu_error_reported = true;
+                }
+            }
+        }
+    }
+
+    fn publication(&mut self) -> anyhow::Result<Arc<GpuFrame>> {
+        // Flow has at most 96 * 23 lines; Beams has 3 * 63 * 4.
+        const MAX_SEGMENTS: usize = 96 * 23;
+        let palette = if let Some(palette) = &self.gpu_palette {
+            palette.clone()
+        } else {
+            let colors: [[f32; 4]; 27] = std::array::from_fn(|index| {
+                let pass = index / 9;
+                let group = index % 9;
+                let mut color = blend(self.colors[0], self.colors[1], (group / 3) as f32 * 0.5);
+                if self.style != AudioVisualizerStyle::FractalFlow && pass == 2 {
+                    color = blend(color, 0xffffff, [0.0, 0.28, 0.62][group % 3]);
+                }
+                let alpha = [0.045 * self.bloom, 0.15 * self.bloom, 0.9][pass]
+                    * ((group % 3) as f32 + 0.5)
+                    / 3.0;
+                [
+                    ((color >> 16) & 255) as f32 / 255.0,
+                    ((color >> 8) & 255) as f32 / 255.0,
+                    (color & 255) as f32 / 255.0,
+                    alpha,
+                ]
+            });
+            let palette = GpuPalette::new(&colors, 27)?;
+            self.gpu_palette = Some(palette.clone());
+            palette
+        };
+        let segments = self.scene.as_ref().expect("published scene").segments();
+        let group = |s: &LightSegment| s.tone * 3 + ((s.strength * 3.0) as usize).min(2);
+        let mut counts = [0usize; 9];
+        for segment in segments.iter().filter(|s| s.strength >= 0.015) {
+            counts[group(segment)] += 1;
+        }
+        let count: usize = counts.iter().sum();
+        anyhow::ensure!(count <= MAX_SEGMENTS, "Fractal segment capacity exceeded");
+        self.gpu_segments.resize(
+            count,
+            GpuSegment {
+                endpoints: [0.0; 4],
+                color: 0,
+            },
+        );
+        let mut offsets = [0usize; 9];
+        for index in 1..9 {
+            offsets[index] = offsets[index - 1] + counts[index - 1];
+        }
+        for segment in segments.iter().filter(|s| s.strength >= 0.015) {
+            let index = group(segment);
+            self.gpu_segments[offsets[index]] = GpuSegment {
+                endpoints: [
+                    segment.from[0],
+                    segment.from[1],
+                    segment.to[0],
+                    segment.to[1],
+                ]
+                .map(|v| 0.5 + v * 0.47),
+                color: index as u32,
+            };
+            offsets[index] += 1;
+        }
+        let layers = [
+            GpuStrokeLayer {
+                width: 9.0,
+                palette_offset: 0,
+            },
+            GpuStrokeLayer {
+                width: 4.0,
+                palette_offset: 9,
+            },
+            GpuStrokeLayer {
+                width: 1.0,
+                palette_offset: 18,
+            },
+        ];
+        GpuFrame::segments(
+            &self.gpu_segments,
+            if self.bloom > 0.0 {
+                &layers
+            } else {
+                &layers[2..]
+            },
+            palette,
+            GpuLimits {
+                max_segments: MAX_SEGMENTS,
+                max_stroke_layers: 3,
+                max_palette_colors: 27,
+                ..Default::default()
+            },
+        )
     }
 
     fn paint(
@@ -298,59 +430,16 @@ impl Data {
         if side < 24.0 {
             return;
         }
-        let center = point(
-            bounds.left() + bounds.size.width * 0.5,
-            bounds.top() + bounds.size.height * 0.5,
-        );
-        let scale = side * 0.47;
-        let tone_colors: [u32; 3] =
-            std::array::from_fn(|tone| blend(self.colors[0], self.colors[1], tone as f32 * 0.5));
-        // Three color groups and three intensity buckets, independent of branch count.
-        // Wide translucent strokes approximate a halo without image feedback buffers.
-        for pass in 0..3 {
-            if pass < 2 && self.bloom <= 0.0 {
-                continue;
-            }
-            let (width, alpha) = match pass {
-                0 => (9.0, 0.045 * self.bloom),
-                1 => (4.0, 0.15 * self.bloom),
-                _ => (1.0, 0.9),
-            };
-            let mut paths: [PathBuilder; 9] =
-                std::array::from_fn(|_| PathBuilder::stroke(px(width)));
-            let mut used = [false; 9];
-            for segment in self.segments() {
-                if segment.strength < 0.015 {
-                    continue;
-                }
-                let bucket = ((segment.strength * 3.0) as usize).min(2);
-                let index = segment.tone * 3 + bucket;
-                let path = &mut paths[index];
-                path.move_to(point(
-                    center.x + px(segment.from[0] * scale),
-                    center.y + px(segment.from[1] * scale),
-                ));
-                path.line_to(point(
-                    center.x + px(segment.to[0] * scale),
-                    center.y + px(segment.to[1] * scale),
-                ));
-                used[index] = true;
-            }
-            for (index, path) in paths.into_iter().enumerate() {
-                if used[index] {
-                    let mut color = tone_colors[index / 3];
-                    if self.style != AudioVisualizerStyle::FractalFlow && pass == 2 {
-                        // Bright cores contrast with the saturated halo. Leave
-                        // Flow's accepted trail colors and alpha buckets intact.
-                        color = blend(color, 0xffffff, [0.0, 0.28, 0.62][index % 3]);
-                    }
-                    if let Ok(path) = path.build() {
-                        window.paint_path(
-                            path,
-                            rgb(color).alpha(alpha * ((index % 3) as f32 + 0.5) / 3.0),
-                        );
-                    }
-                }
+        if let Some(frame) = &self.gpu_frame {
+            let scene_bounds = Bounds::new(
+                point(
+                    bounds.left() + (bounds.size.width - px(side)) * 0.5,
+                    bounds.top() + (bounds.size.height - px(side)) * 0.5,
+                ),
+                size(px(side), px(side)),
+            );
+            if let Err(error) = window.paint_gpu(scene_bounds, GpuSource::Fixed(frame.clone())) {
+                eprintln!("rivu fractal GPU paint: {error:#}");
             }
         }
         paint_scene_guides(

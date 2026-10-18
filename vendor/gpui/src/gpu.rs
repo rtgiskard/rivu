@@ -88,11 +88,33 @@ pub struct GpuRectangleParams {
     pub cell_gap: f32,
 }
 
+/// Independent butt-capped line in normalized placement coordinates.
+#[derive(Clone, Copy, Debug)]
+pub struct GpuSegment {
+    /// Finite endpoints; content masks, not the unit square, clip geometry.
+    pub endpoints: [f32; 4],
+    /// Base palette index, offset by each layer.
+    pub color: u32,
+}
+
+/// Ordered stroke layer sharing the same endpoint storage.
+#[derive(Clone, Copy, Debug)]
+pub struct GpuStrokeLayer {
+    /// Positive logical pixel width, independent of placement size.
+    pub width: f32,
+    /// Added to each segment's palette index.
+    pub palette_offset: u32,
+}
+
 /// Stable CPU capacities. Unused geometry capacities may be zero.
 #[derive(Clone, Copy, Debug)]
 pub struct GpuLimits {
     /// Maximum procedural rectangle count.
     pub max_rectangles: usize,
+    /// Maximum independent line count.
+    pub max_segments: usize,
+    /// Maximum ordered stroke layer count.
+    pub max_stroke_layers: usize,
     /// Maximum scalar field width, including for empty fields.
     pub max_field_width: u32,
     /// Maximum scalar field height, including for empty fields.
@@ -109,6 +131,8 @@ impl Default for GpuLimits {
     fn default() -> Self {
         Self {
             max_rectangles: 0,
+            max_segments: 0,
+            max_stroke_layers: 0,
             max_field_width: 0,
             max_field_height: 0,
             max_field_cells: 0,
@@ -146,12 +170,32 @@ impl GpuLimits {
         Ok(())
     }
 
+    fn segments(self, count: usize, layers: usize) -> Result<()> {
+        ensure!(
+            count <= self.max_segments
+                && layers <= self.max_stroke_layers
+                && count <= u32::MAX as usize
+                && layers <= u32::MAX as usize,
+            "GPU segment capacity exceeded"
+        );
+        ensure!(
+            count
+                .checked_mul(layers)
+                .is_some_and(|n| n <= u32::MAX as usize),
+            "GPU segment instance count overflow"
+        );
+        Ok(())
+    }
+
     fn content(self, content: &GpuContent) -> Result<()> {
         match content {
             GpuContent::Rectangles { rectangles, .. } => ensure!(
                 rectangles.len() <= self.max_rectangles && rectangles.len() <= u32::MAX as usize,
                 "GPU rectangle capacity exceeded"
             ),
+            GpuContent::Segments { segments, layers } => {
+                self.segments(segments.len(), layers.len())?;
+            }
             GpuContent::Field {
                 width,
                 height,
@@ -177,6 +221,8 @@ pub enum GpuSchema {
     Field,
     /// Existing tessellated path geometry with palette material.
     Path,
+    /// Independent lines expanded by the GPU, with ordered shared-geometry layers.
+    Segments,
 }
 
 /// Scalar-to-palette coordinate mapping, followed by clamping to `0..=1`.
@@ -247,6 +293,13 @@ impl Default for GpuPathParams {
 /// Immutable payload exposed by a frame. The frame never exposes mutable access.
 #[derive(Debug)]
 pub enum GpuContent {
+    /// One endpoint payload reused across ordered stroke layers.
+    Segments {
+        /// Immutable ordered endpoints and base palette indices.
+        segments: Box<[GpuSegment]>,
+        /// Draw order is layer first, then segment order.
+        layers: Box<[GpuStrokeLayer]>,
+    },
     /// Normalized procedural rectangles.
     Rectangles {
         /// Owned immutable instance data.
@@ -415,6 +468,45 @@ impl GpuFrame {
         Self::new(GpuContent::Path { path, params }, palette)
     }
 
+    /// Validate capacities and all indices before allocating either payload.
+    pub fn segments(
+        segments: &[GpuSegment],
+        layers: &[GpuStrokeLayer],
+        palette: Arc<GpuPalette>,
+        limits: GpuLimits,
+    ) -> Result<Arc<Self>> {
+        limits.palette(&palette)?;
+        limits.segments(segments.len(), layers.len())?;
+        for layer in layers {
+            ensure!(
+                layer.width.is_finite() && layer.width > 0.0,
+                "GPU stroke width must be finite and positive"
+            );
+        }
+        for segment in segments {
+            ensure!(
+                segment.endpoints.iter().all(|v| v.is_finite()),
+                "GPU segment endpoints must be finite"
+            );
+            for layer in layers {
+                ensure!(
+                    segment
+                        .color
+                        .checked_add(layer.palette_offset)
+                        .is_some_and(|index| (index as usize) < palette.colors.len()),
+                    "GPU segment palette index out of range"
+                );
+            }
+        }
+        Self::new(
+            GpuContent::Segments {
+                segments: copy_slice(segments)?,
+                layers: copy_slice(layers)?,
+            },
+            palette,
+        )
+    }
+
     /// Process-unique immutable identity, never recycled after frame release.
     pub fn id(&self) -> u64 {
         self.id
@@ -426,6 +518,7 @@ impl GpuFrame {
             GpuContent::Rectangles { .. } => GpuSchema::Rectangles,
             GpuContent::Field { .. } => GpuSchema::Field,
             GpuContent::Path { .. } => GpuSchema::Path,
+            GpuContent::Segments { .. } => GpuSchema::Segments,
         }
     }
 

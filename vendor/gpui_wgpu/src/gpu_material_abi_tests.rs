@@ -255,7 +255,7 @@ fn rectangle_retirement_charges_unsubmitted_and_inflight_allocations() -> anyhow
     renderer.allocation_limit = 3 * INITIALIZATION_COPIES as usize;
     let prepared = renderer.prepare(&context.device, &[batch.clone(), batch.clone()], size);
     assert_eq!(prepared.len(), 1);
-    assert_eq!(renderer.pipeline_counts, [1, 0, 0]);
+    assert_eq!(renderer.pipeline_counts, [1, 0, 0, 0]);
     assert_eq!(
         renderer.last_failure_kinds,
         1 << 3,
@@ -391,7 +391,7 @@ fn pipelines_follow_admitted_variants_and_reuse_on_replay() -> anyhow::Result<()
         ..field_batch.clone()
     };
     assert!(renderer.prepare(device, &[cleared, empty], size).is_empty());
-    assert_eq!(renderer.pipeline_counts, [0, 0, 0]);
+    assert_eq!(renderer.pipeline_counts, [0, 0, 0, 0]);
     let invalid = GpuDraw {
         scale_factor: f32::NAN,
         ..field_batch.clone()
@@ -403,7 +403,7 @@ fn pipelines_follow_admitted_variants_and_reuse_on_replay() -> anyhow::Result<()
             .prepare(device, &[field_batch.clone(), path_batch.clone()], size)
             .is_empty()
     );
-    assert_eq!(renderer.pipeline_counts, [0, 0, 0]);
+    assert_eq!(renderer.pipeline_counts, [0, 0, 0, 0]);
     assert_eq!(renderer.upload_count, 0);
     renderer.byte_limit = MAX_BYTES;
     assert_eq!(
@@ -412,7 +412,7 @@ fn pipelines_follow_admitted_variants_and_reuse_on_replay() -> anyhow::Result<()
     );
     assert_eq!(
         renderer.pipeline_counts,
-        [0, 0, 1],
+        [0, 0, 1, 0],
         "path demand must not compile ordinary pipeline"
     );
     context.queue.submit(std::iter::empty());
@@ -424,17 +424,17 @@ fn pipelines_follow_admitted_variants_and_reuse_on_replay() -> anyhow::Result<()
             .prepare(device, &[field_batch.clone()], size)
             .is_empty()
     );
-    assert_eq!(renderer.pipeline_counts, [0, 0, 1]);
+    assert_eq!(renderer.pipeline_counts, [0, 0, 1, 0]);
     renderer.byte_limit = MAX_BYTES;
     let both = [path_batch, field_batch];
     assert_eq!(renderer.prepare(device, &both, size).len(), 2);
-    assert_eq!(renderer.pipeline_counts, [0, 1, 1]);
+    assert_eq!(renderer.pipeline_counts, [0, 1, 1, 0]);
     context.queue.submit(std::iter::empty());
     renderer.submitted(&context.queue);
     assert_eq!(renderer.prepare(device, &both, size).len(), 2);
     assert_eq!(
         renderer.pipeline_counts,
-        [0, 1, 1],
+        [0, 1, 1, 0],
         "replay must reuse both variants"
     );
     context.queue.submit(std::iter::empty());
@@ -443,7 +443,7 @@ fn pipelines_follow_admitted_variants_and_reuse_on_replay() -> anyhow::Result<()
     assert!(renderer.prepare(device, &both, size).is_empty());
     assert_eq!(
         renderer.pipeline_counts,
-        [0, 1, 1],
+        [0, 1, 1, 0],
         "disabled programs must not be recreated"
     );
     Ok(())

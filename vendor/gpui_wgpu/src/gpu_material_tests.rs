@@ -16,6 +16,8 @@ fn limits() -> GpuLimits {
         max_field_height: 1024,
         max_field_cells: 1024 * 1024,
         max_path_vertices: 4096,
+        max_segments: 2208,
+        max_stroke_layers: 3,
     }
 }
 fn size(width: i32, height: i32) -> Size<DevicePixels> {
@@ -92,6 +94,162 @@ fn pixel(image: &image::RgbaImage, x: u32, y: u32, expected: [u8; 4]) {
         actual.iter().zip(expected).all(|(a, e)| a.abs_diff(e) <= 3),
         "({x},{y}): {actual:?} != {expected:?}"
     );
+}
+
+#[test]
+fn segment_admission_bounds_indices_and_preserves_publication_on_failure() {
+    use gpui::{GpuSchema, GpuSegment, GpuStrokeLayer};
+    const LIMITS: GpuLimits = GpuLimits {
+        max_rectangles: 2,
+        max_segments: 2,
+        max_stroke_layers: 2,
+        max_field_width: 2,
+        max_field_height: 2,
+        max_field_cells: 4,
+        max_path_vertices: 6,
+        max_palette_colors: 2,
+    };
+    fn palette() -> Arc<GpuPalette> {
+        GpuPalette::new(&[[0.0, 0.5, 1.0, 0.0], [1.0; 4]], 2).unwrap()
+    }
+    let line = GpuSegment {
+        endpoints: [0.0, 0.5, 1.0, 0.5],
+        color: 0,
+    };
+    let layer = GpuStrokeLayer {
+        width: 1.0,
+        palette_offset: 1,
+    };
+    let initial = GpuFrame::segments(&[line], &[layer], palette(), LIMITS).unwrap();
+    let slot = GpuState::new(initial.clone(), LIMITS).unwrap();
+    assert!(GpuFrame::segments(&[line; 3], &[layer], palette(), LIMITS).is_err());
+    assert!(GpuFrame::segments(&[line], &[layer; 3], palette(), LIMITS).is_err());
+    for width in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+        assert!(
+            GpuFrame::segments(
+                &[line],
+                &[GpuStrokeLayer { width, ..layer }],
+                palette(),
+                LIMITS
+            )
+            .is_err()
+        );
+    }
+    for palette_offset in [2, u32::MAX] {
+        assert!(
+            GpuFrame::segments(
+                &[line],
+                &[GpuStrokeLayer {
+                    palette_offset,
+                    ..layer
+                }],
+                palette(),
+                LIMITS
+            )
+            .is_err()
+        );
+    }
+    assert!(
+        GpuFrame::segments(
+            &[GpuSegment {
+                endpoints: [f32::NAN; 4],
+                ..line
+            }],
+            &[layer],
+            palette(),
+            LIMITS
+        )
+        .is_err()
+    );
+    let larger = GpuFrame::segments(
+        &[line; 3],
+        &[layer],
+        palette(),
+        GpuLimits {
+            max_segments: 3,
+            ..LIMITS
+        },
+    )
+    .unwrap();
+    assert!(slot.publish(larger).is_err());
+    assert!(Arc::ptr_eq(&slot.snapshot().unwrap(), &initial));
+    slot.clear();
+    slot.publish(initial).unwrap();
+    assert_eq!(slot.schema(), GpuSchema::Segments);
+}
+#[test]
+fn gpu_segments_preserve_source_over_caps_layers_and_scaled_width() -> anyhow::Result<()> {
+    use gpui::{GpuSegment, GpuStrokeLayer};
+    let mut renderer = WgpuHeadlessRenderer::new()?;
+    let lines = [
+        GpuSegment {
+            endpoints: [0.125, 0.5, 0.875, 0.5],
+            color: 0,
+        },
+        GpuSegment {
+            endpoints: [0.5, 0.125, 0.5, 0.875],
+            color: 0,
+        },
+        GpuSegment {
+            endpoints: [0.25; 4],
+            color: 0,
+        },
+    ];
+    let palette = GpuPalette::new(&[[1.0, 1.0, 1.0, 0.5]], 1)?;
+    let content = GpuFrame::segments(
+        &lines,
+        &[GpuStrokeLayer {
+            width: 4.0,
+            palette_offset: 0,
+        }],
+        palette,
+        limits(),
+    )?;
+    for scale in [1.0, 2.0] {
+        let extent = bounds(0.0, 0.0, 32.0 * scale, 32.0 * scale);
+        let mut placement = draw(GpuSource::Fixed(content.clone()), extent);
+        placement.scale_factor = scale;
+        let mut scene = Scene::default();
+        scene.insert_primitive(quad(extent, gpui::black()));
+        scene.insert_primitive(placement);
+        scene.finish();
+        let image = renderer
+            .render_scene_to_image(&scene, size((32.0 * scale) as i32, (32.0 * scale) as i32))?;
+        let at = |v: f32| (v * scale) as u32;
+        pixel(&image, at(8.0), at(16.0), [128, 128, 128, 255]);
+        pixel(&image, at(16.0), at(16.0), [191, 191, 191, 255]);
+        pixel(&image, at(3.0), at(16.0), BLACK);
+        pixel(&image, at(8.0), at(13.0), BLACK);
+        pixel(&image, at(8.0), at(8.0), BLACK);
+    }
+    let palette = GpuPalette::new(&[[1.0, 0.0, 0.0, 1.0], [0.0, 0.0, 1.0, 1.0]], 2)?;
+    let content = GpuFrame::segments(
+        &lines[..1],
+        &[
+            GpuStrokeLayer {
+                width: 8.0,
+                palette_offset: 0,
+            },
+            GpuStrokeLayer {
+                width: 2.0,
+                palette_offset: 1,
+            },
+        ],
+        palette,
+        limits(),
+    )?;
+    let extent = bounds(0.0, 0.0, 32.0, 32.0);
+    let mut placement = draw(GpuSource::Fixed(content), extent);
+    placement.content_mask.bounds = bounds(8.0, 0.0, 24.0, 32.0);
+    let mut scene = Scene::default();
+    scene.insert_primitive(quad(extent, gpui::black()));
+    scene.insert_primitive(placement);
+    scene.finish();
+    let image = renderer.render_scene_to_image(&scene, size(32, 32))?;
+    pixel(&image, 12, 16, BLUE);
+    pixel(&image, 12, 13, RED);
+    pixel(&image, 6, 16, BLACK);
+    Ok(())
 }
 
 #[test]
@@ -208,7 +366,10 @@ fn gpu_rectangles_preserve_adjacent_coverage_gaps_and_fractional_edges() -> anyh
             // A fractional outer edge has coverage, but does not become opaque.
             let edge_y = (8.0 * scale) as u32;
             let outer = actual.get_pixel((4.25 * scale).floor() as u32, edge_y).0[0];
-            assert!(outer > 0 && outer < 255, "fractional edge lost at scale {scale}");
+            assert!(
+                outer > 0 && outer < 255,
+                "fractional edge lost at scale {scale}"
+            );
             pixel(&actual, (3.0 * scale) as u32, edge_y, BLACK);
             if segmented {
                 // The upper partial cell survives, and the middle gap stays empty.

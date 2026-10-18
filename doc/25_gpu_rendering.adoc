@@ -4,12 +4,13 @@
 
 == Status and decision boundaries
 
-Design baseline, 2026-10-18. The fixed-schema rectangle, numerical-field and
-existing-path slice described under <<_internal_led_vertical_slice>> is implemented.
+Design baseline, 2026-10-18. The fixed-schema rectangle, numerical-field,
+existing-path and independent-segment slices under <<_internal_led_vertical_slice>> are implemented.
 Density/Spatial now consume numerical fields; their authoritative behavior and
 ownership are described in link:23_visuals.adoc#_stereo_analysis_styles[Stereo analysis styles].
 Spectrum now consumes rectangle and Path publications; its palette sampling and
 ownership are described in link:23_visuals.adoc#_spectrum[Spectrum rendering].
+Fractal Beams/Flow publish shared segment endpoints with ordered stroke layers.
 The general `Program`, generated-schema interfaces and remaining consumer migrations
 below remain proposals. The agreed safety and platform boundaries remain binding.
 
@@ -503,13 +504,23 @@ entry point must not become a permanent parallel convention.
 The current vendor implementation exposes the deliberately experimental
 `GpuPalette`, `GpuFrame`, schema-stable `GpuState`, `GpuSource` and
 `Window::paint_gpu` for integration work. One recording entry accepts normalized
-rectangle instances, row-major numerical fields or an immutable existing
-tessellated path. Rectangle segmentation and bottom-to-top palette coordinates
+rectangle instances, row-major numerical fields, independent line segments or an
+immutable existing tessellated path. Rectangle segmentation and bottom-to-top palette coordinates
 retain their initial behavior. Palette samples are straight-alpha sRGB values;
 their interpolation is in sRGB numerical space. Bounds, clip, scale and inherited
 opacity belong to each scene placement, independently of shared content.
-Density/Spatial and all Spectrum styles use this interface. The old
+Density/Spatial, all Spectrum styles and Fractal Beams/Flow use this interface. The old
 rectangle-only publication API and specialized textured-path interface are removed.
+
+Segments use butt caps and ordinary source-over blending in the shared MSAA
+intermediate. One immutable endpoint array is uploaded once and reused by ordered
+layers with logical-pixel widths and palette-index offsets; no union, grouping
+compositor or feedback buffer is introduced. Zero-length segments draw nothing.
+Fractal simulation and accepted audio time remain application-owned. Publications
+change only with accepted geometry or display parameters, not repaint or resize;
+hiding releases application display storage. The application retains the original
+three light layers, intensity/color buckets and drawing order. Fine antialiasing
+differences are accepted rather than reproducing CPU tessellation pixel for pixel.
 
 Frame construction validates geometry, palette, parameters and explicit caller
 capacities before copying payloads. A process-unique, checked monotonic frame ID
@@ -676,8 +687,8 @@ not break adjacency. This conservative linear scan preserves individually resolv
 MSAA overlap and backend-specific fractional edge coverage without quadratic tests.
 
 This extraction is still a closed set of schemas, not arbitrary shader authoring
-or generated ABI tooling. Density/Spatial and all Spectrum styles have migrated;
-remaining consumers and their independent image-retirement paths are unchanged.
+or generated ABI tooling. Density/Spatial, all Spectrum styles and Fractal Beams/Flow
+have migrated; Spectrogram and Waveform retain their independent image-retirement paths.
 
 ==== Unified field and path measurements
 
@@ -815,9 +826,9 @@ in link:25_gpu_rendering_benchmark.json[the benchmark record].
 
 === Remaining consumers and integrated delivery
 
-Migrate fractals, Spectrogram and Waveform with their distinct geometry and reuse
-patterns. Remove only intermediates and retirement paths made obsolete by the
-cutover. Retain algorithm state and unrelated artwork behavior.
+Migrate Spectrogram and Waveform with their distinct geometry and reuse patterns.
+Remove only intermediates and retirement paths made obsolete by the cutover.
+Retain algorithm state and unrelated artwork behavior.
 
 The slices divide integration risk, not final scope. Generic supporting modules
 belong with GPUI/WGPU; application programs and palette definitions belong near the

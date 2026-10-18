@@ -7,6 +7,8 @@ const LIMITS: GpuLimits = GpuLimits {
     max_field_height: 2,
     max_field_cells: 4,
     max_path_vertices: 6,
+    max_segments: 2,
+    max_stroke_layers: 2,
     max_palette_colors: 2,
 };
 const RECTANGLE: GpuRectangle = GpuRectangle {

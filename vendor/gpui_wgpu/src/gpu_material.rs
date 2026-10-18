@@ -49,6 +49,7 @@ enum MaterialKind {
     Rectangles,
     Field,
     Path,
+    Segments,
 }
 impl MaterialKind {
     fn multisampled(self) -> bool {
@@ -56,7 +57,7 @@ impl MaterialKind {
     }
 }
 struct Program {
-    pipelines: [Option<wgpu::RenderPipeline>; 3],
+    pipelines: [Option<wgpu::RenderPipeline>; 4],
     layout: wgpu::PipelineLayout,
     shader: wgpu::ShaderModule,
     placement_layout: wgpu::BindGroupLayout,
@@ -99,7 +100,7 @@ pub(crate) struct MaterialRenderer {
     #[cfg(test)]
     resolution_count: usize,
     #[cfg(test)]
-    pipeline_counts: [usize; 3],
+    pipeline_counts: [usize; 4],
 }
 fn buffer_entry(binding: u32, uniform: bool, minimum: u64) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
@@ -169,7 +170,7 @@ impl MaterialRenderer {
             source: wgpu::ShaderSource::Wgsl(SHADER.into()),
         });
         Some(Program {
-            pipelines: [None, None, None],
+            pipelines: [None, None, None, None],
             layout,
             shader,
             placement_layout,
@@ -188,6 +189,7 @@ impl MaterialRenderer {
                     MaterialKind::Rectangles => "GPU palette rectangles",
                     MaterialKind::Field => "GPU palette field",
                     MaterialKind::Path => "GPU palette path",
+                    MaterialKind::Segments => "GPU palette segments",
                 }),
                 layout: Some(&program.layout),
                 vertex: wgpu::VertexState {
@@ -196,6 +198,7 @@ impl MaterialRenderer {
                         MaterialKind::Rectangles => "rectangle_vertex",
                         MaterialKind::Field => "material_vertex",
                         MaterialKind::Path => "path_vertex",
+                        MaterialKind::Segments => "segment_vertex",
                     }),
                     buffers: &[],
                     compilation_options: Default::default(),
@@ -206,6 +209,7 @@ impl MaterialRenderer {
                         MaterialKind::Rectangles => "rectangle_fragment",
                         MaterialKind::Field => "material_fragment",
                         MaterialKind::Path => "path_fragment",
+                        MaterialKind::Segments => "segment_fragment",
                     }),
                     targets: &[Some(wgpu::ColorTargetState {
                         format: self.target_format,
@@ -267,7 +271,7 @@ impl MaterialRenderer {
             #[cfg(test)]
             resolution_count: 0,
             #[cfg(test)]
-            pipeline_counts: [0; 3],
+            pipeline_counts: [0; 4],
         }
     }
     fn can_allocate(&self, bytes: u64, count: usize) -> bool {
@@ -408,6 +412,9 @@ impl MaterialRenderer {
                 GpuContent::Rectangles { params, .. } => {
                     ((params.cell_height + params.cell_gap) * batch.scale_factor).is_finite()
                 }
+                GpuContent::Segments { layers, .. } => layers
+                    .iter()
+                    .all(|layer| (layer.width * batch.scale_factor).is_finite()),
                 _ => true,
             };
             if !valid_placement(batch) || !period_valid {
@@ -495,6 +502,13 @@ impl MaterialRenderer {
             }
             GpuContent::Field { values, .. } => (values.len() as u64).checked_mul(4),
             GpuContent::Path { path, .. } => (path.vertices.len() as u64).checked_mul(PATH_STRIDE),
+            GpuContent::Segments { segments, layers } => {
+                (segments.len() as u64).checked_mul(32).and_then(|n| {
+                    (layers.len() as u64)
+                        .checked_mul(16)
+                        .and_then(|l| n.checked_add(l))
+                })
+            }
         }
         .ok_or_else(|| anyhow::anyhow!("material byte count overflow"))?
         .max(4);
@@ -613,6 +627,11 @@ fn draw_counts(frame: &GpuFrame) -> (u32, u32, MaterialKind) {
             (rectangles.len() as u32, 6, MaterialKind::Rectangles)
         }
         GpuContent::Field { values, .. } => (u32::from(!values.is_empty()), 6, MaterialKind::Field),
+        GpuContent::Segments { segments, layers } => (
+            (segments.len() * layers.len()) as u32,
+            6,
+            MaterialKind::Segments,
+        ),
         GpuContent::Path { path, .. } => (
             u32::from(
                 !path.vertices.is_empty()
@@ -668,6 +687,17 @@ fn encode_frame(bytes: &mut wgpu::WriteOnly<'_, [u8]>, frame: &GpuFrame) {
                 let offset = index * RECTANGLE_STRIDE as usize;
                 put_floats(bytes, offset, &rectangle.bounds);
                 put_floats(bytes, offset + 16, &rectangle.palette_range);
+            }
+        }
+        GpuContent::Segments { segments, layers } => {
+            for (index, layer) in layers.iter().enumerate() {
+                put_floats(bytes, index * 16, &[layer.width]);
+                put_u32(bytes, index * 16 + 4, layer.palette_offset);
+            }
+            for (index, segment) in segments.iter().enumerate() {
+                let offset = layers.len() * 16 + index * 32;
+                put_floats(bytes, offset, &segment.endpoints);
+                put_u32(bytes, offset + 16, segment.color);
             }
         }
         GpuContent::Field { values, .. } => put_floats(bytes, 0, values),
@@ -747,6 +777,11 @@ fn encode_placement(
             put_u32(bytes, 84, *height);
             put_u32(bytes, 88, logarithmic as u32);
             1
+        }
+        GpuContent::Segments { segments, layers } => {
+            put_u32(bytes, 80, segments.len() as u32);
+            put_u32(bytes, 84, layers.len() as u32);
+            3
         }
         GpuContent::Path { path, params } => {
             put_floats(bytes, 48, &params.palette_range);
