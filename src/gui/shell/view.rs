@@ -190,8 +190,13 @@ impl Render for GuiApp {
 
         let error = self
             .error
-            .clone()
-            .or_else(|| self.state.system.last_error.clone());
+            .as_ref()
+            .filter(|error| {
+                !self.shell.is_open(Surface::Layouts)
+                    || self.workspace.save_error.as_ref() != Some(*error)
+            })
+            .or(self.state.system.last_error.as_ref())
+            .cloned();
         let footer_height = window.rem_size() * 2.25 + px(UI_INSET);
         let mut footer = row()
             .gap_0()

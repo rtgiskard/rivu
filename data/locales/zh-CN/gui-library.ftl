@@ -266,6 +266,8 @@ gl-played-at = { $time }{ $paused ->
     }
 
 gl-volume = 音量（[ / ]）
+gl-seek-position = 播放进度
+gl-volume-level = 音量
 
 gl-file-missing-suffix = { " · " }文件缺失
 

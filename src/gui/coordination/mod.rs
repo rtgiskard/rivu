@@ -319,6 +319,13 @@ impl GuiApp {
                         this.apply_interaction_cancellation(cancellation, cx);
                         this.drag_position(*position, *alt, cx);
                     }
+                    PlaybackEvent::SliderKey { slider, key } => {
+                        // A later pointer release must not overwrite the keyboard command.
+                        this.cancel_interaction(window, cx);
+                        this.playback.update(cx, |playback, cx| {
+                            playback.slider_key(*slider, *key, cx);
+                        });
+                    }
                     PlaybackEvent::Error(error) => this.feature_error(error, cx),
                 }
             }),

@@ -16,12 +16,21 @@ use crate::config::{AlbumArtworkOptions, AudioVisualizerOptions};
 use anyhow::Result;
 use std::{cell::RefCell, rc::Rc};
 
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub(super) enum SaveStatus {
+    #[default]
+    Idle,
+    Saving,
+    Finished,
+}
+
 pub(super) struct Workspace {
     pub(super) layouts: LayoutSet,
     pub(super) interaction: LayoutInteraction,
     pub(super) scroll_views: Rc<RefCell<ScrollViews>>,
     save: LayoutSaveHandle,
     save_seen: u64,
+    pub(super) save_status: SaveStatus,
     pub(super) save_error: Option<String>,
 }
 
@@ -39,6 +48,7 @@ impl Workspace {
             scroll_views: Rc::new(RefCell::new(ScrollViews::default())),
             save,
             save_seen: 0,
+            save_status: SaveStatus::Idle,
             save_error: None,
         };
         if workspace.initialize_panels(visualizer, artwork) {
@@ -172,9 +182,11 @@ impl Workspace {
 
     /// Manual sync retains the existing single-writer, replaceable-pending-save
     /// policy. Ordinary edits only publish session memory, never start I/O.
-    pub(super) fn request_save(&self) -> u64 {
+    pub(super) fn request_save(&mut self) -> u64 {
         self.submit_save();
-        self.save.sync()
+        let request = self.save.sync();
+        self.save_status = SaveStatus::Saving;
+        request
     }
 
     pub(super) fn take_save_completion(&mut self) -> Option<Result<(), String>> {
@@ -183,6 +195,7 @@ impl Workspace {
             return None;
         }
         self.save_seen = completion.revision;
+        self.save_status = SaveStatus::Finished;
         Some(completion.result)
     }
 }

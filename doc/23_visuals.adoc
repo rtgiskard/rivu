@@ -49,6 +49,15 @@ The isolated regression-test workspace keeps copied upstream crates outside
 Rivu's workspace lint targets, without suppressing upstream warnings or mixing
 framework cleanup into this rendering patch.
 
+GPUI also captures entity dependencies independently for each cached-view scope,
+including entities already accessed by a caller or enclosing cached view. On
+scope exit, local dependencies are merged back into the caller's set; cache
+reuse must retain them for later notifications. This keeps children created
+during render and nested cached consumers live after parent-only redraws,
+without refreshing the whole window or rerendering unrelated cached siblings.
+Run `cargo test --test gpui_cached_dependencies` from the repository root for
+these notification and cache-reuse regressions.
+
 === Why the patch is needed
 
 Album artwork reuses its decoded image and atlas texture while the GPU transforms

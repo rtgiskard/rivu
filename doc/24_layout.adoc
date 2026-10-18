@@ -112,6 +112,10 @@ visibility in a frame. Inactive tabs retain their viewport state but cannot
 receive pointer or page-key input. Structural edits release state for removed
 panels; switching or duplicating a named layout starts new view-local scroll
 state. No per-layout scroll snapshots are kept.
+Albums registers only its currently displayed grid or track-list viewport for
+PageUp/PageDown. Paging updates that panel's existing scroll handle and invalidates
+its AlbumBrowser view; switching regions retires the previous input target without
+discarding the grid's retained position.
 
 == GUI composition boundaries
 
@@ -167,6 +171,16 @@ draft. Deferred focus requests carry a generation so an obsolete callback cannot
 focus a replacement surface. Workspace activation validates the target before
 cancelling an interaction and rolls back a live split against the outgoing tree,
 never against reused IDs in the incoming tree.
+
+Native accessibility Focus is authorized against the live shell surface and its
+published focus scope before custom Focus listeners or built-in Focus run.
+Opening or replacing a surface invalidates the previous publication; native
+focus requests are rejected, not queued for the replacement frame. Feature-owned
+confirmation identity also invalidates focus requests from a replaced confirmation.
+Pointer and keyboard input retain their existing routing paths. Other native
+accessibility actions are not restricted by this focus gate.
+View caching remains unchanged. This focus gate does not add accessibility replay;
+cached views retain the pinned GPUI's existing node and listener retention limits.
 
 Window visibility, layout activation, and menu transitions publish feature demand
 when they change. Rendering measures viewport demand but is not a fallback for
@@ -290,6 +304,10 @@ decisions. `Dialog` and `Popover` supply materials, constraints and modal pointe
 barriers, not global surface state or an automatic outside-close policy. Shell
 focus restoration, draft protection and asynchronous business guards stay with
 their existing owners; a disabled visual control does not replace those guards.
+
+Choice callbacks are bound to the candidate generation that produced the popup.
+Closing, reopening or replacing candidates invalidates both pointer and native
+selection callbacks; moving the keyboard highlight does not.
 
 Ordinary form and confirmation dialogs use `Dialog::scroll_card` for padded,
 viewport-bounded vertical scrolling, with width chosen by the caller. Specialized

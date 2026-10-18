@@ -159,6 +159,9 @@ deadlines belong to current request owners, with one cancellable earliest-deadli
 wake per view entity, retired on completion, cancellation, or hiding. This does
 not retain invalid pages or change empty-result bootstrapping. Metadata and
 selection/duplicate-operation progress retain their separate safety semantics.
+Replacing a Queue search also retires the previous query's loading text and wake.
+The physical worker gate remains occupied until completion; a replacement query
+starts its own loading-text delay only when its request is submitted.
 
 Publication revisions and four state-section tokens are distinct from query
 stamps and request generations. A publication with unchanged section tokens does

@@ -1362,15 +1362,13 @@ impl App {
         &mut self,
         callback: impl FnOnce(&mut App) -> R,
     ) -> (R, FxHashSet<EntityId>) {
-        let accessed_entities_start = self.entities.accessed_entities.get_mut().clone();
+        // Capture all accesses in this scope, including entities already accessed
+        // by its caller. Cached views must retain those shared dependencies too.
+        let outer_accessed = mem::take(self.entities.accessed_entities.get_mut());
         let result = callback(self);
-        let entities_accessed_in_callback = self
-            .entities
-            .accessed_entities
-            .get_mut()
-            .difference(&accessed_entities_start)
-            .copied()
-            .collect::<FxHashSet<EntityId>>();
+        let entities_accessed_in_callback =
+            mem::replace(self.entities.accessed_entities.get_mut(), outer_accessed);
+        self.entities.extend_accessed(&entities_accessed_in_callback);
         (result, entities_accessed_in_callback)
     }
 

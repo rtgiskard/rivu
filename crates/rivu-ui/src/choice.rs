@@ -76,6 +76,7 @@ fn key_action(open: bool, mode: ChoiceMode, composing: bool, key: &str) -> Choic
 pub struct ChoiceState<T> {
     candidates: DropdownState<T>,
     scroll: UniformListScrollHandle,
+    revision: u64,
 }
 
 impl<T> Default for ChoiceState<T> {
@@ -83,17 +84,20 @@ impl<T> Default for ChoiceState<T> {
         Self {
             candidates: DropdownState::default(),
             scroll: UniformListScrollHandle::new(),
+            revision: 0,
         }
     }
 }
 
 impl<T> ChoiceState<T> {
     pub fn open(&mut self, items: impl IntoIterator<Item = DropdownItem<T>>, selected: usize) {
+        self.revision = self.revision.wrapping_add(1);
         self.candidates.open(items);
         self.select_index(selected);
     }
 
     pub fn close(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
         self.candidates.close();
     }
     pub fn is_open(&self) -> bool {
@@ -104,6 +108,14 @@ impl<T> ChoiceState<T> {
     }
     pub fn filtered_item(&self, index: usize) -> Option<(usize, &DropdownItem<T>)> {
         self.candidates.filtered_item(index)
+    }
+
+    fn is_current(&self, revision: u64) -> bool {
+        self.revision == revision && self.is_open()
+    }
+
+    fn accepts(&self, index: usize, revision: u64) -> bool {
+        self.is_current(revision) && self.filtered_item(index).is_some()
     }
 
     pub fn select_index(&mut self, index: usize) {
@@ -161,6 +173,19 @@ impl<T> ChoiceState<T> {
     }
 }
 
+fn choice_callback<Owner: 'static, Value: 'static>(
+    state: fn(&Owner) -> &ChoiceState<Value>,
+    choose: fn(&mut Owner, usize, &mut Window, &mut Context<Owner>),
+    index: usize,
+    revision: u64,
+) -> impl Fn(&mut Owner, &mut Window, &mut Context<Owner>) + Copy {
+    move |owner, window, cx| {
+        if state(owner).accepts(index, revision) {
+            choose(owner, index, window, cx);
+        }
+    }
+}
+
 /// Anchored, viewport-bounded candidate popup. Outside pointer events request dismissal;
 /// the owner can reject it (for example over an editable anchor) without changing focus.
 pub struct ChoicePopup {
@@ -194,6 +219,7 @@ impl ChoicePopup {
         let choices = state(owner);
         let count = choices.candidates.filtered().count();
         let selected = choices.selected_index();
+        let revision = choices.revision;
         let height = (count as f32 * DROPDOWN_ROW_REMS * f32::from(window.rem_size()))
             .min(f32::from(window.rem_size()) * POPOVER_MAX_REMS)
             .min(f32::from(window.viewport_size().height) * 0.45);
@@ -202,11 +228,18 @@ impl ChoicePopup {
             count,
             &choices.scroll,
             cx.processor(move |owner, range: std::ops::Range<usize>, _, cx| {
+                let choices = state(owner);
+                // The list calls this later for measurement and prepaint. Never combine
+                // a popup's captured revision/geometry with replacement candidates.
+                if !choices.is_current(revision) {
+                    return Vec::new();
+                }
                 range
                     .filter_map(|index| {
-                        let (_, item) = state(owner).filtered_item(index)?;
+                        let (_, item) = choices.filtered_item(index)?;
                         let label: SharedString = item.label.clone().into();
                         let hint = label.clone();
+                        let choose = choice_callback(state, choose, index, revision);
                         Some(
                             dropdown_row(
                                 palette(cx),
@@ -223,18 +256,14 @@ impl ChoicePopup {
                                 let owner = cx.entity().downgrade();
                                 move |_, window, cx| {
                                     let _ = owner.update(cx, |owner, cx| {
-                                        if state(owner).is_open()
-                                            && state(owner).filtered_item(index).is_some()
-                                        {
-                                            choose(owner, index, window, cx);
-                                        }
+                                        choose(owner, window, cx);
                                     });
                                 }
                             })
                             .tooltip(text_tooltip(hint))
-                            .on_click(cx.listener(
-                                move |owner, _, window, cx| choose(owner, index, window, cx),
-                            )),
+                            .on_click(
+                                cx.listener(move |owner, _, window, cx| choose(owner, window, cx)),
+                            ),
                         )
                     })
                     .collect()
@@ -313,6 +342,186 @@ mod tests {
         let tab = key_action(true, ChoiceMode::Editable, true, "tab");
         assert_eq!(tab.action, ChoiceAction::Dismiss);
         assert!(!tab.stop_propagation && !tab.prevent_default);
+    }
+
+    struct PopupChoice {
+        choices: ChoiceState<u8>,
+        committed: Vec<u8>,
+    }
+
+    impl PopupChoice {
+        fn choose(&mut self, index: usize, _: &mut Window, cx: &mut Context<Self>) {
+            self.committed
+                .push(self.choices.filtered_item(index).unwrap().1.value);
+            self.choices.close();
+            cx.notify();
+        }
+
+        fn callback(
+            &self,
+            index: usize,
+        ) -> impl Fn(&mut Self, &mut Window, &mut Context<Self>) + Copy + use<> {
+            choice_callback(
+                |this| &this.choices,
+                Self::choose,
+                index,
+                self.choices.revision,
+            )
+        }
+    }
+
+    impl Render for PopupChoice {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().when(self.choices.is_open(), |view| {
+                view.child(
+                    ChoicePopup::new(
+                        "popup",
+                        "popup-scrollbar",
+                        Bounds::new(point(px(0.), px(0.)), size(px(200.), px(20.))),
+                    )
+                    .render(
+                        self,
+                        |this| &this.choices,
+                        Self::choose,
+                        |_, _, _, _| false,
+                        window,
+                        cx,
+                    ),
+                )
+            })
+        }
+    }
+
+    #[test]
+    fn choice_callbacks_commit_only_current_candidate_values() {
+        let mut cx = TestAppContext::single();
+        cx.update(crate::theme::init_test);
+        let window = cx.add_window(|_, _| PopupChoice {
+            choices: ChoiceState::default(),
+            committed: Vec::new(),
+        });
+        let choice = window.root(&mut cx).unwrap();
+        cx.update_window(window.into(), |_, window, cx| {
+            choice.update(cx, |this, cx| {
+                this.choices.open([DropdownItem::new(1, "Old")], 0);
+                let old = this.callback(0);
+                this.choices.close();
+                old(this, window, cx);
+                assert!(this.committed.is_empty());
+
+                this.choices.open([DropdownItem::new(2, "Reopened")], 0);
+                old(this, window, cx);
+                let replaced = this.callback(0);
+                this.choices.open(
+                    [DropdownItem::new(3, "Three"), DropdownItem::new(4, "Four")],
+                    0,
+                );
+                replaced(this, window, cx);
+                this.callback(2)(this, window, cx);
+                assert!(this.committed.is_empty());
+                assert_eq!(this.choices.selected_index(), Some(0));
+
+                let current = this.callback(1);
+                let navigation = this.choices.key(
+                    &KeyDownEvent {
+                        keystroke: Keystroke::parse("down").unwrap(),
+                        is_held: false,
+                        prefer_character_input: false,
+                    },
+                    ChoiceMode::Select,
+                    false,
+                    window,
+                );
+                assert_eq!(navigation.action, ChoiceAction::Navigated);
+                assert_eq!(this.choices.selected_index(), Some(1));
+                this.choices.select_index(0);
+                current(this, window, cx);
+                current(this, window, cx);
+                assert_eq!(this.committed, [4]);
+                assert!(!this.choices.is_open());
+
+                this.choices.open([DropdownItem::new(5, "Five")], 0);
+                let emptied = this.callback(0);
+                this.choices.open([], 0);
+                emptied(this, window, cx);
+                assert_eq!(this.committed, [4]);
+                this.choices.open([DropdownItem::new(6, "Six")], 0);
+                this.callback(0)(this, window, cx);
+                assert_eq!(this.committed, [4, 6]);
+            });
+        })
+        .unwrap();
+    }
+
+    fn click_first_choice(window: &mut Window, cx: &mut App) {
+        use gpui::InputEvent as _;
+        let position = point(px(16.), px(40.));
+        window.dispatch_event(
+            MouseDownEvent {
+                button: MouseButton::Left,
+                position,
+                ..Default::default()
+            }
+            .to_platform_input(),
+            cx,
+        );
+        window.dispatch_event(
+            MouseUpEvent {
+                button: MouseButton::Left,
+                position,
+                ..Default::default()
+            }
+            .to_platform_input(),
+            cx,
+        );
+    }
+
+    #[test]
+    fn painted_pointer_callbacks_do_not_commit_after_choice_lifecycle_changes() {
+        let mut cx = TestAppContext::single();
+        cx.update(crate::theme::init_test);
+        let window = cx.add_window(|_, _| PopupChoice {
+            choices: ChoiceState::default(),
+            committed: Vec::new(),
+        });
+        let choice = window.root(&mut cx).unwrap();
+        cx.update_window(window.into(), |_, window, cx| {
+            for (close_first, replacement) in [
+                (true, None),
+                (true, Some(2)),
+                (false, Some(3)),
+                (false, None),
+            ] {
+                choice.update(cx, |this, cx| {
+                    this.choices.open([DropdownItem::new(1, "Old")], 0);
+                    cx.notify();
+                });
+                window.draw(cx).clear(cx);
+                let before = choice.read(cx).committed.len();
+                choice.update(cx, |this, _| {
+                    if close_first {
+                        this.choices.close();
+                    }
+                    if let Some(value) = replacement {
+                        this.choices.open([DropdownItem::new(value, "New")], 0);
+                    } else if !close_first {
+                        this.choices.open([], 0);
+                    }
+                });
+                // Keep the painted listeners: the owner changed before its next frame.
+                click_first_choice(window, cx);
+                assert_eq!(choice.read(cx).committed.len(), before);
+
+                choice.update(cx, |_, cx| cx.notify());
+                window.draw(cx).clear(cx);
+                if let Some(value) = replacement {
+                    click_first_choice(window, cx);
+                    assert_eq!(choice.read(cx).committed.len(), before + 1);
+                    assert_eq!(choice.read(cx).committed.last(), Some(&value));
+                }
+            }
+        })
+        .unwrap();
     }
 
     struct NativeChoice {

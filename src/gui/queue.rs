@@ -272,3 +272,79 @@ impl Queue {
         self.refresh(cx);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
+
+    #[gpui::test]
+    fn search_replacement_retires_loading_before_worker_release(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            rivu_ui::theme::set_palette(crate::theme::Theme::default().palette(), cx);
+            rivu_ui::theme::set_typography(
+                gpui::font("sans-serif"),
+                crate::gui::appearance::fonts::SYMBOLS_FAMILY,
+                cx,
+            );
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        crate::config::Config {
+            volume: 0.0,
+            ffmpeg_enabled: false,
+            mpris_enabled: false,
+            ..Default::default()
+        }
+        .save(&path)
+        .unwrap();
+        let runtime = crate::core::Runtime::start(directory.path(), &path).unwrap();
+        let i18n = Arc::new(crate::i18n::Localizer::new("en-US"));
+        let labels = Rc::new(
+            i18n.fixed_texts()
+                .map(|(id, text)| (id.to_owned(), SharedString::from(text.to_owned())))
+                .collect(),
+        );
+        let context = FeatureContext {
+            snapshots: Rc::new(crate::gui::snapshot::SnapshotSource::new(
+                runtime.handle.clone(),
+            )),
+            i18n,
+            labels,
+            scroll: Default::default(),
+        };
+        let queue = cx.new(|cx| Queue::new(context, cx));
+        for already_visible in [false, true] {
+            queue.update(cx, |this, cx| {
+                this.model.retire_page_worker();
+                this.visible = true;
+                this.model.change_search(Some("old".to_owned()));
+                this.sync_queue(cx);
+                let (_, token) = this
+                    .model
+                    .demand_page(0..1, this.state.system.config.page_size as usize)
+                    .unwrap();
+                this.loading = LoadingText::new(Duration::ZERO);
+                this.loading.begin((), token, Instant::now());
+                if already_visible {
+                    this.loading.schedule(cx, |this| &mut this.loading);
+                    assert!(this.loading.show(&(), false));
+                }
+                // Keep the physical worker slot occupied while replacing its logical query.
+                this.apply_queue_search(None, cx);
+                this.loading.schedule(cx, |this| &mut this.loading);
+                assert!(!this.loading.show(&(), false));
+                assert!(
+                    this.model
+                        .demand_page(0..1, this.state.system.config.page_size as usize)
+                        .is_none()
+                );
+                this.loading.finish(&(), token);
+                assert!(!this.loading.show(&(), false));
+            });
+        }
+    }
+}

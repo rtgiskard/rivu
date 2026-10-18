@@ -149,6 +149,7 @@ pub(crate) struct A11y {
     pub(crate) focus_ids: FxHashMap<NodeId, FocusId>,
     pub(crate) node_bounds: FxHashMap<NodeId, Bounds<Pixels>>,
     pub(crate) action_listeners: FxHashMap<NodeId, Vec<(Action, A11yActionListener)>>,
+    pub(crate) native_focus_guard: Option<Box<dyn Fn(&crate::FocusHandle, &Window, &App) -> bool>>,
     /// The window's title, used to label the root node so assistive
     /// technology can tell windows apart.
     window_title: Option<SharedString>,
@@ -177,6 +178,7 @@ impl A11y {
             focus_ids: FxHashMap::default(),
             node_bounds: FxHashMap::default(),
             action_listeners: FxHashMap::default(),
+            native_focus_guard: None,
             window_title,
             last_focus_without_node: None,
             debug: debug::A11yDebug::default(),
@@ -656,6 +658,110 @@ mod tests {
         let mut a11y = A11y::new(Arc::new(AtomicBool::new(true)), false, None);
         a11y.begin_frame();
         a11y
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[crate::test]
+    fn native_focus_guard_checks_live_scope_before_listeners(cx: &mut crate::TestAppContext) {
+        use crate::{prelude::*, *};
+        use std::{
+            cell::{Cell, RefCell},
+            rc::Rc,
+        };
+
+        struct Scopes([FocusHandle; 3]);
+        impl Render for Scopes {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .child(
+                        div()
+                            .track_focus(&self.0[0])
+                            .child(div().track_focus(&self.0[1])),
+                    )
+                    .child(div().track_focus(&self.0[2]))
+            }
+        }
+        let window = cx
+            .add_window(|_, cx| Scopes([cx.focus_handle(), cx.focus_handle(), cx.focus_handle()]));
+        window
+            .update(cx, |view, window, cx| {
+                let nodes = [NodeId(101), NodeId(102), NodeId(103)];
+                let register = |window: &mut Window| {
+                    for (node, target) in nodes.iter().zip(&view.0) {
+                        window.a11y.set_focusable(*node, target.id);
+                    }
+                };
+                let send = |window: &mut Window, cx: &mut App, action, target_node| {
+                    window.handle_a11y_action(
+                        accesskit::ActionRequest {
+                            action,
+                            target_tree: accesskit::TreeId::ROOT,
+                            target_node,
+                            data: None,
+                        },
+                        cx,
+                    );
+                };
+                register(window);
+                let unknown = NodeId(999);
+                let calls = Rc::new(Cell::new(0));
+                for node in [nodes[2], unknown] {
+                    let calls = calls.clone();
+                    window.on_a11y_action(node, accesskit::Action::Focus, move |_, _, _| {
+                        calls.set(calls.get() + 1);
+                    });
+                }
+                send(window, cx, accesskit::Action::Focus, unknown);
+                assert_eq!(calls.get(), 1);
+                let scope = Rc::new(RefCell::new(Some(view.0[0].clone())));
+                window.set_native_focus_guard({
+                    let scope = scope.clone();
+                    move |target, window, _| {
+                        scope
+                            .borrow()
+                            .as_ref()
+                            .is_none_or(|scope| scope.contains(target, window))
+                    }
+                });
+                window.focus(&view.0[0], cx);
+                for node in [nodes[2], unknown] {
+                    send(window, cx, accesskit::Action::Focus, node);
+                }
+                assert_eq!(calls.get(), 1);
+                assert!(view.0[0].is_focused(window));
+                send(window, cx, accesskit::Action::Focus, nodes[1]);
+                assert!(view.0[1].is_focused(window));
+
+                // Live scope changes and release need no intervening rendered frame.
+                *scope.borrow_mut() = Some(view.0[2].clone());
+                send(window, cx, accesskit::Action::Focus, nodes[0]);
+                assert!(view.0[1].is_focused(window));
+                send(window, cx, accesskit::Action::Focus, nodes[2]);
+                assert_eq!(calls.get(), 2);
+                *scope.borrow_mut() = None;
+                send(window, cx, accesskit::Action::Focus, nodes[0]);
+                assert!(view.0[0].is_focused(window));
+
+                *scope.borrow_mut() = Some(view.0[2].clone());
+                window.focus(&view.0[1], cx);
+                assert!(view.0[1].is_focused(window));
+                let clicks = Rc::new(Cell::new(0));
+                window.on_a11y_action(nodes[0], accesskit::Action::Click, {
+                    let clicks = clicks.clone();
+                    move |_, _, _| clicks.set(clicks.get() + 1)
+                });
+                send(window, cx, accesskit::Action::Click, nodes[0]);
+                assert_eq!(clicks.get(), 1);
+
+                // Per-frame resets do not remove authorization policy.
+                window.a11y.begin_frame();
+                register(window);
+                send(window, cx, accesskit::Action::Focus, nodes[0]);
+                assert!(view.0[1].is_focused(window));
+                send(window, cx, accesskit::Action::Focus, nodes[2]);
+                assert!(view.0[2].is_focused(window));
+            })
+            .unwrap();
     }
 
     #[test]

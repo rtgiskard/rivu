@@ -1,5 +1,8 @@
 use super::super::*;
-use rivu_ui::{button, caption, column, copyable_message, form_field, icon_button, menu_item, row};
+use rivu_ui::{
+    StatusKind, button, caption, column, copyable_message, form_field, icon_button, menu_item, row,
+    status_message,
+};
 
 #[derive(Clone)]
 pub(in crate::gui) enum Action {
@@ -328,6 +331,23 @@ impl GuiApp {
                             },
                         )),
                 );
+        }
+        match self.workspace.save_status {
+            workspace::SaveStatus::Saving => {
+                content = content.child(status_message(
+                    theme,
+                    self.tr("shell-layouts-syncing"),
+                    StatusKind::Info,
+                ));
+            }
+            workspace::SaveStatus::Finished if self.workspace.save_error.is_none() => {
+                content = content.child(status_message(
+                    theme,
+                    self.tr("shell-layouts-synced"),
+                    StatusKind::Success,
+                ));
+            }
+            _ => {}
         }
         if let Some(error) = &self.error {
             content = content.child(
