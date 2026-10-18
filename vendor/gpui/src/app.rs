@@ -2079,6 +2079,7 @@ impl App {
                         self.event_arena.release_unused();
                         self.layout_id_buffer = Vec::new();
                         self.text_system.release_unused();
+                        crate::path_builder::release_unused_tessellation_buffers();
                     }
                     break;
                 }

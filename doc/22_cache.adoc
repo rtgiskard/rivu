@@ -561,6 +561,17 @@ Each buffer above 4096 elements shrinks after 120 successful frames at no more
 than one-quarter utilization, retaining twice the observed peak with a
 1024-element floor. Surface unconfiguration releases both buffers immediately.
 
+Path tessellation reuses one idle vertex/index scratch pair per calling thread,
+with a combined capacity limit of 1 MiB. Larger paths remain supported, but
+their oversized scratch allocation is discarded after use. Each call owns its
+checked-out buffers; nested calls cannot overwrite them, and failed calls
+cannot leave geometry in the next lease. Final Path vertices have independently
+owned storage reserved for the triangle count, so later scratch reuse does not
+change submitted or cached Paths. Lyon's private tessellator workspace remains
+per-call rather than becoming an unbounded retained cache. GPUI idle reclamation
+also releases idle tessellation scratch on its calling thread; other threads'
+scratch remains bounded and is released when those threads exit.
+
 The renderer allocates Path resolve/MSAA targets only when nonempty Path vertices
 are drawn, and drops its references on a successful frame without Path drawing.
 Restoring Path drawing rebuilds targets at the current physical size. Submitted
@@ -585,17 +596,6 @@ Reopening reconnects to the original display before creating a new window;
 requests arriving during a connection switch are coalesced. A failed reconnect
 leaves the application running so another open request can retry.
 
-Playback, IPC, tray, MPRIS, and accepted business operations remain independent
-of this transition. The GPUI event loop, executors, registered font system, and
-business caches remain available; this is not full framework teardown. Allocator arenas,
-thread-local state, and backend display bookkeeping can outlive a window or
-display reconnect, so RSS is not a count of live rendering resources. No
-allocator trim is performed, and closing the window does not promise
-serve-level process memory.
-
-The graphical host shares one immutable startup Localizer between its GUI
-session and tray worker, including the parsed Fluent resources and fixed-message
-cache. Closing or reopening the window does not rebuild these resources, and
 After a successful headless transition with no pending reopen request, the host
 requests GPUI idle reclamation. GPUI waits until the current update's events and
 deferred callbacks finish, then skips reclamation if a window has opened again.
@@ -607,6 +607,17 @@ Checked-out text wrappers stay usable and need not return to a discarded pool.
 Reopening rebuilds these derived caches on demand. Reclamation adds no timer or
 worker and does not wait for GPU completion or background work.
 
+Playback, IPC, tray, MPRIS, and accepted business operations remain independent
+of this transition. The GPUI event loop, executors, registered font system, and
+business caches remain available; this is not full framework teardown. Allocator arenas,
+thread-local state, and backend display bookkeeping can outlive a window or
+display reconnect, so RSS is not a count of live rendering resources. No
+allocator trim is performed, and closing the window does not promise
+serve-level process memory.
+
+The graphical host shares one immutable startup Localizer between its GUI
+session and tray worker, including the parsed Fluent resources and fixed-message
+cache. Closing or reopening the window does not rebuild these resources, and
 saved language changes apply only after host restart. GUI-specific SharedString
 adaptation remains window-owned; tray protocol payloads remain tray-owned.
 

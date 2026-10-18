@@ -7,6 +7,44 @@ use lyon::path::{ArcFlags, Polygon};
 use lyon::tessellation::{
     BuffersBuilder, FillTessellator, FillVertex, StrokeTessellator, StrokeVertex, VertexBuffers,
 };
+use std::{cell::RefCell, mem, sync::Arc};
+
+// One idle buffer pair per rendering thread. Larger paths remain supported,
+// but do not leave their high-water allocation behind after tessellation.
+const MAX_RETAINED_TESSELLATION_BYTES: usize = 1024 * 1024;
+thread_local! {
+    static TESSELLATION_BUFFERS: RefCell<VertexBuffers<lyon::math::Point, u16>> = const {
+        RefCell::new(VertexBuffers { vertices: Vec::new(), indices: Vec::new() })
+    };
+}
+
+struct TessellationBuffers(VertexBuffers<lyon::math::Point, u16>);
+
+impl TessellationBuffers {
+    fn acquire() -> Self {
+        Self(TESSELLATION_BUFFERS.with(|slot| mem::take(&mut *slot.borrow_mut())))
+    }
+}
+
+impl Drop for TessellationBuffers {
+    fn drop(&mut self) {
+        let bytes = self.0.vertices.capacity() * mem::size_of::<lyon::math::Point>()
+            + self.0.indices.capacity() * mem::size_of::<u16>();
+        if bytes > MAX_RETAINED_TESSELLATION_BYTES || std::thread::panicking() {
+            return;
+        }
+        self.0.vertices.clear();
+        self.0.indices.clear();
+        let buffers = mem::take(&mut self.0);
+        // No TLS borrow survives tessellation: nested builds own separate buffers.
+        // A late build during TLS destruction simply drops its scratch storage.
+        let _ = TESSELLATION_BUFFERS.try_with(|slot| *slot.borrow_mut() = buffers);
+    }
+}
+
+pub(crate) fn release_unused_tessellation_buffers() {
+    TESSELLATION_BUFFERS.with(|slot| *slot.borrow_mut() = VertexBuffers::new());
+}
 
 pub use lyon::math::Transform;
 pub use lyon::tessellation::{FillOptions, FillRule, StrokeOptions};
@@ -258,18 +296,17 @@ impl PathBuilder {
         path: &lyon::path::Path,
         options: &FillOptions,
     ) -> Result<Path<Pixels>, Error> {
-        // Will contain the result of the tessellation.
-        let mut buf: VertexBuffers<lyon::math::Point, u16> = VertexBuffers::new();
+        let mut scratch = TessellationBuffers::acquire();
         let mut tessellator = FillTessellator::new();
 
         // Compute the tessellation.
         tessellator.tessellate_path(
             path,
             options,
-            &mut BuffersBuilder::new(&mut buf, |vertex: FillVertex| vertex.position()),
+            &mut BuffersBuilder::new(&mut scratch.0, |vertex: FillVertex| vertex.position()),
         )?;
 
-        Ok(Self::build_path(buf))
+        Ok(Self::build_path(&scratch.0))
     }
 
     fn tessellate_stroke(
@@ -304,22 +341,21 @@ impl PathBuilder {
             path
         };
 
-        // Will contain the result of the tessellation.
-        let mut buf: VertexBuffers<lyon::math::Point, u16> = VertexBuffers::new();
+        let mut scratch = TessellationBuffers::acquire();
         let mut tessellator = StrokeTessellator::new();
 
         // Compute the tessellation.
         tessellator.tessellate_path(
             path,
             options,
-            &mut BuffersBuilder::new(&mut buf, |vertex: StrokeVertex| vertex.position()),
+            &mut BuffersBuilder::new(&mut scratch.0, |vertex: StrokeVertex| vertex.position()),
         )?;
 
-        Ok(Self::build_path(buf))
+        Ok(Self::build_path(&scratch.0))
     }
 
     /// Builds a [`Path`] from a [`lyon::tessellation::VertexBuffers`].
-    pub fn build_path(buf: VertexBuffers<lyon::math::Point, u16>) -> Path<Pixels> {
+    pub fn build_path(buf: &VertexBuffers<lyon::math::Point, u16>) -> Path<Pixels> {
         if buf.vertices.is_empty() {
             return Path::new(Point::default());
         }
@@ -327,6 +363,9 @@ impl PathBuilder {
         let first_point = buf.vertices[0];
 
         let mut path = Path::new(first_point.into());
+        Arc::get_mut(&mut path.vertices)
+            .expect("new path has unique geometry")
+            .reserve_exact(buf.indices.len() / 3 * 3);
         for i in 0..buf.indices.len() / 3 {
             let i0 = buf.indices[i * 3] as usize;
             let i1 = buf.indices[i * 3 + 1] as usize;
@@ -343,5 +382,102 @@ impl PathBuilder {
         }
 
         path
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn shape(stroke: bool) -> PathBuilder {
+        let mut builder = if stroke {
+            PathBuilder::stroke(px(3.0)).dash_array(&[px(5.0), px(2.0)])
+        } else {
+            PathBuilder::fill()
+        };
+        builder.move_to(point(px(2.0), px(3.0)));
+        builder.cubic_bezier_to(
+            point(px(90.0), px(50.0)),
+            point(px(20.0), px(-30.0)),
+            point(px(70.0), px(100.0)),
+        );
+        builder.line_to(point(px(5.0), px(60.0)));
+        builder.close();
+        builder
+    }
+
+    fn geometry(
+        path: &Path<Pixels>,
+    ) -> Vec<(Point<Pixels>, Point<f32>, crate::ContentMask<Pixels>)> {
+        path.vertices
+            .iter()
+            .map(|vertex| (vertex.xy_position, vertex.st_position, vertex.content_mask))
+            .collect()
+    }
+
+    #[test]
+    fn tessellation_reuse_preserves_geometry_and_submitted_snapshots() {
+        release_unused_tessellation_buffers();
+        for stroke in [false, true] {
+            let original = shape(stroke).build().unwrap();
+            let retained = original.clone();
+            let expected = geometry(&original);
+            let other = shape(!stroke).build().unwrap();
+            assert_ne!(geometry(&other), expected);
+            let repeated = shape(stroke).build().unwrap();
+            assert_eq!(geometry(&repeated), expected);
+            assert_eq!(repeated.bounds, original.bounds);
+            release_unused_tessellation_buffers();
+            assert_eq!(geometry(&retained), expected);
+            assert_eq!(retained.bounds, original.bounds);
+        }
+    }
+
+    #[test]
+    fn nested_tessellation_leases_and_idle_release_preserve_active_storage() {
+        release_unused_tessellation_buffers();
+        let mut outer = TessellationBuffers::acquire();
+        outer.0.vertices.push(lyon::math::point(3.0, 4.0));
+        {
+            let mut inner = TessellationBuffers::acquire();
+            inner.0.vertices.push(lyon::math::point(8.0, 9.0));
+            release_unused_tessellation_buffers();
+            assert_eq!(inner.0.vertices, [lyon::math::point(8.0, 9.0)]);
+        }
+        assert_eq!(outer.0.vertices, [lyon::math::point(3.0, 4.0)]);
+        drop(outer);
+        let next = TessellationBuffers::acquire();
+        assert!(next.0.vertices.is_empty());
+        assert!(next.0.indices.is_empty());
+    }
+
+    #[test]
+    fn oversized_tessellation_scratch_is_not_retained() {
+        release_unused_tessellation_buffers();
+        let mut scratch = TessellationBuffers::acquire();
+        scratch
+            .0
+            .indices
+            .reserve_exact(MAX_RETAINED_TESSELLATION_BYTES / 2 + 1);
+        drop(scratch);
+        let next = TessellationBuffers::acquire();
+        assert_eq!(next.0.vertices.capacity(), 0);
+        assert_eq!(next.0.indices.capacity(), 0);
+    }
+
+    #[test]
+    fn failed_tessellation_does_not_poison_the_next_path() {
+        release_unused_tessellation_buffers();
+        let expected = shape(true).build().unwrap();
+        let mut too_many = PathBuilder::stroke(px(1.0));
+        for index in 0..20_000 {
+            let x = px(index as f32 * 2.0);
+            too_many.move_to(point(x, px(0.0)));
+            too_many.line_to(point(x, px(2.0)));
+        }
+        assert!(too_many.build().is_err());
+        let recovered = shape(true).build().unwrap();
+        assert_eq!(geometry(&recovered), geometry(&expected));
+        assert_eq!(recovered.bounds, expected.bounds);
     }
 }
