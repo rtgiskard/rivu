@@ -129,6 +129,27 @@ read the current snapshot without re-entering the window coordinator.
 Selection-ready and cross-feature transfer events hand their owned payloads to
 their sole coordinator rather than cloning row collections.
 
+Settings separates its edit-session model from GPUI controls. The model owns the
+baseline, draft, mutually exclusive global/panel target, submission identity and
+completion state. Input entities remain the authority for editable text and caret;
+only submission captures text for conditional refill. Successful completion rebases
+later edits onto committed configuration, while failure and obsolete completion
+cannot erase newer input. Panel settings use the same session boundary without
+joining the independent artwork-cache maintenance operation.
+
+Albums keeps both logical listings and their single physical read slot in one
+feature-local model. Query changes, visibility, paging and current revisions decide
+whether a result may publish; logical cancellation does not release the physical
+slot. The GPUI owner executes reads and manages search controls, artwork demand and
+scroll anchors without duplicating the model's pages or query state.
+
+Core remains the single serial authority for commits. Configuration application,
+execution-time composition of playback controls and persistence live together;
+track mutations and committed impact publication have a separate responsibility.
+Command routing retains its shared queue-persistence cleanup. Neither separation
+introduces another service, worker or state cache, nor turns a post-commit refresh
+failure into an uncommitted operation.
+
 Features interpret relative input against their latest desired cursor, not only
 the committed selection. Relative targets are prepared before cross-feature
 cancellation retires that cursor; prepared selections carry the identity and
@@ -222,12 +243,28 @@ barriers, not global surface state or an automatic outside-close policy. Shell
 focus restoration, draft protection and asynchronous business guards stay with
 their existing owners; a disabled visual control does not replace those guards.
 
+Ordinary form and confirmation dialogs use `Dialog::scroll_card` for padded,
+viewport-bounded vertical scrolling, with width chosen by the caller. Specialized
+surfaces can retain `card` and their own internal scrolling. Input-aligned form
+actions opt into `input_aligned_control`, sharing standalone Input's scaled line
+and padding geometry while keeping the border unscaled. Toolbar defaults and
+embedded inputs retain their separate sizing contracts.
+
 `VirtualList` accepts an absolute logical row count, a stable identity, an existing
 scroll handle and a range renderer. It owns neither records nor selection and
 does not fetch data. Only its actual viewport decoration reports demand: GPUI's
 sample-row measurement is not a query request. Sparse placeholders retain their
 logical indices. Optional decorations and a wrapper inside the scrollbar gutter
 keep host measurements and drop targets in the same content coordinates.
+Demand callbacks use `on_viewport_deferred`: each actual viewport queues one GPUI
+end-of-effect-cycle callback, so accepted rows can notify after paint rather than
+lose their redraw during prepaint. The owner is weakly held and release skips
+delivery; visibility, query generations and demand eligibility remain owner guards.
+Equal ranges are delivered again, allowing retry and new data without scrolling.
+The low-level synchronous `on_viewport` remains for side-effect-free observation.
+Callbacks must be cheaply cloneable and capture weak rather than strong owners.
+Each report clones the callback and weak owner into the existing deferred effect;
+there is no shared callback-wrapper allocation, task, timer, channel or range cache.
 Workspace remains responsible for panel lifetime and hidden-tab input routing.
 Library's sparse tree, album grid projection, and History's column geometry remain
 feature-owned; bounded heterogeneous duplicate-review pages use ordinary scroll

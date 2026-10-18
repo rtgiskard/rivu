@@ -646,11 +646,17 @@ impl GuiApp {
                                 .collect::<Vec<_>>()
                         }),
                     )
-                    .on_viewport(cx.processor(|this, range, _, cx| {
-                        this.playlists.update(cx, |playlists, cx| {
-                            playlists.ensure_playlist_range(range, cx);
-                        });
-                    }))
+                    .on_viewport_deferred(cx.weak_entity(), |this, range, cx| {
+                        if this
+                            .content_menu
+                            .as_ref()
+                            .is_some_and(|menu| menu.playlists)
+                        {
+                            this.playlists.update(cx, |playlists, cx| {
+                                playlists.ensure_playlist_range(range, cx);
+                            });
+                        }
+                    })
                     .h(height)
                     .w_full(),
                 )

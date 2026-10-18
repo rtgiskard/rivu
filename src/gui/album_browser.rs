@@ -5,9 +5,8 @@ use gpui::{prelude::*, *};
 use crate::{
     artwork::{Artwork as LoadedArtwork, ArtworkIdentity, ArtworkManager},
     core::CoreHandle,
-    model::{AlbumKey, AlbumSort, AlbumSummary, Command, LibraryRow, PlaybackStatus, Query, Track},
-    projection::QueryProjection,
-    response::{QueryRevisions, ViewResponse},
+    model::{AlbumKey, AlbumSort, Command, PlaybackStatus, Track},
+    response::QueryRevisions,
 };
 
 use super::{
@@ -18,13 +17,15 @@ use super::{
     },
     format_time,
     list_interaction::{ContentDrag, ContentMenuRequest, TrackSource},
-    paged,
 };
 use rivu_ui::{
     ButtonTooltip, LIST_ROW_REMS, VirtualList, caption, column, compact_icon_button, icon_button,
     panel_surface, row,
     search::{SearchEvent, SearchField},
 };
+
+mod model;
+use model::{AlbumModel, DataChange, Published, Request};
 
 fn card_icon_button(
     id: impl Into<ElementId>,
@@ -51,7 +52,6 @@ fn card_icon_button(
         })
 }
 
-const ALBUM_PAGE: usize = 24;
 const ALBUM_FADE_FRACTION: f32 = 0.4;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -145,21 +145,10 @@ pub(super) struct AlbumBrowser {
     manager: Arc<ArtworkManager>,
     images: ArtworkImages,
     default_album: Entity<Artwork>,
-    visible: bool,
-    revisions: QueryRevisions,
-    albums_projection: QueryProjection,
-    tracks_projection: QueryProjection,
-    tracks_key: Option<AlbumKey>,
-    page_size: usize,
-    worker_pending: bool,
-    albums_total: Option<(crate::model::QueryStamp, usize)>,
-    tracks_total: Option<(crate::model::QueryStamp, usize)>,
+    model: AlbumModel,
     loading_text: super::loading::LoadingText<()>,
     error: Option<String>,
-    selected: Option<AlbumKey>,
     dismissed_actions: Option<AlbumKey>,
-    albums: paged::PagedRows<AlbumSummary>,
-    tracks: paged::PagedRows<LibraryRow>,
     covers: BTreeMap<usize, AlbumCover>,
     loader: ArtworkLoader,
     demand: Range<usize>,
@@ -171,9 +160,6 @@ pub(super) struct AlbumBrowser {
     grid_reset: bool,
     album_search: Entity<SearchField>,
     tracks_search: Entity<SearchField>,
-    query: Option<String>,
-    tracks_query: Option<String>,
-    sort: AlbumSort,
     current_track: Option<i64>,
     playback_status: PlaybackStatus,
     _search_subscriptions: Vec<Subscription>,
@@ -219,20 +205,17 @@ impl AlbumBrowser {
         let tracks_search = cx.new(|cx| new_search(&i18n, cx));
         let album_subscription = cx.subscribe(&album_search, |this, _, event, cx| {
             let SearchEvent::Changed(query) = event;
-            if *query != this.query {
-                this.query = query.clone();
+            if let Some(change) = this.model.set_query(query.clone()) {
                 this.reset_grid();
-                this.load(cx);
+                this.reload(change, cx);
             }
         });
         let tracks_subscription = cx.subscribe(&tracks_search, |this, _, event, cx| {
             let SearchEvent::Changed(query) = event;
-            if *query != this.tracks_query {
-                this.tracks_query = query.clone();
-                this.tracks.clear();
+            if let Some(change) = this.model.set_tracks_query(query.clone()) {
                 this.track_scroll
                     .scroll_to_item_strict(0, ScrollStrategy::Top);
-                this.load(cx);
+                this.reload(change, cx);
             }
         });
         Self {
@@ -242,21 +225,10 @@ impl AlbumBrowser {
             manager,
             images,
             default_album,
-            visible: false,
-            revisions: QueryRevisions::default(),
-            albums_projection: QueryProjection::default(),
-            tracks_projection: QueryProjection::default(),
-            tracks_key: None,
-            page_size: 1,
-            worker_pending: false,
-            albums_total: None,
-            tracks_total: None,
+            model: AlbumModel::default(),
             loading_text: super::loading::LoadingText::default(),
             error: None,
-            selected: None,
             dismissed_actions: None,
-            albums: paged::PagedRows::default(),
-            tracks: paged::PagedRows::default(),
             covers: BTreeMap::new(),
             loader: ArtworkLoader::default(),
             demand: 0..0,
@@ -268,9 +240,6 @@ impl AlbumBrowser {
             grid_reset: false,
             album_search,
             tracks_search,
-            query: None,
-            tracks_query: None,
-            sort: AlbumSort::default(),
             current_track: None,
             playback_status: PlaybackStatus::Stopped,
             _search_subscriptions: vec![album_subscription, tracks_subscription],
@@ -285,7 +254,7 @@ impl AlbumBrowser {
     }
 
     fn active_search(&self) -> &Entity<SearchField> {
-        if self.selected.is_some() {
+        if self.model.selected().is_some() {
             &self.tracks_search
         } else {
             &self.album_search
@@ -293,7 +262,7 @@ impl AlbumBrowser {
     }
 
     pub(super) fn input_focused(&self, window: &Window, cx: &App) -> bool {
-        self.visible && self.active_search().read(cx).input_focused(window, cx)
+        self.model.visible() && self.active_search().read(cx).input_focused(window, cx)
     }
 
     pub(super) fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -320,29 +289,26 @@ impl AlbumBrowser {
             self.playback_status = playback_status;
             cx.notify();
         }
-        let visibility_changed = self.visible != visible;
-        let demand_changed = self.page_size != page_size.max(1);
-        self.revisions = revisions;
-        if demand_changed {
-            self.tracks_projection.cancel();
-            self.tracks.configure_page_size(page_size.max(1));
+        if self.model.albums_need_refresh(revisions) || (self.model.visible() && !visible) {
+            self.capture_grid_anchor();
         }
-        self.page_size = page_size.max(1);
-        let data_changed = self.sync_data(cx);
-        if visibility_changed && !visible {
-            self.cancel(cx);
+        let change = self.model.sync(visible, revisions, page_size);
+        let data_changed = change.data.any();
+        self.apply_data_change(change.data, cx);
+        if change.visibility && !visible {
+            self.loading_text.clear();
+            self.clear_covers(cx);
         }
-        self.visible = visible;
         if !visible {
             self.dismissed_actions = None;
         }
-        if visible && (visibility_changed || data_changed || demand_changed) {
-            if visibility_changed && self.selected.is_none() {
+        if visible && (change.visibility || data_changed || change.demand) {
+            if change.visibility && self.model.selected().is_none() {
                 self.restore_grid_anchor();
             }
             self.request_next(cx);
         }
-        if visibility_changed || data_changed || demand_changed {
+        if change.visibility || data_changed || change.demand {
             cx.notify();
         }
     }
@@ -355,80 +321,31 @@ impl AlbumBrowser {
         }
     }
 
-    fn albums_query(&self) -> Query {
-        Query::Albums {
-            query: self.query.clone(),
-            sort: self.sort,
-            offset: 0,
-            limit: ALBUM_PAGE,
-        }
-    }
-
-    fn sync_data(&mut self, cx: &mut App) -> bool {
-        let albums_query = self.albums_query();
-        if self.albums_projection.stamp() != Some(albums_query.stamp(self.revisions)) {
-            self.capture_grid_anchor();
-        }
-        let albums_changed = sync_pages(
-            &mut self.albums_projection,
-            &mut self.albums,
-            &albums_query,
-            self.revisions,
-        );
-        let tracks_changed = self.tracks_key.as_ref().is_some_and(|key| {
-            sync_pages(
-                &mut self.tracks_projection,
-                &mut self.tracks,
-                &Query::AlbumTracks {
-                    key: key.clone(),
-                    query: self.tracks_query.clone(),
-                    offset: 0,
-                    limit: self.page_size,
-                },
-                self.revisions,
-            )
-        });
-        if albums_changed {
+    fn apply_data_change(&mut self, change: DataChange, cx: &mut App) {
+        if change.albums {
             self.album_search
                 .update(cx, |search, cx| search.clear_counts(cx));
             self.clear_covers(cx);
         }
-        if tracks_changed {
+        if change.tracks {
             self.tracks_search
                 .update(cx, |search, cx| search.clear_counts(cx));
         }
-        if (self.selected.is_none() && albums_changed)
-            || (self.selected.is_some() && tracks_changed)
+        if (self.model.selected().is_none() && change.albums)
+            || (self.model.selected().is_some() && change.tracks)
         {
             self.loading_text.clear();
         }
-        albums_changed || tracks_changed
     }
 
-    fn active_projection(&self) -> &QueryProjection {
-        if self.selected.is_some() {
-            &self.tracks_projection
-        } else {
-            &self.albums_projection
-        }
-    }
-
-    fn cancel(&mut self, cx: &mut App) {
-        self.capture_grid_anchor();
+    fn reload(&mut self, change: DataChange, cx: &mut Context<Self>) {
         self.loading_text.clear();
-        cancel_pages(&mut self.albums_projection, &mut self.albums);
-        cancel_pages(&mut self.tracks_projection, &mut self.tracks);
-        // The detached worker still owns the physical gate until it completes.
         self.clear_covers(cx);
-    }
-
-    fn load(&mut self, cx: &mut Context<Self>) {
-        self.cancel(cx);
-        self.sync_data(cx);
-        if !self.visible {
+        self.apply_data_change(change, cx);
+        if !self.model.visible() {
             return;
         }
-        if self.selected.is_none() {
+        if self.model.selected().is_none() {
             self.restore_grid_anchor();
         }
         self.error = None;
@@ -436,72 +353,14 @@ impl AlbumBrowser {
     }
 
     fn request_next(&mut self, cx: &mut Context<Self>) {
-        if !self.visible || self.worker_pending {
+        let Some(Request {
+            query,
+            count_query,
+            generation,
+            ticket,
+        }) = self.model.prepare()
+        else {
             return;
-        }
-        let query = match &self.selected {
-            Some(key) => {
-                let Some(offset) = self.tracks.demand(self.tracks.visible(), self.page_size) else {
-                    return;
-                };
-                self.tracks.begin(offset, self.page_size);
-                Query::AlbumTracks {
-                    key: key.clone(),
-                    query: self.tracks_query.clone(),
-                    offset,
-                    limit: self.page_size,
-                }
-            }
-            None => {
-                let Some(offset) = self.albums.demand(self.albums.visible(), ALBUM_PAGE) else {
-                    return;
-                };
-                self.albums.begin(offset, ALBUM_PAGE);
-                Query::Albums {
-                    query: self.query.clone(),
-                    sort: self.sort,
-                    offset,
-                    limit: ALBUM_PAGE,
-                }
-            }
-        };
-        let count_query = match &query {
-            Query::Albums {
-                query: Some(_),
-                sort,
-                ..
-            } => Some(Query::Albums {
-                query: None,
-                sort: *sort,
-                offset: 0,
-                limit: 0,
-            }),
-            Query::AlbumTracks {
-                key,
-                query: Some(_),
-                ..
-            } => Some(Query::AlbumTracks {
-                key: key.clone(),
-                query: None,
-                offset: 0,
-                limit: 0,
-            }),
-            _ => None,
-        }
-        .filter(|count| {
-            let total = if self.selected.is_some() {
-                self.tracks_total
-            } else {
-                self.albums_total
-            };
-            total.is_none_or(|(stamp, _)| stamp != count.stamp(self.revisions))
-        });
-        self.worker_pending = true;
-        let generation = self.active_projection().generation();
-        let ticket = if self.selected.is_some() {
-            self.tracks_projection.ticket()
-        } else {
-            self.albums_projection.ticket()
         };
         self.loading_text.begin((), generation, Instant::now());
         self.loading_text
@@ -524,80 +383,31 @@ impl AlbumBrowser {
                 this.loading_text.finish(&(), generation);
                 this.loading_text
                     .schedule(cx, |this| &mut this.loading_text);
-                // Completion, not logical cancellation, releases the physical gate.
-                this.worker_pending = false;
-                this.revisions = this.handle.gui_snapshot().query_revisions(None);
-                this.sync_data(cx);
-                if !this.visible
-                    || !this
-                        .active_projection()
-                        .accepts(&query, generation, response.revisions)
-                {
-                    this.request_next(cx);
-                    cx.notify();
-                    return;
+                let revisions = this.handle.gui_snapshot().query_revisions(None);
+                if this.model.albums_need_refresh(revisions) {
+                    this.capture_grid_anchor();
                 }
-                if let Some((count_query, count_response)) = count_response
-                    && count_query.stamp(count_response.revisions)
-                        == count_query.stamp(this.revisions)
-                {
-                    let total = match count_response.result {
-                        Ok(ViewResponse::Albums(page)) => Some(page.total),
-                        Ok(ViewResponse::AlbumTracks(page)) => Some(page.total),
-                        _ => None,
+                let completion = this.model.complete(
+                    &query,
+                    generation,
+                    response,
+                    count_response,
+                    revisions,
+                    this.i18n.text("gl-album-response"),
+                );
+                this.apply_data_change(completion.data, cx);
+                if let Some((matches, total)) = completion.counts {
+                    let search = match completion.published {
+                        Published::Albums => &this.album_search,
+                        Published::Tracks => &this.tracks_search,
+                        Published::None => unreachable!(),
                     };
-                    if let Some(total) = total {
-                        let total = Some((count_query.stamp(count_response.revisions), total));
-                        if this.selected.is_some() {
-                            this.tracks_total = total;
-                        } else {
-                            this.albums_total = total;
-                        }
-                    }
+                    search.update(cx, |search, cx| {
+                        set_search_counts(search, matches, total, &this.i18n, cx)
+                    });
                 }
-                match response.result {
-                    Ok(ViewResponse::Albums(page)) => {
-                        let stamp = Query::Albums {
-                            query: None,
-                            sort: this.sort,
-                            offset: 0,
-                            limit: 0,
-                        }
-                        .stamp(response.revisions);
-                        if this.query.is_none() {
-                            this.albums_total = Some((stamp, page.total));
-                        }
-                        if let Some((_, total)) = this.albums_total.filter(|(s, _)| *s == stamp) {
-                            this.album_search.update(cx, |search, cx| {
-                                set_search_counts(search, page.total, total, &this.i18n, cx)
-                            });
-                        }
-                        this.albums.accept(page);
-                        this.prepare_cover(cx);
-                    }
-                    Ok(ViewResponse::AlbumTracks(page)) => {
-                        let Query::AlbumTracks { key, .. } = &query else {
-                            unreachable!()
-                        };
-                        let stamp = Query::AlbumTracks {
-                            key: key.clone(),
-                            query: None,
-                            offset: 0,
-                            limit: 0,
-                        }
-                        .stamp(response.revisions);
-                        if this.tracks_query.is_none() {
-                            this.tracks_total = Some((stamp, page.total));
-                        }
-                        if let Some((_, total)) = this.tracks_total.filter(|(s, _)| *s == stamp) {
-                            this.tracks_search.update(cx, |search, cx| {
-                                set_search_counts(search, page.total, total, &this.i18n, cx)
-                            });
-                        }
-                        this.tracks.accept(page);
-                    }
-                    Err(error) => this.fail_page(error.to_string()),
-                    _ => this.fail_page(this.i18n.text("gl-album-response").to_owned()),
+                if completion.published == Published::Albums {
+                    this.prepare_cover(cx);
                 }
                 this.request_next(cx);
                 cx.notify();
@@ -607,30 +417,18 @@ impl AlbumBrowser {
         cx.notify();
     }
 
-    fn fail_page(&mut self, message: String) {
-        if self.selected.is_some() {
-            self.tracks.fail(message);
-        } else {
-            self.albums.fail(message);
-        }
-    }
-
     pub(super) fn retry(&mut self, cx: &mut Context<Self>) {
-        if self.selected.is_some() {
-            self.tracks.retry();
-        } else {
-            self.albums.retry();
-        }
+        self.model.retry();
         self.request_next(cx);
         cx.notify();
     }
 
     fn loading_row(&self, index: usize, cx: &mut Context<Self>) -> Div {
         let theme = rivu_ui::theme::palette(cx);
-        let error = if self.selected.is_some() {
-            self.tracks.error(index)
+        let error = if self.model.selected().is_some() {
+            self.model.tracks().error(index)
         } else {
-            self.albums.error(index)
+            self.model.albums().error(index)
         };
         column()
             .overflow_hidden()
@@ -663,22 +461,17 @@ impl AlbumBrowser {
 
     fn open(&mut self, key: AlbumKey, cx: &mut Context<Self>) {
         self.capture_grid_anchor();
-        if self.tracks_key.as_ref() != Some(&key) {
-            self.tracks_key = Some(key.clone());
-            self.tracks_total = None;
-            self.tracks_query = None;
+        let change = self.model.select(Some(key));
+        if change.reset_tracks {
             self.tracks_search.update(cx, |search, cx| search.reset(cx));
-            self.tracks.clear();
             self.track_scroll
                 .scroll_to_item_strict(0, ScrollStrategy::Top);
         }
-        self.selected = Some(key);
-        self.load(cx);
+        self.reload(change.data, cx);
     }
 
     fn reset_grid(&mut self) {
         self.dismissed_actions = None;
-        self.albums.clear();
         self.reset_grid_scroll();
     }
 
@@ -691,7 +484,7 @@ impl AlbumBrowser {
     }
 
     fn capture_grid_anchor(&mut self) {
-        if self.grid_reset || self.selected.is_some() || self.albums.is_empty() {
+        if self.grid_reset || self.model.selected().is_some() || self.model.albums().is_empty() {
             return;
         }
         let state = self.grid_scroll.0.borrow();
@@ -701,7 +494,7 @@ impl AlbumBrowser {
                 // is not the logical row. Use measured content height instead.
                 state.last_item_size.map_or(0, |size| {
                     let height = size.contents.height
-                        / self.albums.len().div_ceil(self.grid_layout.columns) as f32;
+                        / self.model.albums().len().div_ceil(self.grid_layout.columns) as f32;
                     (-state.base_handle.offset().y / height).floor().max(0.) as usize
                 })
             },
@@ -710,15 +503,19 @@ impl AlbumBrowser {
         let previous = self
             .grid_anchor
             .as_ref()
-            .and_then(|key| self.albums.position(|album| &album.key == key))
+            .and_then(|key| self.model.albums().position(|album| &album.key == key))
             .or(Some(self.grid_anchor_index));
         let index = anchored_index(
             previous,
             grid_row,
             self.grid_layout.columns,
-            self.albums.len(),
+            self.model.albums().len(),
         );
-        self.grid_anchor = self.albums.get(index).map(|album| album.key.clone());
+        self.grid_anchor = self
+            .model
+            .albums()
+            .get(index)
+            .map(|album| album.key.clone());
         self.grid_anchor_index = index;
     }
 
@@ -726,47 +523,51 @@ impl AlbumBrowser {
         let index = self
             .grid_anchor
             .as_ref()
-            .and_then(|key| self.albums.position(|album| &album.key == key))
+            .and_then(|key| self.model.albums().position(|album| &album.key == key))
             .unwrap_or(self.grid_anchor_index)
-            .min(self.albums.len().saturating_sub(1));
+            .min(self.model.albums().len().saturating_sub(1));
         self.grid_scroll
             .scroll_to_item_strict(index / self.grid_layout.columns, ScrollStrategy::Top);
-        self.grid_anchor = self.albums.get(index).map(|album| album.key.clone());
+        self.grid_anchor = self
+            .model
+            .albums()
+            .get(index)
+            .map(|album| album.key.clone());
         self.grid_anchor_index = index;
         self.grid_reset = false;
     }
 
     fn cover_demand(&mut self, range: Range<usize>, cx: &mut Context<Self>) {
-        if !self.visible || self.selected.is_some() {
+        if !self.model.visible() || self.model.selected().is_some() {
             return;
         }
         let end = range
             .end
             .saturating_mul(self.grid_layout.columns)
-            .min(self.albums.len());
+            .min(self.model.albums().len());
         let start = range
             .start
             .saturating_mul(self.grid_layout.columns)
             .min(end);
         self.demand = start..end;
         // Updating demand while a request is pending still records the latest viewport.
-        let _ = self.albums.demand(self.demand.clone(), ALBUM_PAGE);
+        self.model.demand_albums(self.demand.clone());
         self.prepare_cover(cx);
         self.request_next(cx);
     }
 
     fn prepare_cover(&mut self, cx: &mut Context<Self>) {
-        if !self.visible || self.selected.is_some() {
+        if !self.model.visible() || self.model.selected().is_some() {
             return;
         }
         for (_, cover) in self.covers.extract_if(.., |index, _| {
-            !self.demand.contains(index) || self.albums.get(*index).is_none()
+            !self.demand.contains(index) || self.model.albums().get(*index).is_none()
         }) {
             cover.view.replace(None, cx);
         }
         let mut changed = false;
         for index in self.demand.clone() {
-            let Some(album) = self.albums.get(index) else {
+            let Some(album) = self.model.albums().get(index) else {
                 continue;
             };
             let cover = self
@@ -788,7 +589,7 @@ impl AlbumBrowser {
             );
         }
         let next = self.demand.clone().find_map(|index| {
-            let track = &self.albums.get(index)?.representative;
+            let track = &self.model.albums().get(index)?.representative;
             self.covers
                 .get(&index)?
                 .needs_load(track, &self.manager)
@@ -809,12 +610,16 @@ impl AlbumBrowser {
                     // The worker result remains leased through direct delivery.
                     // Hidden/obsolete demand can warm the shared cache only.
                     let _ = this.loader.finish(&identity, None);
-                    if !this.visible || this.selected.is_some() {
+                    if !this.model.visible() || this.model.selected().is_some() {
                         return;
                     }
                     let mut changed = false;
                     for index in this.demand.clone() {
-                        let current = this.albums.get(index).map(|album| &album.representative);
+                        let current = this
+                            .model
+                            .albums()
+                            .get(index)
+                            .map(|album| &album.representative);
                         if let Some(cover) = this.covers.get_mut(&index) {
                             changed |= cover.complete(&track, current, loaded.as_ref(), cx);
                         }
@@ -844,7 +649,7 @@ impl AlbumBrowser {
 
     fn card(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
         let theme = rivu_ui::theme::palette(cx);
-        let Some(album) = self.albums.get(index) else {
+        let Some(album) = self.model.albums().get(index) else {
             return self
                 .loading_row(index, cx)
                 .flex_1()
@@ -1041,30 +846,6 @@ impl AlbumBrowser {
     }
 }
 
-fn sync_pages<T>(
-    projection: &mut QueryProjection,
-    pages: &mut paged::PagedRows<T>,
-    query: &Query,
-    revisions: QueryRevisions,
-) -> bool {
-    let identity_changed = !projection.matches_identity(query);
-    if !projection.sync(query, revisions) {
-        return false;
-    }
-    if identity_changed {
-        pages.clear();
-    } else {
-        // Keep viewport geometry until the refreshed page supplies its real total.
-        pages.invalidate();
-    }
-    true
-}
-
-fn cancel_pages<T>(projection: &mut QueryProjection, pages: &mut paged::PagedRows<T>) {
-    projection.cancel();
-    pages.cancel_pending();
-}
-
 // Reflow can place earlier cards before the anchor in its new row. Keep the
 // identity until the user actually scrolls to a different row.
 fn anchored_index(previous: Option<usize>, row: usize, columns: usize, count: usize) -> usize {
@@ -1085,15 +866,9 @@ fn track_marker(current: Option<i64>, status: PlaybackStatus, id: i64) -> Option
 impl Render for AlbumBrowser {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = rivu_ui::theme::palette(cx);
-        let total = if self.selected.is_some() {
-            self.tracks_total
-        } else {
-            self.albums_total
-        }
-        .filter(|(stamp, _)| Some(*stamp) == self.active_projection().stamp())
-        .map(|(_, total)| total);
+        let total = self.model.total();
         let mut header = row().items_end().flex_shrink_0().min_w_0().px_2();
-        if let Some(key) = &self.selected {
+        if let Some(key) = self.model.selected() {
             let play_key = key.clone();
             let enqueue_key = key.clone();
             let menu_key = key.clone();
@@ -1106,8 +881,8 @@ impl Render for AlbumBrowser {
                         self.tr("gl-back-albums"),
                         cx,
                         |this, _, cx| {
-                            this.selected = None;
-                            this.load(cx);
+                            let change = this.model.select(None);
+                            this.reload(change.data, cx);
                         },
                     ),
                 ))
@@ -1177,34 +952,31 @@ impl Render for AlbumBrowser {
                 .child(self.album_search.clone())
                 .child(icon_button(
                     "albums-sort",
-                    match self.sort {
+                    match self.model.sort() {
                         AlbumSort::Title => "󰉿",
                         AlbumSort::Artist => "󰀄",
                     },
-                    match self.sort {
+                    match self.model.sort() {
                         AlbumSort::Title => self.tr("gl-album-sort-title"),
                         AlbumSort::Artist => self.tr("gl-album-sort-artist"),
                     },
                     cx,
                     |this, _, cx| {
-                        this.sort = match this.sort {
-                            AlbumSort::Title => AlbumSort::Artist,
-                            AlbumSort::Artist => AlbumSort::Title,
-                        };
+                        let change = this.model.toggle_sort();
                         this.reset_grid();
-                        this.load(cx);
+                        this.reload(change, cx);
                     },
                 ));
         }
-        let generation = self.active_projection().generation();
+        let generation = self.model.generation();
         let track_demand_owner = cx.weak_entity();
-        let content = if self.selected.is_some() {
-            if self.tracks.is_empty() {
+        let content = if self.model.selected().is_some() {
+            if self.model.tracks().is_empty() {
                 column()
                     .px_2()
                     .child(caption(
                         theme,
-                        self.tr(if self.tracks_query.is_some() && total != Some(0) {
+                        self.tr(if self.model.tracks_query().is_some() && total != Some(0) {
                             "gl-album-tracks-no-matches"
                         } else {
                             "gl-album-no-tracks"
@@ -1214,12 +986,12 @@ impl Render for AlbumBrowser {
             } else {
                 VirtualList::new(
                     "album-tracks",
-                    self.tracks.len(),
+                    self.model.tracks().len(),
                     &self.track_scroll,
                     cx.processor(|this, range: Range<usize>, _, cx| {
                         range
                             .map(|index| {
-                                let Some(track) = this.tracks.get(index) else {
+                                let Some(track) = this.model.tracks().get(index) else {
                                     return this
                                         .loading_row(index, cx)
                                         .h(rems(LIST_ROW_REMS))
@@ -1335,30 +1107,21 @@ impl Render for AlbumBrowser {
                             .collect::<Vec<_>>()
                     }),
                 )
-                .on_viewport(move |range, _, cx| {
-                    let owner = track_demand_owner.clone();
-                    cx.defer(move |cx| {
-                        let _ = owner.update(cx, |this, cx| {
-                            if generation == this.active_projection().generation()
-                                && this.selected.is_some()
-                                && this.visible
-                            {
-                                let _ = this.tracks.demand(range, this.page_size);
-                                this.request_next(cx);
-                            }
-                        });
-                    });
+                .on_viewport_deferred(track_demand_owner, move |this, range, cx| {
+                    if this.model.demand_tracks(range, generation) {
+                        this.request_next(cx);
+                    }
                 })
                 .size_full()
                 .scrollbar("album-tracks-scrollbar")
                 .into_any_element()
             }
-        } else if self.albums.is_empty() {
+        } else if self.model.albums().is_empty() {
             column()
                 .px_2()
                 .child(caption(
                     theme,
-                    if self.query.is_some() && total != Some(0) {
+                    if self.model.query().is_some() && total != Some(0) {
                         self.tr("gl-albums-no-matches")
                     } else {
                         self.tr("gl-albums-empty")
@@ -1368,18 +1131,18 @@ impl Render for AlbumBrowser {
         } else {
             let layout = self.grid_layout;
             let columns = layout.columns;
-            let generation = self.active_projection().generation();
+            let generation = self.model.generation();
             let demand_owner = cx.weak_entity();
             let measure_owner = cx.weak_entity();
             VirtualList::new(
                 "album-grid",
-                self.albums.len().div_ceil(columns),
+                self.model.albums().len().div_ceil(columns),
                 &self.grid_scroll,
                 cx.processor(move |this, range: Range<usize>, _, cx| {
                     range
                         .map(|grid_row| {
                             let start = grid_row * columns;
-                            let end = (start + columns).min(this.albums.len());
+                            let end = (start + columns).min(this.model.albums().len());
                             let mut cards = div()
                                 .grid()
                                 .grid_cols(columns as u16)
@@ -1399,9 +1162,7 @@ impl Render for AlbumBrowser {
                 let owner = demand_owner.clone();
                 cx.defer(move |cx| {
                     let _ = owner.update(cx, |this, cx| {
-                        if generation == this.active_projection().generation()
-                            && layout == this.grid_layout
-                        {
+                        if generation == this.model.generation() && layout == this.grid_layout {
                             this.cover_demand(range, cx);
                         }
                     });
@@ -1453,16 +1214,13 @@ impl Render for AlbumBrowser {
 
 #[cfg(test)]
 mod tests {
-    use super::{AlbumCover, anchored_index, cancel_pages, sync_pages};
+    use super::{AlbumCover, anchored_index};
     use crate::{
         artwork::{
             ArtworkManager,
             tests::{tagged_wav, track},
         },
-        gui::{artwork::ArtworkImages, paged},
-        model::{AlbumKey, AlbumSort, Page, Query},
-        projection::QueryProjection,
-        response::QueryRevisions,
+        gui::artwork::ArtworkImages,
     };
 
     #[gpui::test]
@@ -1572,263 +1330,5 @@ mod tests {
         assert_eq!(anchor, 8);
         assert_eq!(anchored_index(Some(anchor), 3, 4, 24), 12);
         assert_eq!(anchored_index(Some(22), 7, 3, 10), 9);
-    }
-
-    fn queries() -> [Query; 2] {
-        [
-            Query::Albums {
-                query: None,
-                sort: AlbumSort::default(),
-                offset: 0,
-                limit: 2,
-            },
-            Query::AlbumTracks {
-                key: AlbumKey {
-                    directory: "/music".into(),
-                    title: "Album".into(),
-                },
-                query: None,
-                offset: 0,
-                limit: 2,
-            },
-        ]
-    }
-
-    #[test]
-    fn album_track_search_replaces_pages_and_rejects_previous_completion() {
-        let mut projection = QueryProjection::default();
-        let mut pages = paged::PagedRows::default();
-        let revisions = QueryRevisions::default();
-        let mut query = queries().into_iter().nth(1).unwrap();
-        sync_pages(&mut projection, &mut pages, &query, revisions);
-        pages.begin(0, 2);
-        pages.accept(Page {
-            total: 2,
-            rows: vec![41, 42],
-        });
-        let previous = query.clone();
-        let generation = projection.generation();
-        let Query::AlbumTracks { query: search, .. } = &mut query else {
-            unreachable!()
-        };
-        *search = Some("needle".into());
-        assert!(sync_pages(&mut projection, &mut pages, &query, revisions));
-        assert!(pages.get(0).is_none());
-        assert!(!projection.accepts(&previous, generation, revisions));
-        pages.begin(0, 2);
-        pages.accept(Page {
-            total: 1,
-            rows: vec![42],
-        });
-        assert_eq!(pages.get(0), Some(&42));
-        let Query::AlbumTracks { query: search, .. } = &mut query else {
-            unreachable!()
-        };
-        *search = None;
-        assert!(sync_pages(&mut projection, &mut pages, &query, revisions));
-        assert!(pages.get(0).is_none());
-    }
-
-    #[test]
-    fn hiding_retains_pages_and_failures_but_cancels_pending_submissions() {
-        for query in queries() {
-            let mut projection = QueryProjection::default();
-            let mut pages = paged::PagedRows::default();
-            let revisions = QueryRevisions::default();
-            assert!(sync_pages(&mut projection, &mut pages, &query, revisions));
-            pages.begin(0, 2);
-            pages.accept(Page {
-                total: 6,
-                rows: vec![10, 11],
-            });
-            pages.begin(2, 2);
-            pages.fail("Unavailable".into());
-            pages.begin(4, 2);
-            let generation = projection.generation();
-            cancel_pages(&mut projection, &mut pages);
-            assert_eq!(pages.len(), 6);
-            assert_eq!(pages.total(), Some(6));
-            assert_eq!(pages.get(0), Some(&10));
-            assert_eq!(pages.error(2), Some("Unavailable"));
-            assert!(!projection.accepts(&query, generation, revisions));
-            assert!(!sync_pages(&mut projection, &mut pages, &query, revisions));
-            assert_eq!(pages.get(1), Some(&11));
-            assert_eq!(pages.demand(4..6, 2), Some(4));
-            assert_eq!(pages.demand(2..4, 2), Some(4));
-            pages.retry();
-            assert_eq!(pages.demand(2..4, 2), Some(2));
-        }
-    }
-
-    #[test]
-    fn data_refresh_preserves_viewport_until_authoritative_total_arrives() {
-        for query in queries() {
-            let mut projection = QueryProjection::default();
-            let mut pages = paged::PagedRows::default();
-            let revisions = QueryRevisions::default();
-            sync_pages(&mut projection, &mut pages, &query, revisions);
-            pages.begin(80, 2);
-            pages.accept(Page {
-                total: 100,
-                rows: vec![80, 81],
-            });
-            pages.demand(80..84, 2);
-            let generation = projection.generation();
-            let refreshed = QueryRevisions {
-                library: 1,
-                ..revisions
-            };
-            assert!(sync_pages(&mut projection, &mut pages, &query, refreshed));
-            assert_eq!(pages.len(), 100);
-            assert_eq!(pages.total(), None);
-            assert_eq!(pages.visible(), 80..84);
-            assert!(pages.get(80).is_none());
-            assert!(!projection.accepts(&query, generation, revisions));
-            assert_eq!(pages.demand(pages.visible(), 2), Some(80));
-            pages.begin(80, 2);
-            pages.accept(Page {
-                total: 4,
-                rows: vec![],
-            });
-            assert_eq!(pages.len(), 4);
-            assert_eq!(pages.demand(pages.visible(), 2), Some(2));
-            pages.begin(2, 2);
-            pages.accept(Page {
-                total: 4,
-                rows: vec![2, 3],
-            });
-            assert_eq!(pages.get(3), Some(&3));
-        }
-    }
-
-    #[test]
-    fn hidden_data_changes_discard_pages_and_bootstrap_previous_empty_results() {
-        for query in queries() {
-            for revisions in [
-                QueryRevisions {
-                    library: 1,
-                    ..Default::default()
-                },
-                QueryRevisions {
-                    structure: 1,
-                    ..Default::default()
-                },
-            ] {
-                for total in [0, 2] {
-                    let mut projection = QueryProjection::default();
-                    let mut pages = paged::PagedRows::default();
-                    sync_pages(
-                        &mut projection,
-                        &mut pages,
-                        &query,
-                        QueryRevisions::default(),
-                    );
-                    pages.begin(0, 2);
-                    pages.accept(Page {
-                        total,
-                        rows: if total == 0 { vec![] } else { vec![1, 2] },
-                    });
-                    cancel_pages(&mut projection, &mut pages);
-                    assert!(sync_pages(&mut projection, &mut pages, &query, revisions));
-                    assert_eq!(pages.total(), None);
-                    assert!(!pages.is_empty());
-                    assert!(pages.get(0).is_none());
-                    assert_eq!(pages.demand(pages.visible(), 2), Some(0));
-                    pages.begin(0, 2);
-                    pages.accept(Page {
-                        total: 1,
-                        rows: vec![3],
-                    });
-                    assert_eq!(pages.total(), Some(1));
-                    assert_eq!(pages.get(0), Some(&3));
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn filtered_empty_album_results_survive_hide_and_page_boundary_changes() {
-        for mut query in queries() {
-            match &mut query {
-                Query::Albums { query, .. } | Query::AlbumTracks { query, .. } => {
-                    *query = Some("needle".into());
-                }
-                _ => unreachable!(),
-            }
-            let mut projection = QueryProjection::default();
-            let mut pages = paged::PagedRows::<usize>::default();
-            let revisions = QueryRevisions::default();
-            sync_pages(&mut projection, &mut pages, &query, revisions);
-            pages.begin(0, 2);
-            pages.accept(Page {
-                total: 0,
-                rows: vec![],
-            });
-            cancel_pages(&mut projection, &mut pages);
-            let generation = projection.generation();
-            projection.cancel();
-            pages.configure_page_size(4);
-            match &mut query {
-                Query::Albums { limit, .. } | Query::AlbumTracks { limit, .. } => *limit = 4,
-                _ => unreachable!(),
-            }
-            assert!(!sync_pages(&mut projection, &mut pages, &query, revisions));
-            assert!(!projection.accepts(&query, generation, revisions));
-            assert_eq!(pages.total(), Some(0));
-            assert!(pages.demand(pages.visible(), 4).is_none());
-
-            let refreshed = QueryRevisions {
-                library: 1,
-                ..revisions
-            };
-            assert!(sync_pages(&mut projection, &mut pages, &query, refreshed));
-            assert_eq!(pages.total(), None);
-            assert_eq!(pages.demand(pages.visible(), 4), Some(0));
-        }
-    }
-
-    #[test]
-    fn paging_and_unrelated_revisions_do_not_change_album_data_keys() {
-        let mut projection = QueryProjection::default();
-        let mut pages = paged::PagedRows::default();
-        let query = queries().into_iter().next().unwrap();
-        sync_pages(
-            &mut projection,
-            &mut pages,
-            &query,
-            QueryRevisions::default(),
-        );
-        pages.begin(0, 2);
-        pages.accept(Page {
-            total: 2,
-            rows: vec![1, 2],
-        });
-        let generation = projection.generation();
-        let paging = Query::Albums {
-            query: None,
-            sort: AlbumSort::default(),
-            offset: 24,
-            limit: 48,
-        };
-        let revisions = QueryRevisions {
-            playlist: 1,
-            queue: 1,
-            duplicate_members: 1,
-            duplicate_groups: 1,
-            ..Default::default()
-        };
-        assert!(!sync_pages(&mut projection, &mut pages, &paging, revisions));
-        assert_eq!(projection.generation(), generation);
-        assert_eq!(pages.get(0), Some(&1));
-        assert!(projection.accepts(&paging, generation, revisions));
-        let changed = Query::Albums {
-            query: Some("new search".into()),
-            sort: AlbumSort::default(),
-            offset: 0,
-            limit: 2,
-        };
-        assert!(sync_pages(&mut projection, &mut pages, &changed, revisions));
-        assert!(pages.get(0).is_none());
-        assert_eq!(pages.demand(pages.visible(), 2), Some(0));
     }
 }

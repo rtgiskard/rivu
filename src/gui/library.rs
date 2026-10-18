@@ -893,19 +893,14 @@ impl Library {
                         Some(row_view.into_any_element())
                     })
                     .collect::<Vec<_>>()
-            })).on_viewport(move |range, _, cx| {
-                let owner = demand_owner.clone();
-                cx.defer(move |cx| {
-                    let _ = owner.update(cx, |this, cx| {
-                        if !this.demanded() {
-                            return;
-                        }
-                        this.request_root_counts(cx);
-                        for (path, offset) in this.library.demand_directories(range) {
-                            this.request_directory_page(path, offset, cx);
-                        }
-                    });
-                });
+            })).on_viewport_deferred(demand_owner, |this, range, cx| {
+                if !this.demanded() {
+                    return;
+                }
+                this.request_root_counts(cx);
+                for (path, offset) in this.library.demand_directories(range) {
+                    this.request_directory_page(path, offset, cx);
+                }
             })
             .h_full()
             .min_h_0()

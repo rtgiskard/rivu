@@ -7,7 +7,7 @@ pub(super) mod selection;
 use requests::ViewRequestKind;
 
 use super::{
-    ListFocus, UI_INSET,
+    ListFocus,
     components::track::{row_text, track_list_row},
     library::LibraryDrag,
 };
@@ -828,13 +828,8 @@ impl Playlists {
         rivu_ui::Dialog::backdrop("playlist-action-modal")
             .map(|surface| self.dialog_surface(surface))
             .child(
-                rivu_ui::Dialog::card(theme)
-                    .id("playlist-action-card")
+                rivu_ui::Dialog::scroll_card(theme, "playlist-action-card", window)
                     .w(gpui::rems(26.25))
-                    .max_w(gpui::relative(0.9))
-                    .max_h(window.viewport_size().height * 0.9)
-                    .overflow_y_scroll()
-                    .p(px(UI_INSET))
                     .child(panel_header(theme, title, detail).flex_shrink_0())
                     .child(
                         row()
@@ -1246,7 +1241,7 @@ impl Playlists {
                     .collect::<Vec<_>>()
             }),
         )
-        .on_viewport(cx.processor(|this, range, _, cx| this.ensure_playlist_range(range, cx)))
+        .on_viewport_deferred(cx.weak_entity(), Self::ensure_playlist_range)
         .h_full()
         .min_h_0()
         .w_full();
@@ -1619,7 +1614,11 @@ impl Playlists {
                         .collect::<Vec<_>>()
                 }),
             )
-            .on_viewport(cx.processor(|this, range, _, cx| this.ensure_entry_range(range, cx)))
+            .on_viewport_deferred(cx.weak_entity(), move |this, range, cx| {
+                if this.browser.playlists().entries().playlist_id == Some(playlist_id) {
+                    this.ensure_entry_range(range, cx);
+                }
+            })
             .on_drop(cx.listener(move |this, drag: &PlaylistDrag, window, cx| {
                 window.prevent_default();
                 this.transfer_playlist_drag(

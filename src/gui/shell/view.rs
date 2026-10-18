@@ -633,7 +633,7 @@ impl Render for GuiApp {
         if let Some(context) = self.shell.help() {
             app = app.child(self.keyboard_help_overlay(context, cx));
         }
-        if let Some(confirmation) = self.render_manual_confirmation(cx) {
+        if let Some(confirmation) = self.render_manual_confirmation(window, cx) {
             app = app.child(confirmation);
         }
         self.workspace.scroll_views.borrow_mut().finish_frame();

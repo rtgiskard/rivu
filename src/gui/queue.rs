@@ -2209,7 +2209,7 @@ impl Queue {
                             .collect::<Vec<_>>()
                     }),
                 )
-                .on_viewport(cx.processor(|this, range, _, cx| this.ensure_queue_range(range, cx)))
+                .on_viewport_deferred(cx.weak_entity(), Self::ensure_queue_range)
                 .on_drop(cx.listener(|this, drag: &QueueDrag, window, cx| {
                     window.prevent_default();
                     this.move_queue_entry(drag, None, cx);

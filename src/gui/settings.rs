@@ -1,3 +1,7 @@
+mod model;
+
+use model::{Completion, PanelApply, SettingsModel, Submission, Target};
+
 use super::{
     UI_INSET,
     album_artwork::{ALBUM_ARTWORK_STYLES, album_artwork_style_label},
@@ -22,7 +26,7 @@ use rivu_ui::{
     copyable_message, disabled_control, dropdown_trigger, form_field,
     icon_button as common_icon_button,
     input::{Input, InputEvent},
-    row, section_group, status_message,
+    input_aligned_control, row, section_group, status_message,
     theme::{Palette, palette},
     toggle_button, two_column,
 };
@@ -184,16 +188,16 @@ impl Field {
     fn hint(self, settings: &Settings) -> SharedString {
         match self {
             Self::AlbumArtworkPeriod
-                if settings.draft.album_artwork_mode == AlbumArtworkMode::Static =>
+                if settings.model.draft.album_artwork_mode == AlbumArtworkMode::Static =>
             {
                 settings.tr("settings-artwork-recovery")
             }
             Self::SpectrumBars | Self::SpectrumBarWidth | Self::SpectrumGap
-                if settings.draft.spectrum_style == SpectrumStyle::Solid =>
+                if settings.model.draft.spectrum_style == SpectrumStyle::Solid =>
             {
                 settings.tr("settings-spectrum-style-recovery")
             }
-            Self::SpectrumHold | Self::SpectrumGravity if !settings.draft.spectrum_peaks => {
+            Self::SpectrumHold | Self::SpectrumGravity if !settings.model.draft.spectrum_peaks => {
                 settings.tr("settings-spectrum-peaks-recovery")
             }
             Self::AlbumArtworkPeriod => settings.tr("settings-artwork-period-hint"),
@@ -264,16 +268,6 @@ impl Field {
     }
 }
 
-// Match Input's 20px line plus 7px vertical padding and its unscaled border.
-// Keeping the border outside rem sizing also aligns controls at fractional scales.
-fn settings_control(control: Stateful<Div>) -> Stateful<Div> {
-    control
-        .h_auto()
-        .min_h_0()
-        .line_height(rems(20. / 16.))
-        .py(rems(7. / 16.))
-}
-
 fn icon_button(
     id: impl Into<ElementId>,
     icon: impl Into<SharedString>,
@@ -281,7 +275,7 @@ fn icon_button(
     cx: &mut Context<Settings>,
     action: impl Fn(&mut Settings, &mut Window, &mut Context<Settings>) + 'static,
 ) -> Stateful<Div> {
-    settings_control(common_icon_button(id, icon, hint, cx, action))
+    input_aligned_control(common_icon_button(id, icon, hint, cx, action))
 }
 
 fn dropdown_button(
@@ -290,7 +284,7 @@ fn dropdown_button(
     cx: &mut Context<Settings>,
     action: impl Fn(&mut Settings, &mut Window, &mut Context<Settings>) + 'static,
 ) -> Stateful<Div> {
-    settings_control(activate_control(
+    input_aligned_control(activate_control(
         dropdown_trigger(palette(cx), id, label, cx),
         cx,
         move |this, window, cx| {
@@ -322,7 +316,7 @@ fn visual_switch(
     } else {
         format!("{label} ({hint})").into()
     };
-    settings_control(toggle_button(
+    input_aligned_control(toggle_button(
         id,
         icon,
         format!(
@@ -336,7 +330,7 @@ fn visual_switch(
         enabled,
         cx,
         move |this, cx| {
-            toggle(&mut this.draft);
+            toggle(&mut this.model.draft);
             this.sync_field_enabled(cx);
         },
     ))
@@ -469,8 +463,7 @@ pub(super) enum SettingsEvent {
 impl EventEmitter<SettingsEvent> for Settings {}
 
 struct SettingsSubmission {
-    session: u64,
-    config: Config,
+    model: Submission,
     inputs: HashMap<Field, String>,
 }
 
@@ -495,21 +488,15 @@ pub(super) struct Settings {
     scrolls: HashMap<&'static str, Rc<ScrollHandle>>,
     active_scroll: Option<ScrollHandle>,
     _subscriptions: Vec<Subscription>,
-    baseline: Arc<Config>,
-    draft: Config,
+    model: SettingsModel,
     inputs: HashMap<Field, Entity<Input>>,
     initialized: bool,
     dropdown: ChoiceState<SettingChoice>,
     font_options: Vec<FontOption>,
     font_value: String,
     dropdown_anchor: Measured,
-    applying: bool,
-    session: u64,
-    feedback: Option<std::result::Result<(), String>>,
     page: SettingsPage,
     visual_page: VisualPage,
-    visualizer_panel: Option<u64>,
-    artwork_panel: Option<u64>,
 }
 
 impl Focusable for Settings {
@@ -568,21 +555,15 @@ impl Settings {
             scrolls: HashMap::new(),
             active_scroll: None,
             _subscriptions: vec![artwork_cache_subscription],
-            baseline: Arc::clone(&config),
-            draft: config.as_ref().clone(),
+            model: SettingsModel::new(&config),
             inputs: HashMap::new(),
             initialized: false,
             dropdown: ChoiceState::default(),
             font_options: Vec::new(),
             font_value: config.ui_font.clone(),
             dropdown_anchor: Measured::Device,
-            applying: false,
-            session: 0,
-            feedback: None,
             page: SettingsPage::Library,
             visual_page: VisualPage::Common,
-            visualizer_panel: None,
-            artwork_panel: None,
         }
     }
 
@@ -623,12 +604,9 @@ impl Settings {
         result: std::result::Result<(), String>,
         cx: &mut Context<Self>,
     ) {
-        if self.session != session {
-            return;
+        if self.model.complete_panel_apply(session, result) {
+            cx.notify();
         }
-        self.applying = false;
-        self.feedback = Some(result);
-        cx.notify();
     }
 
     fn cancel(&mut self, cx: &mut Context<Self>) {
@@ -781,7 +759,7 @@ impl Settings {
             Field::SpectrumDb | Field::AudioVisualizerDb | Field::SpectrogramDb
         ) {
             let common = self.inputs[&Field::VisualizationDb].clone();
-            let fallback = self.draft.visualization_db_range;
+            let fallback = self.model.draft.visualization_db_range;
             let i18n = Arc::clone(&self.i18n);
             return field.form(
                 palette(cx),
@@ -832,17 +810,17 @@ impl Settings {
     }
 
     fn sync_field_enabled(&self, cx: &mut App) {
-        let solid = self.draft.spectrum_style == SpectrumStyle::Solid;
+        let solid = self.model.draft.spectrum_style == SpectrumStyle::Solid;
         for (field, enabled) in [
             (
                 Field::AlbumArtworkPeriod,
-                self.draft.album_artwork_mode == AlbumArtworkMode::Rotating,
+                self.model.draft.album_artwork_mode == AlbumArtworkMode::Rotating,
             ),
             (Field::SpectrumBars, !solid),
             (Field::SpectrumBarWidth, !solid),
             (Field::SpectrumGap, !solid),
-            (Field::SpectrumHold, self.draft.spectrum_peaks),
-            (Field::SpectrumGravity, self.draft.spectrum_peaks),
+            (Field::SpectrumHold, self.model.draft.spectrum_peaks),
+            (Field::SpectrumGravity, self.model.draft.spectrum_peaks),
         ] {
             if let Some(input) = self.inputs.get(&field) {
                 input.update(cx, |input, cx| input.set_enabled(enabled, cx));
@@ -898,13 +876,7 @@ impl Settings {
     }
 
     fn reset(&mut self, config: &Arc<Config>, cx: &mut App) {
-        self.session = self.session.wrapping_add(1);
-        self.visualizer_panel = None;
-        self.artwork_panel = None;
-        self.baseline = Arc::clone(config);
-        self.draft = config.as_ref().clone();
-        self.applying = false;
-        self.feedback = None;
+        self.model.reset(config);
         self.artwork_cache_report = None;
         self.artwork_cache_error = None;
         self.fill(cx);
@@ -917,130 +889,145 @@ impl Settings {
     fn fill_unchanged(&mut self, unchanged: Option<&HashMap<Field, String>>, cx: &mut App) {
         self.set_value(
             Field::ScanMaxDepth,
-            self.draft.scan_max_depth.to_string(),
+            self.model.draft.scan_max_depth.to_string(),
             unchanged,
             cx,
         );
         self.set_value(
             Field::ScanMinDuration,
-            self.draft.scan_min_duration_secs.to_string(),
+            self.model.draft.scan_min_duration_secs.to_string(),
             unchanged,
             cx,
         );
         self.set_value(
             Field::Volume,
-            (self.draft.volume * 100.).to_string(),
+            (self.model.draft.volume * 100.).to_string(),
             unchanged,
             cx,
         );
         self.set_value(
             Field::PlayCountThreshold,
-            self.draft.play_count_threshold_percent.to_string(),
+            self.model.draft.play_count_threshold_percent.to_string(),
             unchanged,
             cx,
         );
         self.set_value(
             Field::LogRetentionWeeks,
-            self.draft.log_retention_weeks.to_string(),
+            self.model.draft.log_retention_weeks.to_string(),
             unchanged,
             cx,
         );
         self.set_value(
             Field::MediaReadBuffer,
-            self.draft.media_read_buffer_mb.to_string(),
+            self.model.draft.media_read_buffer_mb.to_string(),
             unchanged,
             cx,
         );
         self.set_value(
             Field::ArtworkDecodeBudget,
-            self.draft.artwork_decode_budget_mb.to_string(),
+            self.model.draft.artwork_decode_budget_mb.to_string(),
             unchanged,
             cx,
         );
-        self.font_value = self.draft.ui_font.clone();
-        self.set_value(Field::Font, self.draft.ui_font.clone(), unchanged, cx);
-        self.set_value(Field::Scale, self.draft.ui_scale.to_string(), unchanged, cx);
+        self.font_value = self.model.draft.ui_font.clone();
+        self.set_value(Field::Font, self.model.draft.ui_font.clone(), unchanged, cx);
+        self.set_value(
+            Field::Scale,
+            self.model.draft.ui_scale.to_string(),
+            unchanged,
+            cx,
+        );
         self.set_value(
             Field::LayoutSnapGrid,
-            self.draft.layout_snap_grid_px.to_string(),
+            self.model.draft.layout_snap_grid_px.to_string(),
             unchanged,
             cx,
         );
         self.set_value(
             Field::Fps,
-            self.draft.analysis_fps.to_string(),
+            self.model.draft.analysis_fps.to_string(),
             unchanged,
             cx,
         );
         self.set_value(
             Field::Background,
-            self.draft.visual_background.to_string(),
+            self.model.draft.visual_background.to_string(),
             unchanged,
             cx,
         );
         self.set_value(
             Field::VisualizationDb,
-            self.draft.visualization_db_range.to_string(),
+            self.model.draft.visualization_db_range.to_string(),
             unchanged,
             cx,
         );
         self.set_value(
             Field::AudioVisualizerSensitivity,
-            self.draft.audio_visualizer_sensitivity.to_string(),
+            self.model.draft.audio_visualizer_sensitivity.to_string(),
             unchanged,
             cx,
         );
         self.set_value(
             Field::AudioVisualizerRotationSpeed,
-            self.draft.audio_visualizer_rotation_speed.to_string(),
+            self.model.draft.audio_visualizer_rotation_speed.to_string(),
             unchanged,
             cx,
         );
         self.set_value(
             Field::AudioVisualizerBarWidth,
-            self.draft.audio_visualizer_bar_width.to_string(),
+            self.model.draft.audio_visualizer_bar_width.to_string(),
             unchanged,
             cx,
         );
         self.set_value(
             Field::AudioVisualizerBarGlowLayers,
-            self.draft.audio_visualizer_bar_glow_layers.to_string(),
+            self.model
+                .draft
+                .audio_visualizer_bar_glow_layers
+                .to_string(),
             unchanged,
             cx,
         );
         self.set_value(
             Field::AudioVisualizerRingOpacity,
-            self.draft.audio_visualizer_ring_opacity.to_string(),
+            self.model.draft.audio_visualizer_ring_opacity.to_string(),
             unchanged,
             cx,
         );
         self.set_value(
             Field::AudioVisualizerBloomIntensity,
-            self.draft.audio_visualizer_bloom_intensity.to_string(),
+            self.model
+                .draft
+                .audio_visualizer_bloom_intensity
+                .to_string(),
             unchanged,
             cx,
         );
         self.set_value(
             Field::AudioVisualizerInnerDiameter,
-            self.draft.audio_visualizer_inner_diameter.to_string(),
+            self.model.draft.audio_visualizer_inner_diameter.to_string(),
             unchanged,
             cx,
         );
         self.set_value(
             Field::AudioVisualizerPrimaryColor,
-            self.draft.audio_visualizer_primary_color.to_string(),
+            self.model.draft.audio_visualizer_primary_color.to_string(),
             unchanged,
             cx,
         );
         self.set_value(
             Field::AudioVisualizerSecondaryColor,
-            self.draft.audio_visualizer_secondary_color.to_string(),
+            self.model
+                .draft
+                .audio_visualizer_secondary_color
+                .to_string(),
             unchanged,
             cx,
         );
         self.set_value(
             Field::AudioVisualizerDb,
-            self.draft
+            self.model
+                .draft
                 .audio_visualizer_db_range
                 .map(|range| range.to_string())
                 .unwrap_or_default(),
@@ -1049,7 +1036,8 @@ impl Settings {
         );
         self.set_value(
             Field::SpectrumDb,
-            self.draft
+            self.model
+                .draft
                 .spectrum_db_range
                 .map(|range| range.to_string())
                 .unwrap_or_default(),
@@ -1058,55 +1046,56 @@ impl Settings {
         );
         self.set_value(
             Field::SpectrumGap,
-            self.draft.spectrum_gap.to_string(),
+            self.model.draft.spectrum_gap.to_string(),
             unchanged,
             cx,
         );
         self.set_value(
             Field::SpectrumHold,
-            self.draft.spectrum_peak_hold_ms.to_string(),
+            self.model.draft.spectrum_peak_hold_ms.to_string(),
             unchanged,
             cx,
         );
         self.set_value(
             Field::SpectrumGravity,
-            self.draft.spectrum_peak_gravity.to_string(),
+            self.model.draft.spectrum_peak_gravity.to_string(),
             unchanged,
             cx,
         );
         self.set_value(
             Field::SpectrumBarHold,
-            self.draft.spectrum_bar_hold_ms.to_string(),
+            self.model.draft.spectrum_bar_hold_ms.to_string(),
             unchanged,
             cx,
         );
         self.set_value(
             Field::SpectrumBarGravity,
-            self.draft.spectrum_bar_gravity.to_string(),
+            self.model.draft.spectrum_bar_gravity.to_string(),
             unchanged,
             cx,
         );
         self.set_value(
             Field::SpectrumSmoothing,
-            self.draft.spectrum_smoothing_ms.to_string(),
+            self.model.draft.spectrum_smoothing_ms.to_string(),
             unchanged,
             cx,
         );
         self.set_value(
             Field::SpectrumBarWidth,
-            self.draft.spectrum_bar_width.to_string(),
+            self.model.draft.spectrum_bar_width.to_string(),
             unchanged,
             cx,
         );
         self.set_value(
             Field::SpectrumBars,
-            self.draft.spectrum_bars.to_string(),
+            self.model.draft.spectrum_bars.to_string(),
             unchanged,
             cx,
         );
         self.set_value(
             Field::SpectrogramDb,
-            self.draft
+            self.model
+                .draft
                 .spectrogram_db_range
                 .map(|range| range.to_string())
                 .unwrap_or_default(),
@@ -1115,61 +1104,67 @@ impl Settings {
         );
         self.set_value(
             Field::SpectrogramHistory,
-            self.draft.spectrogram_history_seconds.to_string(),
+            self.model.draft.spectrogram_history_seconds.to_string(),
             unchanged,
             cx,
         );
         self.set_value(
             Field::SpectrogramSamplingPointsScale,
-            self.draft.spectrogram_sampling_points_scale.to_string(),
+            self.model
+                .draft
+                .spectrogram_sampling_points_scale
+                .to_string(),
             unchanged,
             cx,
         );
         self.set_value(
             Field::SpectrogramInterpolationPoints,
-            self.draft.spectrogram_interpolation_points.to_string(),
+            self.model
+                .draft
+                .spectrogram_interpolation_points
+                .to_string(),
             unchanged,
             cx,
         );
         self.set_value(
             Field::CursorColor,
-            self.draft.waveform_cursor_color.to_string(),
+            self.model.draft.waveform_cursor_color.to_string(),
             unchanged,
             cx,
         );
         self.set_value(
             Field::Glow,
-            self.draft.waveform_glow.to_string(),
+            self.model.draft.waveform_glow.to_string(),
             unchanged,
             cx,
         );
         self.set_value(
             Field::WaveformRmsGain,
-            self.draft.waveform_rms_gain.to_string(),
+            self.model.draft.waveform_rms_gain.to_string(),
             unchanged,
             cx,
         );
         self.set_value(
             Field::WaveformPeakGain,
-            self.draft.waveform_peak_gain.to_string(),
+            self.model.draft.waveform_peak_gain.to_string(),
             unchanged,
             cx,
         );
         self.set_value(
             Field::WaveformPeakGamma,
-            self.draft.waveform_peak_gamma.to_string(),
+            self.model.draft.waveform_peak_gamma.to_string(),
             unchanged,
             cx,
         );
         self.set_value(
             Field::AlbumArtworkPeriod,
-            self.draft.album_artwork_period_seconds.to_string(),
+            self.model.draft.album_artwork_period_seconds.to_string(),
             unchanged,
             cx,
         );
         self.set_value(
             Field::AlbumArtworkFps,
-            self.draft.album_artwork_fps.to_string(),
+            self.model.draft.album_artwork_fps.to_string(),
             unchanged,
             cx,
         );
@@ -1177,13 +1172,13 @@ impl Settings {
     }
 
     fn parse(&self, cx: &App) -> Result<Config> {
-        let mut config = self.draft.clone();
+        let mut config = self.model.draft.clone();
         config.scan_max_depth = self.number(Field::ScanMaxDepth, cx)?;
         config.scan_min_duration_secs = self.number(Field::ScanMinDuration, cx)?;
         let volume_percent = self.number::<f32>(Field::Volume, cx)?;
         // Preserve the exact level when the displayed percentage is unchanged:
         // multiplying and dividing by 100 can otherwise lose f32 precision.
-        if volume_percent != self.draft.volume * 100. {
+        if volume_percent != self.model.draft.volume * 100. {
             config.volume = volume_percent / 100.;
         }
         config.play_count_threshold_percent = self.number(Field::PlayCountThreshold, cx)?;
@@ -1386,10 +1381,16 @@ impl Settings {
     }
 
     pub(super) fn open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let config = self.handle.config_snapshot();
+        self.model.reset(&self.handle.config_snapshot());
+        self.show_session(window, cx);
+    }
+
+    fn show_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.initialize_settings(cx);
         self.dropdown.close();
-        self.reset(&config, cx);
+        self.artwork_cache_report = None;
+        self.artwork_cache_error = None;
+        self.fill(cx);
         self.active = true;
         self.scope.focus(window, cx);
         cx.notify();
@@ -1402,14 +1403,11 @@ impl Settings {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.open(window, cx);
-        self.visualizer_panel = Some(panel_id);
+        self.model
+            .reset_visualizer(&self.handle.config_snapshot(), panel_id, options);
         self.page = SettingsPage::Visualizations;
         self.visual_page = VisualPage::AudioVisualizer;
-        self.draft.audio_visualizer_style = options.style;
-        self.draft.audio_visualizer_grid = options.reference_lines;
-        self.draft.audio_visualizer_labels = options.labels;
-        cx.notify();
+        self.show_session(window, cx);
     }
 
     pub(super) fn open_artwork(
@@ -1419,77 +1417,68 @@ impl Settings {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.open(window, cx);
-        self.artwork_panel = Some(panel_id);
+        self.model
+            .reset_artwork(&self.handle.config_snapshot(), panel_id, options);
         self.page = SettingsPage::Interface;
-        self.draft.album_artwork_style = options.style;
-        self.draft.album_artwork_mode = options.mode;
-        self.draft.album_artwork_direction = options.direction;
-        self.draft.album_artwork_period_seconds = options.period_seconds;
-        self.fill(cx);
-        cx.notify();
+        self.show_session(window, cx);
     }
 
     fn apply_settings(&mut self, cx: &mut Context<Self>) {
-        if self.applying {
+        if self.model.applying() {
             return;
         }
-        if let Some(panel_id) = self.artwork_panel {
-            let period = self.value(Field::AlbumArtworkPeriod, cx).parse::<f32>();
-            let Ok(period_seconds) = period else {
-                self.feedback = Some(Err(self
-                    .i18n
-                    .text("settings-artwork-period-hint")
-                    .to_owned()));
-                cx.notify();
-                return;
+        if self.model.target() != Target::Global {
+            let period = if matches!(self.model.target(), Target::Artwork(_)) {
+                self.value(Field::AlbumArtworkPeriod, cx)
+                    .parse::<f32>()
+                    .ok()
+            } else {
+                None
             };
-            if !period_seconds.is_finite() || period_seconds <= 0.0 {
-                self.feedback = Some(Err(self
-                    .i18n
-                    .text("settings-artwork-period-hint")
-                    .to_owned()));
-                cx.notify();
-                return;
+            match self.model.begin_panel_apply(period) {
+                Some(PanelApply::Artwork {
+                    panel_id,
+                    options,
+                    session,
+                }) => {
+                    cx.emit(SettingsEvent::ApplyArtwork {
+                        panel_id,
+                        options,
+                        session,
+                    });
+                }
+                Some(PanelApply::Visualizer {
+                    panel_id,
+                    options,
+                    session,
+                }) => {
+                    cx.emit(SettingsEvent::ApplyVisualizer {
+                        panel_id,
+                        options,
+                        session,
+                    });
+                }
+                None => self
+                    .model
+                    .reject_input(self.i18n.text("settings-artwork-period-hint").to_owned()),
             }
-            self.applying = true;
-            self.feedback = None;
-            cx.emit(SettingsEvent::ApplyArtwork {
-                panel_id,
-                options: AlbumArtworkOptions {
-                    style: self.draft.album_artwork_style,
-                    mode: self.draft.album_artwork_mode,
-                    direction: self.draft.album_artwork_direction,
-                    period_seconds,
-                },
-                session: self.session,
-            });
-            cx.notify();
-            return;
-        }
-        if let Some(panel_id) = self.visualizer_panel {
-            self.applying = true;
-            self.feedback = None;
-            cx.emit(SettingsEvent::ApplyVisualizer {
-                panel_id,
-                options: AudioVisualizerOptions::from(&self.draft),
-                session: self.session,
-            });
             cx.notify();
             return;
         }
         let config = match self.parse(cx) {
             Ok(config) => config,
             Err(error) => {
-                self.feedback = Some(Err(self.i18n.format(
+                self.model.reject_input(self.i18n.format(
                     "settings-invalid",
                     &[("error", format!("{error:#}").into())],
-                )));
+                ));
                 cx.notify();
                 return;
             }
         };
-        let (patch, submission) = self.begin_settings_apply(config, cx);
+        let Some((patch, submission)) = self.begin_settings_apply(config, cx) else {
+            return;
+        };
         let handle = self.handle.clone();
         cx.spawn(async move |this, cx| {
             let (response, committed) = cx
@@ -1518,23 +1507,17 @@ impl Settings {
         &mut self,
         config: Config,
         cx: &App,
-    ) -> (ConfigPatch, SettingsSubmission) {
-        let patch = ConfigPatch::between(&self.baseline, &config);
-        // Numeric/text controls live in Input entities. Establish the submitted
-        // values in draft too, so later toggle/dropdown edits have the same origin.
-        self.draft = config.clone();
-        self.applying = true;
-        self.feedback = None;
+    ) -> Option<(ConfigPatch, SettingsSubmission)> {
+        let (patch, model) = self.model.begin_apply(config)?;
         let submission = SettingsSubmission {
-            session: self.session,
-            config,
+            model,
             inputs: self
                 .inputs
                 .iter()
                 .map(|(&field, input)| (field, input.read(cx).text().to_owned()))
                 .collect(),
         };
-        (patch, submission)
+        Some((patch, submission))
     }
 
     fn complete_settings_apply(
@@ -1544,20 +1527,18 @@ impl Settings {
         result: std::result::Result<(), String>,
         cx: &mut Context<Self>,
     ) {
-        if self.session != submission.session {
-            return;
+        match self
+            .model
+            .complete_apply(submission.model, committed, result)
+        {
+            Completion::Stale => return,
+            Completion::Failed => {}
+            Completion::Committed => {
+                // Preserve invalid/partial input and its caret, not just parsed edits.
+                self.fill_unchanged(Some(&submission.inputs), cx);
+                self.font_value = self.value(Field::Font, cx);
+            }
         }
-        self.applying = false;
-        if result.is_ok() {
-            let later_edits = ConfigPatch::between(&submission.config, &self.draft);
-            self.draft = committed.as_ref().clone();
-            later_edits.apply_to(&mut self.draft);
-            self.baseline = committed;
-            // Preserve even invalid or partially typed input, including its caret.
-            self.fill_unchanged(Some(&submission.inputs), cx);
-            self.font_value = self.value(Field::Font, cx);
-        }
-        self.feedback = Some(result);
         cx.notify();
     }
 
@@ -1565,7 +1546,7 @@ impl Settings {
         // set_text emits Changed too; remember explicit writes so selecting or
         // resetting a value does not reopen the autocomplete popup.
         self.font_value = value.clone();
-        self.draft.ui_font = value.clone();
+        self.model.draft.ui_font = value.clone();
         self.inputs[&Field::Font].update(cx, |input, cx| input.set_text(value, cx));
     }
 
@@ -1574,15 +1555,15 @@ impl Settings {
             return;
         };
         match item.value {
-            SettingChoice::Theme(value) => self.draft.ui_theme = value,
+            SettingChoice::Theme(value) => self.model.draft.ui_theme = value,
             SettingChoice::Language(index) => {
-                self.draft.ui_language = ["auto", "en-US", "zh-CN"][index].to_owned()
+                self.model.draft.ui_language = ["auto", "en-US", "zh-CN"][index].to_owned()
             }
             SettingChoice::Device(device_index) => {
                 if device_index == 0 {
-                    self.draft.output_device = None;
+                    self.model.draft.output_device = None;
                 } else if let Some(name) = self.devices.get(device_index - 1) {
-                    self.draft.output_device = Some(name.clone());
+                    self.model.draft.output_device = Some(name.clone());
                 } else {
                     return;
                 }
@@ -1595,16 +1576,18 @@ impl Settings {
                 let value = self.value(Field::Font, cx).trim().to_owned();
                 self.select_font(value, cx);
             }
-            SettingChoice::SpectrumStyle(value) => self.draft.spectrum_style = value,
-            SettingChoice::AudioVisualizerStyle(value) => self.draft.audio_visualizer_style = value,
-            SettingChoice::Palette(value) => self.draft.visual_palette = value,
-            SettingChoice::Fft(value) => self.draft.analysis_fft_size = value,
-            SettingChoice::LogLevel(value) => self.draft.log_level = value,
-            SettingChoice::Window(value) => self.draft.analysis_window = value,
-            SettingChoice::AlbumArtworkStyle(value) => self.draft.album_artwork_style = value,
-            SettingChoice::AlbumArtworkMode(value) => self.draft.album_artwork_mode = value,
+            SettingChoice::SpectrumStyle(value) => self.model.draft.spectrum_style = value,
+            SettingChoice::AudioVisualizerStyle(value) => {
+                self.model.draft.audio_visualizer_style = value
+            }
+            SettingChoice::Palette(value) => self.model.draft.visual_palette = value,
+            SettingChoice::Fft(value) => self.model.draft.analysis_fft_size = value,
+            SettingChoice::LogLevel(value) => self.model.draft.log_level = value,
+            SettingChoice::Window(value) => self.model.draft.analysis_window = value,
+            SettingChoice::AlbumArtworkStyle(value) => self.model.draft.album_artwork_style = value,
+            SettingChoice::AlbumArtworkMode(value) => self.model.draft.album_artwork_mode = value,
             SettingChoice::AlbumArtworkDirection(value) => {
-                self.draft.album_artwork_direction = value
+                self.model.draft.album_artwork_direction = value
             }
         }
         self.dropdown.select_index(index);
@@ -1678,7 +1661,7 @@ impl Settings {
         self.artwork_cache_busy = Some((days, clean));
         self.artwork_cache_report = None;
         self.artwork_cache_error = None;
-        let session = self.session;
+        let session = self.model.session();
         let age_revision = self.artwork_cache_age_revision;
         let manager = Arc::clone(&self.artwork_manager);
         cx.spawn(async move |this, cx| {
@@ -1690,7 +1673,7 @@ impl Settings {
                 // Keep the busy guard across close/reopen, but never reuse an old session's feedback.
                 this.artwork_cache_busy = None;
                 if this.active
-                    && this.session == session
+                    && this.model.session() == session
                     && this.artwork_cache_age_revision == age_revision
                 {
                     match result {
@@ -1873,7 +1856,7 @@ impl Settings {
             .pl_3()
             .overflow_y_scroll()
             .gap_1();
-        for (index, path) in self.draft.library_roots.iter().enumerate() {
+        for (index, path) in self.model.draft.library_roots.iter().enumerate() {
             let path: SharedString = path.to_string_lossy().into_owned().into();
             paths = paths.child(
                 row()
@@ -1899,7 +1882,7 @@ impl Settings {
                                 self.tr("settings-remove-library-folder"),
                                 cx,
                                 move |this, _, cx| {
-                                    this.draft.library_roots.remove(index);
+                                    this.model.draft.library_roots.remove(index);
                                     cx.notify();
                                 },
                             ),
@@ -1910,7 +1893,7 @@ impl Settings {
                     ),
             );
         }
-        if self.draft.library_roots.is_empty() {
+        if self.model.draft.library_roots.is_empty() {
             paths = paths.child(caption(colors, self.tr("settings-library-folders-empty")));
         }
         column()
@@ -1968,6 +1951,7 @@ impl Settings {
 
     fn playback_settings(&mut self, cx: &mut Context<Self>) -> Div {
         let chosen_device: SharedString = self
+            .model
             .draft
             .output_device
             .clone()
@@ -1988,6 +1972,7 @@ impl Settings {
                             this.dropdown.close();
                         } else {
                             let selected = this
+                                .model
                                 .draft
                                 .output_device
                                 .as_ref()
@@ -2019,8 +2004,8 @@ impl Settings {
                 })
                 .child(self.measurement(Measured::Device, cx)),
             );
-        let ffmpeg = self.draft.ffmpeg_enabled;
-        let remix = self.draft.pipewire_auto_mix;
+        let ffmpeg = self.model.draft.ffmpeg_enabled;
+        let remix = self.model.draft.pipewire_auto_mix;
         let playback = settings_card(
             palette(cx),
             self.tr("settings-playback"),
@@ -2032,7 +2017,7 @@ impl Settings {
                     "settings-confirm-queue-replace",
                     "󰁨",
                     self.tr("settings-confirm-queue-replace"),
-                    self.draft.confirm_queue_replace,
+                    self.model.draft.confirm_queue_replace,
                     cx,
                     |draft| draft.confirm_queue_replace = !draft.confirm_queue_replace,
                 )),
@@ -2086,7 +2071,8 @@ impl Settings {
                                 ),
                                 cx,
                                 |this, _, cx| {
-                                    this.draft.ffmpeg_enabled = !this.draft.ffmpeg_enabled;
+                                    this.model.draft.ffmpeg_enabled =
+                                        !this.model.draft.ffmpeg_enabled;
                                     cx.notify();
                                 },
                             ),
@@ -2108,7 +2094,7 @@ impl Settings {
 
     fn basic_settings(&mut self, cx: &mut Context<Self>) -> Div {
         let colors = palette(cx);
-        let draft = &self.draft;
+        let draft = &self.model.draft;
         let language = dropdown_button(
             "settings-language",
             match draft.ui_language.as_str() {
@@ -2121,7 +2107,7 @@ impl Settings {
                 let values = ["auto", "en-US", "zh-CN"];
                 let selected = values
                     .iter()
-                    .position(|value| *value == this.draft.ui_language)
+                    .position(|value| *value == this.model.draft.ui_language)
                     .unwrap_or(0);
                 let labels = [
                     this.i18n.text("settings-language-auto"),
@@ -2147,7 +2133,7 @@ impl Settings {
             |this, _, _| {
                 let selected = Theme::ALL
                     .iter()
-                    .position(|value| *value == this.draft.ui_theme)
+                    .position(|value| *value == this.model.draft.ui_theme)
                     .unwrap_or(0);
                 let items = Theme::ALL
                     .into_iter()
@@ -2203,7 +2189,7 @@ impl Settings {
                         "settings-layout-snapping",
                         "󰐃",
                         self.tr("settings-layout-snapping"),
-                        self.draft.layout_snap_enabled,
+                        self.model.draft.layout_snap_enabled,
                         cx,
                         |draft| draft.layout_snap_enabled = !draft.layout_snap_enabled,
                     )),
@@ -2213,8 +2199,8 @@ impl Settings {
     }
 
     fn desktop_settings(&mut self, cx: &mut Context<Self>) -> Div {
-        let mpris = self.draft.mpris_enabled;
-        let tray = self.draft.tray_enabled;
+        let mpris = self.model.draft.mpris_enabled;
+        let tray = self.model.draft.tray_enabled;
         column().child(
             row()
                 .flex_wrap()
@@ -2238,7 +2224,7 @@ impl Settings {
                         ),
                         cx,
                         |this, _, cx| {
-                            this.draft.mpris_enabled = !this.draft.mpris_enabled;
+                            this.model.draft.mpris_enabled = !this.model.draft.mpris_enabled;
                             cx.notify();
                         },
                     ),
@@ -2257,7 +2243,7 @@ impl Settings {
     }
 
     fn logging_settings(&mut self, cx: &mut Context<Self>) -> Div {
-        let draft = &self.draft;
+        let draft = &self.model.draft;
         let log_level_dropdown = dropdown_button(
             "settings-log-level",
             SettingChoice::LogLevel(draft.log_level).label(&self.i18n),
@@ -2271,7 +2257,7 @@ impl Settings {
                 ];
                 let selected = values
                     .iter()
-                    .position(|value| *value == this.draft.log_level)
+                    .position(|value| *value == this.model.draft.log_level)
                     .unwrap_or(0);
                 this.open_setting_dropdown(
                     values
@@ -2408,7 +2394,7 @@ impl Settings {
     fn artwork_settings(&mut self, cx: &mut Context<Self>) -> Div {
         let colors = palette(cx);
         let settings = &*self;
-        let draft = &settings.draft;
+        let draft = &settings.model.draft;
         let style = dropdown_button(
             "album-artwork-style",
             SettingChoice::AlbumArtworkStyle(draft.album_artwork_style).label(&self.i18n),
@@ -2417,7 +2403,7 @@ impl Settings {
                 let values = ALBUM_ARTWORK_STYLES;
                 let selected = values
                     .iter()
-                    .position(|value| *value == this.draft.album_artwork_style)
+                    .position(|value| *value == this.model.draft.album_artwork_style)
                     .unwrap_or(0);
                 this.open_setting_dropdown(
                     values
@@ -2441,7 +2427,7 @@ impl Settings {
                 let values = [AlbumArtworkMode::Static, AlbumArtworkMode::Rotating];
                 let selected = values
                     .iter()
-                    .position(|value| *value == this.draft.album_artwork_mode)
+                    .position(|value| *value == this.model.draft.album_artwork_mode)
                     .unwrap_or(0);
                 this.open_setting_dropdown(
                     values
@@ -2468,7 +2454,7 @@ impl Settings {
                 ];
                 let selected = values
                     .iter()
-                    .position(|value| *value == this.draft.album_artwork_direction)
+                    .position(|value| *value == this.model.draft.album_artwork_direction)
                     .unwrap_or(0);
                 this.open_setting_dropdown(
                     values
@@ -2489,7 +2475,7 @@ impl Settings {
             .gap_3()
             .child(settings_group(
                 colors,
-                settings.tr(if settings.artwork_panel.is_some() {
+                settings.tr(if matches!(settings.model.target(), Target::Artwork(_)) {
                     "settings-this-instance"
                 } else {
                     "settings-new-instance-defaults"
@@ -2515,19 +2501,22 @@ impl Settings {
                     ))
                     .child(two_column(
                         settings.field_state(Field::AlbumArtworkPeriod, cx),
-                        column().when(settings.artwork_panel.is_none(), |column| {
-                            column
-                                .min_w(rems(180. / 16.))
-                                .gap_2()
-                                .child(settings.field_state(Field::AlbumArtworkFps, cx))
-                        }),
+                        column().when(
+                            !matches!(settings.model.target(), Target::Artwork(_)),
+                            |column| {
+                                column
+                                    .min_w(rems(180. / 16.))
+                                    .gap_2()
+                                    .child(settings.field_state(Field::AlbumArtworkFps, cx))
+                            },
+                        ),
                     )),
             ))
     }
 
     fn visual_settings(&mut self, cx: &mut Context<Settings>) -> Div {
         let settings = &*self;
-        let draft = &settings.draft;
+        let draft = &settings.model.draft;
         match settings.visual_page {
             VisualPage::Common => {
                 let palette_control = dropdown_button(
@@ -2541,7 +2530,7 @@ impl Settings {
                         ];
                         let selected = values
                             .iter()
-                            .position(|value| *value == this.draft.visual_palette)
+                            .position(|value| *value == this.model.draft.visual_palette)
                             .unwrap_or(0);
                         this.open_setting_dropdown(
                             values
@@ -2567,7 +2556,7 @@ impl Settings {
                         let values = [512, 1024, 2048, 4096, 8192, 16384, 32768];
                         let selected = values
                             .iter()
-                            .position(|value| *value == this.draft.analysis_fft_size)
+                            .position(|value| *value == this.model.draft.analysis_fft_size)
                             .unwrap_or(0);
                         this.open_setting_dropdown(
                             values
@@ -2594,7 +2583,7 @@ impl Settings {
                         ];
                         let selected = values
                             .iter()
-                            .position(|value| *value == this.draft.analysis_window)
+                            .position(|value| *value == this.model.draft.analysis_window)
                             .unwrap_or(0);
                         this.open_setting_dropdown(
                             values
@@ -2697,7 +2686,7 @@ impl Settings {
                         ];
                         let selected = values
                             .iter()
-                            .position(|value| *value == this.draft.spectrum_style)
+                            .position(|value| *value == this.model.draft.spectrum_style)
                             .unwrap_or(0);
                         this.open_setting_dropdown(
                             values
@@ -2854,7 +2843,7 @@ impl Settings {
                         ];
                         let selected = values
                             .iter()
-                            .position(|value| *value == this.draft.audio_visualizer_style)
+                            .position(|value| *value == this.model.draft.audio_visualizer_style)
                             .unwrap_or(0);
                         this.open_setting_dropdown(
                             values
@@ -2881,7 +2870,7 @@ impl Settings {
                     }
                     _ => SharedString::default(),
                 };
-                let instance = settings.visualizer_panel.is_some();
+                let instance = matches!(settings.model.target(), Target::Visualizer(_));
                 let display = settings_card(
                     palette(cx),
                     if instance {
@@ -3060,7 +3049,7 @@ impl Settings {
         let (page_id, content) = match self.page {
             SettingsPage::Library => ("settings-library-scroll", self.library_settings(cx)),
             SettingsPage::Playback => ("settings-playback-scroll", self.playback_settings(cx)),
-            SettingsPage::Interface if self.artwork_panel.is_some() => {
+            SettingsPage::Interface if matches!(self.model.target(), Target::Artwork(_)) => {
                 ("settings-artwork-scroll", self.artwork_settings(cx))
             }
             SettingsPage::Interface => (
@@ -3094,7 +3083,7 @@ impl Settings {
         let scroll = self.scrolls.entry(page_id).or_default().clone();
         self.active_scroll = Some(scroll.as_ref().clone());
         let mut body = row().flex_1().min_h_0().items_start();
-        if self.visualizer_panel.is_none() && self.artwork_panel.is_none() {
+        if self.model.target() == Target::Global {
             let sidebar_scroll = self.scrolls.entry("settings-sidebar").or_default().clone();
             body = body.child(
                 div()
@@ -3130,7 +3119,7 @@ impl Settings {
                 &scroll,
             )),
         );
-        let feedback = if self.applying {
+        let feedback = if self.model.applying() {
             status_message(
                 colors,
                 self.tr("settings-applying-settings"),
@@ -3138,7 +3127,7 @@ impl Settings {
             )
             .into_any_element()
         } else {
-            match &self.feedback {
+            match self.model.feedback() {
                 Some(Err(error)) => copyable_message("copy-settings-error", error.clone(), cx)
                     .text_color(rgb(colors.error))
                     .into_any_element(),
@@ -3175,7 +3164,7 @@ impl Settings {
                         cx,
                         |this, _, cx| this.apply_settings(cx),
                     ),
-                    self.applying,
+                    self.model.applying(),
                 ))
                 .child(icon_button(
                     "settings-discard",
@@ -3347,6 +3336,7 @@ mod tests {
     ) -> (ConfigPatch, SettingsSubmission) {
         settings.update(cx, |this, cx| {
             this.begin_settings_apply(this.parse(cx).unwrap(), cx)
+                .unwrap()
         })
     }
 
@@ -3384,7 +3374,7 @@ mod tests {
         cx.update_window(handle, |_, window, cx| {
             settings.update(cx, |this, cx| {
                 this.scope.handle().focus(window, cx);
-                this.draft.album_artwork_mode = AlbumArtworkMode::Static;
+                this.model.draft.album_artwork_mode = AlbumArtworkMode::Static;
                 this.open_setting_dropdown(
                     [AlbumArtworkMode::Static, AlbumArtworkMode::Rotating]
                         .into_iter()
@@ -3425,7 +3415,10 @@ mod tests {
         settings.update(cx, |this, _| {
             assert!(this.dropdown.is_open());
             assert_eq!(this.dropdown.selected_index(), Some(0));
-            assert_eq!(this.draft.album_artwork_mode, AlbumArtworkMode::Static);
+            assert_eq!(
+                this.model.draft.album_artwork_mode,
+                AlbumArtworkMode::Static
+            );
             assert!(this.active);
         });
         cx.update_window(handle, |_, window, cx| {
@@ -3491,12 +3484,29 @@ mod tests {
     }
 
     #[gpui::test]
+    fn unchanged_volume_text_preserves_exact_config_precision(cx: &mut TestAppContext) {
+        let (_directory, runtime, settings) = fixture(cx);
+        settings.update(cx, |this, cx| {
+            let mut config = runtime.handle.config_snapshot().as_ref().clone();
+            for volume in [0.01_f32, 0.07, 0.1234567, 0.33333334, 0.9876543] {
+                config.volume = volume;
+                this.reset(&Arc::new(config.clone()), cx);
+                assert_eq!(this.parse(cx).unwrap().volume.to_bits(), volume.to_bits());
+            }
+        });
+    }
+
+    #[gpui::test]
     fn successful_settings_apply_rebases_untouched_controls_and_keeps_later_edits(
         cx: &mut TestAppContext,
     ) {
         let (_directory, runtime, settings) = fixture(cx);
+        let window = cx.add_window({
+            let settings = settings.clone();
+            move |_, _| SettingsWindow(settings)
+        });
         settings.update(cx, |this, cx| {
-            this.draft.ui_theme = Theme::TokyoNightDay;
+            this.model.draft.ui_theme = Theme::TokyoNightDay;
             this.set_value(Field::ScanMaxDepth, "7", None, cx);
         });
         let (patch, submission) = submit(&settings, cx);
@@ -3509,21 +3519,34 @@ mod tests {
         let (committed, result) = execute(&runtime, patch);
         assert!(result.is_ok());
         // Hold the completion while a user leaves invalid text and changes a switch.
-        settings.update(cx, |this, cx| {
-            this.set_value(Field::ScanMaxDepth, "1e", None, cx);
-            this.draft.still_mode = true;
-            this.draft.ui_theme = Theme::TokyoNight;
-            this.complete_settings_apply(submission, committed, result, cx);
-            assert_eq!(this.baseline.scan_max_depth, 7);
-            assert_eq!(this.baseline.volume, 0.2);
-            assert_eq!(this.baseline.ui_theme, Theme::TokyoNightDay);
-            assert_eq!(this.draft.ui_theme, Theme::TokyoNight);
-            assert_eq!(this.value(Field::Volume, cx), "20");
-            assert_eq!(this.value(Field::ScanMaxDepth, cx), "1e");
-            assert!(this.draft.still_mode);
-            assert!(this.parse(cx).is_err());
-            this.set_value(Field::ScanMaxDepth, "9", None, cx);
-        });
+        cx.update_window(window.into(), |_, window, cx| {
+            settings.update(cx, |this, cx| {
+                this.set_value(Field::ScanMaxDepth, "1e", None, cx);
+                let input = this.inputs[&Field::ScanMaxDepth].clone();
+                input.update(cx, |input, cx| {
+                    input.replace_text_in_range(Some(0..1), "1", window, cx);
+                });
+                this.model.draft.still_mode = true;
+                this.model.draft.ui_theme = Theme::TokyoNight;
+                this.complete_settings_apply(submission, committed, result, cx);
+                assert_eq!(this.model.baseline().scan_max_depth, 7);
+                assert_eq!(this.model.baseline().volume, 0.2);
+                assert_eq!(this.model.baseline().ui_theme, Theme::TokyoNightDay);
+                assert_eq!(this.model.draft.ui_theme, Theme::TokyoNight);
+                assert_eq!(this.value(Field::Volume, cx), "20");
+                assert_eq!(this.value(Field::ScanMaxDepth, cx), "1e");
+                input.update(cx, |input, cx| {
+                    assert_eq!(
+                        input.selected_text_range(false, window, cx).unwrap().range,
+                        1..1
+                    );
+                });
+                assert!(this.model.draft.still_mode);
+                assert!(this.parse(cx).is_err());
+                this.set_value(Field::ScanMaxDepth, "9", None, cx);
+            });
+        })
+        .unwrap();
         let (patch, submission) = submit(&settings, cx);
         assert!(
             runtime
@@ -3540,7 +3563,7 @@ mod tests {
             assert_eq!(visible.volume, 0.3);
             assert!(visible.still_mode);
             assert_eq!(visible.ui_theme, Theme::TokyoNight);
-            assert_eq!(visible, *this.baseline);
+            assert_eq!(visible, *this.model.baseline());
         });
     }
 
@@ -3555,7 +3578,7 @@ mod tests {
             std::fs::create_dir(root).unwrap();
         }
         settings.update(cx, |this, cx| {
-            this.draft.library_roots = roots.clone();
+            this.model.draft.library_roots = roots.clone();
             assert_eq!(this.parse(cx).unwrap().library_roots, roots);
         });
         let (patch, submission) = submit(&settings, cx);
@@ -3605,10 +3628,10 @@ mod tests {
         let (committed, result) = execute(&runtime, patch);
         assert!(result.is_ok());
         settings.update(cx, |this, cx| {
-            this.draft.library_roots.clear();
-            this.draft.library_roots.push(later.clone());
+            this.model.draft.library_roots.clear();
+            this.model.draft.library_roots.push(later.clone());
             this.complete_settings_apply(submission, committed, result, cx);
-            assert_eq!(this.baseline.library_roots, vec![external]);
+            assert_eq!(this.model.baseline().library_roots, vec![external]);
             assert_eq!(this.parse(cx).unwrap().library_roots, vec![later]);
         });
     }
@@ -3621,7 +3644,7 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         std::fs::create_dir(&path).unwrap();
         settings.update(cx, |this, cx| {
-            this.draft.ui_theme = Theme::TokyoNightDay;
+            this.model.draft.ui_theme = Theme::TokyoNightDay;
             this.set_value(Field::ScanMaxDepth, "7", None, cx);
         });
         let (patch, submission) = submit(&settings, cx);
@@ -3629,18 +3652,18 @@ mod tests {
         assert!(result.is_err());
         settings.update(cx, |this, cx| {
             this.set_value(Field::ScanMaxDepth, "9", None, cx);
-            this.draft.still_mode = true;
+            this.model.draft.still_mode = true;
             this.complete_settings_apply(submission, committed, result, cx);
             assert_eq!(
-                this.baseline.scan_max_depth,
+                this.model.baseline().scan_max_depth,
                 crate::config::DEFAULT_SCAN_MAX_DEPTH
             );
             assert_eq!(this.value(Field::ScanMaxDepth, cx), "9");
-            assert!(this.draft.still_mode);
-            assert_eq!(this.baseline.ui_theme, baseline_theme);
-            assert_eq!(this.draft.ui_theme, Theme::TokyoNightDay);
-            assert!(!this.applying);
-            assert!(matches!(&this.feedback, Some(Err(_))));
+            assert!(this.model.draft.still_mode);
+            assert_eq!(this.model.baseline().ui_theme, baseline_theme);
+            assert_eq!(this.model.draft.ui_theme, Theme::TokyoNightDay);
+            assert!(!this.model.applying());
+            assert!(matches!(this.model.feedback(), Some(Err(_))));
         });
         std::fs::remove_dir(&path).unwrap();
         assert!(
@@ -3654,11 +3677,11 @@ mod tests {
         assert!(result.is_ok());
         settings.update(cx, |this, cx| {
             this.complete_settings_apply(submission, committed, result, cx);
-            assert_eq!(this.baseline.scan_max_depth, 9);
-            assert_eq!(this.baseline.volume, 0.2);
-            assert!(this.baseline.still_mode);
-            assert_eq!(this.baseline.ui_theme, Theme::TokyoNightDay);
-            assert_eq!(this.parse(cx).unwrap(), *this.baseline);
+            assert_eq!(this.model.baseline().scan_max_depth, 9);
+            assert_eq!(this.model.baseline().volume, 0.2);
+            assert!(this.model.baseline().still_mode);
+            assert_eq!(this.model.baseline().ui_theme, Theme::TokyoNightDay);
+            assert_eq!(this.parse(cx).unwrap(), *this.model.baseline());
         });
     }
 
@@ -3682,16 +3705,16 @@ mod tests {
         let (patch, submission) = submit(&settings, cx);
         settings.update(cx, |this, cx| {
             this.complete_settings_apply(old_submission, old_committed, old_result, cx);
-            assert!(this.applying);
-            assert!(this.feedback.is_none());
-            assert_eq!(this.baseline.scan_max_depth, 7);
+            assert!(this.model.applying());
+            assert!(this.model.feedback().is_none());
+            assert_eq!(this.model.baseline().scan_max_depth, 7);
             assert_eq!(this.value(Field::ScanMaxDepth, cx), "9");
         });
         let (committed, result) = execute(&runtime, patch);
         assert!(result.is_ok());
         settings.update(cx, |this, cx| {
             this.complete_settings_apply(submission, committed, result, cx);
-            assert!(!this.applying);
+            assert!(!this.model.applying());
             assert_eq!(this.parse(cx).unwrap().scan_max_depth, 9);
         });
     }

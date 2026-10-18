@@ -132,32 +132,34 @@ impl GuiApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = rivu_ui::theme::palette(cx);
-        let mut content = rivu_ui::Dialog::card(theme).gap_2().child(
-            row()
-                .child(div().flex_1().text_lg().child(self.tr("shell-layouts")))
-                .child(
-                    rivu_ui::quiet_icon_button(
-                        theme,
-                        icon_button(
-                            "layouts-close",
-                            "",
-                            self.tr("shell-close-layouts"),
-                            cx,
-                            |this, window, cx| {
-                                this.shell.dismiss(shell::Surface::Layouts);
-                                this.layout_action = None;
-                                this.focus_layout(window, cx);
-                                cx.notify();
-                            },
-                        ),
-                    )
-                    .focus(|style| {
-                        style
-                            .border_color(gpui::transparent_black())
-                            .text_color(rgb(theme.accent))
-                    }),
-                ),
-        );
+        let mut content = rivu_ui::Dialog::scroll_card(theme, "layouts-content", window)
+            .gap_2()
+            .child(
+                row()
+                    .child(div().flex_1().text_lg().child(self.tr("shell-layouts")))
+                    .child(
+                        rivu_ui::quiet_icon_button(
+                            theme,
+                            icon_button(
+                                "layouts-close",
+                                "",
+                                self.tr("shell-close-layouts"),
+                                cx,
+                                |this, window, cx| {
+                                    this.shell.dismiss(shell::Surface::Layouts);
+                                    this.layout_action = None;
+                                    this.focus_layout(window, cx);
+                                    cx.notify();
+                                },
+                            ),
+                        )
+                        .focus(|style| {
+                            style
+                                .border_color(gpui::transparent_black())
+                                .text_color(rgb(theme.accent))
+                        }),
+                    ),
+            );
         if let Some(action) = self.layout_action.clone() {
             let (title, submit) = match &action {
                 Action::Duplicate => (
@@ -335,15 +337,7 @@ impl GuiApp {
         }
         rivu_ui::Dialog::backdrop("layouts-modal")
             .map(|surface| self.dialog_surface(surface))
-            .child(
-                content
-                    .id("layouts-content")
-                    .w(px(460.))
-                    .max_w(relative(0.9))
-                    .max_h(window.viewport_size().height * 0.9)
-                    .overflow_y_scroll()
-                    .p(px(UI_INSET)),
-            )
+            .child(content.w(px(460.)))
             .into_any_element()
     }
 }

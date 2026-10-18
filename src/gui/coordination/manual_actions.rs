@@ -3,8 +3,8 @@
 //! owns only cross-feature intent identity and the window's confirmation dialog.
 //! Refresh reconciles owners before a frozen target is validated or a draft discarded.
 
-use crate::gui::{GuiApp, UI_INSET};
-use gpui::{AnyElement, Context, prelude::*, px};
+use crate::gui::GuiApp;
+use gpui::{AnyElement, Context, Window, prelude::*};
 use rivu_ui::{icon_button, panel_header, row};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -294,6 +294,7 @@ impl GuiApp {
 
     pub(in crate::gui) fn render_manual_confirmation(
         &mut self,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let theme = rivu_ui::theme::palette(cx);
@@ -307,18 +308,19 @@ impl GuiApp {
             rivu_ui::Dialog::backdrop("metadata-confirmation-modal")
                 .map(|surface| self.shell.scope().surface(surface))
                 .child(
-                    rivu_ui::Dialog::card(theme)
-                        .id("metadata-confirmation-card")
+                    rivu_ui::Dialog::scroll_card(theme, "metadata-confirmation-card", window)
                         .w(gpui::rems(26.25))
-                        .max_w(gpui::relative(0.9))
-                        .p(px(UI_INSET))
-                        .child(panel_header(
-                            theme,
-                            self.tr("gl-metadata-discard-title"),
-                            detail.to_owned(),
-                        ))
+                        .child(
+                            panel_header(
+                                theme,
+                                self.tr("gl-metadata-discard-title"),
+                                detail.to_owned(),
+                            )
+                            .flex_shrink_0(),
+                        )
                         .child(
                             row()
+                                .flex_shrink_0()
                                 .justify_end()
                                 .child(icon_button(
                                     "metadata-confirmation-cancel",

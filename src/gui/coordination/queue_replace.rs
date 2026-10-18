@@ -67,13 +67,8 @@ impl GuiApp {
         rivu_ui::Dialog::backdrop("queue-replace-modal")
             .map(|surface| self.dialog_surface(surface))
             .child(
-                rivu_ui::Dialog::card(theme)
-                    .id("queue-replace-card")
+                rivu_ui::Dialog::scroll_card(theme, "queue-replace-card", window)
                     .w(gpui::rems(26.25))
-                    .max_w(gpui::relative(0.9))
-                    .max_h(window.viewport_size().height * 0.9)
-                    .overflow_y_scroll()
-                    .p(px(UI_INSET))
                     .child(panel_header(theme, title, detail).flex_shrink_0())
                     .child(
                         row()
