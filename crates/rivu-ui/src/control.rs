@@ -1,4 +1,4 @@
-use crate::{layout::UI_INSET, overlay::ButtonTooltip};
+use crate::{layout::UI_INSET, overlay::text_tooltip};
 use gpui::{Context, Div, ElementId, SharedString, Stateful, Window, div, prelude::*, rgb};
 
 /// Keep native keyboard clicks and pointer clicks on the exact same action path.
@@ -131,7 +131,6 @@ pub fn icon_button<T: 'static>(
     cx: &mut Context<T>,
     action: impl Fn(&mut T, &mut Window, &mut Context<T>) + 'static,
 ) -> Stateful<Div> {
-    let hint = hint.into();
     button(id, icon, cx, action)
         .font_family(crate::theme::icon_family(cx))
         .text_size(gpui::rems(1.))
@@ -141,7 +140,7 @@ pub fn icon_button<T: 'static>(
         .items_center()
         .justify_center()
         .flex_shrink_0()
-        .tooltip(move |_, cx| cx.new(|_| ButtonTooltip { text: hint.clone() }).into())
+        .tooltip(text_tooltip(hint))
 }
 
 /// Low-emphasis inline action; preserve the shared icon hit area and tooltip.

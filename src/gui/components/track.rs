@@ -1,6 +1,6 @@
 use crate::gui::appearance::fonts;
 use gpui::{Div, ElementId, SharedString, Stateful, div, prelude::*, rgb};
-use rivu_ui::{caption, column, list_row, row_tooltip};
+use rivu_ui::{list_row, row_tooltip, two_line_text};
 /// Numbered track row shared by album, playlist, and queue views.
 pub(crate) fn track_list_row(
     theme: &'static rivu_ui::theme::Palette,
@@ -34,7 +34,7 @@ pub(crate) fn track_list_row(
         .child(track_row_text(theme, text_id, title, detail, playing))
 }
 
-/// Standard two-line row text with an overflow tooltip.
+/// Standard two-line row text with a full-content hover tooltip.
 pub(crate) fn row_text(
     theme: &'static rivu_ui::theme::Palette,
     id: impl Into<ElementId>,
@@ -53,19 +53,9 @@ fn track_row_text(
 ) -> Stateful<Div> {
     let title = title.into();
     let detail = detail.into();
-    let view = column()
+    let view = two_line_text(theme, title.clone(), detail.clone())
         .id(id)
-        .flex_1()
-        .gap_0()
-        .overflow_hidden()
-        .child(
-            div()
-                .text_sm()
-                .text_color(rgb(if playing { theme.accent } else { theme.text }))
-                .truncate()
-                .child(title.clone()),
-        )
-        .child(caption(theme, detail.clone()).truncate());
+        .when(playing, |view| view.text_color(rgb(theme.accent)));
     row_tooltip(view, title, detail)
 }
 

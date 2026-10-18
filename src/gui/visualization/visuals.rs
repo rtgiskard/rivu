@@ -759,12 +759,7 @@ impl Visuals {
                     .text_color(rgb(theme.secondary))
                     .text_size(px(10.0))
                     .line_height(px(12.0))
-                    .tooltip(move |_, cx| {
-                        cx.new(|_| rivu_ui::ButtonTooltip {
-                            text: tooltip.clone(),
-                        })
-                        .into()
-                    })
+                    .tooltip(rivu_ui::text_tooltip(tooltip))
                     .child(message)
                     .into_any_element();
             }

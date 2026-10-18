@@ -1053,12 +1053,7 @@ impl Metadata {
                                             .text_color(rgb(theme.muted))
                                             .truncate(),
                                     )
-                                    .tooltip(move |_, cx| {
-                                        cx.new(|_| rivu_ui::ButtonTooltip {
-                                            text: status.clone(),
-                                        })
-                                        .into()
-                                    }),
+                                    .tooltip(rivu_ui::text_tooltip(status)),
                             ),
                     )
                     .child(metadata_group(
@@ -1079,12 +1074,7 @@ impl Metadata {
                                     ),
                                 )
                                 .id(("metadata-path", panel_id))
-                                .tooltip(move |_, cx| {
-                                    cx.new(|_| rivu_ui::ButtonTooltip {
-                                        text: path_tooltip.clone(),
-                                    })
-                                    .into()
-                                }),
+                                .tooltip(rivu_ui::text_tooltip(path_tooltip)),
                             ),
                             metadata_item(
                                 theme,

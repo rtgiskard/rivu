@@ -59,7 +59,7 @@ impl Library {
             library,
             library_search,
             requests: Default::default(),
-            loading_text: Default::default(),
+            loading_text: rivu_ui::loading::LoadingText::new(std::time::Duration::from_millis(150)),
             visible: false,
             available: false,
             focused: false,

@@ -213,11 +213,26 @@ shared presentation does not absorb business ownership.
 
 Track compositions share the favorite action's icon, tooltip, hover visibility
 and pointer isolation; feature owners still send the command for the current
-track. Page-placeholder compositions share loading/failure presentation and
-register a retry click only while an error is displayed. Owners supply the
-error, delayed-text visibility and retry callback, retaining request identity,
-failure recovery and notification responsibility. These compositions do not own
-records, timers or asynchronous work.
+track. `rivu_ui::loading::paged_loading_row` supplies list-placeholder presentation
+and registers a retry click only while an error is displayed. Owners supply
+resolved labels, error details, text visibility and the retry callback, retaining
+request identity, failure recovery and notification responsibility. Tree and
+album placeholders keep their specialized layouts. The row does not introduce
+keyboard activation or change pointer propagation.
+
+`loading::LoadingText` owns only delayed text visibility, with a host-provided
+delay and at most one timer per instance. Its tokens match presentation updates;
+they do not validate query results or release worker slots. Hosts decide when
+waiting begins and when to retain or clear presentation state. Rivu uses 150 ms
+and preserves each feature's existing queueing, hiding and cancellation policy.
+
+`two_line_text` supplies two independently truncated lines without input behavior
+or a tooltip; its primary text color can be overridden on the returned element.
+Track numbering, playback markers and selection remain application composition.
+`row_tooltip` can be attached separately and is not gated on measured overflow.
+`text_tooltip` captures resolved text and builds the tooltip when opened. Dynamic
+content that must read current input or defer formatting keeps a native tooltip
+builder; neither helper introduces subscriptions or eager data reads.
 
 Hosts install an immutable `theme::Palette` with `theme::set_palette`, publish a
 resolved text font and icon family with `theme::set_typography`, and call

@@ -12,9 +12,9 @@ use crate::{
 };
 use gpui::{AnyElement, Context, Div, EntityId, SharedString, Window, prelude::*, px, rgb};
 use rivu_ui::{
-    ButtonTooltip, LIST_ROW_REMS, StatusKind, VirtualList, button, caption, compact_icon_button,
-    disabled_control, hover_actions, icon_button, list_panel_header, list_viewport, panel_surface,
-    panel_toolbar, row, status_message,
+    LIST_ROW_REMS, StatusKind, VirtualList, button, caption, compact_icon_button, disabled_control,
+    hover_actions, icon_button, list_panel_header, list_viewport, panel_surface, panel_toolbar,
+    row, status_message,
 };
 use std::cell::RefCell;
 
@@ -153,7 +153,7 @@ impl Queue {
         .id(("queue-count", panel_id))
         .tooltip({
             let text = self.tr("gl-queue-drag-hint");
-            move |_, cx| cx.new(|_| ButtonTooltip { text: text.clone() }).into()
+            rivu_ui::text_tooltip(text)
         });
         let tools = panel_toolbar()
             .min_h(px(32.))
@@ -193,12 +193,7 @@ impl Queue {
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .tooltip(move |_, cx| {
-                        cx.new(|_| ButtonTooltip {
-                            text: selection_message.clone(),
-                        })
-                        .into()
-                    }),
+                    .tooltip(rivu_ui::text_tooltip(selection_message)),
             )
             .when(self.model.selection_error.is_some(), |status| {
                 status.child(icon_button(
@@ -720,11 +715,15 @@ impl Queue {
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<Div> {
         let error = self.model.rows.error(index);
-        crate::gui::components::loading::paged_loading_row(
+        rivu_ui::loading::paged_loading_row(
             ("loading-row", index),
             error,
             self.loading.show(&(), error.is_some()),
-            |key| self.tr(key),
+            self.tr(if error.is_some() {
+                "shell-loading-failed"
+            } else {
+                "shell-loading"
+            }),
             cx,
             |this, _, cx| {
                 this.retry_queue_page(cx);

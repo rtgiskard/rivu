@@ -3,7 +3,7 @@ use crate::{
     focus::dropdown_key,
     list::VirtualList,
     menu::POPOVER_MAX_REMS,
-    overlay::ButtonTooltip,
+    overlay::text_tooltip,
     row::{DROPDOWN_ROW_REMS, dropdown_row},
     surface::Popover,
     theme::palette,
@@ -214,9 +214,7 @@ impl ChoicePopup {
                                 selected == Some(index),
                                 label,
                             )
-                            .tooltip(move |_, cx| {
-                                cx.new(|_| ButtonTooltip { text: hint.clone() }).into()
-                            })
+                            .tooltip(text_tooltip(hint))
                             .on_click(cx.listener(
                                 move |owner, _, window, cx| choose(owner, index, window, cx),
                             )),

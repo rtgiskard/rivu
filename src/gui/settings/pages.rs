@@ -2,7 +2,7 @@
 use super::{
     Field, Measured, SettingChoice, Settings, SettingsEvent, SettingsPage, VisualPage,
     dropdown_button, ffmpeg_hint, icon_button, model::Target, settings_card, settings_group,
-    settings_tooltip, spectrum_style_label, visual_switch, visualization_palette_label,
+    spectrum_style_label, visual_switch, visualization_palette_label,
 };
 use crate::{
     config::{
@@ -16,9 +16,8 @@ use crate::{
 };
 use gpui::{Context, Div, SharedString, div, prelude::*, rems, rgb};
 use rivu_ui::{
-    ButtonTooltip, DropdownItem, StatusKind, active_control, button, caption, column,
-    copyable_message, disabled_control, form_field, row, status_message, theme::palette,
-    two_column,
+    DropdownItem, StatusKind, active_control, button, caption, column, copyable_message,
+    disabled_control, form_field, row, status_message, text_tooltip, theme::palette, two_column,
 };
 
 impl Settings {
@@ -200,7 +199,7 @@ impl Settings {
                             .whitespace_nowrap()
                             .text_ellipsis_middle()
                             .child(path.clone())
-                            .tooltip(settings_tooltip(path)),
+                            .tooltip(text_tooltip(path)),
                     )
                     .child(
                         rivu_ui::quiet_icon_button(
@@ -239,9 +238,7 @@ impl Settings {
                                     .opacity(0.6)
                                     .hover(|style| style.opacity(1.)),
                             )
-                            .tooltip(settings_tooltip(
-                                self.tr("settings-library-folders-add-hint"),
-                            )),
+                            .tooltip(text_tooltip(self.tr("settings-library-folders-add-hint"))),
                     ),
             )
             .child(paths)
@@ -324,12 +321,7 @@ impl Settings {
                 .relative()
                 .tooltip({
                     let chosen_device = chosen_device.clone();
-                    move |_, cx| {
-                        cx.new(|_| ButtonTooltip {
-                            text: chosen_device.clone(),
-                        })
-                        .into()
-                    }
+                    rivu_ui::text_tooltip(chosen_device)
                 })
                 .child(self.measurement(Measured::Device, cx)),
             );
@@ -638,7 +630,7 @@ impl Settings {
                     |draft| draft.log_to_file = !draft.log_to_file,
                 )))
                 .id("settings-logging-scope-help")
-                .tooltip(settings_tooltip(self.tr("settings-logging-scope"))),
+                .tooltip(text_tooltip(self.tr("settings-logging-scope"))),
         )
     }
 
@@ -949,7 +941,7 @@ impl Settings {
                                 .min_w(rems(180. / 16.)),
                             ))
                             .id("settings-appearance-help")
-                            .tooltip(settings_tooltip(settings.tr("settings-appearance-help"))),
+                            .tooltip(text_tooltip(settings.tr("settings-appearance-help"))),
                     ))
                     .child(settings_card(
                         palette(cx),
@@ -973,7 +965,7 @@ impl Settings {
                             ))
                             .child(settings.single(Field::Fps, cx))
                             .id("settings-analysis-help")
-                            .tooltip(settings_tooltip(settings.tr("settings-analysis-help"))),
+                            .tooltip(text_tooltip(settings.tr("settings-analysis-help"))),
                     ))
                     .child(settings_card(
                         palette(cx),
@@ -1213,7 +1205,7 @@ impl Settings {
                             palette(cx),
                             settings.tr("settings-style"),
                             style.when(!hint.is_empty(), |control| {
-                                control.tooltip(settings_tooltip(hint))
+                                control.tooltip(text_tooltip(hint))
                             }),
                         ))
                         .child(
@@ -1245,7 +1237,7 @@ impl Settings {
                                 )),
                         )
                         .id("settings-visualizer-display-help")
-                        .tooltip(settings_tooltip(if instance {
+                        .tooltip(text_tooltip(if instance {
                             settings.tr("settings-visualizer-instance-help")
                         } else {
                             settings.tr("settings-visualizer-defaults-help")
@@ -1286,9 +1278,7 @@ impl Settings {
                                 },
                             )))
                             .id("settings-visualizer-response-motion-help")
-                            .tooltip(settings_tooltip(
-                                settings.tr("settings-visualizer-motion-help"),
-                            )),
+                            .tooltip(text_tooltip(settings.tr("settings-visualizer-motion-help"))),
                     ))
                     .child(settings_card(
                         palette(cx),
@@ -1302,7 +1292,7 @@ impl Settings {
                             ))
                             .child(settings.single(Field::AudioVisualizerRingOpacity, cx))
                             .id("settings-bars-rings-help")
-                            .tooltip(settings_tooltip(
+                            .tooltip(text_tooltip(
                                 settings.tr("settings-visualizer-bars-rings-help"),
                             )),
                     ));
@@ -1358,7 +1348,7 @@ impl Settings {
                         .child(settings.pair(Field::WaveformRmsGain, Field::WaveformPeakGain, cx))
                         .child(settings.single(Field::WaveformPeakGamma, cx))
                         .id("settings-amplitude-help")
-                        .tooltip(settings_tooltip(
+                        .tooltip(text_tooltip(
                             settings.tr("settings-waveform-amplitude-help"),
                         )),
                 )),

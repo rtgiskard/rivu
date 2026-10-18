@@ -1,4 +1,4 @@
-use crate::{control::activate_control, layout::UI_INSET, overlay::ButtonTooltip};
+use crate::{control::activate_control, layout::UI_INSET, overlay::text_tooltip};
 use gpui::{Context, Div, ElementId, SharedString, Stateful, Window, div, prelude::*, rgb};
 
 pub const MENU_WIDTH: f32 = 260.0;
@@ -34,15 +34,9 @@ pub fn menu_back<T: 'static>(
     cx: &mut Context<T>,
     action: impl Fn(&mut T, &mut Window, &mut Context<T>) + 'static,
 ) -> Stateful<Div> {
-    let label = label.into();
     menu_item(id, "", cx, action)
         .font_family(crate::theme::icon_family(cx))
-        .tooltip(move |_, cx| {
-            cx.new(|_| ButtonTooltip {
-                text: label.clone(),
-            })
-            .into()
-        })
+        .tooltip(text_tooltip(label))
 }
 
 /// Destructive menu rows use text, not a button border, to identify the action.

@@ -56,7 +56,7 @@ pub(in crate::gui) struct Library {
     library: LibraryBrowser,
     library_search: gpui::Entity<rivu_ui::search::SearchField>,
     requests: requests::LibraryRequests,
-    loading_text: super::loading::LoadingText<TreeBranch>,
+    loading_text: rivu_ui::loading::LoadingText<TreeBranch>,
     visible: bool,
     available: bool,
     focused: bool,
@@ -1012,10 +1012,7 @@ impl Library {
                     .flex_shrink_0()
                     .min_w_0()
                     .truncate()
-                    .tooltip(move |_, cx| {
-                        cx.new(|_| rivu_ui::ButtonTooltip { text: path.clone() })
-                            .into()
-                    }),
+                    .tooltip(rivu_ui::text_tooltip(path)),
             )
             .child(
                 caption(theme, message.clone())
@@ -1024,12 +1021,7 @@ impl Library {
                     .flex_shrink_0()
                     .min_w_0()
                     .truncate()
-                    .tooltip(move |_, cx| {
-                        cx.new(|_| rivu_ui::ButtonTooltip {
-                            text: message.clone(),
-                        })
-                        .into()
-                    }),
+                    .tooltip(rivu_ui::text_tooltip(message)),
             )
     }
 
@@ -1079,12 +1071,7 @@ impl Library {
             .flex_1()
             .min_w(gpui::rems(3.))
             .id(("library-selection-count", panel_id))
-            .tooltip(move |_, cx| {
-                cx.new(|_| rivu_ui::ButtonTooltip {
-                    text: selection_label.clone().into(),
-                })
-                .into()
-            });
+            .tooltip(rivu_ui::text_tooltip(selection_label));
         let tools = panel_toolbar()
             .min_w_0()
             .flex_shrink(1.)

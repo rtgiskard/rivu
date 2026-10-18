@@ -5,6 +5,7 @@ mod focus;
 pub mod input;
 mod layout;
 pub mod list;
+pub mod loading;
 mod menu;
 mod overlay;
 mod row;
@@ -34,11 +35,11 @@ pub use menu::{
 pub use overlay::{
     ButtonTooltip, ListDragPreview, anchor_list_drag_preview, begin_list_drag, copyable_message,
     drag_preview, drag_preview_surface, lazy_row_tooltip, list_drag_preview, row_tooltip,
-    tooltip_surface,
+    text_tooltip, tooltip_surface,
 };
 pub use row::{
     DROPDOWN_ROW_REMS, LIST_ROW_REMS, dropdown_row, hover_actions, list_row, list_row_height,
-    row_background, tree_row,
+    row_background, tree_row, two_line_text,
 };
 pub use scrollbar::scrollable_area;
 pub use surface::{Dialog, Popover, checked_menu_item};

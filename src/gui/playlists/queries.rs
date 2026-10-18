@@ -305,11 +305,15 @@ impl Playlists {
             ViewRequestKind::Entries => self.browser.playlists().entries().rows.error(index),
             _ => None,
         };
-        crate::gui::components::loading::paged_loading_row(
+        rivu_ui::loading::paged_loading_row(
             ("loading-row", index),
             error,
             self.loading_text.show(&kind, error.is_some()),
-            |key| self.tr(key),
+            self.tr(if error.is_some() {
+                "shell-loading-failed"
+            } else {
+                "shell-loading"
+            }),
             cx,
             move |this, _, cx| {
                 this.retry_view_page(kind, cx);

@@ -1,7 +1,5 @@
 use super::*;
-use rivu_ui::{
-    ButtonTooltip, Dialog, Popover, caption, column, copyable_message, icon_button, menu_item, row,
-};
+use rivu_ui::{Dialog, Popover, caption, column, copyable_message, icon_button, menu_item, row};
 
 impl Render for GuiApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -223,12 +221,7 @@ impl Render for GuiApp {
                             .truncate()
                             .cursor_pointer()
                             .child(message.clone())
-                            .tooltip(move |_, cx| {
-                                cx.new(|_| ButtonTooltip {
-                                    text: message.clone(),
-                                })
-                                .into()
-                            })
+                            .tooltip(rivu_ui::text_tooltip(message))
                             .on_click(cx.listener(move |_, _, _, cx| {
                                 cx.write_to_clipboard(ClipboardItem::new_string(
                                     copied_message.to_string(),

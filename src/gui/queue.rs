@@ -20,7 +20,6 @@ use crate::{
         feature::FeatureContext,
         library::LibraryNode,
         list_interaction::{ContentMenuRequest, TrackSource},
-        loading::LoadingText,
     },
     model::Command,
     projection::GuiSnapshot,
@@ -28,6 +27,7 @@ use crate::{
 use gpui::{Context, Entity, SharedString, Window, prelude::*};
 use model::QueueSelection;
 pub(in crate::gui) use model::{QueueCommit, QueueIdentity};
+use rivu_ui::loading::LoadingText;
 use rivu_ui::search::{SearchEvent, SearchField};
 use std::{cell::RefCell, rc::Rc};
 pub(in crate::gui) use view::QueueDrag;
@@ -91,7 +91,7 @@ impl Queue {
             state,
             model,
             queue_search,
-            loading: LoadingText::default(),
+            loading: LoadingText::new(std::time::Duration::from_millis(150)),
             visible: false,
             focused: false,
             library_selection_pending: false,

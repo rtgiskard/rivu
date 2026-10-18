@@ -22,10 +22,10 @@ use crate::gui::{
     components::search::{new_search, set_search_counts},
     coordination::manual_actions::ManualIntentId,
     feature::FeatureContext,
-    loading::LoadingText,
 };
 use crate::projection::GuiSnapshot;
 use gpui::{App, Entity, EventEmitter, FocusHandle, Focusable, Subscription};
+use rivu_ui::loading::LoadingText;
 use rivu_ui::{
     FocusScope, LIST_ROW_REMS, StatusKind, VirtualList, caption, column, compact_icon_button,
     danger_control, disabled_control, hover_actions, icon_button,
@@ -153,7 +153,7 @@ impl Playlists {
             name_input,
             playlist_editor: None,
             playlist_action: None,
-            loading_text: Default::default(),
+            loading_text: LoadingText::new(std::time::Duration::from_millis(150)),
             intent: None,
             window_visible: true,
             panel_visible: false,
@@ -933,12 +933,7 @@ impl Playlists {
                     pending && !self.loading_text.show(&kind, rows_error.is_some()),
                     |text| text.invisible(),
                 )
-                .tooltip(move |_, cx| {
-                    cx.new(|_| rivu_ui::ButtonTooltip {
-                        text: message.clone(),
-                    })
-                    .into()
-                }),
+                .tooltip(rivu_ui::text_tooltip(message)),
             )
             .when(rows_error.is_some(), |view| {
                 view.child(icon_button(
@@ -1024,12 +1019,7 @@ impl Playlists {
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .tooltip(move |_, cx| {
-                        cx.new(|_| rivu_ui::ButtonTooltip {
-                            text: selection_message.clone(),
-                        })
-                        .into()
-                    }),
+                    .tooltip(rivu_ui::text_tooltip(selection_message)),
             )
             .child(div().w(gpui::rems(4.)).h_full().flex_shrink_0().when(
                 selection_unavailable && !selection_pending,

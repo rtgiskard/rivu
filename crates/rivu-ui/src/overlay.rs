@@ -3,8 +3,8 @@ use crate::{
     surface::floating_surface,
 };
 use gpui::{
-    ClipboardItem, Context, Div, ElementId, Render, SharedString, Stateful, Window, div,
-    prelude::*, px, rgb,
+    AnyView, App, ClipboardItem, Context, Div, ElementId, Render, SharedString, Stateful, Window,
+    div, prelude::*, px, rgb,
 };
 
 pub fn copyable_message<T: 'static>(
@@ -26,15 +26,7 @@ pub fn copyable_message<T: 'static>(
                 .child(message.clone()),
         )
         .child(div().flex_shrink_0().child("⧉"))
-        .tooltip({
-            let message: SharedString = message.clone().into();
-            move |_, cx| {
-                cx.new(|_| ButtonTooltip {
-                    text: message.clone(),
-                })
-                .into()
-            }
-        })
+        .tooltip(text_tooltip(message.clone()))
         .on_click(cx.listener(move |_, _, _, cx| {
             cx.write_to_clipboard(ClipboardItem::new_string(message.clone()));
             cx.stop_propagation();
@@ -61,6 +53,14 @@ pub fn tooltip_surface(window: &Window, cx: &gpui::App, max_width_rems: f32) -> 
         .text_sm()
         .text_color(rgb(theme.text))
         .whitespace_normal()
+}
+
+/// Capture text now and create its tooltip view when opened.
+pub fn text_tooltip(
+    text: impl Into<SharedString>,
+) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
+    let text = text.into();
+    move |_, cx| cx.new(|_| ButtonTooltip { text: text.clone() }).into()
 }
 
 /// Shared tooltip used by icon buttons.

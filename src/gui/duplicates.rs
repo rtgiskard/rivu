@@ -10,8 +10,8 @@ use crate::{
 };
 use gpui::{prelude::*, *};
 use rivu_ui::{
-    ButtonTooltip, StatusKind, active_control, button, caption, column, icon_button, panel_header,
-    panel_toolbar, row, status_message,
+    StatusKind, active_control, button, caption, column, icon_button, panel_header, panel_toolbar,
+    row, status_message,
 };
 use std::{rc::Rc, time::Duration};
 
@@ -1077,7 +1077,7 @@ impl Duplicates {
                             &[("fingerprint", (fingerprint.as_str()).into())],
                         )
                         .into();
-                    move |_, cx| cx.new(|_| ButtonTooltip { text: text.clone() }).into()
+                    rivu_ui::text_tooltip(text)
                 }),
             );
         }
@@ -1153,12 +1153,7 @@ impl Duplicates {
                         .child(track.path.display().to_string())
                         .tooltip({
                             let path = track.path.display().to_string();
-                            move |_, cx| {
-                                cx.new(|_| ButtonTooltip {
-                                    text: path.clone().into(),
-                                })
-                                .into()
-                            }
+                            rivu_ui::text_tooltip(path)
                         }),
                 )
                 .child(caption(

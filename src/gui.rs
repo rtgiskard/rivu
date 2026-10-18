@@ -10,7 +10,6 @@ mod history;
 mod layout;
 mod library;
 mod list_interaction;
-mod loading;
 mod metadata;
 mod paged;
 mod panels;

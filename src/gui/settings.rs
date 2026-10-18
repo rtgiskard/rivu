@@ -259,8 +259,7 @@ impl Field {
             .w_full()
             .child(control)
             .when(!hint.is_empty(), |control| {
-                control
-                    .tooltip(move |_, cx| cx.new(|_| ButtonTooltip { text: hint.clone() }).into())
+                control.tooltip(rivu_ui::text_tooltip(hint))
             });
         form_field(theme, settings.tr(self.label_id()), control)
     }
@@ -351,13 +350,6 @@ fn settings_card(
         .border_1()
         .border_color(rgb(theme.structure_border))
         .rounded(rems(5. / 16.))
-}
-
-fn settings_tooltip(
-    text: impl Into<SharedString>,
-) -> impl Fn(&mut Window, &mut App) -> gpui::AnyView {
-    let text = text.into();
-    move |_, cx| cx.new(|_| ButtonTooltip { text: text.clone() }).into()
 }
 
 fn spectrum_style_label(i18n: &Localizer, style: SpectrumStyle) -> String {

@@ -100,6 +100,22 @@ pub fn list_row(
         .hover(move |style| style.bg(row_background(theme, selected, true)))
 }
 
+/// Two independently truncated text lines, without tooltip or input behavior.
+/// The primary line inherits its color; callers can override it on the returned view.
+pub fn two_line_text(
+    theme: &'static crate::theme::Palette,
+    title: impl Into<SharedString>,
+    detail: impl Into<SharedString>,
+) -> Div {
+    crate::layout::column()
+        .flex_1()
+        .gap_0()
+        .overflow_hidden()
+        .text_color(rgb(theme.text))
+        .child(div().text_sm().truncate().child(title.into()))
+        .child(crate::layout::caption(theme, detail).truncate())
+}
+
 // Out-of-flow actions leave the full text width available until the row is hovered.
 pub fn hover_actions(
     theme: &'static crate::theme::Palette,

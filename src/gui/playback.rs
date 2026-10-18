@@ -295,10 +295,7 @@ impl Playback {
                     .child("󰕾")
                     .tooltip({
                         let text = self.context.tr("gl-volume");
-                        move |_, cx| {
-                            cx.new(|_| rivu_ui::ButtonTooltip { text: text.clone() })
-                                .into()
-                        }
+                        rivu_ui::text_tooltip(text)
                     }),
             )
             .child(div().flex_1().min_w_0().child(volume));
