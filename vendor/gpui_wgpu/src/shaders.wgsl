@@ -1295,19 +1295,34 @@ fn fs_poly_sprite(input: PolySpriteVarying) -> @location(0) vec4<f32> {
     // Linear filtering must not read neighboring atlas tiles, even for one-pixel images.
     let tile_position = clamp(input.tile_position, tile_min, tile_max);
     let sample = textureSample(t_sprite, s_sprite, tile_position);
+    let half_size = sprite.bounds.size * 0.5;
+    let center_to_point = input.local_position - (sprite.bounds.origin + half_size);
+    let radius = pick_corner_radius(center_to_point, sprite.corner_radii);
+    let corner_to_point = abs(center_to_point) - half_size + radius;
+    let distance = quad_sdf_impl(corner_to_point, radius);
+    // Differentiate the affine coordinates, not the piecewise SDF: neighboring
+    // pixels can select different edges at a sharp corner or medial axis.
+    let local_dx = dpdx(input.local_position);
+    let local_dy = dpdy(input.local_position);
+    var normal = select(vec2<f32>(0.0, 1.0), vec2<f32>(1.0, 0.0), corner_to_point.x > corner_to_point.y);
+    if (radius != 0.0 && any(corner_to_point > vec2<f32>(0.0))) {
+        normal = normalize(max(corner_to_point, vec2<f32>(0.0)));
+    }
+    normal *= select(vec2<f32>(-1.0), vec2<f32>(1.0), center_to_point >= vec2<f32>(0.0));
+    // Project the analytic unit normal through the screen-to-local Jacobian.
+    let distance_per_pixel = length(vec2<f32>(dot(normal, local_dx), dot(normal, local_dy)));
+    let coverage = saturate(0.5 - distance / max(distance_per_pixel, 0.000001));
     // Alpha clip after using the derivatives.
     if (any(input.clip_distances < vec4<f32>(0.0))) {
         return vec4<f32>(0.0);
     }
-
-    let distance = quad_sdf(input.local_position, sprite.bounds, sprite.corner_radii);
 
     var color = sample;
     if (sprite.grayscale != 0u) {
         let grayscale = dot(color.rgb, GRAYSCALE_FACTORS);
         color = vec4<f32>(vec3<f32>(grayscale), sample.a);
     }
-    return blend_color(color, sprite.opacity * saturate(0.5 - distance));
+    return blend_color(color, sprite.opacity * coverage);
 }
 
 // --- surfaces --- //

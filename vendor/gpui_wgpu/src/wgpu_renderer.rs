@@ -3139,6 +3139,111 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    fn render_white_image_coverage(
+        renderer: &mut WgpuHeadlessRenderer,
+        width: f32,
+        height: f32,
+        radius: f32,
+        transformation: gpui::TransformationMatrix,
+    ) -> anyhow::Result<image::RgbaImage> {
+        let tile = image_tile(renderer, 0, 1, 1, &[255, 255, 255, 255])?;
+        let bounds = solid_quad(0.0, 0.0, width, height, gpui::white()).bounds;
+        let mut scene = Scene::default();
+        scene.insert_primitive(PolychromeSprite {
+            order: 0,
+            pad: 0,
+            grayscale: false.into(),
+            opacity: 1.0,
+            bounds,
+            content_mask: ContentMask {
+                bounds: solid_quad(0.0, 0.0, 32.0, 32.0, gpui::white()).bounds,
+            },
+            corner_radii: Corners {
+                top_left: radius.into(),
+                top_right: radius.into(),
+                bottom_right: radius.into(),
+                bottom_left: radius.into(),
+            },
+            tile,
+            transformation,
+        });
+        scene.finish();
+        renderer.render_scene_to_image(&scene, device_size(32, 32))
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn image_edge_coverage_is_in_screen_pixels() -> anyhow::Result<()> {
+        let mut renderer = WgpuHeadlessRenderer::new()?;
+        // Each local rectangle becomes the same screen-aligned 32x32 square.
+        // In particular, scale 4 must not darken x=0/1 to 159/223.
+        for (width, height, rotation_scale, translation) in [
+            (32.0, 32.0, [[1.0, 0.0], [0.0, 1.0]], [0.0, 0.0]),
+            (8.0, 8.0, [[4.0, 0.0], [0.0, 4.0]], [0.0, 0.0]),
+            (8.0, 16.0, [[4.0, 0.0], [0.0, 2.0]], [0.0, 0.0]),
+            (8.0, 16.0, [[0.0, -2.0], [4.0, 0.0]], [32.0, 0.0]),
+        ] {
+            let image = render_white_image_coverage(
+                &mut renderer,
+                width,
+                height,
+                0.0,
+                gpui::TransformationMatrix {
+                    rotation_scale,
+                    translation,
+                },
+            )?;
+            for y in 0..32 {
+                for x in 0..32 {
+                    assert_pixel(&image, x, y, [255, 255, 255, 255]);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn rounded_image_coverage_is_invariant_under_scale_and_rotation() -> anyhow::Result<()> {
+        let mut renderer = WgpuHeadlessRenderer::new()?;
+        let reference = render_white_image_coverage(
+            &mut renderer,
+            32.0,
+            32.0,
+            8.0,
+            gpui::TransformationMatrix::default(),
+        )?;
+        assert_pixel(&reference, 0, 0, BLACK);
+        assert_pixel(&reference, 16, 0, [255, 255, 255, 255]);
+        let corner_coverage = reference.get_pixel(2, 2).0;
+        assert!(
+            (170..=205).contains(&corner_coverage[0]),
+            "rounded corner must retain partial coverage: {corner_coverage:?}"
+        );
+        for (rotation_scale, translation) in [
+            ([[4.0, 0.0], [0.0, 4.0]], [0.0, 0.0]),
+            ([[0.0, -4.0], [4.0, 0.0]], [32.0, 0.0]),
+        ] {
+            let image = render_white_image_coverage(
+                &mut renderer,
+                8.0,
+                8.0,
+                2.0,
+                gpui::TransformationMatrix {
+                    rotation_scale,
+                    translation,
+                },
+            )?;
+            for y in 0..32 {
+                for x in 0..32 {
+                    assert_pixel(&image, x, y, reference.get_pixel(x, y).0);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
     fn rectangle_path(x: f32, y: f32, width: f32, height: f32) -> Path<ScaledPixels> {
         let mut builder = gpui::PathBuilder::fill();
         builder.move_to(gpui::point(gpui::px(x), gpui::px(y)));
