@@ -1,10 +1,12 @@
 //! Playlist catalog, occurrence rows, drag and management surfaces.
-pub(super) mod editor;
+mod editor;
 mod model;
 mod queries;
-pub(super) mod requests;
-pub(super) mod selection;
+mod requests;
+mod selection;
+pub(super) use editor::PlaylistNameAction;
 use requests::ViewRequestKind;
+pub(super) use selection::EntryCommit;
 
 use super::{
     ListFocus,

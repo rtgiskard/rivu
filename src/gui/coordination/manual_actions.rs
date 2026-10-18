@@ -70,7 +70,7 @@ impl ManualIntents {
 
 pub(in crate::gui) enum ManualAction {
     Library(crate::gui::library::selection::LibraryCommit),
-    Playlist(crate::gui::playlists::selection::EntryCommit),
+    Playlist(crate::gui::playlists::EntryCommit),
     Queue(crate::gui::queue::QueueCommit),
     History {
         commit: crate::gui::history::HistoryCommit,

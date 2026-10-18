@@ -836,7 +836,7 @@ impl Visuals {
                     .size_full(),
                 )
                 .children(message.map(|message| {
-                    super::super::components::visualization_status(message)
+                    super::visualization_status(message)
                         .absolute()
                         .top_0()
                         .left_0()

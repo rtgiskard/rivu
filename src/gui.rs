@@ -1005,7 +1005,7 @@ impl GuiApp {
         }
         self.playlists.update(cx, |owner, cx| {
             owner.begin_playlist_name(
-                playlists::editor::PlaylistNameAction::SaveQueue,
+                playlists::PlaylistNameAction::SaveQueue,
                 format!("Queue_{}", chrono::Local::now().format("%Y%m%d_%H%M%S")),
                 window,
                 cx,

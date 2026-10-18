@@ -598,7 +598,7 @@ impl GuiApp {
                         };
                         this.playlists.update(cx, |playlists, cx| {
                             playlists.begin_playlist_name(
-                                playlists::editor::PlaylistNameAction::Create { track_ids },
+                                playlists::PlaylistNameAction::Create { track_ids },
                                 String::new(),
                                 window,
                                 cx,

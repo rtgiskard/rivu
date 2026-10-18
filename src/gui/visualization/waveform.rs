@@ -1079,7 +1079,7 @@ impl Waveform {
                 cx.emit(WaveformEvent::Cancelled { generation });
             }
             return panel
-                .children(status.map(super::super::components::visualization_status))
+                .children(status.map(super::visualization_status))
                 .into_any_element();
         }
         let source = full.as_ref().map_or_else(
@@ -1311,7 +1311,7 @@ impl Waveform {
                 )
             })
             .children(status.map(|message| {
-                super::super::components::visualization_status(message)
+                super::visualization_status(message)
                     .absolute()
                     .top_0()
                     .left_0()
