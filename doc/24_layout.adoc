@@ -99,11 +99,19 @@ state. No per-layout scroll snapshots are kept.
 
 == GUI composition boundaries
 
-GPUI remains the rendering and input framework. The window coordinates explicit
-cross-feature actions and metadata confirmation; feature owners decide query
-validity, selection identity, and accepted results. The browser dispatcher runs
-the returned read effects rather than reconstructing owner transitions. See
+GPUI remains the rendering and input framework. Library, Queue, Playlists,
+History, Metadata, Duplicates, and Playback have independent window-lifetime
+owners. A feature owns its inputs, model, read execution, result acceptance, and
+rendering; multiple panels of that feature share its business state. The window
+coordinates explicit cross-feature actions and metadata confirmation, not a
+second aggregate browser model or query dispatcher. See
 link:22_cache.adoc#_query_projection_retention[Query projection retention].
+
+One window-local snapshot source refreshes once per Core revision. Features share
+the immutable snapshot rather than copying it, and asynchronous completions can
+read the current snapshot without re-entering the window coordinator.
+Selection-ready and cross-feature transfer events hand their owned payloads to
+their sole coordinator rather than cloning row collections.
 
 The shell owns mutually exclusive application surfaces and keyboard focus
 restoration. Feature confirmations can cover a surface without discarding its
@@ -112,10 +120,12 @@ focus a replacement surface. Workspace activation validates the target before
 cancelling an interaction and rolls back a live split against the outgoing tree,
 never against reused IDs in the incoming tree.
 
-Business panels have cached view boundaries separate from the shell traversal.
-Window business notifications invalidate their content; playback timeline updates
+Business panels have cached view boundaries separate from shell traversal and
+observe their feature owner directly; rendering never calls back into the window
+root. Feature dependencies invalidate their content. Playback timeline updates
 invalidate transport and, when its live data changes, History, without rebuilding
-library or playlist rows.
+library or playlist rows. Global font/theme changes explicitly invalidate cached
+business views; geometry changes refresh the affected panel measurements.
 Layout visibility, not whether a cached subtree rendered in that frame, decides
 which retained scroll regions can receive input. Re-rendering a panel replaces
 only that panel's region registrations. Visualization scheduling and image

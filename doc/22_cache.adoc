@@ -17,11 +17,11 @@ A projection key is normalized query identity plus its stamp, excluding page
 offsets, limits, batch cursors, and expected revisions. Request generations
 reject obsolete intent independently of data freshness.
 
-The browser reconciles every feature's revision and configuration dependencies
-before the window dispatches resulting reads, including while panels are hidden.
-Directory and root-count preparation, publication, and physical-worker retirement
-are owner transitions. Logical cancellation only changes publication rights;
-it cannot free a submitted worker slot.
+Each window-local feature reconciles its own revision and configuration
+dependencies, including while its panels are hidden, and owns the execution and
+completion of its reads. Directory and root-count preparation, publication, and
+physical-worker retirement are Library owner transitions. Logical cancellation
+only changes publication rights; it cannot free a submitted worker slot.
 Queued directory demand alone does not invalidate the view; local forest
 publication and worker progress supply the notifications that resume rendering.
 
@@ -32,7 +32,7 @@ dispatched full-row read drains before retrying against current metadata.
 Duplicate source/target choices retain track identity across reference-only
 refreshes; command eligibility is checked against current targeted member facts.
 The duplicate-review owner applies start, cancellation, acknowledgement, and
-completion transitions together with its query gates. The window runs the returned
+completion transitions together with its query gates and dispatches its own
 effects; Core owns relocation execution. Dismissal and window destruction request
 cancellation without joining a worker. An acknowledgement arriving after dismissal
 must cancel its accepted task rather than reopen or overwrite a newer review.
@@ -44,8 +44,9 @@ completion releases it before accepting only the current roots, query, stamp,
 and generation. Changing demand or hiding retires old submissions without
 releasing the slot early. A stale completion cannot publish counts or a failure;
 visible demand resumes after it drains, while hidden demand waits until reveal.
-Current failures require explicit retry or changed demand. Query execution and
-search-widget updates remain with the GUI query dispatcher, not the owner.
+Current failures require explicit retry or changed demand. The same Library
+feature owns query execution and search-widget updates; no window-level query
+dispatcher maintains a second copy of those transitions.
 Aggregation counts duplicate and nested configured roots only once; this count
 payload does not determine whether the configured-root viewport remains mounted.
 
@@ -54,17 +55,16 @@ panel demand. An open Add to playlist chooser also demands playlist summaries,
 independently of the Playlists panel. An unchanged key retains bounded album pages
 and page failures across hiding; covers are released independently.
 
-The browser owns the paired Playlist page and request transitions: search,
+The Playlists feature owns the paired page and request transitions: search,
 selection changes, refresh, page-size changes, cancellation, and completion.
-Page lifecycle mutation stays private to the browser owner; GUI consumers borrow
+Page lifecycle mutation stays private to that owner; other consumers borrow
 read-only page buffers and use explicit catalog or entry operations. A registered
 request carries its own identity and optional executable read, so queued demand
 can retain loading feedback without a second caller-supplied request kind.
-The GUI dispatcher executes reads and applies presentation feedback rather than
-separately maintaining page reservations and request validity. Retiring a page
-request does not release its submitted worker; an old completion cannot clear a
-replacement request. Selection-existence lookups remain independent of page-size
-changes.
+Its dispatcher executes reads and applies presentation feedback without separate
+window-level reservations or request validity. Retiring a page request does not
+release its submitted worker; an old completion cannot clear a replacement
+request. Selection-existence lookups remain independent of page-size changes.
 
 Album, Playlist catalog/entry, and Queue buffers retain at most the larger of
 eight pages or visible pages plus three; failed offsets have the same separate
@@ -120,10 +120,10 @@ The window owns the latest explicit action and its confirmation barrier, separat
 from the Details edit session and read coordinator. New input or cancellation
 retires the previous action; a late range result or save acknowledgement cannot
 restore it. Confirmation validates the frozen target again before changing the
-selection or discarding the original draft. Queue and Playlist selection owners
-perform their own synchronous transitions; the window dispatches reads and applies
-accepted effects. Cancellation preserves a submitted worker's gate until its
-completion, even when a newer selection is already waiting.
+selection or discarding the original draft. Selection owners prepare frozen
+commits and dispatch their own reads; the window validates the current action
+and routes acceptance back to the originating owner. Cancellation preserves a
+submitted worker's gate until completion, even when a newer selection is waiting.
 
 Root-count batches run one at a time. Tree reads share at most four physical
 workers and four coalesced latest pending branch demands; unscheduled demand
@@ -136,8 +136,9 @@ physical gate until completion.
 Reusable owner epochs also accompany cancellable GUI reads into Core. Core skips
 an obsolete queued read before accessing Store; cancellation never interrupts a
 read that has passed dispatch, cancels another owner, or replays a write. Hiding
-a window retires its pending page and explicit Details reads without discarding
-retained rows or drafts. Completion still owns every submitted physical gate.
+a window updates owner demand immediately, without waiting for another Core
+publication or render, and retires pending page and explicit Details reads without
+discarding retained rows or drafts. Completion still owns every submitted gate.
 Album searches, Playlist pages, and explicit Details selections retain the latest
 demand's absolute quiet deadline independently of a submitted worker. Replacement
 renews that deadline; redispatch, hiding, and completion consume only its remaining
