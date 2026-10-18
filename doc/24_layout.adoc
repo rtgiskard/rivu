@@ -295,6 +295,10 @@ barriers, not global surface state or an automatic outside-close policy. Shell
 focus restoration, draft protection and asynchronous business guards stay with
 their existing owners; a disabled visual control does not replace those guards.
 
+Choice callbacks are bound to the candidate generation that produced the popup.
+Closing, reopening or replacing candidates invalidates both pointer and native
+selection callbacks; moving the keyboard highlight does not.
+
 Ordinary form and confirmation dialogs use `Dialog::scroll_card` for padded,
 viewport-bounded vertical scrolling, with width chosen by the caller. Specialized
 surfaces can retain `card` and their own internal scrolling. Input-aligned form
