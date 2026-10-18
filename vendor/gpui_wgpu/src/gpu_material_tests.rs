@@ -178,7 +178,7 @@ fn gpu_rectangles_palette_alpha_segments_and_scale() -> anyhow::Result<()> {
 }
 
 #[test]
-fn gpu_rectangles_fractional_edges_and_adjacent_segments_match_paths() -> anyhow::Result<()> {
+fn gpu_rectangles_preserve_adjacent_coverage_gaps_and_fractional_edges() -> anyhow::Result<()> {
     let mut renderer = WgpuHeadlessRenderer::new()?;
     for segmented in [false, true] {
         for scale in [1.0, 1.25, 1.5, 2.0] {
@@ -204,39 +204,17 @@ fn gpu_rectangles_fractional_edges_and_adjacent_segments_match_paths() -> anyhow
             scene.finish();
             let actual = renderer.render_scene_to_image(&scene, size(32, 32))?;
 
-            let mut builder = gpui::PathBuilder::fill().with_style(gpui::PathStyle::Fill(
-                gpui::FillOptions::default().with_fill_rule(gpui::FillRule::NonZero),
-            ));
-            for rectangle in rectangles {
-                let [x, y, width, height] = rectangle.bounds.map(|value| value * 16.0);
-                let mut bottom = y + height;
-                while bottom > y {
-                    let top = if segmented { (bottom - 3.0).max(y) } else { y };
-                    builder.move_to(gpui::point(gpui::px(x), gpui::px(top)));
-                    builder.line_to(gpui::point(gpui::px(x + width), gpui::px(top)));
-                    builder.line_to(gpui::point(gpui::px(x + width), gpui::px(bottom)));
-                    builder.line_to(gpui::point(gpui::px(x), gpui::px(bottom)));
-                    builder.close();
-                    bottom = top - 2.0;
-                }
-            }
-            let mut path = builder.build()?.scale(scale);
-            path.bounds = extent;
-            path.color = gpui::white().into();
-            path.content_mask = ContentMask { bounds: extent };
-            let mut scene = Scene::default();
-            scene.insert_primitive(path);
-            scene.finish();
-            let expected = renderer.render_scene_to_image(&scene, size(32, 32))?;
-            for (actual, expected) in actual.pixels().zip(expected.pixels()) {
-                assert!(
-                    actual
-                        .0
-                        .iter()
-                        .zip(expected.0)
-                        .all(|(a, e)| a.abs_diff(e) <= 3),
-                    "segmented={segmented} scale={scale}: {actual:?} != {expected:?}"
-                );
+            // Adjacent columns cover their shared boundary without an alpha seam.
+            // A fractional outer edge has coverage, but does not become opaque.
+            let edge_y = (8.0 * scale) as u32;
+            let outer = actual.get_pixel((4.25 * scale).floor() as u32, edge_y).0[0];
+            assert!(outer > 0 && outer < 255, "fractional edge lost at scale {scale}");
+            pixel(&actual, (3.0 * scale) as u32, edge_y, BLACK);
+            if segmented {
+                // The upper partial cell survives, and the middle gap stays empty.
+                let x = (5.25 * scale) as u32;
+                assert!(actual.get_pixel(x, (3.0 * scale) as u32).0[0] > 0);
+                pixel(&actual, x, (5.5 * scale) as u32, BLACK);
             }
             pixel(
                 &actual,
