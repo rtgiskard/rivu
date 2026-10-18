@@ -26,15 +26,24 @@ impl Core {
                 .playback
                 .as_ref()
                 .is_some_and(|playback| playback.track_id == track_id)
-            && (title.as_ref().is_some_and(|title| *title != current.title)
-                || artist
-                    .as_ref()
-                    .is_some_and(|artist| *artist != current.artist)
-                || album.as_ref().is_some_and(|album| *album != current.album))
+            && (title.is_some() || artist.is_some() || album.is_some() || decoder_hint.is_some())
         {
-            // Core is the sole ordinary producer. Reserve this admission before
-            // committing a live edit; the worker can only free capacity meanwhile.
-            self.engine.ensure_command_capacity(1)?;
+            // A failed projection refresh can leave current_track behind the store.
+            let stored = self.track(track_id)?;
+            let next_title = title.as_deref().unwrap_or(&stored.title);
+            let next_artist = artist.as_deref().unwrap_or(&stored.artist);
+            let next_album = album.as_deref().unwrap_or(&stored.album);
+            let library_changed = next_title != stored.title
+                || next_artist != stored.artist
+                || next_album != stored.album
+                || decoder_hint.is_some_and(|hint| hint != stored.decoder_hint);
+            let metadata_changed = next_title != current.title
+                || next_artist != current.artist
+                || next_album != current.album;
+            if library_changed && metadata_changed {
+                // Core is the sole producer; the worker can only free capacity.
+                self.engine.ensure_command_capacity(1)?;
+            }
         }
         let impact = self.store.edit_track(
             track_id,

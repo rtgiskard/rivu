@@ -348,8 +348,9 @@ link:21_ipc.adoc#_revisions_and_watching[IPC revisions].
 A refresh error explicitly reports that the change was committed, not rolled
 back. Some previous projections may remain visible until a later successful
 refresh; queries read the committed database state. Rivu does not automatically
-replay committed operations. Repeating an identical edit or cleaning when no
-missing records remain is a no-op, not another mutation or a projection retry.
+replay committed operations. Repeating an edit whose values match the committed
+database, or cleaning when no missing records remain, is a no-op, not another
+mutation or a projection retry.
 Failed writes leave saved data unchanged.
 
 Metadata edits override only fields you change. An omitted CLI option or an

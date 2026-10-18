@@ -946,6 +946,31 @@ fn committed_metadata_refresh_preserves_the_old_snapshot_until_audio_admission()
         core.state.current_track.as_ref().unwrap(),
         &current
     ));
+    // Restoring the cached title still needs audio admission for omitted tags.
+    assert!(
+        core.command(Command::EditTrack {
+            track_id: 1,
+            title: Some(current.title.clone()),
+            artist: None,
+            album: None,
+            decoder_hint: None,
+        })
+        .is_err()
+    );
+    assert_eq!(core.track(1).unwrap().title, "Committed title");
+
+    core.command(Command::EditTrack {
+        track_id: 1,
+        title: Some("Committed title".into()),
+        artist: Some("Artist".into()),
+        album: Some("Album".into()),
+        decoder_hint: None,
+    })
+    .unwrap();
+    assert!(Arc::ptr_eq(
+        core.state.current_track.as_ref().unwrap(),
+        &current
+    ));
     assert!(matches!(receive.try_recv(), Ok(AudioCommand::Volume(_))));
 
     core.refresh_queue_tracks().unwrap();
