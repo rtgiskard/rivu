@@ -43,9 +43,9 @@ impl Render for FeaturePanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.host
             .update(cx, |host, cx| {
-                host.workspace.scroll_views.begin_panel(self.panel.id);
+                host.workspace.scroll_views.borrow_mut().begin_panel(self.panel.id);
                 let element = (self.spec.render)(host, &self.panel, window, cx);
-                host.workspace.scroll_views.finish_frame();
+                host.workspace.scroll_views.borrow_mut().finish_frame();
                 element
             })
             .unwrap_or_else(|_| div().into_any_element())

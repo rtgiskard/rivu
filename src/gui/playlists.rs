@@ -467,10 +467,8 @@ impl GuiApp {
                 },
             ));
         let catalog_len = self.browser.playlists().summaries().rows.len();
-        self.workspace.scroll_views.register_list(
-            ("playlist-catalog", panel_id),
-            &self.browser.playlists().summaries().scroll,
-        );
+        self.workspace.scroll_views.borrow_mut().register_list(("playlist-catalog", panel_id),
+        &self.browser.playlists().summaries().scroll,);
         let catalog = uniform_list(
             ("playlist-catalog", panel_id),
             catalog_len,
@@ -703,10 +701,8 @@ impl GuiApp {
                     )))
                     .child(self.playlist_entries_search.clone()),
             );
-            self.workspace.scroll_views.register_list(
-                ("playlist-entries", panel_id),
-                &self.browser.playlists().entries().scroll,
-            );
+            self.workspace.scroll_views.borrow_mut().register_list(("playlist-entries", panel_id),
+            &self.browser.playlists().entries().scroll,);
             let entries_len = self.browser.playlists().entries().rows.len();
             let entries = uniform_list(
                 ("playlist-entries", panel_id),

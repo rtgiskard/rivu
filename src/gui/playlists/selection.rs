@@ -911,9 +911,7 @@ impl GuiApp {
         self.browser.focus_list(ListFocus::PlaylistTracks);
         self.request_track(commit.target.track_id, cx);
         if commit.scroll {
-            self.workspace
-                .scroll_views
-                .scroll_list_to("playlist-entries", commit.target.offset);
+            self.workspace.scroll_views.borrow_mut().scroll_list_to("playlist-entries", commit.target.offset);
         }
         self.sync_waveform(cx);
         cx.notify();

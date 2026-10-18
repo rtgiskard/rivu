@@ -4,6 +4,7 @@ mod artwork;
 mod browser;
 mod components;
 mod duplicates;
+mod feature;
 mod fonts;
 mod layout;
 mod library;
@@ -21,6 +22,7 @@ mod scrolling;
 pub(crate) mod session;
 mod settings;
 mod shell;
+mod snapshot;
 mod theme;
 mod visualization;
 mod workspace;
@@ -54,7 +56,7 @@ use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
     path::PathBuf,
-    rc::Weak,
+    rc::{Rc, Weak},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -346,9 +348,10 @@ impl FullWaveformRequest {
 
 pub(super) struct GuiApp {
     pub(super) i18n: Arc<Localizer>,
-    localized_text: HashMap<String, SharedString>,
+    localized_text: Rc<HashMap<String, SharedString>>,
     handle: CoreHandle,
-    state: GuiSnapshot,
+    snapshots: Rc<snapshot::SnapshotSource>,
+    state: Rc<GuiSnapshot>,
     workspace: workspace::Workspace,
     session: Weak<RefCell<UiSession>>,
     inputs: HashMap<Field, Entity<Input>>,
@@ -714,12 +717,14 @@ impl GuiApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let state = handle.gui_snapshot();
+        let snapshots = Rc::new(snapshot::SnapshotSource::new(handle.clone()));
+        let state = snapshots.read();
         theme::set_theme(state.system.config.ui_theme, cx);
-        let localized_text = i18n
-            .fixed_texts()
-            .map(|(id, text)| (id.to_owned(), SharedString::from(text.to_owned())))
-            .collect();
+        let localized_text = Rc::new(
+            i18n.fixed_texts()
+                .map(|(id, text)| (id.to_owned(), SharedString::from(text.to_owned())))
+                .collect(),
+        );
         let (mut workspace, load_error) = workspace::Workspace::new(
             layout_save.clone(),
             AudioVisualizerOptions::from(state.system.config.as_ref()),
@@ -769,7 +774,7 @@ impl GuiApp {
             if !this.metadata_protected(cx) {
                 this.clear_metadata_selection(cx);
             }
-            this.workspace.scroll_views.scroll_list_to("history", 0);
+            this.workspace.scroll_views.borrow_mut().scroll_list_to("history", 0);
             cx.notify();
         }));
         subscriptions.push(cx.subscribe(&library_search, |this, _, event, cx| {
@@ -1031,6 +1036,7 @@ impl GuiApp {
             localized_text,
             settings,
             handle,
+            snapshots,
             state,
             workspace,
             session,
@@ -1365,10 +1371,10 @@ impl GuiApp {
     }
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
-        if self.handle.revision() == self.state.system.revision {
+        if self.snapshots.handle().revision() == self.state.system.revision {
             return;
         }
-        let state = self.handle.gui_snapshot();
+        let state = self.snapshots.read();
         let changed = state.revisions.changed_since(self.state.revisions);
         let same_track = match (&state.current_track, &self.state.current_track) {
             (Some(next), Some(previous)) => Arc::ptr_eq(next, previous),

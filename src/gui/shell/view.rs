@@ -17,9 +17,7 @@ impl Render for GuiApp {
             self.cancel_panel_docking(window, cx);
         }
         window.set_rem_size(px(16. * self.state.system.config.ui_scale));
-        self.workspace
-            .scroll_views
-            .begin_frame(self.workspace.layouts.current());
+        self.workspace.scroll_views.borrow_mut().begin_frame(self.workspace.layouts.current());
         let docking_view = cx.entity().downgrade();
         let paint_presentation = self.presentation.clone();
         let paint_artwork_images = self.artwork_images.clone();
@@ -83,7 +81,7 @@ impl Render for GuiApp {
                     this.shell.capture_origin(window, cx);
                 }
                 let modal = this.current_keyboard_surface().is_some();
-                this.workspace.scroll_views.click(event.position, modal);
+                this.workspace.scroll_views.borrow_mut().click(event.position, modal);
             }))
             .on_mouse_down(
                 MouseButton::Left,
@@ -618,7 +616,7 @@ impl Render for GuiApp {
         if let Some(confirmation) = self.render_manual_confirmation(cx) {
             app = app.child(confirmation);
         }
-        self.workspace.scroll_views.finish_frame();
+        self.workspace.scroll_views.borrow_mut().finish_frame();
         app
     }
 }

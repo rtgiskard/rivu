@@ -198,9 +198,7 @@ impl GuiApp {
             }
             Action::PageUp | Action::PageDown => {
                 if self
-                    .workspace
-                    .scroll_views
-                    .page(action == Action::PageDown, window.mouse_position())
+                    .workspace.scroll_views.borrow_mut().page(action == Action::PageDown, window.mouse_position())
                 {
                     cx.notify();
                 }

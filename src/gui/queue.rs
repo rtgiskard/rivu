@@ -600,7 +600,7 @@ impl GuiApp {
         }
         self.content_menu = None;
         self.browser.queue.change_search(query);
-        self.workspace.scroll_views.scroll_list_to("queue", 0);
+        self.workspace.scroll_views.borrow_mut().scroll_list_to("queue", 0);
         self.sync_queue(cx);
         self.ensure_queue_range(0..1, cx);
         cx.notify();
@@ -969,9 +969,7 @@ impl GuiApp {
         self.browser.focus_list(ListFocus::Queue);
         self.request_track(commit.target.track_id, cx);
         if commit.scroll {
-            self.workspace
-                .scroll_views
-                .scroll_list_to("queue", commit.target.offset);
+            self.workspace.scroll_views.borrow_mut().scroll_list_to("queue", commit.target.offset);
         }
         self.sync_waveform(cx);
         cx.notify();
@@ -1866,7 +1864,7 @@ impl GuiApp {
                     },
                 ))
             });
-        let scroll = self.workspace.scroll_views.list(("queue", panel_id));
+        let scroll = self.workspace.scroll_views.borrow_mut().list(("queue", panel_id));
         self.reveal_queue_locate(&scroll, cx);
         let panel_drop_owner = cx.entity().downgrade();
         let list_drop_owner = panel_drop_owner.clone();

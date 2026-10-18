@@ -307,7 +307,7 @@ impl GuiApp {
                     }),
             )
             .child(div().flex_1().min_w_0().child(volume));
-        let scroll = self.workspace.scroll_views.content(("transport", panel_id));
+        let scroll = self.workspace.scroll_views.borrow_mut().content(("transport", panel_id));
         column()
             .id(("transport-panel", panel_id))
             .size_full()
@@ -649,7 +649,7 @@ impl GuiApp {
                 cx,
             ))
             .child(div().w(px(12.)).flex_shrink_0());
-        let scroll = self.workspace.scroll_views.list(("history", panel_id));
+        let scroll = self.workspace.scroll_views.borrow_mut().list(("history", panel_id));
         panel_surface(("history-panel", panel_id))
             .child(
                 row()

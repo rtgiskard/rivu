@@ -1171,10 +1171,8 @@ impl GuiApp {
         if self.state.system.scan_progress.is_some() || self.state.system.scanning {
             panel = panel.child(self.library_scan_status(panel_id, cx));
         }
-        self.workspace.scroll_views.register_list(
-            ("library-projection", panel_id),
-            &self.browser.library.tree().scroll,
-        );
+        self.workspace.scroll_views.borrow_mut().register_list(("library-projection", panel_id),
+        &self.browser.library.tree().scroll,);
         // Track counts describe contents, not the configured root projection.
         // Keep its viewport mounted so root changes can demand a fresh forest.
         if let Some((0, total)) = self.browser.library.search_counts()

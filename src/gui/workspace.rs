@@ -14,11 +14,12 @@ use super::{
 };
 use crate::config::{AlbumArtworkOptions, AudioVisualizerOptions};
 use anyhow::Result;
+use std::{cell::RefCell, rc::Rc};
 
 pub(super) struct Workspace {
     pub(super) layouts: LayoutSet,
     pub(super) interaction: LayoutInteraction,
-    pub(super) scroll_views: ScrollViews,
+    pub(super) scroll_views: Rc<RefCell<ScrollViews>>,
     save: LayoutSaveHandle,
     save_seen: u64,
     pub(super) save_error: Option<String>,
@@ -35,7 +36,7 @@ impl Workspace {
         let mut workspace = Self {
             layouts,
             interaction: LayoutInteraction::default(),
-            scroll_views: ScrollViews::default(),
+            scroll_views: Rc::new(RefCell::new(ScrollViews::default())),
             save,
             save_seen: 0,
             save_error: None,
@@ -115,7 +116,7 @@ impl Workspace {
         visualizer: AudioVisualizerOptions,
         artwork: AlbumArtworkOptions,
     ) {
-        self.scroll_views = ScrollViews::default();
+        *self.scroll_views.borrow_mut() = ScrollViews::default();
         self.initialize_panels(visualizer, artwork);
         self.reconcile_structure();
         self.submit_save();
@@ -124,7 +125,7 @@ impl Workspace {
     /// Structural edits invalidate geometry but retain surviving panels' scroll
     /// positions, including tabs that are not currently painted.
     pub(super) fn reconcile_structure(&mut self) -> Cancellation {
-        self.scroll_views.retain_layout(self.layouts.current());
+        self.scroll_views.borrow_mut().retain_layout(self.layouts.current());
         self.interaction
             .layout_changed(self.layouts.current().root.as_ref())
     }
@@ -277,7 +278,7 @@ mod tests {
     #[test]
     fn activation_rolls_back_old_tree_and_retires_scroll_and_geometry() {
         let (_directory, save, mut workspace) = fixture();
-        let scroll = workspace.scroll_views.list(("library", 3));
+        let scroll = workspace.scroll_views.borrow_mut().list(("library", 3));
         let retired = std::rc::Rc::downgrade(&scroll.0);
         drop(scroll);
         let geometry = DockGeometry {
@@ -336,7 +337,7 @@ mod tests {
             .find(|panel| panel.kind == "albums")
             .unwrap()
             .id;
-        let scroll = workspace.scroll_views.list(("library", library));
+        let scroll = workspace.scroll_views.borrow_mut().list(("library", library));
         scroll
             .0
             .borrow()
@@ -347,7 +348,7 @@ mod tests {
         assert!(!workspace.panel_demand("library", true));
         assert!(workspace.panel_demand("albums", true));
         assert!(!workspace.panel_demand("albums", false));
-        let retained = workspace.scroll_views.list(("library", library));
+        let retained = workspace.scroll_views.borrow_mut().list(("library", library));
         assert!(std::rc::Rc::ptr_eq(&scroll.0, &retained.0));
         assert_eq!(retained.0.borrow().base_handle.offset().y, px(-120.));
     }
