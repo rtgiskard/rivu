@@ -878,18 +878,37 @@ impl Duplicates {
                 .spawn(async move { handle.query(Query::RelocationTask { id }) })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                match this.duplicate_review.accept_task_read(epoch, id, response) {
-                    TaskReadOutcome::Finished => {
-                        this.refresh_snapshot(cx);
-                        this.sync_duplicate_review(cx);
-                    }
-                    TaskReadOutcome::Failed => this.sync_duplicate_review(cx),
-                    TaskReadOutcome::Ignored => return,
-                }
-                cx.notify();
+                this.finish_retained_relocation(epoch, id, response, cx);
             });
         })
         .detach();
+    }
+
+    fn finish_retained_relocation(
+        &mut self,
+        epoch: u64,
+        id: u64,
+        response: QueryResponse,
+        cx: &mut Context<Self>,
+    ) {
+        let superseded =
+            self.duplicate_review.epoch != epoch || self.duplicate_review.task_id() != Some(id);
+        match self.duplicate_review.accept_task_read(epoch, id, response) {
+            TaskReadOutcome::Finished => {
+                self.refresh_snapshot(cx);
+                self.sync_duplicate_review(cx);
+            }
+            TaskReadOutcome::Failed => self.sync_duplicate_review(cx),
+            TaskReadOutcome::Ignored if superseded && self.duplicate_review.open => {
+                // The old physical read may have blocked a reopened review's demand.
+                // Reconcile that newest task once; a current Verifying response must
+                // not turn completion into polling or an automatic retry.
+                self.refresh_snapshot(cx);
+                self.sync_duplicate_review(cx);
+            }
+            TaskReadOutcome::Ignored => return,
+        }
+        cx.notify();
     }
 
     fn submit_duplicate_action(&mut self, independent: bool, cx: &mut Context<Self>) {
@@ -1658,6 +1677,74 @@ mod tests {
         response::{Ack, QueryResponse, QueryRevisions, ViewResponse},
         store::DuplicateMember,
     };
+
+    #[gpui::test]
+    fn retained_read_completion_hands_off_only_superseded_open_demand(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use gpui::AppContext as _;
+        use std::{rc::Rc, sync::Arc};
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        crate::config::Config {
+            volume: 0.0,
+            ffmpeg_enabled: false,
+            mpris_enabled: false,
+            ..Default::default()
+        }
+        .save(&path)
+        .unwrap();
+        let runtime = crate::core::Runtime::start(directory.path(), &path).unwrap();
+        let context = super::FeatureContext {
+            snapshots: Rc::new(crate::gui::snapshot::SnapshotSource::new(
+                runtime.handle.clone(),
+            )),
+            i18n: Arc::new(crate::i18n::Localizer::new("en-US")),
+            labels: Default::default(),
+            scroll: Default::default(),
+        };
+        for (reopen, closed, failed) in [
+            (true, false, false),
+            (false, false, false),
+            (true, true, false),
+            (false, false, true),
+        ] {
+            let owner = cx.new(|cx| super::Duplicates::new(context.clone(), cx));
+            owner.update(cx, |this, cx| {
+                this.duplicate_review = ready_review();
+                this.duplicate_review.busy = Some(Busy::Relocating(7));
+                let epoch = this.duplicate_review.begin_task_read(7).unwrap();
+                if reopen {
+                    this.duplicate_review.close();
+                    this.duplicate_review.open(QueryRevisions::default());
+                    this.duplicate_review.busy = Some(Busy::Relocating(8));
+                    // Demand arrives while the old physical query owns the gate.
+                    this.request_retained_relocation(8, cx);
+                    assert!(this.duplicate_review.task_query_pending);
+                }
+                if closed {
+                    this.duplicate_review.close();
+                }
+                let response = if failed {
+                    QueryResponse {
+                        revisions: QueryRevisions::default(),
+                        result: Err(crate::response::QueryError::Message("read failed".into())),
+                    }
+                } else {
+                    task_response(7, RelocationPhase::Verifying)
+                };
+                this.finish_retained_relocation(epoch, 7, response, cx);
+                assert_eq!(this.duplicate_review.task_query_pending, reopen && !closed);
+                if reopen && !closed {
+                    assert_eq!(this.duplicate_review.task_id(), Some(8));
+                    // The real completion consumer already reserved the new read;
+                    // another demand cannot create a second physical worker.
+                    assert!(this.duplicate_review.begin_task_read(8).is_none());
+                }
+            });
+        }
+    }
 
     fn review() -> DuplicateReview {
         let mut review = DuplicateReview {
