@@ -2289,7 +2289,7 @@ mod tests {
             audio_visualizer: None,
             album_artwork: None,
         };
-        window.update(|window, cx| {
+        window.update(|_window, cx| {
             let panels = [&panel];
             let state = |visible, has_panel| PresentationState {
                 config: Arc::clone(&config),
@@ -2320,7 +2320,7 @@ mod tests {
                     owner.update(cx, |owner, cx| {
                         owner.sync(state(visible, has_panel), cx);
                         if release {
-                            owner.release_render_images(window, cx);
+                            owner.release_display_resources(cx);
                         }
                     });
                     assert!(!cancelled.load(Ordering::Relaxed));

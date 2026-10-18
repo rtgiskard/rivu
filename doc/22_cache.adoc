@@ -180,8 +180,9 @@ rationale are explained in link:23_visuals.adoc[Visualization Rendering Design].
 The policy covers Waveform display columns and rectangle publications, Spectrum body
 geometry, and Spectrogram numerical column publications. Audio Visualizer styles are independent:
 radial styles do not retain reusable graphics, stereo analysis styles retain
-their own result images, and generative styles retain simulation state. The
-setting does not control those resources, album artwork, or font caches.
+numerical publications in revocable GPU slots, and generative styles retain
+simulation state. The setting does not control those resources, album artwork,
+or font caches.
 
 Disabling the cache bypasses reusable graphics, not the underlying audio data
 or Spectrogram history. Peak hold, smoothing, and display calculations retain
@@ -250,10 +251,10 @@ frames received while hidden. This lifetime is independent of the cache setting.
 === Resource boundaries
 
 Caches are local to current panel owners or bounded shared history, not an
-unbounded record of earlier render states. Hiding a window releases Spectrogram
-history and stereo/generative results; it does not necessarily drop the active
-Spectrum panels' geometry or waveform previews. Base waveform storage is bounded
-independently of its display publications; see link:23_visuals.adoc#_waveform[Waveform].
+unbounded record of earlier render states. Hiding a window releases its derived
+visualization publications, Spectrogram history and stereo/generative results.
+Base waveform previews retain their independent bounded lifetime; see
+link:23_visuals.adoc#_waveform[Waveform].
 Waveform rectangle payloads grow with display-column count and panel count,
 not panel pixel area; height changes rebuild geometry without adding rows of pixels.
 Spectrum uses at most 2000 display slots, further limited by drawable width.
@@ -262,11 +263,11 @@ fragment work rather than the number of stored body rectangles.
 Spectrogram numerical publication memory grows with bounded history capacity and
 capped sampling height, in addition to the frequency data needed to preserve history.
 
-These are CPU and renderer resources: image payload alone does not describe
-total process or GPU memory. Removed panel entries are pruned. Replaced images
-and images from hidden or removed panels are retired through the window
-lifecycle, without requiring those panels to paint again. Window closure
-releases the remaining retained images.
+These are CPU and renderer resources: publication payload alone does not describe
+total process or GPU memory. Removed panel entries are pruned. Hiding detaches
+recorded visualization ownership without requiring another paint. GPU uploads
+may remain charged until completion and a later renderer preparation, or renderer
+destruction; hiding does not force a cleanup frame or promise immediate VRAM release.
 
 The GUI staging frame releases optional density, spatial-spectrum, metrics, and
 band-energy payloads as their last display demand disappears. Unchanged demand

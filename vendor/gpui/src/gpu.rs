@@ -1,4 +1,4 @@
-//! Bounded, immutable GPU publications for rectangles, scalar fields and paths.
+//! Bounded, immutable GPU publications for rectangles, scalar fields, paths and segments.
 //!
 //! These are closed geometry/material schemas, not an arbitrary shader interface.
 //! Publication owns no device resources and does not schedule a window repaint.
@@ -338,6 +338,8 @@ pub struct GpuFrame {
     id: u64,
     content: GpuContent,
     palette: Arc<GpuPalette>,
+    // Cached at publication time, never rescanned during scene replay.
+    segment_footprint: Option<([f32; 4], f32)>,
 }
 
 fn validate_range(range: [f32; 2]) -> Result<()> {
@@ -371,6 +373,7 @@ impl GpuFrame {
             id: next_id(&NEXT_FRAME_ID)?,
             content,
             palette,
+            segment_footprint: None,
         }))
     }
 
@@ -515,17 +518,31 @@ impl GpuFrame {
     ) -> Result<Arc<Self>> {
         limits.palette(&palette)?;
         limits.segments(segments.len(), layers.len())?;
+        let mut max_width = 0.0_f32;
+        let mut envelope = [
+            f32::INFINITY,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NEG_INFINITY,
+        ];
         for layer in layers {
             ensure!(
                 layer.width.is_finite() && layer.width > 0.0,
                 "GPU stroke width must be finite and positive"
             );
+            max_width = max_width.max(layer.width);
         }
         for segment in segments {
             ensure!(
                 segment.endpoints.iter().all(|v| v.is_finite()),
                 "GPU segment endpoints must be finite"
             );
+            for endpoint in segment.endpoints.chunks_exact(2) {
+                envelope[0] = envelope[0].min(endpoint[0]);
+                envelope[1] = envelope[1].min(endpoint[1]);
+                envelope[2] = envelope[2].max(endpoint[0]);
+                envelope[3] = envelope[3].max(endpoint[1]);
+            }
             for layer in layers {
                 ensure!(
                     segment
@@ -536,13 +553,15 @@ impl GpuFrame {
                 );
             }
         }
-        Self::new(
-            GpuContent::Segments {
+        Ok(Arc::new(Self {
+            id: next_id(&NEXT_FRAME_ID)?,
+            content: GpuContent::Segments {
                 segments: copy_slice(segments)?,
                 layers: copy_slice(layers)?,
             },
             palette,
-        )
+            segment_footprint: Some((envelope, max_width)),
+        }))
     }
 
     /// Process-unique immutable identity, never recycled after frame release.
@@ -679,7 +698,8 @@ impl GpuState {
 /// Explicit replay policy independent of geometry/material kind.
 #[derive(Clone, Debug)]
 pub enum GpuSource {
-    /// Replay exactly the immutable publication recorded at paint time.
+    /// Replay exactly the immutable publication recorded at paint time. Window
+    /// scenes release their recorded ownership when presentation is hidden.
     Fixed(Arc<GpuFrame>),
     /// Resolve the latest complete publication once per rendered frame.
     Dynamic(Arc<GpuState>),
@@ -690,19 +710,74 @@ pub enum GpuSource {
 pub struct GpuDraw {
     /// Scene-computed ordering key.
     pub order: DrawOrder,
-    /// Physical-pixel placement; path mapping uses its original full bounds.
+    /// Physical-pixel coordinate mapping, not a clip or a visible footprint.
     pub bounds: Bounds<ScaledPixels>,
     /// Inherited physical-pixel clipping mask, independent of mapping bounds.
     pub content_mask: ContentMask<ScaledPixels>,
     /// Inherited element opacity, applied exactly once to sampled alpha.
     pub opacity: f32,
-    /// Logical-to-physical scale for rectangle segmentation parameters.
+    /// Logical-to-physical scale for rectangle segmentation and stroke widths.
     pub scale_factor: f32,
     /// Fixed or dynamically resolved complete content.
     pub source: GpuSource,
 }
 
 impl GpuDraw {
+    /// Conservative scene footprint, distinct from the immutable mapping bounds.
+    /// Dynamic segments can later publish arbitrary finite endpoints, so their
+    /// scene ordering/culling envelope is the full inherited mask.
+    pub fn visible_bounds(&self) -> Bounds<ScaledPixels> {
+        match &self.source {
+            GpuSource::Fixed(frame) => self.visible_bounds_for(frame),
+            GpuSource::Dynamic(state) if state.schema() == GpuSchema::Segments => {
+                self.content_mask.bounds
+            }
+            GpuSource::Dynamic(_) => self.bounds.intersect(&self.content_mask.bounds),
+        }
+    }
+
+    /// Footprint of the coherent frame captured by a renderer. Mapping remains
+    /// `bounds`; only visibility, compositing and overlap use this envelope.
+    pub fn visible_bounds_for(&self, frame: &GpuFrame) -> Bounds<ScaledPixels> {
+        let Some((endpoints, width)) = frame.segment_footprint else {
+            return self.bounds.intersect(&self.content_mask.bounds);
+        };
+        if width == 0.0 || endpoints[0] > endpoints[2] {
+            return Bounds::default();
+        }
+        // Use f64 for finite-but-large normalized coordinates and widths, then
+        // clip before converting back to physical f32 coordinates.
+        let pad = f64::from(width) * f64::from(self.scale_factor) * 0.5;
+        let mask = self.content_mask.bounds;
+        let left = (f64::from(self.bounds.origin.x.0)
+            + f64::from(endpoints[0]) * f64::from(self.bounds.size.width.0)
+            - pad)
+            .max(f64::from(mask.origin.x.0))
+            .min(f64::from(mask.right().0));
+        let top = (f64::from(self.bounds.origin.y.0)
+            + f64::from(endpoints[1]) * f64::from(self.bounds.size.height.0)
+            - pad)
+            .max(f64::from(mask.origin.y.0))
+            .min(f64::from(mask.bottom().0));
+        let right = (f64::from(self.bounds.origin.x.0)
+            + f64::from(endpoints[2]) * f64::from(self.bounds.size.width.0)
+            + pad)
+            .max(f64::from(mask.origin.x.0))
+            .min(f64::from(mask.right().0));
+        let bottom = (f64::from(self.bounds.origin.y.0)
+            + f64::from(endpoints[3]) * f64::from(self.bounds.size.height.0)
+            + pad)
+            .max(f64::from(mask.origin.y.0))
+            .min(f64::from(mask.bottom().0));
+        Bounds::new(
+            crate::point(ScaledPixels(left as f32), ScaledPixels(top as f32)),
+            crate::size(
+                ScaledPixels((right - left) as f32),
+                ScaledPixels((bottom - top) as f32),
+            ),
+        )
+    }
+
     pub(crate) fn from_logical(
         bounds: Bounds<Pixels>,
         content_mask: ContentMask<Pixels>,

@@ -1365,6 +1365,7 @@ impl WgpuRendererCore {
                     target_format,
                     alpha_mode,
                     rendering_params.path_sample_count,
+                    context.adapter.get_downlevel_capabilities().flags,
                 ),
                 device,
                 queue,
@@ -1599,9 +1600,7 @@ impl WgpuRendererCore {
                                 continue;
                             };
                             if draw.multisampled() {
-                                let record = &scene.gpu_draws[index];
-                                let mut bounds =
-                                    record.bounds.intersect(&record.content_mask.bounds);
+                                let mut bounds = draw.visible_bounds;
                                 let mut paths = index..index + 1;
                                 // The scene batch already excludes intervening primitives.
                                 // Overlapping paths must resolve separately: blending MSAA
@@ -1616,9 +1615,7 @@ impl WgpuRendererCore {
                                         if !next.multisampled() {
                                             break;
                                         }
-                                        let record = &scene.gpu_draws[next_index];
-                                        let next_bounds =
-                                            record.bounds.intersect(&record.content_mask.bounds);
+                                        let next_bounds = next.visible_bounds;
                                         if !Self::gpu_path_bounds_are_integer(next_bounds)
                                             || bounds.intersects(&next_bounds)
                                         {
@@ -1633,7 +1630,6 @@ impl WgpuRendererCore {
                                 self.draw_gpu_paths_to_intermediate(
                                     &mut encoder,
                                     &materials,
-                                    &scene.gpu_draws,
                                     paths,
                                     size,
                                 );
@@ -1966,7 +1962,6 @@ impl WgpuRendererCore {
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
         materials: &PreparedMaterials,
-        records: &[gpui::GpuDraw],
         range: Range<usize>,
         size: Size<DevicePixels>,
     ) {
@@ -2000,13 +1995,8 @@ impl WgpuRendererCore {
         };
         for index in range {
             if grouped {
-                let record = &records[index];
-                // Keep each path's original composite footprint. Without this,
-                // a union sprite could expose edge samples outside that footprint.
-                let bounds = record
-                    .bounds
-                    .intersect(&record.content_mask.bounds)
-                    .intersect(&viewport);
+                // Use the coherent captured footprint, not coordinate mapping.
+                let bounds = materials[&index].visible_bounds.intersect(&viewport);
                 if bounds.is_empty() {
                     continue;
                 }

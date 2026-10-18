@@ -848,8 +848,8 @@ impl GuiApp {
                 this.sync_analysis(cx);
                 if !this.window_visible {
                     // Hidden windows may never deliver another paint/frame.
-                    // Flush both current and already-scheduled retired owners.
-                    this.release_render_images(window, cx);
+                    // Release display publications and artwork without a cleanup frame.
+                    this.release_display_resources(window, cx);
                 }
                 this.presentation.update(cx, |presentation, cx| {
                     presentation.request_frame(window, cx)
@@ -981,14 +981,14 @@ impl GuiApp {
         app.shell.layout_focus().focus(window, cx);
         window
             .observe_release(&cx.entity(), cx, |this: &mut Self, window, cx| {
-                this.release_render_images(window, cx);
+                this.release_display_resources(window, cx);
             })
             .detach();
         app
     }
-    fn release_render_images(&self, window: &mut Window, cx: &mut App) {
+    fn release_display_resources(&self, window: &mut Window, cx: &mut App) {
         self.presentation.update(cx, |presentation, cx| {
-            presentation.release_render_images(window, cx);
+            presentation.release_display_resources(cx);
         });
         self.metadata.update(cx, |metadata, cx| {
             metadata.release_render_images(window, cx)

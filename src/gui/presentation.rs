@@ -381,10 +381,10 @@ impl Presentation {
     }
 
     /// Called by the shell's first paint, after every panel's prepaint.
-    pub(super) fn finish_paint(&self, _window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn finish_paint(&self, cx: &mut Context<Self>) {
         if self.visuals.finish_prepaint() {
             // A resized panel can alter history shared by cached siblings.
-            // Repaint them before the next retirement boundary.
+            // Repaint siblings to reflect the shared history extent.
             for (id, view) in &self.views {
                 if self.panels.get(id) == Some(&PanelKind::Spectrogram) {
                     view.update(cx, |_, cx| cx.notify());
@@ -394,7 +394,7 @@ impl Presentation {
     }
 
     /// Release display publications when the window is hidden or destroyed.
-    pub(super) fn release_render_images(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn release_display_resources(&mut self, cx: &mut Context<Self>) {
         self.visible = false;
         self.cancel_clock();
         self.demand = DisplayDemand::default();
@@ -675,7 +675,7 @@ mod tests {
                     cx,
                 );
                 assert!(owner.views.is_empty());
-                owner.release_render_images(window, cx);
+                owner.release_display_resources(cx);
                 assert_eq!(owner.demand, DisplayDemand::default());
             });
         });

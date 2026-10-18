@@ -172,7 +172,7 @@ impl Render for GuiApp {
                             }
                         });
                         paint_presentation
-                            .update(cx, |presentation, cx| presentation.finish_paint(window, cx));
+                            .update(cx, |presentation, cx| presentation.finish_paint(cx));
                         paint_artwork_images.release_retired(window);
                     },
                 )

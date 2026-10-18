@@ -457,8 +457,8 @@ impl Visuals {
         }
     }
 
-    /// Suspend analysis views without changing their settings. Image release
-    /// still runs at frame boundaries, including while no views are rendered.
+    /// Suspend analysis views and release display publications without changing
+    /// their settings. Framework scenes detach their owners when hidden.
     pub(in crate::gui) fn set_enabled(&mut self, enabled: bool) {
         let mut data = self.data.borrow_mut();
         if data.enabled == enabled {
@@ -2079,7 +2079,7 @@ fn frequency_label(frequency: f32) -> SharedString {
 
 /// Cubic Hermite interpolation preserves the palette position and tangent
 /// continuously inside each authored color-stop interval. The lookup table and
-/// Spectrum's shared gradient texture sample this same authored mapping.
+/// Spectrum's shared GPU palette samples this same authored mapping.
 fn gradient(value: f32, stops: &[(f32, [u8; 3])]) -> [u8; 3] {
     debug_assert!(stops.len() >= 2);
     let value = value.clamp(0.0, 1.0);

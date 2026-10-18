@@ -444,9 +444,11 @@ Glow uses batched, widening translucent strokes rather than image feedback
 history or a blur post-pass. This bounds retained scene storage and submissions,
 at the cost of approximating the light spread. Beams retains 189 branches, 756
 line segments, and 12 pulse slots. Flow retains 96 filaments with at most 24
-points each and 2208 line segments. Both styles draw at most 27 light paths per
-panel; Flow limits each integration step to 1/120 second and each accepted-frame
-update to 60 steps. Integration, history fading, and respawn retain those
+points each and 2208 line segments. Both styles publish shared segment endpoints
+with nine intensity/color groups and three ordered stroke layers per panel,
+instead of rebuilding 27 CPU light paths. Flow limits each integration step to
+1/120 second and each accepted-frame update to 60 steps. Integration, history
+fading, and respawn retain those
 substeps, but render segments are rebuilt only from the final state. A gap longer
 than half a second resets the scene instead of attempting unbounded catch-up.
 

@@ -106,6 +106,19 @@ impl Scene {
         }
     }
 
+    /// Release publication ownership without waiting for another frame. Keep
+    /// operation indices and unrelated primitives (including artwork) intact.
+    /// The window forces a fresh paint before these scenes are shown again.
+    pub(crate) fn detach_gpu_draws(&mut self) {
+        self.gpu_draws.clear();
+        #[cfg(not(target_os = "macos"))]
+        for operation in &mut self.paint_operations {
+            if matches!(operation, PaintOperation::Primitive(Primitive::Gpu(_))) {
+                *operation = PaintOperation::DetachedGpu;
+            }
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.paint_operations.len()
     }
@@ -125,6 +138,8 @@ impl Scene {
     pub fn insert_primitive(&mut self, primitive: impl Into<Primitive>) {
         let mut primitive = primitive.into();
         let bounds = match &primitive {
+            #[cfg(not(target_os = "macos"))]
+            Primitive::Gpu(draw) => draw.visible_bounds(),
             #[cfg(not(any(target_os = "macos", target_os = "ios")))]
             Primitive::PolychromeSprite(sprite) => {
                 sprite.transformation.apply_bounds(sprite.bounds)
@@ -194,6 +209,9 @@ impl Scene {
                 PaintOperation::Primitive(primitive) => self.insert_primitive(primitive.clone()),
                 PaintOperation::StartLayer(bounds) => self.push_layer(*bounds),
                 PaintOperation::EndLayer => self.pop_layer(),
+                PaintOperation::DetachedGpu => {
+                    self.paint_operations.push(PaintOperation::DetachedGpu)
+                }
             }
         }
     }
@@ -272,6 +290,8 @@ pub(crate) enum PaintOperation {
     Primitive(Primitive),
     StartLayer(Bounds<ScaledPixels>),
     EndLayer,
+    // Retains cached paint-range indices across a hidden-window detach.
+    DetachedGpu,
 }
 
 #[derive(Clone)]

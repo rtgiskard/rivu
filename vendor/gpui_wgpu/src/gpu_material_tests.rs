@@ -724,9 +724,13 @@ fn gpu_rectangles_budget_and_capability_failures_leave_other_draws_intact() -> a
     let stats = renderer.core.resources.materials.stats();
     assert_eq!(stats.0, 1);
     assert!(stats.2 <= 1024);
-    renderer.core.resources.materials.disable_program();
+    renderer.core.resources.materials.set_downlevel_flags(
+        wgpu::DownlevelFlags::all() - wgpu::DownlevelFlags::MULTISAMPLED_SHADING,
+    );
     let image = renderer.render_scene_to_image(&scene, size(24, 8))?;
     pixel(&image, 12, 4, BLUE);
+    pixel(&image, 4, 4, BLUE);
+    pixel(&image, 20, 4, BLUE);
     Ok(())
 }
 
@@ -1469,5 +1473,137 @@ fn palette_path_batches_keep_fractional_bounds_on_individual_passes() -> anyhow:
             .pixels()
             .any(|pixel| pixel.0[0] > 10 && pixel.0[2] < 245)
     );
+    Ok(())
+}
+
+fn segment_frame(
+    endpoints: [f32; 4],
+    width: f32,
+    color: [f32; 4],
+) -> anyhow::Result<Arc<GpuFrame>> {
+    GpuFrame::segments(
+        &[gpui::GpuSegment {
+            endpoints,
+            color: 0,
+        }],
+        &[gpui::GpuStrokeLayer {
+            width,
+            palette_offset: 0,
+        }],
+        GpuPalette::new(&[color], 1)?,
+        limits(),
+    )
+}
+
+#[test]
+fn gpu_segments_render_beyond_mapping_and_cull_by_stroke_footprint() -> anyhow::Result<()> {
+    let mut renderer = WgpuHeadlessRenderer::new()?;
+    let viewport = bounds(0.0, 0.0, 64.0, 48.0);
+    let mapping = bounds(16.0, 16.0, 16.0, 16.0);
+    let publication = segment_frame([-0.5, 0.5, 1.5, 0.5], 4.0, [1.0, 0.0, 0.0, 1.0])?;
+    let mut record = draw(GpuSource::Fixed(publication.clone()), mapping);
+    record.content_mask.bounds = viewport;
+    let mut scene = Scene::default();
+    scene.insert_primitive(quad(viewport, gpui::black()));
+    scene.insert_primitive(record.clone());
+    scene.finish();
+    let actual = renderer.render_scene_to_image(&scene, size(64, 48))?;
+    for x in [8, 10, 30, 38, 39] {
+        pixel(&actual, x, 24, RED);
+    }
+    for x in [7, 40] {
+        pixel(&actual, x, 24, BLACK);
+    }
+
+    // Mask and mapping are disjoint; the geometry is not. A later ordinary
+    // quad overlapping only the overflow must still sort after the segment.
+    record.content_mask.bounds = bounds(8.0, 22.0, 6.0, 4.0);
+    let mut scene = Scene::default();
+    scene.insert_primitive(quad(viewport, gpui::black()));
+    scene.insert_primitive(record);
+    scene.insert_primitive(quad(bounds(10.0, 22.0, 2.0, 4.0), gpui::blue()));
+    scene.finish();
+    assert_eq!(scene.gpu_draws.len(), 1);
+    let actual = renderer.render_scene_to_image(&scene, size(64, 48))?;
+    pixel(&actual, 8, 24, RED);
+    pixel(&actual, 10, 24, BLUE);
+    pixel(&actual, 12, 24, RED);
+    pixel(&actual, 14, 24, BLACK);
+
+    let mut edge = draw(
+        GpuSource::Fixed(segment_frame(
+            [0.0, 0.0, 0.0, 1.0],
+            4.0,
+            [1.0, 0.0, 0.0, 1.0],
+        )?),
+        mapping,
+    );
+    edge.scale_factor = 2.0;
+    edge.content_mask.bounds = bounds(12.0, 18.0, 2.0, 10.0);
+    let mut scene = Scene::default();
+    scene.insert_primitive(quad(viewport, gpui::black()));
+    scene.insert_primitive(edge);
+    scene.finish();
+    assert_eq!(scene.gpu_draws.len(), 1);
+    let actual = renderer.render_scene_to_image(&scene, size(64, 48))?;
+    pixel(&actual, 12, 24, RED);
+    pixel(&actual, 14, 24, BLACK);
+
+    // Cached dynamic placement must admit a later publication whose envelope
+    // extends into a mask that did not overlap the original mapping.
+    let state = GpuState::new(
+        segment_frame([0.0, 0.5, 1.0, 0.5], 1.0, [1.0, 0.0, 0.0, 1.0])?,
+        limits(),
+    )?;
+    let mut record = draw(GpuSource::Dynamic(state.clone()), mapping);
+    record.content_mask.bounds = bounds(8.0, 22.0, 4.0, 4.0);
+    let mut scene = Scene::default();
+    scene.insert_primitive(quad(viewport, gpui::black()));
+    scene.insert_primitive(record);
+    scene.finish();
+    assert_eq!(scene.gpu_draws.len(), 1);
+    state.publish(publication)?;
+    let actual = renderer.render_scene_to_image(&scene, size(64, 48))?;
+    pixel(&actual, 10, 24, RED);
+    state.clear();
+    let actual = renderer.render_scene_to_image(&scene, size(64, 48))?;
+    pixel(&actual, 10, 24, BLACK);
+    Ok(())
+}
+
+#[test]
+fn gpu_segment_batches_use_visible_overlap_and_disjoint_scissors() -> anyhow::Result<()> {
+    let mut renderer = WgpuHeadlessRenderer::new()?;
+    let viewport = bounds(0.0, 0.0, 88.0, 48.0);
+    for second_x in [36.0, 56.0] {
+        let mut scene = Scene::default();
+        scene.insert_primitive(quad(viewport, gpui::black()));
+        scene.push_layer(viewport);
+        for (x, color) in [
+            (16.0, [1.0, 0.0, 0.0, 0.5]),
+            (second_x, [0.0, 1.0, 0.0, 0.5]),
+        ] {
+            let mut record = draw(
+                GpuSource::Fixed(segment_frame([-0.5, 0.5, 1.5, 0.5], 4.0, color)?),
+                bounds(x, 16.0, 16.0, 16.0),
+            );
+            record.content_mask.bounds = viewport;
+            scene.insert_primitive(record);
+        }
+        scene.pop_layer();
+        scene.finish();
+        assert!(
+            !scene.gpu_draws[0]
+                .bounds
+                .intersects(&scene.gpu_draws[1].bounds)
+        );
+        let actual = compare_individual_material_draws(&mut renderer, &scene, size(88, 48))?;
+        pixel(&actual, 10, 24, [128, 0, 0, 255]);
+        if second_x == 36.0 {
+            pixel(&actual, 30, 24, [64, 128, 0, 255]);
+        } else {
+            pixel(&actual, 50, 24, [0, 128, 0, 255]);
+        }
+    }
     Ok(())
 }

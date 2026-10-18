@@ -12,12 +12,13 @@ Spectrum now consumes rectangle and Path publications; its palette sampling and
 ownership are described in link:23_visuals.adoc#_spectrum[Spectrum rendering].
 Fractal Beams/Flow publish shared segment endpoints with ordered stroke layers.
 Spectrogram publishes numerical column fields at their actual retained time intervals.
-The general `Program`, generated-schema interfaces and remaining consumer migrations
-below remain proposals. The agreed safety and platform boundaries remain binding.
+Waveform publishes RMS and Peak rectangle tiles with per-column gradient pairs.
+The general `Program` and generated-schema interfaces below remain proposals;
+the agreed safety and platform boundaries remain binding.
 
 The application supplies compact parameters and meaningful numerical data. The
-GPU generates geometry and pixels. GPUI owns the common drawing, upload, storage,
-composition, and retirement mechanisms.
+GPU materials expand instances and shade fields and existing paths. GPUI owns
+the common drawing, upload, storage, composition, and retirement mechanisms.
 
 Three kinds of decisions have different stability:
 
@@ -510,8 +511,9 @@ immutable existing tessellated path. Rectangle segmentation and bottom-to-top pa
 retain their initial behavior. Palette samples are straight-alpha sRGB values;
 their interpolation is in sRGB numerical space. Bounds, clip, scale and inherited
 opacity belong to each scene placement, independently of shared content.
-Density/Spatial, all Spectrum styles, Fractal Beams/Flow and Spectrogram use this
-interface. The old rectangle-only publication API and specialized textured-path interface are removed.
+Density/Spatial, all Spectrum styles, Fractal Beams/Flow, Spectrogram and Waveform
+use this interface. The old rectangle-only publication API and specialized
+textured-path interface are removed.
 
 Segments use butt caps and ordinary source-over blending in the shared MSAA
 intermediate. Each immutable frame's endpoint array is uploaded once and reused
@@ -522,6 +524,12 @@ change only with accepted geometry or display parameters, not repaint or resize;
 hiding releases application display storage. The application retains the original
 three light layers, intensity/color buckets and drawing order. Fine antialiasing
 differences are accepted rather than reproducing CPU tessellation pixel for pixel.
+
+Segment placement bounds map endpoint coordinates; they are not a clipping box.
+Scene culling, overlap ordering and MSAA composition use a separate conservative
+footprint covering endpoint extents and stroke expansion at the current scale,
+intersected with the content mask. Endpoints outside the unit square and strokes
+crossing placement edges remain visible wherever that mask permits.
 
 Spectrogram packs at most 32 numerical columns and their independent x intervals
 into each immutable field tile. Intervals are relative to the tile's own earliest
@@ -586,6 +594,12 @@ records are coalesced into one summary when the failure categories change; a
 successful or empty frame resets that episode. Persistent failures do not log once
 per drawing record or once per repaint.
 
+Material admission checks the adapter's multisampled-shading capability as well
+as storage limits before creating the shared shader module. The module contains
+sample-interpolated rectangle coordinates even when a draw uses another schema.
+Unsupported adapters omit these materials through the ordinary capability-error
+path; unrelated GPUI controls do not require the material program.
+
 The unified renderer defaults to 64 MiB of shared charged buffer capacity,
 8,192 allocation charges, 4,096 drawing records per frame and eight outstanding
 completion callbacks. Buffer bytes and allocation counts conservatively charge two
@@ -610,6 +624,10 @@ Ordinary scenes with no extension resources do not perform extension-specific
 device polling. Native Metal remains explicitly unsupported.
 
 ==== Initial comparative measurements
+
+All comparisons below are specific to the source and binary identities recorded
+with their samples. Later correctness fixes do not inherit these timing or memory
+results without corresponding measurements.
 
 The measurements in this subsection describe the rectangle-only predecessor and
 its recorded source hashes, not the subsequently unified field/path renderer.
@@ -709,9 +727,10 @@ batch boundary ends the run. Numeric order values alone do
 not break adjacency. This conservative linear scan preserves individually resolved
 MSAA overlap and backend-specific fractional edge coverage without quadratic tests.
 
-This extraction is still a closed set of schemas, not arbitrary shader authoring
-or generated ABI tooling. Density/Spatial, Spectrum, Fractal Beams/Flow and Spectrogram
-have migrated; Waveform retains its independent image-retirement path.
+This extraction is a closed set of schemas, not arbitrary shader authoring or
+generated ABI tooling. Density/Spatial, Spectrum, Fractal Beams/Flow, Spectrogram
+and Waveform have migrated. Their former colored-image intermediates and
+application-specific image-retirement queues are removed.
 
 ==== Unified field and path measurements
 
@@ -847,11 +866,12 @@ cross-binary screenshots do not establish pixel equality. Source/binary identiti
 the exact configuration and raw samples are retained under `spectrum_bars_led_consumers`
 in link:25_gpu_rendering_benchmark.json[the benchmark record].
 
-=== Remaining consumers and integrated delivery
+=== Consumer integration boundary
 
-Migrate Waveform with its distinct geometry and reuse patterns.
-Remove only intermediates and retirement paths made obsolete by the cutover.
-Retain algorithm state and unrelated artwork behavior.
+The migrated consumers retain their algorithm state, content identity and bounded
+immutable-publication caches. GPUI/WGPU own upload reuse and completion-aware
+physical retirement; applications still decide when content changes or becomes
+invalid. Artwork retains its independent image lifecycle.
 
 The slices divide integration risk, not final scope. Generic supporting modules
 belong with GPUI/WGPU; application programs and palette definitions belong near the

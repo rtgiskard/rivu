@@ -15,7 +15,7 @@ impl GuiApp {
                 .cached(gpui::StyleRefinement::default().size_full())
                 .into_any_element()
         } else {
-            // Uncached renderer images retire at the next paint boundary.
+            // Repaint uncached panels directly rather than replaying their scenes.
             panel.into_any_element()
         }
     }

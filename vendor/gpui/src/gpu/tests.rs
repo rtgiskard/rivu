@@ -783,3 +783,197 @@ fn mixed_gpu_geometries_preserve_overlap_order_and_clipping() {
         if *a == (0..1) && *b == (0..1) && *c == (1..3))
     );
 }
+
+#[test]
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
+fn segment_footprints_preserve_mapping_and_dynamic_publication_envelopes() {
+    use crate::{PrimitiveBatch, Quad, Scene};
+    let make_frame = |endpoints, width| {
+        GpuFrame::segments(
+            &[GpuSegment {
+                endpoints,
+                color: 0,
+            }],
+            &[GpuStrokeLayer {
+                width,
+                palette_offset: 0,
+            }],
+            palette(),
+            LIMITS,
+        )
+        .unwrap()
+    };
+    let mapping = Bounds::new(
+        point(Pixels(16.0), Pixels(16.0)),
+        size(Pixels(16.0), Pixels(16.0)),
+    );
+    let full_mask = ContentMask {
+        bounds: Bounds::new(
+            point(Pixels(0.0), Pixels(0.0)),
+            size(Pixels(64.0), Pixels(64.0)),
+        ),
+    };
+    let outside = make_frame([-0.5, 0.5, 1.5, 0.5], 4.0);
+    let draw =
+        GpuDraw::from_logical(mapping, full_mask, 1.0, 1.0, GpuSource::Fixed(outside)).unwrap();
+    assert_eq!(draw.bounds, mapping.scale(1.0));
+    assert!(draw.visible_bounds().origin.x.0 <= 8.0);
+    assert!(draw.visible_bounds().right().0 >= 40.0);
+    let mut scene = Scene::default();
+    scene.insert_primitive(draw);
+    scene.insert_primitive(Quad {
+        bounds: Bounds::new(
+            point(ScaledPixels(8.0), ScaledPixels(22.0)),
+            size(ScaledPixels(4.0), ScaledPixels(4.0)),
+        ),
+        content_mask: full_mask.scale(1.0),
+        ..Quad::default()
+    });
+    scene.finish();
+    assert!(matches!(
+        &scene.batches().collect::<Vec<_>>()[..],
+        [PrimitiveBatch::Gpu(_), PrimitiveBatch::Quads(_)]
+    ));
+
+    // The mapping does not intersect the mask, but a wide edge stroke does.
+    let edge = make_frame([0.0, 0.0, 0.0, 1.0], 8.0);
+    let clip = ContentMask {
+        bounds: Bounds::new(
+            point(Pixels(12.0), Pixels(18.0)),
+            size(Pixels(2.0), Pixels(8.0)),
+        ),
+    };
+    let edge = GpuDraw::from_logical(mapping, clip, 1.0, 2.0, GpuSource::Fixed(edge)).unwrap();
+    let mut scene = Scene::default();
+    scene.insert_primitive(edge);
+    assert_eq!(scene.gpu_draws.len(), 1);
+
+    let state = GpuState::new(make_frame([0.0, 0.5, 1.0, 0.5], 1.0), LIMITS).unwrap();
+    let dynamic =
+        GpuDraw::from_logical(mapping, clip, 1.0, 1.0, GpuSource::Dynamic(state.clone())).unwrap();
+    assert_eq!(dynamic.visible_bounds(), clip.scale(1.0).bounds);
+    state
+        .publish(make_frame([-0.5, 0.5, 1.5, 0.5], 20.0))
+        .unwrap();
+    let snapshot = state.snapshot().unwrap();
+    let captured = dynamic.visible_bounds_for(&snapshot);
+    state.clear();
+    assert_eq!(dynamic.visible_bounds_for(&snapshot), captured);
+    assert!(!captured.is_empty());
+}
+
+#[test]
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
+fn scene_detach_releases_fixed_cpu_payloads_without_clearing_other_primitives() {
+    use crate::{Quad, Scene};
+    let initial = frame();
+    let weak = Arc::downgrade(&initial);
+    let mut first = Scene::default();
+    first.insert_primitive(placement(GpuSource::Fixed(initial)).unwrap());
+    first.insert_primitive(Quad {
+        bounds: first.gpu_draws[0].bounds,
+        content_mask: first.gpu_draws[0].content_mask,
+        ..Quad::default()
+    });
+    let mut second = Scene::default();
+    second.replay(0..first.len(), &first);
+    let operation_count = first.len();
+    // A later normal paint of B must not retarget the cached replay of A.
+    let ordinary = first.quads[0];
+    first.clear();
+    let replacement = frame();
+    let replacement_weak = Arc::downgrade(&replacement);
+    first.insert_primitive(placement(GpuSource::Fixed(replacement)).unwrap());
+    first.insert_primitive(ordinary);
+    let GpuSource::Fixed(recorded_a) = &second.gpu_draws[0].source else {
+        panic!("fixed A")
+    };
+    let GpuSource::Fixed(recorded_b) = &first.gpu_draws[0].source else {
+        panic!("fixed B")
+    };
+    assert_ne!(recorded_a.id(), recorded_b.id());
+    first.detach_gpu_draws();
+    assert!(replacement_weak.upgrade().is_none());
+    assert!(weak.upgrade().is_some());
+    second.detach_gpu_draws();
+    assert!(weak.upgrade().is_none());
+    assert_eq!(first.len(), operation_count);
+    assert_eq!(second.len(), operation_count);
+    assert_eq!(first.quads.len(), 1);
+    assert_eq!(second.quads.len(), 1);
+    first.detach_gpu_draws();
+    second.detach_gpu_draws();
+}
+
+#[crate::test]
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
+fn hidden_window_detaches_cached_fixed_scenes_without_another_frame(
+    cx: &mut crate::TestAppContext,
+) {
+    use crate::{
+        AppContext, Context, Entity, IntoElement, Render, StyleRefinement, Window,
+        WindowVisibility, canvas, div, prelude::*,
+    };
+    use std::{cell::RefCell, rc::Rc, sync::Weak};
+
+    struct Panel(Rc<RefCell<Vec<Weak<GpuFrame>>>>);
+    impl Render for Panel {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let publications = self.0.clone();
+            canvas(
+                |_, _, _| (),
+                move |bounds, _, window, _| {
+                    let publication = frame();
+                    publications.borrow_mut().push(Arc::downgrade(&publication));
+                    window
+                        .paint_gpu(bounds, GpuSource::Fixed(publication))
+                        .unwrap();
+                },
+            )
+            .size_full()
+        }
+    }
+    struct Root(Entity<Panel>);
+    impl Render for Root {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child(
+                self.0
+                    .clone()
+                    .cached(StyleRefinement::default().size_full()),
+            )
+        }
+    }
+    let publications = Rc::new(RefCell::new(Vec::new()));
+    let window = cx.open_window(size(Pixels(64.0), Pixels(64.0)), {
+        let publications = publications.clone();
+        move |_, cx| Root(cx.new(|_| Panel(publications)))
+    });
+    cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx))
+        .unwrap();
+    let paints_before_replay = publications.borrow().len();
+    assert!(paints_before_replay > 0);
+    window.update(cx, |_, _, cx| cx.notify()).unwrap();
+    cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx))
+        .unwrap();
+    assert_eq!(publications.borrow().len(), paints_before_replay);
+    assert!(publications.borrow().last().unwrap().upgrade().is_some());
+    let platform = cx.test_window(window.into());
+    let wakes = platform.frame_wake_count();
+    platform.simulate_visibility_change(WindowVisibility::Hidden);
+    // No draw, present, or executor drain occurs between hide and this check.
+    assert!(
+        publications
+            .borrow()
+            .iter()
+            .all(|frame| frame.upgrade().is_none())
+    );
+    assert_eq!(platform.frame_wake_count(), wakes);
+    platform.simulate_visibility_change(WindowVisibility::Visible);
+    cx.update_window(window.into(), |_, window, cx| {
+        window.draw(cx).clear(cx);
+        assert_eq!(window.rendered_frame.scene.gpu_draws.len(), 1);
+    })
+    .unwrap();
+    assert!(publications.borrow().len() > paints_before_replay);
+    assert!(publications.borrow().last().unwrap().upgrade().is_some());
+}

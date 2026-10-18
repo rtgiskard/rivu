@@ -23,6 +23,14 @@ const PLACEMENT_SIZE: u64 = 112;
 const INITIALIZATION_COPIES: u64 = 2;
 const MAX_BYTES: u64 = 64 * 1024 * 1024;
 
+fn material_supported(limits: &wgpu::Limits, flags: wgpu::DownlevelFlags) -> bool {
+    // The composed module includes sample-interpolated path coverage even
+    // when the first requested material itself is single-sampled.
+    flags.contains(wgpu::DownlevelFlags::MULTISAMPLED_SHADING)
+        && limits.max_storage_buffers_per_shader_stage >= 2
+        && limits.max_storage_buffer_binding_size >= RECTANGLE_STRIDE
+}
+
 fn material_bytes_admitted(used: u64, additional: u64, limit: u64) -> bool {
     additional
         .checked_mul(INITIALIZATION_COPIES)
@@ -107,6 +115,7 @@ pub(crate) struct PreparedDraw {
     instances: u32,
     vertices: u32,
     kind: MaterialKind,
+    pub(crate) visible_bounds: gpui::Bounds<gpui::ScaledPixels>,
 }
 impl PreparedDraw {
     pub(crate) fn multisampled(&self) -> bool {
@@ -115,6 +124,7 @@ impl PreparedDraw {
 }
 pub(crate) type PreparedMaterials = FxHashMap<usize, PreparedDraw>;
 pub(crate) struct MaterialRenderer {
+    downlevel_flags: wgpu::DownlevelFlags,
     program: Option<Program>,
     uploads: FxHashMap<u64, Upload>,
     palettes: FxHashMap<u64, PaletteUpload>,
@@ -176,15 +186,16 @@ impl MaterialRenderer {
         self.byte_limit = limit;
     }
     #[cfg(test)]
-    pub(crate) fn disable_program(&mut self) {
+    pub(crate) fn set_downlevel_flags(&mut self, flags: wgpu::DownlevelFlags) {
+        self.downlevel_flags = flags;
         self.program = None;
-        self.program_attempted = true;
+        self.program_attempted = false;
     }
-    fn create_program(device: &wgpu::Device) -> Option<Program> {
-        let limits = device.limits();
-        if limits.max_storage_buffers_per_shader_stage < 2
-            || limits.max_storage_buffer_binding_size < RECTANGLE_STRIDE
-        {
+    fn create_program(
+        device: &wgpu::Device,
+        downlevel_flags: wgpu::DownlevelFlags,
+    ) -> Option<Program> {
+        if !material_supported(&device.limits(), downlevel_flags) {
             return None;
         }
         let placement_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -284,8 +295,10 @@ impl MaterialRenderer {
         format: wgpu::TextureFormat,
         alpha: wgpu::CompositeAlphaMode,
         path_samples: u32,
+        downlevel_flags: wgpu::DownlevelFlags,
     ) -> Self {
         Self {
+            downlevel_flags,
             program: None,
             uploads: FxHashMap::default(),
             palettes: FxHashMap::default(),
@@ -429,10 +442,12 @@ impl MaterialRenderer {
             return prepared;
         }
         if !self.program_attempted {
-            self.program = Self::create_program(device);
+            self.program = Self::create_program(device, self.downlevel_flags);
             self.program_attempted = true;
             if self.program.is_none() {
-                log::warn!("GPU materials: storage-buffer capability unavailable; skipping draws");
+                log::warn!(
+                    "GPU materials: storage-buffer or multisampled-shading capability unavailable; skipping material draws"
+                );
             }
         }
         if self.program.is_none() {
@@ -463,6 +478,10 @@ impl MaterialRenderer {
             };
             if !valid_placement(batch) || !period_valid {
                 skipped[1] += 1;
+                continue;
+            }
+            let visible_bounds = batch.visible_bounds_for(&frame);
+            if visible_bounds.is_empty() {
                 continue;
             }
             let key = frame.id();
@@ -521,6 +540,7 @@ impl MaterialRenderer {
                     instances,
                     vertices,
                     kind,
+                    visible_bounds,
                 },
             );
             self.placements.push(PlacementAllocation {

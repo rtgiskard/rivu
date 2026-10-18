@@ -2,6 +2,28 @@ use super::*;
 use gpui::{GpuLimits, GpuPalette, GpuRectangle, GpuRectangleParams};
 
 #[test]
+fn composed_material_capability_admission_matches_shader_requirements() {
+    let module = naga::front::wgsl::parse_str(SHADER).expect("composed shader parses");
+    let validate = |capabilities| {
+        naga::valid::Validator::new(naga::valid::ValidationFlags::all(), capabilities)
+            .validate(&module)
+    };
+    assert!(validate(naga::valid::Capabilities::empty()).is_err());
+    assert!(validate(naga::valid::Capabilities::MULTISAMPLED_SHADING).is_ok());
+    let mut limits = wgpu::Limits::downlevel_defaults();
+    let supported = wgpu::DownlevelFlags::MULTISAMPLED_SHADING;
+    assert!(material_supported(&limits, supported));
+    assert!(!material_supported(&limits, wgpu::DownlevelFlags::empty()));
+    limits.max_storage_buffers_per_shader_stage = 1;
+    assert!(!material_supported(&limits, supported));
+    limits.max_storage_buffers_per_shader_stage = 2;
+    limits.max_storage_buffer_binding_size = RECTANGLE_STRIDE - 1;
+    assert!(!material_supported(&limits, supported));
+    limits.max_storage_buffer_binding_size = RECTANGLE_STRIDE;
+    assert!(material_supported(&limits, supported));
+}
+
+#[test]
 fn material_shader_and_byte_abi_match_structurally() {
     use naga::{AddressSpace, ArraySize, ScalarKind, TypeInner, VectorSize};
     let module = naga::front::wgsl::parse_str(SHADER).expect("fixed shader parses");
@@ -215,8 +237,13 @@ fn fixed_rectangle_encoder_writes_little_endian_and_zero_padding() {
 #[test]
 fn rectangle_retirement_charges_unsubmitted_and_inflight_allocations() -> anyhow::Result<()> {
     let (context, format) = crate::WgpuContext::new_headless()?;
-    let mut renderer =
-        MaterialRenderer::new(&context.device, format, wgpu::CompositeAlphaMode::Opaque, 1);
+    let mut renderer = MaterialRenderer::new(
+        &context.device,
+        format,
+        wgpu::CompositeAlphaMode::Opaque,
+        1,
+        context.adapter.get_downlevel_capabilities().flags,
+    );
     let frame = GpuFrame::rectangles(
         &[GpuRectangle {
             bounds: [0.0, 0.0, 1.0, 1.0],
@@ -328,7 +355,13 @@ fn rectangle_retirement_charges_unsubmitted_and_inflight_allocations() -> anyhow
 fn pipelines_follow_admitted_variants_and_reuse_on_replay() -> anyhow::Result<()> {
     let (context, format) = crate::WgpuContext::new_headless()?;
     let device = &context.device;
-    let mut renderer = MaterialRenderer::new(device, format, wgpu::CompositeAlphaMode::Opaque, 1);
+    let mut renderer = MaterialRenderer::new(
+        device,
+        format,
+        wgpu::CompositeAlphaMode::Opaque,
+        1,
+        context.adapter.get_downlevel_capabilities().flags,
+    );
     let limits = GpuLimits {
         max_field_width: 1,
         max_field_height: 1,
@@ -439,12 +472,12 @@ fn pipelines_follow_admitted_variants_and_reuse_on_replay() -> anyhow::Result<()
     );
     context.queue.submit(std::iter::empty());
     renderer.submitted(&context.queue);
-    renderer.disable_program();
+    renderer.set_downlevel_flags(wgpu::DownlevelFlags::empty());
     assert!(renderer.prepare(device, &both, size).is_empty());
     assert_eq!(
         renderer.pipeline_counts,
         [0, 1, 1, 0],
-        "disabled programs must not be recreated"
+        "unsupported capabilities must not recreate pipelines"
     );
     Ok(())
 }

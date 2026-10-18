@@ -207,6 +207,10 @@ impl WindowInvalidator {
     }
 
     pub fn set_dirty(&self, dirty: bool) {
+        self.set_dirty_with_wake(dirty, true);
+    }
+
+    fn set_dirty_with_wake(&self, dirty: bool, wake: bool) {
         let mut inner = self.inner.borrow_mut();
         let became_dirty = dirty && !inner.dirty;
         inner.dirty = dirty;
@@ -215,7 +219,9 @@ impl WindowInvalidator {
         }
         #[cfg(feature = "profiler")]
         let dirty_at = dirty.then(|| Self::record_frame_dirty(&mut inner));
-        let waker = became_dirty.then(|| inner.platform_waker.clone()).flatten();
+        let waker = (became_dirty && wake)
+            .then(|| inner.platform_waker.clone())
+            .flatten();
         #[cfg(feature = "profiler")]
         let window_id = inner.window_id;
         drop(inner);
@@ -1338,6 +1344,7 @@ pub struct Window {
     pub(crate) image_cache_stack: Vec<AnyImageCache>,
     pub(crate) rendered_frame: Frame,
     pub(crate) next_frame: Frame,
+    gpu_scenes_detached: bool,
     next_hitbox_id: HitboxId,
     pub(crate) next_tooltip_id: TooltipId,
     pub(crate) tooltip_bounds: Option<TooltipBounds>,
@@ -2238,6 +2245,7 @@ impl Window {
             focused_text_input_active: false,
             rendered_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
             next_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
+            gpu_scenes_detached: false,
             next_frame_callbacks,
             next_hitbox_id: HitboxId(0),
             next_tooltip_id: TooltipId::default(),
@@ -2356,6 +2364,14 @@ impl Window {
         let visibility = self.platform_window.visibility();
         if self.visibility != visibility {
             self.visibility = visibility;
+            if !visibility.is_visible() {
+                self.detach_gpu_scenes();
+            } else if mem::take(&mut self.gpu_scenes_detached) {
+                // Detached publications cannot be replayed from cached views.
+                self.refreshing = true;
+                // The platform requests a frame when presentation resumes.
+                self.invalidator.set_dirty_with_wake(true, false);
+            }
             #[cfg(feature = "profiler")]
             profiler::journal::record_window_visibility(self.handle.window_id(), visibility);
             self.visibility_observers
@@ -2366,6 +2382,20 @@ impl Window {
         if self.invalidator.is_dirty() || self.needs_present.get() {
             profiler::journal::record_frame_pending(self.handle.window_id(), Instant::now());
         }
+    }
+
+    fn detach_gpu_scenes(&mut self) {
+        if self.rendered_frame.scene.gpu_draws.is_empty()
+            && self.next_frame.scene.gpu_draws.is_empty()
+        {
+            return;
+        }
+        self.rendered_frame.scene.detach_gpu_draws();
+        self.next_frame.scene.detach_gpu_draws();
+        self.gpu_scenes_detached = true;
+        // Invalidate cached element paint ranges even if the platform requests
+        // a forced hidden frame before the next visibility transition.
+        self.refreshing = true;
     }
 
     /// Whether the platform is presenting this window's frames (see
