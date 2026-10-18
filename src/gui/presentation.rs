@@ -388,7 +388,6 @@ impl Presentation {
             .read(cx)
             .image_releaser()
             .release_retired(window);
-        self.audio_visualizer.release_retired_images(window);
         if self.visuals.finish_prepaint() {
             // A resized panel can alter history shared by cached siblings.
             // Repaint them before the next retirement boundary.
@@ -416,7 +415,6 @@ impl Presentation {
         self.waveform.update(cx, |waveform, cx| {
             waveform.retain_panels(&[], cx);
         });
-        self.audio_visualizer.release_all_images(window);
         self.visuals.release_all_images(window);
         self.waveform
             .read(cx)

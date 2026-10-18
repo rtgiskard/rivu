@@ -1,12 +1,13 @@
-//! Fixed-scale, analysis-backed stereo plots. Texture storage is independent of panel size.
+//! Fixed-scale, analysis-backed stereo plots. GPU field storage is independent of panel size.
 use crate::{
     analysis::{AnalysisFrame, AnalysisSettings, DENSITY_SIDE, DensitySnapshot, SpatialBin},
     config::{AudioVisualizerOptions, AudioVisualizerStyle, Config},
     i18n::Localizer,
 };
 use gpui::{
-    AnyElement, App, Bounds, Hsla, Pixels, Point, RenderImage, SharedString, TextAlign, Window,
-    canvas, div, fill, point, prelude::*, px, rgb, size,
+    AnyElement, App, Bounds, GpuFieldParams, GpuFrame, GpuLimits, GpuPalette, GpuSource, GpuState,
+    GpuValueMapping, Hsla, Pixels, Point, SharedString, TextAlign, Window, canvas, div, fill,
+    point, prelude::*, px, rgb, size,
 };
 use std::{cell::RefCell, rc::Rc, sync::Arc, time::Duration};
 
@@ -70,7 +71,7 @@ struct PlotData {
     background: u32,
     primary: u32,
     secondary: u32,
-    colors: [[u8; 4]; FIELD_COLOR_COUNT],
+    palette: Option<Arc<GpuPalette>>,
     db_range: f32,
     settings: AnalysisSettings,
     generation: Option<u64>,
@@ -82,11 +83,8 @@ struct PlotData {
     field: Vec<f32>,
     spatial_next: Vec<f32>,
     spatial_mapping: SpatialMapping,
-    image: Option<Arc<RenderImage>>,
-    image_painted: bool,
-    image_error_reported: bool,
-    retired: Vec<Arc<RenderImage>>,
-    pending: Vec<Arc<RenderImage>>,
+    gpu: Option<Arc<GpuState>>,
+    gpu_error_reported: bool,
     stereo_metrics: [Option<f32>; 3],
     readout: SharedString,
     range_label: SharedString,
@@ -104,6 +102,37 @@ impl AnalysisVisualizer {
     pub(super) fn new(style: AudioVisualizerStyle) -> Self {
         assert!(analysis_style(style));
         let config = Config::default();
+        let palette = field_palette(
+            style,
+            config.audio_visualizer_primary_color.rgb(),
+            config.audio_visualizer_secondary_color.rgb(),
+        );
+        let gpu = palette.as_ref().and_then(|palette| {
+            let (width, height) = field_dimensions(style);
+            let limits = GpuLimits {
+                max_field_width: width,
+                max_field_height: height,
+                max_field_cells: width as usize * height as usize,
+                max_palette_colors: FIELD_COLOR_COUNT,
+                ..GpuLimits::default()
+            };
+            GpuFrame::field(
+                0,
+                0,
+                &[],
+                Arc::clone(palette),
+                GpuFieldParams {
+                    mapping: GpuValueMapping::Logarithmic {
+                        db_range: config.audio_visualizer_db_range(),
+                    },
+                },
+                limits,
+            )
+            .and_then(|frame| GpuState::new(frame, limits))
+            .inspect(|state| state.clear())
+            .map_err(|error| eprintln!("rivu analysis visualizer GPU initialization: {error}"))
+            .ok()
+        });
         Self {
             data: Rc::new(RefCell::new(PlotData {
                 labels: None,
@@ -112,11 +141,7 @@ impl AnalysisVisualizer {
                 background: config.visual_background.rgb(),
                 primary: config.audio_visualizer_primary_color.rgb(),
                 secondary: config.audio_visualizer_secondary_color.rgb(),
-                colors: field_colors(
-                    style,
-                    config.audio_visualizer_primary_color.rgb(),
-                    config.audio_visualizer_secondary_color.rgb(),
-                ),
+                palette,
                 db_range: config.audio_visualizer_db_range(),
                 settings: AnalysisSettings::from(&config),
                 generation: None,
@@ -127,11 +152,8 @@ impl AnalysisVisualizer {
                 field: Vec::new(),
                 spatial_next: Vec::new(),
                 spatial_mapping: SpatialMapping::default(),
-                image: None,
-                image_painted: false,
-                image_error_reported: false,
-                retired: Vec::new(),
-                pending: Vec::new(),
+                gpu,
+                gpu_error_reported: false,
                 stereo_metrics: [None; 3],
                 readout: "".into(),
                 range_label: "".into(),
@@ -156,14 +178,19 @@ impl AnalysisVisualizer {
         data.primary = config.audio_visualizer_primary_color.rgb();
         data.secondary = config.audio_visualizer_secondary_color.rgb();
         if colors_changed {
-            data.colors = field_colors(data.style, data.primary, data.secondary);
+            data.palette = field_palette(data.style, data.primary, data.secondary);
+            if data.palette.is_none()
+                && let Some(gpu) = &data.gpu
+            {
+                gpu.clear();
+            }
         }
         data.background = config.visual_background.rgb();
         data.db_range = config.audio_visualizer_db_range();
         if reset {
             data.clear();
         } else if recolor && !data.field().is_empty() {
-            data.rasterize();
+            data.publish();
         }
         changed
     }
@@ -180,30 +207,6 @@ impl AnalysisVisualizer {
 
     pub(super) fn update(&self, frame: &AnalysisFrame) {
         self.data.borrow_mut().update(frame);
-    }
-
-    pub(super) fn release_retired_images(&self, window: &mut Window) {
-        let mut data = self.data.borrow_mut();
-        data.release_images(window);
-        if !data.retired.is_empty() {
-            let data = Rc::clone(&self.data);
-            window.on_next_frame(move |window, _| {
-                data.borrow_mut().release_images(window);
-            });
-        }
-    }
-
-    pub(super) fn release_all_images(&self, window: &mut Window) {
-        let mut data = self.data.borrow_mut();
-        data.clear();
-        let PlotData {
-            retired, pending, ..
-        } = &mut *data;
-        for image in retired.drain(..).chain(pending.drain(..)) {
-            if let Err(error) = window.drop_image(image) {
-                eprintln!("rivu analysis visualizer image release: {error}");
-            }
-        }
     }
 
     pub(super) fn view(
@@ -243,31 +246,11 @@ impl AnalysisVisualizer {
 }
 
 impl PlotData {
-    fn release_images(&mut self, window: &mut Window) {
-        for image in self.retired.drain(..) {
-            if let Err(error) = window.drop_image(image) {
-                eprintln!("rivu analysis visualizer image release: {error}");
-            }
-        }
-        // Advance pending images without requesting a content redraw. The image
-        // in the last submitted scene remains retained until it is replaced.
-        self.retired.append(&mut self.pending);
-    }
-
-    fn retire_image(&mut self) {
-        if let Some(image) = self.image.take() {
-            // Images never painted have no GPU allocation to release.
-            if self.image_painted {
-                self.pending.push(image);
-            }
-        }
-        self.image_painted = false;
-        self.image_error_reported = false;
-    }
-
     fn clear(&mut self) {
         self.density = DensitySnapshot::default();
-        self.retire_image();
+        if let Some(gpu) = &self.gpu {
+            gpu.clear();
+        }
         if self.visible {
             self.field.clear();
             self.spatial_next.clear();
@@ -318,7 +301,7 @@ impl PlotData {
             self.generation = Some(frame.generation);
             self.sample_rate = frame.sample_rate;
         }
-        let mut changed = self.image.is_none();
+        let mut changed = self.sequence.is_none();
         match self.style {
             AudioVisualizerStyle::StereoDensity => {
                 if frame.visualizer.density.len() != DENSITY_SIDE * DENSITY_SIDE {
@@ -391,7 +374,7 @@ impl PlotData {
         self.sample_time = Some(frame.sample_time);
         self.sequence = Some(frame.sequence);
         if changed {
-            self.rasterize();
+            self.publish();
         }
     }
 
@@ -403,20 +386,29 @@ impl PlotData {
         }
     }
 
-    fn rasterize(&mut self) {
-        let (width, height) = match self.style {
-            AudioVisualizerStyle::StereoDensity => (DENSITY_SIDE, DENSITY_SIDE),
-            AudioVisualizerStyle::SpatialSpectrum => (SPATIAL_WIDTH, SPATIAL_HEIGHT),
-            _ => return,
+    fn publish(&mut self) {
+        let (Some(gpu), Some(palette)) = (&self.gpu, &self.palette) else {
+            return;
         };
-        let mut pixels = image::RgbaImage::new(width as u32, height as u32);
-        for (pixel, value) in pixels.pixels_mut().zip(self.field()) {
-            let strength = field_strength(*value, self.db_range);
-            let index = (strength * (FIELD_COLOR_COUNT - 1) as f32).round() as usize;
-            *pixel = image::Rgba(self.colors[index]);
+        let (width, height) = field_dimensions(self.style);
+        if let Err(error) = gpu.publish_field(
+            width,
+            height,
+            self.field(),
+            Arc::clone(palette),
+            GpuFieldParams {
+                mapping: GpuValueMapping::Logarithmic {
+                    db_range: self.db_range,
+                },
+            },
+        ) {
+            // A failed replacement must not leave old power or palette under new labels.
+            gpu.clear();
+            if !self.gpu_error_reported {
+                self.gpu_error_reported = true;
+                eprintln!("rivu analysis visualizer GPU publication: {error}");
+            }
         }
-        self.retire_image();
-        self.image = Some(Arc::new(RenderImage::new([image::Frame::new(pixels)])));
     }
 
     fn paint(
@@ -461,14 +453,13 @@ impl PlotData {
             plot,
             rgb(mix_color(self.background, self.primary, 0.035)),
         ));
-        if let Some(image) = &self.image {
-            self.image_painted = true;
-            if let Err(error) =
-                window.paint_image(plot, plot, px(0.0).into(), Arc::clone(image), 0, false)
-                && !self.image_error_reported
-            {
-                self.image_error_reported = true;
-                eprintln!("rivu analysis visualizer image paint: {error}");
+        if let Some(gpu) = &self.gpu
+            && let Err(error) = window.paint_gpu(plot, GpuSource::Dynamic(Arc::clone(gpu)))
+        {
+            gpu.clear();
+            if !self.gpu_error_reported {
+                self.gpu_error_reported = true;
+                eprintln!("rivu analysis visualizer GPU paint: {error}");
             }
         }
         if options.reference_lines {
@@ -722,16 +713,6 @@ fn decay_spatial(source: &[f32], target: &mut [f32], elapsed: f32) {
     }
 }
 
-fn field_strength(value: f32, db_range: f32) -> f32 {
-    // Fixed references: density occupancy=1; spatial spectral power=1 (0 dBFS).
-    // Brightness never depends on the loudest cell in the current field.
-    if !value.is_finite() || value <= 0.0 {
-        0.0
-    } else {
-        ((10.0 * value.log10() + db_range) / db_range).clamp(0.0, 1.0)
-    }
-}
-
 fn stereo_readout(i18n: &Localizer, metrics: [Option<f32>; 3]) -> String {
     let value = |value: Option<f32>| value.filter(|value| value.is_finite());
     let correlation = value(metrics[0])
@@ -773,6 +754,28 @@ fn mix_color(first: u32, second: u32, fraction: f32) -> u32 {
     (channel(16) << 16) | (channel(8) << 8) | channel(0)
 }
 
+fn field_dimensions(style: AudioVisualizerStyle) -> (u32, u32) {
+    if style == AudioVisualizerStyle::StereoDensity {
+        (DENSITY_SIDE as u32, DENSITY_SIDE as u32)
+    } else {
+        (SPATIAL_WIDTH as u32, SPATIAL_HEIGHT as u32)
+    }
+}
+
+fn field_palette(
+    style: AudioVisualizerStyle,
+    primary: u32,
+    secondary: u32,
+) -> Option<Arc<GpuPalette>> {
+    // Preserve the original byte quantization and straight alpha, then convert
+    // BGRA storage order to GPUI's numerical straight RGBA palette samples.
+    let colors = field_colors(style, primary, secondary)
+        .map(|[b, g, r, a]| [r, g, b, a].map(|channel| channel as f32 / 255.0));
+    GpuPalette::new(&colors, FIELD_COLOR_COUNT)
+        .map_err(|error| eprintln!("rivu analysis visualizer GPU palette: {error}"))
+        .ok()
+}
+
 fn field_colors(
     style: AudioVisualizerStyle,
     primary: u32,
@@ -803,8 +806,7 @@ fn field_colors(
             (1.0, shade(secondary, 0.95, 0.0)),
         ]
     };
-    // Build only on color changes, not per frame or per cell. GPUI consumes
-    // BGRA bytes; image::RgbaImage does not perform the channel conversion.
+    // Quantize colors and alpha exactly as the original BGRA image palette.
     std::array::from_fn(|index| {
         let strength = index as f32 / (FIELD_COLOR_COUNT - 1) as f32;
         let interval = stops.windows(2).find(|pair| strength <= pair[1].0).unwrap();
@@ -999,7 +1001,7 @@ mod tests {
     }
 
     #[test]
-    fn rasterized_fields_preserve_channels_silence_and_fixed_brightness() {
+    fn publications_preserve_quantized_straight_color_and_logarithmic_power() {
         for style in [
             AudioVisualizerStyle::StereoDensity,
             AudioVisualizerStyle::SpatialSpectrum,
@@ -1011,58 +1013,62 @@ mod tests {
                 ..Config::default()
             };
             plot.configure(&config);
-            let mut data = plot.data.borrow_mut();
-            let cells = if style == AudioVisualizerStyle::StereoDensity {
-                DENSITY_SIDE * DENSITY_SIDE
-            } else {
-                SPATIAL_WIDTH * SPATIAL_HEIGHT
+            plot.update(&frame(style));
+            let first = publication(&plot).unwrap();
+            let gpui::GpuContent::Field {
+                width,
+                height,
+                values,
+                params,
+            } = first.content()
+            else {
+                panic!("analysis must publish a numerical field");
             };
-            let mut field = vec![0.0; cells];
-            field[1] = 0.001;
-            if style == AudioVisualizerStyle::StereoDensity {
-                data.density = field.into();
-            } else {
-                data.field = field;
-            }
-            data.rasterize();
-            let image = data.image.as_ref().unwrap();
-            let bytes = image.as_bytes(0).unwrap();
-            assert_eq!(bytes[3], 0, "silence must remain transparent");
-            assert!(
-                bytes[6] > bytes[4],
-                "red tint must be red in GPUI's BGRA texture"
-            );
-            let moderate: [u8; 4] = bytes[4..8].try_into().unwrap();
-            if style == AudioVisualizerStyle::StereoDensity {
-                let mut field = data.density.to_vec();
-                field[2] = 1.0;
-                data.density = field.into();
-            } else {
-                data.field[2] = 1.0;
-            }
-            data.rasterize();
-            let bytes = data.image.as_ref().unwrap().as_bytes(0).unwrap();
+            assert_eq!((*width, *height), field_dimensions(style));
+            assert_eq!(values.as_ref(), plot.data.borrow().field());
             assert_eq!(
-                &bytes[4..8],
-                &moderate,
-                "another peak cannot renormalize this cell"
+                params.mapping,
+                GpuValueMapping::Logarithmic {
+                    db_range: config.audio_visualizer_db_range(),
+                }
             );
-            drop(data);
+            let bytes = field_colors(style, 0xff3300, 0xff7700);
+            for (actual, [b, g, r, a]) in first.palette().colors().iter().zip(bytes) {
+                assert_eq!(*actual, [r, g, b, a].map(|channel| channel as f32 / 255.0));
+            }
+            assert_eq!(first.palette().colors()[0][3], 0.0);
+            assert!(first.palette().colors()[128][0] > first.palette().colors()[128][2]);
+            config.audio_visualizer_db_range = Some(50.0);
+            plot.configure(&config);
+            let remapped = publication(&plot).unwrap();
+            assert!(!Arc::ptr_eq(&first, &remapped));
+            assert!(Arc::ptr_eq(first.palette(), remapped.palette()));
+            let gpui::GpuContent::Field {
+                values: remapped_values,
+                params,
+                ..
+            } = remapped.content()
+            else {
+                panic!("analysis must remain a field");
+            };
+            assert_eq!(values, remapped_values);
+            assert_eq!(
+                params.mapping,
+                GpuValueMapping::Logarithmic { db_range: 50.0 }
+            );
             config.audio_visualizer_primary_color = "#0033ff".parse().unwrap();
             config.audio_visualizer_secondary_color = "#0077ff".parse().unwrap();
             plot.configure(&config);
-            let data = plot.data.borrow();
-            assert_eq!(
-                data.field()[1],
-                0.001,
-                "recoloring must preserve measured power"
-            );
-            let bytes = data.image.as_ref().unwrap().as_bytes(0).unwrap();
-            assert!(
-                bytes[4] > bytes[6],
-                "blue tint must remain blue after recoloring"
-            );
+            let recolored = publication(&plot).unwrap();
+            assert!(!Arc::ptr_eq(remapped.palette(), recolored.palette()));
+            assert!(recolored.palette().colors()[128][2] > recolored.palette().colors()[128][0]);
+            plot.configure(&config);
+            assert!(Arc::ptr_eq(&recolored, &publication(&plot).unwrap()));
         }
+    }
+
+    fn publication(plot: &AnalysisVisualizer) -> Option<Arc<GpuFrame>> {
+        plot.data.borrow().gpu.as_ref().unwrap().snapshot()
     }
 
     #[test]
@@ -1088,20 +1094,14 @@ mod tests {
         let (x, y) = spatial_cell(1000.0, 0.0, 20_000.0).unwrap();
         let index = y * SPATIAL_WIDTH + x;
         assert!((plot.data.borrow().field[index] - 0.001).abs() < 1e-7);
-        let image = Arc::clone(plot.data.borrow().image.as_ref().unwrap());
+        let published = publication(&plot).unwrap();
         frame.sequence += 1;
         plot.update(&frame);
-        assert!(Arc::ptr_eq(
-            &image,
-            plot.data.borrow().image.as_ref().unwrap()
-        ));
+        assert!(Arc::ptr_eq(&published, &publication(&plot).unwrap()));
         frame.sample_time += Duration::from_millis(50);
         frame.sequence += 1;
         plot.update(&frame);
-        assert!(Arc::ptr_eq(
-            &image,
-            plot.data.borrow().image.as_ref().unwrap()
-        ));
+        assert!(Arc::ptr_eq(&published, &publication(&plot).unwrap()));
         frame.sample_time += Duration::from_millis(500);
         frame.sequence += 1;
         frame.visualizer.spatial.clear();
@@ -1117,17 +1117,17 @@ mod tests {
         frame.generation += 1;
         frame.visualizer.demand.spatial_spectrum = false;
         plot.update(&frame);
-        assert!(plot.data.borrow().image.is_none());
+        assert!(publication(&plot).is_none());
         frame.visualizer.demand.spatial_spectrum = true;
         plot.update(&frame);
-        assert!(plot.data.borrow().image.is_some());
+        assert!(publication(&plot).is_some());
         plot.configure(&Config {
             audio_visualizer_style: AudioVisualizerStyle::SpatialSpectrum,
             analysis_fft_size: 16384,
             ..Config::default()
         });
         plot.update(&frame);
-        assert!(plot.data.borrow().image.is_none());
+        assert!(publication(&plot).is_none());
         frame.settings.as_mut().unwrap().fft_size = 16384;
         plot.update(&frame);
         plot.set_visible(false);
@@ -1139,7 +1139,7 @@ mod tests {
             ..Config::default()
         });
         plot.update(&frame);
-        assert!(plot.data.borrow().image.is_none());
+        assert!(publication(&plot).is_none());
         let density = self::frame(AudioVisualizerStyle::StereoDensity);
         plot.update(&density);
         assert!(plot.data.borrow().field.is_empty());
@@ -1151,23 +1151,17 @@ mod tests {
     }
 
     #[test]
-    fn density_is_not_auto_normalized_and_unchanged_data_reuses_texture() {
-        assert_eq!(field_strength(0.0, 70.0), 0.0);
-        assert_eq!(field_strength(1.0, 70.0), 1.0);
-        assert!((field_strength(0.001, 60.0) - 0.5).abs() < 1e-6);
+    fn density_is_not_auto_normalized_and_unchanged_data_reuses_publication() {
         let plot = plot(AudioVisualizerStyle::StereoDensity);
         let mut frame = frame(AudioVisualizerStyle::StereoDensity);
         set_density_cell(&mut frame, 0, 0.001);
         plot.update(&frame);
         assert_eq!(plot.data.borrow().field()[0], 0.001);
-        let image = Arc::clone(plot.data.borrow().image.as_ref().unwrap());
+        let published = publication(&plot).unwrap();
         frame.sample_time += Duration::from_millis(100);
         frame.sequence += 1;
         plot.update(&frame);
-        assert!(Arc::ptr_eq(
-            &image,
-            plot.data.borrow().image.as_ref().unwrap()
-        ));
+        assert!(Arc::ptr_eq(&published, &publication(&plot).unwrap()));
         set_density_cell(&mut frame, DENSITY_SIDE * DENSITY_SIDE - 1, 1.0);
         frame.sample_time += Duration::from_millis(100);
         frame.sequence += 1;
@@ -1177,10 +1171,7 @@ mod tests {
             plot.data.borrow().field()[DENSITY_SIDE * DENSITY_SIDE - 1],
             1.0
         );
-        assert!(!Arc::ptr_eq(
-            &image,
-            plot.data.borrow().image.as_ref().unwrap()
-        ));
+        assert!(!Arc::ptr_eq(&published, &publication(&plot).unwrap()));
     }
 
     #[test]
@@ -1214,22 +1205,55 @@ mod tests {
     }
 
     #[test]
-    fn only_uploaded_images_need_delayed_retirement() {
+    fn shared_panel_slot_revokes_content_and_reuses_identity_after_reopening() {
         let plot = plot(AudioVisualizerStyle::StereoDensity);
+        let sibling = plot.clone();
         let mut frame = frame(AudioVisualizerStyle::StereoDensity);
         plot.update(&frame);
-        let old = Arc::downgrade(plot.data.borrow().image.as_ref().unwrap());
+        let slot = Arc::clone(plot.data.borrow().gpu.as_ref().unwrap());
+        assert!(Arc::ptr_eq(
+            &slot,
+            sibling.data.borrow().gpu.as_ref().unwrap()
+        ));
+        let old = Arc::downgrade(&publication(&plot).unwrap());
         set_density_cell(&mut frame, 0, 1.0);
         frame.sample_time += Duration::from_millis(100);
         frame.sequence += 1;
         plot.update(&frame);
         assert!(old.upgrade().is_none());
-        let uploaded = Arc::downgrade(plot.data.borrow().image.as_ref().unwrap());
-        plot.data.borrow_mut().image_painted = true;
+        assert!(Arc::ptr_eq(
+            &publication(&plot).unwrap(),
+            &publication(&sibling).unwrap()
+        ));
+        let latest = Arc::downgrade(&publication(&plot).unwrap());
         plot.set_visible(false);
-        assert!(uploaded.upgrade().is_some());
-        assert_eq!(plot.data.borrow().pending.len(), 1);
-        assert!(plot.data.borrow().image.is_none());
+        assert!(slot.snapshot().is_none());
+        assert!(latest.upgrade().is_none());
+        assert!(sibling.data.borrow().density.is_empty());
+        plot.set_visible(true);
+        plot.update(&frame);
+        assert!(slot.snapshot().is_some());
+        assert!(Arc::ptr_eq(&slot, plot.data.borrow().gpu.as_ref().unwrap()));
+    }
+
+    #[test]
+    fn rejected_publication_revokes_old_content_without_retrying_identical_input() {
+        let plot = plot(AudioVisualizerStyle::StereoDensity);
+        let mut frame = frame(AudioVisualizerStyle::StereoDensity);
+        plot.update(&frame);
+        {
+            let mut data = plot.data.borrow_mut();
+            data.db_range = f32::NAN;
+            data.publish();
+            assert!(data.gpu_error_reported);
+        }
+        assert!(publication(&plot).is_none());
+        frame.sample_time += Duration::from_millis(100);
+        frame.sequence += 1;
+        plot.update(&frame);
+        assert!(publication(&plot).is_none());
+        plot.configure(&Config::default());
+        assert!(publication(&plot).is_some());
     }
 
     #[test]
@@ -1252,16 +1276,16 @@ mod tests {
                 ..Config::default()
             });
             plot.update(&frame(style));
-            assert!(plot.data.borrow().image.is_none());
+            assert!(publication(&plot).is_none());
             assert_eq!(plot.data.borrow().field.capacity(), 0);
             plot.set_visible(true);
             plot.update(&frame(style));
-            assert!(plot.data.borrow().image.is_some());
+            assert!(publication(&plot).is_some());
         }
     }
 
     #[test]
-    fn simultaneous_analysis_styles_keep_independent_fields_and_retire_only_hidden_images() {
+    fn simultaneous_analysis_styles_keep_independent_fields_and_clear_only_hidden_slots() {
         let density = plot(AudioVisualizerStyle::StereoDensity);
         let spatial = plot(AudioVisualizerStyle::SpatialSpectrum);
         let mut frame = frame(AudioVisualizerStyle::StereoDensity);
@@ -1272,10 +1296,8 @@ mod tests {
         spatial.update(&frame);
         assert_eq!(density.data.borrow().field()[0], 0.25);
         assert!(spatial.data.borrow().field.iter().any(|value| *value > 0.0));
-        let density_image = Arc::downgrade(density.data.borrow().image.as_ref().unwrap());
-        let spatial_image = Arc::clone(spatial.data.borrow().image.as_ref().unwrap());
-        density.data.borrow_mut().image_painted = true;
-        spatial.data.borrow_mut().image_painted = true;
+        let density_slot = Arc::clone(density.data.borrow().gpu.as_ref().unwrap());
+        let spatial_publication = publication(&spatial).unwrap();
         let config = Config {
             audio_visualizer_style: AudioVisualizerStyle::FractalFlow,
             ..Config::default()
@@ -1283,25 +1305,21 @@ mod tests {
         assert!(!density.configure(&config));
         assert!(!spatial.configure(&config));
         density.set_visible(false);
-        assert!(density_image.upgrade().is_some());
-        assert_eq!(density.data.borrow().pending.len(), 1);
+        assert!(density_slot.snapshot().is_none());
         assert_eq!(density.data.borrow().field.capacity(), 0);
-        assert!(spatial.data.borrow().pending.is_empty());
         assert!(Arc::ptr_eq(
-            &spatial_image,
-            spatial.data.borrow().image.as_ref().unwrap()
+            &spatial_publication,
+            &publication(&spatial).unwrap()
         ));
         frame.sequence += 1;
         frame.sample_time += Duration::from_millis(50);
         frame.visualizer.spatial[0].power_db = -10.0;
         density.update(&frame);
         spatial.update(&frame);
-        assert!(density.data.borrow().image.is_none());
+        assert!(publication(&density).is_none());
         assert!(!Arc::ptr_eq(
-            &spatial_image,
-            spatial.data.borrow().image.as_ref().unwrap()
+            &spatial_publication,
+            &publication(&spatial).unwrap()
         ));
-        assert_eq!(spatial.data.borrow().pending.len(), 1);
-        assert_eq!(density.data.borrow().pending.len(), 1);
     }
 }

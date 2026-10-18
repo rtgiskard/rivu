@@ -335,18 +335,6 @@ impl AudioVisualizer {
         data.time = (frame.sample_time.as_secs_f32() * data.rotation_speed).rem_euclid(TWO_PI);
     }
 
-    pub(in crate::gui) fn release_retired_images(&self, window: &mut Window) {
-        for renderer in &self.analysis {
-            renderer.release_retired_images(window);
-        }
-    }
-
-    pub(in crate::gui) fn release_all_images(&self, window: &mut Window) {
-        for renderer in &self.analysis {
-            renderer.release_all_images(window);
-        }
-    }
-
     pub(in crate::gui) fn view(
         &self,
         i18n: &Arc<Localizer>,

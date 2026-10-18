@@ -31,7 +31,8 @@ path backgrounds retain their existing behavior.
 The vendor patch also contains experimental fixed-schema rectangle, numerical-field
 and existing-path drawing through one shared publication and recording interface;
 see the link:25_gpu_rendering.adoc#_internal_led_vertical_slice[GPU rendering slice].
-No application visualizer has migrated to this interface.
+Stereo Density and Spatial Spectrum use the numerical-field material; other
+visualizers retain their existing rendering paths.
 
 Run `cargo test --manifest-path vendor/gpui_wgpu/Cargo.toml --lib` to exercise
 the patched shader and headless GPU regressions in their isolated test workspace.
@@ -338,8 +339,9 @@ Panel instances own presentation options, while analysis and simulation results
 are shared by rendering style. Multiple panels of one style do not duplicate its
 field or advance its simulation independently; distinct styles do not overwrite
 each other's state. Overlay toggles are paint-only and do not reset analysis or
-simulation. Hidden styles release result storage; submitted analysis images
-retain the retirement boundary described in link:22_cache.adoc[Caching and Resource Lifecycles].
+simulation. Hidden styles release result storage and revoke their GPU field
+publications; physical reclamation follows the renderer lifecycle described in
+link:22_cache.adoc[Caching and Resource Lifecycles].
 
 === Radial styles
 
@@ -367,20 +369,23 @@ power balance into a fixed 256 by 128 field. Cells retain the strongest power
 rather than summing crowded logarithmic rows, which would make color depend on
 bin density instead of signal level.
 
-Both styles retain fixed-resolution field images independently of panel size;
-enlarging a panel does not multiply analysis resolution or allocate another
-field. Continuity breaks clear existing field contents while preserving storage
-for visible styles; hiding a style releases it. Recoloring uses retained fields
-rather than another FFT. This trades fixed display resolution for predictable
-storage and coherent reuse across differently sized panels.
+Both styles retain fixed-resolution numerical fields and share one GPU publication
+per style across panels. Enlargement does not multiply source resolution, publish
+another snapshot or advance analysis. Continuity breaks revoke the old publication
+while preserving reusable numerical storage for visible styles; hiding releases
+that storage. Color/range changes use retained fields rather than another FFT.
+There is no CPU-generated field image or application image-retirement queue.
 
 Color ramps derive from the configured visualizer colors, with increasing
 lightness and pale highlights reserved for the strongest cells. Density has a
 cyanward intermediate hue; Spatial Spectrum retains the primary-to-secondary
-hue progression. A bounded lookup table supplies BGRA pixels and is rebuilt
-only when the configured colors change. Opacity lifts faint cells without
-renormalizing the field: occupancy and spectral power retain their fixed dB
-references, and empty cells remain transparent.
+hue progression. A bounded 256-sample straight RGBA palette is rebuilt only when
+configured colors change, preserving the previous 8-bit color/alpha quantization.
+The shader maps each of four neighboring scalar values to its quantized palette
+sample before interpolating colors. Opacity lifts faint cells without renormalizing
+the field: occupancy and spectral power retain fixed dB references, and empty cells
+remain transparent. Each changed field still copies/uploads four bytes per cell;
+the benefit is removing CPU coloring, not automatically reducing upload bytes.
 
 == Spectrogram
 
@@ -438,7 +443,7 @@ the source, saved-hint, request-generation, and suspension checks described unde
 <<_waveform,Waveform>> govern pending and completed previews.
 
 Spectrum tessellation and Spectrogram image upload/paint failures are surfaced
-as visualization errors. Stereo-analysis image failures are reported separately.
+as visualization errors. Stereo-analysis publication/paint failures are reported separately.
 These rendering failures do not issue playback commands or make the audio
 callback wait for graphics. Very small plots can omit geometry rather than
 attempting invalid dimensions.

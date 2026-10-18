@@ -4,12 +4,12 @@
 
 == Status and decision boundaries
 
-Design baseline, 2026-10-18. The vendor-only fixed-schema rectangle, numerical-field
-and existing-path slice described under <<_internal_led_vertical_slice>> is
-implemented. The general `Program`, generated-schema interfaces and consumer
-migrations below remain proposals, not available APIs. Implementation details may
-change as subsequent consumers expose different requirements; the agreed safety
-and platform boundaries remain binding.
+Design baseline, 2026-10-18. The fixed-schema rectangle, numerical-field and
+existing-path slice described under <<_internal_led_vertical_slice>> is implemented.
+Density/Spatial now consume numerical fields; their authoritative behavior and
+ownership are described in link:23_visuals.adoc#_stereo_analysis_styles[Stereo analysis styles].
+The general `Program`, generated-schema interfaces and remaining consumer migrations
+below remain proposals. The agreed safety and platform boundaries remain binding.
 
 The application supplies compact parameters and meaningful numerical data. The
 GPU generates geometry and pixels. GPUI owns the common drawing, upload, storage,
@@ -505,8 +505,8 @@ rectangle instances, row-major numerical fields or an immutable existing
 tessellated path. Rectangle segmentation and bottom-to-top palette coordinates
 retain their initial behavior. Palette samples are straight-alpha sRGB values;
 their interpolation is in sRGB numerical space. Bounds, clip, scale and inherited
-opacity belong to each scene placement, independently of shared content. No
-application visualizer has migrated. The old rectangle-only publication/recording
+opacity belong to each scene placement, independently of shared content.
+Density/Spatial use this interface. The old rectangle-only publication/recording
 API is removed; the still-used textured-path interface remains independent.
 
 Frame construction validates geometry, palette, parameters and explicit caller
@@ -667,8 +667,8 @@ not break adjacency. This conservative linear scan preserves individually resolv
 MSAA overlap and backend-specific fractional edge coverage without quadratic tests.
 
 This extraction is still a closed set of schemas, not arbitrary shader authoring
-or generated ABI tooling. Existing application consumers and their retirement
-paths are unchanged.
+or generated ABI tooling. Density/Spatial have migrated; other consumers and their
+independent image-retirement paths remain unchanged.
 
 ==== Unified field and path measurements
 
@@ -753,6 +753,32 @@ A separate allocation smoke rejected a 262,144-byte field update with a largest
 allocation of 72 bytes during rejection, retaining the previous publication;
 validation-error allocation is not field payload copying. Probe-only headless
 entry points and font fixtures do not become production rendering dependencies.
+
+==== Density/Spatial consumer measurements
+
+The actual application comparison uses two differently sized panels per style on
+an isolated 1280-by-800 Wayland surface, identical PCM input, config and library
+seed. After builds/checks finished, baseline/candidate process order was B–C–C–B–B–C.
+Each fresh process warmed up for four seconds, then recorded three two-second live
+intervals and three paused intervals. CPU is percent of one CPU from process ticks;
+the table reports mean and range of the three process means, not GPU timestamps.
+
+[cols="2,2,2",options="header"]
+|===
+|Observation |Before migration |GPU fields
+|Live CPU |9.17% [9.00–9.33%] |8.00% [7.83–8.17%]
+|Live RSS range |119.12–120.41 MiB |118.73–120.38 MiB
+|Paused CPU mean |0% |0.17%
+|===
+
+Live CPU was lower in this short isolated workload; RSS overlaps. The paused
+candidate samples total one 10-ms CPU tick per six-second run, insufficient to
+infer recurring redraw. Process measurements neither isolate GPU cost nor prove
+internal resource release. Cross-binary screenshots were not audio-frame
+synchronized, so they do not establish exact pixel equivalence. Broader whole-app
+performance and physical VRAM claims require separate evidence. Raw samples,
+binary/source identities and limitations are retained under `density_spatial_consumers`
+in link:25_gpu_rendering_benchmark.json[the benchmark record].
 
 === Remaining consumers and integrated delivery
 

@@ -8406,5 +8406,531 @@
       "vendor/gpui_wgpu/src/wgpu_renderer.rs": "e653f92e5e62e9e8643861ab1c7ffd154b2094995b11f14a1cc72e03dca4942d",
       "vendor/gpui_wgpu/src/gpu_material_tests.rs": "83f2dca2d6f6fcff6472f6414081e58dad1db7c281c26f89f3c5145f771273de"
     }
+  },
+  "density_spatial_consumers": {
+    "date": "2026-10-18",
+    "scope": "Actual Density/Spatial consumer cutover; unchanged analysis and source resolutions",
+    "baseline": "c12a058ec0db2cfdf038bcf2b0be1d1a1ee435b0bb5035b6da69f69f970690b5",
+    "candidate": "5898331c259bc4b6e920adb27fac579099dfbbc4ebc25c353630d3fcf1720bb2",
+    "process_observations": {
+      "baseline": {
+        "live": {
+          "run_mean_cpu_percent": [
+            8.999007896964676,
+            9.332088260615835,
+            9.165338286223877
+          ],
+          "mean_cpu_percent": 9.165478147934795,
+          "run_mean_range": [
+            8.999007896964676,
+            9.332088260615835
+          ],
+          "interval_range": [
+            8.998750037650506,
+            9.49863482775571
+          ],
+          "rss_mib_range": [
+            119.12109375,
+            120.41015625
+          ]
+        },
+        "paused": {
+          "run_mean_cpu_percent": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mean_cpu_percent": 0.0,
+          "run_mean_range": [
+            0.0,
+            0.0
+          ],
+          "interval_range": [
+            0.0,
+            0.0
+          ],
+          "rss_mib_range": [
+            120.12109375,
+            120.41015625
+          ]
+        }
+      },
+      "candidate": {
+        "live": {
+          "run_mean_cpu_percent": [
+            7.83237326331814,
+            7.998987120367728,
+            8.165544214283534
+          ],
+          "mean_cpu_percent": 7.998968199323134,
+          "run_mean_range": [
+            7.83237326331814,
+            8.165544214283534
+          ],
+          "interval_range": [
+            7.498941501833774,
+            8.498983878510138
+          ],
+          "rss_mib_range": [
+            118.73046875,
+            120.3828125
+          ]
+        },
+        "paused": {
+          "run_mean_cpu_percent": [
+            0.1666441277167234,
+            0.16664416028965626,
+            0.16663675120405474
+          ],
+          "mean_cpu_percent": 0.16664167973681146,
+          "run_mean_range": [
+            0.16663675120405474,
+            0.16664416028965626
+          ],
+          "interval_range": [
+            0.0,
+            0.4999324808689688
+          ],
+          "rss_mib_range": [
+            119.98046875,
+            120.5078125
+          ]
+        }
+      },
+      "method": "B-C-C-B-B-C; 3 fresh processes per binary; identical library seed, config, layout, PCM; 4s warmup; live 3x2s, pause settle .3s then 3x2s; parent builds/checks finished. Percent of one CPU from /proc/PID/stat at clock tick resolution.",
+      "limits": "Short isolated-compositor observation, not isolated GPU timing or generalized whole-app gain; no compositor CPU included; RSS overlaps and does not establish source release. Paused candidate total is one 10ms tick per 6s run; cannot infer recurring redraw from this."
+    },
+    "raw_process_runs": [
+      {
+        "name": "baseline",
+        "index": 0,
+        "pid": 2019238,
+        "sha256": "c12a058ec0db2cfdf038bcf2b0be1d1a1ee435b0bb5035b6da69f69f970690b5",
+        "live": {
+          "samples": [
+            {
+              "time": 167689.442563764,
+              "ticks": 58,
+              "rss_pages": 30495
+            },
+            {
+              "time": 167691.442788464,
+              "ticks": 76,
+              "rss_pages": 30591
+            },
+            {
+              "time": 167693.443013794,
+              "ticks": 94,
+              "rss_pages": 30655
+            },
+            {
+              "time": 167695.443225239,
+              "ticks": 112,
+              "rss_pages": 30751
+            }
+          ],
+          "cpu_percent": [
+            8.998988963617606,
+            8.998986129207646,
+            8.999048598068775
+          ]
+        },
+        "paused": {
+          "samples": [
+            {
+              "time": 167695.751418532,
+              "ticks": 113,
+              "rss_pages": 30751
+            },
+            {
+              "time": 167697.751729842,
+              "ticks": 113,
+              "rss_pages": 30751
+            },
+            {
+              "time": 167699.7520453,
+              "ticks": 113,
+              "rss_pages": 30751
+            },
+            {
+              "time": 167701.752334258,
+              "ticks": 113,
+              "rss_pages": 30751
+            }
+          ],
+          "cpu_percent": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        }
+      },
+      {
+        "name": "candidate",
+        "index": 1,
+        "pid": 2019387,
+        "sha256": "5898331c259bc4b6e920adb27fac579099dfbbc4ebc25c353630d3fcf1720bb2",
+        "live": {
+          "samples": [
+            {
+              "time": 167706.076672282,
+              "ticks": 53,
+              "rss_pages": 30498
+            },
+            {
+              "time": 167708.076887684,
+              "ticks": 69,
+              "rss_pages": 30626
+            },
+            {
+              "time": 167710.077127762,
+              "ticks": 85,
+              "rss_pages": 30690
+            },
+            {
+              "time": 167712.077410068,
+              "ticks": 100,
+              "rss_pages": 30818
+            }
+          ],
+          "cpu_percent": [
+            7.99913848482841,
+            7.999039803292238,
+            7.498941501833774
+          ]
+        },
+        "paused": {
+          "samples": [
+            {
+              "time": 167712.385036877,
+              "ticks": 101,
+              "rss_pages": 30850
+            },
+            {
+              "time": 167714.385307381,
+              "ticks": 102,
+              "rss_pages": 30850
+            },
+            {
+              "time": 167716.385698651,
+              "ticks": 102,
+              "rss_pages": 30850
+            },
+            {
+              "time": 167718.38598226,
+              "ticks": 102,
+              "rss_pages": 30850
+            }
+          ],
+          "cpu_percent": [
+            0.4999323831501702,
+            0.0,
+            0.0
+          ]
+        }
+      },
+      {
+        "name": "candidate",
+        "index": 2,
+        "pid": 2019553,
+        "sha256": "5898331c259bc4b6e920adb27fac579099dfbbc4ebc25c353630d3fcf1720bb2",
+        "live": {
+          "samples": [
+            {
+              "time": 167722.713261664,
+              "ticks": 53,
+              "rss_pages": 30395
+            },
+            {
+              "time": 167724.713505769,
+              "ticks": 69,
+              "rss_pages": 30523
+            },
+            {
+              "time": 167726.713784799,
+              "ticks": 84,
+              "rss_pages": 30619
+            },
+            {
+              "time": 167728.714023915,
+              "ticks": 101,
+              "rss_pages": 30715
+            }
+          ],
+          "cpu_percent": [
+            7.999023699152314,
+            7.498953783440732,
+            8.498983878510138
+          ]
+        },
+        "paused": {
+          "samples": [
+            {
+              "time": 167729.021307697,
+              "ticks": 101,
+              "rss_pages": 30715
+            },
+            {
+              "time": 167731.021579163,
+              "ticks": 101,
+              "rss_pages": 30715
+            },
+            {
+              "time": 167733.021849276,
+              "ticks": 102,
+              "rss_pages": 30715
+            },
+            {
+              "time": 167735.0222808,
+              "ticks": 102,
+              "rss_pages": 30715
+            }
+          ],
+          "cpu_percent": [
+            0.0,
+            0.4999324808689688,
+            0.0
+          ]
+        }
+      },
+      {
+        "name": "baseline",
+        "index": 3,
+        "pid": 2019724,
+        "sha256": "c12a058ec0db2cfdf038bcf2b0be1d1a1ee435b0bb5035b6da69f69f970690b5",
+        "live": {
+          "samples": [
+            {
+              "time": 167739.349450541,
+              "ticks": 59,
+              "rss_pages": 30569
+            },
+            {
+              "time": 167741.349743848,
+              "ticks": 78,
+              "rss_pages": 30633
+            },
+            {
+              "time": 167743.350031294,
+              "ticks": 97,
+              "rss_pages": 30729
+            },
+            {
+              "time": 167745.350248438,
+              "ticks": 115,
+              "rss_pages": 30825
+            }
+          ],
+          "cpu_percent": [
+            9.498606996008709,
+            9.49863482775571,
+            8.999022958083085
+          ]
+        },
+        "paused": {
+          "samples": [
+            {
+              "time": 167745.656702005,
+              "ticks": 116,
+              "rss_pages": 30825
+            },
+            {
+              "time": 167747.657153436,
+              "ticks": 116,
+              "rss_pages": 30825
+            },
+            {
+              "time": 167749.657543644,
+              "ticks": 116,
+              "rss_pages": 30825
+            },
+            {
+              "time": 167751.657867156,
+              "ticks": 116,
+              "rss_pages": 30825
+            }
+          ],
+          "cpu_percent": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        }
+      },
+      {
+        "name": "baseline",
+        "index": 4,
+        "pid": 2019877,
+        "sha256": "c12a058ec0db2cfdf038bcf2b0be1d1a1ee435b0bb5035b6da69f69f970690b5",
+        "live": {
+          "samples": [
+            {
+              "time": 167755.967902558,
+              "ticks": 59,
+              "rss_pages": 30498
+            },
+            {
+              "time": 167757.968221122,
+              "ticks": 78,
+              "rss_pages": 30594
+            },
+            {
+              "time": 167759.96849893,
+              "ticks": 96,
+              "rss_pages": 30658
+            },
+            {
+              "time": 167761.968770576,
+              "ticks": 114,
+              "rss_pages": 30786
+            }
+          ],
+          "cpu_percent": [
+            9.49848706207963,
+            8.998750037650506,
+            8.998777758941495
+          ]
+        },
+        "paused": {
+          "samples": [
+            {
+              "time": 167762.275483335,
+              "ticks": 115,
+              "rss_pages": 30786
+            },
+            {
+              "time": 167764.275751535,
+              "ticks": 115,
+              "rss_pages": 30786
+            },
+            {
+              "time": 167766.276107719,
+              "ticks": 115,
+              "rss_pages": 30786
+            },
+            {
+              "time": 167768.276375148,
+              "ticks": 115,
+              "rss_pages": 30786
+            }
+          ],
+          "cpu_percent": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        }
+      },
+      {
+        "name": "candidate",
+        "index": 5,
+        "pid": 2020037,
+        "sha256": "5898331c259bc4b6e920adb27fac579099dfbbc4ebc25c353630d3fcf1720bb2",
+        "live": {
+          "samples": [
+            {
+              "time": 167772.582669782,
+              "ticks": 52,
+              "rss_pages": 30514
+            },
+            {
+              "time": 167774.582948151,
+              "ticks": 69,
+              "rss_pages": 30610
+            },
+            {
+              "time": 167776.583228363,
+              "ticks": 85,
+              "rss_pages": 30706
+            },
+            {
+              "time": 167778.583494339,
+              "ticks": 101,
+              "rss_pages": 30802
+            }
+          ],
+          "cpu_percent": [
+            8.498817096393054,
+            7.998879309016413,
+            7.998936237441136
+          ]
+        },
+        "paused": {
+          "samples": [
+            {
+              "time": 167778.890882955,
+              "ticks": 102,
+              "rss_pages": 30802
+            },
+            {
+              "time": 167780.891178055,
+              "ticks": 102,
+              "rss_pages": 30802
+            },
+            {
+              "time": 167782.891537105,
+              "ticks": 103,
+              "rss_pages": 30802
+            },
+            {
+              "time": 167784.891806056,
+              "ticks": 103,
+              "rss_pages": 30802
+            }
+          ],
+          "cpu_percent": [
+            0.0,
+            0.49991025361216423,
+            0.0
+          ]
+        }
+      }
+    ],
+    "gui": {
+      "binary": "rivu-candidate",
+      "sha256": "5898331c259bc4b6e920adb27fac579099dfbbc4ebc25c353630d3fcf1720bb2",
+      "scenarios": {
+        "live": "Viewed two temporal screenshots: both styles update; duplicate panels retain corresponding traces and readouts at different sizes.",
+        "pause": "Full-surface frames captured 2s apart are pixel-identical.",
+        "resize": "Actual compositor width change 1280 -> 960 -> 1280 retains fields and labels.",
+        "tabs": "Native pointer clicks hide all four styles behind Queue tabs and reopen them.",
+        "window": "Compositor close removes the window while same app PID remains; gui command reopens same core with live fields.",
+        "palette_db": "Native Settings Apply sets #ff8844 primary and 40 dB; config status and actual orange fields/-40 labels agree."
+      },
+      "comparison_limits": [
+        "Audio input/config/layout identical; screenshots not frame-synchronized, so no exact pixel-equivalence claim between binaries.",
+        "Actual native Wayland pointer/keyboard input used for tabs and settings; playback and reopen use actual same-data-dir CLI.",
+        "Process state does not directly prove source/GPU field deallocation. No allocation/upload counters instrumented.",
+        "No user desktop, accessibility route, GPU timings or production dependence on fixture tools claimed."
+      ],
+      "evidence": [
+        "candidate-live-1.png",
+        "candidate-live-2.png",
+        "candidate-paused-1.png",
+        "candidate-paused-2.png",
+        "candidate-resize.png",
+        "candidate-hidden-tabs.png",
+        "candidate-reopened-tabs.png",
+        "candidate-window-reopened.png",
+        "candidate-changed-visible.png",
+        "candidate-changed-status.json",
+        "candidate-hidden-process.json",
+        "candidate-window-hidden-process.json"
+      ]
+    },
+    "verification": {
+      "make_lint": "passed after final Rust edits",
+      "make_build": "passed in isolated worktree with absolute target path",
+      "analysis_visualizer_tests": 12,
+      "audio_visualizer_tests": 10,
+      "presentation_lifecycle_tests": 1
+    },
+    "source_sha256": {
+      "src/gui/visualization/analysis_visualizer.rs": "854edf99171811b8b433c2b2522300e67646bad51c4ca5b315ecb20c6977710c",
+      "src/gui/visualization/audio_visualizer.rs": "ecaf7b8e4e3221946dd88742eec06b54fef3bc8b05a8a005686920280b5d7139",
+      "src/gui/presentation.rs": "cef7655d6891ffaad02ebfba11de51faa30c04d30786299a4cefd8ca5cddadce"
+    },
+    "measurement_script_sha256": "a6189b87ebcd156f08a57a1c6a4b76e219cefbb4dda0ec0bde770a98d1a03efd",
+    "cost_boundary": "Changed field copy/upload remains 256 KiB Density and 128 KiB Spatial per style publication; one 4 KiB float palette per style; no CPU field-color loop/image-retirement queue. No measured isolated GPU time or physical VRAM reduction."
   }
 }

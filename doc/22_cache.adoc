@@ -263,24 +263,35 @@ copy. Restoring demand waits for a publication with the current display token
 and generation rather than restoring hidden results.
 
 Density keeps one 256 by 256 accumulation field and three fixed immutable
-snapshot slots: 1 MiB of cell storage per active analyzer, excluding images and
+snapshot slots: 1 MiB of cell storage per active analyzer, excluding rendering and
 small control allocations. A publication materializes into a uniquely held slot;
-the shared frame, GUI staging, and Density renderer then share that payload
-without copying its cells. Spatial Spectrum retains its separate decaying
-field. If slow consumers retain all three slots, the worker coalesces the
-whole publication rather than allocating, blocking, or pairing old Density
+the shared frame, GUI staging, and Density's source model share that payload
+without copying its cells. GPU publication additionally copies the changed numeric
+field into one immutable snapshot shared by its panels. Spatial Spectrum retains
+its separate decaying field. If slow consumers retain all three worker slots, the
+worker coalesces the whole publication rather than allocating, blocking, or pairing old Density
 with newer metrics. Accepted sample time and accumulated signal continue;
 publication resumes when a slot becomes available. Losing Density demand
 releases its pool and consumer references without stopping a surviving
 Spatial Spectrum consumer.
 
+Density/Spatial use revocable dynamic GPU slots rather than retained field images.
+One Density publication contains 256 KiB of numeric cells; one Spatial publication
+contains 128 KiB. Each style shares a 4 KiB palette across publications and panel
+placements. Unchanged fields and paint/resize do not republish. Hiding clears the
+slot and source model, including references used by cached scenes; previously
+captured frames may finish safely. Renderer-owned buffers remain bounded and are
+reclaimed on a later draw after completion, or on renderer destruction, not by an
+application retirement callback or a forced cleanup frame. These are payload counts,
+not total process memory or physical VRAM limits.
+
 An image cannot be dropped merely because the application has stopped reusing
 it: a submitted scene can still reference it. Replaced cached waveform and
 Spectrogram images retire at a subsequent window-frame boundary; transient
-uncached images and uploaded stereo-analysis images survive a complete
-intervening frame. Clearing uncached waveform graphics transfers submitted
-tiles to retirement before discarding reusable data, so every upload retains
-an explicit release owner. Retirement runs from the root window independently of panel
+uncached images survive a complete intervening frame. Clearing uncached waveform
+graphics transfers submitted tiles to retirement before discarding reusable data,
+so every upload retains an explicit release owner. Retirement runs from the root
+window independently of panel
 visibility. Final cleanup uses a frame callback without invalidating content,
 including in Still Mode with analysis frame scheduling inactive. Uncached image creation
 therefore cannot drive its own redraw loop. The last submitted scene retains its
