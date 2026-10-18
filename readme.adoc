@@ -196,6 +196,21 @@ Source archives can set that variable explicitly when Git metadata is absent.
 Set `SOURCE_DATE_EPOCH` to nonnegative Unix seconds for a reproducible build
 timestamp. Invalid values fail the build; About displays the timestamp locally.
 
+=== Source navigation
+
+* `src/main.rs` starts the binary; `src/cli/` separates argument/help handling,
+  command execution, and terminal-safe output with paginated reads.
+* `src/model/query.rs` owns query identities and selected revision stamps;
+  `src/model.rs` exposes the shared model API. Responses and consumer projections
+  remain in `src/response.rs` and `src/projection.rs`.
+* `src/gui/queue.rs` owns the Queue entity and integration events; its `model`,
+  `queries`, and `view` modules separate state, asynchronous work, and rendering.
+* `src/gui/settings.rs` owns settings controls and session integration;
+  `settings/model.rs` owns the edit transaction and `settings/pages.rs` composes pages.
+* `src/core/tests.rs` holds shared fixtures; `src/core/tests/` groups behavior
+  tests by responsibility. Feature-local tests remain with their owners.
+
+
 
 == License
 
