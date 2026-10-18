@@ -102,6 +102,7 @@ system policy and device support; source-rate output alone is not a bit-perfect
 guarantee. Floating-point peaks above full scale are preserved before device
 conversion, not clipped by Rivu. Downstream gain and integer device conversion can
 still cause clipping; Rivu does not add a limiter or dither to its float output.
+Non-finite output samples are replaced with silence before being sent to PipeWire.
 
 Desktop audio mixers receive the current library/CUE title, artist and album,
 including edits made while playing or paused. The application identity remains

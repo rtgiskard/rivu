@@ -522,7 +522,10 @@ impl OutputCallback {
             {
                 for (sample, source) in output.iter_mut().zip(&self.mapping) {
                     *sample = match source {
-                        Some(source) => frame[*source] * volume,
+                        Some(source) => {
+                            let sample = frame[*source] * volume;
+                            if sample.is_finite() { sample } else { 0.0 }
+                        }
                         None => 0.0,
                     };
                 }
@@ -966,7 +969,7 @@ fn run(
     if auto_mix {
         properties.insert("channelmix.normalize", "true");
     }
-    let stream = pw::stream::StreamBox::new(&connection.core, "Rivu native audio", properties)?;
+    let stream = pw::stream::StreamBox::new(&connection.core, "Rivu playback", properties)?;
     let metadata = control
         .metadata
         .lock()
@@ -1528,6 +1531,20 @@ mod pcm_tests {
     }
 
     #[test]
+    fn nonfinite_output_is_silent_without_clipping_finite_headroom() {
+        let samples = [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 4.0, -3.0, 0.125];
+        for volume in [1.0, 0.5, 0.0] {
+            let (mut output, mut callback, _analyzer) = test_output(1000, false);
+            output.set_volume(volume);
+            assert_eq!(output.push(&samples), 3);
+            let mut data = [1.0; 6];
+            callback.render(&mut data, timestamp(0, 20));
+            let gain = crate::volume::gain(volume);
+            assert_eq!(data, [0.0, 0.0, 0.0, 4.0 * gain, -3.0 * gain, 0.125 * gain]);
+        }
+    }
+
+    #[test]
     fn device_names_require_the_native_prefix_without_aliases() {
         assert_eq!(target_name(None).unwrap(), None);
         assert_eq!(target_name(Some("PipeWire: sink")).unwrap(), Some("sink"));
@@ -1797,7 +1814,7 @@ mod pcm_tests {
     }
 
     #[test]
-    fn software_pause_preserves_ring_and_resume_excludes_silence() {
+    fn pause_preserves_ring_and_resume_excludes_silence() {
         let (mut output, mut callback, _analyzer) = test_output(1000, true);
         output.push([[0.5, -0.5]; 2].as_flattened());
         let mut data = [1.0_f32; 16];
