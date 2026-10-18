@@ -667,17 +667,18 @@ bounding rectangle. Their original bounds map into the recorded placement bounds
 the palette spans those full bounds, independently of clipping. Embedded path
 color, texture, order and content mask do not override the material or scene
 placement. Palette ownership is shared; path geometry remains immutable.
-Adjacent paths within one scene GPU batch share a rasterization/resolve pass only
-when their clipped composite bounds are integer-pixel aligned and do not intersect
-the accumulated clipped union. Each draw retains its own bindings and scissor;
-the union is composited once. A non-path, missing prepared draw, overlap, fractional
-edge or actual scene batch boundary ends the run. Numeric order values alone do
+Adjacent multisampled rectangle or path draws within one scene GPU batch share
+a rasterization/resolve pass only when their clipped composite bounds are
+integer-pixel aligned and do not intersect the accumulated clipped union.
+Each draw retains its own bindings and scissor; the union is composited once.
+A field draw, missing prepared draw, overlap, fractional edge or actual scene
+batch boundary ends the run. Numeric order values alone do
 not break adjacency. This conservative linear scan preserves individually resolved
 MSAA overlap and backend-specific fractional edge coverage without quadratic tests.
 
 This extraction is still a closed set of schemas, not arbitrary shader authoring
-or generated ABI tooling. Density/Spatial have migrated; other consumers and their
-independent image-retirement paths remain unchanged.
+or generated ABI tooling. Density/Spatial and Spectrum Bars/LED have migrated;
+remaining consumers and their independent image-retirement paths are unchanged.
 
 ==== Unified field and path measurements
 
@@ -815,7 +816,8 @@ in link:25_gpu_rendering_benchmark.json[the benchmark record].
 
 === Remaining consumers and integrated delivery
 
-Migrate fractals, Spectrogram and Waveform with their distinct reuse patterns.
+Migrate Spectrum Outline/Line/Solid, fractals, Spectrogram and Waveform with their
+distinct geometry and reuse patterns.
 Remove only intermediates and retirement paths made obsolete by the cutover.
 Retain algorithm state and unrelated artwork behavior. If the unified path
 material fully replaces `paint_path_with_texture`, migrate all callers and remove
