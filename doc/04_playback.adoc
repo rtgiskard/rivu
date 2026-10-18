@@ -252,6 +252,14 @@ Home/End. Escape closes GUI help; F1, `?` or Escape closes TUI help, without
 operating the list underneath.
 Editors retain their text and editing keys, including spaces, `R` and `?`.
 In the GUI, a focused button owns Enter/Space instead of also controlling playback.
+The GUI seek and volume sliders are reachable with Tab/Shift+Tab and show a
+focus border. On a focused slider, unmodified Left/Down decrease and Right/Up
+increase the value: five seconds for seek, five percentage points for volume.
+Home/End choose the minimum/maximum. Seeking requires a current queue entry and
+a known positive duration; volume remains adjustable independently. These local
+keys do not extend the scope of the layout's playback shortcuts. A slider key
+ends any active pointer drag before applying its command, so a later pointer
+release cannot commit an obsolete seek preview.
 Escape cancels only the innermost interaction or leaves the focused editor before
 returning from its containing view. See
 link:01_config.adoc#_desktop_keyboard_navigation[desktop control navigation].

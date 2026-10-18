@@ -6,12 +6,12 @@ use super::{
     layout::interaction::{Dragging, SeekCommit},
 };
 use crate::{
-    model::{Command, PlaybackStatus, RepeatMode},
+    model::{Command, PlaybackState, PlaybackStatus, RepeatMode},
     projection::GuiSnapshot,
 };
 use gpui::{
-    AnyElement, Context, ElementId, EventEmitter, MouseButton, MouseDownEvent, Pixels, Point,
-    Window, div, prelude::*, px, relative, rgb,
+    AnyElement, Context, ElementId, EventEmitter, Modifiers, MouseButton, MouseDownEvent, Pixels,
+    Point, Window, div, prelude::*, px, relative, rgb,
 };
 use rivu_ui::{
     active_control, caption, column, disabled_control, icon_button, quiet_icon_button, row,
@@ -25,7 +25,84 @@ pub(super) enum PlaybackEvent {
         position: Point<Pixels>,
         alt: bool,
     },
+    SliderKey {
+        slider: Dragging,
+        key: SliderKey,
+    },
     Error(String),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SliderKey {
+    Decrease,
+    Increase,
+    Start,
+    End,
+}
+
+impl SliderKey {
+    fn resolve(key: &str, modifiers: Modifiers) -> Option<Self> {
+        if modifiers != Modifiers::default() {
+            return None;
+        }
+        match key {
+            "left" | "down" => Some(Self::Decrease),
+            "right" | "up" => Some(Self::Increase),
+            "home" => Some(Self::Start),
+            "end" => Some(Self::End),
+            _ => None,
+        }
+    }
+}
+
+fn slider_command(
+    slider: Dragging,
+    key: SliderKey,
+    queue_id: Option<u64>,
+    playback: &PlaybackState,
+) -> Option<Command> {
+    match slider {
+        Dragging::Seek(_) => {
+            // Match pointer seeking: a known duration and queue occurrence are required.
+            let queue_id = queue_id?;
+            let duration = playback
+                .duration
+                .filter(|value| value.is_finite() && *value > 0.)?;
+            let seconds = match key {
+                SliderKey::Start => 0.,
+                SliderKey::End => duration,
+                SliderKey::Decrease | SliderKey::Increase => {
+                    if !playback.position.is_finite() {
+                        return None;
+                    }
+                    let position = playback.position.clamp(0., duration);
+                    (position + if key == SliderKey::Increase { 5. } else { -5. })
+                        .clamp(0., duration)
+                }
+            };
+            Some(Command::SeekQueue { queue_id, seconds })
+        }
+        Dragging::Volume(_) => {
+            let value = match key {
+                SliderKey::Start => 0.,
+                SliderKey::End => 1.,
+                SliderKey::Decrease | SliderKey::Increase => {
+                    if !playback.volume.is_finite() {
+                        return None;
+                    }
+                    (playback.volume.clamp(0., 1.)
+                        + if key == SliderKey::Increase {
+                            0.05
+                        } else {
+                            -0.05
+                        })
+                    .clamp(0., 1.)
+                }
+            };
+            Some(Command::Volume { value })
+        }
+        Dragging::Split(_) => None,
+    }
 }
 
 pub(super) struct Playback {
@@ -105,6 +182,17 @@ impl Playback {
 
     pub(super) fn set_volume(&mut self, value: f32, cx: &mut Context<Self>) {
         self.send(Command::Volume { value }, cx);
+    }
+
+    pub(super) fn slider_key(&mut self, slider: Dragging, key: SliderKey, cx: &mut Context<Self>) {
+        if let Some(command) = slider_command(
+            slider,
+            key,
+            self.state.queue.current_id,
+            &self.state.playback,
+        ) {
+            self.send(command, cx);
+        }
     }
 
     pub(super) fn send(&mut self, command: Command, cx: &mut Context<Self>) {
@@ -448,6 +536,17 @@ impl Playback {
         };
         div()
             .id(id)
+            .tab_index(0)
+            .role(gpui::Role::Slider)
+            .aria_label(self.context.tr(match dragging {
+                Dragging::Seek(_) => "gl-seek-position",
+                Dragging::Volume(_) => "gl-volume-level",
+                Dragging::Split(_) => unreachable!("split handles are not playback sliders"),
+            }))
+            .border_1()
+            .border_color(gpui::transparent_black())
+            .rounded_sm()
+            .focus(|style| style.border_color(rgb(theme.accent)))
             .group("playback-slider")
             .relative()
             .h(px(20.))
@@ -493,6 +592,18 @@ impl Playback {
                     ),
             )
             .child(measurement)
+            .on_key_down(cx.listener(move |_, event: &gpui::KeyDownEvent, _, cx| {
+                if let Some(key) =
+                    SliderKey::resolve(event.keystroke.key.as_str(), event.keystroke.modifiers)
+                {
+                    // The window cancels any pointer session before dispatching this key.
+                    cx.emit(PlaybackEvent::SliderKey {
+                        slider: dragging,
+                        key,
+                    });
+                    cx.stop_propagation();
+                }
+            }))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |_, event: &MouseDownEvent, _, cx| {
@@ -509,5 +620,170 @@ impl Playback {
                     .on_mouse_up_out(MouseButton::Left, cx.listener(|_, _, _, cx| cx.notify()))
             })
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gui::layout::interaction::{DragCommit, LayoutInteraction};
+
+    #[test]
+    fn slider_keys_are_local_and_unmodified() {
+        for (key, expected) in [
+            ("left", SliderKey::Decrease),
+            ("down", SliderKey::Decrease),
+            ("right", SliderKey::Increase),
+            ("up", SliderKey::Increase),
+            ("home", SliderKey::Start),
+            ("end", SliderKey::End),
+        ] {
+            assert_eq!(
+                SliderKey::resolve(key, Modifiers::default()),
+                Some(expected)
+            );
+            for modifiers in [
+                Modifiers {
+                    control: true,
+                    ..Default::default()
+                },
+                Modifiers {
+                    alt: true,
+                    ..Default::default()
+                },
+                Modifiers {
+                    shift: true,
+                    ..Default::default()
+                },
+                Modifiers {
+                    platform: true,
+                    ..Default::default()
+                },
+                Modifiers {
+                    function: true,
+                    ..Default::default()
+                },
+            ] {
+                assert_eq!(SliderKey::resolve(key, modifiers), None);
+            }
+        }
+        for key in ["tab", "enter", "space", "[", "]", "pageup", "pagedown"] {
+            assert_eq!(SliderKey::resolve(key, Modifiers::default()), None);
+        }
+    }
+
+    #[test]
+    fn seek_keys_use_five_seconds_and_bound_to_current_occurrence() {
+        for (position, key, expected) in [
+            (12., SliderKey::Decrease, 7.),
+            (12., SliderKey::Increase, 17.),
+            (2., SliderKey::Decrease, 0.),
+            (39., SliderKey::Increase, 42.),
+            (12., SliderKey::Start, 0.),
+            (12., SliderKey::End, 42.),
+            (0., SliderKey::Decrease, 0.),
+            (42., SliderKey::Increase, 42.),
+        ] {
+            let state = PlaybackState {
+                position,
+                duration: Some(42.),
+                ..Default::default()
+            };
+            for occurrence in [10, 11] {
+                assert!(matches!(
+                    slider_command(Dragging::Seek(3), key, Some(occurrence), &state),
+                    Some(Command::SeekQueue { queue_id, seconds })
+                        if queue_id == occurrence && seconds == expected
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn seek_keys_require_queue_identity_and_finite_positive_duration() {
+        let mut state = PlaybackState {
+            position: 12.,
+            duration: Some(42.),
+            ..Default::default()
+        };
+        for key in [
+            SliderKey::Decrease,
+            SliderKey::Increase,
+            SliderKey::Start,
+            SliderKey::End,
+        ] {
+            assert!(slider_command(Dragging::Seek(3), key, None, &state).is_none());
+            for duration in [
+                None,
+                Some(0.),
+                Some(-1.),
+                Some(f64::INFINITY),
+                Some(f64::NAN),
+            ] {
+                state.duration = duration;
+                assert!(slider_command(Dragging::Seek(3), key, Some(10), &state).is_none());
+            }
+            state.duration = Some(42.);
+        }
+        for position in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            state.position = position;
+            for key in [SliderKey::Decrease, SliderKey::Increase] {
+                assert!(slider_command(Dragging::Seek(3), key, Some(10), &state).is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn volume_keys_use_five_percentage_points_and_boundaries() {
+        for (volume, key, expected) in [
+            (0.5, SliderKey::Decrease, 0.45),
+            (0.5, SliderKey::Increase, 0.55),
+            (0.02, SliderKey::Decrease, 0.),
+            (0.98, SliderKey::Increase, 1.),
+            (0.5, SliderKey::Start, 0.),
+            (0.5, SliderKey::End, 1.),
+            (0., SliderKey::Decrease, 0.),
+            (1., SliderKey::Increase, 1.),
+        ] {
+            let state = PlaybackState {
+                volume,
+                ..Default::default()
+            };
+            assert!(matches!(
+                slider_command(Dragging::Volume(3), key, None, &state),
+                Some(Command::Volume { value }) if (value - expected).abs() < f32::EPSILON
+            ));
+        }
+        for volume in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let state = PlaybackState {
+                volume,
+                ..Default::default()
+            };
+            assert!(
+                slider_command(Dragging::Volume(3), SliderKey::Increase, None, &state).is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn slider_key_cancellation_discards_pointer_preview_before_command() {
+        let mut owner = LayoutInteraction::default();
+        owner.begin_slider(Dragging::Seek(3), Some(10), Some(100.));
+        owner.update_slider_seek(0.75);
+        owner.cancel();
+        let state = PlaybackState {
+            position: 12.,
+            duration: Some(100.),
+            ..Default::default()
+        };
+        assert!(matches!(
+            slider_command(Dragging::Seek(3), SliderKey::Increase, Some(10), &state),
+            Some(Command::SeekQueue {
+                queue_id: 10,
+                seconds: 17.
+            })
+        ));
+        assert_eq!(owner.seek_preview(), None);
+        assert_eq!(owner.finish_drag(), DragCommit::None);
     }
 }
