@@ -161,6 +161,7 @@ for merging, so even tracks read before cancellation are not saved.
 
 Use a list's Search button, or Ctrl+F with that list focused, to open and focus its
 search field. Once open, the Search button focuses the field without closing it.
+An empty search field folds automatically when it loses focus.
 Each list keeps its own search condition. A nonempty search stays visible; use
 the field's Clear search button to restore the complete list without closing the
 field. From list focus, Esc clears that list's search first and folds an empty
