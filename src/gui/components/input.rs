@@ -108,7 +108,10 @@ impl Input {
         self
     }
 
-    /// Let a containing compound control own the background and border.
+    /// Fill a containing compound control's allocation without adding a border.
+    ///
+    /// The parent owns the background, border, and height; the text line is
+    /// vertically centered without the standalone input's vertical padding.
     pub(in crate::gui) fn embedded(mut self) -> Self {
         self.embedded = true;
         self
@@ -929,17 +932,25 @@ impl Render for Input {
                     })
                     .rounded(px(4.) * scale)
             })
+            .when(self.embedded, |view| {
+                view.w_full().h_full().min_w_0().min_h_0()
+            })
             .text_color(rgb(theme.text))
             .when(!self.enabled, |view| view.text_color(rgb(theme.disabled)))
             .line_height(px(20.) * scale)
             .text_size(px(14.) * scale)
             .child(
                 div()
-                    .h(px(34.) * scale)
                     .flex_1()
                     .min_w_0()
                     .overflow_hidden()
-                    .p(px(7.) * scale)
+                    .px(px(7.) * scale)
+                    .when(self.embedded, |view| {
+                        view.flex().items_center().h_full().min_w(gpui::rems(1.5))
+                    })
+                    .when(!self.embedded, |view| {
+                        view.h(px(34.) * scale).py(px(7.) * scale)
+                    })
                     .pr(self.trailing_space * scale)
                     .child(InputElement { input: cx.entity() }),
             )
@@ -953,6 +964,9 @@ impl Render for Input {
                         .text_size(px(12.) * scale)
                         .text_color(rgb(theme.muted))
                         .whitespace_nowrap()
+                        .when(self.embedded, |view| {
+                            view.flex_shrink(1.).min_w_0().truncate()
+                        })
                         .child(text),
                 )
             })

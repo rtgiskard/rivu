@@ -177,6 +177,8 @@ impl Render for ListSearch {
         if !visible {
             return row()
                 .track_focus(&self.focus_handle)
+                .h(gpui::rems(2.))
+                .flex_shrink_0()
                 .child(icon_button(
                     "search-toggle",
                     "󰍉",
@@ -188,10 +190,10 @@ impl Render for ListSearch {
         }
         let mut field = row()
             .gap_0()
-            .min_h(gpui::rems(2.))
+            .h_full()
+            .w_full()
             .min_w_0()
-            .max_w_full()
-            .overflow_hidden()
+            .overflow_x_hidden()
             .rounded_md()
             .bg(rgb(theme.panel))
             .border_1()
@@ -209,12 +211,13 @@ impl Render for ListSearch {
                     |this, window, cx| this.toggle(window, cx),
                 )
                 .w(gpui::rems(1.4))
+                .h_full()
                 .border_0()
                 .bg(gpui::transparent_black())
                 .rounded_none(),
             );
         field = field
-            .child(div().flex_1().min_w_0().child(self.input.clone()))
+            .child(div().flex_1().min_w_0().h_full().child(self.input.clone()))
             .when(!self.input.read(cx).text().is_empty(), |field| {
                 field.child(
                     icon_button(
@@ -229,15 +232,17 @@ impl Render for ListSearch {
                         },
                     )
                     .w(gpui::rems(1.4))
+                    .h_full()
                     .border_0()
                     .bg(gpui::transparent_black())
                     .rounded_none(),
                 )
             });
-        let field = field.w(gpui::rems(14.));
         let control = row()
             .track_focus(&self.focus_handle)
             .min_w_0()
+            .h(gpui::rems(2.))
+            .w(gpui::rems(14.))
             .flex_basis(gpui::rems(2.))
             .flex_shrink(1.)
             .child(field);
