@@ -219,6 +219,7 @@ pub struct App {
 /// GPUI integration state, not a second application or services owner.
 struct GuiState {
     session: Rc<RefCell<UiSession>>,
+    i18n: Arc<crate::i18n::Localizer>,
     window_closed: Option<Subscription>,
     app_quit: Option<Subscription>,
     wake_task: Option<Task<()>>,
@@ -312,6 +313,7 @@ impl App {
                     Arc::clone(&app.artwork),
                     Arc::clone(&i18n),
                 ),
+                i18n: Arc::clone(&i18n),
                 window_closed: None,
                 app_quit: None,
                 wake_task: None,
@@ -476,8 +478,14 @@ impl App {
     }
 
     fn run_gui(mut self) -> Result<()> {
-        if self.runtime.handle.config_snapshot().tray_enabled {
-            self.tray = TrayController::start(self.runtime.handle.clone(), self.handle.clone())?;
+        if let Some(gui) = &self.gui
+            && self.runtime.handle.config_snapshot().tray_enabled
+        {
+            self.tray = TrayController::start(
+                self.runtime.handle.clone(),
+                self.handle.clone(),
+                Arc::clone(&gui.i18n),
+            )?;
         }
         let app = Rc::new(RefCell::new(self));
         let gpui_owner = Rc::clone(&app);

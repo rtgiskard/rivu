@@ -592,3 +592,9 @@ display reconnect, so RSS is not a count of live rendering resources. No
 allocator trim is performed, and closing the window does not promise
 serve-level process memory.
 
+The graphical host shares one immutable startup Localizer between its GUI
+session and tray worker, including the parsed Fluent resources and fixed-message
+cache. Closing or reopening the window does not rebuild these resources, and
+saved language changes apply only after host restart. GUI-specific SharedString
+adaptation remains window-owned; tray protocol payloads remain tray-owned.
+

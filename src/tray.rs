@@ -58,7 +58,7 @@ fn icon_pixmap() -> &'static Vec<IconPixmap> {
 }
 
 struct TrayData {
-    i18n: Localizer,
+    i18n: Arc<Localizer>,
     snapshot: TraySnapshot,
     menu_revision: u32,
 }
@@ -88,12 +88,16 @@ pub(crate) struct TrayController {
 }
 
 impl TrayController {
-    pub(crate) fn start(handle: CoreHandle, app: AppHandle) -> Result<Option<Self>> {
+    pub(crate) fn start(
+        handle: CoreHandle,
+        app: AppHandle,
+        i18n: Arc<Localizer>,
+    ) -> Result<Option<Self>> {
         let (stop, stop_receiver) = bounded(1);
         let (cancel, cancelled) = oneshot::channel();
         let worker = match thread::Builder::new()
             .name("rivu-tray".into())
-            .spawn(move || run_bus(handle, app, stop_receiver, cancelled))
+            .spawn(move || run_bus(handle, app, i18n, stop_receiver, cancelled))
         {
             Ok(worker) => worker,
             Err(error) => {
@@ -127,12 +131,13 @@ impl Drop for TrayController {
 fn run_bus(
     handle: CoreHandle,
     app: AppHandle,
+    i18n: Arc<Localizer>,
     stop: Receiver<()>,
     cancelled: oneshot::Receiver<()>,
 ) {
     let cancelled = cancelled.shared();
     let data = Arc::new(RwLock::new(TrayData {
-        i18n: Localizer::new(&handle.config_snapshot().ui_language),
+        i18n,
         snapshot: handle.tray_snapshot(),
         menu_revision: 1,
     }));
@@ -795,7 +800,7 @@ mod tests {
         assert!(!app.can_raise());
         let menu = DbusMenu {
             data: Arc::new(RwLock::new(TrayData {
-                i18n: Localizer::new(&handle.config_snapshot().ui_language),
+                i18n: Arc::new(Localizer::new(&handle.config_snapshot().ui_language)),
                 snapshot: handle.tray_snapshot(),
                 menu_revision: 1,
             })),
@@ -829,7 +834,7 @@ mod tests {
             shutting_down: false,
         };
         let mut data = TrayData {
-            i18n: Localizer::new("en-US"),
+            i18n: Arc::new(Localizer::new("en-US")),
             snapshot: baseline.clone(),
             menu_revision: 1,
         };
