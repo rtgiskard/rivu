@@ -1015,7 +1015,7 @@ impl Settings {
                                     .child(visual_switch(
                                         &self.i18n,
                                         "visual-cache",
-                                        "",
+                                        "",
                                         settings.tr("settings-rendering-cache"),
                                         draft.visualization_cache,
                                         cx,

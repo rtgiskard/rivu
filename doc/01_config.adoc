@@ -31,8 +31,8 @@ roots = [] # Add music-directory paths before scanning
 volume_percent = 70
 
 [interface]
-font = "sans-serif"
-font_size = 11
+font = "monospace"
+font_size = 12
 theme = "rivu_dark"
 
 [logging]
@@ -350,35 +350,23 @@ their hue families. Other applications' theme-file formats are not imported. Unk
 names are configuration errors. The selected theme does not change visualization
 backgrounds, signal palettes, canvas labels, cursor colors, or album artwork.
 
-Font: type to search installed families, or use the arrow to browse them and
-`serif`, `sans-serif`, and `monospace`. Enter or a click selects a choice; Space
-remains text. Custom family names are accepted.
+Search or browse installed fonts in Settings, including `monospace`, `sans-serif`,
+and `serif`. Enter or click to select; custom family names are accepted.
 
-`interface.font` defaults to `sans-serif`; empty values also select `sans-serif`.
-Names must contain no control characters and occupy at most 128 UTF-8 bytes.
-Family names use Fontconfig system and user rules
-(`~/.config/fontconfig/fonts.conf`) to select the primary family.
-Localized family aliases are matched to names supported by the GUI, so the
-same font remains selected across terminal and desktop language environments.
-For missing text glyphs, Linux selects additional faces in Fontconfig's effective
-matching order for the actual text, before native fallback. Only selected faces
-are loaded; an entire fallback family or candidate list is not preloaded.
-First use of a new font can take longer; matching results and loaded fonts are
-reused. Loaded fonts may remain cached until exit. Complex shaping and named
-variable-font instances are not guaranteed to reproduce every Fontconfig rule.
-Restart the GUI after changing Fontconfig rules.
+`interface.font` defaults to `monospace`, including empty values. Names must not
+contain control characters or exceed 128 UTF-8 bytes. Fontconfig system and user
+rules (`~/.config/fontconfig/fonts.conf`) select families and missing-glyph
+fallbacks. Restart the GUI after changing those rules. Unavailable primary fonts
+produce a warning and fall back to `sans-serif`.
 
 Fontconfig hinting, subpixel, and synthetic-bold settings do not control GUI
-rendering. If the requested primary family cannot be resolved or is unavailable
-to the GUI, Rivu logs a warning and uses `sans-serif`.
+rendering. Complex shaping and named variable-font instances may differ from
+other applications.
 
-`interface.font_size` is the desktop base text size in points (pt) before
-interface scaling: an integer from `8` to `18`, default `11`. The settings field
-uses the same unit. One point maps to `4/3` logical pixels at the nominal 96 DPI,
-so the default is approximately `14.67` logical pixels. Titles and secondary
-text retain their size hierarchy; icons and visualization chart annotations have
-independent sizes. Apply the setting to update open windows. It does not change
-terminal text sizes or replace `interface.scale` for control spacing and geometry.
+`interface.font_size` accepts integer point sizes from `8` to `18`, default `12`
+(16 logical pixels before interface scaling). Apply to update open windows.
+It preserves title/secondary text hierarchy without resizing icons or chart
+annotations, and does not affect terminal text or replace `interface.scale`.
 
 `interface.scale` accepts finite values from `0.75` to `2.0` (default `1.0`) and
 adjusts desktop controls and list density independently of the desktop's display scaling. Menus and editor dialogs
@@ -780,12 +768,19 @@ RMS uses a center-to-edge palette gradient; Peak uses the palette color at its
 level. Known silence remains visible as a minimum-height RMS fill; unknown
 intervals stay blank.
 
-`visualizations.waveform.labels`, `visualizations.waveform.cursor_color`, and `visualizations.waveform.glow` control labels,
-cursor, and glow. The Amplitude display group exposes `visualizations.waveform.rms_gain`
-(`0`–`3`, default `0.94`), `visualizations.waveform.peak_gain` (`0`–`2`, default `1.0`), and
-`visualizations.waveform.peak_gamma` (`0.25`–`3`, default `0.86`). Gamma above `1` reduces low
-peaks; below `1` lifts them. These controls affect rendering only, not playback
-volume or decoded preview data.
+Waveform labels (`visualizations.waveform.labels`) default to `false`;
+`cursor_color` and `glow` control the cursor and glow. Amplitude settings are:
+
+[cols="2,1,1",options="header"]
+|===
+|`visualizations.waveform.*` key |Range |Default
+|`rms_gain` |0–3 |0.94
+|`peak_gain` |0–2 |1.0
+|`peak_gamma` |0.25–3 |2.0
+|===
+
+Gamma above `1` reduces low peaks; below `1` lifts them. These settings affect
+rendering only, not playback volume or decoded preview data.
 
 === Spectrum and Spectrogram
 
@@ -796,23 +791,25 @@ smoothing, reference lines, labels, and display range. `visualizations.spectrum.
 (default) chooses the band count automatically; explicit counts accept `1`–`512`.
 Motion freezes while paused.
 The default bar falling acceleration (`visualizations.spectrum.bar_gravity`) is
-`200` dB/s². Labels default to off; reference lines remain enabled.
+`200` dB/s². Labels and reference lines both default to off.
 
 `visualizations.spectrum.interpolate` defaults to `false` and controls frequency interpolation and whether `solid` has a
 continuous or stepped boundary. `line` always connects valid body points
 continuously and skips empty slots rather than drawing them at the floor.
 Peak indicators remain discrete in every style.
 
-Spectrogram shows recent frequency history; `visualizations.spectrogram.*` settings control its
-history duration, color range, labels, interpolation, and the `0.4`–`1.4`
-`visualizations.spectrogram.sampling_points_scale` used to choose source frequency rows. Retained
-history also depends on panel width and analysis rate; unavailable history stays blank.
-`visualizations.spectrogram.history_seconds` accepts `1`–`60` and defaults to `20` seconds.
-`visualizations.spectrogram.interpolation_points` accepts `64`–`4096` and defaults to `1024`;
-the settings page labels it Maximum frequency rows. This rendering row limit
-applies with or without frequency interpolation; it is not the FFT size, and
-increasing it does not add
-measured frequency detail.
+Spectrogram shows recent frequency history; unavailable history stays blank.
+Its `visualizations.spectrogram.*` settings include:
+
+* `labels`: default `false`.
+* `history_seconds`: `1`–`60`, default `20`; retained history also depends on panel
+  width and analysis rate.
+* `sampling_points_scale`: `0.4`–`1.4`, choosing source frequency rows relative to
+  visible panel height.
+* `interpolation_points` (Maximum frequency rows): `64`–`4096`, default `1024`.
+  This limits rendering rows with or without interpolation; it does not change
+  FFT size or add measured frequency detail.
+
 The startup-only `interface.gpu_material_budget_mb` setting accepts `16`–`1024`
 MiB and defaults to `64`. Restart the GUI to apply a change. It limits the shared
 charged material buffers per window, including initialization copies and uploads

@@ -324,7 +324,7 @@ config_fields! {
     pub ui_language: String,
     /// Shared GUI and TUI color preset, independent of visualization colors.
     pub ui_theme: Theme,
-    /// UI font family; defaults to sans-serif, including empty saved values.
+    /// UI font family; defaults to monospace, including empty saved values.
     pub ui_font: String,
     /// Base UI font size in points, independent of interface scaling.
     pub ui_font_size: u32,
@@ -428,8 +428,8 @@ impl Default for Config {
             library_columns: LibraryColumns::default(),
             ui_language: "auto".to_owned(),
             ui_theme: Theme::default(),
-            ui_font: "sans-serif".to_owned(),
-            ui_font_size: 11,
+            ui_font: "monospace".to_owned(),
+            ui_font_size: 12,
             ui_scale: 1.0,
             layout_snap_enabled: true,
             layout_snap_grid_px: 16,
@@ -450,7 +450,7 @@ impl Default for Config {
             spectrum_bar_hold_ms: 0,
             spectrum_bar_gravity: 200.0,
             spectrum_smoothing_ms: 80,
-            spectrum_grid: true,
+            spectrum_grid: false,
             spectrum_labels: false,
             audio_visualizer_style: AudioVisualizerStyle::BarsRings,
             audio_visualizer_grid: false,
@@ -466,11 +466,11 @@ impl Default for Config {
             audio_visualizer_primary_color: RgbColor(0x7aa2f7),
             audio_visualizer_secondary_color: RgbColor(0xbb9af7),
 
-            spectrogram_labels: true,
+            spectrogram_labels: false,
             spectrogram_interpolate: true,
             spectrogram_sampling_points_scale: 0.5,
             spectrogram_interpolation_points: 1024,
-            waveform_labels: true,
+            waveform_labels: false,
             waveform_seek_enabled: true,
             visualization_db_range: 70.0,
             spectrum_db_range: None,
@@ -481,7 +481,7 @@ impl Default for Config {
             waveform_glow: 1.0,
             waveform_rms_gain: 0.94,
             waveform_peak_gain: 1.0,
-            waveform_peak_gamma: 0.86,
+            waveform_peak_gamma: 2.0,
             album_artwork_style: AlbumArtworkStyle::Halo,
             album_artwork_mode: AlbumArtworkMode::Rotating,
             album_artwork_period_seconds: 20.0,

@@ -1223,7 +1223,7 @@ impl Settings {
         config.gpu_material_budget_mb = self.number(Field::GpuMaterialBudget, cx)?;
         config.ui_font = self.value(Field::Font, cx).trim().to_owned();
         if config.ui_font.is_empty() {
-            config.ui_font = "sans-serif".to_owned();
+            config.ui_font = "monospace".to_owned();
         }
         config.ui_font_size = self.number(Field::FontSize, cx)?;
         config.ui_scale = self.number(Field::Scale, cx)?;

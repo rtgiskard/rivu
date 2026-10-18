@@ -28,7 +28,7 @@ pub(in crate::gui) fn publish(font: &Font, font_size: u32, cx: &mut App) {
 pub(in crate::gui) fn resolve(requested: &str, cx: &App) -> Font {
     let requested = requested.trim();
     let requested = if requested.is_empty() {
-        "sans-serif"
+        "monospace"
     } else {
         requested
     };

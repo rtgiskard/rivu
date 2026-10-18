@@ -30,7 +30,7 @@ impl Config {
         let mut config = file.into_config();
         config.ui_language = crate::i18n::normalize_language(&config.ui_language).to_owned();
         if config.ui_font.is_empty() {
-            config.ui_font = "sans-serif".to_owned();
+            config.ui_font = "monospace".to_owned();
         }
         config
             .validate()
