@@ -183,6 +183,9 @@ impl Metadata {
         if visible {
             self.refresh(cx);
             self.demand_metadata(cx);
+        } else {
+            self.artwork_view.replace(None, cx);
+            let _ = self.artwork_loader.prepare(None);
         }
         cx.notify();
     }

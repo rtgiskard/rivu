@@ -472,9 +472,11 @@ background executor, not render-time file I/O.
 Replaced or hidden consumers retire through a window-owned queue after scene
 replacement; removed panels need not paint again. Releasing one consumer cannot
 cancel or unload another's image. Only the last retired consumer cancels the
-pending load or removes the completed image from the renderer. Hiding the large
-artwork panel retires its display owner; a late lookup may warm the session cache
-but cannot restore that hidden owner. Window hide, close, or reload releases
+pending load or removes the completed image from the renderer. Hiding Track
+details or the large artwork panel retires its display owner and queued lookup
+demand; a late shared lookup may warm the session cache but cannot restore a
+hidden owner or start another hidden acquisition. Track details keeps its editor
+draft independently. Window hide, close, or reload releases
 current and retired display owners without waiting for another frame. Another
 window owns an independent decode.
 

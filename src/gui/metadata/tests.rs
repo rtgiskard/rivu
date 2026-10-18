@@ -252,3 +252,80 @@ fn hidden_save_completion_releases_only_clean_drafts_and_rejects_old_epochs(
         assert_eq!(this.metadata_decoder_hint, DecoderHint::Auto);
     });
 }
+
+fn artwork_selection(owner: &mut Metadata, track: Track, cx: &mut Context<Metadata>) {
+    owner.metadata.select(track.id);
+    let token = owner.metadata.begin_load(track.id);
+    let draft = owner.draft(cx);
+    let values = owner
+        .metadata
+        .accept_load(token, Some(track), draft)
+        .unwrap();
+    owner.set_metadata_values(values, cx);
+}
+
+#[gpui::test]
+fn hiding_details_releases_cached_artwork_until_revealed(cx: &mut TestAppContext) {
+    let (directory, _runtime, metadata) = fixture(cx);
+    let path = directory.path().join("cover.wav");
+    crate::artwork::tests::tagged_wav(&path);
+    let mut selected = track(7, "Cover");
+    selected.path = path;
+    metadata.update(cx, |this, cx| {
+        assert!(
+            !this
+                .artwork_manager
+                .load(&selected)
+                .unwrap()
+                .is_placeholder()
+        );
+        artwork_selection(this, selected, cx);
+        this.visible = true;
+        this.prepare_artwork(cx);
+        assert!(this.artwork_view.image(cx).is_some());
+
+        this.set_visible(false, cx);
+        assert!(this.artwork_view.image(cx).is_none());
+        this.prepare_artwork(cx);
+        assert!(this.artwork_view.image(cx).is_none());
+
+        this.set_visible(true, cx);
+        this.prepare_artwork(cx);
+        assert!(this.artwork_view.image(cx).is_some());
+        assert_eq!(this.metadata.identity(), Some(7));
+    });
+}
+
+#[gpui::test]
+fn hidden_artwork_completion_retires_without_loading_replacement(cx: &mut TestAppContext) {
+    let (directory, _runtime, metadata) = fixture(cx);
+    let mut first = track(7, "First");
+    first.path = directory.path().join("first.wav");
+    let mut replacement = track(8, "Replacement");
+    replacement.path = directory.path().join("replacement.wav");
+    crate::artwork::tests::tagged_wav(&first.path);
+    crate::artwork::tests::tagged_wav(&replacement.path);
+    metadata.update(cx, |this, cx| {
+        artwork_selection(this, first.clone(), cx);
+        this.visible = true;
+        this.prepare_artwork(cx);
+        this.set_visible(false, cx);
+        artwork_selection(this, replacement.clone(), cx);
+        this.prepare_artwork(cx);
+    });
+    cx.run_until_parked();
+    metadata.update(cx, |this, cx| {
+        assert!(this.artwork_manager.is_loaded(&first));
+        assert!(!this.artwork_manager.is_loaded(&replacement));
+        assert!(this.artwork_view.image(cx).is_none());
+        assert_eq!(this.metadata.identity(), Some(8));
+        this.set_visible(true, cx);
+        this.prepare_artwork(cx);
+    });
+    cx.run_until_parked();
+    metadata.update(cx, |this, cx| {
+        assert!(this.artwork_manager.is_loaded(&replacement));
+        assert!(this.artwork_view.image(cx).is_some());
+        assert_eq!(this.metadata.identity(), Some(8));
+    });
+}

@@ -7,6 +7,11 @@ use std::sync::Arc;
 
 impl Metadata {
     pub(super) fn prepare_artwork(&mut self, cx: &mut Context<Self>) {
+        if !self.visible {
+            // Shared acquisition may finish, but hidden consumers own no demand.
+            let _ = self.artwork_loader.prepare(None);
+            return;
+        }
         self.artwork_view.replace(
             self.metadata
                 .track()
@@ -32,11 +37,12 @@ impl Metadata {
                 .spawn(async move { manager.load(&track) })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                // An old completion may warm the cache, never replace another track's view.
-                if this
-                    .metadata
-                    .track()
-                    .is_some_and(|track| identity.matches(track))
+                // A completion may warm the cache, never revive a hidden consumer.
+                if this.visible
+                    && this
+                        .metadata
+                        .track()
+                        .is_some_and(|track| identity.matches(track))
                 {
                     this.artwork_view
                         .replace(loaded.filter(|artwork| !artwork.is_placeholder()), cx);
@@ -45,7 +51,7 @@ impl Metadata {
                 let current = this
                     .metadata
                     .track()
-                    .filter(|track| !this.artwork_manager.is_loaded(track));
+                    .filter(|track| this.visible && !this.artwork_manager.is_loaded(track));
                 if let Some(next) = this.artwork_loader.finish(&identity, current) {
                     this.start_artwork(next, cx);
                 } else {
