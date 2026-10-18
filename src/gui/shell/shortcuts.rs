@@ -76,7 +76,7 @@ impl GuiApp {
             return;
         }
         if matches!(
-            self.shell.keyboard_surface(),
+            self.current_keyboard_surface(cx),
             Some(shell::KeyboardSurface::Menu(..))
         ) {
             if plain {
@@ -107,9 +107,11 @@ impl GuiApp {
             cx.stop_propagation();
             return;
         }
-        if self.playlist_action.is_some() {
+        if self.playlists.read(cx).action().is_some() {
             if cancel {
-                self.dismiss_playlist_action(window, cx);
+                self.playlists.update(cx, |playlists, cx| {
+                    playlists.dismiss_playlist_action(window, cx)
+                });
             }
             cx.stop_propagation();
             return;
@@ -121,18 +123,21 @@ impl GuiApp {
             cx.stop_propagation();
             return;
         }
-        if self.playlist_editor.is_some() {
+        if self.playlists.read(cx).editor_open() {
             if cancel {
-                self.cancel_playlist_name(window, cx);
+                self.playlists.update(cx, |playlists, cx| {
+                    playlists.cancel_playlist_name(window, cx)
+                });
                 cx.stop_propagation();
             } else if !self.input_focused(window, cx) {
                 cx.stop_propagation();
             }
             return;
         }
-        if self.duplicate_review.open {
+        if self.duplicates.read(cx).is_open() {
             if cancel {
-                self.close_duplicate_review(window, cx);
+                self.duplicates
+                    .update(cx, |duplicates, cx| duplicates.handle_cancel(cx));
             }
             cx.stop_propagation();
             return;
@@ -190,29 +195,40 @@ impl GuiApp {
                 if let Some(focus) = self.active_list_focus() {
                     let last = action == Action::Last;
                     match focus {
-                        ListFocus::Library => self.jump_library_edge(last, cx),
-                        ListFocus::Queue => self.jump_queue_edge(last, cx),
-                        ListFocus::PlaylistTracks => self.jump_playlist_edge(last, cx),
+                        ListFocus::Library => self
+                            .library
+                            .update(cx, |library, cx| library.jump_library_edge(last, cx)),
+                        ListFocus::Queue => self
+                            .queue
+                            .update(cx, |queue, cx| queue.jump_queue_edge(last, cx)),
+                        ListFocus::PlaylistTracks => self
+                            .playlists
+                            .update(cx, |playlists, cx| playlists.jump_playlist_edge(last, cx)),
                     }
                 }
             }
             Action::PageUp | Action::PageDown => {
                 if self
-                    .workspace.scroll_views.borrow_mut().page(action == Action::PageDown, window.mouse_position())
+                    .workspace
+                    .scroll_views
+                    .borrow_mut()
+                    .page(action == Action::PageDown, window.mouse_position())
                 {
                     cx.notify();
                 }
             }
             Action::Parent | Action::Expand => {
                 if self.active_list_focus() == Some(ListFocus::Library) {
-                    self.library_tree_key(
-                        if action == Action::Parent {
-                            "left"
-                        } else {
-                            "right"
-                        },
-                        cx,
-                    );
+                    self.library.update(cx, |library, cx| {
+                        library.library_tree_key(
+                            if action == Action::Parent {
+                                "left"
+                            } else {
+                                "right"
+                            },
+                            cx,
+                        );
+                    });
                 }
             }
             Action::Activate => {
@@ -226,22 +242,28 @@ impl GuiApp {
                 }
             }
             Action::SelectAll => match context {
-                KeyContext::GuiQueue => self.select_all_queue_entries(cx),
-                KeyContext::GuiPlaylistTracks => self.select_all_playlist_entries(cx),
-                KeyContext::GuiHistory => {
-                    self.browser.history.select_all();
-                    cx.notify();
-                }
+                KeyContext::GuiQueue => self
+                    .queue
+                    .update(cx, |queue, cx| queue.select_all_queue_entries(cx)),
+                KeyContext::GuiPlaylistTracks => self.playlists.update(cx, |playlists, cx| {
+                    playlists.select_all_playlist_entries(cx)
+                }),
+                KeyContext::GuiHistory => self
+                    .history
+                    .update(cx, |history, cx| history.select_all(cx)),
                 _ => {}
             },
             Action::ExtendUp | Action::ExtendDown | Action::AddExtendUp | Action::AddExtendDown => {
                 let down = matches!(action, Action::ExtendDown | Action::AddExtendDown);
                 let multi = matches!(action, Action::AddExtendUp | Action::AddExtendDown);
-                self.navigate_playlist(down, true, multi, cx);
+                self.playlists.update(cx, |playlists, cx| {
+                    playlists.navigate_playlist(down, true, multi, cx)
+                });
             }
             _ => {
                 if let Some(command) = keyboard::playback_command(action, &self.state.playback) {
-                    self.send(command, cx);
+                    self.playback
+                        .update(cx, |playback, cx| playback.send(command, cx));
                 }
             }
         }

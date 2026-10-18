@@ -86,7 +86,7 @@ impl GuiApp {
             .min_w_0()
             .min_h_0()
             .id("panel-catalog")
-            .map(|surface| self.menu_surface(surface))
+            .map(|surface| self.menu_surface(surface, cx))
             .occlude()
             .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                 this.shell.dismiss(shell::Surface::PanelCatalog);
@@ -132,7 +132,7 @@ impl GuiApp {
         let is_audio_visualizer = panel_kind == Some("audio_visualizer");
         let is_album_artwork = panel_kind == Some("album_artwork");
         let mut menu = context_menu_container(theme, "panel-context-menu", window)
-            .map(|surface| self.menu_surface(surface))
+            .map(|surface| self.menu_surface(surface, cx))
             .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                 this.panel_menu = None;
                 cx.stop_propagation();
@@ -690,7 +690,8 @@ impl GuiApp {
                                     cx,
                                     |this, _, cx| {
                                         this.panel_menu = None;
-                                        this.browser.queue.clear();
+                                        this.queue
+                                            .update(cx, |queue, cx| queue.clear_selection(cx));
 
                                         this.send(Command::ClearQueue, cx);
                                         cx.notify();

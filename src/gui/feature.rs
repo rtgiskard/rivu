@@ -14,7 +14,10 @@ pub(super) struct FeatureContext {
 
 impl FeatureContext {
     pub(super) fn tr(&self, id: &str) -> SharedString {
-        self.labels.get(id).expect("cached localized GUI text").clone()
+        self.labels
+            .get(id)
+            .expect("cached localized GUI text")
+            .clone()
     }
 
     pub(super) fn snapshot(&self) -> Rc<GuiSnapshot> {

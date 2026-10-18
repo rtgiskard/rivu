@@ -9,6 +9,7 @@ impl Render for GuiApp {
         self.presentation.update(cx, |presentation, cx| {
             presentation.request_frame(window, cx)
         });
+        self.reconcile_feature_demand(cx);
         self.synchronize_interaction(window, cx);
         self.synchronize_keyboard_focus(window, cx);
         if self.workspace.interaction.docking().is_some()
@@ -17,7 +18,10 @@ impl Render for GuiApp {
             self.cancel_panel_docking(window, cx);
         }
         window.set_rem_size(px(16. * self.state.system.config.ui_scale));
-        self.workspace.scroll_views.borrow_mut().begin_frame(self.workspace.layouts.current());
+        self.workspace
+            .scroll_views
+            .borrow_mut()
+            .begin_frame(self.workspace.layouts.current());
         let docking_view = cx.entity().downgrade();
         let paint_presentation = self.presentation.clone();
         let paint_artwork_images = self.artwork_images.clone();
@@ -48,7 +52,7 @@ impl Render for GuiApp {
             .font(self.ui_font.clone())
             .track_focus(self.shell.layout_focus())
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                if this.current_keyboard_surface().is_none() {
+                if this.current_keyboard_surface(cx).is_none() {
                     this.shell.capture_origin(window, cx);
                 }
                 if event.keystroke.key == "escape"
@@ -77,16 +81,19 @@ impl Render for GuiApp {
             }))
             .on_key_down(cx.listener(Self::keyboard_input))
             .capture_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                if this.current_keyboard_surface().is_none() {
+                if this.current_keyboard_surface(cx).is_none() {
                     this.shell.capture_origin(window, cx);
                 }
-                let modal = this.current_keyboard_surface().is_some();
-                this.workspace.scroll_views.borrow_mut().click(event.position, modal);
+                let modal = this.current_keyboard_surface(cx).is_some();
+                this.workspace
+                    .scroll_views
+                    .borrow_mut()
+                    .click(event.position, modal);
             }))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| {
-                    if this.current_keyboard_surface().is_none() {
+                    if this.current_keyboard_surface(cx).is_none() {
                         this.shell.capture_origin(window, cx);
                     }
                 }),
@@ -349,7 +356,7 @@ impl Render for GuiApp {
                     .min_w_0()
                     .min_h_0()
                     .id("app-menu-popup")
-                    .map(|surface| self.menu_surface(surface))
+                    .map(|surface| self.menu_surface(surface, cx))
                     .occlude()
                     .absolute()
                     .bottom(footer_height)
@@ -473,14 +480,28 @@ impl Render for GuiApp {
         }
         app = app.child(self.content_menu_overlay(window, cx));
 
-        if self.playlist_action.is_some() {
-            app = app.child(self.playlist_action_overlay(window, cx));
+        let menu_scope = matches!(
+            self.current_keyboard_surface(cx),
+            Some(KeyboardSurface::Menu(..))
+        )
+        .then(|| self.shell.scope().clone());
+        let dialog_scope = (!self.manual_confirmation_open()).then(|| self.shell.scope().clone());
+        let layout_focus = self.shell.layout_focus().clone();
+        self.playlists.update(cx, |playlists, cx| {
+            playlists.set_shell_context(layout_focus, menu_scope, dialog_scope, cx);
+        });
+        if self.playlists.read(cx).action().is_some() {
+            app = app.child(self.playlists.update(cx, |playlists, cx| {
+                playlists.playlist_action_overlay(window, cx)
+            }));
         }
         if self.queue_replace.is_some() {
             app = app.child(self.queue_replace_overlay(window, cx));
         }
-        if self.playlist_editor.is_some() {
-            app = app.child(self.playlist_name_dialog(window, cx));
+        if self.playlists.read(cx).editor_open() {
+            app = app.child(self.playlists.update(cx, |playlists, cx| {
+                playlists.playlist_name_dialog(window, cx)
+            }));
         }
         if self.shell.is_open(shell::Surface::Layouts) {
             app = app.child(self.layouts_panel(window, cx));
@@ -492,8 +513,13 @@ impl Render for GuiApp {
                     .cached(gpui::StyleRefinement::default().absolute().size_full()),
             );
         }
-        if self.duplicate_review.open {
-            app = app.child(self.duplicate_review_dialog(window, cx));
+        if self.duplicates.read(cx).is_open() {
+            let surface = self.dialog_surface(components::modal_backdrop("duplicate-review-modal"));
+            app = app.child(self.duplicates.update(cx, |duplicates, cx| {
+                duplicates
+                    .render_modal(surface, window, cx)
+                    .into_any_element()
+            }));
         }
         if self.shell.is_open(shell::Surface::About) {
             static LOGO: std::sync::LazyLock<Arc<Image>> = std::sync::LazyLock::new(|| {

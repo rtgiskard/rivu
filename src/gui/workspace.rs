@@ -125,7 +125,9 @@ impl Workspace {
     /// Structural edits invalidate geometry but retain surviving panels' scroll
     /// positions, including tabs that are not currently painted.
     pub(super) fn reconcile_structure(&mut self) -> Cancellation {
-        self.scroll_views.borrow_mut().retain_layout(self.layouts.current());
+        self.scroll_views
+            .borrow_mut()
+            .retain_layout(self.layouts.current());
         self.interaction
             .layout_changed(self.layouts.current().root.as_ref())
     }
@@ -337,7 +339,10 @@ mod tests {
             .find(|panel| panel.kind == "albums")
             .unwrap()
             .id;
-        let scroll = workspace.scroll_views.borrow_mut().list(("library", library));
+        let scroll = workspace
+            .scroll_views
+            .borrow_mut()
+            .list(("library", library));
         scroll
             .0
             .borrow()
@@ -348,7 +353,10 @@ mod tests {
         assert!(!workspace.panel_demand("library", true));
         assert!(workspace.panel_demand("albums", true));
         assert!(!workspace.panel_demand("albums", false));
-        let retained = workspace.scroll_views.borrow_mut().list(("library", library));
+        let retained = workspace
+            .scroll_views
+            .borrow_mut()
+            .list(("library", library));
         assert!(std::rc::Rc::ptr_eq(&scroll.0, &retained.0));
         assert_eq!(retained.0.borrow().base_handle.offset().y, px(-120.));
     }

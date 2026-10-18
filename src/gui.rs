@@ -1,11 +1,12 @@
 mod album_artwork;
 mod album_browser;
 mod artwork;
-mod browser;
 mod components;
+mod coordination;
 mod duplicates;
 mod feature;
 mod fonts;
+mod history;
 mod layout;
 mod library;
 mod list_interaction;
@@ -14,6 +15,7 @@ mod manual_actions;
 mod metadata;
 mod paged;
 mod panels;
+mod playback;
 mod playlists;
 mod presentation;
 mod queue;
@@ -35,11 +37,8 @@ use crate::{
 };
 use anyhow::Result;
 use ashpd::desktop::file_chooser::SelectedFiles;
-use browser::BrowserState;
-use browser::requests::ViewRequestKind;
+use components::drag_preview;
 use components::input::{Input, InputEvent};
-use components::search::{ListSearch, SearchEvent};
-use components::{ButtonTooltip, caption, drag_preview, list_row};
 use futures::{StreamExt, channel::mpsc};
 use gpui::{prelude::*, *};
 use layout::interaction::{
@@ -50,7 +49,6 @@ use layout::save_owner::LayoutSaveHandle;
 use layout::{Axis, Edge, Node};
 use library::LibraryNode;
 use list_interaction::{ContentDrag, ContentMenuRequest, TrackSource};
-use metadata::session::MetadataSession;
 pub(crate) use session::UiSession;
 use std::{
     cell::RefCell,
@@ -58,7 +56,6 @@ use std::{
     path::PathBuf,
     rc::{Rc, Weak},
     sync::Arc,
-    time::{Duration, Instant},
 };
 use url::Url;
 
@@ -73,96 +70,58 @@ pub(crate) fn init(cx: &mut App) -> Result<()> {
 const UI_INSET: f32 = 8.0;
 const SPLIT_GUTTER: f32 = 4.0;
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-enum Field {
-    PlaylistName,
-    LayoutName,
-    Title,
-    Artist,
-    Album,
-}
-
 struct PanelSpec {
     kind: &'static str,
     title_id: &'static str,
-    render: fn(&mut GuiApp, &layout::Panel, &mut Window, &mut Context<GuiApp>) -> AnyElement,
 }
 const PANELS: &[PanelSpec] = &[
     PanelSpec {
         kind: "transport",
         title_id: "shell-panel-playback",
-        render: |app, panel, window, cx| app.transport_panel(panel.id, window, cx),
     },
     PanelSpec {
         kind: "library",
         title_id: "shell-panel-library",
-        render: |app, panel, window, cx| {
-            app.library_panel(panel.id, panel.show_tab_bar, window, cx)
-        },
     },
     PanelSpec {
         kind: "albums",
         title_id: "shell-panel-albums",
-        render: |app, panel, window, cx| app.album_browser_panel(panel.id, window, cx),
     },
     PanelSpec {
         kind: "queue",
         title_id: "shell-panel-queue",
-        render: |app, panel, window, cx| app.queue_panel(panel.id, panel.show_tab_bar, window, cx),
     },
     PanelSpec {
         kind: "playlists",
         title_id: "shell-panel-playlists",
-        render: |app, panel, window, cx| app.playlists_panel(panel.id, window, cx),
     },
     PanelSpec {
         kind: "history",
         title_id: "shell-panel-history",
-        render: |app, panel, window, cx| app.history_panel(panel.id, window, cx),
     },
     PanelSpec {
         kind: "metadata",
         title_id: "shell-panel-metadata",
-        render: |app, panel, window, cx| app.metadata_panel(panel.id, window, cx),
     },
     PanelSpec {
         kind: "album_artwork",
         title_id: "shell-panel-album-artwork",
-        render: |app, panel, _, cx| {
-            app.artwork_panels
-                .entry(panel.id)
-                .or_insert_with(|| {
-                    cx.new(|cx| {
-                        album_artwork::AlbumArtworkPanel::new(
-                            panel.id,
-                            app.album_artwork.clone(),
-                            cx,
-                        )
-                    })
-                })
-                .clone()
-                .into_any_element()
-        },
     },
     PanelSpec {
         kind: "spectrum",
         title_id: "shell-panel-spectrum",
-        render: |app, panel, window, cx| app.spectrum_panel(panel.id, window, cx),
     },
     PanelSpec {
         kind: "spectrogram",
         title_id: "shell-panel-spectrogram",
-        render: |app, panel, window, cx| app.spectrogram_panel(panel.id, window, cx),
     },
     PanelSpec {
         kind: "waveform",
         title_id: "shell-panel-waveform",
-        render: |app, panel, window, cx| app.waveform_panel(panel.id, window, cx),
     },
     PanelSpec {
         kind: "audio_visualizer",
         title_id: "shell-panel-audio-visualizer",
-        render: GuiApp::audio_visualizer_panel,
     },
 ];
 fn panel_spec(kind: &str) -> Option<&'static PanelSpec> {
@@ -229,13 +188,6 @@ fn dock_edge(position: Point<Pixels>, bounds: Bounds<Pixels>) -> Option<Edge> {
         (None, None) => Some(Edge::Center),
         _ => None,
     }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum HistorySort {
-    Recent,
-    Title,
-    Plays,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -354,35 +306,28 @@ pub(super) struct GuiApp {
     state: Rc<GuiSnapshot>,
     workspace: workspace::Workspace,
     session: Weak<RefCell<UiSession>>,
-    inputs: HashMap<Field, Entity<Input>>,
-    queue_search: Entity<ListSearch>,
-    playlist_search: Entity<ListSearch>,
-    playlist_entries_search: Entity<ListSearch>,
-    history_search: Entity<ListSearch>,
-    library_search: Entity<ListSearch>,
-    // Last explicitly targeted panel; unsupported panels own (and suppress) row keys too.
+    layout_name: Entity<Input>,
+    // Last explicitly targeted panel; unsupported panels suppress row keys too.
     search_panel: Option<u64>,
-    browser: BrowserState,
-    loading_text: loading::LoadingText<loading::LoadingOwner>,
-    metadata: MetadataSession,
-    metadata_read: metadata::MetadataReadCoordinator,
+    focus: Option<BrowserFocus>,
+    library: Entity<library::Library>,
+    queue: Entity<queue::Queue>,
+    playlists: Entity<playlists::Playlists>,
+    history: Entity<history::History>,
+    metadata: Entity<metadata::Metadata>,
+    duplicates: Entity<duplicates::Duplicates>,
+    playback: Entity<playback::Playback>,
     manual_intents: manual_actions::ManualIntents,
-    duplicate_review: duplicates::DuplicateReview,
-    metadata_decoder_hint: crate::model::DecoderHint,
     shell: shell::WindowShell,
 
     error: Option<String>,
     artwork_manager: Arc<crate::artwork::ArtworkManager>,
     artwork_images: artwork::ArtworkImages,
-    artwork_loader: artwork::ArtworkLoader,
-    artwork_view: artwork::ArtworkView,
     default_album: Entity<artwork::Artwork>,
     album_artwork: Entity<album_artwork::AlbumArtwork>,
     artwork_panels: HashMap<u64, Entity<album_artwork::AlbumArtworkPanel>>,
     album_browsers: HashMap<u64, Entity<album_browser::AlbumBrowser>>,
-    feature_panels: HashMap<u64, Entity<shell::panels::FeaturePanel>>,
-    playlist_editor: Option<playlists::editor::PlaylistEditor>,
-    playlist_action: Option<playlists::PlaylistAction>,
+    panel_views: HashMap<u64, Entity<shell::panels::PanelView>>,
     queue_replace: Option<queue_replace::QueueReplacement>,
     settings: Entity<settings::Settings>,
     presentation: Entity<presentation::Presentation>,
@@ -395,14 +340,7 @@ pub(super) struct GuiApp {
     full_waveform_request: FullWaveformRequest,
     window_visible: bool,
     ui_font: Font,
-    history_column_widths: Option<panels::HistoryColumnWidths>,
     _subscriptions: Vec<Subscription>,
-}
-
-impl Drop for GuiApp {
-    fn drop(&mut self) {
-        self.cancel_duplicate_task();
-    }
 }
 
 impl GuiApp {
@@ -420,18 +358,12 @@ impl GuiApp {
     }
 
     fn input_focused(&self, window: &Window, cx: &App) -> bool {
-        self.inputs
-            .values()
-            .any(|input| input.read(cx).is_focused(window))
-            || [
-                &self.queue_search,
-                &self.playlist_search,
-                &self.playlist_entries_search,
-                &self.history_search,
-                &self.library_search,
-            ]
-            .iter()
-            .any(|search| search.read(cx).input_focused(window, cx))
+        self.layout_name.read(cx).is_focused(window)
+            || self.library.read(cx).input_focused(window, cx)
+            || self.queue.read(cx).input_focused(window, cx)
+            || self.playlists.read(cx).input_focused(window, cx)
+            || self.history.read(cx).input_focused(window, cx)
+            || self.metadata.read(cx).input_focused(window, cx)
             || self
                 .album_browsers
                 .values()
@@ -448,26 +380,16 @@ impl GuiApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let searches = [
-            &self.library_search,
-            &self.queue_search,
-            &self.playlist_search,
-            &self.playlist_entries_search,
-            &self.history_search,
-        ];
-        if let Some(search) = searches
-            .iter()
-            .find(|search| search.read(cx).input_focused(window, cx))
-        {
-            let search = (*search).clone();
-            return search.update(cx, |search, cx| {
-                if focus {
-                    search.focus(window, cx);
-                    true
-                } else {
-                    search.escape(window, cx)
-                }
-            });
+        for kind in ["library", "queue", "playlists", "history"] {
+            let focused = match kind {
+                "library" => self.library.read(cx).input_focused(window, cx),
+                "queue" => self.queue.read(cx).input_focused(window, cx),
+                "playlists" => self.playlists.read(cx).input_focused(window, cx),
+                _ => self.history.read(cx).input_focused(window, cx),
+            };
+            if focused {
+                return self.route_feature_search(kind, focus, window, cx);
+            }
         }
         if let Some(albums) = self
             .album_browsers
@@ -492,7 +414,7 @@ impl GuiApp {
             .search_panel
             .and_then(|id| panels.iter().find(|panel| panel.id == id).copied())
             .or_else(|| {
-                let kind = match self.browser.focus() {
+                let kind = match self.focus {
                     Some(BrowserFocus::List(ListFocus::Library)) => "library",
                     Some(BrowserFocus::List(ListFocus::Queue)) => "queue",
                     Some(BrowserFocus::List(ListFocus::PlaylistTracks))
@@ -516,46 +438,78 @@ impl GuiApp {
         let Some(panel) = panel else {
             return false;
         };
-        let search = match panel.kind.as_str() {
-            "library" => self.library_search.clone(),
-            "queue" => self.queue_search.clone(),
-            "history" => self.history_search.clone(),
-            "playlists"
-                if self.browser.focus() == Some(BrowserFocus::List(ListFocus::PlaylistTracks)) =>
-            {
-                self.playlist_entries_search.clone()
-            }
-            "playlists" => self.playlist_search.clone(),
-            "albums" => {
-                let Some(albums) = self.album_browsers.get(&panel.id).cloned() else {
-                    return false;
-                };
-                return albums.update(cx, |albums, cx| {
+        let id = panel.id;
+        let kind = panel.kind.clone();
+        if kind == "albums" {
+            let Some(albums) = self.album_browsers.get(&id).cloned() else {
+                return false;
+            };
+            return albums.update(cx, |albums, cx| {
+                if focus {
+                    albums.focus_search(window, cx);
+                    true
+                } else {
+                    albums.escape_search(window, cx)
+                }
+            });
+        }
+        self.route_feature_search(&kind, focus, window, cx)
+    }
+
+    fn route_feature_search(
+        &mut self,
+        kind: &str,
+        focus: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        match kind {
+            "library" => self.library.update(cx, |owner, cx| {
+                if focus {
+                    owner.focus_search(window, cx);
+                    true
+                } else {
+                    owner.escape_search(window, cx)
+                }
+            }),
+            "queue" => self.queue.update(cx, |owner, cx| {
+                if focus {
+                    owner.focus_search(window, cx);
+                    true
+                } else {
+                    owner.escape_search(window, cx)
+                }
+            }),
+            "history" => self.history.update(cx, |owner, cx| {
+                if focus {
+                    owner.focus_search(window, cx);
+                    true
+                } else {
+                    owner.escape_search(window, cx)
+                }
+            }),
+            "playlists" => {
+                let entries = self.focus == Some(BrowserFocus::List(ListFocus::PlaylistTracks));
+                self.playlists.update(cx, |owner, cx| {
                     if focus {
-                        albums.focus_search(window, cx);
+                        owner.focus_search(entries, window, cx);
                         true
                     } else {
-                        albums.escape_search(window, cx)
+                        owner.escape_search(window, cx)
                     }
-                });
+                })
             }
-            _ => return false,
-        };
-        search.update(cx, |search, cx| {
-            if focus {
-                search.focus(window, cx);
-                true
-            } else {
-                search.escape(window, cx)
-            }
-        })
+            _ => false,
+        }
     }
 
     fn dismiss_input_composition(&self, window: &Window, cx: &mut Context<Self>) -> bool {
-        self.inputs
-            .values()
-            .find(|input| input.read(cx).is_focused(window))
-            .is_some_and(|input| input.update(cx, |input, cx| input.dismiss_composition(cx)))
+        self.metadata
+            .update(cx, |owner, cx| owner.dismiss_input_composition(window, cx))
+            || (self.layout_name.read(cx).is_focused(window)
+                && self
+                    .layout_name
+                    .update(cx, |input, cx| input.dismiss_composition(cx)))
     }
 
     fn activate_library(
@@ -575,12 +529,12 @@ impl GuiApp {
             .map(|panel| panel.id)
         {
             self.workspace.layouts.current_mut().activate(panel_id);
-            self.browser.focus_list(ListFocus::Library);
+            self.set_browser_focus(Some(BrowserFocus::List(ListFocus::Library)), cx);
             self.search_panel = Some(panel_id);
             self.shell.dismiss(shell::Surface::PanelCatalog);
             if focus_search {
-                self.library_search
-                    .update(cx, |search, cx| search.focus(window, cx));
+                self.library
+                    .update(cx, |owner, cx| owner.focus_search(window, cx));
             }
             self.persist_layout(cx);
         } else if self.workspace.layouts.current().locked {
@@ -595,11 +549,11 @@ impl GuiApp {
             self.workspace.layouts.current_mut().activate(panel_id);
             self.layout_changed(cx);
             self.search_panel = Some(panel_id);
-            self.browser.focus_list(ListFocus::Library);
+            self.set_browser_focus(Some(BrowserFocus::List(ListFocus::Library)), cx);
             self.shell.dismiss(shell::Surface::PanelCatalog);
             if focus_search {
-                self.library_search
-                    .update(cx, |search, cx| search.focus(window, cx));
+                self.library
+                    .update(cx, |owner, cx| owner.focus_search(window, cx));
             }
             self.persist_layout(cx);
         }
@@ -633,7 +587,7 @@ impl GuiApp {
         };
         self.search_panel = Some(panel_id);
         self.shell.dismiss(shell::Surface::PanelCatalog);
-        self.browser.focus_list(ListFocus::Queue);
+        self.set_browser_focus(Some(BrowserFocus::List(ListFocus::Queue)), cx);
         self.focus_layout(window, cx);
         self.persist_layout(cx);
         true
@@ -641,70 +595,55 @@ impl GuiApp {
 
     fn active_list_focus(&self) -> Option<ListFocus> {
         let panel = self.keyboard_panel()?;
-        panel_list_focus(&panel.kind, self.browser.focus())
-    }
-
-    fn directory_row_selected(&self, row: &crate::model::DirectoryRow) -> bool {
-        match row {
-            crate::model::DirectoryRow::Directory { path } => {
-                self.browser.library.selected_nodes().iter().any(|node| {
-                    matches!(node, library::LibraryNode::Directory(selected) if selected.as_ref() == path.as_path())
-                })
-            }
-            crate::model::DirectoryRow::Track(row) => self.browser.library.selected().contains(&row.id),
-        }
+        panel_list_focus(&panel.kind, self.focus)
     }
 
     fn navigate_list(&mut self, focus: ListFocus, down: bool, cx: &mut Context<Self>) {
         match focus {
-            ListFocus::Library => self.navigate_library_tree(down, cx),
-            ListFocus::Queue => self.navigate_queue(down, cx),
-            ListFocus::PlaylistTracks => self.navigate_playlist(down, false, false, cx),
+            ListFocus::Library => self
+                .library
+                .update(cx, |owner, cx| owner.navigate_library_tree(down, cx)),
+            ListFocus::Queue => self
+                .queue
+                .update(cx, |owner, cx| owner.navigate_queue(down, cx)),
+            ListFocus::PlaylistTracks => self.playlists.update(cx, |owner, cx| {
+                owner.navigate_playlist(down, false, false, cx)
+            }),
         }
     }
 
     fn play_focused_selection(&mut self, focus: ListFocus, cx: &mut Context<Self>) {
         match focus {
-            ListFocus::Library => {
-                if self.library_range_pending() {
-                    return;
+            ListFocus::Library => self.library.update(cx, |owner, cx| {
+                if !owner.library_range_pending() {
+                    owner.activate_library_tree(cx);
                 }
-                self.activate_library_tree(cx);
-            }
+            }),
             ListFocus::Queue => {
-                let queue_id = self.browser.queue.active().map(|row| row.id);
-                if let Some(queue_id) = queue_id {
-                    self.send(Command::PlayQueue { queue_id }, cx);
+                if let Some(row) = self.queue.read(cx).active() {
+                    self.send(Command::PlayQueue { queue_id: row.id }, cx);
                 }
             }
-            ListFocus::PlaylistTracks => {
-                if self.browser.playlists().track_selection.ready()
-                    && let Some(row) = self.browser.playlists().track_selection.active
-                {
-                    self.send(
-                        Command::Play {
-                            track_id: row.track_id,
-                        },
-                        cx,
-                    );
-                }
-            }
+            ListFocus::PlaylistTracks => self
+                .playlists
+                .update(cx, |owner, cx| owner.play_selection(cx)),
         }
     }
 
     fn remove_focused_queue(&mut self, focus: ListFocus, cx: &mut Context<Self>) {
         if focus == ListFocus::PlaylistTracks {
-            self.remove_playlist_selection(cx);
+            self.playlists
+                .update(cx, |owner, cx| owner.remove_playlist_selection(cx));
             return;
         }
         if focus != ListFocus::Queue {
             return;
         }
-        let queue_ids = self.selected_queue_ids_in_order();
+        let queue_ids = self.queue.read(cx).selected_queue_ids_in_order();
         if queue_ids.is_empty() {
             return;
         }
-        self.browser.queue.clear();
+        self.queue.update(cx, |owner, cx| owner.clear_selection(cx));
 
         self.send(Command::RemoveQueueEntries { queue_ids }, cx);
     }
@@ -734,53 +673,9 @@ impl GuiApp {
             .map(|error| i18n.format("shell-load-layouts-error", &[("error", error.into())]));
         workspace.save_error = error.clone();
         let ui_font = fonts::resolve(&state.system.config.ui_font, cx);
-        let mut inputs = HashMap::new();
-        for (field, placeholder) in [
-            (Field::PlaylistName, "shell-playlist-name"),
-            (Field::LayoutName, "shell-layout-name"),
-            (Field::Title, "shell-title"),
-            (Field::Artist, "shell-artist"),
-            (Field::Album, "shell-album"),
-        ] {
-            inputs.insert(
-                field,
-                cx.new(|cx| Input::new("", i18n.text(placeholder).to_owned(), cx)),
-            );
-        }
+        let layout_name =
+            cx.new(|cx| Input::new("", i18n.text("shell-layout-name").to_owned(), cx));
         let mut subscriptions = Vec::new();
-        let queue_search = cx.new(|cx| ListSearch::new(Arc::clone(&i18n), cx));
-        let playlist_search = cx.new(|cx| ListSearch::new(Arc::clone(&i18n), cx));
-        let playlist_entries_search = cx.new(|cx| ListSearch::new(Arc::clone(&i18n), cx));
-        let history_search = cx.new(|cx| ListSearch::new(Arc::clone(&i18n), cx));
-        let library_search = cx.new(|cx| ListSearch::new(Arc::clone(&i18n), cx));
-        subscriptions.push(cx.subscribe(&queue_search, |this, _, event, cx| {
-            let SearchEvent::Changed(query) = event;
-            this.apply_queue_search(query.clone(), cx);
-        }));
-        subscriptions.push(cx.subscribe(&playlist_search, |this, _, event, cx| {
-            let SearchEvent::Changed(query) = event;
-            this.apply_playlist_search(query.clone(), cx);
-        }));
-        subscriptions.push(
-            cx.subscribe(&playlist_entries_search, |this, _, event, cx| {
-                let SearchEvent::Changed(query) = event;
-                this.apply_playlist_entries_search(query.clone(), cx);
-            }),
-        );
-        subscriptions.push(cx.subscribe(&history_search, |this, _, event, cx| {
-            let SearchEvent::Changed(query) = event;
-            this.begin_manual_intent();
-            this.browser.history.set_query(query.clone());
-            if !this.metadata_protected(cx) {
-                this.clear_metadata_selection(cx);
-            }
-            this.workspace.scroll_views.borrow_mut().scroll_list_to("history", 0);
-            cx.notify();
-        }));
-        subscriptions.push(cx.subscribe(&library_search, |this, _, event, cx| {
-            let SearchEvent::Changed(query) = event;
-            this.apply_library_search(query.clone(), cx);
-        }));
         let settings = cx.new(|cx| {
             settings::Settings::new(
                 Arc::clone(&i18n),
@@ -805,7 +700,11 @@ impl GuiApp {
                     cx.notify();
                 }
                 settings::SettingsEvent::ReviewDuplicates => {
-                    this.open_duplicate_review(window, cx);
+                    this.cancel_interaction(window, cx);
+                    this.panel_menu = None;
+                    this.shell.dismiss(shell::Surface::AppMenu);
+                    this.shell.dismiss(shell::Surface::PanelCatalog);
+                    this.duplicates.update(cx, |owner, cx| owner.open(cx));
                 }
                 settings::SettingsEvent::ApplyVisualizer {
                     panel_id,
@@ -921,60 +820,30 @@ impl GuiApp {
                 }
             }),
         );
-        subscriptions.push(cx.subscribe_in(
-            &inputs[&Field::LayoutName],
-            window,
-            |this, _, event, window, cx| {
+        subscriptions.push(
+            cx.subscribe_in(&layout_name, window, |this, _, event, window, cx| {
                 if matches!(event, InputEvent::Submit)
                     && this.shell.is_open(shell::Surface::Layouts)
                     && this.layout_action.is_some()
                 {
                     this.finish_layout_action(window, cx);
                 }
-            },
-        ));
-        subscriptions.push(cx.subscribe_in(
-            &inputs[&Field::PlaylistName],
-            window,
-            |this, _, event, window, cx| match event {
-                InputEvent::Submit => this.submit_playlist_name(window, cx),
-                InputEvent::Changed { .. } => {
-                    if let Some(editor) = this.playlist_editor.as_mut() {
-                        editor.error = None;
-                    }
-                    cx.notify();
-                }
-            },
-        ));
-        for field in [Field::Title, Field::Artist, Field::Album] {
-            subscriptions.push(cx.subscribe(&inputs[&field], move |_, _, event, cx| {
-                if matches!(event, InputEvent::Changed { .. }) {
-                    cx.notify();
-                }
-            }));
-        }
+            }),
+        );
         subscriptions.push(
             cx.observe_window_visibility(window, |this, visibility, window, cx| {
                 this.window_visible = matches!(visibility, WindowVisibility::Visible);
+                this.reconcile_feature_demand(cx);
                 if !this.window_visible {
                     this.invalidate_window_interaction(window, cx);
-                    this.cancel_window_reads();
+                    this.cancel_window_reads(cx);
                 }
                 this.refresh(cx);
                 this.sync_analysis(cx);
                 if !this.window_visible {
                     // Hidden windows may never deliver another paint/frame.
                     // Flush both current and already-scheduled retired owners.
-                    this.presentation.update(cx, |presentation, cx| {
-                        presentation.release_render_images(window, cx);
-                    });
-                    this.album_artwork.update(cx, |artwork, cx| {
-                        artwork.release_all_images(window, cx);
-                    });
-                    for albums in this.album_browsers.values() {
-                        albums.update(cx, |albums, cx| albums.release_all_images(window, cx));
-                    }
-                    this.artwork_images.release_all_retired(window, cx);
+                    this.release_render_images(window, cx);
                 }
                 this.presentation.update(cx, |presentation, cx| {
                     presentation.request_frame(window, cx)
@@ -1031,6 +900,12 @@ impl GuiApp {
         let album_default = default_album.read(cx).circular();
         let artwork_images =
             artwork::ArtworkImages::new(state.system.config.artwork_decode_budget_mb);
+        let feature_context = feature::FeatureContext {
+            snapshots: Rc::clone(&snapshots),
+            i18n: Arc::clone(&i18n),
+            labels: Rc::clone(&localized_text),
+            scroll: Rc::clone(&workspace.scroll_views),
+        };
         let mut app = Self {
             i18n: Arc::clone(&i18n),
             localized_text,
@@ -1040,24 +915,27 @@ impl GuiApp {
             state,
             workspace,
             session,
-            inputs,
-            queue_search,
-            playlist_search,
-            playlist_entries_search,
-            history_search,
-            library_search,
+            layout_name,
             search_panel: None,
-            browser: BrowserState::default(),
-            loading_text: loading::LoadingText::default(),
-            metadata: MetadataSession::default(),
-            metadata_read: Default::default(),
+            focus: None,
+            library: cx.new(|cx| library::Library::new(feature_context.clone(), cx)),
+            queue: cx.new(|cx| queue::Queue::new(feature_context.clone(), cx)),
+            playlists: cx.new(|cx| playlists::Playlists::new(feature_context.clone(), cx)),
+            history: cx.new(|cx| history::History::new(feature_context.clone(), cx)),
+            metadata: cx.new(|cx| {
+                metadata::Metadata::new(
+                    feature_context.clone(),
+                    Arc::clone(&artwork_manager),
+                    artwork_images.clone(),
+                    default_album.clone(),
+                    cx,
+                )
+            }),
+            duplicates: cx.new(|cx| duplicates::Duplicates::new(feature_context.clone(), cx)),
+            playback: cx.new(|cx| playback::Playback::new(feature_context, cx)),
             manual_intents: manual_actions::ManualIntents::default(),
-            duplicate_review: duplicates::DuplicateReview::default(),
-            metadata_decoder_hint: Default::default(),
             shell: shell::WindowShell::new(cx),
             error,
-            playlist_editor: None,
-            playlist_action: None,
             queue_replace: None,
             album_artwork: cx.new(|cx| {
                 let default_album = cx.new(|_| album_default);
@@ -1068,13 +946,11 @@ impl GuiApp {
                 )
             }),
             artwork_panels: HashMap::new(),
-            default_album,
             album_browsers: HashMap::new(),
-            feature_panels: HashMap::new(),
+            panel_views: HashMap::new(),
             artwork_manager,
-            artwork_loader: artwork::ArtworkLoader::default(),
-            artwork_view: artwork::ArtworkView::new(artwork_images.clone()),
             artwork_images,
+            default_album,
             presentation,
             layout_action: None,
             panel_menu: None,
@@ -1086,17 +962,16 @@ impl GuiApp {
             window_visible: window.is_visible(),
             _subscriptions: subscriptions,
             ui_font,
-            history_column_widths: None,
         };
-        app.sync_metadata_default(cx);
-        let effects = app.browser.reconcile(&app.state, &app.state);
-        app.apply_browser_effects(effects, cx);
+        let subscriptions = app.subscribe_features(window, cx);
+        app._subscriptions.extend(subscriptions);
+        app.reconcile_features(cx);
         app.sync_layout_save(cx);
         app.sync_analysis(cx);
         // Initialization may have completed before the wakeup callback was
         // installed. Reconcile once so the first frame never keeps the empty snapshot.
         app.refresh(cx);
-        app.refresh_queue(cx);
+        app.queue.update(cx, |queue, cx| queue.refresh_queue(cx));
         app.shell.layout_focus().focus(window, cx);
         window
             .observe_release(&cx.entity(), cx, |this: &mut Self, window, cx| {
@@ -1109,7 +984,9 @@ impl GuiApp {
         self.presentation.update(cx, |presentation, cx| {
             presentation.release_render_images(window, cx);
         });
-        self.artwork_view.release_all_images(window, cx);
+        self.metadata.update(cx, |metadata, cx| {
+            metadata.release_render_images(window, cx)
+        });
         self.album_artwork.update(cx, |artwork, cx| {
             artwork.release_all_images(window, cx);
         });
@@ -1128,194 +1005,16 @@ impl GuiApp {
         if self.state.queue.total == 0 {
             return;
         }
-        self.begin_playlist_name(
-            playlists::editor::PlaylistNameAction::SaveQueue,
-            format!("Queue_{}", chrono::Local::now().format("%Y%m%d_%H%M%S")),
-            window,
-            cx,
-        );
-    }
-
-    fn choose_playlist_import(&mut self, cx: &mut Context<Self>) {
-        let i18n = Arc::clone(&self.i18n);
-        cx.spawn(async move |this, cx| {
-            let result = SelectedFiles::open_file()
-                .title(i18n.text("shell-import-playlist"))
-                .accept_label(i18n.text("shell-import"))
-                .modal(true)
-                .send()
-                .await
-                .and_then(|request| request.response());
-            let _ = this.update(cx, |this, cx| {
-                match chooser_result(result) {
-                    Ok(Some(files)) => {
-                        if let Some(path) = chooser_path(&files) {
-                            this.send(Command::ImportPlaylist { path, name: None }, cx);
-                        }
-                    }
-                    Ok(None) => return,
-                    Err(error) => {
-                        this.error = Some(this.i18n.format(
-                            "shell-open-playlist-error",
-                            &[("error", error.to_string().into())],
-                        ))
-                    }
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    fn choose_playlist_export(&mut self, playlist_id: i64, cx: &mut Context<Self>) {
-        let i18n = Arc::clone(&self.i18n);
-        cx.spawn(async move |this, cx| {
-            let result = SelectedFiles::save_file()
-                .title(i18n.text("shell-export-playlist"))
-                .accept_label(i18n.text("shell-export"))
-                .modal(true)
-                .send()
-                .await
-                .and_then(|request| request.response());
-            let _ = this.update(cx, |this, cx| {
-                match chooser_result(result) {
-                    Ok(Some(files)) => {
-                        if let Some(path) = chooser_path(&files) {
-                            this.send(Command::ExportPlaylist { playlist_id, path }, cx);
-                        }
-                    }
-                    Ok(None) => return,
-                    Err(error) => {
-                        this.error = Some(this.i18n.format(
-                            "shell-open-playlist-destination-error",
-                            &[("error", error.to_string().into())],
-                        ))
-                    }
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-    fn choose_library_root(&mut self, cx: &mut Context<Self>) {
-        let i18n = Arc::clone(&self.i18n);
-        cx.spawn(async move |this, cx| {
-            let result = SelectedFiles::open_file()
-                .title(i18n.text("shell-add-library-folder"))
-                .accept_label(i18n.text("shell-add"))
-                .directory(true)
-                .modal(true)
-                .send()
-                .await
-                .and_then(|request| request.response());
-            let _ = this.update(cx, |this, cx| {
-                match chooser_result(result) {
-                    Ok(Some(files)) => {
-                        if let Some(path) = chooser_path(&files)
-                            && let Err(error) = this.handle.update_gui_config(
-                                crate::core::GuiConfigChange::AddLibraryRoot(path),
-                            )
-                        {
-                            this.error = Some(format!("{error:#}"));
-                        }
-                    }
-                    Ok(None) => return,
-                    Err(error) => {
-                        this.error = Some(this.i18n.format(
-                            "shell-open-library-error",
-                            &[("error", error.to_string().into())],
-                        ))
-                    }
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-    fn input(&self, field: Field) -> Entity<Input> {
-        self.inputs[&field].clone()
-    }
-    fn value(&self, field: Field, cx: &App) -> String {
-        self.inputs[&field].read(cx).text().to_owned()
-    }
-    fn set_value(&mut self, field: Field, value: impl Into<SharedString>, cx: &mut Context<Self>) {
-        let value = value.into();
-        self.inputs[&field].update(cx, |input, cx| input.set_text(value, cx));
-    }
-    fn paged_loading_row(
-        &self,
-        kind: ViewRequestKind,
-        index: usize,
-        cx: &mut Context<Self>,
-    ) -> Stateful<Div> {
-        let theme = crate::gui::theme::palette(cx);
-        let error = match kind {
-            ViewRequestKind::Summaries => self.browser.playlists().summaries().rows.error(index),
-            ViewRequestKind::Entries => self.browser.playlists().entries().rows.error(index),
-            ViewRequestKind::Queue => self.browser.queue.rows().error(index),
-            _ => None,
-        };
-        list_row(theme, ("loading-row", index), false)
-            .child(
-                caption(
-                    theme,
-                    if error.is_some() {
-                        self.tr("shell-loading-failed")
-                    } else {
-                        self.tr("shell-loading")
-                    },
-                )
-                .when(
-                    !self
-                        .loading_text
-                        .show(&loading::LoadingOwner::View(kind), error.is_some()),
-                    |text| text.invisible(),
-                ),
+        self.playlists.update(cx, |owner, cx| {
+            owner.begin_playlist_name(
+                playlists::editor::PlaylistNameAction::SaveQueue,
+                format!("Queue_{}", chrono::Local::now().format("%Y%m%d_%H%M%S")),
+                window,
+                cx,
             )
-            .when_some(error.map(str::to_owned), |row, error| {
-                row.tooltip(move |_, cx| {
-                    cx.new(|_| ButtonTooltip {
-                        text: error.clone().into(),
-                    })
-                    .into()
-                })
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.retry_view_page(kind, cx);
-                    cx.notify();
-                }))
-            })
+        });
     }
 
-    pub(super) fn select_history_track(
-        &mut self,
-        id: i64,
-        shift: bool,
-        multi: bool,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(commit) = self.browser.history.prepare_selection(id, shift, multi) else {
-            return;
-        };
-        let intent = self.begin_manual_intent();
-        self.ready_manual_action(
-            intent,
-            manual_actions::ManualAction::History {
-                commit,
-                structure_revision: self.state.library.structure_revision,
-            },
-            cx,
-        );
-    }
-
-    fn commit_history_selection(&mut self, commit: browser::HistoryCommit, cx: &mut Context<Self>) {
-        let id = commit.track_id;
-        if !self.browser.history.commit_selection(commit) {
-            return;
-        }
-        self.request_track(id, cx);
-        self.sync_waveform(cx);
-        cx.notify();
-    }
     fn apply_interaction_cancellation(
         &mut self,
         cancellation: Cancellation,
@@ -1361,13 +1060,17 @@ impl GuiApp {
     }
 
     fn apply_layout_change(&mut self, cancellation: Cancellation, cx: &mut Context<Self>) {
-        self.feature_panels
+        self.panel_views
             .retain(|id, _| self.workspace.layouts.current().contains_panel(*id));
         self.apply_interaction_cancellation(cancellation, cx);
         self.panel_menu = None;
         self.content_menu = None;
         self.content_generation = self.content_generation.wrapping_add(1);
-        self.browser.clear_focus();
+        self.set_browser_focus(None, cx);
+        for view in self.panel_views.values() {
+            view.update(cx, |_, cx| cx.notify());
+        }
+        self.reconcile_feature_demand(cx);
     }
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
@@ -1402,12 +1105,12 @@ impl GuiApp {
                 );
             });
         }
-        let effects = self.browser.reconcile(&self.state, &state);
-        let history_changed = effects.history_changed;
         let waveform_seek_disabled = self.state.system.config.waveform_seek_enabled
             && !state.system.config.waveform_seek_enabled;
         let still_mode_changed =
             self.state.system.config.still_mode != state.system.config.still_mode;
+        let appearance_changed = self.state.system.config.ui_font != state.system.config.ui_font
+            || self.state.system.config.ui_theme != state.system.config.ui_theme;
         if self.state.system.config.ui_font != state.system.config.ui_font {
             self.ui_font = fonts::resolve(&state.system.config.ui_font, cx);
         }
@@ -1415,7 +1118,12 @@ impl GuiApp {
             theme::set_theme(state.system.config.ui_theme, cx);
         }
         self.state = state;
-        self.apply_browser_effects(effects, cx);
+        self.reconcile_features(cx);
+        if appearance_changed {
+            for view in self.panel_views.values() {
+                view.update(cx, |_, cx| cx.notify());
+            }
+        }
         if self
             .artwork_images
             .set_decode_budget_mb(self.state.system.config.artwork_decode_budget_mb, cx)
@@ -1426,9 +1134,6 @@ impl GuiApp {
             }
             cx.notify();
         }
-        self.sync_duplicate_review(cx);
-        self.sync_metadata_query();
-        self.sync_metadata_default(cx);
         if still_mode_changed || waveform_seek_disabled {
             let cancellation = self.workspace.interaction.cancel();
             self.apply_interaction_cancellation(cancellation, cx);
@@ -1438,10 +1143,7 @@ impl GuiApp {
                 .update(cx, |waveform, _| waveform.set_seek_enabled(false));
         }
         self.sync_analysis(cx);
-        self.sync_loading_text(cx);
-        if transport_only {
-            self.refresh_playback_panels(history_changed, cx);
-        } else if !changed.is_empty() {
+        if !transport_only && !changed.is_empty() {
             cx.notify();
         }
     }
@@ -1452,7 +1154,7 @@ impl GuiApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let page_size = self.view_page_size();
+        let page_size = self.state.system.config.page_size as usize;
         let albums = self.album_browsers.entry(id).or_insert_with(|| {
             let albums = cx.new(|cx| {
                 album_browser::AlbumBrowser::new(
@@ -1503,7 +1205,7 @@ impl GuiApp {
         let active = self.workspace.layouts.current().active_panels();
         let visible = self.window_visible && !self.state.system.shutting_down;
         let revisions = self.state.query_revisions(None);
-        let page_size = self.view_page_size();
+        let page_size = self.state.system.config.page_size as usize;
         let current_track = self.state.current_track().map(|track| track.id);
         let playback_status = self.state.playback.status;
         self.album_browsers.retain(|id, albums| {
@@ -1551,17 +1253,21 @@ impl GuiApp {
         self.sync_waveform(cx);
     }
 
-    fn sync_full_waveform_request(&mut self) {
+    fn sync_full_waveform_request(&mut self, cx: &App) {
         self.full_waveform_request.retain_target(
-            self.state.current_track().or(self.metadata.track()),
+            self.state
+                .current_track()
+                .or(self.metadata.read(cx).track()),
             self.state.system.config.still_mode,
         );
     }
 
     fn sync_waveform(&mut self, cx: &mut Context<Self>) {
-        self.sync_full_waveform_request();
+        self.sync_full_waveform_request(cx);
+        self.sync_playback_interaction(cx);
+        let metadata_track = self.metadata.read(cx).track_snapshot();
         let current = self.state.current_track();
-        let track = current.or(self.metadata.track());
+        let track = current.or(metadata_track.as_deref());
         let position = if current.is_some() {
             self.workspace
                 .interaction
@@ -1598,7 +1304,11 @@ impl GuiApp {
         if self.state.system.config.still_mode {
             return;
         }
-        let Some(track) = self.state.current_track().or(self.metadata.track()) else {
+        let Some(track) = self
+            .state
+            .current_track()
+            .or(self.metadata.read(cx).track())
+        else {
             return;
         };
         let track_id = track.id;
@@ -1617,7 +1327,7 @@ impl GuiApp {
             let _ = this.update(cx, |this, cx| {
                 // Core changes also arrive while hidden, without a rendered frame.
                 this.refresh(cx);
-                this.sync_full_waveform_request();
+                this.sync_full_waveform_request(cx);
                 if query.stamp(response.revisions) != stamp
                     || query.stamp(this.state.query_revisions_for(&query)) != stamp
                 {
@@ -1625,7 +1335,9 @@ impl GuiApp {
                 }
                 if !this.full_waveform_request.accepts(
                     generation,
-                    this.state.current_track().or(this.metadata.track()),
+                    this.state
+                        .current_track()
+                        .or(this.metadata.read(cx).track()),
                 ) {
                     return;
                 }
@@ -1682,107 +1394,20 @@ impl GuiApp {
             }
             Dragging::Volume(_) => {
                 let value = ((position.x - bounds.origin.x) / bounds.size.width).clamp(0., 1.);
-                self.send(Command::Volume { value }, cx);
+                self.playback
+                    .update(cx, |owner, cx| owner.set_volume(value, cx));
             }
         }
     }
     fn finish_drag(&mut self, cx: &mut Context<Self>) {
         match self.workspace.interaction.finish_drag() {
             DragCommit::None => {}
-            DragCommit::Seek(seek) => self.send(
-                Command::SeekQueue {
-                    queue_id: seek.queue_id,
-                    seconds: seek.seconds,
-                },
-                cx,
-            ),
+            DragCommit::Seek(seek) => self
+                .playback
+                .update(cx, |owner, cx| owner.commit_seek(seek, cx)),
             DragCommit::PersistSplit => self.persist_layout(cx),
         }
-    }
-    fn slider(
-        &self,
-        id: impl Into<ElementId>,
-        value: f32,
-        dragging: Dragging,
-        key: Measured,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let theme = crate::gui::theme::palette(cx);
-        let value = value.clamp(0., 1.);
-        let is_dragging = match (self.workspace.interaction.dragging(), dragging) {
-            (Some(Dragging::Seek(active)), Dragging::Seek(id))
-            | (Some(Dragging::Volume(active)), Dragging::Volume(id)) => active == id,
-            _ => false,
-        };
-        div()
-            .id(id)
-            .group("playback-slider")
-            .relative()
-            .h(px(20.))
-            .w_full()
-            .min_w(px(60.))
-            .cursor_pointer()
-            .flex()
-            .items_center()
-            .child(
-                div()
-                    .w_full()
-                    .h(px(4.))
-                    .flex_shrink_0()
-                    .rounded_full()
-                    .bg(rgb(theme.border))
-                    .child(
-                        div()
-                            .h_full()
-                            .w(relative(value))
-                            .rounded_full()
-                            .bg(rgb(theme.accent)),
-                    ),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .inset_0()
-                    .mx(px(5.))
-                    .flex()
-                    .items_center()
-                    .opacity(0.)
-                    .group_hover("playback-slider", |style| style.opacity(1.))
-                    .when(is_dragging, |view| view.opacity(1.))
-                    .child(
-                        div()
-                            .relative()
-                            .left(relative(value))
-                            .ml(px(-5.))
-                            .size(px(10.))
-                            .flex_shrink_0()
-                            .rounded_full()
-                            .bg(rgb(theme.text)),
-                    ),
-            )
-            .child(self.measurement(key))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                    this.synchronize_interaction(window, cx);
-                    let cancellation = this.workspace.interaction.begin_slider(
-                        dragging,
-                        this.state.queue.current_id,
-                        this.state.playback.duration,
-                    );
-                    if cancellation.docking {
-                        cx.stop_active_drag(window);
-                    }
-                    this.apply_interaction_cancellation(cancellation, cx);
-                    this.drag_position(event.position, event.modifiers.alt, cx);
-                }),
-            )
-            .when(is_dragging, |view| {
-                // Volume release has no command; repaint after the root clears the drag.
-                view.on_mouse_up(MouseButton::Left, cx.listener(|_, _, _, cx| cx.notify()))
-                    .on_mouse_up_out(MouseButton::Left, cx.listener(|_, _, _, cx| cx.notify()))
-            })
-            .into_any_element()
+        self.sync_playback_interaction(cx);
     }
 }
 

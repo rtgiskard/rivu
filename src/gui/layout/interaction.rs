@@ -130,6 +130,7 @@ impl Measurements {
 }
 
 /// A paint callback capability, not a second owner of layout interaction state.
+#[derive(Clone)]
 pub(in crate::gui) struct MeasurementHandle {
     measurements: Rc<RefCell<Measurements>>,
     epoch: u64,

@@ -137,24 +137,6 @@ impl<K: Eq + Hash + 'static> LoadingText<K> {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(super) enum LoadingOwner {
-    View(super::ViewRequestKind),
-    Branch(super::library::TreeBranch),
-}
-
-impl LoadingText<LoadingOwner> {
-    pub(super) fn show_branch(&self, branch: &super::library::TreeBranch, failed: bool) -> bool {
-        // The map contains only current requests (at most four tree workers),
-        // so borrowing the branch avoids a PathBuf allocation for each row.
-        failed
-            || self.pending.iter().any(|(owner, pending)| {
-                matches!(owner, LoadingOwner::Branch(candidate) if candidate == branch)
-                    && pending.visible
-            })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

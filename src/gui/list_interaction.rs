@@ -1,5 +1,4 @@
 use super::*;
-use super::{library::LibraryDrag, playlists::PlaylistDrag, queue::QueueDrag};
 use crate::gui::components::{POPOVER_MAX_REMS, caption, context_menu_container, menu_item};
 use crate::response::ViewResponse;
 
@@ -212,7 +211,8 @@ impl GuiApp {
             _ => None,
         };
         self.panel_menu = None;
-        self.playlist_action = None;
+        self.playlists
+            .update(cx, |playlists, cx| playlists.clear_action(cx));
         self.queue_replace = None;
         let tracks_only = nodes.as_ref().is_none_or(|nodes| {
             nodes
@@ -287,25 +287,14 @@ impl GuiApp {
         cx.notify();
     }
 
-    pub(super) fn can_drop_content(&self, drag: &ContentDrag) -> bool {
-        match drag.source() {
-            Some(TrackSource::Tracks(ids)) => !ids.is_empty(),
-            Some(TrackSource::Album(_)) => !self.content_resolution,
-            None => false,
-        }
-    }
-
     pub(super) fn drop_content(
         &mut self,
-        drag: &ContentDrag,
+        source: TrackSource,
         destination: DragDestination,
         cx: &mut Context<Self>,
     ) {
-        let Some(source) = drag.source() else {
-            return;
-        };
         match source {
-            TrackSource::Tracks(ids) => self.send_content_tracks(ids.clone(), destination, cx),
+            TrackSource::Tracks(ids) => self.send_content_tracks(ids, destination, cx),
             TrackSource::Album(key) => {
                 self.refresh(cx);
                 if self.content_resolution {
@@ -335,7 +324,6 @@ impl GuiApp {
                         .copied(),
                     _ => None,
                 };
-                let key = key.clone();
                 let handle = self.handle.clone();
                 cx.spawn(async move |this, cx| {
                     let result = cx
@@ -441,7 +429,9 @@ impl GuiApp {
                     _ => DragDestination::Queue,
                 };
                 if let Some(nodes) = menu.nodes {
-                    self.resolve_library_drag(&nodes, destination, cx);
+                    self.library.update(cx, |library, cx| {
+                        library.resolve_library_drag(&nodes, destination, cx);
+                    });
                 } else {
                     self.send_content_tracks(track_ids, destination, cx);
                 }
@@ -501,7 +491,7 @@ impl GuiApp {
             return div().into_any_element();
         };
         let mut menu = context_menu_container(theme, "content-menu", window)
-            .map(|surface| self.menu_surface(surface))
+            .map(|surface| self.menu_surface(surface, cx))
             .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                 this.content_menu = None;
                 cx.stop_propagation();
@@ -562,16 +552,18 @@ impl GuiApp {
                         let TrackSource::Tracks(track_ids) = menu.source else {
                             return;
                         };
-                        this.begin_playlist_name(
-                            playlists::editor::PlaylistNameAction::Create { track_ids },
-                            String::new(),
-                            window,
-                            cx,
-                        );
+                        this.playlists.update(cx, |playlists, cx| {
+                            playlists.begin_playlist_name(
+                                playlists::editor::PlaylistNameAction::Create { track_ids },
+                                String::new(),
+                                window,
+                                cx,
+                            );
+                        });
                     },
                 ));
             }
-            let count = self.browser.playlists().summaries().rows.len();
+            let count = self.playlists.read(cx).catalog_len();
             let height = (window.rem_size() * components::LIST_ROW_REMS * count.max(1) as f32)
                 .min(window.rem_size() * POPOVER_MAX_REMS)
                 .min(window.viewport_size().height * 0.5);
@@ -583,21 +575,22 @@ impl GuiApp {
                         cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
                             range
                                 .map(|index| {
-                                    let Some(playlist) =
-                                        this.browser.playlists().summaries().rows.get(index)
+                                    let Some((id, name)) = this
+                                        .playlists
+                                        .read(cx)
+                                        .catalog_row(index)
+                                        .map(|playlist| (playlist.id, playlist.name.clone()))
                                     else {
                                         return this
-                                            .paged_loading_row(
-                                                ViewRequestKind::Summaries,
-                                                index,
-                                                cx,
-                                            )
+                                            .playlists
+                                            .update(cx, |playlists, cx| {
+                                                playlists.catalog_loading_row(index, cx)
+                                            })
                                             .h(gpui::rems(components::LIST_ROW_REMS));
                                     };
-                                    let id = playlist.id;
                                     menu_item(
                                         ("content-playlist-target", id as u64),
-                                        div().min_w_0().truncate().child(playlist.name.clone()),
+                                        div().min_w_0().truncate().child(name),
                                         cx,
                                         move |this, _, cx| {
                                             this.content_action(ContentAction::Playlist(id), cx)
@@ -608,9 +601,13 @@ impl GuiApp {
                                 .collect::<Vec<_>>()
                         }),
                     )
-                    .with_decoration(paged::viewport_demand(
-                        cx.processor(|this, range, _, cx| this.ensure_playlist_range(range, cx)),
-                    ))
+                    .with_decoration(paged::viewport_demand(cx.processor(
+                        |this, range, _, cx| {
+                            this.playlists.update(cx, |playlists, cx| {
+                                playlists.ensure_playlist_range(range, cx);
+                            });
+                        },
+                    )))
                     .h(height)
                     .w_full(),
                 )
@@ -649,7 +646,9 @@ impl GuiApp {
                         if let Some(menu) = &mut this.content_menu {
                             menu.playlists = true;
                         }
-                        this.ensure_playlist_range(0..1, cx);
+                        this.playlists.update(cx, |playlists, cx| {
+                            playlists.ensure_playlist_range(0..1, cx);
+                        });
                         cx.notify();
                     },
                 ));
@@ -715,66 +714,6 @@ impl GuiApp {
 }
 
 impl GuiApp {
-    pub(super) fn can_transfer_content(
-        &self,
-        value: &dyn std::any::Any,
-        destination: super::DragDestination,
-    ) -> bool {
-        if let super::DragDestination::Playlist(id) = destination
-            && !self
-                .state
-                .library
-                .playlist_entry_revisions
-                .contains_key(&id)
-        {
-            return false;
-        }
-        if let Some(drag) = value.downcast_ref::<super::ContentDrag>() {
-            return self.can_drop_content(drag);
-        }
-        if let Some(drag) = value.downcast_ref::<LibraryDrag>() {
-            return self.can_resolve_library_drag(drag);
-        }
-        if let Some(drag) = value.downcast_ref::<QueueDrag>() {
-            return drag.can_transfer(self, destination);
-        }
-        if let Some(drag) = value.downcast_ref::<PlaylistDrag>() {
-            return drag.can_transfer(self, destination);
-        }
-        false
-    }
-
-    pub(super) fn transfer_queue_drag(
-        &mut self,
-        drag: &QueueDrag,
-        destination: super::DragDestination,
-        cx: &mut Context<Self>,
-    ) {
-        self.refresh(cx);
-        if !self.can_transfer_content(drag, destination) {
-            return;
-        }
-        let ids = drag.track_ids();
-        self.send_content_tracks(ids, destination, cx);
-    }
-
-    pub(super) fn transfer_playlist_drag(
-        &mut self,
-        drag: &PlaylistDrag,
-        destination: super::DragDestination,
-        cx: &mut Context<Self>,
-    ) {
-        self.refresh(cx);
-        if !self.can_transfer_content(drag, destination) {
-            return;
-        }
-        if drag.targets_source(destination) {
-            self.move_playlist_entries(drag, None, cx);
-        } else {
-            self.send_content_tracks(drag.track_ids(), destination, cx);
-        }
-    }
-
     pub(super) fn append_playlist_to_queue(&mut self, playlist_id: i64, cx: &mut Context<Self>) {
         self.refresh(cx);
         if self.content_resolution {
@@ -782,17 +721,17 @@ impl GuiApp {
             cx.notify();
             return;
         }
-        if !self
+        let Some(revision) = self
             .state
             .library
             .playlist_entry_revisions
-            .contains_key(&playlist_id)
-        {
+            .get(&playlist_id)
+            .copied()
+        else {
             return;
-        }
+        };
         self.content_resolution = true;
         let generation = self.content_generation;
-        let revision = self.playlist_revision(playlist_id);
         let revisions = self.state.query_revisions(Some(playlist_id));
         let handle = self.handle.clone();
         cx.spawn(async move |this, cx| {

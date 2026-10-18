@@ -105,10 +105,6 @@ impl WindowShell {
         &self.scope
     }
 
-    pub(super) fn keyboard_surface(&self) -> Option<KeyboardSurface> {
-        self.keyboard_surface
-    }
-
     pub(super) fn help(&self) -> Option<crate::keyboard::Context> {
         self.help
     }
@@ -185,9 +181,13 @@ impl WindowShell {
 }
 
 impl GuiApp {
-    pub(super) fn menu_surface(&self, surface: gpui::Stateful<Div>) -> gpui::Stateful<Div> {
+    pub(super) fn menu_surface(
+        &self,
+        surface: gpui::Stateful<Div>,
+        cx: &App,
+    ) -> gpui::Stateful<Div> {
         if matches!(
-            self.current_keyboard_surface(),
+            self.current_keyboard_surface(cx),
             Some(KeyboardSurface::Menu(..))
         ) {
             self.shell.scope().menu_surface(surface)
@@ -204,7 +204,7 @@ impl GuiApp {
         }
     }
 
-    fn current_keyboard_surface(&self) -> Option<KeyboardSurface> {
+    fn current_keyboard_surface(&self, cx: &App) -> Option<KeyboardSurface> {
         if self.shell.help().is_some() {
             return Some(KeyboardSurface::Dialog(DialogSurface::KeyboardHelp));
         }
@@ -214,16 +214,16 @@ impl GuiApp {
         if self.shell.is_open(shell::Surface::About) {
             return Some(KeyboardSurface::Dialog(DialogSurface::About));
         }
-        if self.duplicate_review.open {
+        if self.duplicates.read(cx).is_open() {
             return Some(KeyboardSurface::Dialog(DialogSurface::DuplicateReview));
         }
         if self.shell.is_open(shell::Surface::Settings) {
             return Some(KeyboardSurface::Settings);
         }
-        if self.playlist_editor.is_some() {
+        if self.playlists.read(cx).editor_open() {
             return Some(KeyboardSurface::Dialog(DialogSurface::PlaylistEditor));
         }
-        if let Some(action) = &self.playlist_action {
+        if let Some(action) = self.playlists.read(cx).action() {
             return Some(if matches!(action, playlists::PlaylistAction::Menu(..)) {
                 KeyboardSurface::Menu(MenuSurface::Playlist)
             } else {
@@ -258,7 +258,7 @@ impl GuiApp {
     }
 
     fn synchronize_keyboard_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let surface = self.current_keyboard_surface();
+        let surface = self.current_keyboard_surface(cx);
         let Some(epoch) = self.shell.synchronize(surface, window, cx) else {
             return;
         };
@@ -282,8 +282,9 @@ impl GuiApp {
                     } else {
                         menu.page = PanelMenuPage::Main;
                     }
-                } else if self.playlist_action.is_some() {
-                    self.playlist_action = None;
+                } else if self.playlists.read(cx).action().is_some() {
+                    self.playlists
+                        .update(cx, |playlists, cx| playlists.clear_action(cx));
                 } else {
                     self.shell.dismiss(shell::Surface::AppMenu);
                     self.shell.dismiss(shell::Surface::PanelCatalog);

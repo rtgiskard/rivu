@@ -33,7 +33,7 @@ impl GuiApp {
             cx.stop_active_drag(window);
         }
         self.apply_layout_change(cancellation, cx);
-        self.begin_manual_intent();
+        self.begin_manual_intent(cx);
         self.shell.dismiss(shell::Surface::Layouts);
         self.layout_action = None;
         self.shell.dismiss(shell::Surface::PanelCatalog);
@@ -72,12 +72,10 @@ impl GuiApp {
         } else {
             String::new()
         };
-        self.set_value(Field::LayoutName, name, cx);
+        self.layout_name
+            .update(cx, |input, cx| input.set_text(name, cx));
         if !matches!(action, Action::Delete(_)) {
-            self.input(Field::LayoutName)
-                .read(cx)
-                .focus_handle(cx)
-                .focus(window, cx);
+            self.layout_name.read(cx).focus_handle(cx).focus(window, cx);
         }
         self.layout_action = Some(action);
         cx.notify();
@@ -94,7 +92,7 @@ impl GuiApp {
         let Some(action) = self.layout_action.clone() else {
             return;
         };
-        let name = self.value(Field::LayoutName, cx).trim().to_owned();
+        let name = self.layout_name.read(cx).text().trim().to_owned();
         let result = match action {
             Action::Duplicate => self
                 .workspace
@@ -187,7 +185,7 @@ impl GuiApp {
                 content = content.child(form_field(
                     theme,
                     self.tr("shell-name"),
-                    self.input(Field::LayoutName),
+                    self.layout_name.clone(),
                 ));
             }
             content = content.child(
