@@ -28,12 +28,15 @@ maintained rendering capability patch, not a framework replacement or upgrade.
 The extensions add centered image transforms and shared GPU materials on
 Rivu's Linux/WGPU rendering path. Existing untransformed images and ordinary
 path backgrounds retain their existing behavior.
-The vendor patch also contains experimental fixed-schema rectangle, numerical-field
-and existing-path drawing through one shared publication and recording interface;
-see the link:25_gpu_rendering.adoc#_internal_led_vertical_slice[GPU rendering slice].
-Stereo Density and Spatial Spectrum use the numerical-field material, and
-Spectrum uses rectangle and Path publications. Other visualizers retain their
-existing rendering paths.
+The vendor patch also contains experimental fixed-schema rectangle, numerical-field,
+existing-path and independent-segment drawing through one shared publication and
+recording interface; see the
+link:25_gpu_rendering.adoc#_internal_led_vertical_slice[GPU rendering slice].
+Stereo Density, Spatial Spectrum and Spectrogram use numerical fields; Spectrum
+uses rectangle and Path publications; Fractal Beams/Flow use shared segments;
+Waveform uses rectangle tiles. Radial Bars/Rings styles retain their existing
+rendering paths. The general `Program` and generated-schema interfaces remain
+proposals, not implemented APIs.
 
 Run `cargo test --manifest-path vendor/gpui_wgpu/Cargo.toml --lib` to exercise
 the patched shader and headless GPU regressions in their isolated test workspace.
@@ -65,10 +68,6 @@ the already-cropped sprite. Rounded clipping follows image-local coordinates;
 the surrounding content mask remains in screen coordinates. No rotated pixel
 buffers or angle-indexed image cache are created. `Img` forwards its existing
 transformation matrix through image painting to the WGPU sprite shader.
-Edge coverage uses the analytic local edge normal projected through screen-to-local
-coordinate derivatives, so scaling and rotation do not widen the antialiasing ramp
-in screen pixels. No additional sprite fields or transformed textures are needed.
-
 Spectrum fills its geometry with the shared GPU palette material. Its full
 authored cubic palette is retained rather than approximated by two stops or
 repeated masked submissions; see <<_spectrum,Spectrum>>.

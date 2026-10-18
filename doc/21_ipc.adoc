@@ -664,11 +664,12 @@ directory; artist order uses summary artist, title, then directory (binary order
 rows use the identical album-level filter. Browsing filters never restrict
 whole-album playback or queue command membership.
 
-Representative-track lookups use the ordered album-member index. Member pages
-and whole-album queue operations use the path index to restrict directory ranges,
-then check the exact parent directory and effective title. This avoids scanning
-same-title albums outside the path range. Member-page totals and rows use separate
-count and ordered-selection queries; album-summary counts do not regroup tracks.
+Representative-track lookups, member pages and whole-album queue operations use
+the ordered `tracks_album_members` index. Exact direct-parent directory and
+effective album title select the member range, without scanning descendant paths.
+Member-page totals and rows use separate count and ordered-selection queries;
+album-summary counts do not regroup tracks. Resource and retention details are
+documented in link:22_cache.adoc#_query_projection_retention[Query projection retention].
 
 Members and the representative track use disc number, track number (each null
 last), effective title, then track ID. Summary artist is the sole nonempty

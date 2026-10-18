@@ -669,13 +669,24 @@ values or JSON data.
   requests only `library`; `library optimize` requests only `system`.
   Unrequested sections are `null`, not empty data.
 * Successful ordinary mutations return an acknowledgement with `ok`, `error`,
-  `revision`, and `scan_id` (null except for accepted scan/import tasks).
-  Acceptance does not mean an asynchronous scan has completed.
-  Rejected commands and failed scan waits report an error on stderr and exit
-  unsuccessfully rather than printing a JSON acknowledgement.
+  `revision`, `scan_id`, and `relocation_id`. The task IDs are `null` except for
+  accepted scan/import and manual relocation tasks respectively.
+  Acceptance does not mean the asynchronous task has completed.
+  Rejected commands and failed scan/import or relocation waits report an error
+  on stderr and exit unsuccessfully rather than printing a JSON acknowledgement.
 * Successful scan/import with `--wait` returns the submitted task's
   `{id, progress, message, error}` status, not a global state snapshot. Later
   scans and unrelated command errors do not change that result.
+* `library relocate` without `--wait` returns the acknowledgement; use its
+  `relocation_id` with `library relocation-status`. Successful relocation with
+  `--wait` and every successful `relocation-status` query return
+  `{id, source_id, target_id, phase, error}`. The phase is `verifying`, `completed`,
+  `cancelled`, or `failed`. A status query reports the retained task even when
+  cancelled or failed; its successful exit does not imply relocation succeeded.
+* `library duplicates` returns `{"DuplicateGroups": {"total": ..., "rows": [...]}}`;
+  with `--fingerprint`, it returns the corresponding `DuplicateMembers` wrapper.
+  These are single pages controlled by `--offset` and `--limit`, not streamed
+  arrays or acknowledgements.
 * `library stats` returns aggregate statistics; `library probe` returns metadata
   and decoder status; `playback devices` returns an array of device names.
 

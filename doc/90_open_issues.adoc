@@ -52,3 +52,37 @@ Verify a hide/reopen and search replacement with an outstanding query longer
 than 150 ms, and retain explicit retry for failed pages. Existing ownership is
 documented in link:22_cache.adoc#_query_projection_retention[Query projection retention].
 
+== Query timeout and physical worker retirement
+
+Status: open, 2026-10-18.
+
+In-process GUI reads wait at most 12 seconds for a Core response after successful
+submission. A timeout returns an error and runs the consumer's completion path,
+which releases its worker slot even though the Core request can remain queued or
+executing. This is an exception to the physical-retirement invariant in
+link:22_cache.adoc#_query_projection_retention[Query projection retention].
+The global Core queue remains bounded; the defect is premature feature-local
+slot release, not unbounded thread creation.
+
+An isolated SQLite write-lock experiment confirmed that a query can time out
+while queued operations remain pending. GUI slot release is established by code
+inspection, not a live GUI reproduction.
+
+Keep user-visible waiting feedback separate from physical retirement. A submitted
+read must retain its gate until the actual reply or disconnection; logical
+cancellation must still reject obsolete publication without interrupting a read
+already dispatched to Store. Verify a delayed reply beyond 12 seconds with demand
+replacement and cancellation before claiming this boundary is fixed.
+
+== Small visualization canvas feedback
+
+Status: open, 2026-10-18; established by code inspection, not a live GUI reproduction.
+
+The sizing rule in link:24_layout.adoc[Desktop layout] currently covers only
+Spectrum and Spectrogram. Audio Visualizer styles and Waveform can continue
+drawing in an unreadably small canvas or leave only the background; the layout
+wrapper adds no shared hint.
+
+Extend the same 64px-width/40px-height rule to the remaining consumers, including
+tooltip and scrolling access. Verify small saved layouts, separator resizing and
+interface scale 2 without changing saved proportions.

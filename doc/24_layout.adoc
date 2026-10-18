@@ -44,9 +44,12 @@ selection and template controls are documented in
 link:01_config.adoc#_layout[Configuration and layout].
 
 Visualization sizing uses the actual content canvas, after any visible 1.75rem
-tab row, panel borders, and 8px content insets. A canvas at most 64px wide or 40px high
-shows an `Enlarge panel` hint instead of an unreadable plot or unexplained blank
-background; the hint remains accessible through its tooltip and scrolling.
+tab row, panel borders, and 8px content insets. Spectrum and Spectrogram show an
+`Enlarge panel` hint when that canvas is at most 64px wide or 40px high; the hint
+remains accessible through its tooltip and scrolling. Audio Visualizer and
+Waveform do not yet share this hint; their smaller drawing cutoffs can leave a
+blank background. See
+link:90_open_issues.adoc#_small_visualization_canvas_feedback[Small visualization canvas feedback].
 Spectrum omits axis labels below 78px canvas height rather than overlapping its
 four dB labels, without changing the saved label preference.
 

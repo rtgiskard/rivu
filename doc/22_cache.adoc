@@ -31,6 +31,10 @@ and current-intent checks before publication.
 Queued directory demand alone does not invalidate the view; local forest
 publication and worker progress supply the notifications that resume rendering.
 
+The current Core response timeout is an exception to the physical-retirement
+boundary: a GUI read can finish waiting before its Core request has retired.
+See link:90_open_issues.adoc#_query_timeout_and_physical_worker_retirement[Query timeout and physical worker retirement].
+
 The forest page is synthesized locally from configured roots, not another
 database query; root-count identity also includes those roots. Metadata-only
 changes preserve the latest navigation target and modifiers; an already
@@ -604,9 +608,10 @@ per-call rather than becoming an unbounded retained cache. GPUI idle reclamation
 also releases idle tessellation scratch on its calling thread; other threads'
 scratch remains bounded and is released when those threads exit.
 
-The renderer allocates Path resolve/MSAA targets only when nonempty Path vertices
-are drawn, and drops its references on a successful frame without Path drawing.
-Restoring Path drawing rebuilds targets at the current physical size. Submitted
+The renderer allocates shared Path resolve/MSAA targets when drawing nonempty
+ordinary Paths or multisampled GPU materials, including rectangles and segments.
+It drops its references on a successful frame that uses neither path. Restoring
+either kind of drawing rebuilds targets at the current physical size. Submitted
 GPU work retains its resources; reclamation does not destroy in-flight textures
 or wait for the GPU. Instance storage above its initial capacity shrinks after
 120 successful frames at no more than one-quarter utilization, retaining twice
