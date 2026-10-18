@@ -5,6 +5,11 @@ use rand::RngExt;
 const MAX_NAVIGATION_HISTORY: usize = 4096;
 
 impl Core {
+    pub(in crate::core) fn save_queue(&mut self) -> Result<()> {
+        self.store.set_queue_current(self.state.queue.current_id)?;
+        self.state.queue = self.store.queue_projection(self.queue_ids.len())?;
+        Ok(())
+    }
     pub(in crate::core) fn random_queue_id(&self, rng: &mut impl rand::Rng) -> Option<u64> {
         if self.queue_ids.is_empty() {
             return None;

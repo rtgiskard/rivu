@@ -44,15 +44,7 @@ impl Core {
                 target_id,
             } => return self.relocate_track(source_id, target_id),
             Command::CancelRelocation { id } => self.cancel_relocation(id)?,
-            Command::KeepTrackIndependent { track_id } => {
-                if self.store.keep_independent(track_id)? {
-                    self.state.library.duplicate_members_revision = self
-                        .state
-                        .library
-                        .duplicate_members_revision
-                        .wrapping_add(1);
-                }
-            }
+            Command::KeepTrackIndependent { track_id } => self.keep_track_independent(track_id)?,
             Command::Play { track_id } => {
                 self.track(track_id)?;
                 let existing = self.store.queued_track(track_id)?;
@@ -242,132 +234,14 @@ impl Core {
                 artist,
                 album,
                 decoder_hint,
-            } => {
-                let impact = self.store.edit_track(
-                    track_id,
-                    title.as_deref(),
-                    artist.as_deref(),
-                    album.as_deref(),
-                    decoder_hint,
-                )?;
-                if impact.member_facts {
-                    self.state.library.duplicate_members_revision = self
-                        .state
-                        .library
-                        .duplicate_members_revision
-                        .wrapping_add(1);
-                }
-                if impact.library {
-                    self.state
-                        .library
-                        .change_metadata(Some(&[track_id]), impact.playlists.as_deref());
-                    (|| -> Result<()> {
-                        self.refresh_affected_queue_tracks(&[track_id])?;
-                        if title.is_some()
-                            && self
-                                .state
-                                .library
-                                .history
-                                .iter()
-                                .any(|entry| entry.track_id == track_id)
-                        {
-                            let track = self.store.track(track_id)?.context("Track not found")?;
-                            self.refresh_history_track(&track);
-                        }
-                        Ok(())
-                    })()
-                    .context("Track edit committed, but refreshing views failed; some projections may be stale")?;
-                }
-            }
-            Command::RemoveTracks { mut track_ids } => {
-                track_ids.sort_unstable();
-                track_ids.dedup();
-                if track_ids.is_empty() {
-                    return Ok(());
-                }
-                let removal = self.store.prepare_track_removal(&track_ids)?;
-                if self
-                    .state
-                    .current_track()
-                    .is_some_and(|track| track_ids.contains(&track.id))
-                {
-                    self.stop()?;
-                }
-                // Keep the selection on failure; only a committed cascade clears it.
-                let impact = self.store.remove_prepared_tracks(removal)?;
-                self.invalidate_playlist_members(&impact.playlists);
-                let catalog = self.apply_scan_impacts(crate::store::ScanImpacts {
-                    changed: true,
-                    library: true,
-                    structure: true,
-                    duplicate_groups: impact.duplicate_groups,
-                    duplicate_members: false,
-                    ..crate::store::ScanImpacts::default()
-                });
-                let queue = self
-                    .reload_queue()
-                    .and_then(|()| self.refresh_queue_tracks());
-                catalog.and(queue).context("Track deletion committed, but refreshing views failed; some projections may be stale")?;
-            }
+            } => self.edit_track(track_id, title, artist, album, decoder_hint)?,
+            Command::RemoveTracks { track_ids } => self.remove_tracks(track_ids)?,
             Command::SetFavorite {
                 track_ids,
                 favorite,
-            } => {
-                let impact = self.store.set_favorite(&track_ids, favorite)?;
-                if impact.changed {
-                    self.state
-                        .library
-                        .change_metadata(impact.tracks.as_deref(), impact.playlists.as_deref());
-                    for entry in Arc::make_mut(&mut self.state.library.history) {
-                        if track_ids.contains(&entry.track_id) {
-                            entry.favorite = favorite;
-                        }
-                    }
-                    self.refresh_affected_queue_tracks(&track_ids)
-                        .context("Favorite edit committed, but refreshing views failed; some projections may be stale")?;
-                }
-            }
-            Command::ToggleFavorite { track_ids } => {
-                let impact = self.store.toggle_favorite(&track_ids)?;
-                if impact.changed {
-                    self.state
-                        .library
-                        .change_metadata(impact.tracks.as_deref(), impact.playlists.as_deref());
-                    for entry in Arc::make_mut(&mut self.state.library.history) {
-                        if track_ids.contains(&entry.track_id) {
-                            entry.favorite = !entry.favorite;
-                        }
-                    }
-                    self.refresh_affected_queue_tracks(&track_ids)
-                        .context("Favorite edit committed, but refreshing views failed; some projections may be stale")?;
-                }
-            }
-            Command::RemoveMissingTracks => {
-                if self
-                    .state
-                    .current_track()
-                    .is_some_and(|track| track.missing)
-                {
-                    self.stop()?;
-                }
-                // A stopped decoder does not imply the database deletion succeeded.
-                let impact = self.store.remove_missing_tracks()?;
-                if impact.removed != 0 {
-                    self.invalidate_playlist_members(&impact.playlists);
-                    let catalog = self.apply_scan_impacts(crate::store::ScanImpacts {
-                        changed: true,
-                        library: true,
-                        structure: true,
-                        duplicate_groups: impact.duplicate_groups,
-                        duplicate_members: false,
-                        ..crate::store::ScanImpacts::default()
-                    });
-                    let queue = self
-                        .reload_queue()
-                        .and_then(|()| self.refresh_queue_tracks());
-                    catalog.and(queue).context("Track deletion committed, but refreshing views failed; some projections may be stale")?;
-                }
-            }
+            } => self.set_favorite(&track_ids, favorite)?,
+            Command::ToggleFavorite { track_ids } => self.toggle_favorite(&track_ids)?,
+            Command::RemoveMissingTracks => self.remove_missing_tracks()?,
             Command::Device { name } => {
                 let request = self.output_settings_request.wrapping_add(1);
                 self.audio(AudioCommand::OutputSettings {
@@ -393,58 +267,7 @@ impl Core {
                 }
                 return Ok(());
             }
-            Command::Configure { mut config } => {
-                config.validate()?;
-                let roots = config
-                    .library_roots
-                    .iter()
-                    .map(|root| library::logical_path(root))
-                    .collect::<Result<_>>()?;
-                Arc::make_mut(&mut config).library_roots = roots;
-                // No other producer can consume these slots while Core persists.
-                // Reject a busy batch before committing any desired settings.
-                self.engine.ensure_command_capacity(6)?;
-                let ffmpeg_status = if !config.ffmpeg_enabled {
-                    "disabled".to_owned()
-                } else {
-                    audio::ffmpeg_status().unwrap_or_else(|error| format!("unavailable: {error:#}"))
-                };
-                if let Some(logging) = self.logging.clone() {
-                    logging.reconfigure_with(&config, || self.write_config(&config))?;
-                } else {
-                    self.write_config(&config)?;
-                }
-                // Persistence and logging have committed the desired settings.
-                // Audio delivery may partially succeed; never roll this state back.
-                self.store.set_track_cache_page_size(config.page_size);
-                self.state.system.selected_device = config.output_device.clone();
-                self.state.playback.volume = config.volume;
-                if self.state.playback.shuffle != config.shuffle {
-                    self.played.clear();
-                    self.played_cursor = 0;
-                }
-                self.state.playback.shuffle = config.shuffle;
-                self.state.playback.repeat = config.repeat;
-                self.state.system.ffmpeg_status = ffmpeg_status;
-                self.state.system.config = config;
-                tracing::info!("configuration_updated");
-                let request = self.output_settings_request.wrapping_add(1);
-                let config = &self.state.system.config;
-                (|| -> Result<()> {
-                    self.audio(AudioCommand::StillMode(config.still_mode))?;
-                    self.audio(AudioCommand::MediaReadBuffer(config.media_read_buffer_mb))?;
-                    self.audio(AudioCommand::Volume(config.volume))?;
-                    self.audio(AudioCommand::AnalysisSettings(config.as_ref().into()))?;
-                    self.audio(AudioCommand::FfmpegEnabled(config.ffmpeg_enabled))?;
-                    self.audio(AudioCommand::OutputSettings {
-                        request,
-                        device: config.output_device.clone(),
-                        auto_mix: config.pipewire_auto_mix,
-                    })
-                })()
-                .context("Configuration saved, but audio application failed")?;
-                self.output_settings_request = request;
-            }
+            Command::Configure { config } => self.configure(config)?,
             Command::MprisStatus { status } => {
                 self.state.system.mpris_status = status;
                 return Ok(());

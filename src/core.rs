@@ -748,11 +748,12 @@ impl Core {
 mod catalog;
 mod command;
 mod dispatch;
-mod persistence;
 mod playback;
 mod playlists;
 mod queue;
 mod relocation;
+mod settings;
+mod tracks;
 
 fn now() -> i64 {
     SystemTime::now()
