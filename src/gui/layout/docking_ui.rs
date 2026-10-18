@@ -1,5 +1,5 @@
 use super::super::*;
-use super::{docking, layout_geometry};
+use super::{Layout, docking, layout_geometry};
 
 fn panel_group(node: &Node, panel: u64) -> Option<(u64, usize)> {
     match node {
@@ -9,6 +9,25 @@ fn panel_group(node: &Node, panel: u64) -> Option<(u64, usize)> {
             .then_some((*id, panels.len())),
         Node::Split { children, .. } => children.iter().find_map(|child| panel_group(child, panel)),
     }
+}
+
+/// Translate measured insertion slots before building the shared preview/drop model.
+fn docking_candidate(current: &Layout, source: u64, request: DockRequest) -> Option<Layout> {
+    let mut index = request.index;
+    if request.target.edge == Edge::Center
+        && let Some(index) = &mut index
+        && let Node::Tabs { panels, .. } =
+            layout_geometry::find(current.root.as_ref()?, request.target.node)?
+        && let Some(source_index) = panels.iter().position(|panel| panel.id == source)
+        && *index > source_index
+    {
+        // Hit testing sees the source; move_panel inserts after removing it.
+        *index -= 1;
+    }
+    let mut prepared = current.clone();
+    prepared
+        .move_panel(source, request.target.node, request.target.edge, index)
+        .then_some(prepared)
 }
 
 impl GuiApp {
@@ -151,8 +170,7 @@ impl GuiApp {
         }
         // One owned candidate per target transition, never per pointer update.
         // The preview and drop consume the same model result, including source collapse.
-        let mut prepared = current.clone();
-        let new_tabs = prepared.next_id;
+        let new_tabs = current.next_id;
         let needs_geometry =
             request.target.edge != Edge::Center || panel_group(root, source)?.1 == 1;
         let sizes = needs_geometry.then(|| {
@@ -161,14 +179,9 @@ impl GuiApp {
                 Some((request.target.node, request.target.edge, new_tabs)),
             )
         });
-        if !prepared.move_panel(
-            source,
-            request.target.node,
-            request.target.edge,
-            request.index,
-        ) {
+        let Some(mut prepared) = docking_candidate(current, source, request) else {
             return Some(hover);
-        }
+        };
         if let Some(sizes) = sizes {
             prepared.preserve_region_sizes(&sizes, self.layout_gutter());
         }
@@ -300,5 +313,144 @@ impl GuiApp {
             );
         }
         overlay.into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gui::layout::Panel;
+    use core::prelude::v1::test;
+
+    fn tabs(id: u64, ids: &[u64], active: u64) -> Node {
+        Node::Tabs {
+            id,
+            active,
+            panels: ids
+                .iter()
+                .map(|&id| Panel {
+                    id,
+                    kind: "library".into(),
+                    show_tab_bar: true,
+                    audio_visualizer: None,
+                    album_artwork: None,
+                })
+                .collect(),
+        }
+    }
+
+    fn panel_ids(layout: &Layout, group: u64) -> Vec<u64> {
+        let Node::Tabs { panels, .. } =
+            layout_geometry::find(layout.root.as_ref().unwrap(), group).unwrap()
+        else {
+            panic!("expected tab group");
+        };
+        panels.iter().map(|panel| panel.id).collect()
+    }
+
+    #[test]
+    fn measured_tab_slots_build_the_preview_and_drop_candidate() {
+        let owner = Bounds::new(point(px(0.), px(0.)), size(px(500.), px(300.)));
+        let tab_bounds = |id| {
+            (101..=104).contains(&id).then(|| {
+                Bounds::new(
+                    point(px((id - 101) as f32 * 100.), px(0.)),
+                    size(px(100.), px(30.)),
+                )
+            })
+        };
+        for (label, source, x, y, slot, expected) in [
+            (
+                "rightward",
+                101,
+                200.,
+                10.,
+                Some(2),
+                vec![102, 101, 103, 104],
+            ),
+            (
+                "leftward",
+                104,
+                100.,
+                10.,
+                Some(1),
+                vec![101, 104, 102, 103],
+            ),
+            (
+                "self before",
+                102,
+                100.,
+                10.,
+                Some(1),
+                vec![101, 102, 103, 104],
+            ),
+            (
+                "self after",
+                102,
+                200.,
+                10.,
+                Some(2),
+                vec![101, 102, 103, 104],
+            ),
+            ("start", 103, 0., 10., Some(0), vec![103, 101, 102, 104]),
+            ("end", 102, 499., 10., Some(4), vec![101, 103, 104, 102]),
+            (
+                "cross group",
+                201,
+                200.,
+                10.,
+                Some(2),
+                vec![101, 102, 201, 103, 104],
+            ),
+            (
+                "center append",
+                102,
+                200.,
+                100.,
+                None,
+                vec![101, 103, 104, 102],
+            ),
+        ] {
+            let current = Layout {
+                root: Some(Node::Split {
+                    id: 1,
+                    axis: Axis::Horizontal,
+                    children: vec![
+                        tabs(
+                            2,
+                            &[101, 102, 103, 104],
+                            if source == 201 { 101 } else { source },
+                        ),
+                        tabs(3, &[201, 202], 201),
+                    ],
+                    boundaries: Vec::new(),
+                }),
+                next_id: 1000,
+                locked: false,
+            };
+            let target = layout_geometry::find(current.root.as_ref().unwrap(), 2).unwrap();
+            let index = docking::tab_index(target, point(px(x), px(y)), owner, &tab_bounds);
+            assert_eq!(index, slot, "{label}: measured slot");
+            let candidate = docking_candidate(
+                &current,
+                source,
+                DockRequest {
+                    target: docking::Target {
+                        node: 2,
+                        edge: Edge::Center,
+                    },
+                    index,
+                },
+            )
+            .unwrap();
+            assert_eq!(panel_ids(&candidate, 2), expected, "{label}");
+            assert_eq!(candidate.next_id, current.next_id, "{label}: allocator");
+            if label.starts_with("self") {
+                assert_eq!(candidate, current, "{label}: unchanged preview/drop");
+            }
+            if source == 201 {
+                assert_eq!(panel_ids(&candidate, 3), vec![202]);
+            }
+        }
     }
 }
