@@ -415,8 +415,10 @@ to inspect or discard. Starting or failing a reload does not restore saving.
 An earlier save acknowledgement confirms
 its submitted changes without changing that unavailable state or cancelling a
 newer query. Cached playback details cannot restore saving either; only a reload
-that finds the record enables it again. Without a draft, unavailable details are
-cleared.
+that finds the record enables it again. If there are no unsaved changes or pending
+save when the record is confirmed unavailable, details are cleared. Otherwise,
+the retained fields remain available to inspect, copy, or edit. Restoring those
+fields to their original values does not itself clear them or enable Save.
 
 Decoder hints use the same Save and draft-discard workflow as tags. Routing and
 DTS-WAV safety: link:04_playback.adoc#_optional_ffmpeg_decoder[Playback].
