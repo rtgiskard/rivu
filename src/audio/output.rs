@@ -516,16 +516,15 @@ impl OutputCallback {
                     self.control.tap_overflow.store(true, Ordering::Release);
                 }
             }
+            // Decoder PCM is finite and normalized volume gives gain in [0, 1].
+            // Mapping and attenuation cannot introduce non-finite samples.
             for (output, frame) in block
                 .chunks_exact_mut(self.channels)
                 .zip(scratch.chunks_exact(source_channels))
             {
                 for (sample, source) in output.iter_mut().zip(&self.mapping) {
                     *sample = match source {
-                        Some(source) => {
-                            let sample = frame[*source] * volume;
-                            if sample.is_finite() { sample } else { 0.0 }
-                        }
+                        Some(source) => frame[*source] * volume,
                         None => 0.0,
                     };
                 }
@@ -1518,29 +1517,15 @@ mod pcm_tests {
         let (mut output, mut callback, _analyzer) = test_output(1000, false);
         for (index, volume) in [1.0, 0.9, 0.5, 0.0].into_iter().enumerate() {
             output.set_volume(volume);
-            let samples = [4.0, -3.0];
-            assert_eq!(output.push(&samples), 1);
-            let mut data = [0.0; 2];
+            let samples = [4.0, -3.0, f32::MAX, -f32::MAX];
+            assert_eq!(output.push(&samples), 2);
+            let mut data = [0.0; 4];
             callback.render(&mut data, timestamp(index as u64, index as u64 + 20));
             let gain = crate::volume::gain(volume);
             assert_eq!(data, samples.map(|sample| sample * gain));
             if volume == 1.0 || volume == 0.9 {
                 assert!(data[0] > 1.0 && data[1] < -1.0);
             }
-        }
-    }
-
-    #[test]
-    fn nonfinite_output_is_silent_without_clipping_finite_headroom() {
-        let samples = [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 4.0, -3.0, 0.125];
-        for volume in [1.0, 0.5, 0.0] {
-            let (mut output, mut callback, _analyzer) = test_output(1000, false);
-            output.set_volume(volume);
-            assert_eq!(output.push(&samples), 3);
-            let mut data = [1.0; 6];
-            callback.render(&mut data, timestamp(0, 20));
-            let gain = crate::volume::gain(volume);
-            assert_eq!(data, [0.0, 0.0, 0.0, 4.0 * gain, -3.0 * gain, 0.125 * gain]);
         }
     }
 

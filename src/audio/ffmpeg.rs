@@ -6,7 +6,7 @@
 use super::{
     Channel, MediaInfo,
     bitrate::PacketStats,
-    source::{DecodeStep, SourceIdentity, check_cancelled},
+    source::{DecodeStep, SourceIdentity, check_cancelled, finite_sample},
 };
 use anyhow::{Context, Result, bail};
 use libloading::Library;
@@ -1015,8 +1015,10 @@ fn copy_frame(frame: &AVFrame, output: &mut [f32]) -> Result<()> {
             S64 | S64P => copy_samples::<i64>(frame, output, planar, |value| {
                 value as f32 / 9223372036854775808.0
             }),
-            F32 | F32P => copy_samples::<f32>(frame, output, planar, |value| value),
-            F64 | F64P => copy_samples::<f64>(frame, output, planar, |value| value as f32),
+            F32 | F32P => copy_samples::<f32>(frame, output, planar, finite_sample),
+            F64 | F64P => {
+                copy_samples::<f64>(frame, output, planar, |value| finite_sample(value as f32))
+            }
             _ => bail!("Unsupported FFmpeg sample format {}", frame.format),
         }
     }
@@ -1327,9 +1329,9 @@ mod tests {
     }
 
     #[test]
-    fn planar_samples_preserve_channel_and_frame_order() {
-        let left = [0.1f32, 0.2, 0.3];
-        let right = [-0.4f32, -0.5, -0.6];
+    fn planar_float_samples_clear_invalid_values_without_reordering_channels() {
+        let left = [f32::NAN, 2.0, f32::MAX];
+        let right = [f32::NEG_INFINITY, -3.0, 0.5];
         let mut planes = [
             left.as_ptr().cast_mut().cast(),
             right.as_ptr().cast_mut().cast(),
@@ -1341,6 +1343,6 @@ mod tests {
         frame.extended_data = planes.as_mut_ptr();
         let mut output = [0.0; 6];
         copy_frame(&frame, &mut output).unwrap();
-        assert_eq!(output, [0.1, -0.4, 0.2, -0.5, 0.3, -0.6]);
+        assert_eq!(output, [0.0, 0.0, 2.0, -3.0, f32::MAX, 0.5]);
     }
 }

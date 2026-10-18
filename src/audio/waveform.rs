@@ -697,24 +697,19 @@ impl WaveformFrame {
             dirty.end = dirty.end.max(bin + 1);
             let mut combined_peak = 0.0_f32;
             let mut combined_energy = 0.0_f64;
-            let mut combined_count = 0_u64;
+            let combined_count = (take * channels) as u64;
             let mut side_peaks = [0.0_f32; 2];
             let mut side_energy = [0.0_f64; 2];
-            let mut side_counts = [0_u64; 2];
+            let side_count = take as u64;
+            // Source conversions already guarantee finite decoded PCM.
             for frame_offset in 0..take {
                 let base = (offset + frame_offset) * channels;
                 let mut mixed = [0.0_f32; 2];
-                let mut finite = false;
                 for channel in 0..channels {
                     let sample = samples[base + channel];
-                    if !sample.is_finite() {
-                        continue;
-                    }
-                    finite = true;
                     let magnitude = sample.abs();
                     combined_peak = combined_peak.max(magnitude);
                     combined_energy += f64::from(sample) * f64::from(sample);
-                    combined_count += 1;
                     let fallback = if channels == 1 {
                         [1.0, 0.0]
                     } else if channels == 2 {
@@ -735,25 +730,15 @@ impl WaveformFrame {
                         mixed[1] += sample * weight[1];
                     }
                 }
-                if finite {
-                    side_peaks[0] = side_peaks[0].max(mixed[0].abs());
-                    side_energy[0] += f64::from(mixed[0]) * f64::from(mixed[0]);
-                    side_counts[0] += 1;
-                    if channels != 1 {
-                        side_peaks[1] = side_peaks[1].max(mixed[1].abs());
-                        side_energy[1] += f64::from(mixed[1]) * f64::from(mixed[1]);
-                        side_counts[1] += 1;
-                    }
-                } else {
-                    side_counts[0] += 1;
-                    if channels != 1 {
-                        side_counts[1] += 1;
-                    }
+                side_peaks[0] = side_peaks[0].max(mixed[0].abs());
+                side_energy[0] += f64::from(mixed[0]) * f64::from(mixed[0]);
+                if channels != 1 {
+                    side_peaks[1] = side_peaks[1].max(mixed[1].abs());
+                    side_energy[1] += f64::from(mixed[1]) * f64::from(mixed[1]);
                 }
                 if channels == 1 {
                     side_peaks[1] = side_peaks[0];
                     side_energy[1] = side_energy[0];
-                    side_counts[1] = side_counts[0];
                 }
             }
             changed |= update_bin(
@@ -763,7 +748,7 @@ impl WaveformFrame {
                 bin,
                 combined_peak,
                 combined_energy,
-                if accumulate { combined_count.max(1) } else { 0 },
+                if accumulate { combined_count } else { 0 },
             );
             changed |= update_bin(
                 &mut self.left_peaks,
@@ -772,7 +757,7 @@ impl WaveformFrame {
                 bin,
                 side_peaks[0],
                 side_energy[0],
-                if accumulate { side_counts[0] } else { 0 },
+                if accumulate { side_count } else { 0 },
             );
             changed |= update_bin(
                 &mut self.right_peaks,
@@ -781,7 +766,7 @@ impl WaveformFrame {
                 bin,
                 side_peaks[1],
                 side_energy[1],
-                if accumulate { side_counts[1] } else { 0 },
+                if accumulate { side_count } else { 0 },
             );
             if accumulate {
                 let end = frame + take as u64;
@@ -792,7 +777,7 @@ impl WaveformFrame {
             }
             if collect_prefix {
                 let energy = [combined_energy, side_energy[0], side_energy[1]];
-                let counts = [combined_count.max(1), side_counts[0], side_counts[1]];
+                let counts = [combined_count, side_count, side_count];
                 match &mut self.rms_prefixes[bin] {
                     Some(prefix) if end == prefix.span.start || frame == prefix.span.end => {
                         prefix.span = prefix.span.start.min(frame)..prefix.span.end.max(end);
@@ -1383,36 +1368,16 @@ mod tests {
 
     #[test]
     fn short_clip_preserves_channel_peaks_silence_and_overfull_samples() {
-        let mut frame = frame(Some(6.0 / 48_000.0), 48_000);
+        let mut frame = frame(Some(5.0 / 48_000.0), 48_000);
         frame.push(
             0.0,
-            &[
-                0.25,
-                -0.25,
-                0.0,
-                0.5,
-                -0.75,
-                0.0,
-                0.0,
-                0.0,
-                f32::NAN,
-                f32::INFINITY,
-                -2.0,
-                1.5,
-            ],
+            &[0.25, -0.25, 0.0, 0.5, -0.75, 0.0, 0.0, 0.0, -2.0, 1.5],
             48_000,
             2,
         );
         assert_eq!(
             frame.peaks,
-            [
-                Some(0.25),
-                Some(0.5),
-                Some(0.75),
-                Some(0.0),
-                Some(0.0),
-                Some(2.0)
-            ]
+            [Some(0.25), Some(0.5), Some(0.75), Some(0.0), Some(2.0)]
         );
         assert_eq!(frame.max_peak, 2.0);
     }

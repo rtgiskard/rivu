@@ -580,8 +580,8 @@ impl SpectrumAnalyzer {
     }
 
     fn push(&mut self, samples: [f32; 2]) {
-        // Optional plots treat nonfinite channels as silence; leave the
-        // existing spectrum-only sample path unchanged.
+        // Optional plots also guard folded channels: finite decoded PCM does
+        // not guarantee finite results after channel-mixing arithmetic.
         let samples = if self.visualizer.demand == VisualizerDemand::default() {
             samples
         } else {

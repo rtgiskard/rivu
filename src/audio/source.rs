@@ -1231,8 +1231,11 @@ impl Source {
                     let end = count
                         .saturating_sub(trim_samples(self.time_base, packet.trim_end, 48_000)?)
                         .max(leading);
-                    self.frames.extend_from_slice(
-                        &opus.samples[leading * opus.channels..end * opus.channels],
+                    self.frames.extend(
+                        opus.samples[leading * opus.channels..end * opus.channels]
+                            .iter()
+                            .copied()
+                            .map(finite_sample),
                     );
                     if self.layout.is_empty() {
                         self.layout = if opus.channels == 1 {
@@ -1322,27 +1325,36 @@ fn update_layout(channels: &Channels, layout: &mut Vec<Channel>) -> Result<()> {
     Ok(())
 }
 
-fn interleave_samples<S: Sample>(audio: &AudioBuffer<S>, output: &mut Vec<f32>)
-where
-    f32: FromSample<S>,
-{
+/// Decoder conversions clear invalid PCM before waveform, analysis and output.
+/// Preserve every finite f32 value, including peaks above nominal full scale.
+pub(super) fn finite_sample(sample: f32) -> f32 {
+    if sample.is_finite() { sample } else { 0.0 }
+}
+
+fn interleave_samples<S: Sample>(
+    audio: &AudioBuffer<S>,
+    output: &mut Vec<f32>,
+    convert: impl Fn(S) -> f32,
+) {
     output.clear();
     output.reserve(audio.samples_interleaved());
-    output.extend(audio.iter_interleaved().map(f32::from_sample));
+    output.extend(audio.iter_interleaved().map(convert));
 }
 
 fn interleave_audio(audio: GenericAudioBufferRef<'_>, output: &mut Vec<f32>) {
     match audio {
-        GenericAudioBufferRef::U8(audio) => interleave_samples(audio, output),
-        GenericAudioBufferRef::U16(audio) => interleave_samples(audio, output),
-        GenericAudioBufferRef::U24(audio) => interleave_samples(audio, output),
-        GenericAudioBufferRef::U32(audio) => interleave_samples(audio, output),
-        GenericAudioBufferRef::S8(audio) => interleave_samples(audio, output),
-        GenericAudioBufferRef::S16(audio) => interleave_samples(audio, output),
-        GenericAudioBufferRef::S24(audio) => interleave_samples(audio, output),
-        GenericAudioBufferRef::S32(audio) => interleave_samples(audio, output),
-        GenericAudioBufferRef::F32(audio) => interleave_samples(audio, output),
-        GenericAudioBufferRef::F64(audio) => interleave_samples(audio, output),
+        GenericAudioBufferRef::U8(audio) => interleave_samples(audio, output, f32::from_sample),
+        GenericAudioBufferRef::U16(audio) => interleave_samples(audio, output, f32::from_sample),
+        GenericAudioBufferRef::U24(audio) => interleave_samples(audio, output, f32::from_sample),
+        GenericAudioBufferRef::U32(audio) => interleave_samples(audio, output, f32::from_sample),
+        GenericAudioBufferRef::S8(audio) => interleave_samples(audio, output, f32::from_sample),
+        GenericAudioBufferRef::S16(audio) => interleave_samples(audio, output, f32::from_sample),
+        GenericAudioBufferRef::S24(audio) => interleave_samples(audio, output, f32::from_sample),
+        GenericAudioBufferRef::S32(audio) => interleave_samples(audio, output, f32::from_sample),
+        GenericAudioBufferRef::F32(audio) => interleave_samples(audio, output, finite_sample),
+        GenericAudioBufferRef::F64(audio) => interleave_samples(audio, output, |sample| {
+            finite_sample(f32::from_sample(sample))
+        }),
     }
 }
 
@@ -1564,13 +1576,13 @@ mod tests {
         audio.resize(3, &[8_192, -8_192]);
         let mut output = Vec::with_capacity(32);
         let allocation = output.as_ptr();
-        interleave_samples(&audio, &mut output);
+        interleave_audio(GenericAudioBufferRef::S16(&audio), &mut output);
         assert_eq!(output, [0.5, -0.5, 0.25, -0.25, 0.25, -0.25]);
         audio.resize(1, &[0, 0]);
-        interleave_samples(&audio, &mut output);
+        interleave_audio(GenericAudioBufferRef::S16(&audio), &mut output);
         assert_eq!(output, [0.5, -0.5]);
         audio.clear();
-        interleave_samples(&audio, &mut output);
+        interleave_audio(GenericAudioBufferRef::S16(&audio), &mut output);
         assert!(output.is_empty());
         assert_eq!(output.as_ptr(), allocation);
     }
@@ -2724,6 +2736,54 @@ mod tests {
                 Some(1.0)
             ]
         );
+    }
+
+    #[test]
+    fn decoded_float_pcm_clears_invalid_samples_before_consumers() {
+        let samples = [
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            1.5,
+            -2.0,
+            0.125,
+            f64::MAX,
+        ];
+        const REPEATS: usize = 2048;
+        for bits in [32_u16, 64] {
+            let mut file = tempfile::NamedTempFile::new().unwrap();
+            let stride = bits / 8;
+            let bytes = (samples.len() * REPEATS) as u32 * u32::from(stride);
+            file.write_all(b"RIFF").unwrap();
+            file.write_all(&(36 + bytes).to_le_bytes()).unwrap();
+            file.write_all(b"WAVEfmt \x10\0\0\0\x03\0\x01\0").unwrap();
+            file.write_all(&48_000_u32.to_le_bytes()).unwrap();
+            file.write_all(&(48_000 * u32::from(stride)).to_le_bytes())
+                .unwrap();
+            file.write_all(&stride.to_le_bytes()).unwrap();
+            file.write_all(&bits.to_le_bytes()).unwrap();
+            file.write_all(b"data").unwrap();
+            file.write_all(&bytes.to_le_bytes()).unwrap();
+            for sample in samples.into_iter().cycle().take(samples.len() * REPEATS) {
+                if bits == 32 {
+                    file.write_all(&(sample as f32).to_le_bytes()).unwrap();
+                } else {
+                    file.write_all(&sample.to_le_bytes()).unwrap();
+                }
+            }
+            for hint in [
+                DecoderHint::Native,
+                #[cfg(feature = "ffmpeg")]
+                DecoderHint::Ffmpeg,
+            ] {
+                let mut source = Source::open(file.path(), PROBE_BUFFER_LEN, hint, true).unwrap();
+                assert_eq!(
+                    decode_remaining(&mut source),
+                    [0.0, 0.0, 0.0, 1.5, -2.0, 0.125, 0.0].repeat(REPEATS),
+                    "{bits}-bit {hint:?} PCM must be finite before any consumer"
+                );
+            }
+        }
     }
 
     #[test]
