@@ -188,7 +188,7 @@ impl Settings {
         let colors = palette(cx);
         let mut paths = column()
             .id("settings-library-roots-list")
-            .max_h(rems(10.))
+            .max_h_40()
             .pl_3()
             .overflow_y_scroll()
             .gap_1();

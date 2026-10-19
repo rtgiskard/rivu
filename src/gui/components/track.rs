@@ -14,7 +14,7 @@ pub(crate) fn track_list_row(
     list_row(theme, id, selected)
         .child(
             div()
-                .w(gpui::rems(2.))
+                .w_8()
                 .flex_shrink_0()
                 .text_xs()
                 .whitespace_nowrap()

@@ -149,7 +149,7 @@ impl Queue {
             ),
         )
         .flex_1()
-        .min_w(gpui::rems(3.))
+        .min_w_12()
         .id(("queue-count", panel_id))
         .tooltip({
             let text = self.tr("gl-queue-drag-hint");
@@ -184,7 +184,7 @@ impl Queue {
                 ("".into(), StatusKind::Info)
             };
         let status = row()
-            .h(gpui::rems(2.))
+            .h_8()
             .flex_shrink_0()
             .overflow_hidden()
             .child(

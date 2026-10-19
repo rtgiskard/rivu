@@ -597,7 +597,7 @@ fn metadata_copy(
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(value.to_string()));
             }),
         )
-        .h(gpui::rems(1.25))
+        .h_5()
         .min_h_0()
         .text_size(gpui::rems(0.75))
         .opacity(0.)
@@ -1078,7 +1078,7 @@ impl Metadata {
                                 div()
                                     .id(("metadata-status", panel_id))
                                     .min_w_0()
-                                    .min_h(gpui::rems(1.25))
+                                    .min_h_5()
                                     .child(
                                         caption(theme, status.clone())
                                             .text_xs()

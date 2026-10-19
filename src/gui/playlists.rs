@@ -1016,7 +1016,7 @@ impl Playlists {
         let selection_status = row()
             .flex_shrink_0()
             .min_w_0()
-            .h(gpui::rems(2.))
+            .h_8()
             .overflow_hidden()
             .child(
                 status_message(theme, selection_message.clone(), StatusKind::Info)
@@ -1026,7 +1026,7 @@ impl Playlists {
                     .truncate()
                     .tooltip(rivu_ui::text_tooltip(selection_message)),
             )
-            .child(div().w(gpui::rems(4.)).h_full().flex_shrink_0().when(
+            .child(div().w_16().h_full().flex_shrink_0().when(
                 selection_unavailable && !selection_pending,
                 |slot| {
                     slot.child(icon_button(
@@ -1669,7 +1669,7 @@ impl Playlists {
                         div()
                             .id(("playlist-append", panel_id))
                             .flex_1()
-                            .min_h(gpui::rems(1.))
+                            .min_h_4()
                             .w_full()
                             .on_drop(cx.listener(move |this, drag: &PlaylistDrag, window, cx| {
                                 window.prevent_default();
@@ -1747,7 +1747,7 @@ impl Playlists {
             .drag_over::<PlaylistDrag>(|style, _, _, _| style.border_color(rgb(theme.accent)))
             .child(
                 row()
-                    .min_h(gpui::rems(2.))
+                    .min_h_8()
                     .flex_wrap()
                     .flex_shrink_0()
                     .items_end()

@@ -316,7 +316,7 @@ impl GuiApp {
                     .line_height(rems(1.25))
                     .child(
                         div()
-                            .w(rems(12.))
+                            .w_48()
                             .flex_shrink_0()
                             .text_color(rgb(theme.accent))
                             .child(binding.label()),

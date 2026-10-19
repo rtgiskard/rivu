@@ -26,7 +26,7 @@ pub fn tree_row(
     div()
         .id(id)
         .w_full()
-        .h(gpui::rems(1.75))
+        .h_7()
         .px_2()
         .pr_2()
         .pl(gpui::rems(0.5 + depth as f32 * 1.25))

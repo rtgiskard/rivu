@@ -293,7 +293,7 @@ impl History {
                                 .format("gl-track-count", &[("count", history_total.into())]),
                         )
                         .flex_1()
-                        .min_w(gpui::rems(3.)),
+                        .min_w_12(),
                     )
                     .child(self.search.clone()),
             )

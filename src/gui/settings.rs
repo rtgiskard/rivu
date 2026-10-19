@@ -1310,7 +1310,7 @@ impl Settings {
                     .items_center()
                     .w_full()
                     .min_w_0()
-                    .min_h(rems(2.0))
+                    .min_h_8()
                     .px_2()
                     .py_1()
                     .rounded_sm()
@@ -1888,7 +1888,7 @@ impl Settings {
                 .flex_shrink_0()
                 .px_2()
                 .py_2()
-                .min_h(rems(3.))
+                .min_h_12()
                 .border_t_1()
                 .border_color(rgb(colors.border))
                 .child(
@@ -2013,7 +2013,7 @@ impl Render for Settings {
                         .gap_0()
                         .overflow_hidden()
                         .child(
-                            row().h(rems(2.5)).flex_shrink_0().px_2().child(
+                            row().h_10().flex_shrink_0().px_2().child(
                                 div().flex_1().text_lg().child(self.tr("settings-settings")),
                             ),
                         )

@@ -189,7 +189,7 @@ impl Render for GuiApp {
             div()
                 .id("footer-window-drag")
                 .flex_1()
-                .min_w(gpui::rems(4.))
+                .min_w_16()
                 .self_stretch()
                 .on_mouse_down(
                     MouseButton::Left,
@@ -531,7 +531,7 @@ impl Render for GuiApp {
                                     .child(div().text_2xl().child("Rivu"))
                                     .child(
                                         column()
-                                            .gap(rems(1.))
+                                            .gap_4()
                                             .child(caption(theme, self.tr("shell-tagline")))
                                             .children(
                                                 [
@@ -564,7 +564,7 @@ impl Render for GuiApp {
                                                         .gap_3()
                                                         .child(
                                                             div()
-                                                                .w(rems(4.))
+                                                                .w_16()
                                                                 .flex_shrink_0()
                                                                 .child(caption(theme, label)),
                                                         )

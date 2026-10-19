@@ -721,8 +721,8 @@ impl AlbumBrowser {
         let actions = row()
             .id(("album-actions", index))
             .absolute()
-            .right(rems(0.5))
-            .bottom(rems(0.5))
+            .right_2()
+            .bottom_2()
             .gap_0()
             .when(self.dismissed_actions.as_ref() == Some(&key), |view| {
                 view.invisible()
@@ -988,7 +988,7 @@ impl Render for AlbumBrowser {
                         ),
                     )
                     .flex_1()
-                    .min_w(gpui::rems(3.)),
+                    .min_w_12(),
                 )
                 .child(self.album_search.clone())
                 .child(icon_button(
@@ -1106,7 +1106,7 @@ impl Render for AlbumBrowser {
                                         track.duration.map_or_else(|| "—".into(), format_time),
                                     )
                                     .font_features(super::appearance::fonts::tabular_numbers())
-                                    .w(rems(4.))
+                                    .w_16()
                                     .flex_shrink_0()
                                     .text_right(),
                                 )

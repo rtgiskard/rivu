@@ -306,7 +306,7 @@ impl Playback {
                 )
                 .bg(rgb(theme.control))
                 .text_color(rgb(theme.text))
-                .size(gpui::rems(2.5))
+                .size_10()
                 .rounded_full()
                 .text_xl(),
             )

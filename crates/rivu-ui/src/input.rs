@@ -1779,23 +1779,18 @@ mod tests {
             fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
                 let measure = |index, child: gpui::AnyElement| {
                     let heights = self.heights.clone();
-                    div()
-                        .relative()
-                        .w(gpui::rems(12.))
-                        .flex_shrink_0()
-                        .child(child)
-                        .child(
-                            gpui::canvas(
-                                move |bounds, _, _| {
-                                    let mut values = heights.get();
-                                    values[index] = bounds.size.height;
-                                    heights.set(values);
-                                },
-                                |_, _, _, _| {},
-                            )
-                            .absolute()
-                            .size_full(),
+                    div().relative().w_48().flex_shrink_0().child(child).child(
+                        gpui::canvas(
+                            move |bounds, _, _| {
+                                let mut values = heights.get();
+                                values[index] = bounds.size.height;
+                                heights.set(values);
+                            },
+                            |_, _, _, _| {},
                         )
+                        .absolute()
+                        .size_full(),
+                    )
                 };
                 let theme = crate::theme::palette(cx);
                 let button = crate::button("aligned-text", "Apply", cx, |_, _, _| {});

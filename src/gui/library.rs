@@ -167,7 +167,7 @@ fn track_columns(
         let cell = rivu_ui::caption(theme, value).truncate();
         cells = cells.child(match column {
             LibraryColumn::Artist | LibraryColumn::Album => {
-                cell.max_w(gpui::rems(6.0)).flex_initial().min_w_0()
+                cell.max_w_24().flex_initial().min_w_0()
             }
             LibraryColumn::Duration | LibraryColumn::Bitrate => cell
                 .font_features(super::appearance::fonts::tabular_numbers())
@@ -298,7 +298,7 @@ fn tree_guides(
                     .absolute()
                     .left(left)
                     .top(gpui::relative(0.5))
-                    .w(gpui::rems(0.5))
+                    .w_2()
                     .h(px(1.0))
                     .bg(gpui::rgb(theme.muted).alpha(0.35)),
             );
@@ -582,7 +582,7 @@ impl Library {
                                                             },
                                                         ))
                                                         .min_h_0()
-                                                        .size(gpui::rems(1.5)),
+                                                        .size_6(),
                                                     )
                                                 }),
                                         ),
@@ -730,7 +730,7 @@ impl Library {
                                 )
                             });
                         let name_cell = div()
-                            .w(gpui::rems(14.0))
+                            .w_56()
                             .flex_auto()
                             .min_w_0()
                             .h_full()
@@ -959,21 +959,18 @@ impl Library {
                     ScanPhase::Completed | ScanPhase::Failed | ScanPhase::Cancelled
                 )
             });
-        let dismiss = div()
-            .size(gpui::rems(2.))
-            .flex_shrink_0()
-            .when(dismissible, |slot| {
-                slot.child(quiet_icon_button(
-                    theme,
-                    icon_button(
-                        ("dismiss-scan-result", panel_id),
-                        "",
-                        self.tr("gl-dismiss-scan"),
-                        cx,
-                        |this, _, cx| this.send(Command::DismissScanResult, cx),
-                    ),
-                ))
-            });
+        let dismiss = div().size_8().flex_shrink_0().when(dismissible, |slot| {
+            slot.child(quiet_icon_button(
+                theme,
+                icon_button(
+                    ("dismiss-scan-result", panel_id),
+                    "",
+                    self.tr("gl-dismiss-scan"),
+                    cx,
+                    |this, _, cx| this.send(Command::DismissScanResult, cx),
+                ),
+            ))
+        });
         let mut bar = div()
             .w_full()
             .h(px(3.))
@@ -1004,7 +1001,7 @@ impl Library {
             .flex_shrink_0()
             .child(
                 row()
-                    .min_h(gpui::rems(2.))
+                    .min_h_8()
                     .flex_shrink_0()
                     .child(caption(theme, header_text).flex_1().min_w_0().truncate())
                     .child(dismiss),
@@ -1013,7 +1010,7 @@ impl Library {
             .child(
                 caption(theme, path.clone())
                     .id(("scan-path", panel_id))
-                    .min_h(gpui::rems(1.25))
+                    .min_h_5()
                     .flex_shrink_0()
                     .min_w_0()
                     .truncate()
@@ -1022,7 +1019,7 @@ impl Library {
             .child(
                 caption(theme, message.clone())
                     .id(("scan-message", panel_id))
-                    .min_h(gpui::rems(1.25))
+                    .min_h_5()
                     .flex_shrink_0()
                     .min_w_0()
                     .truncate()
@@ -1074,7 +1071,7 @@ impl Library {
         };
         let heading = list_panel_header(theme, self.tr("gl-library"), selection_label.clone())
             .flex_1()
-            .min_w(gpui::rems(3.))
+            .min_w_12()
             .id(("library-selection-count", panel_id))
             .tooltip(rivu_ui::text_tooltip(selection_label));
         let tools = panel_toolbar()

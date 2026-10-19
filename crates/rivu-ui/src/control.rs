@@ -45,7 +45,7 @@ fn control_surface(
         .px_2()
         .py_1()
         .rounded_sm()
-        .min_h(gpui::rems(2.0))
+        .min_h_8()
         .text_sm()
         .text_color(rgb(theme.text))
         .cursor_pointer()
@@ -165,7 +165,7 @@ pub fn icon_button<T: 'static>(
         cx,
         action,
     )
-    .w(gpui::rems(2.))
+    .w_8()
     .h(toolbar_control_height(cx))
     .text_size(gpui::rems(1.))
     .p_0()

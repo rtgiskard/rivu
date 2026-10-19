@@ -267,7 +267,7 @@ impl Render for SearchField {
             .h(height)
             .min_h(height)
             .max_h(height)
-            .w(gpui::rems(14.))
+            .w_56()
             .flex_basis(gpui::rems(2.))
             .flex_shrink(1.)
             .child(field);

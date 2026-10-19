@@ -280,7 +280,7 @@ impl GuiApp {
                     .items_stretch()
                     .flex_shrink_0()
                     .px_2()
-                    .py(gpui::rems(0.125))
+                    .py_0p5()
                     .gap_1()
                     .border_b_1()
                     .border_color(rgb(theme.structure_border));
@@ -305,7 +305,7 @@ impl GuiApp {
                             .items_center()
                             .gap_2()
                             .px_1()
-                            .py(gpui::rems(0.125))
+                            .py_0p5()
                             .rounded_sm()
                             .border_1()
                             .border_color(gpui::transparent_black())
@@ -399,7 +399,7 @@ impl GuiApp {
                                             },
                                         ),
                                     )
-                                    .size(gpui::rems(1.))
+                                    .size_4()
                                     .min_h_0(),
                                 )
                             }),

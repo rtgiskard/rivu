@@ -249,7 +249,7 @@ impl GuiApp {
                 if current {
                     choice = choice.child(
                         div()
-                            .size(gpui::rems(2.))
+                            .size_8()
                             .flex_shrink_0()
                             .flex()
                             .items_center()

@@ -11,7 +11,7 @@ pub(crate) fn metadata_item(
     row()
         .items_baseline()
         .group("metadata-field")
-        .gap(gpui::rems(1.))
+        .gap_4()
         .flex_1()
         .min_w_0()
         .child(caption(theme, label).w(label_width).flex_shrink_0())

@@ -67,7 +67,7 @@ pub fn menu_item_style(
         .tab_index(0)
         .focus(|style| style.bg(rgb(theme.selected)))
         .w_full()
-        .min_h(gpui::rems(2.0))
+        .min_h_8()
         .px_2()
         .py_0()
         .flex()
