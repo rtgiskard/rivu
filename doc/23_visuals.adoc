@@ -44,6 +44,9 @@ The companion GPUI workspace runs publication/replay regressions with
 `cargo test --manifest-path vendor/gpui/Cargo.toml --lib gpu::tests --no-default-features`
 and existing scene regressions with
 `cargo test --manifest-path vendor/gpui/Cargo.toml --lib scene::reclamation_tests --no-default-features`.
+Run `cargo test --manifest-path vendor/gpui/Cargo.toml --lib elements::img::`
+for source-animation cursor and frame-request ownership regressions. Automatic
+frame requests are exercised beneath a rendered entity, matching real image views.
 Compilation also requires the pinned upstream `assets/fonts/lilex` and
 `assets/fonts/ibm-plex-sans` fixtures, placed under this repository's
 `tests/fixtures/fonts/` with their original subdirectory names.

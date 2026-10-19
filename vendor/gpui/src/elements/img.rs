@@ -195,6 +195,7 @@ pub struct Img {
     style: ImageStyle,
     image_cache: Option<AnyImageCache>,
     transformation: Option<Transformation>,
+    automatic_animation_frames: bool,
 }
 
 /// Create a new image element.
@@ -206,10 +207,21 @@ pub fn img(source: impl Into<ImageSource>) -> Img {
         style: ImageStyle::default(),
         image_cache: None,
         transformation: None,
+        automatic_animation_frames: true,
     }
 }
 
 impl Img {
+    /// Whether animated images request their own frames. Enabled by default.
+    ///
+    /// Disable this when an external owner schedules redraws (for example, to
+    /// share an FPS cap). The existing per-element, time-based animation cursor
+    /// still advances on those redraws; this does not pause the source animation.
+    pub fn with_automatic_animation_frames(mut self, automatic: bool) -> Self {
+        self.automatic_animation_frames = automatic;
+        self
+    }
+
     /// Transform the cropped image around the original element's center on the GPU.
     ///
     /// Rounded clipping is applied before transformation; the content mask remains
@@ -265,6 +277,57 @@ struct ImgState {
     frame_index: usize,
     last_frame_time: Option<Instant>,
     started_loading: Option<(Instant, Task<()>)>,
+}
+
+impl ImgState {
+    fn advance_animation(&mut self, data: &RenderImage, now: Instant) {
+        let frame_count = data.frame_count();
+        debug_assert!(frame_count > 1 && self.frame_index < frame_count);
+        let Some(last_frame_time) = self.last_frame_time else {
+            self.last_frame_time = Some(now);
+            return;
+        };
+        let mut elapsed = now - last_frame_time;
+        let mut cycle_duration = Duration::ZERO;
+
+        // Usually only the current frame is visited. A late redraw scans at most
+        // one cycle before skipping whole cycles, never one iteration per missed
+        // frame over an arbitrarily long suspension.
+        for _ in 0..frame_count {
+            let delay = Duration::from(data.delay(self.frame_index));
+            if elapsed < delay {
+                self.last_frame_time = Some(now - elapsed);
+                return;
+            }
+            elapsed -= delay;
+            cycle_duration += delay;
+            self.frame_index = (self.frame_index + 1) % frame_count;
+        }
+
+        if cycle_duration.is_zero() {
+            // No time-based position exists for an all-zero-delay animation.
+            // Preserve progress at one frame per redraw without retaining debt.
+            self.frame_index = (self.frame_index + 1) % frame_count;
+            self.last_frame_time = Some(now);
+            return;
+        }
+        let remainder = elapsed.as_nanos() % cycle_duration.as_nanos();
+        elapsed = Duration::new(
+            (remainder / 1_000_000_000) as u64,
+            (remainder % 1_000_000_000) as u32,
+        );
+        // The remainder is shorter than a full cycle, including when individual
+        // zero-delay frames must be skipped. This second scan is also bounded.
+        for _ in 0..frame_count {
+            let delay = Duration::from(data.delay(self.frame_index));
+            if elapsed < delay {
+                break;
+            }
+            elapsed -= delay;
+            self.frame_index = (self.frame_index + 1) % frame_count;
+        }
+        self.last_frame_time = Some(now - elapsed);
+    }
 }
 
 /// The image layout state between frames
@@ -331,21 +394,7 @@ impl Element for Img {
                                 state.frame_index = state.frame_index.min(max_frame_index);
                                 if frame_count > 1 && !cx.reduce_motion() {
                                     if window.is_window_active() {
-                                        let current_time = Instant::now();
-                                        if let Some(last_frame_time) = state.last_frame_time {
-                                            let elapsed = current_time - last_frame_time;
-                                            let frame_duration =
-                                                Duration::from(data.delay(state.frame_index));
-
-                                            if elapsed >= frame_duration {
-                                                state.frame_index =
-                                                    (state.frame_index + 1) % frame_count;
-                                                state.last_frame_time =
-                                                    Some(current_time - (elapsed - frame_duration));
-                                            }
-                                        } else {
-                                            state.last_frame_time = Some(current_time);
-                                        }
+                                        state.advance_animation(&data, Instant::now());
                                     } else {
                                         state.last_frame_time = None;
                                     }
@@ -391,6 +440,7 @@ impl Element for Img {
                             }
 
                             if global_id.is_some()
+                                && self.automatic_animation_frames
                                 && data.frame_count() > 1
                                 && window.is_window_active()
                                 && !cx.reduce_motion()
@@ -814,7 +864,9 @@ impl From<image::ImageError> for ImageCacheError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ParentElement as _, TestAppContext, canvas, div, point, px, size};
+    use crate::{
+        AppContext as _, ParentElement as _, TestAppContext, canvas, div, point, px, size,
+    };
     use image::{Frame, ImageBuffer, Rgba};
 
     const TEST_IMG_ID: &str = "test-img";
@@ -831,6 +883,105 @@ mod tests {
         Arc::new(RenderImage::new(SmallVec::from_elem(frame, 1)))
     }
 
+    fn timed_test_image(delays_ms: &[u32]) -> RenderImage {
+        RenderImage::new(SmallVec::from_iter(delays_ms.iter().map(|&delay| {
+            Frame::from_parts(
+                ImageBuffer::from_pixel(1, 1, Rgba([0, 0, 0, 0])),
+                0,
+                0,
+                image::Delay::from_numer_denom_ms(delay, 1),
+            )
+        })))
+    }
+
+    fn animation_cursor(frame_index: usize, last_frame_time: Option<Instant>) -> ImgState {
+        ImgState {
+            frame_index,
+            last_frame_time,
+            started_loading: None,
+        }
+    }
+
+    #[test]
+    fn animation_cursor_skips_expired_variable_delay_frames_and_preserves_remainder() {
+        let data = timed_test_image(&[100, 200, 300]);
+        let start = Instant::now();
+        let mut state = animation_cursor(0, None);
+        state.advance_animation(&data, start);
+        assert_eq!(state.frame_index, 0);
+        assert_eq!(state.last_frame_time, Some(start));
+
+        for (elapsed_ms, expected_frame, frame_start_ms) in [
+            (350, 2, 300),
+            (590, 2, 300),
+            (600, 0, 600),
+            (850, 1, 700),
+            (1_200, 0, 1_200),
+        ] {
+            state.advance_animation(&data, start + Duration::from_millis(elapsed_ms));
+            assert_eq!(state.frame_index, expected_frame);
+            assert_eq!(
+                state.last_frame_time,
+                Some(start + Duration::from_millis(frame_start_ms)),
+            );
+        }
+    }
+
+    #[test]
+    fn animation_cursor_skips_whole_cycles_after_long_elapsed_time() {
+        let data = timed_test_image(&[100, 200, 300]);
+        let start = Instant::now();
+        let mut state = animation_cursor(1, Some(start));
+        // Ten years is an exact multiple of this 600 ms cycle. Starting from
+        // frame 1 also proves the cycle skip does not assume a frame-0 origin.
+        let now = start + Duration::from_secs(10 * 365 * 24 * 60 * 60) + Duration::from_millis(350);
+        state.advance_animation(&data, now);
+        assert_eq!(state.frame_index, 2);
+        assert_eq!(
+            state.last_frame_time,
+            Some(now - Duration::from_millis(150))
+        );
+        state.advance_animation(&data, now + Duration::from_millis(149));
+        assert_eq!(state.frame_index, 2);
+        state.advance_animation(&data, now + Duration::from_millis(150));
+        assert_eq!(state.frame_index, 0);
+        assert_eq!(
+            state.last_frame_time,
+            Some(now + Duration::from_millis(150))
+        );
+    }
+
+    #[test]
+    fn animation_cursor_skips_zero_delay_frames_and_bounds_an_all_zero_cycle() {
+        let data = timed_test_image(&[0, 100, 0, 200]);
+        let start = Instant::now();
+        let mut state = animation_cursor(0, Some(start));
+        for (elapsed_ms, expected_frame, frame_start_ms) in [
+            (0, 1, 0),
+            (50, 1, 0),
+            (100, 3, 100),
+            (300, 1, 300),
+            (550, 3, 400),
+            (600, 1, 600),
+        ] {
+            state.advance_animation(&data, start + Duration::from_millis(elapsed_ms));
+            assert_eq!(state.frame_index, expected_frame);
+            assert_eq!(
+                state.last_frame_time,
+                Some(start + Duration::from_millis(frame_start_ms)),
+            );
+        }
+
+        let data = timed_test_image(&[0, 0, 0]);
+        let mut state = animation_cursor(0, Some(start));
+        let now = start + Duration::from_secs(10 * 365 * 24 * 60 * 60);
+        for expected_frame in [1, 2, 0, 1] {
+            state.advance_animation(&data, now);
+            assert_eq!(state.frame_index, expected_frame);
+            assert_eq!(state.last_frame_time, Some(now));
+        }
+    }
+
     /// Overwrites the cached `frame_index` of the sibling `img` during paint.
     fn seed_frame_index(frame_index: usize) -> impl IntoElement {
         canvas(
@@ -845,6 +996,82 @@ mod tests {
                 });
             },
         )
+    }
+
+    #[gpui::test]
+    fn external_frame_owner_preserves_cursor_without_requesting_frames(cx: &mut TestAppContext) {
+        struct AnimationView {
+            automatic: bool,
+            seed: bool,
+            frame_index: std::rc::Rc<std::cell::Cell<usize>>,
+        }
+
+        impl crate::Render for AnimationView {
+            fn render(&mut self, _: &mut Window, _: &mut crate::Context<Self>) -> impl IntoElement {
+                let seed = self.seed;
+                let frame_index = self.frame_index.clone();
+                div()
+                    .child(
+                        img(test_image(2))
+                            .with_automatic_animation_frames(!seed && self.automatic)
+                            .id(TEST_IMG_ID),
+                    )
+                    .child(canvas(
+                        |_, _, _| (),
+                        move |_, _, window, _| {
+                            window.with_global_id(TEST_IMG_ID.into(), |id, window| {
+                                window.with_element_state::<ImgState, _>(id, |state, _| {
+                                    let mut state = state.unwrap();
+                                    if seed {
+                                        state.frame_index = 0;
+                                        state.last_frame_time =
+                                            Some(Instant::now() - Duration::from_secs(1));
+                                    }
+                                    frame_index.set(state.frame_index);
+                                    ((), state)
+                                });
+                            });
+                        },
+                    ))
+            }
+        }
+
+        let window = cx.add_empty_window();
+        window.update(|window, _| window.activate_window());
+        window.run_until_parked();
+
+        for automatic in [false, true] {
+            let frame_index = std::rc::Rc::new(std::cell::Cell::new(0));
+            let view = window.update(|_, cx| {
+                cx.new(|_| AnimationView {
+                    automatic,
+                    seed: true,
+                    frame_index: frame_index.clone(),
+                })
+            });
+            window.draw(point(px(0.), px(0.)), size(px(100.), px(100.)), |_, _| {
+                view.clone().into_any_element()
+            });
+            assert_eq!(
+                window.update(|window, cx| window.simulate_next_frame(cx)),
+                0
+            );
+
+            window.update(|_, cx| view.update(cx, |view, _| view.seed = false));
+            window.draw(point(px(0.), px(0.)), size(px(100.), px(100.)), |_, _| {
+                view.clone().into_any_element()
+            });
+            assert_eq!(
+                frame_index.get(),
+                1,
+                "external redraws still advance the cursor"
+            );
+            assert_eq!(
+                window.update(|window, cx| window.simulate_next_frame(cx)),
+                usize::from(automatic),
+                "ordinary Img retains automatic animation requests",
+            );
+        }
     }
 
     #[gpui::test]

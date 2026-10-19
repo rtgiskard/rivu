@@ -414,6 +414,24 @@ impl ArtworkView {
         Some(element)
     }
 
+    /// Cache-only readiness for consumers that own animated-image frame pacing.
+    /// Loading and failed sources do not start an animation clock. Img's normal
+    /// completion notification redraws the consumer when the decode becomes ready.
+    pub(super) fn is_animated(&self, cx: &App) -> bool {
+        let state = self.state.borrow();
+        state.current.as_ref().is_some_and(|image| {
+            image
+                .owner
+                .image
+                .read(cx)
+                .item
+                .as_ref()
+                .and_then(ImageCacheItem::get)
+                .and_then(Result::ok)
+                .is_some_and(|decoded| decoded.frame_count() > 1)
+        })
+    }
+
     pub(super) fn aspect_ratio(&self, cx: &App) -> Option<f32> {
         let state = self.state.borrow();
         let image = state.current.as_ref()?.owner.image.read(cx);
@@ -848,6 +866,8 @@ mod tests {
             let cache = window.update(|_, cx| {
                 first.replace(Some(loaded.clone()), cx);
                 second.replace(Some(loaded), cx);
+                assert!(!first.is_animated(cx));
+                assert!(!second.is_animated(cx));
                 assert!(Rc::ptr_eq(
                     &first.state.borrow().current.as_ref().unwrap().owner,
                     &second.state.borrow().current.as_ref().unwrap().owner,
@@ -880,6 +900,8 @@ mod tests {
                     for _ in 0..3 {
                         assert!(first.image(cx).is_none());
                         assert!(second.image(cx).is_none());
+                        assert!(!first.is_animated(cx));
+                        assert!(!second.is_animated(cx));
                         assert!(
                             cache
                                 .read(cx)
@@ -896,11 +918,14 @@ mod tests {
                     let decoded = result.unwrap();
                     assert_eq!(decoded.frame_count(), 2);
                     assert_eq!(decoded.delay(1).numer_denom_ms(), (130, 1));
+                    assert!(first.is_animated(cx));
+                    assert!(second.is_animated(cx));
                     Some(Arc::downgrade(&decoded))
                 }
             });
             window.update(|window, cx| {
                 first.replace(None, cx);
+                assert!(!first.is_animated(cx));
                 images.release_retired(window);
                 window.simulate_next_frame(cx);
             });
@@ -1335,6 +1360,196 @@ mod tests {
             window.update(|window, cx| reopened.release(window, cx));
             assert!(new_pixels.upgrade().is_none());
         }
+    }
+
+    #[gpui::test]
+    fn artwork_source_animation_uses_one_owner_gate_across_panels_and_suspension(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use super::super::{
+            album_artwork::{AlbumArtwork, AlbumArtworkPanel},
+            layout::{Axis, Node, Panel},
+        };
+        use crate::{
+            config::{AlbumArtworkMode, AlbumArtworkOptions, AlbumArtworkStyle, Config},
+            model::PlaybackStatus,
+        };
+
+        cx.update(|cx| {
+            crate::gui::appearance::theme::set_theme(crate::theme::Theme::default(), cx);
+            crate::gui::appearance::fonts::publish(&gpui::font("sans-serif"), 12, cx);
+        });
+        std::fs::create_dir_all(".cache").unwrap();
+        let directory = tempfile::tempdir_in(".cache").unwrap();
+        let path = directory.path().join("paced.wav");
+        cover_wave(&path, &decode::tests::gif());
+        let track = crate::artwork::tests::track(path);
+        let manager = Arc::new(crate::artwork::ArtworkManager::new(directory.path()));
+        assert!(manager.load(&track).is_some());
+        let images = ArtworkImages::default();
+        let owner = cx.update(|cx| {
+            let default = cx.new(|cx| Artwork::new(&crate::i18n::Localizer::new("en"), cx));
+            cx.new(|_| AlbumArtwork::new(manager, default, images.clone()))
+        });
+        let sync = |mode, status, fps, visible, cx: &mut gpui::TestAppContext| {
+            let config = Config {
+                album_artwork_fps: fps,
+                ..Config::default()
+            };
+            let root = Node::Split {
+                id: 90,
+                axis: Axis::Horizontal,
+                boundaries: vec![0.5],
+                children: [1, 2]
+                    .into_iter()
+                    .map(|id| Node::Tabs {
+                        id: id + 10,
+                        active: id,
+                        panels: vec![Panel {
+                            id,
+                            kind: "album_artwork".into(),
+                            show_tab_bar: true,
+                            audio_visualizer: None,
+                            album_artwork: Some(AlbumArtworkOptions {
+                                mode,
+                                style: AlbumArtworkStyle::Plain,
+                                ..(&config).into()
+                            }),
+                        }],
+                    })
+                    .collect(),
+            };
+            owner.update(cx, |owner, cx| {
+                owner.sync(Some(&track), status, &config, Some(&root), visible, cx);
+            });
+        };
+        sync(
+            AlbumArtworkMode::Static,
+            PlaybackStatus::Paused,
+            0,
+            true,
+            cx,
+        );
+        let window = cx.add_empty_window();
+        window.update(|window, _| window.activate_window());
+        window.run_until_parked();
+        let panels =
+            [1, 2].map(|id| window.new(|cx| AlbumArtworkPanel::new(id, owner.clone(), cx)));
+        let draw = |window: &mut gpui::VisualTestContext| {
+            window.draw(
+                gpui::point(gpui::px(0.), gpui::px(0.)),
+                gpui::size(gpui::px(128.), gpui::px(128.)),
+                |_, _| div().children(panels.iter().cloned()).into_any_element(),
+            );
+        };
+
+        // Loading a static/paused panel must not invent a clock. The existing
+        // decode-completion redraw then starts source animation without playback.
+        draw(window);
+        assert_eq!(
+            window.update(|window, cx| window.simulate_next_frame(cx)),
+            0
+        );
+        window.run_until_parked();
+        draw(window);
+        assert_eq!(
+            window.update(|window, cx| window.simulate_next_frame(cx)),
+            1
+        );
+
+        for mode in [AlbumArtworkMode::Static, AlbumArtworkMode::Rotating] {
+            for status in [PlaybackStatus::Paused, PlaybackStatus::Playing] {
+                for fps in [1, 0] {
+                    sync(mode, status, fps, true, &mut window.cx);
+                    draw(window);
+                    assert_eq!(
+                        window.update(|window, cx| window.simulate_next_frame(cx)),
+                        1,
+                        "two source cursors and rotation share one native request",
+                    );
+                    draw(window);
+                    assert_eq!(
+                        window.update(|window, cx| window.simulate_next_frame(cx)),
+                        usize::from(fps == 0),
+                        "positive FPS waits at the owner deadline; zero uses native frames",
+                    );
+                }
+            }
+        }
+
+        window.update(|_, cx| cx.set_reduce_motion(true));
+        draw(window);
+        assert_eq!(
+            window.update(|window, cx| window.simulate_next_frame(cx)),
+            0
+        );
+        window.update(|_, cx| cx.set_reduce_motion(false));
+        draw(window);
+        assert_eq!(
+            window.update(|window, cx| window.simulate_next_frame(cx)),
+            1
+        );
+
+        window.deactivate_window();
+        draw(window);
+        assert_eq!(
+            window.update(|window, cx| window.simulate_next_frame(cx)),
+            0
+        );
+        window.update(|window, _| window.activate_window());
+        window.run_until_parked();
+        assert_eq!(
+            window.update(|window, cx| window.simulate_next_frame(cx)),
+            1
+        );
+
+        // Hide with a native callback outstanding. It may drain once, but cannot
+        // restart the old generation while the panels are hidden.
+        sync(
+            AlbumArtworkMode::Static,
+            PlaybackStatus::Paused,
+            0,
+            true,
+            &mut window.cx,
+        );
+        draw(window);
+        sync(
+            AlbumArtworkMode::Static,
+            PlaybackStatus::Paused,
+            0,
+            false,
+            &mut window.cx,
+        );
+        assert_eq!(
+            window.update(|window, cx| window.simulate_next_frame(cx)),
+            1
+        );
+        assert_eq!(
+            window.update(|window, cx| window.simulate_next_frame(cx)),
+            0
+        );
+        sync(
+            AlbumArtworkMode::Static,
+            PlaybackStatus::Paused,
+            0,
+            true,
+            &mut window.cx,
+        );
+        draw(window);
+        assert_eq!(
+            window.update(|window, cx| window.simulate_next_frame(cx)),
+            1
+        );
+        window.run_until_parked();
+        draw(window);
+        assert_eq!(
+            window.update(|window, cx| window.simulate_next_frame(cx)),
+            1
+        );
+        window.update(|window, cx| {
+            owner.update(cx, |owner, cx| owner.release_all_images(window, cx));
+            images.release_all_retired(window, cx);
+        });
     }
 
     #[gpui::test]

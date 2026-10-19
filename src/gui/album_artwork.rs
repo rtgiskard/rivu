@@ -204,7 +204,7 @@ fn decoration_index(style: AlbumArtworkStyle) -> Option<usize> {
 }
 
 /// Instances share one source owner, frame callback and cancellable deadline.
-/// Only rotation state and presentation options belong to individual panels.
+/// Rotation and source-animation cursors remain local to individual panels.
 pub(super) struct AlbumArtwork {
     manager: Arc<ArtworkManager>,
     loader: ArtworkLoader,
@@ -220,6 +220,7 @@ pub(super) struct AlbumArtwork {
     frame_pending: bool,
     frame_generation: u64,
     frame_timer: Option<Task<()>>,
+    activation_subscription: Option<gpui::Subscription>,
 }
 
 impl AlbumArtwork {
@@ -243,6 +244,7 @@ impl AlbumArtwork {
             frame_pending: false,
             frame_generation: 0,
             frame_timer: None,
+            activation_subscription: None,
         }
     }
 
@@ -430,7 +432,23 @@ impl AlbumArtwork {
     }
 
     fn request_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.running() || self.frame_pending || self.frame_timer.is_some() {
+        if self.activation_subscription.is_none() {
+            self.activation_subscription =
+                Some(cx.observe_window_activation(window, |this, window, cx| {
+                    this.request_frame(window, cx);
+                    cx.notify();
+                }));
+        }
+        if !self.running(cx) || !window.is_window_active() || cx.reduce_motion() {
+            if self.frame_pending || self.frame_timer.is_some() {
+                self.cancel_frame();
+            }
+            for instance in self.instances.values_mut() {
+                instance.rotation.last_tick = None;
+            }
+            return;
+        }
+        if self.frame_pending || self.frame_timer.is_some() {
             return;
         }
         let now = Instant::now();
@@ -441,7 +459,7 @@ impl AlbumArtwork {
             self.frame_timer = Some(cx.spawn_in(window, async move |this, cx| {
                 timer.await;
                 let _ = this.update_in(cx, |this, window, cx| {
-                    if generation == this.frame_generation && this.running() {
+                    if generation == this.frame_generation {
                         this.frame_timer = None;
                         this.request_frame(window, cx);
                     }
@@ -452,9 +470,16 @@ impl AlbumArtwork {
         self.pacing.requested(now);
         self.frame_pending = true;
         let view = cx.weak_entity();
-        window.on_next_frame(move |_, cx| {
+        window.on_next_frame(move |window, cx| {
             let _ = view.update(cx, |this, cx| {
-                if generation != this.frame_generation || !this.running() {
+                if generation != this.frame_generation {
+                    return;
+                }
+                if !this.running(cx) || !window.is_window_active() || cx.reduce_motion() {
+                    this.cancel_frame();
+                    for instance in this.instances.values_mut() {
+                        instance.rotation.last_tick = None;
+                    }
                     return;
                 }
                 this.frame_pending = false;
@@ -484,10 +509,13 @@ impl AlbumArtwork {
         }
     }
 
-    fn running(&self) -> bool {
-        self.instances
-            .values()
-            .any(|instance| instance.rotation.running)
+    fn running(&self, cx: &App) -> bool {
+        self.visible
+            && (self
+                .instances
+                .values()
+                .any(|instance| instance.rotation.running)
+                || self.view.is_animated(cx))
     }
 }
 
@@ -543,6 +571,7 @@ impl AlbumArtwork {
         let image = self.view.image(cx).map(|mut image| {
             // Multiple panels share a decode, not their playback cursor.
             image.interactivity().element_id = Some(("album-artwork-cover", id).into());
+            image = image.with_automatic_animation_frames(false);
             image
         });
         let default_album = self.default_album.clone();
