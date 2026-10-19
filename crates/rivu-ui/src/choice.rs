@@ -1,5 +1,4 @@
 use crate::{
-    dropdown::{DropdownItem, DropdownState},
     focus::dropdown_key,
     list::VirtualList,
     menu::POPOVER_MAX_REMS,
@@ -9,6 +8,22 @@ use crate::{
     theme::palette,
 };
 use gpui::{prelude::*, *};
+
+/// A candidate shown by a dropdown or autocomplete popup.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DropdownItem<T> {
+    pub value: T,
+    pub label: SharedString,
+}
+
+impl<T> DropdownItem<T> {
+    pub fn new(value: T, label: impl Into<SharedString>) -> Self {
+        Self {
+            value,
+            label: label.into(),
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChoiceMode {
@@ -74,7 +89,9 @@ fn key_action(open: bool, mode: ChoiceMode, composing: bool, key: &str) -> Choic
 
 /// Candidate and scroll state only. Owners retain filtering, values and commit policy.
 pub struct ChoiceState<T> {
-    candidates: DropdownState<T>,
+    items: Vec<DropdownItem<T>>,
+    selected: usize,
+    open: bool,
     scroll: UniformListScrollHandle,
     revision: u64,
 }
@@ -82,7 +99,9 @@ pub struct ChoiceState<T> {
 impl<T> Default for ChoiceState<T> {
     fn default() -> Self {
         Self {
-            candidates: DropdownState::default(),
+            items: Vec::new(),
+            selected: 0,
+            open: false,
             scroll: UniformListScrollHandle::new(),
             revision: 0,
         }
@@ -92,22 +111,25 @@ impl<T> Default for ChoiceState<T> {
 impl<T> ChoiceState<T> {
     pub fn open(&mut self, items: impl IntoIterator<Item = DropdownItem<T>>, selected: usize) {
         self.revision = self.revision.wrapping_add(1);
-        self.candidates.open(items);
+        self.items = items.into_iter().collect();
+        self.open = !self.items.is_empty();
         self.select_index(selected);
     }
 
     pub fn close(&mut self) {
         self.revision = self.revision.wrapping_add(1);
-        self.candidates.close();
+        self.open = false;
+        self.selected = 0;
+        self.items.clear();
     }
     pub fn is_open(&self) -> bool {
-        self.candidates.is_open()
+        self.open
     }
     pub fn selected_index(&self) -> Option<usize> {
-        self.candidates.selected_index()
+        (!self.items.is_empty()).then_some(self.selected)
     }
-    pub fn filtered_item(&self, index: usize) -> Option<(usize, &DropdownItem<T>)> {
-        self.candidates.filtered_item(index)
+    pub fn item(&self, index: usize) -> Option<&DropdownItem<T>> {
+        self.items.get(index)
     }
 
     fn is_current(&self, revision: u64) -> bool {
@@ -115,12 +137,26 @@ impl<T> ChoiceState<T> {
     }
 
     fn accepts(&self, index: usize, revision: u64) -> bool {
-        self.is_current(revision) && self.filtered_item(index).is_some()
+        self.is_current(revision) && self.item(index).is_some()
     }
 
     pub fn select_index(&mut self, index: usize) {
-        self.candidates.select_index(index);
+        self.selected = index.min(self.items.len().saturating_sub(1));
         self.scroll_selected();
+    }
+
+    fn move_next(&mut self) {
+        let count = self.items.len();
+        if count > 0 {
+            self.selected = (self.selected + 1) % count;
+        }
+    }
+
+    fn move_previous(&mut self) {
+        let count = self.items.len();
+        if count > 0 {
+            self.selected = self.selected.checked_sub(1).unwrap_or(count - 1);
+        }
     }
 
     fn scroll_selected(&self) {
@@ -143,12 +179,12 @@ impl<T> ChoiceState<T> {
         match disposition.action {
             ChoiceAction::Navigated => {
                 match key {
-                    "up" => self.candidates.move_previous(),
-                    "down" => self.candidates.move_next(),
+                    "up" => self.move_previous(),
+                    "down" => self.move_next(),
                     "pageup" | "pagedown" => {
                         if let Some(index) = self.selected_index() {
                             let height = self.scroll.0.borrow().base_handle.bounds().size.height;
-                            let count = self.candidates.filtered().count().max(1);
+                            let count = self.items.len().max(1);
                             let row_height = self
                                 .scroll
                                 .0
@@ -159,11 +195,12 @@ impl<T> ChoiceState<T> {
                                 .unwrap_or(DROPDOWN_ROW_REMS * f32::from(window.rem_size()));
                             let visible =
                                 ((f32::from(height) / row_height).floor() as usize).max(1);
-                            self.candidates.select_index(if key == "pagedown" {
+                            self.selected = (if key == "pagedown" {
                                 index.saturating_add(visible)
                             } else {
                                 index.saturating_sub(visible)
-                            });
+                            })
+                            .min(self.items.len().saturating_sub(1));
                         }
                     }
                     _ => unreachable!(),
@@ -225,7 +262,7 @@ impl ChoicePopup {
         cx: &mut Context<Owner>,
     ) -> AnyElement {
         let choices = state(owner);
-        let count = choices.candidates.filtered().count();
+        let count = choices.items.len();
         let selected = choices.selected_index();
         let revision = choices.revision;
         let height = (count as f32 * f32::from(single_line_row_height(window, cx)))
@@ -244,8 +281,8 @@ impl ChoicePopup {
                 }
                 range
                     .filter_map(|index| {
-                        let (_, item) = choices.filtered_item(index)?;
-                        let label: SharedString = item.label.clone().into();
+                        let item = choices.item(index)?;
+                        let label = item.label.clone();
                         let hint = label.clone();
                         let choose = choice_callback(state, choose, index, revision);
                         Some(
@@ -312,6 +349,109 @@ mod tests {
     use super::*;
     use core::prelude::v1::test;
 
+    fn with_choice_window(test: impl FnOnce(&Window)) {
+        let mut cx = TestAppContext::single();
+        let window = cx.add_window(|_, _| PopupChoice {
+            choices: ChoiceState::default(),
+            committed: Vec::new(),
+        });
+        cx.update_window(window.into(), |_, window, _| test(window))
+            .unwrap();
+    }
+
+    fn navigate(state: &mut ChoiceState<u8>, key: &str, window: &Window) {
+        state.key(
+            &KeyDownEvent {
+                keystroke: Keystroke::parse(key).unwrap(),
+                is_held: false,
+                prefer_character_input: false,
+            },
+            ChoiceMode::Select,
+            false,
+            window,
+        );
+    }
+
+    #[test]
+    fn closing_releases_candidates_and_removes_selection() {
+        let value = std::rc::Rc::new(());
+        let mut state = ChoiceState::default();
+        state.open([DropdownItem::new(value.clone(), "candidate")], 0);
+        assert_eq!(std::rc::Rc::strong_count(&value), 2);
+        state.close();
+        assert_eq!(std::rc::Rc::strong_count(&value), 1);
+        assert!(!state.is_open());
+        assert_eq!(state.selected_index(), None);
+        assert!(state.item(0).is_none());
+    }
+
+    #[test]
+    fn empty_open_does_not_leave_a_zero_height_popup() {
+        with_choice_window(|window| {
+            let mut state = ChoiceState::<u8>::default();
+            state.open([], 0);
+            assert!(!state.is_open());
+            assert_eq!(state.selected_index(), None);
+            navigate(&mut state, "down", window);
+            navigate(&mut state, "up", window);
+            state.select_index(usize::MAX);
+            assert_eq!(state.selected_index(), None);
+            assert!(state.item(0).is_none());
+        });
+    }
+
+    #[test]
+    fn keyboard_selection_wraps_and_clamps() {
+        with_choice_window(|window| {
+            let mut state = ChoiceState::default();
+            state.open(
+                [
+                    DropdownItem::new(1, "one"),
+                    DropdownItem::new(2, "two"),
+                    DropdownItem::new(3, "three"),
+                ],
+                0,
+            );
+            navigate(&mut state, "up", window);
+            assert_eq!(state.selected_index(), Some(2));
+            navigate(&mut state, "down", window);
+            assert_eq!(state.selected_index(), Some(0));
+            state.select_index(usize::MAX);
+            assert_eq!(state.selected_index(), Some(2));
+        });
+    }
+
+    #[test]
+    fn replacing_choices_resets_selection_and_empty_choices_close_popup() {
+        with_choice_window(|window| {
+            let mut state = ChoiceState::default();
+            state.open(
+                [
+                    DropdownItem::new(10, "ten"),
+                    DropdownItem::new(20, "twenty"),
+                ],
+                1,
+            );
+            assert_eq!(state.selected_index(), Some(1));
+            state.close();
+            assert!(!state.is_open());
+
+            state.open([DropdownItem::new(30, "thirty")], usize::MAX);
+            assert!(state.is_open());
+            assert_eq!(state.selected_index(), Some(0));
+            assert_eq!(state.item(0).map(|item| item.value), Some(30));
+            assert!(state.item(1).is_none());
+            navigate(&mut state, "down", window);
+            navigate(&mut state, "up", window);
+            assert_eq!(state.selected_index(), Some(0));
+
+            state.open([], 0);
+            assert!(!state.is_open());
+            assert_eq!(state.selected_index(), None);
+            assert!(state.item(0).is_none());
+        });
+    }
+
     #[test]
     fn selection_consumes_native_click_but_tab_keeps_focus_traversal() {
         for key in [
@@ -360,8 +500,7 @@ mod tests {
 
     impl PopupChoice {
         fn choose(&mut self, index: usize, _: &mut Window, cx: &mut Context<Self>) {
-            self.committed
-                .push(self.choices.filtered_item(index).unwrap().1.value);
+            self.committed.push(self.choices.item(index).unwrap().value);
             self.choices.close();
             cx.notify();
         }

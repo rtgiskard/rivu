@@ -336,7 +336,11 @@ edit path; selection requests validate node identity and Unicode character bound
 Platform adapter support determines which text actions reach those handlers.
 `SearchLabels::name` names the editable search independently of its icon actions.
 
-`ChoiceState` owns candidates, keyboard highlight and the existing scroll handle;
+`ChoiceState` directly owns candidates, keyboard highlight, open state and the
+existing scroll handle. `DropdownItem` stores its label as `SharedString`, so
+rendering clones the shared label without allocating a new string. Owners access
+an already-filtered candidate with `ChoiceState::item(index)`; filtering remains
+the owner's responsibility rather than a second candidate-state layer.
 `ChoicePopup` renders their viewport-bounded anchored surface. Select and editable
 input modes share navigation, but editable text/IME submission remains Input's
 responsibility. Owners supply filtering, value mapping, commit and dismissal

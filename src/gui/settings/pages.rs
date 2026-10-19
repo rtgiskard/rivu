@@ -318,7 +318,7 @@ impl Settings {
                                 .map_or(0, |index| index + 1);
                             let items = std::iter::once(DropdownItem::new(
                                 SettingChoice::Device(0),
-                                this.i18n.text("settings-system-default"),
+                                this.i18n.text("settings-system-default").to_owned(),
                             ))
                             .chain(this.devices.iter().enumerate().map(|(index, device)| {
                                 DropdownItem::new(SettingChoice::Device(index + 1), device.clone())
@@ -1209,7 +1209,7 @@ impl Settings {
                                 .map(|value| {
                                     DropdownItem::new(
                                         SettingChoice::AudioVisualizerStyle(value),
-                                        audio_visualizer_style_label(&this.i18n, value),
+                                        audio_visualizer_style_label(&this.i18n, value).to_owned(),
                                     )
                                 })
                                 .collect(),

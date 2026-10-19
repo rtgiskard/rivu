@@ -1633,7 +1633,7 @@ impl Settings {
     }
 
     fn choose_setting(&mut self, index: usize, cx: &mut Context<Self>) {
-        let Some((_, item)) = self.dropdown.filtered_item(index) else {
+        let Some(item) = self.dropdown.item(index) else {
             return;
         };
         match item.value {

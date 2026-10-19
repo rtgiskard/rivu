@@ -156,7 +156,7 @@ impl Showcase {
         cx.notify();
     }
     fn choose(&mut self, index: usize, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some((_, item)) = self.choices.filtered_item(index) {
+        if let Some(item) = self.choices.item(index) {
             self.choice = item.value;
         }
         self.choices.close();
