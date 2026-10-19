@@ -134,13 +134,14 @@ impl FractalVisualizer {
             config.audio_visualizer_primary_color.rgb(),
             config.audio_visualizer_secondary_color.rgb(),
         ];
+        let appearance_changed =
+            data.colors != colors || data.bloom != config.audio_visualizer_bloom_intensity;
         let changed = reset
-            || data.colors != colors
+            || appearance_changed
             || data.background != config.visual_background.rgb()
             || data.sensitivity != config.audio_visualizer_sensitivity
-            || data.db_range != config.audio_visualizer_db_range()
-            || data.bloom != config.audio_visualizer_bloom_intensity;
-        if data.colors != colors || data.bloom != config.audio_visualizer_bloom_intensity {
+            || data.db_range != config.audio_visualizer_db_range();
+        if appearance_changed {
             data.gpu_palette = None;
         }
         data.settings = settings;
@@ -151,8 +152,8 @@ impl FractalVisualizer {
         data.bloom = config.audio_visualizer_bloom_intensity;
         if reset {
             data.reset();
-        }
-        if changed && !reset {
+        } else if appearance_changed {
+            // Background only affects paint; response settings apply to future audio.
             data.publish();
         }
         changed
@@ -305,7 +306,7 @@ impl Data {
     }
 
     fn publish(&mut self) {
-        if !self.visible || self.scene.is_none() {
+        if !self.visible || self.last_time.is_none() || self.scene.is_none() {
             self.gpu_frame = None;
             return;
         }
@@ -594,6 +595,197 @@ mod tests {
         }
     }
 
+    fn publication(visual: &FractalVisualizer) -> Arc<GpuFrame> {
+        Arc::clone(visual.data.borrow().gpu_frame.as_ref().unwrap())
+    }
+
+    fn published_segments(frame: &GpuFrame) -> Vec<([f32; 4], u32)> {
+        let gpui::GpuContent::Segments { segments, .. } = frame.content() else {
+            panic!("expected fractal segments");
+        };
+        segments.iter().map(|s| (s.endpoints, s.color)).collect()
+    }
+
+    #[test]
+    fn background_and_response_configuration_preserve_publication_until_new_audio() {
+        for style in [
+            AudioVisualizerStyle::FractalBeams,
+            AudioVisualizerStyle::FractalFlow,
+        ] {
+            for (config, changes_drive) in [
+                (
+                    Config {
+                        visual_background: "#123456".parse().unwrap(),
+                        ..Config::default()
+                    },
+                    false,
+                ),
+                (
+                    Config {
+                        audio_visualizer_sensitivity: 0.25,
+                        ..Config::default()
+                    },
+                    true,
+                ),
+                (
+                    Config {
+                        audio_visualizer_db_range: Some(40.0),
+                        ..Config::default()
+                    },
+                    true,
+                ),
+            ] {
+                let visual = plot(style);
+                let reference = plot(style);
+                for t in (50..=1000).step_by(50) {
+                    visual.update(&frame(t));
+                    reference.update(&frame(t));
+                }
+                let before = publication(&visual);
+                let geometry = visual.data.borrow().segments().to_vec();
+                let drive = visual.data.borrow().drive;
+                let previous_energy = visual.data.borrow().previous_energy;
+                assert!(visual.configure(&config));
+                assert!(!visual.configure(&config));
+                let mut paused = frame(1000);
+                paused.sequence += 1;
+                paused.visualizer.band_rms = [1.0; 3];
+                visual.update(&paused);
+                assert!(Arc::ptr_eq(&before, &publication(&visual)));
+                {
+                    let data = visual.data.borrow();
+                    assert_eq!(data.background, config.visual_background.rgb());
+                    assert_eq!(data.segments(), geometry);
+                    assert_eq!(data.last_time, Some(paused.sample_time));
+                    assert_eq!(data.drive.bands, drive.bands);
+                    assert_eq!(data.drive.energy, drive.energy);
+                    assert_eq!(data.drive.onset, drive.onset);
+                    assert_eq!(data.previous_energy, previous_energy);
+                }
+                visual.update(&frame(1050));
+                reference.update(&frame(1050));
+                let after = publication(&visual);
+                assert!(!Arc::ptr_eq(&before, &after));
+                assert!(Arc::ptr_eq(before.palette(), after.palette()));
+                if changes_drive {
+                    assert!(
+                        visual.data.borrow().drive.energy < reference.data.borrow().drive.energy
+                    );
+                    assert_ne!(
+                        visual.data.borrow().segments(),
+                        reference.data.borrow().segments()
+                    );
+                } else {
+                    assert_eq!(
+                        visual.data.borrow().segments(),
+                        reference.data.borrow().segments()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn color_and_bloom_configuration_republishes_material_without_advancing_audio() {
+        for style in [
+            AudioVisualizerStyle::FractalBeams,
+            AudioVisualizerStyle::FractalFlow,
+        ] {
+            let visual = plot(style);
+            for t in (50..=1000).step_by(50) {
+                visual.update(&frame(t));
+            }
+            let geometry = visual.data.borrow().segments().to_vec();
+            let drive = visual.data.borrow().drive;
+            let mut config = Config::default();
+            for change in 0..4 {
+                let before = publication(&visual);
+                match change {
+                    0 => config.audio_visualizer_primary_color = "#ff0000".parse().unwrap(),
+                    1 => config.audio_visualizer_secondary_color = "#0000ff".parse().unwrap(),
+                    2 => config.audio_visualizer_bloom_intensity = 0.9,
+                    _ => config.audio_visualizer_bloom_intensity = 0.0,
+                }
+                assert!(visual.configure(&config));
+                let after = publication(&visual);
+                assert!(!Arc::ptr_eq(&before, &after));
+                assert!(!Arc::ptr_eq(before.palette(), after.palette()));
+                assert_ne!(before.palette().colors(), after.palette().colors());
+                assert_eq!(published_segments(&before), published_segments(&after));
+                if change >= 2 {
+                    let gpui::GpuContent::Segments { layers, .. } = after.content() else {
+                        panic!("expected fractal segments");
+                    };
+                    if config.audio_visualizer_bloom_intensity == 0.0 {
+                        assert_eq!(layers.len(), 1);
+                        assert_eq!(layers[0].width, 1.0);
+                        assert_eq!(layers[0].palette_offset, 18);
+                        assert!(after.palette().colors()[..18].iter().all(|c| c[3] == 0.0));
+                    } else {
+                        assert_eq!(layers.len(), 3);
+                        assert!(after.palette().colors()[0][3] > before.palette().colors()[0][3]);
+                    }
+                }
+                assert!(!visual.configure(&config));
+                visual.update(&frame(1000));
+                assert!(Arc::ptr_eq(&after, &publication(&visual)));
+                let data = visual.data.borrow();
+                assert_eq!(data.segments(), geometry);
+                assert_eq!(data.last_time, Some(Duration::from_millis(1000)));
+                assert_eq!(data.drive.bands, drive.bands);
+                assert_eq!(data.drive.energy, drive.energy);
+                assert_eq!(data.drive.onset, drive.onset);
+            }
+        }
+    }
+
+    #[test]
+    fn fft_and_window_reset_drop_publication_until_matching_audio_is_accepted() {
+        for style in [
+            AudioVisualizerStyle::FractalBeams,
+            AudioVisualizerStyle::FractalFlow,
+        ] {
+            for mut config in [
+                Config {
+                    analysis_fft_size: 4096,
+                    ..Config::default()
+                },
+                Config {
+                    analysis_window: crate::config::AnalysisWindow::Hann,
+                    ..Config::default()
+                },
+            ] {
+                let visual = plot(style);
+                visual.update(&frame(50));
+                let old = publication(&visual);
+                config.audio_visualizer_primary_color = "#ff0000".parse().unwrap();
+                assert!(visual.configure(&config));
+                assert!(visual.data.borrow().gpu_frame.is_none());
+                assert!(visual.data.borrow().segments().is_empty());
+                visual.update(&frame(50));
+                assert!(visual.data.borrow().last_time.is_none());
+                config.audio_visualizer_secondary_color = "#0000ff".parse().unwrap();
+                assert!(visual.configure(&config));
+                assert!(visual.data.borrow().gpu_frame.is_none());
+                let mut accepted = frame(50);
+                accepted.settings = Some(AnalysisSettings::from(&config));
+                visual.update(&accepted);
+                let fresh = plot(style);
+                fresh.configure(&config);
+                fresh.update(&accepted);
+                assert!(!Arc::ptr_eq(&old, &publication(&visual)));
+                assert_eq!(
+                    visual.data.borrow().segments(),
+                    fresh.data.borrow().segments()
+                );
+                assert_eq!(
+                    published_segments(&publication(&visual)),
+                    published_segments(&publication(&fresh))
+                );
+            }
+        }
+    }
+
     #[test]
     fn flow_refresh_preserves_state_and_discontinuities_reset() {
         let visual = plot(AudioVisualizerStyle::FractalFlow);
@@ -698,6 +890,55 @@ mod tests {
     }
 
     #[test]
+    fn generation_rate_rewind_and_gap_restart_from_fresh_audio_state() {
+        for style in [
+            AudioVisualizerStyle::FractalBeams,
+            AudioVisualizerStyle::FractalFlow,
+        ] {
+            for discontinuity in 0..4 {
+                let visual = plot(style);
+                for t in (50..=1000).step_by(50) {
+                    visual.update(&frame(t));
+                }
+                let old = publication(&visual);
+                let mut next = frame(1000);
+                match discontinuity {
+                    0 => next.generation += 1,
+                    1 => next.sample_rate = 44100,
+                    2 => next.sample_time = Duration::from_millis(950),
+                    _ => next.sample_time = Duration::from_millis(1550),
+                }
+                if discontinuity < 2 {
+                    let mut undemanded = next.clone();
+                    undemanded.visualizer.demand.band_energy = false;
+                    visual.update(&undemanded);
+                    assert!(visual.data.borrow().gpu_frame.is_none());
+                    assert!(visual.data.borrow().segments().is_empty());
+                    // Material changes cannot resurrect a reset scene before audio arrives.
+                    visual.configure(&Config {
+                        audio_visualizer_bloom_intensity: 0.9,
+                        ..Config::default()
+                    });
+                    assert!(visual.data.borrow().gpu_frame.is_none());
+                    visual.configure(&Config::default());
+                }
+                visual.update(&next);
+                let fresh = plot(style);
+                fresh.update(&next);
+                assert!(!Arc::ptr_eq(&old, &publication(&visual)));
+                assert_eq!(
+                    visual.data.borrow().segments(),
+                    fresh.data.borrow().segments()
+                );
+                assert_eq!(
+                    published_segments(&publication(&visual)),
+                    published_segments(&publication(&fresh))
+                );
+            }
+        }
+    }
+
+    #[test]
     fn discontinuities_and_stale_configuration_never_bridge_scenes() {
         for style in [
             AudioVisualizerStyle::FractalBeams,
@@ -711,6 +952,7 @@ mod tests {
             stale.generation += 1;
             stale.visualizer.demand.band_energy = false;
             visual.update(&stale);
+            assert!(visual.data.borrow().gpu_frame.is_none());
             assert!(
                 visual
                     .data
@@ -794,6 +1036,7 @@ mod tests {
             visual.update(&frame(50));
             assert!(visual.data.borrow().scene.is_some());
             visual.set_visible(false);
+            assert!(visual.data.borrow().gpu_frame.is_none());
             assert!(visual.data.borrow().scene.is_none());
             visual.update(&frame(100));
             assert!(visual.data.borrow().scene.is_none());
@@ -803,6 +1046,7 @@ mod tests {
             stale.visualizer.demand.band_energy = false;
             visual.update(&stale);
             assert!(visual.data.borrow().scene.is_none());
+            assert!(visual.data.borrow().gpu_frame.is_none());
             visual.update(&frame(200));
             let fresh = plot(style);
             fresh.update(&frame(200));

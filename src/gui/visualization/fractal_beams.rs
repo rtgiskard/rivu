@@ -65,7 +65,6 @@ impl Scene {
         for (root, length) in ROOT_LENGTHS.iter().copied().enumerate() {
             scene.grow(NO_PARENT, root, 0, length, 0.0, 0.0);
         }
-        scene.rebuild_segments();
         scene
     }
 
@@ -77,9 +76,11 @@ impl Scene {
         self.next_pulse = 0;
         self.previous_onset = 0.0;
         self.pulse_cooldown = 0.0;
-        self.rebuild_segments();
+        // Geometry belongs to accepted-frame publication, never reset itself.
+        self.segments.clear();
     }
 
+    // Integrate state only; the accepted-frame owner rebuilds after the final step.
     pub(super) fn advance(&mut self, dt: f32, drive: Drive) {
         if dt <= 0.0 || !dt.is_finite() {
             return;
@@ -338,7 +339,15 @@ mod tests {
         for _ in 0..240 {
             scene.advance(DT, sounding());
         }
+        scene.rebuild_segments();
+        assert!(
+            scene
+                .segments()
+                .iter()
+                .any(|segment| segment.strength > 0.05)
+        );
         scene.reset();
+        assert!(scene.segments().is_empty());
         same_segments(scene.segments(), fresh.segments());
         for step in 0..180 {
             let drive = Drive {
