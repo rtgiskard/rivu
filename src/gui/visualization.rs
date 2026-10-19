@@ -13,6 +13,16 @@ pub(super) use waveform::{Waveform, WaveformEvent};
 use crate::{config::AudioVisualizerStyle, i18n::Localizer};
 use gpui::{Div, SharedString, div, prelude::*, rgb};
 
+pub(super) const AUDIO_VISUALIZER_STYLES: [AudioVisualizerStyle; 7] = [
+    AudioVisualizerStyle::Bars,
+    AudioVisualizerStyle::Rings,
+    AudioVisualizerStyle::BarsRings,
+    AudioVisualizerStyle::StereoDensity,
+    AudioVisualizerStyle::SpatialSpectrum,
+    AudioVisualizerStyle::FractalBeams,
+    AudioVisualizerStyle::FractalFlow,
+];
+
 fn visualization_status(message: impl Into<SharedString>) -> Div {
     div()
         .w_full()

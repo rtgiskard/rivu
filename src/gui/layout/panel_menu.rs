@@ -1,7 +1,6 @@
 //! Panel catalog and context-menu presentation, options, and layout actions.
 
 use super::super::*;
-use crate::config::AudioVisualizerStyle;
 use rivu_ui::{
     Popover, button, caption, checked_menu_item, column, menu_item, row, surface::MenuIndicator,
 };
@@ -554,15 +553,7 @@ impl GuiApp {
                     .current()
                     .audio_visualizer_options(state.panel_id)
                 {
-                    for style in [
-                        AudioVisualizerStyle::Bars,
-                        AudioVisualizerStyle::Rings,
-                        AudioVisualizerStyle::BarsRings,
-                        AudioVisualizerStyle::StereoDensity,
-                        AudioVisualizerStyle::SpatialSpectrum,
-                        AudioVisualizerStyle::FractalBeams,
-                        AudioVisualizerStyle::FractalFlow,
-                    ] {
+                    for style in visualization::AUDIO_VISUALIZER_STYLES {
                         let selected = options.style == style;
                         menu = menu.child(checked_menu_item(
                             ("audio-visualizer-style", style as usize),

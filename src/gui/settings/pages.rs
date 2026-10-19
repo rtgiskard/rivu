@@ -9,7 +9,10 @@ use crate::{
         AlbumArtworkDirection, AlbumArtworkMode, AnalysisWindow, AudioVisualizerStyle, LogLevel,
         SpectrumStyle, VisualizationPalette,
     },
-    gui::{album_artwork::ALBUM_ARTWORK_STYLES, visualization::audio_visualizer_style_label},
+    gui::{
+        album_artwork::ALBUM_ARTWORK_STYLES,
+        visualization::{AUDIO_VISUALIZER_STYLES, audio_visualizer_style_label},
+    },
     theme::Theme,
 };
 use gpui::{Context, Div, SharedString, div, prelude::*, rems, rgb};
@@ -1190,15 +1193,7 @@ impl Settings {
                     self.dropdown.is_open() && self.dropdown_anchor == Measured::SettingsStyle,
                     cx,
                     |this, _, _| {
-                        let values = [
-                            AudioVisualizerStyle::Bars,
-                            AudioVisualizerStyle::Rings,
-                            AudioVisualizerStyle::BarsRings,
-                            AudioVisualizerStyle::StereoDensity,
-                            AudioVisualizerStyle::SpatialSpectrum,
-                            AudioVisualizerStyle::FractalBeams,
-                            AudioVisualizerStyle::FractalFlow,
-                        ];
+                        let values = AUDIO_VISUALIZER_STYLES;
                         let selected = values
                             .iter()
                             .position(|value| *value == this.model.draft.audio_visualizer_style)

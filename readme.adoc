@@ -211,6 +211,8 @@ timestamp. Invalid values fail the build; About displays the timestamp locally.
   The positional IPC configuration schema remains independent.
 * `src/audio/source.rs` applies playback ranges and seek-prefix discard to decoded
   PCM through one shared step; codec-specific trimming remains with each decoder.
+* `src/gui/visualization.rs` owns the ordered audio-visualizer style catalog used
+  by both Settings and panel menus; rendering remains with the individual backends.
 * `src/gui/queue.rs` owns the Queue entity and integration events; its `model`,
   `queries`, and `view` modules separate state, asynchronous work, and rendering.
 * `src/gui/settings.rs` owns settings controls and session integration;
