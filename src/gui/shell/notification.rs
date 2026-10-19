@@ -6,9 +6,9 @@ fn notification_button(
     control: gpui::Stateful<gpui::Div>,
 ) -> gpui::Stateful<gpui::Div> {
     rivu_ui::quiet_icon_button(theme, control)
-        .min_h(gpui::rems(1.5))
-        .h(gpui::rems(1.5))
-        .w(gpui::rems(1.5))
+        .group_hover("control", |style| style.bg(rgb(theme.text).alpha(0.08)))
+        .min_h_6()
+        .size_6()
         .p_0()
         .flex_shrink_0()
 }
@@ -31,22 +31,28 @@ impl GuiApp {
         };
         let theme = rivu_ui::theme::palette(cx);
         let copied_message = message.clone();
-        let mut buttons = row().flex_shrink_0().gap_1().child(notification_button(
-            theme,
-            icon_button(
-                if is_error {
-                    "copy-error"
-                } else {
-                    "copy-scan-message"
-                },
-                "",
-                self.tr("shell-copy-message"),
-                cx,
-                move |_, _, cx| {
-                    cx.write_to_clipboard(ClipboardItem::new_string(copied_message.to_string()));
-                },
-            ),
-        ));
+        let mut buttons = row()
+            .flex_shrink_0()
+            .gap_0()
+            .ml_4()
+            .child(notification_button(
+                theme,
+                icon_button(
+                    if is_error {
+                        "copy-error"
+                    } else {
+                        "copy-scan-message"
+                    },
+                    "",
+                    self.tr("shell-copy-message"),
+                    cx,
+                    move |_, _, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(
+                            copied_message.to_string(),
+                        ));
+                    },
+                ),
+            ));
         if is_error {
             buttons = buttons.child(notification_button(
                 theme,
@@ -66,8 +72,9 @@ impl GuiApp {
             row()
                 .flex_initial()
                 .min_w_0()
-                .px_2()
-                .gap_2()
+                .py_0p5()
+                .px_1()
+                .gap_0()
                 .text_xs()
                 .text_color(rgb(theme.text))
                 .when(is_error, |notification| {
