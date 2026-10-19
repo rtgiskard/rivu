@@ -908,7 +908,6 @@ impl Playlists {
         };
         let message: SharedString = message.to_owned().into();
         row()
-            .p_2()
             .h(gpui::rems(LIST_ROW_REMS))
             .flex_shrink_0()
             .w_full()

@@ -43,8 +43,8 @@ apply only at collection creation or explicit template creation. Initial tab
 selection and template controls are documented in
 link:01_config.adoc#_layout[Configuration and layout].
 
-Visualization sizing uses the actual content canvas, after any visible 1.75rem
-tab row, panel borders, and 8px content insets. Spectrum and Spectrogram show an
+Visualization sizing uses the actual content canvas, after any visible
+tab row, panel borders, and 0.5rem content insets. Spectrum and Spectrogram show an
 `Enlarge panel` hint when that canvas is at most 64px wide or 40px high; the hint
 remains accessible through its tooltip and scrolling. Audio Visualizer and
 Waveform do not yet share this hint; their smaller drawing cutoffs can leave a
@@ -74,7 +74,27 @@ than force overflow into neighboring panels; longer headings do not increase
 the layout minimum. The existing separator minima are therefore retained rather
 than adding panel-specific hard minima that the smallest supported viewport
 cannot always satisfy.
-The shell owns the outer content inset for every docked panel. Panel roots and
+The main shell owns a uniform 0.25rem outer inset (4px at the default interface
+scale) around the workspace and footer, separated by a 0.25rem gap. Neither child
+repeats the outer inset. The full-window root stays unpadded so modal backdrops
+and docking overlays keep their window coordinates.
+The tab strip uses 0.5rem horizontal and 0.125rem vertical padding. Its labels
+use 0.25rem horizontal and 0.125rem vertical padding. These follow interface
+scale. Neither the strip nor its labels impose a fixed or minimum height;
+text, close controls and padding
+determine their height. The footer has no separate outer padding and keeps at
+least 4rem between messages and the right-aligned button group. Messages can
+shrink and truncate; the button group does not shrink. Its content determines its height, without
+a fixed or minimum height. Its menu and panel catalog anchor above the actual
+footer bounds, with a 1rem right inset and a 0.5rem clearance from the other
+window edges. Menus size to their contents rather than a fixed width or the
+whole workspace; catalog buttons wrap to the available width. An individual
+overlong label truncates within its button and exposes its full text in a
+tooltip. Oversized menus scroll within the available height. Shared
+menus, tooltip width limits, and drag-preview width limits likewise retain
+0.5rem clearance on both sides of the viewport, following interface scale.
+
+The shell owns the 0.5rem outer content inset for every docked panel. Panel roots and
 standalone headings, empty-state captions, and error captions do not repeat that
 edge padding. Cards, list rows (including placeholder rows), and form groups
 retain their internal spacing; scrollable content remains bounded by the shell's

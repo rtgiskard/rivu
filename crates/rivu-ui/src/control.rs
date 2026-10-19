@@ -1,4 +1,4 @@
-use crate::{layout::UI_INSET, overlay::text_tooltip};
+use crate::overlay::text_tooltip;
 use gpui::{
     Context, Div, ElementId, Role, SharedString, Stateful, Toggled, Window, div, prelude::*, rgb,
 };
@@ -42,7 +42,7 @@ fn control_surface(
         .flex()
         .items_center()
         .min_w_0()
-        .px(gpui::px(UI_INSET))
+        .px_2()
         .py_1()
         .rounded_sm()
         .min_h(gpui::rems(2.0))

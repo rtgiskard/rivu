@@ -10,14 +10,13 @@ pub(super) use audio_visualizer::AudioVisualizer;
 pub(super) use visuals::Visuals;
 pub(super) use waveform::{Waveform, WaveformEvent};
 
-use super::UI_INSET;
 use crate::{config::AudioVisualizerStyle, i18n::Localizer};
 use gpui::{Div, SharedString, div, prelude::*, rgb};
 
 fn visualization_status(message: impl Into<SharedString>) -> Div {
     div()
         .w_full()
-        .p(gpui::px(UI_INSET))
+        .p_2()
         .text_sm()
         .text_color(rgb(0xb1bbc5))
         .child(message.into())

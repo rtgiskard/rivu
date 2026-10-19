@@ -129,6 +129,7 @@ impl History {
         label: impl Into<SharedString>,
         sort: HistorySort,
         width: Option<gpui::Pixels>,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let active = self.model.sort() == sort;
@@ -149,7 +150,7 @@ impl History {
                 cx.notify();
             },
         )
-        .px_2()
+        .px(window.rem_size() * 0.5 - px(1.))
         .py_1()
         .rounded_sm()
     }
@@ -265,7 +266,7 @@ impl History {
             cache.playback = playback;
             cache.playback_text = label.map(|(text, _)| text);
         }
-        // Match px_2 on both header controls and data cells.
+        // Header control borders fit inside the same cell inset as row text.
         let widths = self
             .column_widths
             .as_ref()
@@ -275,7 +276,7 @@ impl History {
         let header = row()
             .items_center()
             .gap_0()
-            .px_2()
+            .px(rem_size * 0.5 + px(1.))
             .py_1()
             .h_auto()
             .min_h(gpui::rems(2.625))
@@ -297,6 +298,7 @@ impl History {
                 self.tr("gl-track"),
                 HistorySort::Title,
                 None,
+                window,
                 cx,
             ))
             .child(self.history_sort_button(
@@ -304,6 +306,7 @@ impl History {
                 self.tr("gl-play-count"),
                 HistorySort::Plays,
                 Some(widths[1]),
+                window,
                 cx,
             ))
             .child(self.history_sort_button(
@@ -311,6 +314,7 @@ impl History {
                 self.tr("gl-last-played"),
                 HistorySort::Recent,
                 Some(widths[2]),
+                window,
                 cx,
             ))
             .child(div().w(px(12.)).flex_shrink_0());

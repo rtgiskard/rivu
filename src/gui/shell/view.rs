@@ -179,14 +179,6 @@ impl Render for GuiApp {
                 )
                 .absolute()
                 .size_full(),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .min_w_0()
-                    .p(gpui::px(UI_INSET))
-                    .child(layout_view),
             );
 
         let error = self
@@ -198,16 +190,11 @@ impl Render for GuiApp {
             })
             .or(self.state.system.last_error.as_ref())
             .cloned();
-        let footer_height = window.rem_size() * 2.25 + px(UI_INSET);
         let mut footer = row()
-            .gap_0()
-            .h(footer_height)
+            .gap(gpui::rems(4.))
+            .relative()
             .flex_shrink_0()
-            .px(gpui::px(UI_INSET))
-            .pt_1()
-            .pb(gpui::px(UI_INSET))
-            .text_xs()
-            .text_color(rgb(theme.muted));
+            .text_xs();
         if let Some(error) = error {
             let message: SharedString = error.clone().into();
             let copied_message = message.clone();
@@ -286,35 +273,44 @@ impl Render for GuiApp {
                     self.state.system.scan_message.clone(),
                     cx,
                 )
+                .flex_initial()
                 .text_color(rgb(theme.text)),
             );
         }
-        footer = footer
-            .child(div().flex_1().min_w(gpui::rems(4.)))
+        let tools = row()
+            .ml_auto()
+            .gap_1()
+            .flex_shrink_0()
             .child(
-                icon_button(
-                    "layout",
-                    if self.workspace.layouts.current().locked {
-                        "󰌾"
-                    } else {
-                        ""
-                    },
-                    if self.workspace.layouts.current().locked {
-                        self.tr("shell-layout-locked-hint")
-                    } else {
-                        self.tr("shell-layout-unlocked-hint")
-                    },
-                    cx,
-                    |this, _, cx| {
-                        if this.workspace.layouts.current().locked {
-                            return;
-                        }
-                        this.shell.toggle(shell::Surface::PanelCatalog);
-                        this.panel_menu = None;
-                        cx.notify();
-                    },
+                rivu_ui::active_control(
+                    theme,
+                    rivu_ui::quiet_icon_button(
+                        theme,
+                        icon_button(
+                            "layout",
+                            if self.workspace.layouts.current().locked {
+                                "󰌾"
+                            } else {
+                                ""
+                            },
+                            if self.workspace.layouts.current().locked {
+                                self.tr("shell-layout-locked-hint")
+                            } else {
+                                self.tr("shell-layout-unlocked-hint")
+                            },
+                            cx,
+                            |this, _, cx| {
+                                if this.workspace.layouts.current().locked {
+                                    return;
+                                }
+                                this.shell.toggle(shell::Surface::PanelCatalog);
+                                this.panel_menu = None;
+                                cx.notify();
+                            },
+                        ),
+                    ),
+                    self.shell.is_open(shell::Surface::PanelCatalog),
                 )
-                .mr_2()
                 .on_mouse_down(
                     MouseButton::Right,
                     cx.listener(|this, _, window, cx| {
@@ -332,23 +328,32 @@ impl Render for GuiApp {
                     }),
                 ),
             )
-            .child(icon_button(
-                "app-menu",
-                "",
-                self.tr("shell-menu"),
-                cx,
-                |this, _, cx| {
-                    this.shell.toggle(shell::Surface::AppMenu);
-                    this.panel_menu = None;
-                    cx.notify();
-                },
+            .child(rivu_ui::active_control(
+                theme,
+                rivu_ui::quiet_icon_button(
+                    theme,
+                    icon_button(
+                        "app-menu",
+                        "",
+                        self.tr("shell-menu"),
+                        cx,
+                        |this, _, cx| {
+                            this.shell.toggle(shell::Surface::AppMenu);
+                            this.panel_menu = None;
+                            cx.notify();
+                        },
+                    ),
+                ),
+                self.shell.is_open(shell::Surface::AppMenu),
             ));
+        footer = footer.child(tools);
+        let mut footer_popup = None;
         if self.shell.is_open(shell::Surface::AppMenu) {
             let about = menu_item("app-about", self.tr("shell-about"), cx, |this, _, cx| {
                 this.shell.open(shell::Surface::About);
                 cx.notify();
             });
-            app = app.child(
+            footer_popup = Some(
                 Popover::surface(theme, "app-menu-popup")
                     .role(gpui::Role::Menu)
                     .flex()
@@ -356,15 +361,6 @@ impl Render for GuiApp {
                     .min_w_0()
                     .min_h_0()
                     .map(|surface| self.menu_surface(surface, cx))
-                    .absolute()
-                    .bottom(footer_height)
-                    .right(gpui::px(UI_INSET))
-                    .w(rems(220. / 16.))
-                    .max_w((window.viewport_size().width - px(UI_INSET * 2.)).max(px(0.)))
-                    .max_h(
-                        (window.viewport_size().height - footer_height - px(UI_INSET)).max(px(0.)),
-                    )
-                    .overflow_y_scroll()
                     .p_1()
                     .gap_1()
                     .rounded_md()
@@ -462,15 +458,56 @@ impl Render for GuiApp {
             );
         }
 
-        app = app.child(footer);
-        if self.workspace.interaction.docking().is_some() {
-            app = app.child(self.docking_overlay(theme));
-        }
-
         if self.shell.is_open(shell::Surface::PanelCatalog)
             && !self.workspace.layouts.current().locked
         {
-            app = app.child(self.render_panel_catalog(theme, footer_height, cx));
+            footer_popup = Some(self.render_panel_catalog(theme, cx));
+        }
+
+        if let Some(popup) = footer_popup {
+            // Absolute content reads the footer's intrinsic size without sizing it.
+            footer = footer.child(
+                gpui::container_query(move |size, window, _| {
+                    let outer_inset = window.rem_size() * 0.25;
+                    let inset = window.rem_size() * 0.5;
+                    div().relative().size_full().child(
+                        popup
+                            .absolute()
+                            .bottom(size.height + outer_inset)
+                            .right(window.rem_size() - outer_inset)
+                            .max_w(
+                                (window.viewport_size().width - window.rem_size() - inset)
+                                    .max(px(0.)),
+                            )
+                            .max_h(
+                                (window.viewport_size().height
+                                    - size.height
+                                    - outer_inset * 2.
+                                    - inset)
+                                    .max(px(0.)),
+                            )
+                            .overflow_y_scroll(),
+                    )
+                })
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full(),
+            );
+        }
+        app = app.child(
+            column()
+                .flex_1()
+                .min_h_0()
+                .min_w_0()
+                .w_full()
+                .p_1()
+                .gap_1()
+                .child(div().flex_1().min_h_0().min_w_0().child(layout_view))
+                .child(footer),
+        );
+        if self.workspace.interaction.docking().is_some() {
+            app = app.child(self.docking_overlay(theme));
         }
 
         if let Some(state) = self.panel_menu {

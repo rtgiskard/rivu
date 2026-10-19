@@ -1,7 +1,5 @@
 use gpui::{Div, ElementId, SharedString, Stateful, div, prelude::*, px, rgb};
 
-pub(crate) const UI_INSET: f32 = 8.0;
-
 pub fn row() -> Div {
     div().flex().items_center().gap_2().min_w_0()
 }

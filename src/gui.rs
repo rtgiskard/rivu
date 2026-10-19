@@ -64,7 +64,6 @@ pub(crate) fn init(cx: &mut App) -> Result<()> {
     Ok(())
 }
 
-const UI_INSET: f32 = 8.0;
 const SPLIT_GUTTER: f32 = 4.0;
 
 struct PanelSpec {

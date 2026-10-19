@@ -277,10 +277,10 @@ impl GuiApp {
                     .find(|panel| panel.id == active)
                     .is_none_or(|panel| panel.show_tab_bar);
                 let mut tabs = row()
-                    .h(gpui::rems(1.75))
+                    .items_stretch()
                     .flex_shrink_0()
-                    .px(gpui::px(UI_INSET))
-                    .py(px(1.))
+                    .px_2()
+                    .py(gpui::rems(0.125))
                     .gap_1()
                     .border_b_1()
                     .border_color(rgb(theme.structure_border));
@@ -302,11 +302,10 @@ impl GuiApp {
                             .focus(|style| style.border_color(rgb(theme.accent)))
                             .relative()
                             .flex()
-                            .h_full()
                             .items_center()
                             .gap_2()
-                            .px_2()
-                            .py_0()
+                            .px_1()
+                            .py(gpui::rems(0.125))
                             .rounded_sm()
                             .border_1()
                             .border_color(gpui::transparent_black())
@@ -429,7 +428,6 @@ impl GuiApp {
                             .map(|_| self.render_panel(panel, window, cx))
                             .unwrap_or_else(|| {
                                 div()
-                                    .p(gpui::px(UI_INSET))
                                     .child(self.i18n.format(
                                         "shell-unknown-panel",
                                         &[("kind", panel.kind.as_str().into())],
@@ -445,7 +443,7 @@ impl GuiApp {
                     .flex_1()
                     .min_h_0()
                     .min_w_0()
-                    .p(gpui::px(UI_INSET))
+                    .p_2()
                     .overflow_hidden()
                     .capture_any_mouse_down(cx.listener(move |this, _: &MouseDownEvent, _, _| {
                         this.search_panel = Some(active);

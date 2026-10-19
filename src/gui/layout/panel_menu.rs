@@ -52,14 +52,14 @@ impl GuiApp {
     pub(in crate::gui) fn render_panel_catalog(
         &self,
         theme: &'static rivu_ui::theme::Palette,
-        footer_height: Pixels,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let mut choices = row().gap_1();
-        let mut visualizations = row().gap_1();
+    ) -> gpui::Stateful<Div> {
+        let mut choices = row().gap_1().flex_wrap();
+        let mut visualizations = row().gap_1().flex_wrap();
         for spec in PANELS {
             let kind = spec.kind;
-            let choice = button(kind, self.tr(spec.title_id), cx, move |this, _, cx| {
+            let title = self.tr(spec.title_id);
+            let choice = button(kind, title.clone(), cx, move |this, _, cx| {
                 if this.workspace.layouts.current().locked {
                     return;
                 }
@@ -72,7 +72,11 @@ impl GuiApp {
                 this.layout_changed(cx);
                 this.shell.dismiss(shell::Surface::PanelCatalog);
                 this.persist_layout(cx);
-            });
+            })
+            .flex_shrink_0()
+            .max_w_full()
+            .truncate()
+            .tooltip(rivu_ui::text_tooltip(title));
             if matches!(
                 kind,
                 "spectrum" | "waveform" | "spectrogram" | "audio_visualizer" | "album_artwork"
@@ -93,11 +97,8 @@ impl GuiApp {
                 cx.stop_propagation();
                 cx.notify();
             }))
-            .absolute()
-            .bottom(footer_height)
-            .right(gpui::px(UI_INSET))
             .max_w_full()
-            .p(gpui::px(UI_INSET))
+            .p_2()
             .gap_1()
             .child(
                 div()
@@ -108,7 +109,6 @@ impl GuiApp {
             .child(rivu_ui::menu_separator(theme))
             .child(choices)
             .child(visualizations)
-            .into_any_element()
     }
 
     pub(in crate::gui) fn render_panel_menu(
@@ -605,16 +605,14 @@ impl GuiApp {
                     ));
             }
             PanelMenuPage::ConfirmClearQueue => {
-                menu =
-                    menu.child(div().px(gpui::px(UI_INSET)).py_2().text_sm().child(
-                        self.i18n.format(
-                            "shell-clear-queue-confirm",
-                            &[("count", self.state.queue.total.into())],
-                        ),
-                    ))
+                menu = menu
+                    .child(div().px_2().py_2().text_sm().child(self.i18n.format(
+                        "shell-clear-queue-confirm",
+                        &[("count", self.state.queue.total.into())],
+                    )))
                     .child(
                         caption(theme, self.tr("shell-clear-stops-playback"))
-                            .px(gpui::px(UI_INSET))
+                            .px_2()
                             .pb_2(),
                     )
                     .child(
