@@ -10,6 +10,18 @@ use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::time::timeout;
 
+const BRIDGE_ALLOWANCE: Duration = Duration::from_secs(1);
+const RESPONSE_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+const TRANSPORT_ALLOWANCE: Duration = Duration::from_secs(1);
+
+pub(super) fn bridge_timeout(operation_timeout: Duration) -> Duration {
+    operation_timeout + BRIDGE_ALLOWANCE
+}
+
+pub(super) fn response_timeout(operation_timeout: Duration) -> Duration {
+    bridge_timeout(operation_timeout) + RESPONSE_WRITE_TIMEOUT + TRANSPORT_ALLOWANCE
+}
+
 fn decode_message_header(bytes: &[u8], limit: usize) -> Result<(u8, &[u8])> {
     ensure!(bytes.len() >= 2, "IPC message header is truncated");
     let version = bytes[0];
@@ -261,8 +273,6 @@ async fn fill_frame<S: AsyncRead + Unpin>(
     Ok(length)
 }
 
-const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
-
 pub(super) async fn write_frame_buffered<S: AsyncWrite + Unpin>(
     stream: &mut S,
     value: &WireResponse,
@@ -271,7 +281,7 @@ pub(super) async fn write_frame_buffered<S: AsyncWrite + Unpin>(
     encode_response_frame_into(value, buffer)?;
     // Finish accepted replies, including shutdown acknowledgements, but never
     // let a nonreading peer hold a session (or server teardown) indefinitely.
-    let result = timeout(WRITE_TIMEOUT, async {
+    let result = timeout(RESPONSE_WRITE_TIMEOUT, async {
         stream
             .write_all(buffer)
             .await

@@ -771,15 +771,22 @@ a usable response.
 
 Core request capacity is bounded to 64 queued operations. Requests waiting for
 capacity or a result can fail as unavailable; UI fire-and-forget sends report
-`Rivu is busy or stopped` rather than blocking. The server bounds query and
-ordinary command dispatch waits to 15 seconds, with 120 seconds for database
-optimization. Each server response write, including Hello, Error, busy replies,
-and shutdown acknowledgements, has a five-second completion deadline covering
-both write and flush. A stalled write closes that connection; it does not block
-teardown indefinitely. Accepted operations still finish their replies during
-shutdown rather than cancelling acknowledgements when shutdown starts.
-Clients allow 120 seconds for each non-Watch response read, including Hello;
-persistent sessions keep the same limit as one-shot requests.
+`Rivu is busy or stopped` rather than blocking. Core allows two seconds for queue
+admission and twelve seconds for a reply, or 120 seconds for database optimization.
+The operation interface owns that total waiting budget; IPC adds one second for
+the server bridge rather than classifying commands again. Local ShowWindow and
+Shutdown operations have a twelve-second budget without queue admission.
+Each server response write, including Hello, Error, busy replies, and shutdown
+acknowledgements, has a five-second completion deadline covering write and flush.
+A stalled write closes that connection; it does not block teardown indefinitely.
+Accepted operations still finish their replies during shutdown rather than
+cancelling acknowledgements when shutdown starts.
+Client response reads cover the operation budget, bridge allowance, response-write
+deadline and one additional second for transport: 21 seconds for queries, state
+reads (including Hello) and ordinary commands, 129 seconds for database optimization,
+and 19 seconds for ShowWindow or Shutdown. Persistent and one-shot sessions use
+the same policy. Watch still has no response deadline. These are waiting limits,
+not guarantees on operation execution time or system scheduling.
 
 Audio admission has a separate 64-command queue and 128 worker-event slots.
 Ordinary audio admission never waits for capacity: a full queue returns an

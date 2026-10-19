@@ -6,6 +6,7 @@ use super::transport::{
 };
 use crate::{
     app::AppCommand,
+    core::CoreHandle,
     model::Query,
     response::{Ack, QueryResponse, StateResponse, StateRevisions, StateSections},
 };
@@ -134,7 +135,7 @@ impl ClientSession {
         Ok(())
     }
 
-    fn exchange(&mut self, request: &WireRequest) -> Result<WireResponse> {
+    fn exchange(&mut self, request: &WireRequest, wait_timeout: Duration) -> Result<WireResponse> {
         let result = self.runtime.block_on(async {
             let notified = self.cancel_notify.notified();
             tokio::pin!(notified);
@@ -159,7 +160,7 @@ impl ClientSession {
                     if matches!(request, WireRequest::Watch(_)) {
                         response.await
                     } else {
-                        timeout(Duration::from_secs(120), response)
+                        timeout(super::transport::response_timeout(wait_timeout), response)
                             .await
                             .context("Reading IPC response timed out")?
                     }
@@ -180,7 +181,10 @@ impl ClientSession {
 
     pub fn get_state(&mut self, sections: StateSections) -> Result<StateResponse> {
         if !self.session.is_bound() {
-            let response = self.exchange(&WireRequest::Hello(sections))?;
+            let response = self.exchange(
+                &WireRequest::Hello(sections),
+                CoreHandle::query_wait_timeout(),
+            )?;
             return match unpack_hello(response) {
                 Ok(response) => {
                     let instance_id = u32::from_le_bytes(response.instance_id);
@@ -200,7 +204,10 @@ impl ClientSession {
                 }
             };
         }
-        match unpack_error(self.exchange(&WireRequest::State(sections))?)? {
+        match unpack_error(self.exchange(
+            &WireRequest::State(sections),
+            CoreHandle::query_wait_timeout(),
+        )?)? {
             WireResponse::State(state) => Ok(state_response(state)),
             _ => bail!("IPC response was not a state response"),
         }
@@ -209,7 +216,7 @@ impl ClientSession {
     pub fn query(&mut self, query: &Query) -> Result<QueryResponse> {
         self.ensure_handshake()?;
         let request = WireRequest::Query(WireQuery::from(query.clone()));
-        match unpack_error(self.exchange(&request)?)? {
+        match unpack_error(self.exchange(&request, CoreHandle::query_wait_timeout())?)? {
             WireResponse::Query(response) => Ok(response),
             _ => bail!("IPC response was not a query response"),
         }
@@ -218,8 +225,9 @@ impl ClientSession {
     pub fn request_ack(&mut self, command: &(impl Clone + Into<AppCommand>)) -> Result<Ack> {
         self.ensure_handshake()?;
         let command: AppCommand = command.clone().into();
+        let wait_timeout = command.wait_timeout();
         let request = WireRequest::Command(WireCommand::from(command));
-        match unpack_error(self.exchange(&request)?)? {
+        match unpack_error(self.exchange(&request, wait_timeout)?)? {
             WireResponse::Ack(response) => Ok(response),
             _ => bail!("IPC response was not an acknowledgement"),
         }
@@ -236,7 +244,7 @@ impl ClientSession {
     ) -> Result<Option<StateRevisions>> {
         self.ensure_handshake()?;
         let request = WireRequest::Watch(revisions);
-        let response = match self.exchange(&request) {
+        let response = match self.exchange(&request, CoreHandle::query_wait_timeout()) {
             Ok(response) => response,
             Err(_) if self.cancelled.load(Ordering::Acquire) => return Ok(None),
             Err(error) => return Err(error),
@@ -263,6 +271,96 @@ pub fn request_ack(data_dir: &Path, command: &(impl Clone + Into<AppCommand>)) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn optimize_database_accepts_reply_after_old_response_deadline() {
+        use super::super::{
+            protocol::{HelloResponse, MAX_REQUEST, wire_state},
+            transport::{decode_request_frame, read_frame, write_frame_buffered},
+        };
+        use crate::model::Command;
+        use std::os::unix::net::UnixListener;
+
+        let directory = super::super::tests::socket_test_directory();
+        let listener =
+            UnixListener::bind_addr(&super::super::endpoint::address(directory.path()).unwrap())
+                .unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let mut client = client_session(directory.path()).unwrap();
+        let server = {
+            let _entered = client.runtime.enter();
+            tokio::time::pause();
+            let listener = tokio::net::UnixListener::from_std(listener).unwrap();
+            // Paused time must not advance while real socket I/O is pending.
+            // Only the deliberate server delay below may advance the clock.
+            let keep_awake = || async {
+                loop {
+                    tokio::task::yield_now().await;
+                }
+            };
+            let mut io_guards = tokio::task::JoinSet::new();
+            let handshake_guard = io_guards.spawn(keep_awake());
+            tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut pending = BytesMut::new();
+                let mut buffer = Vec::new();
+                let frame = read_frame(&mut stream, MAX_REQUEST, &mut pending)
+                    .await
+                    .unwrap();
+                assert!(matches!(
+                    decode_request_frame(&frame).unwrap(),
+                    WireRequest::Hello(_)
+                ));
+                write_frame_buffered(
+                    &mut stream,
+                    &WireResponse::Hello(HelloResponse {
+                        instance_id: 1u32.to_le_bytes(),
+                        state: wire_state(StateResponse {
+                            revisions: StateRevisions::default(),
+                            playback: None,
+                            queue: None,
+                            library: None,
+                            system: None,
+                        }),
+                    }),
+                    &mut buffer,
+                )
+                .await
+                .unwrap();
+                let frame = read_frame(&mut stream, MAX_REQUEST, &mut pending)
+                    .await
+                    .unwrap();
+                assert!(matches!(
+                    decode_request_frame(&frame).unwrap(),
+                    WireRequest::Command(WireCommand::OptimizeDatabase)
+                ));
+                handshake_guard.abort();
+                // The old 120s client deadline would expire before this timer.
+                tokio::time::sleep(Duration::from_secs(121)).await;
+                io_guards.spawn(keep_awake());
+                write_frame_buffered(
+                    &mut stream,
+                    &WireResponse::Ack(Ack {
+                        ok: true,
+                        error: None,
+                        revision: 17,
+                        scan_id: None,
+                        relocation_id: None,
+                    }),
+                    &mut buffer,
+                )
+                .await
+                .unwrap();
+                // Dropping this set aborts the I/O guards on every exit path.
+                io_guards
+            })
+        };
+
+        let ack = client.request_ack(&Command::OptimizeDatabase).unwrap();
+        assert!(ack.ok);
+        assert_eq!(ack.revision, 17);
+        drop(client.runtime.block_on(server).unwrap());
+    }
 
     #[test]
     fn cancelled_exchange_releases_partial_bulk_buffers() {

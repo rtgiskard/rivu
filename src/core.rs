@@ -27,6 +27,10 @@ use std::{
 mod query_epoch;
 pub(crate) use query_epoch::{QueryEpoch, QueryTicket};
 
+const ADMISSION_TIMEOUT: Duration = Duration::from_secs(2);
+pub(crate) const REPLY_TIMEOUT: Duration = Duration::from_secs(12);
+const OPTIMIZE_REPLY_TIMEOUT: Duration = Duration::from_secs(120);
+
 type Wakeup = Arc<dyn Fn() + Send + Sync>;
 type QueryTimeout = Arc<dyn Fn(QueryResponse) + Send + Sync>;
 #[expect(
@@ -159,6 +163,23 @@ pub(crate) struct MprisServiceState {
 }
 
 impl CoreHandle {
+    /// Total caller waiting budget, including queue admission and the query reply.
+    pub fn query_wait_timeout() -> Duration {
+        ADMISSION_TIMEOUT + REPLY_TIMEOUT
+    }
+
+    /// Total caller waiting budget; timing out never revokes an admitted command.
+    pub fn command_wait_timeout(command: &Command) -> Duration {
+        ADMISSION_TIMEOUT + Self::command_reply_timeout(command)
+    }
+
+    fn command_reply_timeout(command: &Command) -> Duration {
+        match command {
+            Command::OptimizeDatabase => OPTIMIZE_REPLY_TIMEOUT,
+            _ => REPLY_TIMEOUT,
+        }
+    }
+
     /// Publish complete display demand without entering the business command queue.
     pub(crate) fn set_display_demand(&self, demand: DisplayDemand) {
         self.analysis_control.set_display_demand(demand);
@@ -185,7 +206,7 @@ impl CoreHandle {
     pub(crate) fn apply_gui_settings(&self, patch: ConfigPatch) -> Ack {
         self.operation_ack(
             Operation::GuiConfig(GuiConfigChange::Settings(Box::new(patch))),
-            Duration::from_secs(12),
+            REPLY_TIMEOUT,
         )
     }
 
@@ -250,7 +271,7 @@ impl CoreHandle {
     }
     /// Query metadata and rows are produced in the same Core dispatch.
     pub fn query(&self, query: Query) -> QueryResponse {
-        self.query_with_ticket(query, None, false, Duration::from_secs(12))
+        self.query_with_ticket(query, None, false, REPLY_TIMEOUT)
     }
 
     /// Report GUI waiting failures without treating them as physical completion.
@@ -264,13 +285,13 @@ impl CoreHandle {
 
     /// GUI reads retain their caller's physical slot until reply or disconnect.
     pub(crate) fn query_for_gui(&self, query: Query) -> QueryResponse {
-        self.query_with_ticket(query, None, true, Duration::from_secs(12))
+        self.query_with_ticket(query, None, true, REPLY_TIMEOUT)
     }
 
     /// Cancel stale queued reads without interrupting an already executing read.
     /// A timeout notifies the GUI, then drains and discards the actual reply.
     pub(crate) fn query_if_current(&self, query: Query, ticket: QueryTicket) -> QueryResponse {
-        self.query_with_ticket(query, Some(ticket), true, Duration::from_secs(12))
+        self.query_with_ticket(query, Some(ticket), true, REPLY_TIMEOUT)
     }
 
     fn query_with_ticket(
@@ -296,7 +317,7 @@ impl CoreHandle {
         };
         let response = self
             .sender
-            .send_timeout(request, Duration::from_secs(2))
+            .send_timeout(request, ADMISSION_TIMEOUT)
             .map_err(|error| format!("Core unavailable: {error}"))
             .and_then(|()| self.receive_query(&rx, ticket.as_ref(), physical_retirement, timeout));
         match response {
@@ -358,17 +379,13 @@ impl CoreHandle {
     }
 
     pub fn request_ack(&self, command: Command) -> Ack {
-        let duration = if matches!(command, Command::OptimizeDatabase) {
-            Duration::from_secs(120)
-        } else {
-            Duration::from_secs(12)
-        };
+        let duration = Self::command_reply_timeout(&command);
         self.operation_ack(Operation::Command(command), duration)
     }
 
     /// Navigate in one Core dispatch, preserving its status at execution time.
     pub(crate) fn navigate(&self, direction: Navigation) -> Ack {
-        self.operation_ack(Operation::Navigate(direction), Duration::from_secs(12))
+        self.operation_ack(Operation::Navigate(direction), REPLY_TIMEOUT)
     }
 
     fn operation_ack(&self, operation: Operation, duration: Duration) -> Ack {
@@ -379,7 +396,7 @@ impl CoreHandle {
         };
         let response = self
             .sender
-            .send_timeout(request, Duration::from_secs(2))
+            .send_timeout(request, ADMISSION_TIMEOUT)
             .map_err(|error| format!("Core unavailable: {error}"))
             .and_then(|()| {
                 rx.recv_timeout(duration)
@@ -443,7 +460,7 @@ impl RuntimeControl {
     pub(crate) fn shutdown_ack(&self, revision: impl Fn() -> u64) -> Ack {
         let requested = self.request_shutdown();
         let mut state = self.completion.state.lock();
-        let deadline = Instant::now() + Duration::from_secs(12);
+        let deadline = Instant::now() + REPLY_TIMEOUT;
         while requested.is_ok() && state.ack.is_none() && !state.finished {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {

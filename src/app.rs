@@ -3,7 +3,7 @@
 
 use crate::{
     artwork::ArtworkManager,
-    core::{CoreHandle, Runtime, RuntimeControl},
+    core::{CoreHandle, REPLY_TIMEOUT, Runtime, RuntimeControl},
     gui::{self, session::UiSession},
     ipc, logging,
     model::Command,
@@ -19,7 +19,7 @@ use signal_hook::{
     consts::{SIGINT, SIGTERM},
     iterator::{Handle as SignalHandle, Signals},
 };
-use std::{cell::RefCell, path::PathBuf, rc::Rc, sync::Arc, thread};
+use std::{cell::RefCell, path::PathBuf, rc::Rc, sync::Arc, thread, time::Duration};
 
 /// Application requests are never business commands or core view state.
 #[derive(Clone, Debug)]
@@ -27,6 +27,16 @@ pub enum AppCommand {
     Core(Command),
     ShowWindow,
     Shutdown,
+}
+
+impl AppCommand {
+    /// Total operation wait, before IPC bridge and response transport allowances.
+    pub fn wait_timeout(&self) -> Duration {
+        match self {
+            Self::Core(command) => CoreHandle::command_wait_timeout(command),
+            Self::ShowWindow | Self::Shutdown => REPLY_TIMEOUT,
+        }
+    }
 }
 
 impl From<Command> for AppCommand {

@@ -2,11 +2,13 @@ use super::protocol::{
     HELLO_TIMEOUT, HelloResponse, MAX_CLIENTS, MAX_REQUEST, SessionState, UNKNOWN_INSTANCE,
     WireRequest, WireResponse, wire_state,
 };
-use super::transport::{decode_request_frame, read_frame, write_error_frame, write_frame_buffered};
+use super::transport::{
+    bridge_timeout, decode_request_frame, read_frame, write_error_frame, write_frame_buffered,
+};
 use crate::core::CoreHandle;
 use crate::{
     app::{AppCommand, AppHandle},
-    model::{Command, Query},
+    model::Query,
     response::{Ack, QueryResponse, StateRevisions},
 };
 use anyhow::{Context, Error, Result, bail};
@@ -143,11 +145,7 @@ impl Drop for Server {
     }
 }
 async fn run_command(app: &AppHandle, command: AppCommand) -> Result<Ack> {
-    let duration = if matches!(command, AppCommand::Core(Command::OptimizeDatabase)) {
-        Duration::from_secs(120)
-    } else {
-        Duration::from_secs(15)
-    };
+    let duration = bridge_timeout(command.wait_timeout());
     timeout(
         duration,
         tokio::task::spawn_blocking({
@@ -162,7 +160,7 @@ async fn run_command(app: &AppHandle, command: AppCommand) -> Result<Ack> {
 
 async fn run_query(handle: &CoreHandle, query: Query) -> Result<QueryResponse> {
     timeout(
-        Duration::from_secs(15),
+        bridge_timeout(CoreHandle::query_wait_timeout()),
         tokio::task::spawn_blocking({
             let handle = handle.clone();
             move || handle.query(query)
