@@ -1,4 +1,4 @@
-//! Linux system fallback metadata, ranked by Fontconfig rather than by coverage.
+//! Linux system fallback metadata, ranked by Fontconfig.
 //!
 //! The resolver owns its configuration for its entire lifetime. It never opens font
 //! files: callers map the returned file/index pairs into their font database.
@@ -110,7 +110,7 @@ impl FontconfigResolver {
             text,
         };
         let config = &mut self.config;
-        self.cache.resolve(query, || config.resolve(query))
+        self.cache.resolve(query, |needed| config.resolve(query, needed))
     }
 }
 
@@ -132,8 +132,7 @@ impl Drop for Config {
 }
 
 impl Config {
-    fn resolve(&mut self, query: Query<'_>) -> Result<Candidates> {
-        let mut needed = NeededCharacters::new(query.text);
+    fn resolve(&mut self, query: Query<'_>, needed: &mut NeededCharacters) -> Result<Candidates> {
         if needed.0.is_empty() {
             return Ok(Arc::from([]));
         }
@@ -355,13 +354,36 @@ fn fontconfig_weight(weight: u16) -> f64 {
     unreachable!("weight is clamped to the final mapping entry")
 }
 
+#[derive(Default)]
 struct NeededCharacters(Vec<u32>);
 impl NeededCharacters {
+    #[cfg(test)]
     fn new(text: &str) -> Self {
-        let mut characters: Vec<_> = text.chars().map(u32::from).collect();
-        characters.sort_unstable();
-        characters.dedup();
-        Self(characters)
+        let mut needed = Self::default();
+        needed.set(text);
+        needed
+    }
+
+    fn set(&mut self, text: &str) {
+        self.0.clear();
+        for character in text.chars().map(u32::from) {
+            if self.0.len() == self.0.capacity() {
+                // Compact full batches before growing: repeated input must not
+                // allocate proportional to text length. Temporary storage is
+                // bounded by the Unicode scalar universe, without truncation.
+                self.0.sort_unstable();
+                self.0.dedup();
+                // Leave at least half a batch free. Merely freeing one slot
+                // would repeatedly sort a large nearly-unique set for every
+                // subsequent duplicate.
+                if self.0.len() > self.0.capacity() / 2 {
+                    self.0.reserve(self.0.len());
+                }
+            }
+            self.0.push(character);
+        }
+        self.0.sort_unstable();
+        self.0.dedup();
     }
 
     fn select<T>(
@@ -389,11 +411,11 @@ struct Query<'a> {
 }
 
 impl Query<'_> {
-    fn key_bytes(self) -> usize {
+    fn key_bytes(self, characters: &[u32]) -> usize {
         self.family
             .len()
             .saturating_add(self.locale.len())
-            .saturating_add(self.text.len())
+            .saturating_add(std::mem::size_of_val(characters))
     }
 }
 
@@ -402,49 +424,72 @@ struct CacheEntry {
     locale: Box<str>,
     weight: u16,
     style: FontconfigStyle,
-    text: Box<str>,
+    characters: Box<[u32]>,
     candidates: Candidates,
     candidate_bytes: usize,
 }
 
 impl CacheEntry {
-    fn matches(&self, query: Query<'_>) -> bool {
+    fn matches(&self, query: Query<'_>, characters: &[u32]) -> bool {
         self.weight == query.weight
             && self.style == query.style
             && &*self.family == query.family
             && &*self.locale == query.locale
-            && &*self.text == query.text
+            && &*self.characters == characters
     }
 
     fn key_bytes(&self) -> usize {
-        self.family.len() + self.locale.len() + self.text.len()
+        self.family.len() + self.locale.len() + std::mem::size_of_val(&*self.characters)
     }
 }
 
-/// Small FIFO memoization. Hits do not allocate query strings or refresh age.
-/// Oversized keys or candidate storage still resolve normally, without retention
-/// or truncation. Empty and nonempty successes share the same budgets.
+/// Small FIFO memoization keyed by sorted, unique Unicode scalars and metadata.
+/// Hits reuse normalization scratch and do not refresh age. At most 64 KiB of
+/// scratch is retained separately from the key/candidate budgets. Oversized
+/// requests still resolve completely, without retention or truncation; empty
+/// and nonempty successes share the same budgets.
 #[derive(Default)]
 struct CandidateCache {
     entries: VecDeque<CacheEntry>,
     key_bytes: usize,
     candidate_bytes: usize,
+    needed: NeededCharacters,
 }
 
 impl CandidateCache {
     fn resolve(
         &mut self,
         query: Query<'_>,
-        load: impl FnOnce() -> Result<Candidates>,
+        load: impl FnOnce(&mut NeededCharacters) -> Result<Candidates>,
     ) -> Result<Candidates> {
-        if let Some(entry) = self.entries.iter().find(|entry| entry.matches(query)) {
+        let mut needed = std::mem::take(&mut self.needed);
+        needed.set(query.text);
+        let result = self.resolve_needed(query, &mut needed, load);
+        if needed.0.capacity() <= MAX_CACHE_KEY_BYTES / std::mem::size_of::<u32>() {
+            needed.0.clear();
+            self.needed = needed;
+        }
+        result
+    }
+
+    fn resolve_needed(
+        &mut self,
+        query: Query<'_>,
+        needed: &mut NeededCharacters,
+        load: impl FnOnce(&mut NeededCharacters) -> Result<Candidates>,
+    ) -> Result<Candidates> {
+        if let Some(entry) = self.entries.iter().find(|entry| entry.matches(query, &needed.0)) {
             return Ok(entry.candidates.clone());
         }
-        let candidates = load()?;
-        let key_bytes = query.key_bytes();
-        if key_bytes > MAX_CACHE_KEY_BYTES {
+        let key_bytes = query.key_bytes(&needed.0);
+        // Resolution consumes coverage from needed; preserve only cacheable
+        // keys beforehand, reusing the normalized buffer for the FFI work.
+        let characters = (key_bytes <= MAX_CACHE_KEY_BYTES)
+            .then(|| needed.0.clone().into_boxed_slice());
+        let candidates = load(needed)?;
+        let Some(characters) = characters else {
             return Ok(candidates);
-        }
+        };
         if let Some(candidate_bytes) = retained_candidate_bytes(&candidates)
             .filter(|&bytes| bytes <= MAX_CACHE_CANDIDATE_BYTES)
         {
@@ -464,7 +509,7 @@ impl CandidateCache {
                 locale: query.locale.into(),
                 weight: query.weight,
                 style: query.style,
-                text: query.text.into(),
+                characters,
                 candidates: candidates.clone(),
                 candidate_bytes,
             });
@@ -496,8 +541,14 @@ mod tests {
         }
     }
 
-    fn empty() -> Result<Candidates> {
+    fn empty(_: &mut NeededCharacters) -> Result<Candidates> {
         Ok(Arc::from([]))
+    }
+
+    fn unique_text(start: u32, count: usize) -> String {
+        (0..count)
+            .map(|index| char::from_u32(start + index as u32).unwrap())
+            .collect()
     }
 
     fn select(text: &str, fonts: &[&str]) -> Vec<usize> {
@@ -560,22 +611,69 @@ mod tests {
         let mut cache = CandidateCache::default();
         assert!(
             cache
-                .resolve(query("a"), || Err(FontconfigError::Operation("test")))
+                .resolve(query("a"), |_| Err(FontconfigError::Operation("test")))
                 .is_err()
         );
         assert!(cache.entries.is_empty());
         cache.resolve(query("a"), empty).unwrap();
         cache
-            .resolve(query("a"), || panic!("negative result should be memoized"))
+            .resolve(query("aaa"), |_| panic!("negative result should be memoized"))
             .unwrap();
         assert_eq!(cache.entries.len(), 1);
+        cache.resolve(query(""), |needed| {
+            assert!(needed.0.is_empty());
+            empty(needed)
+        }).unwrap();
+        cache.resolve(query(""), |_| panic!("empty scalar set should be memoized")).unwrap();
+    }
+
+    #[test]
+    fn cache_reuses_scalar_sets_without_conflating_different_sets() {
+        let mut cache = CandidateCache::default();
+        let candidates: Candidates = vec![FontconfigCandidate {
+            file: PathBuf::from("selected"),
+            index: 3,
+        }]
+        .into();
+        cache
+            .resolve(query("日a\u{301}日"), |needed| {
+                assert_eq!(needed.0, vec![u32::from('a'), 0x301, u32::from('日')]);
+                // Real resolution consumes coverage; it must not alter the key.
+                needed.0.clear();
+                Ok(candidates.clone())
+            })
+            .unwrap();
+        let returned = cache
+            .resolve(query("\u{301}aa日日"), |_| panic!("same scalar set must hit"))
+            .unwrap();
+        assert!(Arc::ptr_eq(&returned, &candidates));
+        for text in ["a日", "a\u{301}本", "á日"] {
+            assert!(cache.resolve(query(text), empty).unwrap().is_empty());
+        }
+        assert_eq!(cache.entries.len(), 4);
+    }
+
+    #[test]
+    fn long_repeated_requests_cache_the_complete_scalar_set() {
+        let mut cache = CandidateCache::default();
+        let text = format!("{}日", "a".repeat(MAX_CACHE_KEY_BYTES + 1));
+        cache
+            .resolve(query(&text), |needed| {
+                assert_eq!(needed.0, vec![u32::from('a'), u32::from('日')]);
+                empty(needed)
+            })
+            .unwrap();
+        cache
+            .resolve(query("日aa"), |_| panic!("compressed key should be memoized"))
+            .unwrap();
+        assert_eq!(cache.key_bytes, query("").key_bytes(&[u32::from('a'), u32::from('日')]));
     }
 
     #[test]
     fn cache_key_keeps_every_request_dimension() {
         let mut cache = CandidateCache::default();
         let base = query("a");
-        for request in [
+        let requests = [
             base,
             Query {
                 family: "alias",
@@ -598,24 +696,35 @@ mod tests {
                 ..base
             },
             Query { text: "b", ..base },
-        ] {
-            cache.resolve(request, empty).unwrap();
+        ];
+        for (index, request) in requests.into_iter().enumerate() {
+            let result = cache.resolve(request, |_| {
+                Ok(vec![FontconfigCandidate {
+                    file: PathBuf::new(),
+                    index: index as u32,
+                }]
+                .into())
+            }).unwrap();
+            assert_eq!(result[0].index, index as u32);
         }
-        assert_eq!(cache.entries.len(), 7);
+        for (index, request) in requests.into_iter().enumerate().rev() {
+            let result = cache.resolve(request, |_| panic!("expected isolated cache hit")).unwrap();
+            assert_eq!(result[0].index, index as u32);
+        }
     }
 
     #[test]
     fn cache_bounds_entry_count_and_aggregate_key_bytes() {
         let mut cache = CandidateCache::default();
         for index in 0..MAX_CACHE_ENTRIES + 1 {
-            cache.resolve(query(&index.to_string()), empty).unwrap();
+            cache.resolve(query(&unique_text(0x1000 + index as u32, 1)), empty).unwrap();
         }
         assert_eq!(cache.entries.len(), MAX_CACHE_ENTRIES);
-        assert!(!cache.entries.iter().any(|entry| &*entry.text == "0"));
+        assert!(!cache.entries.iter().any(|entry| &*entry.characters == [0x1000]));
 
-        let text = "a".repeat(MAX_CACHE_KEY_BYTES / 2);
+        let text = unique_text(0x10000, MAX_CACHE_KEY_BYTES / 8);
         cache.resolve(query(&text), empty).unwrap();
-        let other_text = "b".repeat(MAX_CACHE_KEY_BYTES / 2);
+        let other_text = unique_text(0x20000, MAX_CACHE_KEY_BYTES / 8);
         cache.resolve(query(&other_text), empty).unwrap();
         assert_eq!(cache.entries.len(), 1);
         assert!(cache.key_bytes <= MAX_CACHE_KEY_BYTES);
@@ -628,9 +737,18 @@ mod tests {
     #[test]
     fn oversized_requests_resolve_without_being_memoized() {
         let mut cache = CandidateCache::default();
-        let text = "a".repeat(MAX_CACHE_KEY_BYTES + 1);
+        let count = MAX_CACHE_KEY_BYTES / std::mem::size_of::<u32>() + 1;
+        let text = unique_text(0x10000, count);
         for _ in 0..2 {
-            cache.resolve(query(&text), empty).unwrap();
+            let returned = cache.resolve(query(&text), |needed| {
+                assert_eq!(needed.0.len(), count);
+                assert_eq!(needed.0.last(), Some(&(0x10000 + count as u32 - 1)));
+                Ok(vec![FontconfigCandidate {
+                    file: PathBuf::new(),
+                    index: needed.0.len() as u32,
+                }].into())
+            }).unwrap();
+            assert_eq!(returned[0].index, count as u32);
             assert!(cache.entries.is_empty());
             assert_eq!(cache.key_bytes, 0);
         }
@@ -640,14 +758,14 @@ mod tests {
     fn cache_hits_do_not_refresh_fifo_age() {
         let mut cache = CandidateCache::default();
         for index in 0..MAX_CACHE_ENTRIES {
-            cache.resolve(query(&index.to_string()), empty).unwrap();
+            cache.resolve(query(&unique_text(0x1000 + index as u32, 1)), empty).unwrap();
         }
         cache
-            .resolve(query("0"), || panic!("expected a cache hit"))
+            .resolve(query(&unique_text(0x1000, 1)), |_| panic!("expected a cache hit"))
             .unwrap();
         cache.resolve(query("new"), empty).unwrap();
-        assert_eq!(&*cache.entries.front().unwrap().text, "1");
-        assert!(!cache.entries.iter().any(|entry| &*entry.text == "0"));
+        assert_eq!(&*cache.entries.front().unwrap().characters, [0x1001]);
+        assert!(!cache.entries.iter().any(|entry| &*entry.characters == [0x1000]));
     }
 
     #[test]
@@ -664,13 +782,13 @@ mod tests {
         ]
         .into();
         let returned = cache
-            .resolve(query("at-budget"), || Ok(candidates.clone()))
+            .resolve(query("at-budget"), |_| Ok(candidates.clone()))
             .unwrap();
         assert!(Arc::ptr_eq(&returned, &candidates));
         assert_eq!(cache.entries.len(), 1);
         assert_eq!(cache.candidate_bytes, count * item_bytes);
         cache
-            .resolve(query("at-budget"), || panic!("expected a cache hit"))
+            .resolve(query("at-budget"), |_| panic!("expected a cache hit"))
             .unwrap();
 
         let oversized: Candidates = vec![
@@ -683,7 +801,7 @@ mod tests {
         .into();
         for _ in 0..2 {
             let returned = cache
-                .resolve(query("over-budget"), || Ok(oversized.clone()))
+                .resolve(query("over-budget"), |_| Ok(oversized.clone()))
                 .unwrap();
             assert!(Arc::ptr_eq(&returned, &oversized));
             assert_eq!(returned.len(), count + 1);
@@ -704,7 +822,7 @@ mod tests {
         assert!(retained_candidate_bytes(&candidates).unwrap() > MAX_CACHE_CANDIDATE_BYTES);
         for _ in 0..2 {
             let returned = cache
-                .resolve(query("large-path"), || Ok(candidates.clone()))
+                .resolve(query("large-path"), |_| Ok(candidates.clone()))
                 .unwrap();
             assert!(Arc::ptr_eq(&returned, &candidates));
             assert_eq!(cache.entries.len(), 1);
@@ -724,22 +842,30 @@ mod tests {
         assert!(bytes <= MAX_CACHE_CANDIDATE_BYTES);
         assert!(bytes > MAX_CACHE_CANDIDATE_BYTES / 2);
         cache
-            .resolve(query("first"), || Ok(candidates.clone()))
+            .resolve(query("first"), |_| Ok(candidates.clone()))
             .unwrap();
         cache
-            .resolve(query("second"), || Ok(candidates.clone()))
+            .resolve(query("second"), |_| Ok(candidates.clone()))
             .unwrap();
         assert_eq!(cache.entries.len(), 1);
-        assert_eq!(&*cache.entries.front().unwrap().text, "second");
+        assert_eq!(
+            &*cache.entries.front().unwrap().characters,
+            &*NeededCharacters::new("second").0
+        );
         assert_eq!(cache.candidate_bytes, bytes);
-        assert_eq!(cache.key_bytes, query("second").key_bytes());
+        assert_eq!(
+            cache.key_bytes,
+            query("second").key_bytes(&NeededCharacters::new("second").0)
+        );
 
         // Key-budget eviction must release candidate accounting too.
-        let text = "b".repeat(MAX_CACHE_KEY_BYTES - query("").key_bytes());
-        cache.resolve(query(&text), empty).unwrap();
+        let text = unique_text(0x10000, MAX_CACHE_KEY_BYTES / std::mem::size_of::<u32>());
+        let request = Query { family: "", locale: "", ..query(&text) };
+        cache.resolve(request, empty).unwrap();
         assert_eq!(cache.entries.len(), 1);
         assert_eq!(cache.key_bytes, MAX_CACHE_KEY_BYTES);
         assert_eq!(cache.candidate_bytes, 0);
+        cache.resolve(request, |_| panic!("inclusive key budget must cache")).unwrap();
     }
 
     #[test]
@@ -756,3 +882,4 @@ mod tests {
         assert_eq!(FontconfigStyle::Oblique.slant(), FC_SLANT_OBLIQUE);
     }
 }
+

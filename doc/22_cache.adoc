@@ -598,7 +598,13 @@ age. These are owned-storage accounting budgets, not a total allocation or RSS
 limit: allocator overhead, Fontconfig metadata, externally held candidate results,
 and loaded font data are not included. Oversized requests or results are returned
 normally, without memoization or truncation; failed requests are not cached.
-Keys include the original family, locale, weight, style, and actual missing text.
+Keys include the original family, locale, weight, style, and the sorted, unique
+Unicode scalars of the actual missing text. Reordering or repeating the same
+scalars reuses candidates, not shaped layouts; shaping still receives the
+original text and complete graphemes. Scalar keys are charged by their stored
+`u32` bytes. Normalization reuses at most 64 KiB of separately retained scratch;
+larger temporary scratch is released after the request. Repeated input does not
+grow scratch in proportion to the original text length.
 Changing base text size alone does not resolve font families again.
 
 Icon text selects a separate symbol family, independent of the UI text font.
