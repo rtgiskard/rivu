@@ -241,6 +241,7 @@ separate sidebar subpages. Panel-specific artwork settings remain a focused edit
 Logging is application-wide, including headless operation, and remains in `[logging]`.
 Visualizations contains General and the four audio-data views.
 Dropdown keys: <<_desktop_keyboard_navigation,Desktop keyboard navigation>>.
+Long sidebar labels are shortened to one line; hover over a category to read its full name.
 The system tray switch takes effect after restarting the graphical host, not
 merely reopening its window. Media read buffering applies to future source opens,
 including full waveform scans; it does not reopen the current track.

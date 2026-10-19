@@ -4,7 +4,7 @@ mod pages;
 use model::{Completion, PanelApply, SettingsModel, Submission, Target};
 
 use super::{
-    UI_INSET, album_artwork::album_artwork_style_label, visualization::audio_visualizer_style_label,
+    album_artwork::album_artwork_style_label, visualization::audio_visualizer_style_label,
 };
 use crate::{
     artwork::{ArtworkCacheReport, ArtworkManager},
@@ -21,7 +21,7 @@ use anyhow::{Context as _, Result};
 use gpui::{prelude::*, *};
 use rivu_ui::{
     ButtonTooltip, ChoiceAction, ChoiceMode, ChoicePopup, ChoiceState, Dialog, DropdownItem,
-    FocusScope, StatusKind, activate_control, active_control, button, column, copyable_message,
+    FocusScope, StatusKind, activate_control, active_control, column, copyable_message,
     disabled_control, dropdown_trigger, form_field, icon_button as common_icon_button,
     input::{Input, InputEvent},
     input_aligned_control, row, section_group, status_message,
@@ -1296,13 +1296,40 @@ impl Settings {
         cx: &mut Context<Settings>,
         select: impl Fn(&mut Settings) + 'static,
     ) -> Stateful<Div> {
+        let label: SharedString = label.into();
+        let theme = palette(cx);
         active_control(
-            palette(cx),
-            button(id, label, cx, move |this, _, cx| {
-                this.dropdown.close();
-                select(this);
-                cx.notify();
-            }),
+            theme,
+            activate_control(
+                div()
+                    .id(id)
+                    .group("control")
+                    .tab_index(0)
+                    .focus(|style| style.border_color(rgb(theme.accent)))
+                    .flex()
+                    .items_center()
+                    .w_full()
+                    .min_w_0()
+                    .min_h(rems(2.0))
+                    .px_2()
+                    .py_1()
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(gpui::transparent_black())
+                    .text_sm()
+                    .text_color(rgb(theme.text))
+                    .cursor_pointer()
+                    .group_hover("control", |style| style.bg(rgb(theme.highlight)))
+                    .aria_label(label.clone())
+                    .tooltip(rivu_ui::text_tooltip(label.clone()))
+                    .child(div().flex_1().min_w_0().truncate().child(label)),
+                cx,
+                move |this, _, cx| {
+                    this.dropdown.close();
+                    select(this);
+                    cx.notify();
+                },
+            ),
             active,
         )
         .role(Role::Tab)
@@ -1827,7 +1854,7 @@ impl Settings {
                     .h_full()
                     .overflow_y_scroll()
                     .track_scroll(&scroll)
-                    .child(content.flex_shrink_0().p(gpui::px(UI_INSET))),
+                    .child(content.flex_shrink_0().p_2()),
                 &scroll,
             )),
         );
@@ -1859,8 +1886,8 @@ impl Settings {
             row()
                 .gap_3()
                 .flex_shrink_0()
-                .px(gpui::px(UI_INSET))
-                .py(gpui::px(UI_INSET))
+                .px_2()
+                .py_2()
                 .min_h(rems(3.))
                 .border_t_1()
                 .border_color(rgb(colors.border))
@@ -1986,13 +2013,9 @@ impl Render for Settings {
                         .gap_0()
                         .overflow_hidden()
                         .child(
-                            row()
-                                .h(rems(2.5))
-                                .flex_shrink_0()
-                                .px(gpui::px(UI_INSET))
-                                .child(
-                                    div().flex_1().text_lg().child(self.tr("settings-settings")),
-                                ),
+                            row().h(rems(2.5)).flex_shrink_0().px_2().child(
+                                div().flex_1().text_lg().child(self.tr("settings-settings")),
+                            ),
                         )
                         .child(panel),
                 ),

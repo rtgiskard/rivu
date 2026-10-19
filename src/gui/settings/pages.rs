@@ -9,9 +9,7 @@ use crate::{
         AlbumArtworkDirection, AlbumArtworkMode, AnalysisWindow, AudioVisualizerStyle, LogLevel,
         SpectrumStyle, VisualizationPalette,
     },
-    gui::{
-        UI_INSET, album_artwork::ALBUM_ARTWORK_STYLES, visualization::audio_visualizer_style_label,
-    },
+    gui::{album_artwork::ALBUM_ARTWORK_STYLES, visualization::audio_visualizer_style_label},
     theme::Theme,
 };
 use gpui::{Context, Div, SharedString, div, prelude::*, rems, rgb};
@@ -655,7 +653,7 @@ impl Settings {
             .gap_1()
             .w(rems(11.))
             .flex_shrink_0()
-            .p(gpui::px(UI_INSET))
+            .p_2()
             .border_r_1()
             .border_color(rgb(palette(cx).border));
         sidebar = sidebar.child(self.tab_button(
