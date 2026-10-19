@@ -265,7 +265,11 @@ impl GuiApp {
                 });
             }
             _ => {
-                if let Some(command) = keyboard::playback_command(action, &self.state.playback) {
+                if let Some(command) = keyboard::playback_command(
+                    action,
+                    &self.state.playback,
+                    self.state.queue.current_id,
+                ) {
                     self.playback
                         .update(cx, |playback, cx| playback.send(command, cx));
                 }

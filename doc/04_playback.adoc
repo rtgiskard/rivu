@@ -13,6 +13,17 @@ Volume uses a dB-linear control curve rather than linear amplitude: 0% mutes,
 change the level by five percentage points (3 dB away from mute). See
 link:01_config.adoc#volume[Volume configuration] for fractional values.
 
+Keyboard volume steps, repeat cycling, and shuffle toggles are applied in order
+against the core's current state, so rapid repeated inputs accumulate even before
+the next display update. The Playback panel's repeat/shuffle buttons and slider
+arrow keys use the same execution-time intents. Ctrl+Left/Right and seek-slider
+arrow keys move by five seconds from the current position. Seek keys carry the
+queue occurrence selected when pressed, so delayed inputs cannot seek a different
+occurrence after Next, even when both occurrences refer to the same track.
+Seek-slider Home/End and terminal Ctrl+Home/End seek to zero or that occurrence's
+known duration. Slider pointer dragging remains an absolute target, as do CLI
+seek and volume commands.
+
 The desktop Playback panel shows the current title, artist and album, playback
 progress, transport controls, and volume. Transport controls and volume stay on
 one row with horizontal scrolling in narrow panels. Use Album artwork for covers.
@@ -27,8 +38,9 @@ With Shuffle enabled, each Next independently chooses a queue occurrence with
 equal probability, including the current one. Immediate repeats are expected;
 duplicate occurrences increase their track's chances. Previous follows playback
 history, retaining up to 4096 occurrences during the running session; Next draws
-afresh even after Previous. Setting Shuffle to its current value preserves that
-history. Repeat One repeats the current occurrence at
+afresh even after Previous. Changing Shuffle, including through configuration,
+starts a new history at the current occurrence. Setting Shuffle to its current
+value preserves that history. Repeat One repeats the current occurrence at
 natural EOF but does not constrain explicit Next.
 CUE playback uses the original source without splitting or transcoding it.
 Positions and seeks are relative to the subtrack; pregap directives do not
@@ -59,9 +71,12 @@ Auto fallback rules.
 Seek targets must be finite and non-negative. Ordinary file seeks are not clamped
 by estimated metadata duration; completion requires actual decoder EOF. Only an
 explicit CUE end bounds the seek target. Seeking while paused keeps playback
-paused. A late EOF notification after pausing does not restart playback or
-automatically advance the queue. Pause also pauses live analysis. Listening
-statistics use confirmed heard time; see link:02_library.adoc[Library].
+paused. If Pause is accepted before a queued notification of actual EOF, Rivu
+still settles that EOF and selects the next occurrence, but keeps it paused;
+Repeat One instead reloads the current occurrence from its start, also paused.
+At the queue end with Repeat Off, playback stops. An EOF from an older playback
+generation cannot advance the queue again. Pause also pauses live analysis.
+Listening statistics use confirmed heard time; see link:02_library.adoc[Library].
 
 Pausing lets already submitted audio finish, then makes the output stream inactive.
 Unread audio is retained for resume; paused wall time does not advance playback.

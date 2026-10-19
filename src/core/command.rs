@@ -111,12 +111,27 @@ impl Core {
             Command::Next => self.advance(false)?,
             Command::Previous => self.previous()?,
             Command::Seek { seconds } => self.seek(seconds)?,
+            Command::SeekRelative { queue_id, delta } => {
+                ensure!(delta.is_finite(), "Seek delta must be finite");
+                if self.state.queue.current_id == Some(queue_id)
+                    && self.state.playback.status != PlaybackStatus::Stopped
+                {
+                    self.seek((self.state.playback.position + delta).max(0.0))?;
+                }
+                return Ok(());
+            }
             Command::Volume { value } => {
                 if !value.is_finite() || !(0.0..=1.0).contains(&value) {
                     bail!("Volume must be between 0 and 1");
                 }
                 self.audio(AudioCommand::Volume(value))?;
                 self.state.playback.volume = value;
+            }
+            Command::AdjustVolume { delta } => {
+                ensure!(delta.is_finite(), "Volume delta must be finite");
+                return self.apply_command(Command::Volume {
+                    value: (self.state.playback.volume + delta).clamp(0.0, 1.0),
+                });
             }
             Command::Enqueue { track_ids } => self.enqueue(&track_ids)?,
             Command::EnqueueSources {
@@ -148,18 +163,16 @@ impl Core {
             }
             Command::RandomizeQueue => self.randomize_queue(&mut rand::rng())?,
             Command::DeduplicateQueue => self.deduplicate_queue()?,
-            Command::Shuffle { enabled } => {
-                if self.state.playback.shuffle != enabled {
-                    self.state.playback.shuffle = enabled;
-                    self.played.clear();
-                    self.played_cursor = 0;
-                    if let Some(id) = self.state.queue.current_id {
-                        self.played.push(id);
-                        self.played_cursor = 1;
-                    }
-                }
-            }
+            Command::Shuffle { enabled } => self.set_shuffle(enabled),
             Command::Repeat { mode } => self.state.playback.repeat = mode,
+            Command::CycleRepeat => {
+                self.state.playback.repeat = match self.state.playback.repeat {
+                    RepeatMode::Off => RepeatMode::All,
+                    RepeatMode::All => RepeatMode::One,
+                    RepeatMode::One => RepeatMode::Off,
+                };
+            }
+            Command::ToggleShuffle => self.set_shuffle(!self.state.playback.shuffle),
             Command::CreatePlaylist { name } => self.create_playlist(name)?,
             Command::CreatePlaylistWithTracks { name, track_ids } => {
                 self.create_playlist_with_tracks(name, track_ids)?;

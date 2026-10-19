@@ -1114,7 +1114,9 @@ impl UiState {
             }
             _ => {}
         }
-        if let Some(command) = keyboard::playback_command(action, &state.playback) {
+        if let Some(command) =
+            keyboard::playback_command(action, &state.playback, state.queue.current_id)
+        {
             return KeyAction::Command(command);
         }
         let page_size = self.page_size;

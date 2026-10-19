@@ -326,7 +326,7 @@ The frame header is six bytes. `body_length` excludes the four-byte length field
 and includes the version, message type, and serialized body.
 
 Bodies use Postcard serialization without COBS framing. The current protocol
-version is `1`; clients and servers must use matching wire schemas. The four-byte
+version is `3`; clients and servers must use matching wire schemas. The four-byte
 frame length remains little-endian; body integers follow Postcard's encoding.
 Restart clients and hosts together after upgrading: incompatible versions are
 rejected before decoding the body. There is no compatibility alias or schema
@@ -445,7 +445,7 @@ Response types:
 Wire enum variant and field order are part of the binary schema. Incompatible
 schema changes require a new protocol version and coordinated client and host
 updates; there is no obligation to preserve earlier schemas.
-The current protocol version is `2`; hosts and clients must both use this version.
+The current protocol version is `3`; hosts and clients must both use this version.
 
 == Revisions and watching
 
@@ -626,6 +626,21 @@ about 1.53 MiB for 200,000 occurrences); client state frames remain constant-siz
 
 Shuffle navigation retains at most 4096 successful occurrence starts for
 Previous; it does not maintain a nonrepeating shuffle cycle.
+
+Interactive playback changes use execution-time intent commands:
+`AdjustVolume { delta }` adds a finite signed delta to the core's current volume
+and clamps the result to 0..1; `CycleRepeat` cycles Off → All → One → Off;
+`ToggleShuffle` flips the core's current setting. Queued commands are applied in
+order rather than deriving absolute targets from a frontend's earlier snapshot.
+`SeekRelative { queue_id, delta }` adds finite signed seconds to the core's current
+position, bounded below by zero and by an explicit CUE end, not estimated metadata
+duration. A different current occurrence or stopped playback makes it a no-op.
+`SeekQueue { queue_id, seconds }` retains an absolute target bound to one occurrence;
+interactive start/end seeks use it, with the end captured from that occurrence's
+known duration. Neither command can seek a replacement occurrence of the same track.
+CLI `Seek` and `Volume`, and MPRIS absolute properties, retain their absolute semantics.
+The new wire command variants are appended without renumbering existing tags;
+protocol version 3 requires coordinated host and client updates.
 
 `DirectoryPage {path, query, favorite, missing, offset, limit}` returns immediate
 directory children and tracks as `Page<DirectoryRow>`. Search, favorite, and missing

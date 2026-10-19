@@ -68,39 +68,32 @@ fn slider_command(
             let duration = playback
                 .duration
                 .filter(|value| value.is_finite() && *value > 0.)?;
-            let seconds = match key {
-                SliderKey::Start => 0.,
-                SliderKey::End => duration,
-                SliderKey::Decrease | SliderKey::Increase => {
-                    if !playback.position.is_finite() {
-                        return None;
-                    }
-                    let position = playback.position.clamp(0., duration);
-                    (position + if key == SliderKey::Increase { 5. } else { -5. })
-                        .clamp(0., duration)
-                }
-            };
-            Some(Command::SeekQueue { queue_id, seconds })
+            Some(match key {
+                SliderKey::Start => Command::SeekQueue {
+                    queue_id,
+                    seconds: 0.,
+                },
+                SliderKey::End => Command::SeekQueue {
+                    queue_id,
+                    seconds: duration,
+                },
+                SliderKey::Decrease | SliderKey::Increase => Command::SeekRelative {
+                    queue_id,
+                    delta: if key == SliderKey::Increase { 5. } else { -5. },
+                },
+            })
         }
-        Dragging::Volume(_) => {
-            let value = match key {
-                SliderKey::Start => 0.,
-                SliderKey::End => 1.,
-                SliderKey::Decrease | SliderKey::Increase => {
-                    if !playback.volume.is_finite() {
-                        return None;
-                    }
-                    (playback.volume.clamp(0., 1.)
-                        + if key == SliderKey::Increase {
-                            0.05
-                        } else {
-                            -0.05
-                        })
-                    .clamp(0., 1.)
-                }
-            };
-            Some(Command::Volume { value })
-        }
+        Dragging::Volume(_) => Some(match key {
+            SliderKey::Start => Command::Volume { value: 0. },
+            SliderKey::End => Command::Volume { value: 1. },
+            SliderKey::Decrease | SliderKey::Increase => Command::AdjustVolume {
+                delta: if key == SliderKey::Increase {
+                    0.05
+                } else {
+                    -0.05
+                },
+            },
+        }),
         Dragging::Split(_) => None,
     }
 }
@@ -264,14 +257,7 @@ impl Playback {
                             self.context.tr("gl-shuffle-off")
                         },
                         cx,
-                        |this, _, cx| {
-                            this.send(
-                                Command::Shuffle {
-                                    enabled: !this.state.playback.shuffle,
-                                },
-                                cx,
-                            )
-                        },
+                        |this, _, cx| this.send(Command::ToggleShuffle, cx),
                     ),
                 )
                 .rounded_full()
@@ -353,14 +339,7 @@ impl Playback {
                             RepeatMode::One => self.context.tr("gl-repeat-one"),
                         },
                         cx,
-                        |this, _, cx| {
-                            let mode = match this.state.playback.repeat {
-                                RepeatMode::Off => RepeatMode::All,
-                                RepeatMode::All => RepeatMode::One,
-                                RepeatMode::One => RepeatMode::Off,
-                            };
-                            this.send(Command::Repeat { mode }, cx);
-                        },
+                        |this, _, cx| this.send(Command::CycleRepeat, cx),
                     ),
                 )
                 .rounded_full()
@@ -678,33 +657,6 @@ mod tests {
     }
 
     #[test]
-    fn seek_keys_use_five_seconds_and_bound_to_current_occurrence() {
-        for (position, key, expected) in [
-            (12., SliderKey::Decrease, 7.),
-            (12., SliderKey::Increase, 17.),
-            (2., SliderKey::Decrease, 0.),
-            (39., SliderKey::Increase, 42.),
-            (12., SliderKey::Start, 0.),
-            (12., SliderKey::End, 42.),
-            (0., SliderKey::Decrease, 0.),
-            (42., SliderKey::Increase, 42.),
-        ] {
-            let state = PlaybackState {
-                position,
-                duration: Some(42.),
-                ..Default::default()
-            };
-            for occurrence in [10, 11] {
-                assert!(matches!(
-                    slider_command(Dragging::Seek(3), key, Some(occurrence), &state),
-                    Some(Command::SeekQueue { queue_id, seconds })
-                        if queue_id == occurrence && seconds == expected
-                ));
-            }
-        }
-    }
-
-    #[test]
     fn seek_keys_require_queue_identity_and_finite_positive_duration() {
         let mut state = PlaybackState {
             position: 12.,
@@ -730,44 +682,6 @@ mod tests {
             }
             state.duration = Some(42.);
         }
-        for position in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-            state.position = position;
-            for key in [SliderKey::Decrease, SliderKey::Increase] {
-                assert!(slider_command(Dragging::Seek(3), key, Some(10), &state).is_none());
-            }
-        }
-    }
-
-    #[test]
-    fn volume_keys_use_five_percentage_points_and_boundaries() {
-        for (volume, key, expected) in [
-            (0.5, SliderKey::Decrease, 0.45),
-            (0.5, SliderKey::Increase, 0.55),
-            (0.02, SliderKey::Decrease, 0.),
-            (0.98, SliderKey::Increase, 1.),
-            (0.5, SliderKey::Start, 0.),
-            (0.5, SliderKey::End, 1.),
-            (0., SliderKey::Decrease, 0.),
-            (1., SliderKey::Increase, 1.),
-        ] {
-            let state = PlaybackState {
-                volume,
-                ..Default::default()
-            };
-            assert!(matches!(
-                slider_command(Dragging::Volume(3), key, None, &state),
-                Some(Command::Volume { value }) if (value - expected).abs() < f32::EPSILON
-            ));
-        }
-        for volume in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
-            let state = PlaybackState {
-                volume,
-                ..Default::default()
-            };
-            assert!(
-                slider_command(Dragging::Volume(3), SliderKey::Increase, None, &state).is_none()
-            );
-        }
     }
 
     #[test]
@@ -783,9 +697,9 @@ mod tests {
         };
         assert!(matches!(
             slider_command(Dragging::Seek(3), SliderKey::Increase, Some(10), &state),
-            Some(Command::SeekQueue {
+            Some(Command::SeekRelative {
                 queue_id: 10,
-                seconds: 17.
+                delta: 5.
             })
         ));
         assert_eq!(owner.seek_preview(), None);

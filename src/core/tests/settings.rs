@@ -1065,3 +1065,30 @@ fn ffmpeg_external_load_result_survives_runtime_disable_and_reenable() {
     control.request_shutdown().unwrap();
     worker.join().unwrap();
 }
+
+#[test]
+fn configure_shuffle_keeps_current_occurrence_as_history_start() {
+    let (directory, mut core) = fixture();
+    for id in 1..=4 {
+        std::fs::write(directory.path().join(format!("{id}.wav")), []).unwrap();
+    }
+    let _audio = recording_audio(&mut core);
+    let first = core.queue_ids[0];
+    let next = core.queue_ids[4];
+    core.start(first, true).unwrap();
+    core.command(Command::Pause).unwrap();
+    let mut config = core.state.system.config.as_ref().clone();
+    config.shuffle = true;
+    let config = Arc::new(config);
+    core.command(Command::Configure {
+        config: Arc::clone(&config),
+    })
+    .unwrap();
+    // Choose a non-adjacent draw deterministically, then reapply the same mode.
+    core.start(next, true).unwrap();
+    core.command(Command::Pause).unwrap();
+    core.command(Command::Configure { config }).unwrap();
+    core.navigate(Navigation::Previous).unwrap();
+    assert_eq!(core.state.queue.current_id, Some(first));
+    assert_eq!(core.state.playback.status, PlaybackStatus::Paused);
+}

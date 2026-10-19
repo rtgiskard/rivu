@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-pub(super) const PROTOCOL_VERSION: u8 = 2;
+pub(super) const PROTOCOL_VERSION: u8 = 3;
 pub(super) const MAX_REQUEST: usize = 4 * 1024 * 1024;
 pub(super) const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 pub(super) const MAX_CLIENTS: usize = 16;
@@ -390,6 +390,15 @@ pub(super) enum WireCommand {
     },
     ToggleFavorite {
         track_ids: Vec<i64>,
+    },
+    AdjustVolume {
+        delta: f32,
+    },
+    CycleRepeat,
+    ToggleShuffle,
+    SeekRelative {
+        queue_id: u64,
+        delta: f64,
     },
 }
 
@@ -890,6 +899,10 @@ impl From<Command> for WireCommand {
             Command::Seek { seconds } => Self::Seek { seconds },
             Command::SeekQueue { queue_id, seconds } => Self::SeekQueue { queue_id, seconds },
             Command::Volume { value } => Self::Volume { value },
+            Command::AdjustVolume { delta } => Self::AdjustVolume { delta },
+            Command::CycleRepeat => Self::CycleRepeat,
+            Command::ToggleShuffle => Self::ToggleShuffle,
+            Command::SeekRelative { queue_id, delta } => Self::SeekRelative { queue_id, delta },
             Command::Enqueue { track_ids } => Self::Enqueue { track_ids },
             Command::EnqueueSources {
                 directories,
@@ -1034,6 +1047,10 @@ impl TryFrom<WireCommand> for Command {
             WireCommand::Seek { seconds } => Self::Seek { seconds },
             WireCommand::SeekQueue { queue_id, seconds } => Self::SeekQueue { queue_id, seconds },
             WireCommand::Volume { value } => Self::Volume { value },
+            WireCommand::AdjustVolume { delta } => Self::AdjustVolume { delta },
+            WireCommand::CycleRepeat => Self::CycleRepeat,
+            WireCommand::ToggleShuffle => Self::ToggleShuffle,
+            WireCommand::SeekRelative { queue_id, delta } => Self::SeekRelative { queue_id, delta },
             WireCommand::Enqueue { track_ids } => Self::Enqueue { track_ids },
             WireCommand::EnqueueSources {
                 directories,

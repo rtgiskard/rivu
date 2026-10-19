@@ -640,8 +640,15 @@ pub enum Command {
         queue_id: u64,
         seconds: f64,
     },
+    SeekRelative {
+        queue_id: u64,
+        delta: f64,
+    },
     Volume {
         value: f32,
+    },
+    AdjustVolume {
+        delta: f32,
     },
     Enqueue {
         track_ids: Vec<i64>,
@@ -673,6 +680,8 @@ pub enum Command {
     Repeat {
         mode: RepeatMode,
     },
+    CycleRepeat,
+    ToggleShuffle,
     CreatePlaylist {
         name: String,
     },

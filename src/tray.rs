@@ -680,16 +680,8 @@ impl DbusMenu {
             2 => Command::Resume,
             3 => Command::Previous,
             4 => Command::Next,
-            6 => Command::Shuffle {
-                enabled: !snapshot.shuffle,
-            },
-            7 => Command::Repeat {
-                mode: match snapshot.repeat {
-                    RepeatMode::Off => RepeatMode::All,
-                    RepeatMode::All => RepeatMode::One,
-                    RepeatMode::One => RepeatMode::Off,
-                },
-            },
+            6 => Command::ToggleShuffle,
+            7 => Command::CycleRepeat,
             _ => return,
         };
         if let Err(error) = self.handle.send(command) {

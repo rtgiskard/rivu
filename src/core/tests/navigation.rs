@@ -469,3 +469,145 @@ fn random_draws_include_current_weight_duplicates_and_ignore_forward_history() {
     assert_eq!(core.played.len(), 4096);
     assert_eq!(core.played_cursor, 4096);
 }
+
+#[test]
+fn repeated_keyboard_intents_accumulate_from_one_snapshot_in_execution_order() {
+    use crate::keyboard::{self, Action};
+
+    let (_directory, mut core) = navigation_fixture(PlaybackStatus::Paused);
+    let _commands = recording_audio(&mut core);
+    core.state.playback.volume = 0.4;
+    core.state.playback.repeat = RepeatMode::Off;
+    core.state.playback.shuffle = false;
+    core.state.playback.position = 2.0;
+    let snapshot = core.state.playback.clone();
+    let occurrence = core.state.queue.current_id;
+    let input = |action| keyboard::playback_command(action, &snapshot, occurrence).unwrap();
+
+    for _ in 0..2 {
+        core.command(input(Action::VolumeUp)).unwrap();
+        core.command(input(Action::SeekForward)).unwrap();
+    }
+    assert!((core.state.playback.volume - 0.5).abs() < 0.000001);
+    assert_eq!(core.state.playback.position, 12.0);
+    assert_eq!(core.state.playback.status, PlaybackStatus::Paused);
+    for _ in 0..2 {
+        core.command(input(Action::VolumeDown)).unwrap();
+        core.command(input(Action::SeekBackward)).unwrap();
+    }
+    assert!((core.state.playback.volume - 0.4).abs() < 0.000001);
+    assert_eq!(core.state.playback.position, 2.0);
+    for expected in [
+        RepeatMode::All,
+        RepeatMode::One,
+        RepeatMode::Off,
+        RepeatMode::All,
+    ] {
+        core.command(input(Action::Repeat)).unwrap();
+        assert_eq!(core.state.playback.repeat, expected);
+    }
+    for expected in [true, false, true] {
+        core.command(input(Action::Shuffle)).unwrap();
+        assert_eq!(core.state.playback.shuffle, expected);
+    }
+    core.command(Command::Repeat {
+        mode: RepeatMode::One,
+    })
+    .unwrap();
+    core.command(input(Action::Repeat)).unwrap();
+    assert_eq!(core.state.playback.repeat, RepeatMode::Off);
+    core.command(Command::Shuffle { enabled: false }).unwrap();
+    core.command(input(Action::Shuffle)).unwrap();
+    assert!(core.state.playback.shuffle);
+}
+
+#[test]
+fn relative_intents_clamp_owner_values_and_reject_nonfinite_deltas() {
+    let (_directory, mut core) = navigation_fixture(PlaybackStatus::Paused);
+    let _commands = recording_audio(&mut core);
+    let queue_id = core.state.queue.current_id.unwrap();
+    for (volume, delta, expected) in [(0.98, 0.05, 1.0), (0.02, -0.05, 0.0)] {
+        core.command(Command::Volume { value: volume }).unwrap();
+        core.command(Command::AdjustVolume { delta }).unwrap();
+        assert_eq!(core.state.playback.volume, expected);
+    }
+    core.state.playback.position = 2.0;
+    core.command(Command::SeekRelative {
+        queue_id,
+        delta: -5.0,
+    })
+    .unwrap();
+    assert_eq!(core.state.playback.position, 0.0);
+    core.command(Command::SeekRelative {
+        queue_id,
+        delta: 25.0,
+    })
+    .unwrap();
+    // Metadata duration is not a hard seek boundary for ordinary audio.
+    assert_eq!(core.state.playback.position, 25.0);
+    Arc::make_mut(core.state.current_track.as_mut().unwrap()).cue = Some(CueSegment {
+        sheet: "album.cue".into(),
+        number: 1,
+        start_frame: 75,
+        end_frame: Some(300),
+    });
+    core.command(Command::SeekRelative {
+        queue_id,
+        delta: 5.0,
+    })
+    .unwrap();
+    assert_eq!(core.state.playback.position, 3.0);
+    let revision = core.state.playback.seek_revision;
+    for delta in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(
+            core.command(Command::SeekRelative { queue_id, delta })
+                .is_err()
+        );
+        assert_eq!(core.state.playback.position, 3.0);
+        assert_eq!(core.state.playback.seek_revision, revision);
+    }
+    for delta in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        assert!(core.command(Command::AdjustVolume { delta }).is_err());
+        assert_eq!(core.state.playback.volume, 0.0);
+    }
+}
+
+#[test]
+fn delayed_keyboard_seeks_cannot_target_next_duplicate_occurrence_or_stopped_playback() {
+    use crate::keyboard::{self, Action};
+
+    let (_directory, mut core) = navigation_fixture(PlaybackStatus::Paused);
+    let _commands = recording_audio(&mut core);
+    let snapshot = core.state.playback.clone();
+    let old_occurrence = core.state.queue.current_id;
+    let old_track = core.state.current_track().unwrap().id;
+    let delayed: Vec<_> = [
+        Action::SeekForward,
+        Action::SeekBackward,
+        Action::SeekStart,
+        Action::SeekEnd,
+    ]
+    .into_iter()
+    .map(|action| keyboard::playback_command(action, &snapshot, old_occurrence).unwrap())
+    .collect();
+    core.command(Command::Next).unwrap();
+    assert_ne!(core.state.queue.current_id, old_occurrence);
+    assert_eq!(core.state.current_track().unwrap().id, old_track);
+    let revision = core.state.playback.seek_revision;
+    for command in delayed {
+        core.command(command).unwrap();
+        assert_eq!(core.state.playback.position, 0.0);
+        assert_eq!(core.state.playback.seek_revision, revision);
+    }
+    let queue_id = core.state.queue.current_id.unwrap();
+    core.command(Command::Stop).unwrap();
+    let revision = core.state.playback.seek_revision;
+    core.command(Command::SeekRelative {
+        queue_id,
+        delta: 5.0,
+    })
+    .unwrap();
+    assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
+    assert_eq!(core.state.playback.position, 0.0);
+    assert_eq!(core.state.playback.seek_revision, revision);
+}

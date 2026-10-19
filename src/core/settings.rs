@@ -84,11 +84,7 @@ impl Core {
         self.store.set_track_cache_page_size(config.page_size);
         self.state.system.selected_device = config.output_device.clone();
         self.state.playback.volume = config.volume;
-        if self.state.playback.shuffle != config.shuffle {
-            self.played.clear();
-            self.played_cursor = 0;
-        }
-        self.state.playback.shuffle = config.shuffle;
+        self.set_shuffle(config.shuffle);
         self.state.playback.repeat = config.repeat;
         self.state.system.ffmpeg_status = ffmpeg_status;
         self.state.system.config = config;

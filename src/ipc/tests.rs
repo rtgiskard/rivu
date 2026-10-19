@@ -1383,6 +1383,51 @@ fn edit_track_wire_round_trip_preserves_omitted_and_explicit_fields() {
 }
 
 #[test]
+fn relative_playback_intents_round_trip_without_changing_existing_command_tags() {
+    let mut encoded = Vec::new();
+    encode_request_frame_into(
+        &WireRequest::Command(WireCommand::from(Command::Volume { value: 0.5 })),
+        &mut encoded,
+    )
+    .unwrap();
+    // Appended intent variants must not renumber the existing Volume tag.
+    assert_eq!(encoded[6], 16);
+    for command in [
+        Command::AdjustVolume { delta: -0.05 },
+        Command::AdjustVolume { delta: 0.05 },
+        Command::CycleRepeat,
+        Command::ToggleShuffle,
+        Command::SeekRelative {
+            queue_id: u64::MAX,
+            delta: -5.0,
+        },
+        Command::SeekRelative {
+            queue_id: 7,
+            delta: 5.0,
+        },
+        Command::SeekQueue {
+            queue_id: 7,
+            seconds: 0.0,
+        },
+        Command::Seek { seconds: 42.0 },
+    ] {
+        let expected = serde_json::to_value(&command).unwrap();
+        encode_request_frame_into(
+            &WireRequest::Command(WireCommand::from(command)),
+            &mut encoded,
+        )
+        .unwrap();
+        let WireRequest::Command(wire) = decode_request_frame(&encoded[4..]).unwrap() else {
+            panic!("expected playback intent");
+        };
+        assert_eq!(
+            serde_json::to_value(Command::try_from(wire).unwrap()).unwrap(),
+            expected
+        );
+    }
+}
+
+#[test]
 fn request_encoding_rejects_oversized_body_before_completion() {
     let request = WireRequest::Command(WireCommand::from(Command::EditTrack {
         track_id: 1,

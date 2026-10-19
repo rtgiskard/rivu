@@ -1,4 +1,4 @@
-use crate::model::{Command, PlaybackState, PlaybackStatus, RepeatMode};
+use crate::model::{Command, PlaybackState, PlaybackStatus};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Modifiers {
@@ -435,37 +435,40 @@ pub(crate) fn resolve(key: &str, mut modifiers: Modifiers, context: Context) -> 
         .map(|binding| binding.action)
 }
 
-pub(crate) fn playback_command(action: Action, playback: &PlaybackState) -> Option<Command> {
-    let seek = |seconds: f64| {
-        (playback.status != PlaybackStatus::Stopped).then_some(Command::Seek { seconds })
-    };
+pub(crate) fn playback_command(
+    action: Action,
+    playback: &PlaybackState,
+    queue_id: Option<u64>,
+) -> Option<Command> {
+    let queue_id = queue_id.filter(|_| playback.status != PlaybackStatus::Stopped);
     match action {
         Action::Toggle => Some(Command::Toggle),
         Action::Next => Some(Command::Next),
         Action::Previous => Some(Command::Previous),
-        Action::SeekBackward => seek((playback.position - 5.0).max(0.0)),
-        Action::SeekForward => seek((playback.position + 5.0).max(0.0)),
-        Action::SeekStart => seek(0.0),
-        Action::SeekEnd => playback
-            .duration
-            .filter(|duration| duration.is_finite())
-            .and_then(seek),
-        Action::Repeat => Some(Command::Repeat {
-            mode: match playback.repeat {
-                RepeatMode::Off => RepeatMode::All,
-                RepeatMode::All => RepeatMode::One,
-                RepeatMode::One => RepeatMode::Off,
-            },
+        Action::SeekBackward | Action::SeekForward => {
+            queue_id.map(|queue_id| Command::SeekRelative {
+                queue_id,
+                delta: if action == Action::SeekForward {
+                    5.0
+                } else {
+                    -5.0
+                },
+            })
+        }
+        Action::SeekStart => queue_id.map(|queue_id| Command::SeekQueue {
+            queue_id,
+            seconds: 0.0,
         }),
-        Action::Shuffle => Some(Command::Shuffle {
-            enabled: !playback.shuffle,
+        Action::SeekEnd => queue_id.and_then(|queue_id| {
+            playback
+                .duration
+                .filter(|duration| duration.is_finite() && *duration >= 0.0)
+                .map(|seconds| Command::SeekQueue { queue_id, seconds })
         }),
-        Action::VolumeUp => Some(Command::Volume {
-            value: (playback.volume + 0.05).min(1.0),
-        }),
-        Action::VolumeDown => Some(Command::Volume {
-            value: (playback.volume - 0.05).max(0.0),
-        }),
+        Action::Repeat => Some(Command::CycleRepeat),
+        Action::Shuffle => Some(Command::ToggleShuffle),
+        Action::VolumeUp => Some(Command::AdjustVolume { delta: 0.05 }),
+        Action::VolumeDown => Some(Command::AdjustVolume { delta: -0.05 }),
         _ => None,
     }
 }
@@ -739,51 +742,50 @@ mod tests {
     }
 
     #[test]
-    fn playback_seek_respects_status_and_boundaries() {
+    fn playback_seek_requires_active_occurrence_and_keeps_relative_intent() {
         let mut state = PlaybackState {
             position: 2.0,
             ..Default::default()
         };
-        assert!(playback_command(Action::SeekBackward, &state).is_none());
-        state.status = PlaybackStatus::Playing;
-        assert!(
-            matches!(playback_command(Action::SeekBackward, &state), Some(Command::Seek { seconds }) if seconds == 0.0)
-        );
-        state.position = 12.0;
-        assert!(
-            matches!(playback_command(Action::SeekForward, &state), Some(Command::Seek { seconds }) if seconds == 17.0)
-        );
-        state.duration = Some(f64::INFINITY);
-        assert!(playback_command(Action::SeekEnd, &state).is_none());
-        state.duration = Some(42.0);
-        assert!(
-            matches!(playback_command(Action::SeekEnd, &state), Some(Command::Seek { seconds }) if seconds == 42.0)
-        );
-        assert!(playback_command(Action::First, &state).is_none());
-    }
-
-    #[test]
-    fn playback_volume_and_repeat_cycle_are_bounded() {
-        let mut state = PlaybackState {
-            volume: 1.0,
-            ..Default::default()
-        };
-        assert!(
-            matches!(playback_command(Action::VolumeUp, &state), Some(Command::Volume { value }) if value == 1.0)
-        );
-        state.volume = 0.0;
-        assert!(
-            matches!(playback_command(Action::VolumeDown, &state), Some(Command::Volume { value }) if value == 0.0)
-        );
-        for (before, after) in [
-            (RepeatMode::Off, RepeatMode::All),
-            (RepeatMode::All, RepeatMode::One),
-            (RepeatMode::One, RepeatMode::Off),
+        for action in [
+            Action::SeekBackward,
+            Action::SeekForward,
+            Action::SeekStart,
+            Action::SeekEnd,
         ] {
-            state.repeat = before;
-            assert!(
-                matches!(playback_command(Action::Repeat, &state), Some(Command::Repeat { mode }) if mode == after)
-            );
+            assert!(playback_command(action, &state, Some(7)).is_none());
+            state.status = PlaybackStatus::Playing;
+            assert!(playback_command(action, &state, None).is_none());
+            state.status = PlaybackStatus::Stopped;
         }
+        for status in [PlaybackStatus::Playing, PlaybackStatus::Paused] {
+            state.status = status;
+            for (action, expected) in [(Action::SeekBackward, -5.0), (Action::SeekForward, 5.0)] {
+                assert!(matches!(
+                    playback_command(action, &state, Some(7)),
+                    Some(Command::SeekRelative { queue_id: 7, delta }) if delta == expected
+                ));
+            }
+            assert!(matches!(
+                playback_command(Action::SeekStart, &state, Some(7)),
+                Some(Command::SeekQueue {
+                    queue_id: 7,
+                    seconds: 0.0
+                })
+            ));
+            for duration in [None, Some(f64::INFINITY), Some(f64::NAN), Some(-1.0)] {
+                state.duration = duration;
+                assert!(playback_command(Action::SeekEnd, &state, Some(7)).is_none());
+            }
+            state.duration = Some(42.0);
+            assert!(matches!(
+                playback_command(Action::SeekEnd, &state, Some(7)),
+                Some(Command::SeekQueue {
+                    queue_id: 7,
+                    seconds: 42.0
+                })
+            ));
+        }
+        assert!(playback_command(Action::First, &state, Some(7)).is_none());
     }
 }

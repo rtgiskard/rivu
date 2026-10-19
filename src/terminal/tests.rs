@@ -1585,12 +1585,20 @@ fn terminal_routes_playback_chords_and_exit_without_stopping_core() {
             position: 12.0,
             ..Default::default()
         },
+        queue: crate::model::QueueState {
+            current_id: Some(7),
+            ..Default::default()
+        },
         ..Default::default()
     };
     let mut ui = UiState::default();
-    assert!(
-        matches!(ui.key_action(KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL), &state), KeyAction::Command(Command::Seek { seconds }) if seconds == 7.0)
-    );
+    assert!(matches!(
+        ui.key_action(KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL), &state),
+        KeyAction::Command(Command::SeekRelative {
+            queue_id: 7,
+            delta: -5.0
+        })
+    ));
     assert!(matches!(
         ui.key_action(KeyEvent::from(KeyCode::Char(' ')), &state),
         KeyAction::Command(Command::Toggle)

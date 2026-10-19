@@ -5,6 +5,18 @@ use rand::RngExt;
 const MAX_NAVIGATION_HISTORY: usize = 4096;
 
 impl Core {
+    pub(in crate::core) fn set_shuffle(&mut self, enabled: bool) {
+        if self.state.playback.shuffle == enabled {
+            return;
+        }
+        self.state.playback.shuffle = enabled;
+        self.played.clear();
+        self.played_cursor = 0;
+        if let Some(id) = self.state.queue.current_id {
+            self.record_queue_history(id);
+        }
+    }
+
     pub(in crate::core) fn save_queue(&mut self) -> Result<()> {
         self.store.set_queue_current(self.state.queue.current_id)?;
         self.state.queue = self.store.queue_projection(self.queue_ids.len())?;
