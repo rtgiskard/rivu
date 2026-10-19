@@ -297,6 +297,7 @@ struct SpectrumGeometry {
     key: Option<SpectrumGeometryKey>,
     grouping_key: SpectrumGroupingKey,
     bins: Vec<Range<usize>>,
+    samples: Vec<Option<HeatSample>>,
     body: Option<Arc<GpuFrame>>,
 }
 
@@ -312,6 +313,7 @@ struct VisualData {
     spectrum_labels: [SharedString; 2],
     db_labels: [SharedString; 4],
     spectrum_bins: Vec<Range<usize>>,
+    spectrum_samples: Vec<Option<HeatSample>>,
     heat_samples: Vec<HeatSample>,
     heat_sample_generation: u64,
     spectrogram_sample_height: usize,
@@ -369,6 +371,7 @@ struct VisualData {
     latest: Option<usize>,
     latest_sample_time: Option<Duration>,
     error: Option<String>,
+    last_paint_error: Option<String>,
 }
 
 #[derive(Clone)]
@@ -392,6 +395,7 @@ impl Visuals {
                 spectrum_labels: ["20 Hz".into(), "20 kHz".into()],
                 db_labels: std::array::from_fn(|step| db_label(-70.0 * step as f32 / 3.0)),
                 spectrum_bins: Vec::new(),
+                spectrum_samples: Vec::new(),
                 heat_samples: Vec::new(),
                 spectrogram_panel_sizes: HashMap::new(),
                 spectrogram_panel_height: 0,
@@ -451,6 +455,7 @@ impl Visuals {
                 latest: None,
                 latest_sample_time: None,
                 error: None,
+                last_paint_error: None,
             })),
         }
     }
@@ -477,10 +482,13 @@ impl Visuals {
         data.bar_deadlines = Vec::new();
         data.smoothed_levels = Vec::new();
         data.spectrum_bins = Vec::new();
+        data.spectrum_samples = Vec::new();
         data.spectrum_points = Vec::new();
         data.spectrum_rectangles = Vec::new();
         data.spectrum_geometry = HashMap::new();
         data.last_analysis_sequence = None;
+        data.error = None;
+        data.last_paint_error = None;
         data.envelope_initialized = false;
         data.last_update = None;
         data.source_generation = None;
@@ -537,7 +545,6 @@ impl Visuals {
             || data.analysis_window != config.analysis_window
             || data.visualization_signal != config.visualization_signal;
         let heat_changed = palette_changed
-            || data.visual_background != config.visual_background.rgb()
             || data.spectrogram_db_range != spectrogram_db_range
             || data.spectrogram_interpolate != config.spectrogram_interpolate
             || data.spectrogram_interpolation_points != config.spectrogram_interpolation_points
@@ -573,7 +580,6 @@ impl Visuals {
             data.clear_derived_caches();
         }
         data.spectrogram_history_seconds = config.spectrogram_history_seconds;
-        data.history_limit_seconds = config.spectrogram_history_seconds as f64;
         data.analysis_fps = config.analysis_fps;
         if data.enabled && data.spectrogram_visible && history_changed {
             data.resize_history(history_column_count(
@@ -603,7 +609,6 @@ impl Visuals {
             &data.latest_levels
         };
         data.top_db = (levels.iter().copied().fold(0.0, f32::max) / 6.0).ceil() * 6.0;
-        data.refresh_frequency_labels();
         data.refresh_db_labels();
         true
     }
@@ -629,6 +634,7 @@ impl Visuals {
             data.report_error("Analysis frequency and level counts differ".into());
             return;
         }
+        data.error = None;
         let sample_rate_changed = data.sample_rate != frame.sample_rate;
         data.sample_rate = frame.sample_rate;
         if sample_rate_changed || data.frequencies != frame.frequencies_hz {
@@ -845,20 +851,26 @@ impl Visuals {
                             if !visual_canvas_has_room(bounds.size) {
                                 return;
                             }
-                            if !showing_status {
-                                let result = match mode {
+                            let result = if showing_status {
+                                Ok(())
+                            } else {
+                                match mode {
                                     VisualMode::Spectrum => {
                                         data.paint_spectrum(panel_id, bounds, window, cx)
                                     }
                                     VisualMode::Spectrogram => {
                                         data.paint_spectrogram(bounds, window, cx)
                                     }
-                                };
-                                if let Err(error) = result {
-                                    data.report_error(error);
                                 }
+                            };
+                            let paint_error = result.err();
+                            if data.last_paint_error != paint_error {
+                                if let Some(error) = &paint_error {
+                                    eprintln!("rivu visualization: {error}");
+                                }
+                                data.last_paint_error.clone_from(&paint_error);
                             }
-                            if let Some(error) = &data.error {
+                            if let Some(error) = paint_error.as_ref().or(data.error.as_ref()) {
                                 window.paint_quad(fill(
                                     Bounds::new(bounds.origin, size(bounds.size.width, px(22.0))),
                                     rgb(theme.error_bg),
@@ -939,8 +951,6 @@ impl VisualData {
         let columns =
             history_columns_for_width(self.spectrogram_history_seconds, self.analysis_fps, width);
         self.resize_history(columns);
-        self.history_limit_seconds = (columns as f64 / self.analysis_fps.max(1) as f64)
-            .min(self.spectrogram_history_seconds as f64);
         previous != (self.history_columns, self.spectrogram_panel_height)
     }
 
@@ -953,17 +963,15 @@ impl VisualData {
         }
     }
 
-    fn interpolate_level(&self, hz: f32, low: f32, high: f32, peaks: bool) -> f32 {
-        let first = self.frequencies.partition_point(|value| *value < low);
-        let end = self.frequencies.partition_point(|value| *value <= high);
-        if first == end {
+    fn interpolate_level(&self, sample: Option<HeatSample>, peaks: bool) -> f32 {
+        let Some(HeatSample {
+            left,
+            right,
+            fraction,
+        }) = sample
+        else {
             return f32::NEG_INFINITY;
-        }
-        let right = self
-            .frequencies
-            .partition_point(|value| *value < hz)
-            .clamp(first, end - 1);
-        let left = right.saturating_sub(1).max(first);
+        };
         let level = |index| {
             if peaks {
                 finite_level(self.peaks[index])
@@ -976,10 +984,6 @@ impl VisualData {
         if left == right {
             return b;
         }
-        let coordinate = |value: f32| value.ln();
-        let fraction = ((coordinate(hz) - coordinate(self.frequencies[left]))
-            / (coordinate(self.frequencies[right]) - coordinate(self.frequencies[left])))
-        .clamp(0.0, 1.0);
         let floor = self.top_db - self.spectrum_db_range;
         a.max(floor) + (b.max(floor) - a.max(floor)) * fraction
     }
@@ -1035,6 +1039,8 @@ impl VisualData {
     }
     fn resize_history(&mut self, requested_columns: usize) {
         let new_columns = requested_columns.max(2);
+        self.history_limit_seconds = (new_columns as f64 / self.analysis_fps.max(1) as f64)
+            .min(self.spectrogram_history_seconds as f64);
         if new_columns == self.history_columns {
             return;
         }
@@ -1068,6 +1074,7 @@ impl VisualData {
     }
     fn clear_derived_caches(&mut self) {
         self.spectrum_bins.clear();
+        self.spectrum_samples.clear();
         self.spectrum_points.clear();
         self.spectrum_rectangles.clear();
         self.spectrum_geometry.clear();
@@ -1145,7 +1152,6 @@ impl VisualData {
     }
 
     fn refresh_frequency_labels(&mut self) {
-        self.spectrum_geometry.clear();
         if let Some((_, _, low, high)) = self.visible_range() {
             self.frequency_labels = [frequency_label(low), frequency_label(high)];
         }
@@ -1185,6 +1191,15 @@ impl VisualData {
                 true,
                 &mut self.spectrum_bins,
             );
+            if self.spectrum_interpolate {
+                spectrum_samples(
+                    &self.frequencies,
+                    low,
+                    high,
+                    bars,
+                    &mut self.spectrum_samples,
+                );
+            }
             return;
         }
         let key = SpectrumGroupingKey {
@@ -1205,13 +1220,18 @@ impl VisualData {
                     high: 0.0,
                 },
                 bins: Vec::new(),
+                samples: Vec::new(),
                 body: None,
             });
         if geometry.grouping_key != key {
             group_bands(&self.frequencies, low, high, bars, true, &mut geometry.bins);
+            geometry.samples.clear();
             geometry.grouping_key = key;
             geometry.key = None;
             geometry.body = None;
+        }
+        if self.spectrum_interpolate && geometry.samples.len() != bars {
+            spectrum_samples(&self.frequencies, low, high, bars, &mut geometry.samples);
         }
     }
 
@@ -1220,6 +1240,14 @@ impl VisualData {
             self.spectrum_geometry[&panel_id].bins[bar].clone()
         } else {
             self.spectrum_bins[bar].clone()
+        }
+    }
+
+    fn spectrum_sample(&self, panel_id: u64, bar: usize) -> Option<HeatSample> {
+        if self.visualization_cache {
+            self.spectrum_geometry[&panel_id].samples[bar]
+        } else {
+            self.spectrum_samples[bar]
         }
     }
 
@@ -1295,11 +1323,11 @@ impl VisualData {
             for index in range.clone() {
                 level = level.max(self.display_level(index));
             }
-            let center_hz = axis_frequency(low, high, (left_t + right_t) * 0.5, true);
             if self.spectrum_interpolate {
                 // Interpolation fills undersampled slots, but never averages
                 // away a transient already max-pooled into this slot.
-                level = level.max(self.interpolate_level(center_hz, low, high, false));
+                level =
+                    level.max(self.interpolate_level(self.spectrum_sample(panel_id, bar), false));
             }
             let slot_width = plot.size.width * (right_t - left_t);
             let slot_gap = px(self.spectrum_gap)
@@ -1537,8 +1565,8 @@ impl VisualData {
                         peak = peak.max(finite_level(self.peaks[index]));
                     }
                     if self.spectrum_interpolate {
-                        let center_hz = axis_frequency(low, high, (left_t + right_t) * 0.5, true);
-                        peak = peak.max(self.interpolate_level(center_hz, low, high, true));
+                        peak = peak
+                            .max(self.interpolate_level(self.spectrum_sample(panel_id, bar), true));
                     }
                     let peak_fraction = db_height(peak, self.top_db, self.spectrum_db_range);
                     if peak_fraction <= 0.0 {
@@ -1577,6 +1605,7 @@ impl VisualData {
         }
         if !self.visualization_cache {
             self.spectrum_bins.clear();
+            self.spectrum_samples.clear();
         }
         if show_labels {
             let labels_y = plot.bottom() + px(3.0);
@@ -1944,6 +1973,26 @@ fn build_heat_samples(frequencies: &[f32], low: f32, high: f32, height: usize) -
         .collect()
 }
 
+fn spectrum_samples(
+    frequencies: &[f32],
+    low: f32,
+    high: f32,
+    bars: usize,
+    samples: &mut Vec<Option<HeatSample>>,
+) {
+    samples.clear();
+    samples.extend((0..bars).map(|bar| {
+        let left = bar as f32 / bars as f32;
+        let right = (bar + 1) as f32 / bars as f32;
+        heat_sample(
+            frequencies,
+            axis_frequency(low, high, (left + right) * 0.5, true),
+            low,
+            high,
+        )
+    }));
+}
+
 fn heat_sample(frequencies: &[f32], hz: f32, low: f32, high: f32) -> Option<HeatSample> {
     let first = frequencies.partition_point(|value| *value < low);
     let end = frequencies.partition_point(|value| *value <= high);
@@ -2200,6 +2249,41 @@ fn paint_aligned_label(
 mod tests {
     use super::*;
 
+    #[test]
+    fn appearance_changes_preserve_spectrum_body_and_history_bucketing() {
+        let mut visuals = configured_visuals();
+        let mut config = Config::default();
+        visuals.data.borrow_mut().resize_history(100);
+        visuals.update(&frame(10.010, -10.0));
+        let body = prepared_body(&visuals, 1, 120.0, 100.0).unwrap();
+        config.visual_background = "#202020".parse().unwrap();
+        config.spectrum_grid = !config.spectrum_grid;
+        config.spectrogram_db_range = Some(100.0);
+        visuals.configure(&config);
+        assert!(Arc::ptr_eq(
+            &body,
+            &prepared_body(&visuals, 1, 120.0, 100.0).unwrap()
+        ));
+        visuals.update(&frame(10.020, -60.0));
+        let data = visuals.data.borrow();
+        assert_eq!(data.len, 1);
+        assert_eq!(data.columns[data.latest.unwrap()].levels, vec![-10.0; 4]);
+    }
+
+    #[test]
+    fn valid_analysis_replaces_previous_input_error() {
+        let mut visuals = configured_visuals();
+        let mut invalid = frame(1.0, -20.0);
+        invalid.spectrum_db.pop();
+        visuals.update(&invalid);
+        assert!(visuals.data.borrow().error.is_some());
+        visuals.update(&frame(1.1, -30.0));
+        let data = visuals.data.borrow();
+        assert!(data.error.is_none());
+        assert_eq!(data.latest_levels, vec![-30.0; 4]);
+        assert!(data.spectrum_render_range().is_some());
+    }
+
     fn prepared_body(
         visuals: &Visuals,
         panel: u64,
@@ -2235,40 +2319,44 @@ mod tests {
     }
 
     #[test]
-    fn gpu_spectrum_continuous_partial_height_preserves_geometry_and_plot_domain() {
+    fn gpu_spectrum_continuous_signal_preserves_amplitude_and_plot_domain() {
         for style in [SpectrumStyle::Line, SpectrumStyle::Solid] {
             for interpolate in [false, true] {
-                let mut visuals = configured_visuals();
-                visuals.configure(&Config {
-                    spectrum_style: style,
-                    spectrum_interpolate: interpolate,
-                    spectrum_db_range: Some(100.0),
-                    spectrum_bars: 4,
-                    ..Config::default()
-                });
-                visuals.update(&frame(1.0, -75.0));
-                let body = prepared_body(&visuals, 1, 100.0, 100.0).unwrap();
-                let gpui::GpuContent::Path { path, params } = body.content() else {
-                    panic!("expected path")
-                };
-                let plot = Bounds::new(point(px(13.25), px(21.5)), size(px(100.0), px(100.0)));
-                assert_eq!(path.bounds, plot);
-                assert_eq!(params.palette_range, [0.0, 1.0]);
-                assert!(!path.vertices.is_empty());
-                let minimum_y = path
-                    .vertices
-                    .iter()
-                    .map(|vertex| vertex.xy_position.y)
-                    .fold(plot.bottom(), |a, b| a.min(b));
-                // A quarter-height signal stays in the lower plot region; it must
-                // not be stretched to the ceiling by a geometry-local domain.
-                assert!(minimum_y > plot.top() + plot.size.height * 0.5);
-                assert!(minimum_y < plot.bottom() - plot.size.height * 0.2);
-                assert!(
-                    path.vertices
+                for level in [-99.9, -75.0, 0.0] {
+                    let mut visuals = configured_visuals();
+                    visuals.configure(&Config {
+                        spectrum_style: style,
+                        spectrum_interpolate: interpolate,
+                        spectrum_db_range: Some(100.0),
+                        spectrum_bars: 4,
+                        ..Config::default()
+                    });
+                    visuals.update(&frame(1.0, level));
+                    let body = prepared_body(&visuals, 1, 100.0, 100.0).unwrap();
+                    let gpui::GpuContent::Path { path, params } = body.content() else {
+                        panic!("expected continuous spectrum path")
+                    };
+                    let plot = Bounds::new(point(px(13.25), px(21.5)), size(px(100.0), px(100.0)));
+                    assert_eq!(path.bounds, plot);
+                    assert_eq!(params.palette_range, [0.0, 1.0]);
+                    let minimum_y = path
+                        .vertices
                         .iter()
-                        .all(|vertex| vertex.xy_position.y <= plot.bottom() + px(1.0))
-                );
+                        .map(|vertex| vertex.xy_position.y)
+                        .fold(plot.bottom(), |a, b| a.min(b));
+                    if style == SpectrumStyle::Solid {
+                        let expected = plot.bottom() - plot.size.height * ((level + 100.0) / 100.0);
+                        assert!((minimum_y - expected).abs() < px(0.001));
+                    } else {
+                        assert!(minimum_y >= plot.top() - px(0.001));
+                        assert!(minimum_y < plot.bottom());
+                    }
+                    assert!(
+                        path.vertices
+                            .iter()
+                            .all(|vertex| vertex.xy_position.y <= plot.bottom() + px(1.0))
+                    );
+                }
             }
         }
     }
@@ -2931,8 +3019,9 @@ mod tests {
                 assert_eq!(data.display_level(index), -60.0);
                 assert_eq!(data.peaks[index], -60.0);
             }
-            assert_eq!(data.interpolate_level(high, low, high, false), -60.0);
-            assert_eq!(data.interpolate_level(high, low, high, true), -60.0);
+            let sample = heat_sample(&data.frequencies, high, low, high);
+            assert_eq!(data.interpolate_level(sample, false), -60.0);
+            assert_eq!(data.interpolate_level(sample, true), -60.0);
             assert_eq!(data.bar_levels.len(), count);
             assert_eq!(data.smoothed_levels.len(), count);
         }
@@ -3630,7 +3719,13 @@ mod tests {
         transient.spectrum_db[1] = 0.0;
         visuals.update(&transient);
         let data = visuals.data.borrow();
-        let middle = data.interpolate_level((200.0f32 * 2000.0).sqrt(), 20.0, 20_000.0, false);
+        let sample = heat_sample(
+            &data.frequencies,
+            (200.0f32 * 2000.0).sqrt(),
+            20.0,
+            20_000.0,
+        );
+        let middle = data.interpolate_level(sample, false);
         assert!((middle + 30.0).abs() < 0.001);
         assert_eq!(data.display_level(1).max(middle), 0.0);
         let points = [point(px(0.0), px(40.0)), point(px(10.0), px(0.0))];
