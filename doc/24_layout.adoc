@@ -275,7 +275,11 @@ waiting begins and when to retain or clear presentation state. Rivu uses 150 ms
 and preserves each feature's existing queueing, hiding and cancellation policy.
 
 `two_line_text` supplies two independently truncated lines without input behavior
-or a tooltip; its primary text color can be overridden on the returned element.
+or a tooltip. Both lines use a compact line height of 1.28 times their own font
+size, without an extra inter-line gap; callers do not set leading on the entire
+row. Existing list row heights are retained, leaving the remaining space above
+and below the centered text block. Its primary text color can be overridden on
+the returned element.
 Track numbering, playback markers and selection remain application composition.
 `row_tooltip` can be attached separately and is not gated on measured overflow.
 `text_tooltip` captures resolved text and builds the tooltip when opened. Dynamic

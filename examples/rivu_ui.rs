@@ -259,8 +259,8 @@ impl Render for Showcase {
                             },cx,|this,_,cx| this.set_rows(Rows::Loading,cx)).into_any_element();
                         }
                         let title: SharedString = row_title(this.filtered[index]).into();
-                        let detail: SharedString = "Secondary line · host controls row height and line height".into();
-                        list_row(colors,("row",index),false).line_height(rems(1.125))
+                        let detail: SharedString = "Secondary line · compact leading follows each line's font size".into();
+                        list_row(colors,("row",index),false)
                             .child(row_tooltip(two_line_text(colors,title.clone(),detail.clone()).id(("text",index)),title,detail)).into_any_element()
                     }).collect::<Vec<_>>()
                 })).flex_1().min_h_0().w_full().scrollbar("example-scroll")

@@ -1066,7 +1066,6 @@ impl Render for AlbumBrowser {
                                 )
                                 .h(rivu_ui::list_row_height(window, cx))
                                 .group("album-track-row")
-                                .line_height(rems(1.125))
                                 .relative()
                                 .gap_0()
                                 .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {

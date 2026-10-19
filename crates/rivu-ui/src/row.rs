@@ -135,6 +135,7 @@ pub fn two_line_text(
     crate::layout::column()
         .flex_1()
         .gap_0()
+        .line_height(gpui::relative(1.28))
         .overflow_hidden()
         .text_color(rgb(theme.text))
         .child(div().text_sm().truncate().child(title.into()))

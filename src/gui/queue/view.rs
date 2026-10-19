@@ -332,7 +332,6 @@ impl Queue {
                                     |row| row.border_color(rgb(theme.accent)),
                                 )
                                 .group("queue-track-row")
-                                .line_height(gpui::rems(1.125))
                                 .relative()
                                 .child(
                                     hover_actions(

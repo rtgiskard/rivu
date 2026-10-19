@@ -1348,7 +1348,6 @@ impl Playlists {
                                 |row| row.border_color(rgb(theme.accent)),
                             )
                             .group("playlist-track-row")
-                            .line_height(gpui::rems(1.125))
                             .relative()
                             .gap_0()
                             .child(
