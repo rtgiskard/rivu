@@ -61,10 +61,9 @@ fn track_row_text(
     row_tooltip(view, title, detail)
 }
 
-/// Hover-only favorite action; the caller owns the command and current state.
+/// Favorite action; the caller owns visibility, commands, and current state.
 pub(in crate::gui) fn track_favorite_toggle<T: 'static>(
     id: impl Into<ElementId>,
-    group: &'static str,
     favorite: bool,
     text: impl Fn(&str) -> SharedString,
     cx: &mut gpui::Context<T>,
@@ -86,7 +85,10 @@ pub(in crate::gui) fn track_favorite_toggle<T: 'static>(
         ),
     )
     .when(favorite, |view| view.text_color(rgb(theme.accent)))
-    .opacity(0.)
-    .group_hover(group, |style| style.opacity(1.))
+    .aria_toggled(if favorite {
+        gpui::Toggled::True
+    } else {
+        gpui::Toggled::False
+    })
     .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
 }

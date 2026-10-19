@@ -27,6 +27,9 @@ seek and volume commands.
 The desktop Playback panel shows the current title, artist and album, playback
 progress, transport controls, and volume. Transport controls and volume stay on
 one row with horizontal scrolling in narrow panels. Use Album artwork for covers.
+When a track is loaded, the always-visible favorite button before the artist and
+album toggles that track's library favorite status. No favorite button is shown
+without a current track.
 The crosshair beside its title (*Locate playing entry in Queue*) reveals the
 Queue tab and locates the current occurrence, subject to layout locking;
 see <<_queue,Queue>>.

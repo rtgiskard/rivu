@@ -291,7 +291,6 @@ impl Library {
     ) -> gpui::Stateful<gpui::Div> {
         crate::gui::components::track::track_favorite_toggle(
             id,
-            group,
             favorite,
             |key| self.tr(key),
             cx,
@@ -305,6 +304,8 @@ impl Library {
                 )
             },
         )
+        .opacity(0.)
+        .group_hover(group, |style| style.opacity(1.))
     }
 
     pub(super) fn choose_library_root(&mut self, cx: &mut Context<Self>) {

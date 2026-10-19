@@ -257,9 +257,10 @@ confirmation code there does not transfer its state from GuiApp to a feature.
 Existing feature directories retain their models, requests, editors and views;
 shared presentation does not absorb business ownership.
 
-Track compositions share the favorite action's icon, tooltip, hover visibility
-and pointer isolation; feature owners still send the command for the current
-track. `rivu_ui::loading::paged_loading_row` supplies list-placeholder presentation
+Track compositions share the favorite action's icon, tooltip, accessible toggle
+state, and pointer isolation. Owners choose visibility: Playback keeps the action
+visible while track lists reveal it on hover. Feature owners send the command for
+the current track. `rivu_ui::loading::paged_loading_row` supplies list-placeholder presentation
 and exposes explicit retry and full-error copy buttons only while an error is
 displayed. Owners supply `LoadingRowLabels`, error details, text visibility and
 the retry callback, retaining request identity and recovery responsibility.
@@ -341,6 +342,8 @@ existing scroll handle. `DropdownItem` stores its label as `SharedString`, so
 rendering clones the shared label without allocating a new string. Owners access
 an already-filtered candidate with `ChoiceState::item(index)`; filtering remains
 the owner's responsibility rather than a second candidate-state layer.
+Closing releases the candidates and clears the highlighted selection; reopening
+supplies a fresh candidate set.
 `ChoicePopup` renders their viewport-bounded anchored surface. Select and editable
 input modes share navigation, but editable text/IME submission remains Input's
 responsibility. Owners supply filtering, value mapping, commit and dismissal

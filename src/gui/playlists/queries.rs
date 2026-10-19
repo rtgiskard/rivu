@@ -353,7 +353,6 @@ impl Playlists {
     ) -> gpui::Stateful<Div> {
         crate::gui::components::track::track_favorite_toggle(
             id,
-            group,
             favorite,
             |key| self.tr(key),
             cx,
@@ -367,5 +366,7 @@ impl Playlists {
                 );
             },
         )
+        .opacity(0.)
+        .group_hover(group, |style| style.opacity(1.))
     }
 }

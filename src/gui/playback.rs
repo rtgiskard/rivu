@@ -124,10 +124,12 @@ impl Playback {
         }
         let track_changed = match (self.state.current_track(), state.current_track()) {
             (Some(old), Some(new)) => {
-                old.title != new.title
+                old.id != new.id
+                    || old.title != new.title
                     || old.artist != new.artist
                     || old.album != new.album
                     || old.duration != new.duration
+                    || old.favorite != new.favorite
             }
             (None, None) => false,
             _ => true,
@@ -445,6 +447,25 @@ impl Playback {
                     .w_full()
                     .min_w_0()
                     .flex_shrink_0()
+                    .when_some(track, |view, track| {
+                        let track_id = track.id;
+                        let favorite = track.favorite;
+                        view.child(super::components::track::track_favorite_toggle(
+                            ("playback-favorite", panel_id),
+                            favorite,
+                            |key| self.context.tr(key),
+                            cx,
+                            move |this, _, cx| {
+                                this.send(
+                                    Command::SetFavorite {
+                                        track_ids: vec![track_id],
+                                        favorite: !favorite,
+                                    },
+                                    cx,
+                                );
+                            },
+                        ))
+                    })
                     .child(
                         row()
                             .flex_1()

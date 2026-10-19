@@ -107,7 +107,6 @@ impl History {
     ) -> gpui::Stateful<Div> {
         crate::gui::components::track::track_favorite_toggle(
             id,
-            group,
             favorite,
             |key| self.tr(key),
             cx,
@@ -121,6 +120,8 @@ impl History {
                 );
             },
         )
+        .opacity(0.)
+        .group_hover(group, |style| style.opacity(1.))
     }
 
     fn history_sort_button(
