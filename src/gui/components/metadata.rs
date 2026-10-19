@@ -28,6 +28,6 @@ pub(crate) fn metadata_item(
                         .truncate()
                         .child(value.into()),
                 )
-                .child(div().w(gpui::rems(1.4)).flex_shrink_0().children(copy)),
+                .child(div().w_6().flex_shrink_0().children(copy)),
         )
 }

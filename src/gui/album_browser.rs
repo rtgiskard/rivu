@@ -40,8 +40,7 @@ fn card_icon_button(
 ) -> Stateful<Div> {
     let theme = rivu_ui::theme::palette(cx);
     compact_icon_button(theme, icon_button(id, icon, hint, cx, action))
-        .w(rems(1.4))
-        .h(rems(2.))
+        .h_8()
         .rounded_none()
         .border_0()
         .opacity(0.)

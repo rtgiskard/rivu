@@ -753,7 +753,7 @@ impl Library {
                                         })
                                         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                                         .on_click(|_, _, cx| cx.stop_propagation())
-                                        .child(scan.min_h_0().h(gpui::rems(1.5)).w(gpui::rems(1.4))),
+                                        .child(scan.min_h_0().size_6()),
                                 )
                             });
                         let menu_node = id.clone();

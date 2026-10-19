@@ -296,7 +296,7 @@ pub fn compact_icon_button(
     theme: &'static crate::theme::Palette,
     control: gpui::Stateful<Div>,
 ) -> gpui::Stateful<Div> {
-    quiet_icon_button(theme, control).w(gpui::rems(1.4))
+    quiet_icon_button(theme, control).w_6()
 }
 
 /// Decorative Nerd Font glyph; the owning control supplies its accessible name.
