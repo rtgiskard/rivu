@@ -1263,20 +1263,25 @@ impl Playlists {
         if let Some(playlist_id) = playlist_id {
             lists = lists.child(
                 panel_toolbar()
-                    .on_mouse_down(
-                        gpui::MouseButton::Left,
-                        cx.listener(|this, _, _, cx| this.focus_list(cx)),
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .on_mouse_down(
+                                gpui::MouseButton::Left,
+                                cx.listener(|this, _, _, cx| this.focus_list(cx)),
+                            )
+                            .child(caption(
+                                theme,
+                                total.map_or_else(
+                                    || "—".to_owned(),
+                                    |count| {
+                                        self.i18n
+                                            .format("gl-track-count", &[("count", count.into())])
+                                    },
+                                ),
+                            )),
                     )
-                    .child(div().flex_1().min_w_0().child(caption(
-                        theme,
-                        total.map_or_else(
-                            || "—".to_owned(),
-                            |count| {
-                                self.i18n
-                                    .format("gl-track-count", &[("count", count.into())])
-                            },
-                        ),
-                    )))
                     .child(self.playlist_entries_search.clone()),
             );
             self.context.scroll.borrow_mut().register_list(
@@ -1772,11 +1777,11 @@ impl Playlists {
                             },
                         )
                         .flex_1()
-                        .min_w(gpui::rems(3.)),
-                    )
-                    .on_mouse_down(
-                        gpui::MouseButton::Left,
-                        cx.listener(|this, _, _, cx| this.focus_catalog(cx)),
+                        .min_w_12()
+                        .on_mouse_down(
+                            gpui::MouseButton::Left,
+                            cx.listener(|this, _, _, cx| this.focus_catalog(cx)),
+                        ),
                     )
                     .child(self.playlist_search.clone())
                     .child(icon_button(

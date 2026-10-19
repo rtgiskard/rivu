@@ -204,6 +204,18 @@ focus a replacement surface. Workspace activation validates the target before
 cancelling an interaction and rolls back a live split against the outgoing tree,
 never against reused IDs in the incoming tree.
 
+Pointer focus and activation belong to semantic interaction regions, not every
+ancestor container. A list heading's focus action covers its passive title or
+count, not an embedded search field or action button. Passive row content still
+bubbles to its owning row; independent row actions isolate their press and click
+from row selection and drag initiation. Do not replace those boundaries with
+blanket suppression in shared inputs or buttons: GPUI runs custom mouse-down
+listeners before the same control's native focus listener. Composite editable
+controls may also intentionally observe child presses, as the font picker does.
+Capture-phase bookkeeping, outside dismissal, wheel/drop routing, and gesture
+move/release delivery retain their separate owners; stopping activation does not
+transfer or cancel a gesture's lifecycle.
+
 Native accessibility Focus is authorized against the live shell surface and its
 published focus scope before custom Focus listeners or built-in Focus run.
 Opening or replacing a surface invalidates the previous publication; native
