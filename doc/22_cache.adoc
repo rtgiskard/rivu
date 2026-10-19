@@ -253,6 +253,10 @@ publication per panel. The effective column count is the smaller of drawable wid
 and available source bins. Source revision, amplitude mapping or effective-count
 changes trigger aggregation; only changed mapped values or a changed palette
 replace the publication. Missing values remain distinct from decoded silence.
+A full-scan result keeps its request generation as display identity while rolling
+PCM updates replace its bins. Cache keys do not retain full-preview snapshots;
+unchanged pooled values retain their publication, while a replacement scan has
+a distinct identity even when its source revision matches.
 An all-unknown result creates no GPU publication or waveform draw; known silence
 still publishes its minimum-height fill. Publication construction transfers the
 packed column vector to GPUI without a second column-buffer allocation or copy.

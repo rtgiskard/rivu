@@ -3,9 +3,10 @@
 //! Explicit scans provide a baseline for one rolling display. New playback PCM
 //! replaces visited intervals; untouched bins retain their previous statistics.
 //! Source/hint changes and Still Mode retire results; signal and EQ edits do not.
-//! Each panel publishes one immutable numerical frame; placement-only changes
-//! reuse it. RMS pooling weights decoded sample counts, preserving missing bins.
-//! Rational sample geometry excludes merely adjacent source bins from pooling.
+//! Equivalent visible panels share immutable numerical columns and publications;
+//! placement-only changes reuse them. RMS pooling weights decoded sample counts,
+//! preserving missing bins. Rational sample geometry excludes merely adjacent
+//! source bins from pooling.
 //!
 //! Pointer captures require a live interactive panel, not just cached peaks.
 //! Losing that surface cancels its generation and the matching window seek;
@@ -81,6 +82,7 @@ struct ManualRequest {
 struct FullPreview {
     source: Rc<Source>,
     suspension_generation: u64,
+    generation: u64,
     frame: WaveformFrame,
     progressive_revision: u64,
     baseline_revision: u64,
@@ -412,6 +414,28 @@ fn merge_progressive(
     }
 }
 
+enum PaintFrame<'a> {
+    Full(&'a Rc<FullPreview>),
+    Progressive(parking_lot::RwLockReadGuard<'a, WaveformFrame>),
+}
+
+fn paint_frame<'a>(
+    shared: &'a RwLock<WaveformFrame>,
+    full: Option<&'a Rc<FullPreview>>,
+) -> PaintFrame<'a> {
+    let progressive = shared.read();
+    // Even a captured full preview must observe an intervening Still transition.
+    if let Some(full) =
+        full.filter(|full| full.suspension_generation == progressive.suspension_generation())
+    {
+        drop(progressive);
+        PaintFrame::Full(full)
+    } else {
+        // Keep progressive bins borrowed instead of copying them each paint.
+        PaintFrame::Progressive(progressive)
+    }
+}
+
 fn track_range(track: &Track) -> Option<PlaybackRange> {
     track.cue.as_ref().map(|cue| PlaybackRange {
         start_seconds: cue.start_seconds(),
@@ -434,16 +458,64 @@ struct WaveformMapping {
     peak_gamma: f32,
 }
 
-struct Columns {
+#[derive(Clone)]
+enum DisplayIdentity {
+    Progressive {
+        source: Rc<Source>,
+        decoder_hint: DecoderHint,
+        suspension_generation: u64,
+    },
+    // Request generations are unique within this plot's Waveform owner.
+    Full(u64),
+}
+
+impl PartialEq for DisplayIdentity {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                Self::Progressive {
+                    source,
+                    decoder_hint,
+                    suspension_generation,
+                },
+                Self::Progressive {
+                    source: other_source,
+                    decoder_hint: other_hint,
+                    suspension_generation: other_generation,
+                },
+            ) => {
+                (Rc::ptr_eq(source, other_source) || source == other_source)
+                    && decoder_hint == other_hint
+                    && suspension_generation == other_generation
+            }
+            (Self::Full(generation), Self::Full(other)) => generation == other,
+            _ => false,
+        }
+    }
+}
+
+#[derive(PartialEq)]
+struct ColumnsKey {
+    identity: DisplayIdentity,
     revision: u64,
-    mapping: Option<WaveformMapping>,
+    count: usize,
+    mapping: WaveformMapping,
+}
+
+struct ColumnData {
     values: Vec<WaveformColumn>,
     has_known_component: bool,
-    publication: Option<(crate::config::VisualizationPalette, Arc<GpuFrame>)>,
+    publication: RefCell<Option<(crate::config::VisualizationPalette, Arc<GpuFrame>)>>,
+}
+
+struct Columns {
+    key: ColumnsKey,
+    data: Rc<ColumnData>,
 }
 
 #[derive(Default)]
 struct WaveformPlot {
+    // Only live panels own entries: no historical sizes, sources or revisions.
     columns: HashMap<u64, Columns>,
 }
 
@@ -496,12 +568,7 @@ impl WaveformPlot {
     }
 
     fn clear_cache(&mut self) {
-        for columns in self.columns.values_mut() {
-            columns.values.clear();
-            columns.has_known_component = false;
-            columns.mapping = None;
-            columns.publication = None;
-        }
+        self.columns.clear();
     }
 
     fn publication(
@@ -511,12 +578,12 @@ impl WaveformPlot {
         cache_enabled: bool,
         palette: &super::visuals::PaletteLut,
     ) -> Result<Option<Arc<GpuFrame>>, String> {
-        let columns = self.columns.get_mut(&panel_id).unwrap();
+        let columns = &self.columns.get(&panel_id).unwrap().data;
         if !columns.has_known_component {
             return Ok(None);
         }
         if cache_enabled
-            && let Some((retained_palette, frame)) = &columns.publication
+            && let Some((retained_palette, frame)) = &*columns.publication.borrow()
             && *retained_palette == palette_id
         {
             return Ok(Some(Arc::clone(frame)));
@@ -548,7 +615,7 @@ impl WaveformPlot {
             },
         )
         .map_err(|error| error.to_string())?;
-        columns.publication = cache_enabled.then(|| (palette_id, Arc::clone(&frame)));
+        *columns.publication.borrow_mut() = cache_enabled.then(|| (palette_id, Arc::clone(&frame)));
         Ok(Some(frame))
     }
     #[cfg(test)]
@@ -566,6 +633,7 @@ impl WaveformPlot {
         )
     }
 
+    #[cfg(test)]
     fn columns_with_cache(
         &mut self,
         panel_id: u64,
@@ -574,13 +642,23 @@ impl WaveformPlot {
         cache_enabled: bool,
         mapping: WaveformMapping,
     ) -> &[WaveformColumn] {
-        let columns = self.columns.entry(panel_id).or_insert_with(|| Columns {
-            revision: frame.revision,
-            mapping: None,
-            values: Vec::new(),
-            has_known_component: false,
-            publication: None,
-        });
+        let identity = DisplayIdentity::Progressive {
+            source: Rc::new(Source::from_frame(frame).expect("test frame has a source")),
+            decoder_hint: frame.decoder_hint,
+            suspension_generation: frame.suspension_generation(),
+        };
+        self.columns_for_frame(panel_id, width, frame, identity, cache_enabled, mapping)
+    }
+
+    fn columns_for_frame(
+        &mut self,
+        panel_id: u64,
+        width: usize,
+        frame: &WaveformFrame,
+        identity: DisplayIdentity,
+        cache_enabled: bool,
+        mapping: WaveformMapping,
+    ) -> &[WaveformColumn] {
         let left_peaks = if frame.left_peaks.is_empty() {
             &frame.peaks
         } else {
@@ -602,61 +680,114 @@ impl WaveformPlot {
             (&frame.right_rms, &frame.right_rms_counts)
         };
         let count = width.max(1).min(left_peaks.len());
-        if !cache_enabled
-            || columns.revision != frame.revision
-            || columns.mapping != Some(mapping)
-            || columns.values.len() != count
-        {
-            let mut changed = columns.values.len() != count;
-            let scale = frame.max_peak.max(1.0).recip();
-            let mut has_known_component = false;
-            for column in 0..count {
-                let first = column * left_peaks.len() / count;
-                let end = (column + 1) * left_peaks.len() / count;
-                let (left_rms, left_peak) = pooled_side(
-                    left_peaks,
-                    left_rms,
-                    left_counts,
-                    first,
-                    end,
-                    scale,
-                    mapping,
-                );
-                let (right_rms, right_peak) = pooled_side(
-                    right_peaks,
-                    right_rms,
-                    right_counts,
-                    first,
-                    end,
-                    scale,
-                    mapping,
-                );
-                let value = WaveformColumn {
-                    left_rms,
-                    left_peak,
-                    right_rms,
-                    right_peak,
-                };
-                has_known_component |= left_rms.is_some()
-                    || left_peak.is_some()
-                    || right_rms.is_some()
-                    || right_peak.is_some();
-                if let Some(previous) = columns.values.get_mut(column) {
-                    changed |= *previous != value;
-                    *previous = value;
-                } else {
-                    columns.values.push(value);
-                }
+        let key = ColumnsKey {
+            identity,
+            revision: frame.revision,
+            count,
+            mapping,
+        };
+        if cache_enabled {
+            if self
+                .columns
+                .get(&panel_id)
+                .is_some_and(|columns| columns.key == key)
+            {
+                return &self.columns[&panel_id].data.values;
             }
-            columns.values.truncate(count);
-            columns.has_known_component = has_known_component;
-            if changed || !cache_enabled {
-                columns.publication = None;
+            if let Some(data) = self
+                .columns
+                .values()
+                .find(|columns| columns.key == key)
+                .map(|columns| Rc::clone(&columns.data))
+            {
+                self.columns.insert(panel_id, Columns { key, data });
+                return &self.columns[&panel_id].data.values;
             }
         }
-        columns.revision = frame.revision;
-        columns.mapping = Some(mapping);
-        &columns.values
+        let previous = self
+            .columns
+            .remove(&panel_id)
+            .filter(|columns| columns.key.identity == key.identity && columns.key.count == count);
+        let scale = frame.max_peak.max(1.0).recip();
+        let mut has_known_component = false;
+        let values = (0..count).map(|column| {
+            let first = column * left_peaks.len() / count;
+            let end = (column + 1) * left_peaks.len() / count;
+            let (left_rms, left_peak) = pooled_side(
+                left_peaks,
+                left_rms,
+                left_counts,
+                first,
+                end,
+                scale,
+                mapping,
+            );
+            let (right_rms, right_peak) = pooled_side(
+                right_peaks,
+                right_rms,
+                right_counts,
+                first,
+                end,
+                scale,
+                mapping,
+            );
+            has_known_component |= left_rms.is_some()
+                || left_peak.is_some()
+                || right_rms.is_some()
+                || right_peak.is_some();
+            WaveformColumn {
+                left_rms,
+                left_peak,
+                right_rms,
+                right_peak,
+            }
+        });
+        let data = if let Some(mut previous) = previous {
+            if let Some(data) = Rc::get_mut(&mut previous.data) {
+                let mut changed = !cache_enabled;
+                for (old, value) in data.values.iter_mut().zip(values) {
+                    changed |= *old != value;
+                    *old = value;
+                }
+                data.has_known_component = has_known_component;
+                if changed {
+                    *data.publication.get_mut() = None;
+                }
+                previous.data
+            } else {
+                // A revision may leave the display unchanged. Compare lazily so
+                // siblings keep sharing without allocating or copying columns.
+                let mut replacement = (!cache_enabled).then(|| Vec::with_capacity(count));
+                for (index, value) in values.enumerate() {
+                    if let Some(replacement) = &mut replacement {
+                        replacement.push(value);
+                    } else if previous.data.values[index] != value {
+                        let mut changed = Vec::with_capacity(count);
+                        changed.extend_from_slice(&previous.data.values[..index]);
+                        changed.push(value);
+                        replacement = Some(changed);
+                    }
+                }
+                if let Some(values) = replacement {
+                    Rc::new(ColumnData {
+                        values,
+                        has_known_component,
+                        publication: RefCell::new(None),
+                    })
+                } else {
+                    previous.data
+                }
+            }
+        } else {
+            let values = values.collect();
+            Rc::new(ColumnData {
+                values,
+                has_known_component,
+                publication: RefCell::new(None),
+            })
+        };
+        self.columns.insert(panel_id, Columns { key, data });
+        &self.columns[&panel_id].data.values
     }
 }
 
@@ -1148,6 +1279,7 @@ impl Waveform {
             completed = Some(Rc::new(FullPreview {
                 source: Rc::clone(&request.source),
                 suspension_generation: request.suspension_generation,
+                generation,
                 frame: result,
                 progressive_revision: shared.revision,
                 baseline_revision: request.progressive_revision,
@@ -1278,6 +1410,7 @@ impl Waveform {
             .overflow_hidden()
             .bg(rgb(config.visual_background.rgb()));
         let Some(source) = self.source.as_deref() else {
+            self.plot.borrow_mut().columns.remove(&panel_id);
             if let Some(generation) = self.remove_interaction_panel(panel_id) {
                 cx.emit(WaveformEvent::Cancelled { generation });
             }
@@ -1295,6 +1428,7 @@ impl Waveform {
             )
         };
         if !available {
+            self.plot.borrow_mut().columns.remove(&panel_id);
             if let Some(generation) = self.remove_interaction_panel(panel_id) {
                 cx.emit(WaveformEvent::Cancelled { generation });
             }
@@ -1364,6 +1498,7 @@ impl Waveform {
                                 if bounds.size.width <= px(16.0)
                                     || bounds.size.height <= px(if labels { 32.0 } else { 16.0 })
                                 {
+                                    waveform.borrow_mut().columns.remove(&panel_id);
                                     return;
                                 }
                                 let plot = Bounds::new(
@@ -1374,24 +1509,31 @@ impl Waveform {
                                     ),
                                 );
                                 let mut waveform = waveform.borrow_mut();
-                                let (_revision, progress) = {
-                                    let shared_frame = shared.read();
-                                    let frame = full
-                                        .as_ref()
-                                        .filter(|full| {
-                                            full.suspension_generation
-                                                == shared_frame.suspension_generation()
-                                        })
-                                        .map_or(&*shared_frame, |full| &full.frame);
-                                    // The shared generation also guards a full preview captured
-                                    // before a Still Mode transition between layout and paint.
+                                let progress = {
+                                    let selected = paint_frame(&shared, full.as_ref());
+                                    let (frame, identity) = match &selected {
+                                        PaintFrame::Full(full) => {
+                                            (&full.frame, DisplayIdentity::Full(full.generation))
+                                        }
+                                        PaintFrame::Progressive(frame) => (
+                                            &**frame,
+                                            DisplayIdentity::Progressive {
+                                                source: Rc::clone(&source),
+                                                decoder_hint: frame.decoder_hint,
+                                                suspension_generation: frame
+                                                    .suspension_generation(),
+                                            },
+                                        ),
+                                    };
                                     if !source.matches_target(frame) {
+                                        waveform.columns.remove(&panel_id);
                                         return;
                                     }
-                                    waveform.columns_with_cache(
+                                    waveform.columns_for_frame(
                                         panel_id,
                                         (plot.size.width / px(1.0)) as usize,
                                         frame,
+                                        identity,
                                         cache_enabled,
                                         WaveformMapping {
                                             rms_gain,
@@ -1399,10 +1541,7 @@ impl Waveform {
                                             peak_gamma,
                                         },
                                     );
-                                    (
-                                        frame.revision,
-                                        progress(position, timeline(frame, duration)),
-                                    )
+                                    progress(position, timeline(frame, duration))
                                 };
                                 let width_px = (plot.size.width / px(1.0)).ceil().max(1.0);
                                 let result = (|| {
@@ -1561,6 +1700,295 @@ impl Drop for Waveform {
 mod tests {
     use crate::gui::layout::interaction::{DragCommit, LayoutInteraction, SeekCommit};
     #[test]
+    fn full_paint_releases_playback_lock_but_observes_still_generation() {
+        let data = frame(vec![Some(0.25); 2]);
+        let full = Rc::new(FullPreview {
+            source: Rc::new(Source::from_frame(&data).unwrap()),
+            suspension_generation: data.suspension_generation(),
+            generation: 1,
+            progressive_revision: data.revision,
+            baseline_revision: data.revision,
+            identity: data.identity,
+            frame: frame(vec![Some(0.75); 2]),
+        });
+        let shared = RwLock::new(data);
+        let selected = paint_frame(&shared, Some(&full));
+        assert!(matches!(&selected, PaintFrame::Full(_)));
+        assert!(
+            shared.try_write().is_some(),
+            "independent full pooling must not lock playback"
+        );
+        drop(selected);
+        {
+            let mut frame = shared.write();
+            frame.set_still_mode(true);
+            frame.set_still_mode(false);
+        }
+        let selected = paint_frame(&shared, Some(&full));
+        let PaintFrame::Progressive(frame) = &selected else {
+            panic!("a full preview captured before Still Mode must not be painted");
+        };
+        assert!(frame.peaks.is_empty());
+        assert!(
+            shared.try_write().is_none(),
+            "progressive paint borrows without copying"
+        );
+    }
+
+    #[test]
+    fn equivalent_panels_share_columns_and_revision_publications_then_fork() {
+        let palette_id = crate::config::VisualizationPalette::Deadbeef;
+        let palette = super::super::visuals::active_palette_lut(palette_id);
+        let mut data = frame(vec![Some(0.25), None, Some(0.0)]);
+        let mut plot = WaveformPlot::default();
+        plot.columns(1, 100, &data);
+        plot.columns(2, 100, &data);
+        assert!(Rc::ptr_eq(&plot.columns[&1].data, &plot.columns[&2].data));
+        let initial = plot
+            .publication(1, palette_id, true, &palette)
+            .unwrap()
+            .unwrap();
+        let sibling = plot
+            .publication(2, palette_id, true, &palette)
+            .unwrap()
+            .unwrap();
+        assert!(Arc::ptr_eq(&initial, &sibling));
+
+        data.revision += 1;
+        plot.columns(1, 200, &data);
+        plot.columns(2, 100, &data);
+        assert!(Rc::ptr_eq(&plot.columns[&1].data, &plot.columns[&2].data));
+        let revised = plot
+            .publication(2, palette_id, true, &palette)
+            .unwrap()
+            .unwrap();
+        assert!(Arc::ptr_eq(&initial, &revised));
+
+        let mapping = WaveformMapping {
+            rms_gain: 2.0,
+            peak_gain: 2.0,
+            peak_gamma: 1.0,
+        };
+        plot.columns_with_cache(1, 100, &data, true, mapping);
+        assert!(!Rc::ptr_eq(&plot.columns[&1].data, &plot.columns[&2].data));
+        assert_ne!(plot.columns[&1].data.values, plot.columns[&2].data.values);
+        let unchanged = plot
+            .publication(2, palette_id, true, &palette)
+            .unwrap()
+            .unwrap();
+        assert!(Arc::ptr_eq(&initial, &unchanged));
+        plot.columns(1, 1, &data);
+        assert_eq!(plot.columns[&1].data.values.len(), 1);
+        assert_eq!(plot.columns[&2].data.values.len(), 3);
+    }
+
+    #[test]
+    fn mapping_changes_reuse_zero_and_saturated_output_but_fork_changed_values() {
+        let palette_id = crate::config::VisualizationPalette::Deadbeef;
+        let palette = super::super::visuals::active_palette_lut(palette_id);
+        let data = frame(vec![Some(0.0), Some(1.0), None]);
+        for with_sibling in [false, true] {
+            let mut plot = WaveformPlot::default();
+            plot.columns(1, 3, &data);
+            if with_sibling {
+                plot.columns(2, 3, &data);
+            }
+            let initial = plot
+                .publication(1, palette_id, true, &palette)
+                .unwrap()
+                .unwrap();
+            let boosted = WaveformMapping {
+                rms_gain: 2.0,
+                peak_gain: 2.0,
+                peak_gamma: 0.5,
+            };
+            plot.columns_with_cache(1, 3, &data, true, boosted);
+            let unchanged = plot
+                .publication(1, palette_id, true, &palette)
+                .unwrap()
+                .unwrap();
+            assert!(Arc::ptr_eq(&initial, &unchanged));
+            assert!(plot.columns[&1].key.mapping == boosted);
+            if with_sibling {
+                assert!(plot.columns[&1].key.mapping != plot.columns[&2].key.mapping);
+                assert!(Rc::ptr_eq(&plot.columns[&1].data, &plot.columns[&2].data));
+            }
+
+            let attenuated = WaveformMapping {
+                rms_gain: 0.5,
+                peak_gain: 0.5,
+                peak_gamma: 1.0,
+            };
+            plot.columns_with_cache(1, 3, &data, true, attenuated);
+            let changed = plot
+                .publication(1, palette_id, true, &palette)
+                .unwrap()
+                .unwrap();
+            assert!(!Arc::ptr_eq(&initial, &changed));
+            assert!(plot.columns[&1].key.mapping == attenuated);
+            assert_eq!(plot.columns[&1].data.values[0].left_peak, Some(0.0));
+            assert_eq!(plot.columns[&1].data.values[1].left_peak, Some(0.5));
+            assert_eq!(plot.columns[&1].data.values[2].left_peak, None);
+            if with_sibling {
+                assert!(!Rc::ptr_eq(&plot.columns[&1].data, &plot.columns[&2].data));
+                assert_eq!(plot.columns[&2].data.values[1].left_peak, Some(1.0));
+                let sibling = plot
+                    .publication(2, palette_id, true, &palette)
+                    .unwrap()
+                    .unwrap();
+                assert!(Arc::ptr_eq(&initial, &sibling));
+            }
+        }
+    }
+
+    #[test]
+    fn removing_a_sibling_retains_only_the_live_shared_owner() {
+        let palette_id = crate::config::VisualizationPalette::Deadbeef;
+        let palette = super::super::visuals::active_palette_lut(palette_id);
+        let data = frame(vec![Some(0.25); 4]);
+        let mut plot = WaveformPlot::default();
+        plot.columns(1, 4, &data);
+        plot.columns(2, 4, &data);
+        let scene = plot
+            .publication(1, palette_id, true, &palette)
+            .unwrap()
+            .unwrap();
+        let publication = Arc::downgrade(&scene);
+        let columns = Rc::downgrade(&plot.columns[&1].data);
+        drop(scene);
+        plot.retain_panels(|id| id == 2);
+        assert!(columns.upgrade().is_some());
+        let sibling = plot
+            .publication(2, palette_id, true, &palette)
+            .unwrap()
+            .unwrap();
+        assert!(Arc::ptr_eq(&publication.upgrade().unwrap(), &sibling));
+        drop(sibling);
+        plot.retain_panels(|_| false);
+        assert!(columns.upgrade().is_none());
+        assert!(publication.upgrade().is_none());
+    }
+
+    #[test]
+    fn same_revision_different_sources_and_full_results_do_not_alias() {
+        let palette_id = crate::config::VisualizationPalette::Deadbeef;
+        let palette = super::super::visuals::active_palette_lut(palette_id);
+        let data = frame(vec![Some(0.25); 2]);
+        let mut other = frame(vec![Some(0.25); 2]);
+        other.path = Some("other.flac".into());
+        let mut plot = WaveformPlot::default();
+        plot.columns(1, 2, &data);
+        let progressive = plot
+            .publication(1, palette_id, true, &palette)
+            .unwrap()
+            .unwrap();
+        plot.columns(2, 2, &other);
+        assert!(!Rc::ptr_eq(&plot.columns[&1].data, &plot.columns[&2].data));
+        let other_scene = plot
+            .publication(2, palette_id, true, &palette)
+            .unwrap()
+            .unwrap();
+        assert!(!Arc::ptr_eq(&progressive, &other_scene));
+        other.path = data.path.clone();
+        other.decoder_hint = DecoderHint::Ffmpeg;
+        plot.columns(2, 2, &other);
+        assert!(!Rc::ptr_eq(&plot.columns[&1].data, &plot.columns[&2].data));
+
+        let source = Rc::new(Source::from_frame(&data).unwrap());
+        let mut full = Rc::new(FullPreview {
+            source,
+            suspension_generation: data.suspension_generation(),
+            generation: 1,
+            progressive_revision: data.revision,
+            baseline_revision: data.revision,
+            identity: data.identity,
+            frame: frame(vec![Some(0.25); 2]),
+        });
+        let mapping = WaveformMapping {
+            rms_gain: 1.0,
+            peak_gain: 1.0,
+            peak_gamma: 1.0,
+        };
+        plot.columns_for_frame(
+            2,
+            2,
+            &full.frame,
+            DisplayIdentity::Full(full.generation),
+            true,
+            mapping,
+        );
+        plot.columns_for_frame(
+            3,
+            2,
+            &full.frame,
+            DisplayIdentity::Full(full.generation),
+            true,
+            mapping,
+        );
+        assert!(!Rc::ptr_eq(&plot.columns[&1].data, &plot.columns[&2].data));
+        assert!(Rc::ptr_eq(&plot.columns[&2].data, &plot.columns[&3].data));
+        let full_scene = plot
+            .publication(2, palette_id, true, &palette)
+            .unwrap()
+            .unwrap();
+        assert!(!Arc::ptr_eq(&progressive, &full_scene));
+
+        // Rolling PCM may replace the snapshot without changing pooled values.
+        // The cache must not hold the full payload or discard its publication.
+        let updated = Rc::make_mut(&mut full);
+        updated.frame.revision += 1;
+        plot.columns_for_frame(
+            2,
+            2,
+            &full.frame,
+            DisplayIdentity::Full(full.generation),
+            true,
+            mapping,
+        );
+        let rolling_scene = plot
+            .publication(2, palette_id, true, &palette)
+            .unwrap()
+            .unwrap();
+        assert!(Arc::ptr_eq(&full_scene, &rolling_scene));
+
+        // A replacement scan is a different result even at the same revision.
+        let replacement = Rc::make_mut(&mut full);
+        replacement.generation += 1;
+        plot.columns_for_frame(
+            2,
+            2,
+            &full.frame,
+            DisplayIdentity::Full(full.generation),
+            true,
+            mapping,
+        );
+        let replacement_scene = plot
+            .publication(2, palette_id, true, &palette)
+            .unwrap()
+            .unwrap();
+        assert!(!Arc::ptr_eq(&rolling_scene, &replacement_scene));
+    }
+
+    #[test]
+    fn disabling_cache_recomputes_without_sharing_or_retaining_publications() {
+        let mut data = frame(vec![Some(0.25); 2]);
+        let mut plot = WaveformPlot::default();
+        plot.columns(1, 2, &data);
+        plot.columns(2, 2, &data);
+        let mapping = WaveformMapping {
+            rms_gain: 1.0,
+            peak_gain: 1.0,
+            peak_gamma: 1.0,
+        };
+        // No revision bump: cache-off must still observe changed bins.
+        data.left_peaks[0] = Some(0.75);
+        plot.columns_with_cache(1, 2, &data, false, mapping);
+        assert!(!Rc::ptr_eq(&plot.columns[&1].data, &plot.columns[&2].data));
+        assert_eq!(plot.columns[&1].data.values[0].left_peak, Some(0.75));
+        assert_eq!(plot.columns[&2].data.values[0].left_peak, Some(0.25));
+    }
+
+    #[test]
     fn removed_panels_retire_without_repainting() {
         let mut plot = WaveformPlot::default();
         let data = frame(vec![Some(0.25); 100]);
@@ -1617,8 +2045,8 @@ mod tests {
                 .unwrap()
                 .unwrap();
             let weak = Arc::downgrade(&scene);
-            assert!(plot.columns[&1].publication.is_none());
-            assert_eq!(plot.columns[&1].values.len(), 100);
+            assert!(plot.columns[&1].data.publication.borrow().is_none());
+            assert_eq!(plot.columns[&1].data.values.len(), 100);
             assert_eq!(data.peaks, vec![Some(0.25); 100]);
             assert!(weak.upgrade().is_some());
             drop(scene);
@@ -1699,10 +2127,22 @@ mod tests {
                 data.right_peaks[1] = known;
                 data.revision += 1;
                 plot.columns_with_cache(1, 2, &data, cache_enabled, mapping);
+                plot.columns_with_cache(2, 2, &data, cache_enabled, mapping);
+                assert_eq!(
+                    Rc::ptr_eq(&plot.columns[&1].data, &plot.columns[&2].data),
+                    cache_enabled,
+                );
                 let published = plot
                     .publication(1, palette_id, cache_enabled, &palette)
                     .unwrap();
                 assert_eq!(published.is_some(), known.is_some());
+                let sibling = plot
+                    .publication(2, palette_id, cache_enabled, &palette)
+                    .unwrap();
+                assert_eq!(sibling.is_some(), known.is_some());
+                if let (Some(published), Some(sibling)) = (&published, &sibling) {
+                    assert_eq!(Arc::ptr_eq(published, sibling), cache_enabled);
+                }
                 if let Some(published) = published {
                     let gpui::GpuContent::Waveform { columns, .. } = published.content() else {
                         panic!("expected waveform");
@@ -1716,7 +2156,7 @@ mod tests {
                         .unwrap();
                     assert_eq!(Arc::ptr_eq(&published, &repeated), cache_enabled);
                 } else {
-                    assert!(plot.columns[&1].publication.is_none());
+                    assert!(plot.columns[&1].data.publication.borrow().is_none());
                     assert!(
                         plot.publication(1, palette_id, cache_enabled, &palette)
                             .unwrap()
@@ -2177,7 +2617,7 @@ mod tests {
         assert!(waveform.source.is_none());
         {
             let plot = waveform.plot.borrow();
-            assert_eq!(plot.columns.capacity(), 0);
+            assert!(plot.columns.is_empty());
             assert!(cached.upgrade().is_none());
         }
         waveform.set_enabled(true);
@@ -2260,8 +2700,7 @@ mod tests {
         assert!(waveform.manual_error.is_none());
         {
             let plot = waveform.plot.borrow();
-            assert!(plot.columns[&1].values.is_empty());
-            assert!(plot.columns[&1].publication.is_none());
+            assert!(plot.columns.is_empty());
             assert!(cached.upgrade().is_none());
         }
         assert!(!waveform.sync_state(Some(&track)));
