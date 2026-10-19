@@ -16,6 +16,7 @@ const SHADER: &str = concat!(
     include_str!("path_coverage.wgsl")
 );
 const RECTANGLE_STRIDE: u64 = 32;
+const WAVEFORM_STRIDE: u64 = 16;
 const PATH_STRIDE: u64 = 16;
 const PALETTE_STRIDE: u64 = 16;
 const PLACEMENT_SIZE: u64 = 112;
@@ -97,6 +98,7 @@ enum MaterialKind {
     Field,
     Path,
     Segments,
+    Waveform,
 }
 impl MaterialKind {
     fn multisampled(self) -> bool {
@@ -104,7 +106,7 @@ impl MaterialKind {
     }
 }
 struct Program {
-    pipelines: [Option<wgpu::RenderPipeline>; 4],
+    pipelines: [Option<wgpu::RenderPipeline>; 5],
     layout: wgpu::PipelineLayout,
     shader: wgpu::ShaderModule,
     placement_layout: wgpu::BindGroupLayout,
@@ -153,7 +155,7 @@ pub(crate) struct MaterialRenderer {
     #[cfg(test)]
     resolution_count: usize,
     #[cfg(test)]
-    pipeline_counts: [usize; 4],
+    pipeline_counts: [usize; 5],
 }
 fn buffer_entry(binding: u32, uniform: bool, minimum: u64) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
@@ -224,7 +226,7 @@ impl MaterialRenderer {
             source: wgpu::ShaderSource::Wgsl(SHADER.into()),
         });
         Some(Program {
-            pipelines: [None, None, None, None],
+            pipelines: [None, None, None, None, None],
             layout,
             shader,
             placement_layout,
@@ -244,6 +246,7 @@ impl MaterialRenderer {
                     MaterialKind::Field => "GPU palette field",
                     MaterialKind::Path => "GPU palette path",
                     MaterialKind::Segments => "GPU palette segments",
+                    MaterialKind::Waveform => "GPU palette waveform",
                 }),
                 layout: Some(&program.layout),
                 vertex: wgpu::VertexState {
@@ -253,6 +256,7 @@ impl MaterialRenderer {
                         MaterialKind::Field => "material_vertex",
                         MaterialKind::Path => "path_vertex",
                         MaterialKind::Segments => "segment_vertex",
+                        MaterialKind::Waveform => "waveform_vertex",
                     }),
                     buffers: &[],
                     compilation_options: Default::default(),
@@ -264,6 +268,7 @@ impl MaterialRenderer {
                         MaterialKind::Field => "material_fragment",
                         MaterialKind::Path => "path_fragment",
                         MaterialKind::Segments => "segment_fragment",
+                        MaterialKind::Waveform => "waveform_fragment",
                     }),
                     targets: &[Some(wgpu::ColorTargetState {
                         format: self.target_format,
@@ -327,7 +332,7 @@ impl MaterialRenderer {
             #[cfg(test)]
             resolution_count: 0,
             #[cfg(test)]
-            pipeline_counts: [0; 4],
+            pipeline_counts: [0; 5],
         }
     }
     pub(crate) fn configure_budget(&mut self, bytes: Option<u64>) {
@@ -476,6 +481,10 @@ impl MaterialRenderer {
                 continue;
             }
             let period_valid = match frame.content() {
+                GpuContent::Waveform { .. } => {
+                    (batch.bounds.size.width.0 / batch.scale_factor).is_finite()
+                        && (batch.bounds.size.height.0 / batch.scale_factor).is_finite()
+                }
                 GpuContent::Rectangles { params, .. } => {
                     ((params.cell_height + params.cell_gap) * batch.scale_factor).is_finite()
                 }
@@ -588,6 +597,9 @@ impl MaterialRenderer {
     ) -> anyhow::Result<()> {
         let limits = device.limits();
         let data_size = match frame.content() {
+            GpuContent::Waveform { columns, .. } => {
+                (columns.len() as u64).checked_mul(WAVEFORM_STRIDE)
+            }
             GpuContent::Rectangles { rectangles, .. } => {
                 (rectangles.len() as u64).checked_mul(RECTANGLE_STRIDE)
             }
@@ -727,6 +739,9 @@ impl MaterialRenderer {
 }
 fn draw_counts(frame: &GpuFrame) -> (u32, u32, MaterialKind) {
     match frame.content() {
+        GpuContent::Waveform { columns, .. } => {
+            ((columns.len() * 4) as u32, 6, MaterialKind::Waveform)
+        }
         GpuContent::Rectangles { rectangles, .. } => {
             (rectangles.len() as u32, 6, MaterialKind::Rectangles)
         }
@@ -799,6 +814,11 @@ fn put_floats(bytes: &mut wgpu::WriteOnly<'_, [u8]>, offset: usize, values: &[f3
 }
 fn encode_frame(bytes: &mut wgpu::WriteOnly<'_, [u8]>, frame: &GpuFrame) {
     match frame.content() {
+        GpuContent::Waveform { columns, .. } => {
+            for (index, column) in columns.iter().enumerate() {
+                put_floats(bytes, index * WAVEFORM_STRIDE as usize, &column.levels);
+            }
+        }
         GpuContent::Rectangles { rectangles, .. } => {
             for (index, rectangle) in rectangles.iter().enumerate() {
                 let offset = index * RECTANGLE_STRIDE as usize;
@@ -886,6 +906,19 @@ fn encode_placement(
         ],
     );
     let schema = match frame.content() {
+        GpuContent::Waveform { columns, params } => {
+            put_floats(
+                bytes,
+                48,
+                &[
+                    params.palette_start,
+                    (bounds.size.width.0 / batch.scale_factor).ceil(),
+                    (bounds.size.height.0 / batch.scale_factor).ceil(),
+                ],
+            );
+            put_u32(bytes, 80, columns.len() as u32);
+            4
+        }
         GpuContent::Rectangles { params, .. } => {
             put_floats(bytes, 48, &[params.cell_height, params.cell_gap]);
             0

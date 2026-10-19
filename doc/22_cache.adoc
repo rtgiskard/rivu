@@ -208,7 +208,7 @@ palette mapping, or playback state. Settings and display controls are documented
 in link:01_config.adoc[Configuration and layout]; signal continuity and rendering
 rationale are explained in link:23_visuals.adoc[Visualization Rendering Design].
 
-The policy covers Waveform display columns and rectangle publications, Spectrum body
+The policy covers Waveform display columns and numerical publications, Spectrum body
 geometry, and Spectrogram numerical column publications. Audio Visualizer styles are independent:
 radial styles do not retain reusable graphics, stereo analysis styles retain
 numerical publications in revocable GPU slots, and generative styles retain
@@ -230,13 +230,19 @@ have already been submitted still follow the retirement boundary below.
 
 ==== Waveform
 
-Waveform separates display-column aggregation from immutable GPU rectangle tiles.
-Unchanged data and display mapping reuse the columns; incremental waveform
-updates replace only affected tiles. Playback cursor movement does not invalidate
-the static waveform. Source, dimensions, amplitude mapping, and palette changes
-rebuild the affected derived data. The renderer reuses uploaded buffers by
-publication identity and owns completion-aware retirement; the application does
-not retain colored pixel tiles or an image retirement queue.
+Waveform separates display-column aggregation from one immutable numerical GPU
+publication per panel. The effective column count is the smaller of drawable width
+and available source bins. Source revision, amplitude mapping or effective-count
+changes trigger aggregation; only changed mapped values or a changed palette
+replace the publication. Missing values remain distinct from decoded silence.
+An all-unknown result creates no GPU publication or waveform draw; known silence
+still publishes its minimum-height fill. Publication construction transfers the
+packed column vector to GPUI without a second column-buffer allocation or copy.
+Raw-width changes with the same effective count, height changes and playback cursor
+movement reuse the publication. Cache-off recomputes derived values and does not
+retain a publication, without discarding source samples. The renderer owns upload
+reuse and completion-aware retirement; there are no rectangle tiles, tile
+fingerprints, colored images or application image-retirement queues.
 
 ==== Spectrum
 
@@ -296,8 +302,10 @@ unbounded record of earlier render states. Hiding a window releases its derived
 visualization publications, Spectrogram history and stereo/generative results.
 Base waveform previews retain their independent bounded lifetime; see
 link:23_visuals.adoc#_waveform[Waveform].
-Waveform rectangle payloads grow with display-column count and panel count,
-not panel pixel area; height changes rebuild geometry without adding rows of pixels.
+Waveform numerical payloads grow with effective display-column count and panel
+count, not panel pixel area: four f32 values (16 bytes) per column, at most 1024
+columns per panel, plus the shared paired-color palette and publication metadata.
+Height and placement are shader inputs and do not require new numerical uploads.
 Spectrum uses at most 2000 display slots, further limited by drawable width.
 Bars and LED store at most one rectangle per visible slot; LED density increases
 fragment work rather than the number of stored body rectangles.
@@ -345,9 +353,9 @@ Caching avoids repeated aggregation, geometry construction, and image creation,
 but does not eliminate scene submission or rendering. All Spectrum styles reuse
 renderer-owned backing for unchanged publications. Changed Line/Solid bodies still
 require curve generation and tessellation; changed Bars/Outline/LED bodies require
-a bounded rectangle payload. Waveform also submits bounded rectangle tiles, with
-a shared paired-color palette preserving each column's RMS gradient. Spectrogram
-submits retained numerical column fields. These publications use renderer-owned
+a bounded rectangle payload. Waveform submits numerical stereo RMS/Peak columns,
+with a shared paired-color palette preserving each column's RMS gradient.
+Spectrogram submits retained numerical column fields. These publications use renderer-owned
 upload lifetime rather than application image retirement.
 Disabling reuse reduces retained graphics memory at the cost of rebuilding that work.
 

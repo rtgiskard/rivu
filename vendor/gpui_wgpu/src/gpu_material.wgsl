@@ -25,6 +25,13 @@ struct RectangleVertexOutput {
     @location(0) @interpolate(perspective, sample) local: vec2<f32>,
     @location(1) @interpolate(flat) instance: u32,
 }
+struct WaveformVertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) @interpolate(perspective, sample) local: vec2<f32>,
+    @location(1) @interpolate(flat) instance: u32,
+    @location(2) @interpolate(flat) low: vec4<f32>,
+    @location(3) @interpolate(flat) high: vec4<f32>,
+}
 fn screen_position(pixel: vec2<f32>) -> vec4<f32> {
     return vec4<f32>(pixel / placement.viewport * vec2<f32>(2.0, -2.0) + vec2<f32>(-1.0, 1.0), 0.0, 1.0);
 }
@@ -60,6 +67,60 @@ fn rectangle_vertex(@builtin(vertex_index) vertex: u32, @builtin(instance_index)
     let value = quad_vertex(vertex, instance);
     return RectangleVertexOutput(value.position, value.local, value.instance);
 }
+// Four instances per column retain source-over order: left/right RMS, then peaks.
+// Missing levels produce degenerate geometry; zero is an audible-data silence line.
+fn waveform_level_index(instance: u32) -> u32 {
+    let component = array<u32, 4>(0u, 2u, 1u, 3u);
+    return (instance / 4u) * 4u + component[instance % 4u];
+}
+@vertex
+fn waveform_vertex(@builtin(vertex_index) vertex: u32, @builtin(instance_index) instance: u32) -> WaveformVertexOutput {
+    let corners = array<vec2<f32>, 6>(
+        vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 0.0), vec2<f32>(0.0, 1.0),
+        vec2<f32>(0.0, 1.0), vec2<f32>(1.0, 0.0), vec2<f32>(1.0, 1.0));
+    let local = corners[vertex];
+    let bits = data[waveform_level_index(instance)];
+    if (bits & 0x7f800000u) == 0x7f800000u {
+        return WaveformVertexOutput(vec4<f32>(0.0, 0.0, 0.0, 1.0), local, instance, vec4<f32>(0.0), vec4<f32>(0.0));
+    }
+    let level = bitcast<f32>(bits);
+    let coordinate = placement.params.x + pow(level, select(1.2, 1.35, (instance % 4u) >= 2u)) * (1.0 - placement.params.x);
+    let pair_count = placement.config.y / 2u;
+    let pair_coordinate = coordinate * f32(pair_count - 1u);
+    let first = min(u32(floor(pair_coordinate)), pair_count - 1u) * 2u;
+    let second = min(u32(ceil(pair_coordinate)), pair_count - 1u) * 2u;
+    let blend = fract(pair_coordinate);
+    let low = mix(palette[first], palette[second], blend);
+    let high = mix(palette[first + 1u], palette[second + 1u], blend);
+    let column = instance / 4u;
+    let width = placement.params.y;
+    let height = placement.params.z;
+    let left = floor(f32(column) * width / f32(placement.field.x));
+    let right = floor(f32(column + 1u) * width / f32(placement.field.x));
+    let upper = (instance % 2u) == 0u;
+    let peak = (instance % 4u) >= 2u;
+    let center = height * 0.5;
+    var extent = min(max(center * level, 1.0), center);
+    var top = select(center, center - extent, upper);
+    if peak {
+        extent = 1.0;
+        let distance = max(center * level, 1.0);
+        // Rust's positive round and saturating cast: negative upper endpoints
+        // clamp to zero before the final height-1 clamp.
+        top = clamp(floor(select(center + distance, center - distance, upper) + 0.5), 0.0, height - 1.0);
+    }
+    let unit = vec2<f32>((left + local.x * (right - left)) / width, (top + local.y * extent) / height);
+    return WaveformVertexOutput(screen_position(placement.bounds.xy + unit * placement.bounds.zw), local, instance, low, high);
+}
+@fragment
+fn waveform_fragment(input: WaveformVertexOutput) -> @location(0) vec4<f32> {
+    if clipped(input.position.xy) { discard; }
+    let peak = (input.instance % 4u) >= 2u;
+    let upper = (input.instance % 2u) == 0u;
+    let fraction = select(select(input.local.y, 1.0 - input.local.y, upper), 1.0, peak);
+    return finish_color(mix(input.low, input.high, fraction), 1.0, true);
+}
+
 @vertex
 fn segment_vertex(@builtin(vertex_index) vertex: u32, @builtin(instance_index) instance: u32) -> VertexOutput {
     let layer = instance / placement.field.x;

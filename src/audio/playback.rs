@@ -684,14 +684,17 @@ mod tests {
         assert!(playback.eof);
         assert!(playback.waveform.read().complete);
         let waveform = playback.waveform.read();
-        assert!(waveform.rms_counts.iter().all(|count| *count == 10));
-        assert!(waveform.left_rms_counts.iter().all(|count| *count == 10));
-        assert!(waveform.right_rms_counts.iter().all(|count| *count == 10));
         for (bin, rms) in waveform.rms.iter().enumerate() {
-            let energy: f64 = (bin * 10..bin * 10 + 10)
+            let first = (bin * 16_000).div_ceil(waveform.peaks.len());
+            let end = ((bin + 1) * 16_000).div_ceil(waveform.peaks.len());
+            let count = (end - first) as u64;
+            assert_eq!(waveform.rms_counts[bin], count);
+            assert_eq!(waveform.left_rms_counts[bin], count);
+            assert_eq!(waveform.right_rms_counts[bin], count);
+            let energy: f64 = (first..end)
                 .map(|index| (index as f64 / 32768.0).powi(2))
                 .sum();
-            let expected = (energy / 10.0).sqrt() as f32;
+            let expected = (energy / count as f64).sqrt() as f32;
             assert!((rms.unwrap() - expected).abs() < 1e-6);
         }
     }

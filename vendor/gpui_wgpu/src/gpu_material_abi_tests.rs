@@ -268,7 +268,7 @@ fn rectangle_retirement_charges_unsubmitted_and_inflight_allocations() -> anyhow
         (RECTANGLE_STRIDE + PALETTE_STRIDE + PLACEMENT_SIZE) * INITIALIZATION_COPIES;
     let prepared = renderer.prepare(&context.device, &[batch.clone(), batch.clone()], size);
     assert_eq!(prepared.draws.len(), 1);
-    assert_eq!(renderer.pipeline_counts, [1, 0, 0, 0]);
+    assert_eq!(renderer.pipeline_counts, [1, 0, 0, 0, 0]);
     assert_eq!(
         renderer.last_failure_kinds,
         1 << 3,
@@ -420,7 +420,7 @@ fn pipelines_follow_admitted_variants_and_reuse_on_replay() -> anyhow::Result<()
             .draws
             .is_empty()
     );
-    assert_eq!(renderer.pipeline_counts, [0, 0, 0, 0]);
+    assert_eq!(renderer.pipeline_counts, [0, 0, 0, 0, 0]);
     let invalid = GpuDraw {
         scale_factor: f32::NAN,
         ..field_batch.clone()
@@ -433,7 +433,7 @@ fn pipelines_follow_admitted_variants_and_reuse_on_replay() -> anyhow::Result<()
             .draws
             .is_empty()
     );
-    assert_eq!(renderer.pipeline_counts, [0, 0, 0, 0]);
+    assert_eq!(renderer.pipeline_counts, [0, 0, 0, 0, 0]);
     assert_eq!(renderer.upload_count, 0);
     renderer.byte_limit = MAX_BYTES;
     assert_eq!(
@@ -445,7 +445,7 @@ fn pipelines_follow_admitted_variants_and_reuse_on_replay() -> anyhow::Result<()
     );
     assert_eq!(
         renderer.pipeline_counts,
-        [0, 0, 1, 0],
+        [0, 0, 1, 0, 0],
         "path demand must not compile ordinary pipeline"
     );
     context.queue.submit(std::iter::empty());
@@ -458,17 +458,17 @@ fn pipelines_follow_admitted_variants_and_reuse_on_replay() -> anyhow::Result<()
             .draws
             .is_empty()
     );
-    assert_eq!(renderer.pipeline_counts, [0, 0, 1, 0]);
+    assert_eq!(renderer.pipeline_counts, [0, 0, 1, 0, 0]);
     renderer.byte_limit = MAX_BYTES;
     let both = [path_batch, field_batch];
     assert_eq!(renderer.prepare(device, &both, size).draws.len(), 2);
-    assert_eq!(renderer.pipeline_counts, [0, 1, 1, 0]);
+    assert_eq!(renderer.pipeline_counts, [0, 1, 1, 0, 0]);
     context.queue.submit(std::iter::empty());
     renderer.submitted(&context.queue);
     assert_eq!(renderer.prepare(device, &both, size).draws.len(), 2);
     assert_eq!(
         renderer.pipeline_counts,
-        [0, 1, 1, 0],
+        [0, 1, 1, 0, 0],
         "replay must reuse both variants"
     );
     context.queue.submit(std::iter::empty());
@@ -477,7 +477,7 @@ fn pipelines_follow_admitted_variants_and_reuse_on_replay() -> anyhow::Result<()
     assert!(renderer.prepare(device, &both, size).draws.is_empty());
     assert_eq!(
         renderer.pipeline_counts,
-        [0, 1, 1, 0],
+        [0, 1, 1, 0, 0],
         "unsupported capabilities must not recreate pipelines"
     );
     Ok(())
@@ -598,5 +598,148 @@ fn field_and_path_encoders_preserve_bits_dimensions_mapping_and_geometry() -> an
         assert_eq!(&placement[offset..offset + 4], &value.to_le_bytes());
     }
     assert_eq!(draw_counts(&path), (1, 3, MaterialKind::Path));
+    Ok(())
+}
+
+#[test]
+fn waveform_encoder_keeps_numerical_payload_independent_of_placement() -> anyhow::Result<()> {
+    let levels = [0.0, 1.0, f32::from_bits(0x7fc01234), 0.25];
+    let frame = GpuFrame::waveform(
+        vec![gpui::GpuWaveformColumn { levels }],
+        GpuPalette::new(&[[0.0; 4], [1.0; 4]], 2)?,
+        gpui::GpuWaveformParams {
+            palette_start: 0.06,
+        },
+        GpuLimits {
+            max_waveform_columns: 1,
+            max_palette_colors: 2,
+            ..Default::default()
+        },
+    )?;
+    let mut payload = [0; WAVEFORM_STRIDE as usize];
+    encode_frame(&mut wgpu::WriteOnly::from_mut(&mut payload[..]), &frame);
+    for (index, level) in levels.iter().enumerate() {
+        assert_eq!(&payload[index * 4..index * 4 + 4], &level.to_le_bytes());
+    }
+    assert_eq!(draw_counts(&frame), (4, 6, MaterialKind::Waveform));
+    for scale_factor in [1.0, 1.25, 2.0] {
+        let bounds = gpui::Bounds {
+            origin: gpui::point(3.0.into(), 5.0.into()),
+            size: gpui::size((13.0 * scale_factor).into(), (9.25 * scale_factor).into()),
+        };
+        let batch = GpuDraw {
+            order: 0,
+            bounds,
+            content_mask: gpui::ContentMask { bounds },
+            opacity: 0.5,
+            scale_factor,
+            source: GpuSource::Fixed(frame.clone()),
+        };
+        let mut encoded = [0; PLACEMENT_SIZE as usize];
+        encode_placement(
+            &mut wgpu::WriteOnly::from_mut(&mut encoded[..]),
+            &batch,
+            &frame,
+            gpui::size(DevicePixels(64), DevicePixels(64)),
+            true,
+            false,
+        );
+        for (offset, value) in [(48, 0.06_f32), (52, 13.0), (56, 10.0)] {
+            assert_eq!(&encoded[offset..offset + 4], &value.to_le_bytes());
+        }
+        for (offset, value) in [(64, 4_u32), (68, 2), (72, 1), (80, 1)] {
+            assert_eq!(&encoded[offset..offset + 4], &value.to_le_bytes());
+        }
+        assert_eq!(&encoded[60..64], &[0; 4]);
+        assert!(encoded[84..].iter().all(|byte| *byte == 0));
+    }
+    let empty = GpuFrame::waveform(
+        Vec::new(),
+        frame.palette().clone(),
+        gpui::GpuWaveformParams::default(),
+        GpuLimits {
+            max_palette_colors: 2,
+            ..Default::default()
+        },
+    )?;
+    assert_eq!(draw_counts(&empty), (0, 6, MaterialKind::Waveform));
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn waveform_uploads_are_lazy_budgeted_weak_and_completion_retired() -> anyhow::Result<()> {
+    let (context, format) = crate::WgpuContext::new_headless()?;
+    let mut renderer = MaterialRenderer::new(
+        &context.device,
+        format,
+        wgpu::CompositeAlphaMode::Opaque,
+        1,
+        context.adapter.get_downlevel_capabilities().flags,
+    );
+    let frame = GpuFrame::waveform(
+        vec![gpui::GpuWaveformColumn { levels: [0.5; 4] }; 2],
+        GpuPalette::new(&[[0.0, 0.0, 0.0, 1.0], [1.0; 4]], 2)?,
+        gpui::GpuWaveformParams::default(),
+        GpuLimits {
+            max_waveform_columns: 2,
+            max_palette_colors: 2,
+            ..Default::default()
+        },
+    )?;
+    let bounds = gpui::Bounds {
+        origin: gpui::point(0.0.into(), 0.0.into()),
+        size: gpui::size(8.0.into(), 8.0.into()),
+    };
+    let batch = GpuDraw {
+        order: 0,
+        bounds,
+        content_mask: gpui::ContentMask { bounds },
+        opacity: 1.0,
+        scale_factor: 1.0,
+        source: GpuSource::Fixed(frame.clone()),
+    };
+    let size = gpui::size(DevicePixels(8), DevicePixels(8));
+    let charge =
+        (2 * WAVEFORM_STRIDE + 2 * PALETTE_STRIDE + PLACEMENT_SIZE) * INITIALIZATION_COPIES;
+    renderer.byte_limit = charge - 1;
+    assert!(
+        renderer
+            .prepare(&context.device, &[batch.clone()], size)
+            .draws
+            .is_empty()
+    );
+    assert_eq!(renderer.pipeline_counts, [0; 5]);
+    assert_eq!(renderer.bytes, 0);
+    renderer.byte_limit = charge;
+    let prepared = renderer.prepare(&context.device, &[batch.clone()], size);
+    assert_eq!(prepared.draws.len(), 1);
+    assert_eq!(renderer.pipeline_counts, [0, 0, 0, 0, 1]);
+    assert_eq!(renderer.bytes, charge);
+    assert_eq!(renderer.upload_count, 1);
+    assert_eq!(
+        Arc::strong_count(&frame),
+        2,
+        "uploads must keep only weak CPU ownership"
+    );
+    let weak = Arc::downgrade(&frame);
+    drop(prepared);
+    drop(batch);
+    drop(frame);
+    assert!(weak.upgrade().is_none());
+    assert!(renderer.preparing);
+    assert!(!renderer.can_allocate(1, 1));
+    assert_eq!(renderer.bytes, charge, "unsubmitted storage stays charged");
+    let submission = context.queue.submit(std::iter::empty());
+    renderer.submitted(&context.queue);
+    context.device.poll(wgpu::PollType::Wait {
+        submission_index: Some(submission),
+        timeout: Some(std::time::Duration::from_secs(30)),
+    })?;
+    renderer.prepare(&context.device, &[], size);
+    assert_eq!(renderer.bytes, 0);
+    assert!(renderer.uploads.is_empty());
+    assert!(renderer.palettes.is_empty());
+    assert!(renderer.placements.is_empty());
     Ok(())
 }

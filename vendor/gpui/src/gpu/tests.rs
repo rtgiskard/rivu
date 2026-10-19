@@ -3,6 +3,7 @@ use crate::{point, size};
 
 const LIMITS: GpuLimits = GpuLimits {
     max_rectangles: 2,
+    max_waveform_columns: 2,
     max_field_width: 2,
     max_field_height: 2,
     max_field_cells: 4,
@@ -1030,4 +1031,108 @@ fn hidden_window_detaches_cached_fixed_scenes_without_another_frame(
     .unwrap();
     assert!(publications.borrow().len() > paints_before_replay);
     assert!(publications.borrow().last().unwrap().upgrade().is_some());
+}
+
+#[test]
+fn waveform_publications_validate_levels_and_keep_dynamic_snapshots_coherent() {
+    let samples = [GpuWaveformColumn {
+        levels: [0.0, 1.0, f32::NAN, 0.5],
+    }];
+    let initial = GpuFrame::waveform(
+        samples.to_vec(),
+        palette(),
+        GpuWaveformParams::default(),
+        LIMITS,
+    )
+    .unwrap();
+    assert_eq!(initial.schema(), GpuSchema::Waveform);
+    let state = GpuState::new(initial.clone(), LIMITS).unwrap();
+    for level in [-0.01, 1.01, f32::INFINITY, f32::NEG_INFINITY] {
+        assert!(
+            GpuFrame::waveform(
+                vec![GpuWaveformColumn { levels: [level; 4] }],
+                palette(),
+                GpuWaveformParams::default(),
+                LIMITS
+            )
+            .is_err()
+        );
+    }
+    assert!(
+        GpuFrame::waveform(
+            vec![samples[0]; 3],
+            palette(),
+            GpuWaveformParams::default(),
+            LIMITS
+        )
+        .is_err()
+    );
+    assert!(
+        GpuFrame::waveform(
+            Vec::new(),
+            palette(),
+            GpuWaveformParams::default(),
+            GpuLimits {
+                max_waveform_columns: 0,
+                ..LIMITS
+            }
+        )
+        .is_ok()
+    );
+    assert!(
+        GpuFrame::waveform(
+            samples.to_vec(),
+            GpuPalette::new(&[[1.0; 4]], 1).unwrap(),
+            GpuWaveformParams::default(),
+            LIMITS
+        )
+        .is_err()
+    );
+    for palette_start in [f32::NAN, f32::INFINITY, -0.01, 1.01] {
+        assert!(
+            GpuFrame::waveform(
+                samples.to_vec(),
+                palette(),
+                GpuWaveformParams { palette_start },
+                LIMITS
+            )
+            .is_err()
+        );
+    }
+    let oversized = GpuFrame::waveform(
+        vec![samples[0]; 3],
+        palette(),
+        GpuWaveformParams::default(),
+        GpuLimits {
+            max_waveform_columns: 3,
+            ..LIMITS
+        },
+    )
+    .unwrap();
+    assert!(state.publish(oversized).is_err());
+    assert!(state.publish(frame()).is_err());
+    assert!(Arc::ptr_eq(&state.snapshot().unwrap(), &initial));
+    let captured = state.snapshot().unwrap();
+    state.clear();
+    assert_eq!(state.schema(), GpuSchema::Waveform);
+    assert!(state.snapshot().is_none());
+    let next = GpuFrame::waveform(
+        vec![GpuWaveformColumn { levels: [0.25; 4] }],
+        palette(),
+        GpuWaveformParams {
+            palette_start: 0.06,
+        },
+        LIMITS,
+    )
+    .unwrap();
+    assert_ne!(initial.id(), next.id());
+    state.publish(next.clone()).unwrap();
+    assert!(Arc::ptr_eq(&state.snapshot().unwrap(), &next));
+    let GpuContent::Waveform { columns, params } = captured.content() else {
+        panic!("expected waveform")
+    };
+    assert_eq!(columns[0].levels[0], 0.0);
+    assert!(columns[0].levels[2].is_nan());
+    assert_eq!(params.palette_start, 0.0);
+    assert!(Arc::ptr_eq(captured.palette(), initial.palette()));
 }

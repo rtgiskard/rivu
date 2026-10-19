@@ -29,12 +29,12 @@ The extensions add centered image transforms and shared GPU materials on
 Rivu's Linux/WGPU rendering path. Existing untransformed images and ordinary
 path backgrounds retain their existing behavior.
 The vendor patch also contains experimental fixed-schema rectangle, numerical-field,
-existing-path and independent-segment drawing through one shared publication and
+existing-path, independent-segment and numerical-waveform drawing through one shared publication and
 recording interface; see the
 link:25_gpu_rendering.adoc#_internal_led_vertical_slice[GPU rendering slice].
 Stereo Density, Spatial Spectrum and Spectrogram use numerical fields; Spectrum
 uses rectangle and Path publications; Fractal Beams/Flow use shared segments;
-Waveform uses rectangle tiles. Radial Bars/Rings styles retain their existing
+Waveform uses numerical stereo columns. Radial Bars/Rings styles retain their existing
 rendering paths. The general `Program` and generated-schema interfaces remain
 proposals, not implemented APIs.
 
@@ -228,7 +228,7 @@ Mode cannot restore that preview or automatically start another full scan.
 == Waveform
 
 Playback builds a progressive waveform from decoded PCM, not from the FFT tap.
-It retains at most 1600 bins rather than whole-track PCM. Unknown or underestimated
+It retains at most 1024 bins rather than whole-track PCM. Unknown or underestimated
 timelines expand by coarsening existing bins, preserving bounded memory at the
 cost of preview resolution. Normal decoder EOF corrects the timeline end even
 when coverage is incomplete; only capacity beyond that endpoint is removed.
@@ -283,27 +283,39 @@ per-frame filesystem lookup or extra whole-track PCM scan. A library refresh or
 saved hint change cannot relabel or discard data from an already opened old
 file descriptor; only a subsequent Load selects the replacement content.
 
+Display aggregation keeps left and right statistics separate. Peak takes the
+maximum known value; RMS uses decoded-sample-weighted energy,
+`sqrt(sum(rms_i^2 * count_i) / sum(count_i))`, before display gain and gamma.
+Channel fallback uses matching mono values and mono counts. Missing intervals are
+not zero-valued samples. The 1024-bin limit trades whole-track time resolution for
+bounded storage; it does not introduce zoom, interpolation or a second display mode.
+
 RMS fills extend above and below the centerline for the respective stereo
 channels. Each display column has its own gradient endpoint, preserving color
 differences between adjacent columns with different energy. The gradient starts
 at a dimmed, desaturated palette minimum on the centerline and brightens toward
-that column's RMS edge. Nonlinear color compression keeps warm colors as high-energy accents
-while preserving access to the full visible palette range. It is a visual choice, not an
-amplitude or renderer limit.
+that column's RMS edge. Color compression uses an exponent of 1.2 for RMS
+and 1.35 for Peak, preserving access to the full visible palette range.
+These are visual choices, not amplitude or renderer limits.
 Peak is a thin, solid marker at the channel's peak level. Color compression
 does not change the height represented by the amplitude mapping.
 
 A single shared vertical gradient would be cheaper to batch, but would assign
 the same color to equal heights across columns and weaken those differences.
-Each immutable tile instead publishes up to two RMS rectangles and two Peak
-rectangles per column. A shared palette stores adjacent center/endpoint color
-pairs for all existing 1024 amplitude-color samples. Each RMS rectangle interpolates
-only within its pair, preserving linear RGB mixing rather than traversing the
-intermediate palette colors; Peak uses the endpoint directly.
-Unchanged tiles retain publication identity so the renderer reuses their GPU
-buffers. Height changes rebuild normalized geometry; cursor and glow remain
-dynamic. The application no longer rasterizes colored images or retires their
-atlas entries. Buffer admission and completion-aware retirement use the shared
+Each panel instead publishes numerical left RMS, left Peak, right RMS and right
+Peak columns. The GPU expands them into two RMS fills and two thin Peak markers;
+unknown components draw nothing, while known silence retains a minimum-height fill.
+A shared palette stores floating-point center/endpoint color pairs for all existing
+1024 amplitude-color samples, without an intermediate 8-bit quantization. The
+vertex stage applies color compression and continuously interpolates neighboring
+pairs' endpoints. Each RMS fill then blends only its own two endpoints in RGB,
+not intermediate palette colors; Peak uses its endpoint directly. Color selection
+is per primitive, not repeated per fragment. Integer logical column boundaries and
+ceil-height geometry preserve the drawing recipe, including fractional placement
+height and one-logical-pixel Peak thickness after resizing or physical scaling.
+Height and placement do not alter numerical publication identity. Cursor and glow
+remain dynamic. There are no application rectangle tiles or colored images.
+Buffer admission and completion-aware retirement use the shared
 GPU material budget described in link:22_cache.adoc[Caching and Resource Lifecycles].
 
 == Spectrum

@@ -4,6 +4,8 @@
 //! separate bounded results, never replacing playback's frame. Content changes,
 //! saved decoder hint edits or target switches cancel previews; hiding does not.
 //! Still Mode cancels scans and releases both owners' display data.
+//! Each panel publishes one immutable numerical frame; placement-only changes
+//! reuse it. RMS pooling weights decoded sample counts, preserving missing bins.
 //!
 //! Pointer captures require a live interactive panel, not just cached peaks.
 //! Losing that surface cancels its generation and the matching window seek;
@@ -13,7 +15,6 @@ use crate::i18n::Localizer;
 use std::{
     cell::RefCell,
     collections::HashMap,
-    hash::{Hash, Hasher},
     path::PathBuf,
     rc::Rc,
     sync::{
@@ -23,9 +24,9 @@ use std::{
 };
 
 use gpui::{
-    AnyElement, Bounds, Context, EventEmitter, GpuFrame, GpuLimits, GpuRectangle,
-    GpuRectangleParams, GpuSource, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    Pixels, Point, SharedString, Window, canvas, div, fill, point, prelude::*, px, rgb, size,
+    AnyElement, Bounds, Context, EventEmitter, GpuFrame, GpuLimits, GpuSource, GpuWaveformColumn,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Window,
+    canvas, div, fill, point, prelude::*, px, rgb, size,
 };
 use parking_lot::RwLock;
 
@@ -88,15 +89,6 @@ fn track_range(track: &Track) -> Option<PlaybackRange> {
     })
 }
 
-const WAVEFORM_TILE_WIDTH: u32 = 32;
-
-struct Tile {
-    x_start: u32,
-    x_end: u32,
-    fingerprint: u64,
-    frame: Arc<GpuFrame>,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct WaveformColumn {
     left_rms: Option<f32>,
@@ -114,30 +106,15 @@ struct WaveformMapping {
 
 struct Columns {
     revision: u64,
-    width: usize,
     mapping: Option<WaveformMapping>,
     values: Vec<WaveformColumn>,
-    layer_key: Option<LayerKey>,
-    tiles: Vec<Tile>,
-    tile_revision: Option<u64>,
-}
-
-#[derive(PartialEq)]
-struct LayerKey {
-    source: Rc<Source>,
-    width: u32,
-    height: u32,
-    rms_gain: u32,
-    peak_gain: u32,
-    peak_gamma: u32,
-    palette: crate::config::VisualizationPalette,
+    has_known_component: bool,
+    publication: Option<(crate::config::VisualizationPalette, Arc<GpuFrame>)>,
 }
 
 #[derive(Default)]
 struct WaveformPlot {
     columns: HashMap<u64, Columns>,
-    paint_tiles: Vec<(u32, u32, Arc<GpuFrame>)>,
-    rectangles: Vec<GpuRectangle>,
 }
 
 fn waveform_level(value: f32, gain: f32, gamma: f32) -> f32 {
@@ -149,13 +126,10 @@ fn waveform_height(level: f32, half_height: Pixels) -> Pixels {
     (half_height * level).max(px(1.0))
 }
 
-fn waveform_color_level(level: f32) -> f32 {
-    level.clamp(0.0, 1.0).powf(1.35)
-}
-
 fn pooled_side(
     peaks: &[Option<f32>],
     rms: &[Option<f32>],
+    counts: &[u64],
     first: usize,
     end: usize,
     scale: f32,
@@ -167,15 +141,18 @@ fn pooled_side(
         .copied()
         .reduce(f32::max)
         .map(|value| waveform_level(value * scale, mapping.peak_gain, mapping.peak_gamma));
-    let mut energy = 0.0_f32;
-    let mut known = 0_u32;
-    for value in rms[first..end].iter().flatten().copied() {
-        energy += value * value;
-        known += 1;
+    let mut energy = 0.0_f64;
+    let mut known = 0.0_f64;
+    for (value, &count) in rms[first..end].iter().zip(&counts[first..end]) {
+        if let Some(value) = value {
+            let value = f64::from(*value);
+            energy += value * value * count as f64;
+            known += count as f64;
+        }
     }
-    let rms = (known != 0).then(|| {
+    let rms = (known != 0.0).then(|| {
         waveform_level(
-            (energy / known as f32).sqrt() * scale,
+            (energy / known).sqrt() as f32 * scale,
             mapping.rms_gain,
             0.86,
         )
@@ -183,195 +160,66 @@ fn pooled_side(
     (rms, peak)
 }
 
-fn tile_columns(x_start: u32, x_end: u32, width: u32, count: usize) -> std::ops::Range<usize> {
-    if count == 0 || width == 0 || x_start >= x_end {
-        return 0..0;
-    }
-    let width = u64::from(width);
-    let count64 = count as u64;
-    let first = ((u64::from(x_start) + 1) * count64 - 1) / width;
-    let end = (u64::from(x_end) * count64).div_ceil(width);
-    (first as usize).min(count)..(end as usize).min(count)
-}
-
-fn tile_fingerprint(values: &[WaveformColumn], start: usize, end: usize) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    for column in &values[start..end] {
-        for value in [
-            column.left_rms,
-            column.left_peak,
-            column.right_rms,
-            column.right_peak,
-        ] {
-            value.map(f32::to_bits).hash(&mut hasher);
-        }
-    }
-    hasher.finish()
-}
-
 impl WaveformPlot {
     fn retain_panels(&mut self, mut keep: impl FnMut(u64) -> bool) {
         self.columns.retain(|id, _| keep(*id));
-        self.paint_tiles.clear();
     }
 
     fn clear_cache(&mut self) {
-        self.paint_tiles.clear();
         for columns in self.columns.values_mut() {
             columns.values.clear();
-            columns.layer_key = None;
-            columns.tiles.clear();
-            columns.tile_revision = None;
+            columns.has_known_component = false;
+            columns.mapping = None;
+            columns.publication = None;
         }
     }
 
-    fn finish_paint(&mut self, cache_enabled: bool) {
-        if !cache_enabled {
-            self.clear_cache();
-        } else {
-            self.paint_tiles.clear();
-        }
-        self.rectangles.clear();
-    }
-
-    fn update_tiles(
+    fn publication(
         &mut self,
         panel_id: u64,
-        key: LayerKey,
+        palette_id: crate::config::VisualizationPalette,
         cache_enabled: bool,
         palette: &super::visuals::PaletteLut,
-    ) -> Result<(), String> {
-        self.paint_tiles.clear();
+    ) -> Result<Option<Arc<GpuFrame>>, String> {
         let columns = self.columns.get_mut(&panel_id).unwrap();
-        if columns.values.is_empty() {
-            return Ok(());
+        if !columns.has_known_component {
+            return Ok(None);
         }
-        let unchanged = cache_enabled
-            && columns.layer_key.as_ref() == Some(&key)
-            && columns.tile_revision == Some(columns.revision);
-        if !cache_enabled || columns.layer_key.as_ref() != Some(&key) {
-            columns.tiles.clear();
+        if cache_enabled
+            && let Some((retained_palette, frame)) = &columns.publication
+            && *retained_palette == palette_id
+        {
+            return Ok(Some(Arc::clone(frame)));
         }
-        let tile_count = key.width.div_ceil(WAVEFORM_TILE_WIDTH) as usize;
-        for tile_index in 0..tile_count {
-            let x_start = tile_index as u32 * WAVEFORM_TILE_WIDTH;
-            let x_end = (x_start + WAVEFORM_TILE_WIDTH).min(key.width);
-            let fingerprint = if unchanged {
-                columns.tiles[tile_index].fingerprint
-            } else {
-                let range = tile_columns(x_start, x_end, key.width, columns.values.len());
-                tile_fingerprint(&columns.values, range.start, range.end)
-            };
-            let retained = cache_enabled
-                && columns.tiles.get(tile_index).is_some_and(|tile| {
-                    tile.x_start == x_start
-                        && tile.x_end == x_end
-                        && tile.fingerprint == fingerprint
-                });
-            if retained {
-                self.paint_tiles.push((
-                    x_start,
-                    x_end,
-                    Arc::clone(&columns.tiles[tile_index].frame),
-                ));
-                continue;
-            }
-            let frame = Self::build_tile(
-                &columns.values,
-                x_start,
-                x_end,
-                key.width,
-                key.height,
-                palette,
-                &mut self.rectangles,
-            )?;
-            if cache_enabled {
-                let tile = Tile {
-                    x_start,
-                    x_end,
-                    fingerprint,
-                    frame: Arc::clone(&frame),
-                };
-                if tile_index < columns.tiles.len() {
-                    columns.tiles[tile_index] = tile;
-                } else {
-                    columns.tiles.push(tile);
-                }
-            }
-            self.paint_tiles.push((x_start, x_end, frame));
-        }
-        columns.layer_key = cache_enabled.then_some(key);
-        columns.tile_revision = cache_enabled.then_some(columns.revision);
-        Ok(())
-    }
-
-    fn build_tile(
-        values: &[WaveformColumn],
-        x_start: u32,
-        x_end: u32,
-        width: u32,
-        height: u32,
-        palette: &super::visuals::PaletteLut,
-        rectangles: &mut Vec<GpuRectangle>,
-    ) -> Result<Arc<GpuFrame>, String> {
-        rectangles.clear();
+        let values: Vec<_> = columns
+            .values
+            .iter()
+            .map(|column| GpuWaveformColumn {
+                levels: [
+                    column.left_rms,
+                    column.left_peak,
+                    column.right_rms,
+                    column.right_peak,
+                ]
+                .map(|value| value.unwrap_or(f32::NAN)),
+            })
+            .collect();
         let gpu_palette = palette.waveform_gpu_palette()?;
-        let tile_width = (x_end - x_start) as f32;
-        let center = height as f32 * 0.5;
-        if tile_width > 0.0 && height > 0 {
-            for column in tile_columns(x_start, x_end, width, values.len()) {
-                let WaveformColumn {
-                    left_rms,
-                    left_peak,
-                    right_rms,
-                    right_peak,
-                } = values[column];
-                let x0 = (column as u32 * width / values.len() as u32).max(x_start);
-                let x1 = (((column + 1) as u32 * width) / values.len() as u32).min(x_end);
-                if x0 >= x1 {
-                    continue;
-                }
-                let x = (x0 - x_start) as f32 / tile_width;
-                let w = ((x1 - x0) as f32 / tile_width).min(1.0 - x);
-                for (level, upper) in [(left_rms, true), (right_rms, false)] {
-                    let Some(level) = level else { continue };
-                    let extent = (center * level).max(1.0).min(center);
-                    let start = if upper { center - extent } else { center };
-                    let [low, high] = palette.waveform_gpu_range(waveform_color_level(level));
-                    rectangles.push(GpuRectangle {
-                        bounds: [x, start / height as f32, w, extent / height as f32],
-                        palette_range: if upper { [low, high] } else { [high, low] },
-                    });
-                }
-                for (level, upper) in [(left_peak, true), (right_peak, false)] {
-                    let Some(level) = level else { continue };
-                    let extent = (center * level).max(1.0);
-                    let y = if upper {
-                        center - extent
-                    } else {
-                        center + extent
-                    };
-                    let y = (y.round() as u32).min(height - 1);
-                    let high = palette.waveform_gpu_range(waveform_color_level(level))[1];
-                    rectangles.push(GpuRectangle {
-                        bounds: [x, y as f32 / height as f32, w, 1.0 / height as f32],
-                        palette_range: [high, high],
-                    });
-                }
-            }
-        }
         let max_palette_colors = gpu_palette.colors().len();
-        GpuFrame::rectangles(
-            rectangles,
+        let max_waveform_columns = values.len();
+        let frame = GpuFrame::waveform(
+            values,
             gpu_palette,
-            GpuRectangleParams::default(),
+            palette.waveform_gpu_params(),
             GpuLimits {
-                max_rectangles: tile_columns(x_start, x_end, width, values.len()).len() * 4,
+                max_waveform_columns,
                 max_palette_colors,
                 ..Default::default()
             },
         )
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+        columns.publication = cache_enabled.then(|| (palette_id, Arc::clone(&frame)));
+        Ok(Some(frame))
     }
     #[cfg(test)]
     fn columns(&mut self, panel_id: u64, width: usize, frame: &WaveformFrame) -> &[WaveformColumn] {
@@ -398,61 +246,85 @@ impl WaveformPlot {
     ) -> &[WaveformColumn] {
         let columns = self.columns.entry(panel_id).or_insert_with(|| Columns {
             revision: frame.revision,
-            width,
             mapping: None,
             values: Vec::new(),
-            layer_key: None,
-            tiles: Vec::new(),
-            tile_revision: None,
+            has_known_component: false,
+            publication: None,
         });
         let left_peaks = if frame.left_peaks.is_empty() {
             &frame.peaks
         } else {
             &frame.left_peaks
         };
-        let left_rms = if frame.left_rms.is_empty() {
-            &frame.rms
+        let (left_rms, left_counts) = if frame.left_rms.is_empty() {
+            (&frame.rms, &frame.rms_counts)
         } else {
-            &frame.left_rms
+            (&frame.left_rms, &frame.left_rms_counts)
         };
         let right_peaks = if frame.right_peaks.is_empty() {
             &frame.peaks
         } else {
             &frame.right_peaks
         };
-        let right_rms = if frame.right_rms.is_empty() {
-            &frame.rms
+        let (right_rms, right_counts) = if frame.right_rms.is_empty() {
+            (&frame.rms, &frame.rms_counts)
         } else {
-            &frame.right_rms
+            (&frame.right_rms, &frame.right_rms_counts)
         };
         let count = width.max(1).min(left_peaks.len());
         if !cache_enabled
             || columns.revision != frame.revision
-            || columns.width != width
             || columns.mapping != Some(mapping)
             || columns.values.len() != count
         {
-            columns.values.clear();
-        }
-        if columns.values.len() != count {
+            let mut changed = columns.values.len() != count;
             let scale = frame.max_peak.max(1.0).recip();
+            let mut has_known_component = false;
             for column in 0..count {
                 let first = column * left_peaks.len() / count;
                 let end = (column + 1) * left_peaks.len() / count;
-                let (left_rms, left_peak) =
-                    pooled_side(left_peaks, left_rms, first, end, scale, mapping);
-                let (right_rms, right_peak) =
-                    pooled_side(right_peaks, right_rms, first, end, scale, mapping);
-                columns.values.push(WaveformColumn {
+                let (left_rms, left_peak) = pooled_side(
+                    left_peaks,
+                    left_rms,
+                    left_counts,
+                    first,
+                    end,
+                    scale,
+                    mapping,
+                );
+                let (right_rms, right_peak) = pooled_side(
+                    right_peaks,
+                    right_rms,
+                    right_counts,
+                    first,
+                    end,
+                    scale,
+                    mapping,
+                );
+                let value = WaveformColumn {
                     left_rms,
                     left_peak,
                     right_rms,
                     right_peak,
-                });
+                };
+                has_known_component |= left_rms.is_some()
+                    || left_peak.is_some()
+                    || right_rms.is_some()
+                    || right_peak.is_some();
+                if let Some(previous) = columns.values.get_mut(column) {
+                    changed |= *previous != value;
+                    *previous = value;
+                } else {
+                    columns.values.push(value);
+                }
+            }
+            columns.values.truncate(count);
+            columns.has_known_component = has_known_component;
+            if changed || !cache_enabled {
+                columns.publication = None;
             }
         }
         columns.revision = frame.revision;
-        columns.width = width;
         columns.mapping = Some(mapping);
         &columns.values
     }
@@ -542,7 +414,6 @@ pub(in crate::gui) struct Waveform {
     dragging: bool,
     seek_generation: u64,
     seek_enabled: bool,
-    visualization_cache: bool,
 }
 
 impl Waveform {
@@ -561,7 +432,6 @@ impl Waveform {
             dragging: false,
             seek_generation: 0,
             seek_enabled: true,
-            visualization_cache: true,
         }
     }
 
@@ -581,8 +451,6 @@ impl Waveform {
         let mut plot = self.plot.borrow_mut();
         plot.retain_panels(|_| false);
         plot.columns = HashMap::new();
-        plot.paint_tiles = Vec::new();
-        plot.rectangles = Vec::new();
         drop(plot);
         *self.interaction.borrow_mut() = WaveformInteraction::default();
         self.cancel_seek();
@@ -983,10 +851,6 @@ impl Waveform {
             .min_h_0()
             .overflow_hidden()
             .bg(rgb(config.visual_background.rgb()));
-        if self.visualization_cache != config.visualization_cache {
-            self.plot.borrow_mut().clear_cache();
-            self.visualization_cache = config.visualization_cache;
-        }
         let Some(source) = self.source.as_deref() else {
             if let Some(generation) = self.remove_interaction_panel(panel_id) {
                 cx.emit(WaveformEvent::Cancelled { generation });
@@ -1114,39 +978,26 @@ impl Waveform {
                                         progress(position, timeline(frame, duration)),
                                     )
                                 };
-                                let width_px = (plot.size.width / px(1.0)).ceil().max(1.0) as u32;
-                                let height_px = (plot.size.height / px(1.0)).ceil().max(1.0) as u32;
-                                let key = LayerKey {
-                                    source: Rc::clone(&source),
-                                    width: width_px,
-                                    height: height_px,
-                                    rms_gain: rms_gain.to_bits(),
-                                    peak_gain: peak_gain.to_bits(),
-                                    peak_gamma: peak_gamma.to_bits(),
-                                    palette: config_palette,
-                                };
+                                let width_px = (plot.size.width / px(1.0)).ceil().max(1.0);
                                 let result = (|| {
-                                    waveform.update_tiles(
+                                    if let Some(frame) = waveform.publication(
                                         panel_id,
-                                        key,
+                                        config_palette,
                                         cache_enabled,
                                         &palette,
-                                    )?;
-                                    for (x_start, x_end, frame) in &waveform.paint_tiles {
-                                        let tile_bounds = Bounds::new(
-                                            point(plot.left() + px(*x_start as f32), plot.top()),
-                                            size(px((*x_end - *x_start) as f32), plot.size.height),
-                                        );
+                                    )? {
                                         window
                                             .paint_gpu(
-                                                tile_bounds,
-                                                GpuSource::Fixed(Arc::clone(frame)),
+                                                Bounds::new(
+                                                    plot.origin,
+                                                    size(px(width_px), plot.size.height),
+                                                ),
+                                                GpuSource::Fixed(frame),
                                             )
                                             .map_err(|error| error.to_string())?;
                                     }
                                     Ok::<(), String>(())
                                 })();
-                                waveform.finish_paint(cache_enabled);
                                 if let Err(error) = result {
                                     window.paint_quad(fill(
                                         Bounds::new(plot.origin, size(plot.size.width, px(22.0))),
@@ -1284,69 +1135,6 @@ impl Drop for Waveform {
 mod tests {
     use crate::gui::layout::interaction::{DragCommit, LayoutInteraction, SeekCommit};
     #[test]
-    fn rms_gradient_uses_only_center_and_amplitude_colors() {
-        let palette = super::super::visuals::active_palette_lut(
-            crate::config::VisualizationPalette::Deadbeef,
-        );
-        let columns = [WaveformColumn {
-            left_rms: Some(0.5),
-            right_rms: Some(0.5),
-            left_peak: None,
-            right_peak: None,
-        }];
-        let frame =
-            WaveformPlot::build_tile(&columns, 0, 1, 1, 100, &palette, &mut Vec::new()).unwrap();
-        let gpui::GpuContent::Rectangles { rectangles, .. } = frame.content() else {
-            panic!("expected rectangles")
-        };
-        let colors = frame.palette().colors();
-        let index = |coordinate: f32| (coordinate * (colors.len() - 1) as f32).round() as usize;
-        let [low, high] = rectangles[0].palette_range.map(index);
-        assert_eq!(
-            high,
-            low + 1,
-            "gradient must not traverse other palette colors"
-        );
-        assert_eq!(rectangles[1].palette_range.map(index), [high, low]);
-        let expected = palette.lookup_mapped_rgb(waveform_color_level(0.5));
-        assert_eq!(
-            colors[high],
-            [expected[0], expected[1], expected[2], 255].map(|value| f32::from(value) / 255.0)
-        );
-        assert!(colors[low][..3].iter().sum::<f32>() < colors[high][..3].iter().sum::<f32>());
-    }
-
-    #[test]
-    fn full_stereo_peaks_remain_within_short_and_tall_panels() {
-        let palette = super::super::visuals::active_palette_lut(
-            crate::config::VisualizationPalette::Deadbeef,
-        );
-        let columns = [1.0, 0.999].map(|level| WaveformColumn {
-            left_rms: None,
-            right_rms: None,
-            left_peak: Some(level),
-            right_peak: Some(level),
-        });
-        for height in [1, 2, 99, 100] {
-            let frame =
-                WaveformPlot::build_tile(&columns, 0, 2, 2, height, &palette, &mut Vec::new())
-                    .unwrap();
-            let gpui::GpuContent::Rectangles { rectangles, .. } = frame.content() else {
-                panic!("expected rectangles")
-            };
-            for peaks in rectangles.as_chunks::<2>().0 {
-                assert_eq!(peaks[0].bounds[1], 0.0);
-                assert!((peaks[1].bounds[1] + peaks[1].bounds[3] - 1.0).abs() < 1e-6);
-                assert_eq!(peaks[0].bounds[3], 1.0 / height as f32);
-                assert_eq!(peaks[1].bounds[3], 1.0 / height as f32);
-                for peak in peaks {
-                    assert_eq!(peak.palette_range[0], peak.palette_range[1]);
-                }
-            }
-        }
-    }
-
-    #[test]
     fn removed_panels_retire_without_repainting() {
         let mut plot = WaveformPlot::default();
         let data = frame(vec![Some(0.25); 100]);
@@ -1354,31 +1142,24 @@ mod tests {
             crate::config::VisualizationPalette::Deadbeef,
         );
         plot.columns(1, 100, &data);
-        plot.update_tiles(
-            1,
-            LayerKey {
-                source: Rc::new(Source::from_frame(&data).unwrap()),
-                width: 101,
-                height: 40,
-                rms_gain: 1.0_f32.to_bits(),
-                peak_gain: 1.0_f32.to_bits(),
-                peak_gamma: 1.0_f32.to_bits(),
-                palette: crate::config::VisualizationPalette::Deadbeef,
-            },
-            true,
-            &palette,
-        )
-        .unwrap();
-        let tile = Arc::downgrade(&plot.columns[&1].tiles[0].frame);
-        let scene = Arc::clone(&plot.columns[&1].tiles[0].frame);
+        let scene = plot
+            .publication(
+                1,
+                crate::config::VisualizationPalette::Deadbeef,
+                true,
+                &palette,
+            )
+            .unwrap()
+            .unwrap();
+        let publication = Arc::downgrade(&scene);
         plot.retain_panels(|_| false);
         assert!(plot.columns.is_empty());
         assert!(
-            tile.upgrade().is_some(),
+            publication.upgrade().is_some(),
             "a captured scene must survive panel removal"
         );
         drop(scene);
-        assert!(tile.upgrade().is_none());
+        assert!(publication.upgrade().is_none());
     }
 
     #[test]
@@ -1400,26 +1181,19 @@ mod tests {
                     peak_gamma: 1.0,
                 },
             );
-            plot.update_tiles(
-                1,
-                LayerKey {
-                    source: Rc::new(Source::from_frame(&data).unwrap()),
-                    width: 101,
-                    height: 40,
-                    rms_gain: 1.0_f32.to_bits(),
-                    peak_gain: 1.0_f32.to_bits(),
-                    peak_gamma: 1.0_f32.to_bits(),
-                    palette: crate::config::VisualizationPalette::Deadbeef,
-                },
-                false,
-                &palette,
-            )
-            .unwrap();
-            let scene = Arc::clone(&plot.paint_tiles[0].2);
+            let scene = plot
+                .publication(
+                    1,
+                    crate::config::VisualizationPalette::Deadbeef,
+                    false,
+                    &palette,
+                )
+                .unwrap()
+                .unwrap();
             let weak = Arc::downgrade(&scene);
-            plot.finish_paint(false);
-            assert!(plot.paint_tiles.is_empty());
-            assert!(plot.columns[&1].values.is_empty());
+            assert!(plot.columns[&1].publication.is_none());
+            assert_eq!(plot.columns[&1].values.len(), 100);
+            assert_eq!(data.peaks, vec![Some(0.25); 100]);
             assert!(weak.upgrade().is_some());
             drop(scene);
             assert!(weak.upgrade().is_none());
@@ -1427,55 +1201,160 @@ mod tests {
     }
 
     #[test]
-    fn boundary_columns_refresh_all_and_only_intersecting_tiles() {
-        let palette = super::super::visuals::active_palette_lut(
-            crate::config::VisualizationPalette::Deadbeef,
+    fn unchanged_columns_reuse_publication_across_resize_and_revisions() {
+        let palette_id = crate::config::VisualizationPalette::Deadbeef;
+        let palette = super::super::visuals::active_palette_lut(palette_id);
+        let mut data = frame(vec![Some(0.25), None, Some(0.0)]);
+        let mut plot = WaveformPlot::default();
+        plot.columns(1, 100, &data);
+        let initial = plot
+            .publication(1, palette_id, true, &palette)
+            .unwrap()
+            .unwrap();
+        // Widths above the source bin count, height and position only change placement.
+        plot.columns(1, 200, &data);
+        let resized = plot
+            .publication(1, palette_id, true, &palette)
+            .unwrap()
+            .unwrap();
+        assert!(Arc::ptr_eq(&initial, &resized));
+        data.revision += 1;
+        plot.columns(1, 200, &data);
+        let revised = plot
+            .publication(1, palette_id, true, &palette)
+            .unwrap()
+            .unwrap();
+        assert!(
+            Arc::ptr_eq(&initial, &revised),
+            "missing values must compare as unchanged"
         );
-        for (count, changed_column, changed_tiles) in [(100, 95, vec![2]), (70, 22, vec![0, 1])] {
-            let mut data = frame(vec![Some(0.25); count]);
+        data.left_peaks[1] = Some(0.0);
+        data.revision += 1;
+        plot.columns(1, 200, &data);
+        let silence = plot
+            .publication(1, palette_id, true, &palette)
+            .unwrap()
+            .unwrap();
+        assert!(
+            !Arc::ptr_eq(&initial, &silence),
+            "known silence differs from missing"
+        );
+        plot.columns(1, 1, &data);
+        let pooled = plot
+            .publication(1, palette_id, true, &palette)
+            .unwrap()
+            .unwrap();
+        assert!(!Arc::ptr_eq(&silence, &pooled));
+        plot.clear_cache();
+        plot.columns(1, 1, &data);
+        let switched = plot
+            .publication(1, palette_id, true, &palette)
+            .unwrap()
+            .unwrap();
+        assert!(
+            !Arc::ptr_eq(&pooled, &switched),
+            "source/full switches invalidate"
+        );
+    }
+
+    #[test]
+    fn unknown_silence_and_partially_known_transitions_control_publication() {
+        let palette_id = crate::config::VisualizationPalette::Deadbeef;
+        let palette = super::super::visuals::active_palette_lut(palette_id);
+        for cache_enabled in [true, false] {
             let mut plot = WaveformPlot::default();
-            let key = |data: &WaveformFrame| LayerKey {
-                source: Rc::new(Source::from_frame(data).unwrap()),
-                width: 101,
-                height: 40,
-                rms_gain: 1.0_f32.to_bits(),
-                peak_gain: 1.0_f32.to_bits(),
-                peak_gamma: 1.0_f32.to_bits(),
-                palette: crate::config::VisualizationPalette::Deadbeef,
+            let mut data = frame(vec![None; 2]);
+            let mapping = WaveformMapping {
+                rms_gain: 1.0,
+                peak_gain: 1.0,
+                peak_gamma: 1.0,
             };
-            plot.columns(1, count, &data);
-            plot.update_tiles(1, key(&data), true, &palette).unwrap();
-            let before: Vec<_> = plot.columns[&1]
-                .tiles
-                .iter()
-                .map(|tile| Arc::clone(&tile.frame))
-                .collect();
-            data.peaks[changed_column] = Some(0.75);
-            data.rms[changed_column] = Some(0.75);
-            data.left_peaks[changed_column] = Some(0.75);
-            data.left_rms[changed_column] = Some(0.75);
-            data.revision += 1;
-            plot.columns(1, count, &data);
-            plot.update_tiles(1, key(&data), true, &palette).unwrap();
-            for (index, image) in before.iter().enumerate() {
-                assert_eq!(
-                    Arc::ptr_eq(image, &plot.columns[&1].tiles[index].frame),
-                    !changed_tiles.contains(&index)
-                );
+            for known in [None, Some(0.0), None, Some(0.5), None] {
+                data.right_peaks[1] = known;
+                data.revision += 1;
+                plot.columns_with_cache(1, 2, &data, cache_enabled, mapping);
+                let published = plot
+                    .publication(1, palette_id, cache_enabled, &palette)
+                    .unwrap();
+                assert_eq!(published.is_some(), known.is_some());
+                if let Some(published) = published {
+                    let gpui::GpuContent::Waveform { columns, .. } = published.content() else {
+                        panic!("expected waveform");
+                    };
+                    assert!(columns[0].levels.iter().all(|level| level.is_nan()));
+                    assert!(columns[1].levels[..3].iter().all(|level| level.is_nan()));
+                    assert_eq!(columns[1].levels[3], known.unwrap());
+                    let repeated = plot
+                        .publication(1, palette_id, cache_enabled, &palette)
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(Arc::ptr_eq(&published, &repeated), cache_enabled);
+                } else {
+                    assert!(plot.columns[&1].publication.is_none());
+                    assert!(
+                        plot.publication(1, palette_id, cache_enabled, &palette)
+                            .unwrap()
+                            .is_none()
+                    );
+                }
             }
-            let before: Vec<_> = plot.columns[&1]
-                .tiles
-                .iter()
-                .map(|tile| Arc::clone(&tile.frame))
-                .collect();
-            plot.update_tiles(1, key(&data), true, &palette).unwrap();
-            assert!(
-                before
-                    .iter()
-                    .zip(&plot.columns[&1].tiles)
-                    .all(|(image, tile)| Arc::ptr_eq(image, &tile.frame))
-            );
         }
+    }
+
+    #[test]
+    fn numerical_publication_preserves_asymmetric_stereo_and_mono_duplication() {
+        let palette_id = crate::config::VisualizationPalette::Deadbeef;
+        let palette = super::super::visuals::active_palette_lut(palette_id);
+        let mut data = frame(vec![Some(0.25), None]);
+        data.left_rms[0] = Some(0.2);
+        data.left_peaks[0] = Some(0.4);
+        data.right_rms[0] = Some(0.6);
+        data.right_peaks[0] = Some(0.8);
+        let mut plot = WaveformPlot::default();
+        plot.columns(1, 2, &data);
+        let stereo = plot
+            .publication(1, palette_id, true, &palette)
+            .unwrap()
+            .unwrap();
+        let gpui::GpuContent::Waveform { columns, params } = stereo.content() else {
+            panic!("expected waveform");
+        };
+        assert_eq!(
+            columns[0].levels,
+            [
+                waveform_level(0.2, 1.0, 0.86),
+                0.4,
+                waveform_level(0.6, 1.0, 0.86),
+                0.8,
+            ]
+        );
+        assert!(columns[1].levels.iter().all(|value| value.is_nan()));
+        assert_eq!(params.palette_start, 0.06);
+
+        data.left_rms.clear();
+        data.left_peaks.clear();
+        data.left_rms_counts.clear();
+        data.right_rms.clear();
+        data.right_peaks.clear();
+        data.right_rms_counts.clear();
+        data.revision += 1;
+        plot.columns(1, 2, &data);
+        let mono = plot
+            .publication(1, palette_id, true, &palette)
+            .unwrap()
+            .unwrap();
+        let gpui::GpuContent::Waveform { columns, .. } = mono.content() else {
+            panic!("expected waveform");
+        };
+        assert_eq!(
+            columns[0].levels,
+            [
+                waveform_level(0.25, 1.0, 0.86),
+                0.25,
+                waveform_level(0.25, 1.0, 0.86),
+                0.25,
+            ]
+        );
     }
 
     use super::*;
@@ -1552,12 +1431,34 @@ mod tests {
     }
 
     #[test]
+    fn pooled_rms_weights_boundary_counts_and_matching_channel_fallbacks() {
+        let mut data = frame(vec![Some(0.0), Some(1.0), None, Some(0.0), Some(1.0)]);
+        data.rms_counts = vec![3, 1, 100, 2, 0];
+        data.left_rms.clear();
+        // A missing channel RMS uses the mono values and their counts together.
+        data.left_rms_counts = vec![999; 5];
+        data.right_rms = vec![Some(1.0), Some(0.0), None, Some(0.0), Some(1.0)];
+        data.right_rms_counts = vec![1, 3, 100, 2, 0];
+        let mut plot = WaveformPlot::default();
+        let columns = plot.columns(1, 2, &data);
+        let expected = waveform_level(0.5, 1.0, 0.86);
+        assert_eq!(columns[0].left_rms, Some(expected));
+        assert_eq!(columns[0].right_rms, Some(expected));
+        // Unknown and zero-count bins contribute no weight; known silence does.
+        assert_eq!(columns[1].left_rms, Some(0.0));
+        assert_eq!(columns[1].right_rms, Some(0.0));
+        assert!(columns.iter().all(|column| column.left_peak == Some(1.0)));
+        assert!(columns.iter().all(|column| column.right_peak == Some(1.0)));
+    }
+
+    #[test]
     fn low_amplitude_rms_stays_within_peak_after_display_mapping() {
         for scale in [1.0, 0.5] {
             for (rms, peak) in [(0.1, 0.15), (0.01, 0.02), (0.00025, 0.0005), (0.2, 0.2)] {
                 let (rms_height, peak_height) = pooled_side(
                     &[Some(peak)],
                     &[Some(rms)],
+                    &[1],
                     0,
                     1,
                     scale,
@@ -1794,7 +1695,6 @@ mod tests {
         let data = frame(vec![Some(0.25), None]);
         let mut waveform = preview(data);
         waveform.revision = Some(1);
-        let source = Rc::clone(waveform.source.as_ref().unwrap());
         let (generation, cancelled) = waveform.start_full(DecoderHint::Auto);
         let palette = super::super::visuals::active_palette_lut(
             crate::config::VisualizationPalette::Deadbeef,
@@ -1802,22 +1702,16 @@ mod tests {
         let cached = {
             let mut plot = waveform.plot.borrow_mut();
             plot.columns(1, 100, &waveform.shared.read());
-            plot.update_tiles(
-                1,
-                LayerKey {
-                    source: Rc::clone(&source),
-                    width: 101,
-                    height: 40,
-                    rms_gain: 1.0_f32.to_bits(),
-                    peak_gain: 1.0_f32.to_bits(),
-                    peak_gamma: 1.0_f32.to_bits(),
-                    palette: crate::config::VisualizationPalette::Deadbeef,
-                },
-                true,
-                &palette,
-            )
-            .unwrap();
-            Arc::downgrade(&plot.columns[&1].tiles[0].frame)
+            let frame = plot
+                .publication(
+                    1,
+                    crate::config::VisualizationPalette::Deadbeef,
+                    true,
+                    &palette,
+                )
+                .unwrap()
+                .unwrap();
+            Arc::downgrade(&frame)
         };
         waveform.dragging = true;
         {
@@ -1841,7 +1735,6 @@ mod tests {
         {
             let plot = waveform.plot.borrow();
             assert_eq!(plot.columns.capacity(), 0);
-            assert_eq!(plot.paint_tiles.capacity(), 0);
             assert!(cached.upgrade().is_none());
         }
         waveform.set_enabled(true);
@@ -1893,22 +1786,16 @@ mod tests {
             assert_eq!(full.peaks, vec![Some(0.5), Some(0.75)]);
             let mut plot = waveform.plot.borrow_mut();
             plot.columns(1, 100, full);
-            plot.update_tiles(
-                1,
-                LayerKey {
-                    source: Rc::clone(&waveform.full.as_ref().unwrap().source),
-                    width: 100,
-                    height: 40,
-                    rms_gain: 1.0_f32.to_bits(),
-                    peak_gain: 1.0_f32.to_bits(),
-                    peak_gamma: 1.0_f32.to_bits(),
-                    palette: crate::config::VisualizationPalette::Deadbeef,
-                },
-                true,
-                &palette,
-            )
-            .unwrap();
-            Arc::downgrade(&plot.columns[&1].tiles[0].frame)
+            let frame = plot
+                .publication(
+                    1,
+                    crate::config::VisualizationPalette::Deadbeef,
+                    true,
+                    &palette,
+                )
+                .unwrap()
+                .unwrap();
+            Arc::downgrade(&frame)
         };
         {
             let mut shared = waveform.shared.write();
@@ -1931,8 +1818,7 @@ mod tests {
         {
             let plot = waveform.plot.borrow();
             assert!(plot.columns[&1].values.is_empty());
-            assert!(plot.columns[&1].tiles.is_empty());
-            assert!(plot.paint_tiles.is_empty());
+            assert!(plot.columns[&1].publication.is_none());
             assert!(cached.upgrade().is_none());
         }
         assert!(!waveform.sync_state(Some(&track)));

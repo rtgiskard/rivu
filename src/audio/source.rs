@@ -2307,7 +2307,7 @@ mod tests {
         assert!(waveform.complete);
         assert_eq!(waveform.duration, Some(actual_duration));
         assert!(waveform.span_seconds >= actual_duration);
-        assert!(waveform.peaks.len() <= 1600);
+        assert!(waveform.peaks.len() <= 1024);
         source
             .restrict(super::super::PlaybackRange {
                 start_seconds: 3.0,
@@ -2677,7 +2677,7 @@ mod tests {
                 end_seconds: end.map(|end| end as f64 / 75.0),
             });
             let samples = &reference[start * 588..end.map_or(reference.len(), |end| end * 588)];
-            let count = 1600.min(samples.len());
+            let count = 1024.min(samples.len());
             let mut expected = vec![0.0_f32; count];
             for (index, sample) in samples.iter().enumerate() {
                 let bin = index * count / samples.len();
@@ -2917,8 +2917,10 @@ mod tests {
             .unwrap();
         assert!(frame.complete);
         assert_eq!(frame.duration, Some(2.0));
-        assert!(frame.span_seconds >= 2.0 && frame.span_seconds < 2.04);
-        assert!(frame.peaks.len() <= 1600);
+        let bin_seconds =
+            frame.bin_frames as f64 / frame.bin_count as f64 / f64::from(source.info.sample_rate);
+        assert!(frame.span_seconds >= 2.0 && frame.span_seconds < 2.0 + bin_seconds);
+        assert!(frame.peaks.len() <= 1024);
         assert!(frame.peaks.iter().all(Option::is_some));
         assert!(frame.peaks.iter().flatten().any(|peak| *peak >= 0.49));
     }
@@ -2963,7 +2965,9 @@ mod tests {
                 assert!(frame.complete);
                 assert!((frame.duration.unwrap() - expected_duration).abs() < 1e-9);
                 assert!(frame.span_seconds >= expected_duration);
-                assert!(frame.span_seconds - expected_duration < 0.04);
+                let bin_seconds =
+                    frame.bin_frames as f64 / frame.bin_count as f64 / f64::from(rate);
+                assert!(frame.span_seconds - expected_duration < bin_seconds);
                 assert!(frame.peaks.iter().all(Option::is_some));
                 let revision = frame.revision;
                 coverage.finish(&mut frame);
@@ -3035,10 +3039,12 @@ mod tests {
         coverage.finish(&mut frame);
         assert!(!frame.complete);
         assert_eq!(frame.duration, Some(2.0));
-        assert!(frame.span_seconds >= 2.0 && frame.span_seconds < 2.04);
+        let bin_seconds = frame.bin_frames as f64 / frame.bin_count as f64 / f64::from(rate);
+        assert!(frame.span_seconds >= 2.0 && frame.span_seconds < 2.0 + bin_seconds);
         assert_eq!(frame.peaks[0], first_peak);
-        assert!(frame.peaks[1..26].iter().all(Option::is_none));
-        assert!(frame.peaks[26].is_some());
+        let resumed_bin = (1.0 / bin_seconds) as usize;
+        assert!(frame.peaks[1..resumed_bin].iter().all(Option::is_none));
+        assert!(frame.peaks[resumed_bin].is_some());
     }
 
     #[test]

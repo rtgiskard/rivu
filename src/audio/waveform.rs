@@ -13,7 +13,7 @@ use std::{
     },
 };
 
-const MAX_BINS: usize = 1600;
+const MAX_BINS: usize = 1024;
 const INITIAL_UNKNOWN_SPAN: f64 = 60.0;
 
 /// Coverage of one decoder traversal. Cached bins do not prove that seek-skipped
@@ -912,7 +912,7 @@ mod tests {
         resumed.push(1.0, &[0.0; 160], 8_000, 1);
         resumed.publish(&mut shared);
         assert!(shared.revision > resumed_revision);
-        assert!(shared.peaks[..800].iter().all(Option::is_none));
+        assert!(shared.peaks[..MAX_BINS / 2].iter().all(Option::is_none));
         assert!(shared.peaks.iter().flatten().all(|peak| *peak == 0.0));
         assert_eq!(shared.rms_counts.iter().sum::<u64>(), 160);
         assert!(shared.retained_capacity_bytes() <= retained);
@@ -924,13 +924,14 @@ mod tests {
 
     #[test]
     fn cached_seek_reopens_preserve_unique_counts_and_accept_new_pcm() {
-        let mut shared = frame(Some(1.0), 3200);
+        let rate = (MAX_BINS * 2) as u32;
+        let mut shared = frame(Some(1.0), rate);
         let mut accumulator = WaveformAccumulator::new(shared.clone());
-        accumulator.push(0.0, &[1.0], 3200, 1);
+        accumulator.push(0.0, &[1.0], rate, 1);
         accumulator.publish(&mut shared);
         let revision = shared.revision;
         // Same RMS/peak, but newly represented PCM must still be published.
-        accumulator.push(1.0 / 3200.0, &[1.0], 3200, 1);
+        accumulator.push(1.0 / f64::from(rate), &[1.0], rate, 1);
         accumulator.publish(&mut shared);
         assert!(shared.revision > revision);
         assert_eq!(shared.rms_counts[0], 2);
@@ -940,17 +941,17 @@ mod tests {
                 None,
                 DecoderHint::Auto,
                 Some(1.0),
-                3200,
+                rate,
             );
             let mut reopened = WaveformAccumulator::new(shared.clone());
             let revision = shared.revision;
-            reopened.push(0.0, &[1.0, 1.0], 3200, 1);
+            reopened.push(0.0, &[1.0, 1.0], rate, 1);
             reopened.publish(&mut shared);
             assert_eq!(shared.revision, revision);
             assert_eq!(shared.rms_counts[0], 2);
         }
         let mut reopened = WaveformAccumulator::new(shared.clone());
-        reopened.push(2.0 / 3200.0, &[0.5, 0.0], 3200, 1);
+        reopened.push(2.0 / f64::from(rate), &[0.5, 0.0], rate, 1);
         reopened.publish(&mut shared);
         assert_eq!(shared.rms_counts[..2], [2, 2]);
         assert_eq!(shared.peaks[..2], [Some(1.0), Some(0.5)]);
@@ -1010,14 +1011,15 @@ mod tests {
 
     #[test]
     fn seeking_back_does_not_reweight_the_original_two_sample_bin() {
-        let mut frame = frame(Some(1.0), 3200);
-        frame.push(0.0, &[1.0], 3200, 1);
-        frame.push(1.0 / 3200.0, &[0.0], 3200, 1);
+        let rate = (MAX_BINS * 2) as u32;
+        let mut frame = frame(Some(1.0), rate);
+        frame.push(0.0, &[1.0], rate, 1);
+        frame.push(1.0 / f64::from(rate), &[0.0], rate, 1);
         let expected = (0.5_f32).sqrt();
         let revision = frame.revision;
         for _ in 0..100 {
-            frame.push(0.0, &[1.0], 3200, 1);
-            frame.push(1.0 / 3200.0, &[0.0], 3200, 1);
+            frame.push(0.0, &[1.0], rate, 1);
+            frame.push(1.0 / f64::from(rate), &[0.0], rate, 1);
             assert_eq!(frame.rms[0], Some(expected));
             assert_eq!(frame.rms_counts[0], 2);
             assert_eq!(frame.left_rms[0], Some(expected));
@@ -1030,7 +1032,7 @@ mod tests {
 
     #[test]
     fn overlapping_packets_prefixes_and_longer_same_timestamp_packets_are_unique() {
-        let rate = 12800;
+        let rate = (MAX_BINS * 8) as u32;
         let samples: Vec<f32> = (0..16)
             .flat_map(|index| [index as f32 / 16.0, -(index as f32) / 32.0])
             .collect();
@@ -1079,7 +1081,7 @@ mod tests {
 
     #[test]
     fn middle_bin_cache_recovers_from_small_packets_across_reopens() {
-        let rate = 12800;
+        let rate = (MAX_BINS * 8) as u32;
         let samples: Vec<f32> = (0..rate).map(|index| (index % 8) as f32 / 8.0).collect();
         let mut shared = frame(Some(1.0), rate);
         let mut accumulator = WaveformAccumulator::new(shared.clone());
@@ -1188,14 +1190,15 @@ mod tests {
 
     #[test]
     fn a_continuous_complete_scan_has_exact_bin_counts_and_rms() {
-        let samples: Vec<f32> = (0..3200).map(|index| (index % 2) as f32).collect();
-        let mut actual = frame(Some(1.0), 3200);
+        let rate = (MAX_BINS * 2) as u32;
+        let samples: Vec<f32> = (0..rate).map(|index| (index % 2) as f32).collect();
+        let mut actual = frame(Some(1.0), rate);
         let mut coverage = WaveformCoverage::new(0.0, 0.0);
         for start in (0..samples.len()).step_by(7) {
             let end = (start + 7).min(samples.len());
-            let timestamp = start as f64 / 3200.0;
-            actual.push(timestamp, &samples[start..end], 3200, 1);
-            coverage.record(timestamp, end - start, 3200);
+            let timestamp = start as f64 / f64::from(rate);
+            actual.push(timestamp, &samples[start..end], rate, 1);
+            coverage.record(timestamp, end - start, rate);
         }
         coverage.finish(&mut actual);
         assert!(actual.complete);
@@ -1215,8 +1218,10 @@ mod tests {
         coverage.finish(&mut frame);
         assert!(!frame.complete);
         assert_eq!(frame.duration, Some(1.01));
-        assert!(frame.span_seconds >= 1.01 && frame.span_seconds < 1.05);
-        assert!(frame.peaks[1..26].iter().all(Option::is_none));
+        let bin_seconds = frame.bin_frames as f64 / frame.bin_count as f64 / 100.0;
+        assert!(frame.span_seconds >= 1.01 && frame.span_seconds < 1.01 + bin_seconds);
+        let resumed_bin = (1.0 / bin_seconds) as usize;
+        assert!(frame.peaks[1..resumed_bin].iter().all(Option::is_none));
     }
 
     #[test]
@@ -1357,13 +1362,19 @@ mod tests {
         let mut full = frame(None, 100);
         full.push(0.0, &[0.5], 100, 1);
         full.push(120.0, &[2.0], 100, 1);
+        let peak_bin = full
+            .peaks
+            .iter()
+            .position(|peak| *peak == Some(2.0))
+            .unwrap();
+        let bin_seconds = full.span_seconds / full.peaks.len() as f64;
         full.finish_scan(120.01);
         assert!(full.complete);
         assert_eq!(full.duration, Some(120.01));
-        assert_eq!(full.peaks.len(), 801);
+        assert_eq!(full.peaks.len(), peak_bin + 1);
         assert_eq!(full.peaks[0], Some(0.5));
-        assert_eq!(full.peaks[800], Some(2.0));
-        assert!((full.span_seconds - 120.15).abs() < 1e-9);
+        assert_eq!(full.peaks[peak_bin], Some(2.0));
+        assert!(full.span_seconds >= 120.01 && full.span_seconds < 120.01 + bin_seconds);
     }
 
     #[test]
@@ -1612,11 +1623,15 @@ mod tests {
         assert_eq!(frame.span_seconds, 480.0);
         assert_eq!(frame.peaks.len(), MAX_BINS);
         assert_eq!(frame.peaks[0], Some(2.0));
-        assert_eq!(frame.peaks[196], Some(0.5));
-        assert_eq!(frame.peaks[800], Some(0.75));
-        assert!(frame.peaks[400..800].iter().all(Option::is_none));
+        assert_eq!(frame.peaks[MAX_BINS * 59 / 480], Some(0.5));
+        assert_eq!(frame.peaks[MAX_BINS / 2], Some(0.75));
+        assert!(
+            frame.peaks[MAX_BINS / 4..MAX_BINS / 2]
+                .iter()
+                .all(Option::is_none)
+        );
         frame.push(120.0, &[0.25], 100, 1);
-        assert_eq!(frame.peaks[400], Some(0.25));
+        assert_eq!(frame.peaks[MAX_BINS / 4], Some(0.25));
         assert_eq!(frame.peaks[0], Some(2.0));
         assert_eq!(frame.max_peak, 2.0);
     }
@@ -1669,7 +1684,8 @@ mod tests {
 
     #[test]
     fn packets_crossing_bins_use_decoded_sample_timestamps() {
-        let mut frame = frame(Some(2000.0 / 100.0), 100);
+        let total_frames = MAX_BINS * 5 / 4;
+        let mut frame = frame(Some(total_frames as f64 / 100.0), 100);
         frame.push(0.01, &[0.25, 0.5, 0.75, 1.0], 100, 1);
         assert_eq!(
             frame.peaks[..4],

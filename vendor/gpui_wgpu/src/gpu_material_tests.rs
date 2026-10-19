@@ -11,6 +11,7 @@ const BLACK: [u8; 4] = [0, 0, 0, 255];
 fn limits() -> GpuLimits {
     GpuLimits {
         max_rectangles: 1024,
+        max_waveform_columns: 1600,
         max_palette_colors: 16,
         max_field_width: 1024,
         max_field_height: 1024,
@@ -481,6 +482,7 @@ fn segment_admission_bounds_indices_and_preserves_publication_on_failure() {
     use gpui::{GpuSchema, GpuSegment, GpuStrokeLayer};
     const LIMITS: GpuLimits = GpuLimits {
         max_rectangles: 2,
+        max_waveform_columns: 0,
         max_segments: 2,
         max_stroke_layers: 2,
         max_field_width: 2,
@@ -1894,5 +1896,294 @@ fn gpu_segment_batches_use_visible_overlap_and_disjoint_scissors() -> anyhow::Re
             pixel(&actual, 50, 24, [0, 128, 0, 255]);
         }
     }
+    Ok(())
+}
+
+// Independent reference for the former logical-pixel rectangle recipe. This is
+// test-only: production publishes four numerical samples, never these rectangles.
+fn waveform_reference(
+    columns: &[gpui::GpuWaveformColumn],
+    palette: Arc<GpuPalette>,
+    palette_start: f32,
+    width: u32,
+    height: u32,
+) -> anyhow::Result<Arc<GpuFrame>> {
+    let mut rectangles = Vec::new();
+    let center = height as f32 * 0.5;
+    let pairs = palette.colors().len() / 2;
+    for (index, column) in columns.iter().enumerate() {
+        let left = index as u32 * width / columns.len() as u32;
+        let right = (index as u32 + 1) * width / columns.len() as u32;
+        if left == right {
+            continue;
+        }
+        for component in [0, 2, 1, 3] {
+            let level = column.levels[component];
+            if level.is_nan() {
+                continue;
+            }
+            let upper = component < 2;
+            let peak = component % 2 == 1;
+            let fraction =
+                palette_start + level.powf(if peak { 1.35 } else { 1.2 }) * (1.0 - palette_start);
+            let pair = (fraction * (pairs - 1) as f32).round() as usize;
+            let low = (pair * 2) as f32 / (palette.colors().len() - 1) as f32;
+            let high = (pair * 2 + 1) as f32 / (palette.colors().len() - 1) as f32;
+            let distance = (center * level).max(1.0);
+            let extent = distance.min(center);
+            let (top, extent, palette_range) = if peak {
+                let y = if upper {
+                    center - distance
+                } else {
+                    center + distance
+                };
+                ((y.round() as u32).min(height - 1) as f32, 1.0, [high, high])
+            } else {
+                (
+                    if upper { center - extent } else { center },
+                    extent,
+                    if upper { [low, high] } else { [high, low] },
+                )
+            };
+            rectangles.push(GpuRectangle {
+                bounds: [
+                    left as f32 / width as f32,
+                    top / height as f32,
+                    (right - left) as f32 / width as f32,
+                    extent / height as f32,
+                ],
+                palette_range,
+            });
+        }
+    }
+    let max_palette_colors = palette.colors().len();
+    GpuFrame::rectangles(
+        &rectangles,
+        palette,
+        GpuRectangleParams::default(),
+        GpuLimits {
+            max_rectangles: rectangles.len(),
+            max_palette_colors,
+            ..Default::default()
+        },
+    )
+}
+
+#[test]
+fn waveform_geometry_palette_and_source_over_match_logical_pixel_recipe() -> anyhow::Result<()> {
+    use gpui::{GpuWaveformColumn, GpuWaveformParams};
+    let mut renderer = WgpuHeadlessRenderer::new()?;
+    let columns = [
+        GpuWaveformColumn {
+            levels: [f32::NAN; 4],
+        },
+        GpuWaveformColumn { levels: [0.0; 4] },
+        GpuWaveformColumn {
+            levels: [0.37, 0.82, 0.61, 1.0],
+        },
+        GpuWaveformColumn {
+            levels: [1.0, 1.0, 0.8, 0.8],
+        },
+        GpuWaveformColumn {
+            levels: [f32::NAN, 0.999, 0.01, f32::NAN],
+        },
+    ];
+    let colors: Vec<_> = (0..1024)
+        .flat_map(|pair| {
+            let fraction = pair as f32 / 1023.0;
+            [
+                [0.08, 0.03, 0.1, 0.35],
+                [fraction, 1.0 - fraction, 0.7, 0.75],
+            ]
+        })
+        .collect();
+    let palette = GpuPalette::new(&colors, colors.len())?;
+    for palette_start in [0.0, 0.06] {
+        let numerical = GpuFrame::waveform(
+            columns.to_vec(),
+            palette.clone(),
+            GpuWaveformParams { palette_start },
+            GpuLimits {
+                max_waveform_columns: columns.len(),
+                max_palette_colors: colors.len(),
+                ..Default::default()
+            },
+        )?;
+        for (width, height, scale) in [
+            (17.0_f32, 13.0_f32, 1.0_f32),
+            (23.0, 18.25, 1.25),
+            (3.0, 9.0, 2.0),
+            (11.0, 1.0, 1.0),
+        ] {
+            let reference = waveform_reference(
+                &columns,
+                palette.clone(),
+                palette_start,
+                width as u32,
+                height.ceil() as u32,
+            )?;
+            let placement = bounds(3.25, 2.5, width * scale, height * scale);
+            let render = |renderer: &mut WgpuHeadlessRenderer, frame| -> anyhow::Result<_> {
+                let mut scene = Scene::default();
+                scene.insert_primitive(quad(bounds(0.0, 0.0, 64.0, 64.0), gpui::blue()));
+                let mut waveform = draw(GpuSource::Fixed(frame), placement);
+                waveform.scale_factor = scale;
+                waveform.opacity = 0.65;
+                waveform.content_mask.bounds = bounds(4.0, 3.0, 60.0, 60.0);
+                scene.insert_primitive(waveform);
+                scene.finish();
+                renderer.render_scene_to_image(&scene, size(64, 64))
+            };
+            let actual = render(&mut renderer, numerical.clone())?;
+            let expected = render(&mut renderer, reference)?;
+            for (index, (actual, expected)) in actual.pixels().zip(expected.pixels()).enumerate() {
+                assert!(
+                    actual
+                        .0
+                        .iter()
+                        .zip(expected.0)
+                        .all(|(a, e)| a.abs_diff(e) <= 3),
+                    "waveform mismatch at {index}: {actual:?} != {expected:?}; {width}x{height}@{scale}, palette {palette_start}"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn waveform_coarse_palette_interpolates_both_pair_endpoints() -> anyhow::Result<()> {
+    let mut renderer = WgpuHeadlessRenderer::new()?;
+    // The compressed amplitude is halfway between two palette pairs. Both
+    // endpoints must blend across pairs before the spatial gradient is applied.
+    let level = 0.5_f32.powf(1.0 / 1.2);
+    let numerical = GpuFrame::waveform(
+        vec![gpui::GpuWaveformColumn {
+            levels: [level, f32::NAN, f32::NAN, f32::NAN],
+        }],
+        GpuPalette::new(
+            &[
+                [1.0, 0.0, 0.0, 1.0],
+                [0.0, 1.0, 0.0, 1.0],
+                [0.0, 0.0, 1.0, 1.0],
+                [1.0, 1.0, 0.0, 1.0],
+            ],
+            4,
+        )?,
+        gpui::GpuWaveformParams::default(),
+        limits(),
+    )?;
+    let reference = GpuFrame::rectangles(
+        &[GpuRectangle {
+            bounds: [0.0, (1.0 - level) * 0.5, 1.0, level * 0.5],
+            palette_range: [0.0, 1.0],
+        }],
+        GpuPalette::new(&[[0.5, 0.0, 0.5, 1.0], [0.5, 1.0, 0.0, 1.0]], 2)?,
+        GpuRectangleParams::default(),
+        limits(),
+    )?;
+    let render = |renderer: &mut WgpuHeadlessRenderer, frame| -> anyhow::Result<_> {
+        let mut scene = Scene::default();
+        scene.insert_primitive(draw(GpuSource::Fixed(frame), bounds(0.0, 0.0, 8.0, 16.0)));
+        scene.finish();
+        renderer.render_scene_to_image(&scene, size(8, 16))
+    };
+    let actual = render(&mut renderer, numerical)?;
+    let expected = render(&mut renderer, reference)?;
+    for (index, (actual, expected)) in actual.pixels().zip(expected.pixels()).enumerate() {
+        assert!(
+            actual
+                .0
+                .iter()
+                .zip(expected.0)
+                .all(|(a, e)| a.abs_diff(e) <= 3),
+            "continuous waveform palette mismatch at {index}: {actual:?} != {expected:?}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn waveform_peaks_keep_one_logical_pixel_after_resize_and_scale() -> anyhow::Result<()> {
+    let mut renderer = WgpuHeadlessRenderer::new()?;
+    let frame = GpuFrame::waveform(
+        vec![gpui::GpuWaveformColumn {
+            levels: [f32::NAN, 1.0, f32::NAN, 1.0],
+        }],
+        GpuPalette::new(&[[0.0, 0.0, 0.0, 1.0], [1.0, 0.0, 0.0, 1.0]], 2)?,
+        gpui::GpuWaveformParams::default(),
+        limits(),
+    )?;
+    for (height, scale) in [(8, 1), (12, 2), (20, 3)] {
+        let mut scene = Scene::default();
+        let mut placement = draw(
+            GpuSource::Fixed(frame.clone()),
+            bounds(0.0, 0.0, 6.0, (height * scale) as f32),
+        );
+        placement.scale_factor = scale as f32;
+        scene.insert_primitive(placement);
+        scene.finish();
+        let actual = renderer.render_scene_to_image(&scene, size(6, height * scale))?;
+        for y in 0..height * scale {
+            pixel(
+                &actual,
+                2,
+                y as u32,
+                if y < scale || y >= (height - 1) * scale {
+                    RED
+                } else {
+                    BLACK
+                },
+            );
+        }
+    }
+    assert_eq!(
+        renderer.core.resources.materials.stats().3,
+        1,
+        "resize/scale must reuse numerical upload"
+    );
+    Ok(())
+}
+
+#[test]
+fn waveform_cached_scene_resolves_latest_snapshot_and_clear_without_repaint() -> anyhow::Result<()>
+{
+    let mut renderer = WgpuHeadlessRenderer::new()?;
+    let palette = GpuPalette::new(&[[1.0, 0.0, 0.0, 1.0]; 2], 2)?;
+    let initial = GpuFrame::waveform(
+        vec![gpui::GpuWaveformColumn {
+            levels: [f32::NAN; 4],
+        }],
+        palette.clone(),
+        gpui::GpuWaveformParams::default(),
+        limits(),
+    )?;
+    let state = GpuState::new(initial, limits())?;
+    let mut source = Scene::default();
+    source.insert_primitive(draw(
+        GpuSource::Dynamic(state.clone()),
+        bounds(0.0, 0.0, 8.0, 8.0),
+    ));
+    source.finish();
+    let mut cached = Scene::default();
+    cached.replay(0..source.len(), &source);
+    cached.finish();
+    let missing = renderer.render_scene_to_image(&cached, size(8, 8))?;
+    pixel(&missing, 3, 3, BLACK);
+    state.publish(GpuFrame::waveform(
+        vec![gpui::GpuWaveformColumn {
+            levels: [0.0, f32::NAN, 0.0, f32::NAN],
+        }],
+        palette,
+        gpui::GpuWaveformParams::default(),
+        limits(),
+    )?)?;
+    let silence = renderer.render_scene_to_image(&cached, size(8, 8))?;
+    pixel(&silence, 3, 3, RED);
+    pixel(&silence, 3, 4, RED);
+    pixel(&silence, 3, 2, BLACK);
+    state.clear();
+    let cleared = renderer.render_scene_to_image(&cached, size(8, 8))?;
+    pixel(&cleared, 3, 3, BLACK);
     Ok(())
 }

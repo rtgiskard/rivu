@@ -125,28 +125,26 @@ impl PaletteLut {
     pub(super) fn waveform_gpu_palette(&self) -> Result<Arc<GpuPalette>, String> {
         self.waveform_gpu_palette
             .get_or_init(|| {
-                let floor = self.lookup_mapped_rgb(0.0);
-                let neutral = floor.iter().map(|&v| u32::from(v)).sum::<u32>() / 3;
-                let low = floor.map(|v| ((u32::from(v) + 3 * neutral) / 6) as u8);
-                let colors: Vec<_> = self
-                    .colors
-                    .iter()
-                    .flat_map(|&high| [low, high])
-                    .map(|[r, g, b]| [r, g, b, 255].map(|v| f32::from(v) / 255.0))
+                let stops = palette_stops(self.palette);
+                let floor = gradient_channels(visible_palette_fraction(self.palette, 0.0), stops);
+                let neutral = floor.iter().sum::<f32>() / 3.0;
+                let low = floor.map(|value| (value + 3.0 * neutral) / (6.0 * 255.0));
+                let colors: Vec<_> = (0..PALETTE_LUT_SIZE)
+                    .flat_map(|index| {
+                        let fraction = index as f32 / (PALETTE_LUT_SIZE - 1) as f32;
+                        let high = gradient_channels(fraction, stops).map(|value| value / 255.0);
+                        [low, high].map(|[r, g, b]| [r, g, b, 1.0])
+                    })
                     .collect();
                 GpuPalette::new(&colors, PALETTE_LUT_SIZE * 2).map_err(|error| error.to_string())
             })
             .clone()
     }
 
-    pub(super) fn waveform_gpu_range(&self, fraction: f32) -> [f32; 2] {
-        let mapped = visible_palette_fraction(self.palette, fraction);
-        let index = (mapped.clamp(0.0, 1.0) * (PALETTE_LUT_SIZE - 1) as f32).round() as usize;
-        let denominator = (PALETTE_LUT_SIZE * 2 - 1) as f32;
-        [
-            (index * 2) as f32 / denominator,
-            (index * 2 + 1) as f32 / denominator,
-        ]
+    pub(super) fn waveform_gpu_params(&self) -> gpui::GpuWaveformParams {
+        gpui::GpuWaveformParams {
+            palette_start: visible_palette_fraction(self.palette, 0.0),
+        }
     }
 
     pub(super) fn lookup_rgb(&self, fraction: f32) -> [u8; 3] {
@@ -2088,6 +2086,10 @@ fn frequency_label(frequency: f32) -> SharedString {
 /// continuously inside each authored color-stop interval. The lookup table and
 /// Spectrum's shared GPU palette samples this same authored mapping.
 fn gradient(value: f32, stops: &[(f32, [u8; 3])]) -> [u8; 3] {
+    gradient_channels(value, stops).map(|channel| channel.round() as u8)
+}
+
+fn gradient_channels(value: f32, stops: &[(f32, [u8; 3])]) -> [f32; 3] {
     debug_assert!(stops.len() >= 2);
     let value = value.clamp(0.0, 1.0);
     let index = stops
@@ -2124,7 +2126,7 @@ fn gradient(value: f32, stops: &[(f32, [u8; 3])]) -> [u8; 3] {
             + h10 * span * slope(index, channel)
             + h01 * c1[channel] as f32
             + h11 * span * slope(index + 1, channel);
-        value.round().clamp(0.0, 255.0) as u8
+        value.clamp(0.0, 255.0)
     })
 }
 fn note_label(frequency: f32) -> SharedString {

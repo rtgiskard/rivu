@@ -1,4 +1,4 @@
-//! Bounded, immutable GPU publications for rectangles, scalar fields, paths and segments.
+//! Bounded, immutable GPU publications for rectangles, scalar fields, paths, segments and waveforms.
 //!
 //! These are closed geometry/material schemas, not an arbitrary shader interface.
 //! Publication owns no device resources and does not schedule a window repaint.
@@ -88,6 +88,23 @@ pub struct GpuRectangleParams {
     pub cell_gap: f32,
 }
 
+/// One stereo waveform column, independent of drawing placement and height.
+#[derive(Clone, Copy, Debug)]
+pub struct GpuWaveformColumn {
+    /// Left RMS, left peak, right RMS, right peak. NaN means missing;
+    /// finite samples must be in `0..=1`, and infinities are rejected.
+    pub levels: [f32; 4],
+}
+
+/// Numerical waveform palette mapping, published atomically with its columns.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct GpuWaveformParams {
+    /// Palette fraction at level zero, in `0..=1`, excluding any black floor.
+    /// The shader maps `start + level.powf(1.35) * (1 - start)` continuously
+    /// between adjacent low/high pairs, then blends those two endpoint colors.
+    pub palette_start: f32,
+}
+
 /// Independent butt-capped line in normalized placement coordinates.
 #[derive(Clone, Copy, Debug)]
 pub struct GpuSegment {
@@ -111,6 +128,8 @@ pub struct GpuStrokeLayer {
 pub struct GpuLimits {
     /// Maximum procedural rectangle count.
     pub max_rectangles: usize,
+    /// Maximum stereo waveform column count (four procedural instances each).
+    pub max_waveform_columns: usize,
     /// Maximum independent line count.
     pub max_segments: usize,
     /// Maximum ordered stroke layer count.
@@ -131,6 +150,7 @@ impl Default for GpuLimits {
     fn default() -> Self {
         Self {
             max_rectangles: 0,
+            max_waveform_columns: 0,
             max_segments: 0,
             max_stroke_layers: 0,
             max_field_width: 0,
@@ -187,8 +207,17 @@ impl GpuLimits {
         Ok(())
     }
 
+    fn waveform(self, count: usize) -> Result<()> {
+        ensure!(
+            count <= self.max_waveform_columns && count <= u32::MAX as usize / 4,
+            "GPU waveform column capacity exceeded"
+        );
+        Ok(())
+    }
+
     fn content(self, content: &GpuContent) -> Result<()> {
         match content {
+            GpuContent::Waveform { columns, .. } => self.waveform(columns.len())?,
             GpuContent::Rectangles { rectangles, .. } => ensure!(
                 rectangles.len() <= self.max_rectangles && rectangles.len() <= u32::MAX as usize,
                 "GPU rectangle capacity exceeded"
@@ -223,6 +252,8 @@ pub enum GpuSchema {
     Path,
     /// Independent lines expanded by the GPU, with ordered shared-geometry layers.
     Segments,
+    /// Stereo numerical columns expanded at the current logical placement size.
+    Waveform,
 }
 
 /// Scalar-to-palette coordinate mapping, followed by clamping to `0..=1`.
@@ -293,6 +324,13 @@ impl Default for GpuPathParams {
 /// Immutable payload exposed by a frame. The frame never exposes mutable access.
 #[derive(Debug)]
 pub enum GpuContent {
+    /// Whole-track stereo samples, expanded into RMS fills and one-pixel peaks.
+    Waveform {
+        /// Immutable numerical samples; no position or height is stored.
+        columns: Vec<GpuWaveformColumn>,
+        /// Palette mapping belonging to this publication.
+        params: GpuWaveformParams,
+    },
     /// One endpoint payload reused across ordered stroke layers.
     Segments {
         /// Immutable ordered endpoints and base palette indices.
@@ -370,6 +408,34 @@ fn validate_bounds(bounds: Bounds<ScaledPixels>) -> Result<()> {
 }
 
 impl GpuFrame {
+    /// Validate all numerical samples and capacities before taking ownership of the payload.
+    /// Palettes contain alternating low/high endpoint colors for each level.
+    pub fn waveform(
+        columns: Vec<GpuWaveformColumn>,
+        palette: Arc<GpuPalette>,
+        params: GpuWaveformParams,
+        limits: GpuLimits,
+    ) -> Result<Arc<Self>> {
+        limits.palette(&palette)?;
+        limits.waveform(columns.len())?;
+        ensure!(
+            palette.colors.len() % 2 == 0,
+            "GPU waveform palette requires low/high pairs"
+        );
+        ensure!(
+            params.palette_start.is_finite() && (0.0..=1.0).contains(&params.palette_start),
+            "invalid GPU waveform palette start"
+        );
+        ensure!(
+            columns
+                .iter()
+                .flat_map(|column| column.levels)
+                .all(|level| level.is_nan() || (level.is_finite() && (0.0..=1.0).contains(&level))),
+            "GPU waveform levels must be NaN or finite and in 0..=1"
+        );
+        Self::new(GpuContent::Waveform { columns, params }, palette)
+    }
+
     fn new(content: GpuContent, palette: Arc<GpuPalette>) -> Result<Arc<Self>> {
         Ok(Arc::new(Self {
             id: next_id(&NEXT_FRAME_ID)?,
@@ -587,6 +653,7 @@ impl GpuFrame {
             GpuContent::Field { .. } => GpuSchema::Field,
             GpuContent::Path { .. } => GpuSchema::Path,
             GpuContent::Segments { .. } => GpuSchema::Segments,
+            GpuContent::Waveform { .. } => GpuSchema::Waveform,
         }
     }
 

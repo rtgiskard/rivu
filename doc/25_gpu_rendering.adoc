@@ -5,14 +5,14 @@
 == Status and decision boundaries
 
 Design baseline, 2026-10-18. The fixed-schema rectangle, numerical-field,
-existing-path and independent-segment slices under <<_internal_led_vertical_slice>> are implemented.
+existing-path, independent-segment and numerical-waveform slices under <<_internal_led_vertical_slice>> are implemented.
 Density/Spatial now consume numerical fields; their authoritative behavior and
 ownership are described in link:23_visuals.adoc#_stereo_analysis_styles[Stereo analysis styles].
 Spectrum now consumes rectangle and Path publications; its palette sampling and
 ownership are described in link:23_visuals.adoc#_spectrum[Spectrum rendering].
 Fractal Beams/Flow publish shared segment endpoints with ordered stroke layers.
 Spectrogram publishes numerical column fields at their actual retained time intervals.
-Waveform publishes RMS and Peak rectangle tiles with per-column gradient pairs.
+Waveform publishes numerical stereo RMS/Peak columns with per-column gradient pairs.
 The general `Program` and generated-schema interfaces below remain proposals;
 the agreed safety and platform boundaries remain binding.
 
@@ -506,14 +506,27 @@ entry point must not become a permanent parallel convention.
 The current vendor implementation exposes the deliberately experimental
 `GpuPalette`, `GpuFrame`, schema-stable `GpuState`, `GpuSource` and
 `Window::paint_gpu` for integration work. One recording entry accepts normalized
-rectangle instances, row-major numerical fields, independent line segments or an
-immutable existing tessellated path. Rectangle segmentation and bottom-to-top palette coordinates
+rectangle instances, row-major numerical fields, independent line segments,
+numerical stereo waveform columns or an immutable existing tessellated path.
+Rectangle segmentation and bottom-to-top palette coordinates
 retain their initial behavior. Palette samples are straight-alpha sRGB values;
 their interpolation is in sRGB numerical space. Bounds, clip, scale and inherited
 opacity belong to each scene placement, independently of shared content.
 Density/Spatial, all Spectrum styles, Fractal Beams/Flow, Spectrogram and Waveform
 use this interface. The old rectangle-only publication API and specialized
 textured-path interface are removed.
+
+`GpuFrame::waveform` takes ownership of a vector of four normalized f32 levels per
+column in left RMS, left Peak, right RMS, right Peak order. NaN denotes missing;
+infinities and finite values outside `0..=1` are rejected.
+`GpuWaveformParams::palette_start` selects the visible domain in a paired endpoint
+palette. The lazy waveform pipeline expands four instances per column and selects
+their continuously sampled endpoint colors in the vertex stage; bounds, logical
+height and scale remain placement data.
+Columns use existing publication budgets, weak upload ownership, coherent dynamic
+snapshots, scene replay and completion-aware retirement. Application aggregation
+and cache invalidation are authoritative in
+link:22_cache.adoc#_waveform[Waveform caching].
 
 Segments use butt caps and ordinary source-over blending in the shared MSAA
 intermediate. Each immutable frame's endpoint array is uploaded once and reused
