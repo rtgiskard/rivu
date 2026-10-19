@@ -581,10 +581,13 @@ measure or reclaim decoded images; the encoded 8 MiB limit is not a pixel budget
 Font retention is independent of `visualizations.cache` and Still Mode.
 Primary-font selection and fallback behavior are documented in
 link:01_config.adoc[Configuration and layout]. Rivu resolves the primary family
-at startup or when its saved setting changes, not during painting. The Linux
-backend resolves missing characters from actual text through Fontconfig and
-loads individual selected faces, preserving candidate rank rather than preferring
-the face with the most coverage. Native shaping fallback remains the final step.
+at startup or when its saved setting changes, not during painting. On Linux,
+primary-family matching and missing-character resolution share one backend-owned
+Fontconfig configuration, initialized on first demand and retained for the text
+system's lifetime. Configuration initialization failures are retained by that
+same owner. The backend loads individual selected faces, preserving candidate
+rank rather than preferring the face with the most coverage. Native shaping
+fallback remains the final step.
 A candidate that cannot be registered or loaded is logged and skipped without
 discarding earlier successful candidates or changing the remaining order.
 Fontconfig metadata is retained by the resolver; first-use matching and loading

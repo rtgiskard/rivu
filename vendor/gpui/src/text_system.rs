@@ -291,6 +291,15 @@ impl TextSystem {
         names
     }
 
+    /// Resolve a system family to an available platform font name.
+    ///
+    /// This may initialize platform font metadata. Resolve at startup or when a
+    /// font setting changes, never from a paint callback.
+    pub fn resolve_system_font_family(&self, requested: &str) -> Result<String> {
+        self.platform_text_system
+            .resolve_system_font_family(requested)
+    }
+
     /// Add a font's data to the text system.
     ///
     /// Cached font resolution and line layouts are invalidated after installation.

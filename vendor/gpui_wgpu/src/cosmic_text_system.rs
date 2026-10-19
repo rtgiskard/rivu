@@ -193,6 +193,14 @@ impl PlatformTextSystem for CosmicTextSystem {
         result
     }
 
+    #[cfg(target_os = "linux")]
+    fn resolve_system_font_family(&self, requested: &str) -> Result<String> {
+        let available = self.all_font_names();
+        let mut state = self.0.write();
+        let resolver = CosmicTextSystemState::fontconfig_resolver(&mut state.fontconfig)?;
+        Ok(resolver.primary_family(requested, &available)?)
+    }
+
     fn font_id(&self, font: &Font) -> Result<FontId> {
         let mut state = self.0.write();
         state
@@ -276,6 +284,15 @@ impl PlatformTextSystem for CosmicTextSystem {
 }
 
 impl CosmicTextSystemState {
+    #[cfg(target_os = "linux")]
+    fn fontconfig_resolver(
+        slot: &mut Option<Result<FontconfigResolver, String>>,
+    ) -> Result<&mut FontconfigResolver> {
+        slot.get_or_insert_with(|| FontconfigResolver::new().map_err(|error| error.to_string()))
+            .as_mut()
+            .map_err(|error| anyhow::anyhow!("{error}"))
+    }
+
     fn loaded_font(&self, font_id: FontId) -> &LoadedFont {
         &self.loaded_fonts[font_id.0]
     }
@@ -378,12 +395,7 @@ impl CosmicTextSystemState {
             gpui::FontStyle::Italic => FontconfigStyle::Italic,
             gpui::FontStyle::Oblique => FontconfigStyle::Oblique,
         };
-        let resolver = self
-            .fontconfig
-            .get_or_insert_with(|| FontconfigResolver::new().map_err(|error| error.to_string()));
-        let resolver = resolver
-            .as_mut()
-            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        let resolver = Self::fontconfig_resolver(&mut self.fontconfig)?;
         let candidates = resolver.resolve(
             family,
             self.font_system.locale(),
@@ -1815,6 +1827,32 @@ mod tests {
         // An icon-family override inherits the descriptor but not system fallback.
         assert!(state.prepare_font(independent_id, "\u{10ffff}").is_some());
         assert!(state.fontconfig.is_none());
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn primary_and_fallback_preserve_the_same_initialization_failure() -> Result<()> {
+        let backend = Arc::new(text_system()?);
+        backend.0.write().fontconfig = Some(Err("isolated configuration failure".into()));
+        let text_system = gpui::TextSystem::new(backend.clone());
+        for _ in 0..2 {
+            let error = text_system.resolve_system_font_family("monospace").unwrap_err();
+            assert_eq!(error.to_string(), "isolated configuration failure");
+        }
+
+        let request = Font {
+            fallbacks: Some(FontFallbacks::from_system_family("monospace", "IBM Plex Sans")),
+            ..gpui::font("IBM Plex Sans")
+        };
+        let primary = backend.font_id(&request)?;
+        let mut state = backend.0.write();
+        let mut properties = state.font_match_properties(primary).unwrap();
+        let error = state
+            .prepare_system_fallbacks(primary, "\u{10ffff}", &mut properties)
+            .unwrap_err();
+        assert_eq!(error.to_string(), "isolated configuration failure");
+        assert!(properties.fallback_chain.is_empty());
         Ok(())
     }
 

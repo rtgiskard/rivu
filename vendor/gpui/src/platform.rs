@@ -1497,6 +1497,14 @@ pub trait PlatformTextSystem: Send + Sync {
     fn set_missing_glyph_sink(&self, _sink: Option<Arc<dyn MissingGlyphSink>>) {}
     /// Get all available font names.
     fn all_font_names(&self) -> Vec<String>;
+    /// Resolve a system family to a name available in this text system.
+    /// May consult platform font metadata; call on settings changes, not while painting.
+    fn resolve_system_font_family(&self, requested: &str) -> Result<String> {
+        self.all_font_names()
+            .into_iter()
+            .find(|name| name == requested)
+            .ok_or_else(|| anyhow::anyhow!("Requested font family unavailable in GPUI"))
+    }
     /// Get the font ID for a font descriptor.
     fn font_id(&self, descriptor: &Font) -> Result<FontId>;
     /// Prewarm any system font caches needed to shape text.

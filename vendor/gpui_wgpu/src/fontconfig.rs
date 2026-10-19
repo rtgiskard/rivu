@@ -1,4 +1,4 @@
-//! Linux system fallback metadata, ranked by Fontconfig.
+//! Linux primary matching and fallback metadata, ranked by Fontconfig.
 //!
 //! The resolver owns its configuration for its entire lifetime. It never opens font
 //! files: callers map the returned file/index pairs into their font database.
@@ -86,6 +86,12 @@ impl FontconfigResolver {
         })
     }
 
+    /// Resolves the primary family using the same configuration as lazy fallback.
+    /// All localized aliases are considered against names usable by the backend.
+    pub(super) fn primary_family(&mut self, family: &str, available: &[String]) -> Result<String> {
+        self.config.primary_family(family, available)
+    }
+
     /// Returns concrete faces in Fontconfig order, each adding coverage of text
     /// still uncovered by earlier returned faces. It does not seek a smaller or
     /// higher-coverage set. An empty successful result is a cacheable no-coverage
@@ -132,6 +138,39 @@ impl Drop for Config {
 }
 
 impl Config {
+    fn primary_family(&mut self, family: &str, available: &[String]) -> Result<String> {
+        let family = CString::new(family)
+            .map_err(|_| FontconfigError::InvalidInput("family containing NUL"))?;
+        // SAFETY: every allocated pattern immediately acquires its owning guard.
+        // Fontconfig copies the requested family and retains no borrowed strings.
+        unsafe {
+            let pattern = Pattern(
+                NonNull::new(fc::FcPatternCreate())
+                    .ok_or(FontconfigError::Operation("FcPatternCreate"))?,
+            );
+            check_bool(
+                fc::FcPatternAddString(
+                    pattern.0.as_ptr(),
+                    FC_FAMILY.as_ptr(),
+                    family.as_ptr().cast(),
+                ),
+                "FcPatternAddString(family)",
+            )?;
+            check_bool(
+                fc::FcConfigSubstitute(self.0.as_ptr(), pattern.0.as_ptr(), fc::FcMatchPattern),
+                "FcConfigSubstitute",
+            )?;
+            fc::FcDefaultSubstitute(pattern.0.as_ptr());
+            let mut result = fc::FcResultNoMatch;
+            let matched = Pattern(
+                NonNull::new(fc::FcFontMatch(self.0.as_ptr(), pattern.0.as_ptr(), &mut result))
+                    .ok_or(FontconfigError::Operation("FcFontMatch"))?,
+            );
+            check_result(result, "FcFontMatch")?;
+            matched.available_family(available)
+        }
+    }
+
     fn resolve(&mut self, query: Query<'_>, needed: &mut NeededCharacters) -> Result<Candidates> {
         if needed.0.is_empty() {
             return Ok(Arc::from([]));
@@ -260,6 +299,33 @@ impl Drop for Pattern {
     fn drop(&mut self) {
         // SAFETY: this guard exclusively owns the pattern reference.
         unsafe { fc::FcPatternDestroy(self.0.as_ptr()) }
+    }
+}
+
+impl Pattern {
+    fn available_family(&self, available: &[String]) -> Result<String> {
+        // Fontconfig orders localized aliases by locale; the backend lists one
+        // name per face. Consider every alias before rejecting the matched font.
+        for index in 0.. {
+            let mut name = ptr::null_mut();
+            // SAFETY: this pattern remains live and owns the returned string.
+            let result = unsafe {
+                fc::FcPatternGetString(self.0.as_ptr(), FC_FAMILY.as_ptr(), index, &mut name)
+            };
+            if result == fc::FcResultNoMatch || result == fc::FcResultNoId {
+                break;
+            }
+            check_result(result, "family")?;
+            if name.is_null() {
+                return Err(FontconfigError::Operation("null family name"));
+            }
+            // SAFETY: successful FcPatternGetString returns a terminated string.
+            let name = unsafe { CStr::from_ptr(name.cast()) }.to_string_lossy();
+            if let Some(canonical) = available.iter().find(|candidate| candidate.as_str() == name) {
+                return Ok(canonical.clone());
+            }
+        }
+        Err(FontconfigError::Operation("family unavailable in GPUI"))
     }
 }
 
@@ -883,3 +949,98 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+mod primary_tests {
+    use super::*;
+
+    fn isolated_resolver() -> FontconfigResolver {
+        // SAFETY: the fresh configuration has no system directories or global
+        // ownership. Its only font is the explicitly registered test fixture.
+        let config = Config(NonNull::new(unsafe { fc::FcConfigCreate() }).unwrap());
+        let file = CString::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/fixtures/fonts/ibm-plex-sans/IBMPlexSans-Regular.ttf"
+        ))
+        .unwrap();
+        // SAFETY: config is live and Fontconfig copies the terminated filename.
+        assert_ne!(
+            unsafe { fc::FcConfigAppFontAddFile(config.0.as_ptr(), file.as_ptr().cast()) },
+            0
+        );
+        FontconfigResolver {
+            config,
+            cache: CandidateCache::default(),
+        }
+    }
+
+    fn pattern(families: &[&str]) -> Pattern {
+        // SAFETY: each string is copied into the owned pattern by Fontconfig.
+        unsafe {
+            let pattern = Pattern(NonNull::new(fc::FcPatternCreate()).unwrap());
+            for family in families {
+                let family = CString::new(*family).unwrap();
+                assert_ne!(
+                    fc::FcPatternAddString(
+                        pattern.0.as_ptr(),
+                        FC_FAMILY.as_ptr(),
+                        family.as_ptr().cast(),
+                    ),
+                    0
+                );
+            }
+            pattern
+        }
+    }
+
+    #[test]
+    fn localized_alias_order_does_not_hide_an_available_font() {
+        let available = vec!["Example Sans".to_owned()];
+        for aliases in [["示例字体", "Example Sans"], ["Example Sans", "示例字体"]] {
+            assert_eq!(
+                pattern(&aliases).available_family(&available).unwrap(),
+                "Example Sans"
+            );
+        }
+        assert!(pattern(&["示例字体"]).available_family(&available).is_err());
+        assert!(pattern(&[]).available_family(&available).is_err());
+    }
+
+    #[test]
+    fn primary_failures_leave_the_shared_configuration_usable() {
+        let mut resolver = isolated_resolver();
+        let available = vec!["IBM Plex Sans".to_owned()];
+        assert!(matches!(
+            resolver.primary_family("bad\0family", &available),
+            Err(FontconfigError::InvalidInput(_))
+        ));
+        assert!(resolver.primary_family("IBM Plex Sans", &[]).is_err());
+        assert_eq!(
+            resolver.primary_family("IBM Plex Sans", &available).unwrap(),
+            "IBM Plex Sans"
+        );
+
+        let candidates = resolver
+            .resolve("IBM Plex Sans", "en-US", 400, FontconfigStyle::Normal, "a")
+            .unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].index, 0);
+        assert!(candidates[0].file.ends_with("IBMPlexSans-Regular.ttf"));
+        assert_eq!(
+            resolver.primary_family("IBM Plex Sans", &available).unwrap(),
+            "IBM Plex Sans"
+        );
+    }
+
+    #[test]
+    fn dropping_one_text_system_configuration_does_not_finalize_another() {
+        let first = isolated_resolver();
+        let mut second = isolated_resolver();
+        drop(first);
+        assert_eq!(
+            second
+                .primary_family("IBM Plex Sans", &["IBM Plex Sans".to_owned()])
+                .unwrap(),
+            "IBM Plex Sans"
+        );
+    }
+}
