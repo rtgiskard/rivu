@@ -1,5 +1,36 @@
 use super::*;
 
+#[test]
+fn gui_snapshot_skips_unchanged_revision_and_projects_current_state() {
+    let (handle, _worker, _receiver) = display_fixture();
+    let initial = handle.gui_snapshot();
+    assert!(
+        handle
+            .gui_snapshot_if_changed(initial.system.revision)
+            .is_none()
+    );
+
+    {
+        let mut state = handle.state.write();
+        state.system.revision = state.system.revision.wrapping_add(1);
+        state.system.shutting_down = true;
+    }
+    let changed = handle
+        .gui_snapshot_if_changed(initial.system.revision)
+        .expect("changed state is projected");
+    assert_eq!(
+        changed.system.revision,
+        initial.system.revision.wrapping_add(1)
+    );
+    assert!(changed.system.shutting_down);
+    assert!(!initial.system.shutting_down);
+    assert!(
+        handle
+            .gui_snapshot_if_changed(changed.system.revision)
+            .is_none()
+    );
+}
+
 fn display_wait(ready: impl Fn() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(3);
     while !ready() {

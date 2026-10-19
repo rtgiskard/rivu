@@ -310,7 +310,7 @@ mod tests {
                 .collect(),
         );
         let context = FeatureContext {
-            snapshots: Rc::new(crate::gui::snapshot::SnapshotSource::new(
+            snapshots: Rc::new(crate::gui::feature::SnapshotSource::new(
                 runtime.handle.clone(),
             )),
             i18n,

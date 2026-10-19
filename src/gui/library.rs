@@ -1323,7 +1323,7 @@ mod library_root_tests {
                 .collect(),
         );
         let context = FeatureContext {
-            snapshots: std::rc::Rc::new(crate::gui::snapshot::SnapshotSource::new(
+            snapshots: std::rc::Rc::new(crate::gui::feature::SnapshotSource::new(
                 runtime.handle.clone(),
             )),
             i18n,

@@ -47,7 +47,7 @@ fn fixture(cx: &mut TestAppContext) -> (tempfile::TempDir, Runtime, Entity<Metad
     let runtime = Runtime::start(directory.path(), &path).unwrap();
     let i18n = Arc::new(Localizer::new("en-US"));
     let context = FeatureContext {
-        snapshots: Rc::new(crate::gui::snapshot::SnapshotSource::new(
+        snapshots: Rc::new(crate::gui::feature::SnapshotSource::new(
             runtime.handle.clone(),
         )),
         labels: Rc::new(

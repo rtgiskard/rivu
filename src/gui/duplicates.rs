@@ -2001,7 +2001,7 @@ mod tests {
         .unwrap();
         let runtime = crate::core::Runtime::start(directory.path(), &path).unwrap();
         let context = super::FeatureContext {
-            snapshots: Rc::new(crate::gui::snapshot::SnapshotSource::new(
+            snapshots: Rc::new(crate::gui::feature::SnapshotSource::new(
                 runtime.handle.clone(),
             )),
             i18n: Arc::new(crate::i18n::Localizer::new("en-US")),

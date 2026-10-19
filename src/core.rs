@@ -219,6 +219,11 @@ impl CoreHandle {
     pub fn gui_snapshot(&self) -> GuiSnapshot {
         GuiSnapshot::from_core(&self.state.read())
     }
+    /// Compare and project under one lock so the returned revision owns its data.
+    pub(crate) fn gui_snapshot_if_changed(&self, revision: u64) -> Option<GuiSnapshot> {
+        let state = self.state.read();
+        (state.system.revision != revision).then(|| GuiSnapshot::from_core(&state))
+    }
     pub(crate) fn tray_snapshot(&self) -> TraySnapshot {
         TraySnapshot::from_core(&self.state.read())
     }

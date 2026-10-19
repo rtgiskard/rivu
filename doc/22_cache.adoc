@@ -17,6 +17,15 @@ A projection key is normalized query identity plus its stamp, excluding page
 offsets, limits, batch cursors, and expected revisions. Request generations
 reject obsolete intent independently of data freshness.
 
+The window and its feature owners share one GUI snapshot cache. Core compares
+the cached revision and projects changed state under the same read lock; unchanged
+reads reuse the existing snapshot without projecting it again. Initial cache
+creation takes an unconditional snapshot. Each consumer compares the shared
+snapshot with its own last processed revision, so a feature refreshing the cache
+cannot make the window skip that state. Album query completion and timeout read
+current revisions from this shared source, never from the submission snapshot;
+freshness checks and physical-worker retirement remain independent.
+
 Each window-local feature reconciles its own revision and configuration
 dependencies, including while its panels are hidden, and owns the execution and
 completion of its reads. Directory and root-count preparation, publication, and

@@ -12,7 +12,6 @@ mod library;
 mod list_interaction;
 mod metadata;
 mod paged;
-mod panels;
 mod playback;
 mod playlists;
 mod presentation;
@@ -22,7 +21,6 @@ mod scrolling;
 pub(crate) mod session;
 mod settings;
 mod shell;
-mod snapshot;
 mod visualization;
 mod workspace;
 use crate::{
@@ -314,7 +312,7 @@ pub(super) struct GuiApp {
     pub(super) i18n: Arc<Localizer>,
     localized_text: Rc<HashMap<String, SharedString>>,
     handle: CoreHandle,
-    snapshots: Rc<snapshot::SnapshotSource>,
+    snapshots: Rc<feature::SnapshotSource>,
     state: Rc<GuiSnapshot>,
     workspace: workspace::Workspace,
     session: Weak<RefCell<UiSession>>,
@@ -667,7 +665,7 @@ impl GuiApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let snapshots = Rc::new(snapshot::SnapshotSource::new(handle.clone()));
+        let snapshots = Rc::new(feature::SnapshotSource::new(handle.clone()));
         let state = snapshots.read();
         window
             .set_gpu_material_budget(state.system.config.gpu_material_budget_bytes())
@@ -1095,10 +1093,10 @@ impl GuiApp {
     }
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
-        if self.snapshots.handle().revision() == self.state.system.revision {
+        let state = self.snapshots.read();
+        if state.system.revision == self.state.system.revision {
             return;
         }
-        let state = self.snapshots.read();
         if state.system.shutting_down && !self.state.system.shutting_down {
             self.content_resolution.cancel();
         }

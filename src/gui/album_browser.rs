@@ -149,6 +149,7 @@ pub(super) struct AlbumBrowser {
     panel_id: u64,
     scroll_views: Rc<RefCell<ScrollViews>>,
     handle: CoreHandle,
+    snapshots: Rc<super::feature::SnapshotSource>,
     i18n: Arc<crate::i18n::Localizer>,
     localized_text: BTreeMap<&'static str, SharedString>,
     manager: Arc<ArtworkManager>,
@@ -236,6 +237,7 @@ impl AlbumBrowser {
             i18n,
             localized_text,
             handle,
+            snapshots: context.snapshots,
             manager,
             images,
             default_album,
@@ -410,7 +412,7 @@ impl AlbumBrowser {
                         this.loading_text.finish(&(), generation);
                         this.loading_text
                             .schedule(cx, |this| &mut this.loading_text);
-                        let revisions = this.handle.gui_snapshot().query_revisions(None);
+                        let revisions = this.snapshots.read().query_revisions(None);
                         let data = this.model.timeout(&query, generation, response, revisions);
                         this.apply_data_change(data, cx);
                         cx.notify();
@@ -422,7 +424,7 @@ impl AlbumBrowser {
                 this.loading_text.finish(&(), generation);
                 this.loading_text
                     .schedule(cx, |this| &mut this.loading_text);
-                let revisions = this.handle.gui_snapshot().query_revisions(None);
+                let revisions = this.snapshots.read().query_revisions(None);
                 if this.model.albums_need_refresh(revisions) {
                     this.capture_grid_anchor();
                 }
