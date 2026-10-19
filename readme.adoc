@@ -209,6 +209,8 @@ timestamp. Invalid values fail the build; About displays the timestamp locally.
   `config/file.rs` maps the grouped TOML format, `config/persistence.rs` owns
   filesystem loading and atomic saving, and `config/tests.rs` covers their behavior.
   The positional IPC configuration schema remains independent.
+* `src/audio/source.rs` applies playback ranges and seek-prefix discard to decoded
+  PCM through one shared step; codec-specific trimming remains with each decoder.
 * `src/gui/queue.rs` owns the Queue entity and integration events; its `model`,
   `queries`, and `view` modules separate state, asynchronous work, and rendering.
 * `src/gui/settings.rs` owns settings controls and session integration;

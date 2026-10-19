@@ -1048,6 +1048,39 @@ impl Source {
         Ok(frame)
     }
 
+    // Both backends supply codec-trimmed interleaved PCM and an absolute timestamp.
+    // Empty PCM means keep decoding unless the explicit segment end was reached;
+    // it is neither decoder EOF nor a reason to reset the caller's work budget.
+    fn retain_pcm(&mut self, mut packet_start: f64) -> bool {
+        let channels = self.layout.len();
+        if let Some(end) = self.range_end {
+            let remaining =
+                ((end - packet_start).max(0.0) * self.info.sample_rate as f64).round() as usize;
+            self.exhausted = remaining <= self.frames.len() / channels;
+            self.frames.truncate(remaining.saturating_mul(channels));
+        }
+        if let Some(target) = self.seek_target {
+            let discard =
+                (((target - packet_start).max(0.0) * self.info.sample_rate as f64).round()
+                    as usize)
+                    .saturating_mul(channels);
+            if discard >= self.frames.len() {
+                return false;
+            }
+            if discard != 0 {
+                self.frames.copy_within(discard.., 0);
+                self.frames.truncate(self.frames.len() - discard);
+                packet_start += (discard / channels) as f64 / self.info.sample_rate as f64;
+            }
+            self.seek_target = None;
+        }
+        if self.frames.is_empty() {
+            return false;
+        }
+        self.frame_start = packet_start - self.range_start;
+        true
+    }
+
     fn read_ffmpeg_next(
         &mut self,
         cancelled: Option<&AtomicBool>,
@@ -1082,34 +1115,12 @@ impl Source {
                 self.info.channels = decoder.info().channels;
                 self.info.sample_rate = decoder.info().sample_rate;
             }
-            let mut retained_start = packet_start;
+            // Validate backend output before applying the shared frame-based crop.
             let channels = self.layout.len();
             if channels == 0 || !self.frames.len().is_multiple_of(channels) {
                 bail!("FFmpeg decoder returned incomplete interleaved frames");
             }
-            if let Some(end) = self.range_end {
-                let remaining =
-                    ((end - packet_start).max(0.0) * self.info.sample_rate as f64).round() as usize;
-                self.exhausted = remaining <= self.frames.len() / channels;
-                self.frames.truncate(remaining.saturating_mul(channels));
-            }
-            if let Some(target) = self.seek_target {
-                let discard = (((target - packet_start).max(0.0) * self.info.sample_rate as f64)
-                    .round() as usize)
-                    .saturating_mul(channels);
-                if discard >= self.frames.len() {
-                    if self.exhausted {
-                        return Ok(DecodeStep::Eof);
-                    }
-                    continue;
-                }
-                self.frames.copy_within(discard.., 0);
-                self.frames.truncate(self.frames.len() - discard);
-                retained_start += (discard / channels) as f64 / self.info.sample_rate as f64;
-                self.seek_target = None;
-            }
-            if !self.frames.is_empty() {
-                self.frame_start = retained_start - self.range_start;
+            if self.retain_pcm(packet_start) {
                 return Ok(DecodeStep::Frames(()));
             }
             if self.exhausted {
@@ -1255,30 +1266,7 @@ impl Source {
                 Some(samples) => self.packet_stats.add(packet.data.len() as u64, samples),
                 None => self.packet_stats.invalidate(),
             }
-            if let Some(end) = self.range_end {
-                let remaining =
-                    ((end - packet_start).max(0.0) * self.info.sample_rate as f64).round() as usize;
-                self.exhausted = remaining <= self.frames.len() / self.layout.len();
-                self.frames
-                    .truncate(remaining.saturating_mul(self.layout.len()));
-            }
-            if let Some(target) = self.seek_target {
-                let discard = (((target - packet_start).max(0.0) * self.info.sample_rate as f64)
-                    .round() as usize)
-                    .saturating_mul(self.layout.len());
-                if discard >= self.frames.len() {
-                    if self.exhausted {
-                        return Ok(DecodeStep::Eof);
-                    }
-                    continue;
-                }
-                self.frames.copy_within(discard.., 0);
-                self.frames.truncate(self.frames.len() - discard);
-                packet_start += (discard / self.layout.len()) as f64 / self.info.sample_rate as f64;
-                self.seek_target = None;
-            }
-            if !self.frames.is_empty() {
-                self.frame_start = packet_start - self.range_start;
+            if self.retain_pcm(packet_start) {
                 return Ok(DecodeStep::Frames(()));
             }
             if self.exhausted {
@@ -2135,6 +2123,58 @@ mod tests {
     #[test]
     fn incremental_ffmpeg_open_preserves_pcm_range_and_start_seek() {
         assert_incremental_pcm_start(DecoderHint::Ffmpeg, true);
+    }
+
+    #[test]
+    fn stereo_ranges_preserve_channel_pairs_and_sample_accurate_seek_timestamps() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        let rate = 8_000_u32;
+        let count = 8_192_u32;
+        let bytes = count * 4;
+        file.write_all(b"RIFF").unwrap();
+        file.write_all(&(36 + bytes).to_le_bytes()).unwrap();
+        file.write_all(b"WAVEfmt \x10\0\0\0\x01\0\x02\0").unwrap();
+        file.write_all(&rate.to_le_bytes()).unwrap();
+        file.write_all(&(rate * 4).to_le_bytes()).unwrap();
+        file.write_all(b"\x04\0\x10\0data").unwrap();
+        file.write_all(&bytes.to_le_bytes()).unwrap();
+        let mut expected = Vec::with_capacity(count as usize * 2);
+        for value in 1..=count as i16 {
+            for sample in [value, -value] {
+                file.write_all(&sample.to_le_bytes()).unwrap();
+                expected.push(f32::from(sample) / 32_768.0);
+            }
+        }
+        for hint in [
+            DecoderHint::Native,
+            #[cfg(feature = "ffmpeg")]
+            DecoderHint::Ffmpeg,
+        ] {
+            for (start, end) in [(257, 6_147), (4_095, 4_096)] {
+                let mut source = Source::open(file.path(), PROBE_BUFFER_LEN, hint, true).unwrap();
+                source
+                    .restrict(super::super::PlaybackRange {
+                        start_seconds: start as f64 / f64::from(rate),
+                        end_seconds: Some(end as f64 / f64::from(rate)),
+                    })
+                    .unwrap();
+                for offset in [0, 1, end - start, 0] {
+                    source.seek(offset as f64 / f64::from(rate)).unwrap();
+                    let mut consumed = 0;
+                    let expected = &expected[(start + offset) * 2..end * 2];
+                    while let Some((samples, timestamp)) = source.next_frames().unwrap() {
+                        assert_eq!(samples.len() % 2, 0);
+                        assert!(!samples.is_empty());
+                        let time = (offset + consumed / 2) as f64 / f64::from(rate);
+                        assert!((timestamp - time).abs() < 1e-9);
+                        assert_eq!(samples, &expected[consumed..consumed + samples.len()]);
+                        consumed += samples.len();
+                    }
+                    assert_eq!(consumed, expected.len());
+                    assert_eq!(source.completed_bitrate(), None);
+                }
+            }
+        }
     }
 
     #[test]
