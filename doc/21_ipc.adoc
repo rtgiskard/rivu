@@ -818,6 +818,12 @@ Failed exchanges discard the client connection. A later explicit request can
 reconnect and perform a fresh Hello, but clients never automatically replay a
 failed command.
 
+Client session stopping shares one handle for the stop state and waiter wakeup.
+Stopping is permanent and wakes all registered waits; a later wait also observes
+the stopped state. TUI worker shutdown stops the session and discards its socket.
+Replacing a query only invalidates its result: the active exchange still drains
+before the latest queued query is sent.
+
 Accepted scan and playlist-import commands return `Ack.scan_id` with their `u64`
 task ID. Acceptance is not completion. The CLI polls `Query::ScanTask { id }`
 and waits for that exact task's result: only `Completed` succeeds; `Failed` and

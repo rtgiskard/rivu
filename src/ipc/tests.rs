@@ -1986,14 +1986,13 @@ fn cancelling_client_session_closes_pending_watch_with_partial_response() {
     use std::{
         io::{Read, Write},
         os::unix::net::UnixListener,
-        sync::atomic::Ordering,
     };
 
     let directory = socket_test_directory();
     let listener =
         UnixListener::bind_addr(&super::endpoint::address(directory.path()).unwrap()).unwrap();
     let mut session = client_session(directory.path()).unwrap();
-    let (cancelled, notify) = session.cancellation();
+    let stop = session.cancellation();
     let client = std::thread::spawn(move || {
         session.get_state(StateSections::default()).unwrap();
         session
@@ -2009,8 +2008,7 @@ fn cancelling_client_session_closes_pending_watch_with_partial_response() {
     ));
     // Cancellation discards a partial response, not just an idle watch socket.
     stream.write_all(&[10, 0, 0, 0, PROTOCOL_VERSION]).unwrap();
-    cancelled.store(true, Ordering::Release);
-    notify.notify_waiters();
+    stop.cancel();
     assert!(client.join().unwrap().unwrap().is_none());
     let closed = stream.read(&mut [0]);
     assert!(

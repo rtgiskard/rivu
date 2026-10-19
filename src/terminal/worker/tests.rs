@@ -8,8 +8,7 @@ fn injected_watcher(update: Option<WatchedSnapshot>) -> (Watcher, Sender<()>) {
     let watcher = Watcher {
         receiver,
         latest: Arc::new(Mutex::new(update)),
-        stopping: Arc::new(AtomicBool::new(false)),
-        cancel_notify: Arc::new(tokio::sync::Notify::new()),
+        stopping: ipc::SessionStop::default(),
         worker: None,
     };
     (watcher, sender)
@@ -164,7 +163,7 @@ fn watcher_shutdown_closes_stalled_initial_handshake() {
     assert!(length <= 4096);
     stream.read_exact(&mut vec![0; length]).unwrap();
     // Hello has reached the peer, which deliberately never replies. The
-    // loading screen's exit must join the watcher without its 120s timeout.
+    // loading screen's exit must join the watcher without its response timeout.
     let (finished, completion) = bounded(1);
     let shutdown = std::thread::spawn(move || {
         drop(watcher);

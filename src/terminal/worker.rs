@@ -20,8 +20,7 @@ type WatchedSnapshot = Result<(u32, ClientSnapshot), String>;
 pub(super) struct Watcher {
     pub(super) receiver: Receiver<()>,
     pub(super) latest: Arc<Mutex<Option<WatchedSnapshot>>>,
-    stopping: Arc<AtomicBool>,
-    cancel_notify: Arc<tokio::sync::Notify>,
+    stopping: ipc::SessionStop,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -49,8 +48,7 @@ impl Watcher {
 
 impl Drop for Watcher {
     fn drop(&mut self) {
-        self.stopping.store(true, Ordering::Release);
-        self.cancel_notify.notify_waiters();
+        self.stopping.cancel();
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
@@ -62,13 +60,10 @@ pub(super) fn spawn_watcher(data_dir: &Path) -> Watcher {
     let (sender, receiver) = bounded(1);
     let latest = Arc::new(Mutex::new(None));
     let latest_worker = Arc::clone(&latest);
-    let stopping = Arc::new(AtomicBool::new(false));
-    let stop = Arc::clone(&stopping);
-    let cancel_notify = Arc::new(tokio::sync::Notify::new());
-    let thread_notify = Arc::clone(&cancel_notify);
+    let stopping = ipc::SessionStop::default();
+    let stop = stopping.clone();
     let worker = std::thread::spawn(move || {
-        let Ok(mut session) = ipc::client_session_with_cancel(&data_dir, stop, thread_notify)
-        else {
+        let Ok(mut session) = ipc::client_session_with_cancel(&data_dir, stop) else {
             *latest_worker.lock() = Some(Err("TUI state watcher could not initialize".into()));
             let _ = sender.try_send(());
             return;
@@ -146,7 +141,6 @@ pub(super) fn spawn_watcher(data_dir: &Path) -> Watcher {
         receiver,
         latest,
         stopping,
-        cancel_notify,
         worker: Some(worker),
     }
 }
@@ -178,8 +172,7 @@ impl WorkerFailure {
 pub(super) struct CommandWorker {
     pub(super) sender: Option<Sender<Command>>,
     stopping: Option<Sender<()>>,
-    shutdown: Arc<AtomicBool>,
-    shutdown_notify: Arc<tokio::sync::Notify>,
+    shutdown: ipc::SessionStop,
     pub(super) results: Receiver<Result<Ack, WorkerFailure>>,
     worker: Option<JoinHandle<()>>,
 }
@@ -187,8 +180,7 @@ pub(super) struct CommandWorker {
 impl Drop for CommandWorker {
     fn drop(&mut self) {
         self.sender.take();
-        self.shutdown.store(true, Ordering::Release);
-        self.shutdown_notify.notify_waiters();
+        self.shutdown.cancel();
         if let Some(stopping) = self.stopping.take() {
             let _ = stopping.send(());
         }
@@ -203,20 +195,17 @@ pub(super) fn spawn_command_worker(data_dir: &Path, instance_id: u32) -> Command
     let (sender, receiver) = bounded::<Command>(8);
     let (stopping, stop_receiver) = bounded::<()>(1);
     let (result_sender, results) = bounded::<Result<Ack, WorkerFailure>>(8);
-    let shutdown = Arc::new(AtomicBool::new(false));
-    let shutdown_notify = Arc::new(tokio::sync::Notify::new());
-    let stop = Arc::clone(&shutdown);
-    let stop_notify = Arc::clone(&shutdown_notify);
+    let shutdown = ipc::SessionStop::default();
+    let stop = shutdown.clone();
     let worker = std::thread::spawn(move || {
-        let mut session =
-            ipc::client_session_with_cancel(&data_dir, Arc::clone(&stop), stop_notify)
-                .and_then(|mut session| {
-                    session.bind_instance(instance_id)?;
-                    Ok(session)
-                })
-                .map_err(WorkerFailure::from);
+        let mut session = ipc::client_session_with_cancel(&data_dir, stop.clone())
+            .and_then(|mut session| {
+                session.bind_instance(instance_id)?;
+                Ok(session)
+            })
+            .map_err(WorkerFailure::from);
         while let Ok(command) = receiver.recv() {
-            if stop.load(Ordering::Acquire) {
+            if stop.is_cancelled() {
                 break;
             }
             let result = match &mut session {
@@ -237,7 +226,6 @@ pub(super) fn spawn_command_worker(data_dir: &Path, instance_id: u32) -> Command
         sender: Some(sender),
         stopping: Some(stopping),
         shutdown,
-        shutdown_notify,
         results,
         worker: Some(worker),
     }
@@ -360,8 +348,7 @@ pub(super) struct QueryWorker {
     pending: Arc<Mutex<Option<QueryJob>>>,
     pub(super) latest: Arc<Mutex<Option<QueryCompletion>>>,
     cancellation: Option<Arc<AtomicBool>>,
-    shutdown: Arc<AtomicBool>,
-    shutdown_notify: Arc<tokio::sync::Notify>,
+    shutdown: ipc::SessionStop,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -390,8 +377,7 @@ impl Drop for QueryWorker {
         // Replacement invalidates results, not the in-flight server query. Only
         // shutdown aborts its socket wait; otherwise one active query drains
         // before the most recent pending request is sent.
-        self.shutdown.store(true, Ordering::Release);
-        self.shutdown_notify.notify_waiters();
+        self.shutdown.cancel();
         self.sender.take();
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
@@ -406,20 +392,17 @@ pub(super) fn spawn_query_worker(data_dir: &Path, instance_id: u32) -> QueryWork
     let requests = Arc::clone(&pending);
     let latest = Arc::new(Mutex::new(None));
     let results = Arc::clone(&latest);
-    let shutdown = Arc::new(AtomicBool::new(false));
-    let shutdown_notify = Arc::new(tokio::sync::Notify::new());
-    let stopping = Arc::clone(&shutdown);
-    let stop_notify = Arc::clone(&shutdown_notify);
+    let shutdown = ipc::SessionStop::default();
+    let stopping = shutdown.clone();
     let worker = std::thread::spawn(move || {
-        let mut session =
-            ipc::client_session_with_cancel(&data_dir, Arc::clone(&stopping), stop_notify)
-                .and_then(|mut session| {
-                    session.bind_instance(instance_id)?;
-                    Ok(session)
-                })
-                .map_err(WorkerFailure::from);
+        let mut session = ipc::client_session_with_cancel(&data_dir, stopping.clone())
+            .and_then(|mut session| {
+                session.bind_instance(instance_id)?;
+                Ok(session)
+            })
+            .map_err(WorkerFailure::from);
         while receiver.recv().is_ok() {
-            if stopping.load(Ordering::Acquire) {
+            if stopping.is_cancelled() {
                 break;
             }
             let Some(job) = requests.lock().take() else {
@@ -456,7 +439,6 @@ pub(super) fn spawn_query_worker(data_dir: &Path, instance_id: u32) -> QueryWork
         latest,
         cancellation: None,
         shutdown,
-        shutdown_notify,
         worker: Some(worker),
     }
 }

@@ -33,6 +33,37 @@ impl std::fmt::Display for InstanceChanged {
 
 impl std::error::Error for InstanceChanged {}
 
+#[derive(Clone, Default)]
+pub struct SessionStop {
+    state: Arc<SessionStopState>,
+}
+
+#[derive(Default)]
+struct SessionStopState {
+    cancelled: AtomicBool,
+    notify: tokio::sync::Notify,
+}
+
+impl SessionStop {
+    pub fn cancel(&self) {
+        self.state.cancelled.store(true, Ordering::Release);
+        self.state.notify.notify_waiters();
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.state.cancelled.load(Ordering::Acquire)
+    }
+
+    pub async fn cancelled(&self) {
+        let notified = self.state.notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if !self.is_cancelled() {
+            notified.await;
+        }
+    }
+}
+
 /// Serial IPC requests share a runtime, socket, handshake, and framing buffers.
 /// A failed exchange discards the socket; only a later request reconnects, and
 /// the failed request is never replayed because its mutation may have executed.
@@ -40,8 +71,7 @@ pub struct ClientSession {
     runtime: tokio::runtime::Runtime,
     data_dir: PathBuf,
     stream: Option<UnixStream>,
-    cancelled: Arc<AtomicBool>,
-    cancel_notify: Arc<tokio::sync::Notify>,
+    stop: SessionStop,
     read_buffer: BytesMut,
     write_buffer: Vec<u8>,
     session: SessionState,
@@ -58,24 +88,15 @@ fn client_runtime() -> Result<tokio::runtime::Runtime> {
 
 /// Create a session for a data directory; connect and handshake on its first request.
 pub fn client_session(data_dir: &Path) -> Result<ClientSession> {
-    client_session_with_cancel(
-        data_dir,
-        Arc::new(AtomicBool::new(false)),
-        Arc::new(tokio::sync::Notify::new()),
-    )
+    client_session_with_cancel(data_dir, SessionStop::default())
 }
 
-pub fn client_session_with_cancel(
-    data_dir: &Path,
-    cancelled: Arc<AtomicBool>,
-    cancel_notify: Arc<tokio::sync::Notify>,
-) -> Result<ClientSession> {
+pub fn client_session_with_cancel(data_dir: &Path, stop: SessionStop) -> Result<ClientSession> {
     Ok(ClientSession {
         runtime: client_runtime()?,
         data_dir: data_dir.to_owned(),
         stream: None,
-        cancelled,
-        cancel_notify,
+        stop,
         read_buffer: BytesMut::new(),
         write_buffer: Vec::new(),
         session: SessionState::Unbound,
@@ -109,13 +130,12 @@ impl ClientSession {
         Ok(())
     }
 
-    pub fn cancellation(&self) -> (Arc<AtomicBool>, Arc<tokio::sync::Notify>) {
-        (self.cancelled.clone(), self.cancel_notify.clone())
+    pub fn cancellation(&self) -> SessionStop {
+        self.stop.clone()
     }
 
     pub fn cancel(&self) {
-        self.cancelled.store(true, Ordering::Release);
-        self.cancel_notify.notify_waiters();
+        self.stop.cancel();
     }
 
     fn disconnect(&mut self) {
@@ -137,14 +157,9 @@ impl ClientSession {
 
     fn exchange(&mut self, request: &WireRequest, wait_timeout: Duration) -> Result<WireResponse> {
         let result = self.runtime.block_on(async {
-            let notified = self.cancel_notify.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-            if self.cancelled.load(Ordering::Acquire) {
-                bail!("IPC request cancelled");
-            }
             tokio::select! {
-                _ = &mut notified => bail!("IPC request cancelled"),
+                biased;
+                _ = self.stop.cancelled() => bail!("IPC request cancelled"),
                 response = async {
                     if self.stream.is_none() {
                         self.stream = Some(super::endpoint::connect(&self.data_dir).await.with_context(|| {
@@ -166,7 +181,7 @@ impl ClientSession {
                     }
                 } => {
                     let response = response?;
-                    if self.cancelled.load(Ordering::Acquire) {
+                    if self.stop.is_cancelled() {
                         bail!("IPC request cancelled");
                     }
                     Ok(response)
@@ -246,7 +261,7 @@ impl ClientSession {
         let request = WireRequest::Watch(revisions);
         let response = match self.exchange(&request, CoreHandle::query_wait_timeout()) {
             Ok(response) => response,
-            Err(_) if self.cancelled.load(Ordering::Acquire) => return Ok(None),
+            Err(_) if self.stop.is_cancelled() => return Ok(None),
             Err(error) => return Err(error),
         };
         match unpack_error(response)? {
@@ -360,6 +375,29 @@ mod tests {
         assert!(ack.ok);
         assert_eq!(ack.revision, 17);
         drop(client.runtime.block_on(server).unwrap());
+    }
+
+    #[test]
+    fn session_stop_wakes_all_waiters_and_remains_cancelled() {
+        use std::{future::Future, task::Context};
+
+        let stop = SessionStop::default();
+        let clone = stop.clone();
+        let mut first = Box::pin(stop.cancelled());
+        let mut second = Box::pin(clone.cancelled());
+        let mut context = Context::from_waker(std::task::Waker::noop());
+        assert!(first.as_mut().poll(&mut context).is_pending());
+        assert!(second.as_mut().poll(&mut context).is_pending());
+
+        clone.cancel();
+        clone.cancel();
+        assert!(stop.is_cancelled());
+        assert!(first.as_mut().poll(&mut context).is_ready());
+        assert!(second.as_mut().poll(&mut context).is_ready());
+
+        // A waiter first polled after cancellation must not need another notify.
+        let mut late = Box::pin(stop.cancelled());
+        assert!(late.as_mut().poll(&mut context).is_ready());
     }
 
     #[test]
