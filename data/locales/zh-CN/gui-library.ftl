@@ -1,7 +1,7 @@
 search-toggle = 搜索当前列表（Ctrl+F）
 search-clear = 清除搜索
 search-placeholder = 搜索标题…
-search-count = { $matched } / { $total }
+search-count = { $matched }/{ $total }
 search-empty = 列表为空
 search-no-matches = 无匹配结果
 search-clear-and-locate = 清除搜索并定位

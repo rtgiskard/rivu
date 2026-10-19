@@ -210,6 +210,7 @@ impl Render for SearchField {
         }
         let mut field = row()
             .gap_0()
+            .px_0p5()
             .h_full()
             .w_full()
             .min_w_0()
@@ -230,7 +231,7 @@ impl Render for SearchField {
                     cx,
                     |this, window, cx| this.toggle(window, cx),
                 )
-                .w(gpui::rems(1.4))
+                .w_6()
                 .h_full()
                 .min_h_0()
                 .border_0()
@@ -252,7 +253,7 @@ impl Render for SearchField {
                                 .update(cx, |input, cx| input.focus_handle(cx).focus(window, cx));
                         },
                     )
-                    .w(gpui::rems(1.4))
+                    .w_6()
                     .h_full()
                     .min_h_0()
                     .border_0()

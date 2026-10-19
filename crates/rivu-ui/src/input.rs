@@ -1157,7 +1157,7 @@ impl Render for Input {
                     .overflow_hidden()
                     .px(px(7.) * scale)
                     .when(self.embedded, |view| {
-                        view.flex().items_center().h_full().min_w(gpui::rems(1.5))
+                        view.flex().items_center().h_full().min_w_6().px_0()
                     })
                     .when(!self.embedded, |view| {
                         view.h(px(
@@ -1166,6 +1166,10 @@ impl Render for Input {
                             .py(px(INPUT_VERTICAL_PADDING) * scale)
                     })
                     .pr(self.trailing_space * scale)
+                    .when(self.embedded, |view| {
+                        view.pr_0()
+                            .when(self.trailing_text.is_some(), |view| view.pr_1())
+                    })
                     .child(InputElement { input: cx.entity() }),
             )
             .when_some(self.trailing_text.clone(), |view, text| {
@@ -1179,7 +1183,7 @@ impl Render for Input {
                         .text_color(rgb(theme.muted))
                         .whitespace_nowrap()
                         .when(self.embedded, |view| {
-                            view.flex_shrink(1.).min_w_0().truncate()
+                            view.flex_shrink(1.).min_w_0().truncate().pr_0()
                         })
                         .child(text),
                 )
