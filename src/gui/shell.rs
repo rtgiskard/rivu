@@ -1,5 +1,6 @@
 //! Root input, keyboard-surface routing, and top-level composition.
 
+mod notification;
 pub(super) mod panels;
 mod shortcuts;
 mod view;

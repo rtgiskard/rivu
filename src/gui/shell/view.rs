@@ -1,5 +1,5 @@
 use super::*;
-use rivu_ui::{Dialog, Popover, caption, column, copyable_message, icon_button, menu_item, row};
+use rivu_ui::{Dialog, Popover, caption, column, icon_button, menu_item, row};
 
 impl Render for GuiApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -181,104 +181,31 @@ impl Render for GuiApp {
                 .size_full(),
             );
 
-        let error = self
-            .error
-            .as_ref()
-            .filter(|error| {
-                !self.shell.is_open(Surface::Layouts)
-                    || self.workspace.save_error.as_ref() != Some(*error)
-            })
-            .or(self.state.system.last_error.as_ref())
-            .cloned();
-        let mut footer = row()
-            .gap(gpui::rems(4.))
-            .relative()
-            .flex_shrink_0()
-            .text_xs();
-        if let Some(error) = error {
-            let message: SharedString = error.clone().into();
-            let copied_message = message.clone();
-            footer = footer.child(
-                row()
-                    .flex_initial()
-                    .min_w_0()
-                    .gap_3()
-                    .px_2()
-                    .bg(rgb(theme.error_bg))
-                    .text_color(rgb(theme.text))
-                    .child(
-                        div()
-                            .id("error-message-text")
-                            .flex_initial()
-                            .min_w_0()
-                            .truncate()
-                            .cursor_pointer()
-                            .child(message.clone())
-                            .tooltip(rivu_ui::text_tooltip(message))
-                            .on_click(cx.listener(move |_, _, _, cx| {
-                                cx.write_to_clipboard(ClipboardItem::new_string(
-                                    copied_message.to_string(),
-                                ));
-                                cx.stop_propagation();
-                            })),
-                    )
-                    .child(
-                        row()
-                            .flex_shrink_0()
-                            .gap_0()
-                            .child(
-                                rivu_ui::compact_icon_button(
-                                    theme,
-                                    icon_button(
-                                        "copy-error",
-                                        "",
-                                        self.tr("shell-copy-message"),
-                                        cx,
-                                        move |_, _, cx| {
-                                            cx.write_to_clipboard(ClipboardItem::new_string(
-                                                error.clone(),
-                                            ));
-                                        },
-                                    ),
-                                )
-                                .group_hover("control", |style| {
-                                    style.bg(rgb(theme.text).alpha(0.08))
-                                }),
-                            )
-                            .child(
-                                rivu_ui::compact_icon_button(
-                                    theme,
-                                    icon_button(
-                                        "dismiss-error",
-                                        "",
-                                        self.tr("shell-dismiss-message"),
-                                        cx,
-                                        |this, _, cx| {
-                                            this.error = None;
-                                            this.send(Command::DismissError, cx);
-                                        },
-                                    ),
-                                )
-                                .group_hover("control", |style| {
-                                    style.bg(rgb(theme.text).alpha(0.08))
-                                }),
-                            ),
-                    ),
-            );
-        } else if self.state.system.scanning {
-            footer = footer.child(
-                copyable_message(
-                    "copy-scan-message",
-                    self.tr("shell-copy-message"),
-                    self.state.system.scan_message.clone(),
-                    cx,
-                )
-                .flex_initial()
-                .text_color(rgb(theme.text)),
-            );
+        let mut footer = row().gap_0().relative().flex_shrink_0().text_xs();
+        if let Some(notification) = self.footer_notification(cx) {
+            footer = footer.child(notification);
         }
+        footer = footer.child(
+            div()
+                .id("footer-window-drag")
+                .flex_1()
+                .min_w(gpui::rems(4.))
+                .self_stretch()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, window, cx| {
+                        if this.current_keyboard_surface(cx).is_none()
+                            && this.workspace.interaction.dragging().is_none()
+                            && this.workspace.interaction.docking().is_none()
+                            && !cx.has_active_drag()
+                        {
+                            window.start_window_move();
+                            cx.stop_propagation();
+                        }
+                    }),
+                ),
+        );
         let tools = row()
-            .ml_auto()
             .gap_1()
             .flex_shrink_0()
             .child(

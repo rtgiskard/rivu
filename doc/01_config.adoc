@@ -619,9 +619,12 @@ failed write preserves the old file and all session edits. Retry with manual
 sync, not another layout edit or instance-settings Apply. Orderly application
 exit writes the latest dirty collection, waits for completion, and reports a
 remaining failure.
-Errors and scan progress appear in the footer. Click a message or its copy action
-to copy the complete text. Error copy and dismiss actions remain visible
-without hovering.
+Errors and scan progress appear in the footer. Use the copy action to copy the
+complete text, including text truncated on screen. Errors also provide a dismiss
+action; these actions remain visible without hovering. Drag the empty footer area
+with the left mouse button to move the window using the window manager's native
+move operation. Notification text and controls do not start a window move.
+Menus and dialogs suppress footer dragging.
 
 See link:24_layout.adoc[Desktop Layout Design] for geometry, ownership, and
 editing invariants.
