@@ -1,3 +1,6 @@
+mod duplicates;
+pub use duplicates::{DuplicateGroup, DuplicateMember};
+
 mod query;
 pub use query::{Query, QueryIdentity, QueryStamp};
 

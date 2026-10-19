@@ -1,5 +1,6 @@
 //! Filesystem scanning and playlist I/O, independent of database ownership.
 
+mod cue;
 mod input;
 mod paths;
 mod playlist_io;

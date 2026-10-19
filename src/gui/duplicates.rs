@@ -3,10 +3,12 @@
 
 use super::{feature::FeatureContext, format_time};
 use crate::{
-    model::{Command, Page, Query, RelocationPhase, RelocationTaskStatus},
+    model::{
+        Command, DuplicateGroup, DuplicateMember, Page, Query, RelocationPhase,
+        RelocationTaskStatus,
+    },
     projection::{GuiSnapshot, QueryProjection},
     response::{Ack, QueryResponse, QueryRevisions, ViewResponse},
-    store::{DuplicateGroup, DuplicateMember},
 };
 use gpui::{prelude::*, *};
 use rivu_ui::{
@@ -1796,9 +1798,8 @@ fn has_target_state(member: &DuplicateMember) -> bool {
 mod tests {
     use super::{Busy, DuplicateReview, Member, ReviewFeedback, TaskReadOutcome};
     use crate::{
-        model::{Command, Page, RelocationPhase, RelocationTaskStatus, Track},
+        model::{Command, DuplicateMember, Page, RelocationPhase, RelocationTaskStatus, Track},
         response::{Ack, QueryResponse, QueryRevisions, ViewResponse},
-        store::DuplicateMember,
     };
 
     #[test]

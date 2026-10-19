@@ -1,29 +1,27 @@
 use super::Store;
 use super::rows::{TRACK_COLUMNS, fingerprint_from_row, track_from_row};
-use crate::model::{Page, Track};
+use crate::model::{DuplicateGroup, DuplicateMember, Page};
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, params};
-use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-/// Same cached whole-file fingerprint, not a newly verified content assertion.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DuplicateGroup {
-    pub fingerprint: String,
-    pub total_members: usize,
-    pub missing_members: usize,
-    pub present_members: usize,
-}
+const DUPLICATE_MEMBER_COLUMNS: &str = "file_size,modified_ns,
+    (title_override IS NOT NULL OR artist_override IS NOT NULL
+     OR album_override IS NOT NULL OR decoder_hint<>0),
+    (SELECT COUNT(*) FROM playlist_entries WHERE track_id=tracks.id),
+    (SELECT COUNT(*) FROM queue_entries WHERE track_id=tracks.id),
+    relocation_independent";
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct DuplicateMember {
-    pub track: Track,
-    pub file_size: u64,
-    pub modified_ns: i64,
-    pub has_overrides: bool,
-    pub playlist_references: usize,
-    pub queue_references: usize,
-    pub independent: bool,
+fn duplicate_member_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DuplicateMember> {
+    Ok(DuplicateMember {
+        track: track_from_row(row)?,
+        file_size: row.get::<_, i64>(25)? as u64,
+        modified_ns: row.get(26)?,
+        has_overrides: row.get(27)?,
+        playlist_references: row.get::<_, i64>(28)? as usize,
+        queue_references: row.get::<_, i64>(29)? as usize,
+        independent: row.get(30)?,
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -170,12 +168,7 @@ impl Store {
             |row| row.get::<_, i64>(0),
         )? as usize;
         let mut query = self.conn.prepare(&format!(
-            "SELECT {TRACK_COLUMNS},file_size,modified_ns,
-                    (title_override IS NOT NULL OR artist_override IS NOT NULL
-                     OR album_override IS NOT NULL OR decoder_hint<>0),
-                    (SELECT COUNT(*) FROM playlist_entries WHERE track_id=tracks.id),
-                    (SELECT COUNT(*) FROM queue_entries WHERE track_id=tracks.id),
-                    relocation_independent
+            "SELECT {TRACK_COLUMNS},{DUPLICATE_MEMBER_COLUMNS}
              FROM tracks INDEXED BY tracks_fingerprint
              WHERE cue_sheet IS NULL AND fingerprint=?1 ORDER BY missing DESC,id
              LIMIT ?2 OFFSET ?3"
@@ -187,17 +180,7 @@ impl Store {
                     limit.min(crate::model::MAX_QUERY_ROWS) as i64,
                     offset.min(i64::MAX as usize) as i64
                 ],
-                |row| {
-                    Ok(DuplicateMember {
-                        track: track_from_row(row)?,
-                        file_size: row.get::<_, i64>(25)? as u64,
-                        modified_ns: row.get(26)?,
-                        has_overrides: row.get(27)?,
-                        playlist_references: row.get::<_, i64>(28)? as usize,
-                        queue_references: row.get::<_, i64>(29)? as usize,
-                        independent: row.get(30)?,
-                    })
-                },
+                duplicate_member_from_row,
             )?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(Page { total, rows })
@@ -215,12 +198,7 @@ impl Store {
         let fingerprint = blake3::Hash::from_hex(fingerprint)
             .context("Invalid duplicate group BLAKE3 fingerprint")?;
         let mut query = self.conn.prepare(&format!(
-            "SELECT {TRACK_COLUMNS},file_size,modified_ns,
-                    (title_override IS NOT NULL OR artist_override IS NOT NULL
-                     OR album_override IS NOT NULL OR decoder_hint<>0),
-                    (SELECT COUNT(*) FROM playlist_entries WHERE track_id=tracks.id),
-                    (SELECT COUNT(*) FROM queue_entries WHERE track_id=tracks.id),
-                    relocation_independent
+            "SELECT {TRACK_COLUMNS},{DUPLICATE_MEMBER_COLUMNS}
              FROM tracks WHERE id IN (SELECT value FROM json_each(?2))
              AND cue_sheet IS NULL AND fingerprint=?1 ORDER BY missing DESC,id"
         ))?;
@@ -230,17 +208,7 @@ impl Store {
                     fingerprint.as_bytes().as_slice(),
                     serde_json::to_string(track_ids)?
                 ],
-                |row| {
-                    Ok(DuplicateMember {
-                        track: track_from_row(row)?,
-                        file_size: row.get::<_, i64>(25)? as u64,
-                        modified_ns: row.get(26)?,
-                        has_overrides: row.get(27)?,
-                        playlist_references: row.get::<_, i64>(28)? as usize,
-                        queue_references: row.get::<_, i64>(29)? as usize,
-                        independent: row.get(30)?,
-                    })
-                },
+                duplicate_member_from_row,
             )?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(Page {

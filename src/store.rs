@@ -16,7 +16,7 @@ use anyhow::{Result, bail};
 use rusqlite::Connection;
 use std::cell::RefCell;
 
-pub use duplicates::{DuplicateGroup, DuplicateMember, PreparedRelocation, RelocationIdentity};
+pub use duplicates::{PreparedRelocation, RelocationIdentity};
 pub use scan::ScanImpacts;
 pub(crate) use tracks::PlaybackSource;
 pub use tracks::{FavoriteImpact, TrackEditImpact, TrackRemovalImpact};

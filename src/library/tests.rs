@@ -371,7 +371,7 @@ fn bounded_playlist_reads_enforce_capacity_and_cancellation_boundaries() -> Resu
             .contains("cancelled")
         );
         assert!(
-            crate::cue::parse_input(&[0xff], &sheet, &cancellation)
+            super::cue::parse_input(&[0xff], &sheet, &cancellation)
                 .unwrap_err()
                 .to_string()
                 .contains("cancelled")

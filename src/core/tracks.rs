@@ -1,6 +1,51 @@
 use super::*;
 
 impl Core {
+    pub(in crate::core) fn track(&self, id: i64) -> Result<Track> {
+        self.store.track(id)?.context("Track not found")
+    }
+
+    pub(in crate::core) fn refresh_affected_queue_tracks(
+        &mut self,
+        track_ids: &[i64],
+    ) -> Result<()> {
+        self.state.queue = self.store.queue_projection(self.queue_ids.len())?;
+        if let Some(current) = self.state.current_track.as_ref()
+            && track_ids.contains(&current.id)
+        {
+            let track = self.store.track(current.id)?;
+            if track.as_ref() != Some(current.as_ref()) {
+                self.replace_current_track(track)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Both targeted edits and scan/CUE refreshes pass through this boundary.
+    /// Queue admission precedes replacing the cache: a committed producer that
+    /// cannot synchronize audio reports a refresh error and retains the old
+    /// snapshot, so a later refresh still observes the outstanding difference.
+    pub(in crate::core) fn replace_current_track(&mut self, track: Option<Track>) -> Result<()> {
+        if let Some(track) = track.as_ref()
+            && self
+                .playback
+                .as_ref()
+                .is_some_and(|playback| playback.track_id == track.id)
+            && self.state.current_track.as_ref().is_none_or(|current| {
+                current.title != track.title
+                    || current.artist != track.artist
+                    || current.album != track.album
+            })
+        {
+            self.audio(AudioCommand::Metadata {
+                generation: self.generation,
+                metadata: Self::playback_metadata(track),
+            })?;
+        }
+        self.state.current_track = track.map(Arc::new);
+        Ok(())
+    }
+
     pub(in crate::core) fn keep_track_independent(&mut self, track_id: i64) -> Result<()> {
         if self.store.keep_independent(track_id)? {
             self.state.library.duplicate_members_revision = self

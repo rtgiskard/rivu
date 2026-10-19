@@ -22,7 +22,7 @@ const MAX_RETAINED_BYTES: usize = 64 * 1024 * 1024;
 
 pub(crate) struct PlaylistImport {
     pub items: Vec<M3uItem>,
-    pub sheets: HashMap<PathBuf, crate::cue::CueSheet>,
+    pub sheets: HashMap<PathBuf, super::cue::CueSheet>,
 }
 
 /// Import a bounded CUE sheet in sheet order, or a UTF-8 M3U/M3U8 playlist.
@@ -83,14 +83,14 @@ fn prepare_import(
                 )
                 .with_context(|| format!("Reading import CUE {}", path.display()))?;
                 bytes_read += bytes.len();
-                let sheet = crate::cue::parse_input(&bytes, path, cancellation)?;
+                let sheet = super::cue::parse_input(&bytes, path, cancellation)?;
                 // Account for retained parsed paths/metadata, not merely source bytes.
-                retained += path.as_os_str().len() + std::mem::size_of::<crate::cue::CueSheet>();
+                retained += path.as_os_str().len() + std::mem::size_of::<super::cue::CueSheet>();
                 retained += sheet.title.as_ref().map_or(0, String::len)
                     + sheet.performer.as_ref().map_or(0, String::len);
                 for track in &sheet.tracks {
                     cancellation.check()?;
-                    retained += std::mem::size_of::<crate::cue::CueTrack>()
+                    retained += std::mem::size_of::<super::cue::CueTrack>()
                         + track.file.as_os_str().len()
                         + track.title.as_ref().map_or(0, String::len)
                         + track.performer.as_ref().map_or(0, String::len);
@@ -201,7 +201,7 @@ where
     {
         let mut writer = BufWriter::new(temporary.as_file_mut());
         writer.write_all(b"#EXTM3U\n")?;
-        let mut cue_run: Option<(PathBuf, crate::cue::CueSheet, usize)> = None;
+        let mut cue_run: Option<(PathBuf, super::cue::CueSheet, usize)> = None;
         for item in tracks {
             let mut track = item?;
             track.path = logical_path(&track.path)?;
@@ -245,7 +245,7 @@ where
                 let cancellation = ScanCancellation::default();
                 let bytes = read_input(&cue.sheet, MAX_CUE_BYTES, &cancellation)
                     .with_context(|| format!("Reading export CUE {}", cue.sheet.display()))?;
-                let sheet = crate::cue::parse_input(&bytes, &cue.sheet, &cancellation)?;
+                let sheet = super::cue::parse_input(&bytes, &cue.sheet, &cancellation)?;
                 let expected = sheet
                     .tracks
                     .first()

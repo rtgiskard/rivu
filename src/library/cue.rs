@@ -34,10 +34,10 @@ struct PendingTrack {
 }
 
 /// Parse already bounded input without reopening its sheet.
-pub(crate) fn parse_input(
+pub(super) fn parse_input(
     bytes: &[u8],
     path: &Path,
-    cancellation: &crate::library::ScanCancellation,
+    cancellation: &super::ScanCancellation,
 ) -> Result<CueSheet> {
     cancellation.check()?;
     let text = decode(bytes).with_context(|| format!("Decoding CUE {}", path.display()))?;

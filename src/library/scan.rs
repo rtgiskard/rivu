@@ -265,7 +265,7 @@ pub(crate) fn scan_paths_with_cues(
     max_depth: u32,
     (cancellation, mut sheets): (
         &ScanCancellation,
-        Option<HashMap<PathBuf, crate::cue::CueSheet>>,
+        Option<HashMap<PathBuf, super::cue::CueSheet>>,
     ),
     mut progress: impl FnMut(ScanPhase, usize, Option<usize>, usize, Option<&Path>),
 ) -> Result<ScanResult> {
@@ -587,7 +587,7 @@ fn scan_cue(
     ffmpeg_enabled: bool,
     library_roots: &[PathBuf],
     cancellation: &ScanCancellation,
-    sheets: Option<&mut HashMap<PathBuf, crate::cue::CueSheet>>,
+    sheets: Option<&mut HashMap<PathBuf, super::cue::CueSheet>>,
 ) -> Result<Vec<ScanRecord>> {
     cancellation.check()?;
     path.to_str().context("CUE sheet path is not UTF-8")?;
@@ -598,7 +598,7 @@ fn scan_cue(
         None => {
             let bytes = super::input::read_input(path, super::input::MAX_CUE_BYTES, cancellation)
                 .with_context(|| format!("Reading CUE {}", path.display()))?;
-            crate::cue::parse_input(&bytes, path, cancellation)
+            super::cue::parse_input(&bytes, path, cancellation)
         }
     };
     cancellation.check()?;

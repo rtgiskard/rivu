@@ -164,8 +164,8 @@ pub enum ViewResponse {
     QueueBatch(Batch<QueueRow, BatchContinuation<QueueCursor>>),
     QueueEntries(Vec<QueueRow>),
     PlaylistEntry(Option<PlaylistEntryLocation>),
-    DuplicateGroups(Page<crate::store::DuplicateGroup>),
-    DuplicateMembers(Page<crate::store::DuplicateMember>),
+    DuplicateGroups(Page<crate::model::DuplicateGroup>),
+    DuplicateMembers(Page<crate::model::DuplicateMember>),
     RelocationTask(crate::model::RelocationTaskStatus),
     PlaylistEntryLocations(Vec<PlaylistEntryLocation>),
 }
