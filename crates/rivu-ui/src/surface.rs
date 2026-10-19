@@ -1,8 +1,4 @@
-use crate::{
-    layout::{UI_INSET, column},
-    menu::{MENU_WIDTH, menu_item},
-    theme::Palette,
-};
+use crate::{layout::column, menu::menu_item, theme::Palette};
 use gpui::{prelude::*, *};
 
 /// Opaque elevated material for menus, dropdowns, and tooltips only.
@@ -53,7 +49,7 @@ impl Dialog {
             .max_w(relative(0.9))
             .max_h(window.viewport_size().height * 0.9)
             .overflow_y_scroll()
-            .p(px(UI_INSET))
+            .p_2()
     }
 }
 
@@ -70,11 +66,11 @@ impl Popover {
         id: impl Into<ElementId>,
         window: &Window,
     ) -> Stateful<Div> {
+        let inset = window.rem_size() * 0.5;
         Self::surface(theme, id)
             .role(Role::Menu)
-            .w(rems(MENU_WIDTH / 16.))
-            .max_w((window.viewport_size().width - px(UI_INSET * 2.)).max(px(0.)))
-            .max_h((window.viewport_size().height - px(UI_INSET * 2.)).max(px(0.)))
+            .max_w((window.viewport_size().width - inset * 2.).max(px(0.)))
+            .max_h((window.viewport_size().height - inset * 2.).max(px(0.)))
             .overflow_y_scroll()
             .p_1()
             .gap_0()

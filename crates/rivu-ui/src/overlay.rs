@@ -1,5 +1,5 @@
 use crate::{
-    layout::{UI_INSET, caption, row},
+    layout::{caption, row},
     surface::floating_surface,
 };
 use gpui::{
@@ -48,11 +48,12 @@ fn overlay_font(cx: &gpui::App) -> gpui::Font {
 /// Compact floating surface shared by action and row tooltips.
 pub fn tooltip_surface(window: &Window, cx: &gpui::App, max_width_rems: f32) -> Div {
     let theme = crate::theme::palette(cx);
-    let available = (window.viewport_size().width - px(UI_INSET * 2.)).max(px(0.));
+    let inset = window.rem_size() * 0.5;
+    let available = (window.viewport_size().width - inset * 2.).max(px(0.));
     floating_surface(theme)
         .min_w_0()
         .max_w((window.rem_size() * max_width_rems).min(available))
-        .px(px(UI_INSET))
+        .px_2()
         .py_1()
         .rounded_md()
         .font(overlay_font(cx))
@@ -84,7 +85,8 @@ impl Render for ButtonTooltip {
 /// Shared compact surface for independent drag previews.
 pub fn drag_preview_surface(window: &Window, cx: &gpui::App) -> Div {
     let theme = crate::theme::palette(cx);
-    let available = (window.viewport_size().width - px(UI_INSET * 2.)).max(px(0.));
+    let inset = window.rem_size() * 0.5;
+    let available = (window.viewport_size().width - inset * 2.).max(px(0.));
     div()
         .flex()
         .items_center()

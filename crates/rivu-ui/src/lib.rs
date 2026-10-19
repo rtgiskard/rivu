@@ -29,8 +29,8 @@ pub use layout::{
 };
 pub use list::VirtualList;
 pub use menu::{
-    MENU_WIDTH, POPOVER_MAX_REMS, danger_menu_item, menu_back, menu_item, menu_item_style,
-    menu_separator, menu_title,
+    POPOVER_MAX_REMS, danger_menu_item, menu_back, menu_item, menu_item_style, menu_separator,
+    menu_title,
 };
 pub use overlay::{
     ButtonTooltip, ListDragPreview, anchor_list_drag_preview, begin_list_drag, copyable_message,

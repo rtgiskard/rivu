@@ -83,6 +83,7 @@ Menus open without a focused action. Use `Up` or `Down` to enter and move betwee
 available actions (wrapping at the ends), or use `Tab`/`Shift+Tab`. `Enter` chooses
 the focused action. `Escape` or `Left` returns from a submenu; at the top level it
 closes the menu without triggering a playback shortcut.
+Menu action labels stay on one line; long labels are shortened, with the full name available on hover.
 
 Open Shortcuts from the application menu to view desktop bindings;
 `Escape` or the close button dismisses the list. `F1` and `?` do not open or close it.
@@ -240,8 +241,8 @@ Interface presents these sections together on one scrollable page, without
 separate sidebar subpages. Panel-specific artwork settings remain a focused editor.
 Logging is application-wide, including headless operation, and remains in `[logging]`.
 Visualizations contains General and the four audio-data views.
-Dropdown keys: <<_desktop_keyboard_navigation,Desktop keyboard navigation>>.
 Long sidebar labels are shortened to one line; hover over a category to read its full name.
+Dropdown keys: <<_desktop_keyboard_navigation,Desktop keyboard navigation>>.
 The system tray switch takes effect after restarting the graphical host, not
 merely reopening its window. Media read buffering applies to future source opens,
 including full waveform scans; it does not reopen the current track.
