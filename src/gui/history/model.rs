@@ -47,19 +47,20 @@ impl Default for HistoryBrowser {
 }
 
 impl HistoryBrowser {
+    /// Returns whether source data or visible order changed. Playback-only
+    /// updates preserve pending row actions unless they actually reorder rows.
     pub(in crate::gui) fn sync(
         &mut self,
         source: &Arc<Vec<HistoryEntry>>,
         playback: Option<(i64, i64)>,
     ) -> bool {
         let source_changed = !Arc::ptr_eq(&self.source, source);
-        let playback_changed = self.playback != playback;
+        let previous_playback = self.playback;
         self.playback = playback;
         if !source_changed {
-            if playback_changed && self.sort == HistorySort::Recent {
-                self.rebuild();
-            }
-            return playback_changed;
+            return previous_playback != playback
+                && self.sort == HistorySort::Recent
+                && self.reorder_playback(previous_playback);
         }
         self.source = Arc::clone(source);
         self.title_keys = source
@@ -86,6 +87,80 @@ impl HistoryBrowser {
         self.source.len()
     }
 
+    fn recent_key(entry: &HistoryEntry, playback: Option<(i64, i64)>) -> (i64, bool) {
+        let current = playback.filter(|&(id, _)| id == entry.track_id);
+        (
+            current.map_or(entry.played_at, |(_, time)| time),
+            current.is_some(),
+        )
+    }
+
+    fn compare_recent_indices(&self, a: usize, b: usize) -> std::cmp::Ordering {
+        let ordering = Self::recent_key(&self.source[a], self.playback)
+            .cmp(&Self::recent_key(&self.source[b], self.playback));
+        let ordering = if self.descending {
+            ordering.reverse()
+        } else {
+            ordering
+        };
+        // Rebuild's stable sort preserves source order for equal keys.
+        ordering.then_with(|| a.cmp(&b))
+    }
+
+    fn reorder_playback(&mut self, previous: Option<(i64, i64)>) -> bool {
+        let mut affected = [
+            previous.and_then(|(id, _)| self.positions.get(&id).copied()),
+            self.playback
+                .and_then(|(id, _)| self.positions.get(&id).copied()),
+        ];
+        if affected[0] == affected[1] {
+            affected[1] = None;
+        }
+        // Only the old and new current rows can have changed keys. Most ticks
+        // keep them between the same neighbors, without touching the projection.
+        let needs_reorder = affected.iter().flatten().any(|&position| {
+            let index = self.indices[position];
+            (position > 0
+                && self
+                    .compare_recent_indices(self.indices[position - 1], index)
+                    .is_gt())
+                || (position + 1 < self.indices.len()
+                    && self
+                        .compare_recent_indices(index, self.indices[position + 1])
+                        .is_gt())
+        });
+        if !needs_reorder {
+            return false;
+        }
+
+        // Remove both changed keys before searching the otherwise sorted rows.
+        // Descending positions keep the second removal's original index valid.
+        affected.sort_unstable_by(|a, b| b.cmp(a));
+        let mut removed = [None, None];
+        let mut start = self.indices.len();
+        for (slot, position) in removed.iter_mut().zip(affected) {
+            if let Some(position) = position {
+                start = start.min(position);
+                *slot = Some(self.indices.remove(position));
+            }
+        }
+        for index in removed.into_iter().flatten() {
+            let position = self
+                .indices
+                .partition_point(|&other| self.compare_recent_indices(other, index).is_lt());
+            self.indices.insert(position, index);
+            start = start.min(position);
+        }
+        // Reinserting the second row can shift the first inserted row again.
+        // Refresh the affected suffix rather than retaining stale intermediate positions.
+        for position in start..self.indices.len() {
+            self.positions
+                .insert(self.source[self.indices[position]].track_id, position);
+        }
+        self.generation = self.generation.wrapping_add(1);
+        true
+    }
+
     fn rebuild(&mut self) {
         self.indices.clear();
         self.indices.extend((0..self.source.len()).filter(|&index| {
@@ -95,16 +170,8 @@ impl HistoryBrowser {
         }));
         self.indices.sort_by(|&a, &b| {
             let ordering = match self.sort {
-                HistorySort::Recent => {
-                    let key = |entry: &HistoryEntry| {
-                        let current = self.playback.filter(|&(id, _)| id == entry.track_id);
-                        (
-                            current.map_or(entry.played_at, |(_, time)| time),
-                            current.is_some(),
-                        )
-                    };
-                    key(&self.source[a]).cmp(&key(&self.source[b]))
-                }
+                HistorySort::Recent => Self::recent_key(&self.source[a], self.playback)
+                    .cmp(&Self::recent_key(&self.source[b], self.playback)),
                 HistorySort::Title => self.title_keys[a].cmp(&self.title_keys[b]),
                 HistorySort::Plays => self.source[a].play_count.cmp(&self.source[b].play_count),
             };
@@ -398,26 +465,29 @@ mod tests {
     }
 
     #[test]
-    fn history_playback_reorder_preserves_selected_ids_but_invalidates_old_drag() {
+    fn history_playback_reorder_preserves_selection_but_invalidates_pending_actions() {
         let mut history = HistoryBrowser::default();
         let source = history_selection_source(&[1, 2, 3]);
         history.sync(&source, None);
         history.select_all();
         let generation = history.generation();
+        let commit = history.prepare_selection(2, false, false).unwrap();
         assert!(history.sync(&source, Some((3, 200))));
+        assert_eq!(history.generation(), generation.wrapping_add(1));
         assert_eq!(history.ordered_selection(), [3, 1, 2]);
+        assert!(!history.commit_selection(commit));
         assert!(history.drag_ids(1, generation).is_empty());
         assert_eq!(history.drag_ids(1, history.generation()), [3, 1, 2]);
 
-        // A later heard timestamp needs fresh row handlers even when the row
-        // order stays the same. Ordinary playback ticks must keep them usable.
         let generation = history.generation();
+        let commit = history.prepare_selection(2, false, false).unwrap();
         assert!(!history.sync(&source, Some((3, 200))));
-        assert_eq!(history.drag_ids(1, generation), [3, 1, 2]);
-        assert!(history.sync(&source, Some((3, 201))));
+        assert!(!history.sync(&source, Some((3, 201))));
+        assert_eq!(history.generation(), generation);
         assert_eq!(history.ordered_selection(), [3, 1, 2]);
-        assert!(history.drag_ids(1, generation).is_empty());
-        assert_eq!(history.drag_ids(1, history.generation()), [3, 1, 2]);
+        assert_eq!(history.drag_ids(1, generation), [3, 1, 2]);
+        assert!(history.commit_selection(commit));
+        assert_eq!(history.ordered_selection(), [2]);
     }
 
     #[test]
@@ -433,15 +503,119 @@ mod tests {
             let selected = history.ordered_selection();
             let commit = history.prepare_selection(2, false, false).unwrap();
 
-            // The timestamp cell changes, but these sorts do not invalidate
-            // row identity or an already prepared selection.
-            assert!(history.sync(&source, Some((3, 201))));
+            // Neither timestamp nor current-ID changes affect these projections.
+            assert!(!history.sync(&source, Some((3, 201))));
+            assert!(!history.sync(&source, Some((1, 202))));
+            assert!(!history.sync(&source, None));
+            assert_eq!(history.generation(), generation);
             assert_eq!(history.drag_ids(1, generation), selected);
             assert!(history.commit_selection(commit));
             assert_eq!(history.ordered_selection(), [2]);
-            assert!(!history.sync(&source, Some((3, 201))));
+            assert!(!history.sync(&source, None));
             assert_eq!(history.drag_ids(2, generation), [2]);
         }
+    }
+
+    #[test]
+    fn history_same_order_current_changes_preserve_anchor_selection_and_drag() {
+        let source = history_selection_source(&[1, 2, 3]);
+        let mut history = HistoryBrowser::default();
+        history.sync(&source, None);
+        select_history(&mut history, 1, false, false);
+        let generation = history.generation();
+        let commit = history.prepare_selection(3, true, false).unwrap();
+        for playback in [Some((1, 100)), Some((2, 98)), None, Some((99, 200))] {
+            assert!(!history.sync(&source, playback));
+            assert_eq!(history.generation(), generation);
+            assert_eq!(history.anchor, Some(1));
+            assert_eq!(history.drag_ids(1, generation), [1]);
+            assert!(history.commit_valid(&commit));
+        }
+        assert!(history.commit_selection(commit));
+        assert_eq!(history.ordered_selection(), [1, 2, 3]);
+    }
+
+    #[test]
+    fn history_incremental_recent_order_matches_rebuild_for_ties_filters_and_directions() {
+        let mut source = history_selection_source(&[4, 2, 1, 3]);
+        for (entry, time) in Arc::make_mut(&mut source).iter_mut().zip([98, 98, 99, 97]) {
+            entry.played_at = time;
+            if entry.track_id != 1 {
+                entry.title.push_str(" match");
+            }
+        }
+        let mut playbacks = vec![None, Some((99, 200))];
+        for id in [1, 2, 3, 4] {
+            for time in [96, 97, 98, 99, 100] {
+                playbacks.push(Some((id, time)));
+            }
+        }
+        for descending in [true, false] {
+            for query in [None, Some("match"), Some("track 9"), Some("missing")] {
+                let projection = |playback| {
+                    let mut history = HistoryBrowser::default();
+                    history.sync(&source, playback);
+                    history.set_query(query.map(str::to_owned));
+                    if !descending {
+                        history.set_sort(HistorySort::Recent);
+                    }
+                    history
+                };
+                for &previous in &playbacks {
+                    for &next in &playbacks {
+                        let mut history = projection(previous);
+                        history.select_all();
+                        let old_indices = history.indices.clone();
+                        let generation = history.generation();
+                        let mut rebuilt = projection(next);
+                        rebuilt.select_all();
+                        let changed = old_indices != rebuilt.indices;
+
+                        assert_eq!(history.sync(&source, next), changed);
+                        assert_eq!(history.indices, rebuilt.indices);
+                        assert_eq!(history.positions, rebuilt.positions);
+                        assert_eq!(history.ordered_selection(), rebuilt.ordered_selection());
+                        assert_eq!(
+                            history.generation(),
+                            generation.wrapping_add(u64::from(changed))
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn history_source_replacement_refreshes_fields_and_prunes_selection() {
+        let source = history_selection_source(&[1, 2, 3]);
+        let mut history = HistoryBrowser::default();
+        history.sync(&source, Some((3, 200)));
+        select_history(&mut history, 1, false, false);
+        select_history(&mut history, 3, false, true);
+        let generation = history.generation();
+        let commit = history.prepare_selection(2, false, false).unwrap();
+        let mut replacement = history_selection_source(&[1, 2]);
+        let entry = &mut Arc::make_mut(&mut replacement)[0];
+        entry.title = "Updated title".into();
+        entry.play_count = 42;
+        entry.played_at = 300;
+        entry.favorite = true;
+
+        assert!(history.sync(&replacement, Some((3, 200))));
+        assert_eq!(history.generation(), generation.wrapping_add(1));
+        assert!(!history.commit_selection(commit));
+        assert!(history.drag_ids(1, generation).is_empty());
+        assert_eq!(history.ordered_selection(), [1]);
+        assert_eq!(history.anchor, None);
+        let entry = history.get(0).unwrap();
+        assert_eq!(entry.track_id, 1);
+        assert_eq!(entry.title, "Updated title");
+        assert_eq!(entry.play_count, 42);
+        assert_eq!(entry.played_at, 300);
+        assert!(entry.favorite);
+        history.set_query(Some("updated".into()));
+        assert_eq!(history.len(), 1);
+        assert_eq!(history.get(0).unwrap().track_id, 1);
     }
 
     #[test]

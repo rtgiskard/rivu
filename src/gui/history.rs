@@ -90,6 +90,12 @@ impl History {
         }
     }
 
+    fn current_playback(state: &GuiSnapshot) -> Option<(i64, PlaybackStatus)> {
+        state
+            .current_track()
+            .map(|track| (track.id, state.playback.status))
+    }
+
     fn playback(state: &GuiSnapshot) -> Option<(i64, i64)> {
         (state.playback.status != PlaybackStatus::Stopped)
             .then(|| {
@@ -105,10 +111,8 @@ impl History {
         let changed = self
             .model
             .sync(&state.library.history, Self::playback(&state));
-        // Playing/paused labels can change without changing either order or timestamp.
-        let labels_changed = self.state.playback.status != state.playback.status
-            || self.state.current_track().map(|track| track.id)
-                != state.current_track().map(|track| track.id);
+        // Status/loaded-track changes affect labels independently of visible order.
+        let labels_changed = Self::current_playback(&self.state) != Self::current_playback(&state);
         let typography_changed = self.state.system.config.ui_font_size
             != state.system.config.ui_font_size
             || self.state.system.config.ui_scale != state.system.config.ui_scale;

@@ -19,7 +19,7 @@ pub(super) struct HistoryColumnWidths {
     rem_size: gpui::Pixels,
     font_size_scale: f32,
     times: TimeWidths,
-    playback: Option<(i64, PlaybackStatus, Option<i64>)>,
+    playback: Option<(i64, PlaybackStatus)>,
     playback_text: Option<SharedString>,
     widths: [gpui::Pixels; 3],
 }
@@ -53,46 +53,22 @@ impl TimeWidths {
     }
 }
 
+fn playback_label(playback: Option<(i64, PlaybackStatus)>, track_id: i64) -> Option<&'static str> {
+    let (current_id, status) = playback?;
+    (current_id == track_id).then_some(match status {
+        PlaybackStatus::Playing => "gl-playing",
+        PlaybackStatus::Paused => "gl-paused",
+        PlaybackStatus::Stopped => "gl-stopped",
+    })
+}
+
 impl History {
-    pub(super) fn last_played_text(&self, track_id: i64, stored_at: Option<i64>) -> String {
-        let current = self
-            .state
-            .current_track()
-            .is_some_and(|track| track.id == track_id);
-        if current
-            && self.state.playback.status == PlaybackStatus::Playing
-            && self.state.playback.last_heard_at.is_some()
-        {
-            return self.context.i18n.text("gl-played-now").into();
-        }
-
-        let played_at = if current && self.state.playback.status == PlaybackStatus::Paused {
-            self.state.playback.last_heard_at
-        } else {
-            stored_at
-        };
-        self.format_played_at(
-            played_at,
-            current && self.state.playback.status == PlaybackStatus::Paused,
-        )
-    }
-
-    fn format_played_at(&self, played_at: Option<i64>, paused: bool) -> String {
+    fn format_played_at(&self, played_at: Option<i64>) -> String {
         match played_at.and_then(|time| DateTime::from_timestamp(time, 0)) {
-            Some(time) => self.context.i18n.format(
-                "gl-played-at",
-                &[
-                    (
-                        "time",
-                        (time
-                            .with_timezone(&Local)
-                            .format("%Y-%m-%d %H:%M:%S")
-                            .to_string())
-                        .into(),
-                    ),
-                    ("paused", usize::from(paused).into()),
-                ],
-            ),
+            Some(time) => time
+                .with_timezone(&Local)
+                .format("%Y-%m-%d %H:%M:%S")
+                .to_string(),
             None => self.context.i18n.text("gl-played-none").into(),
         }
     }
@@ -170,22 +146,7 @@ impl History {
         self.search.update(cx, |search, cx| {
             set_search_counts(search, history_len, history_total, &self.context.i18n, cx)
         });
-        // Playing uses one fixed label regardless of the latest heard timestamp.
-        // Stopped or not-yet-heard playback leaves the stored labels untouched.
-        let playback =
-            self.state
-                .current_track()
-                .and_then(|track| match self.state.playback.status {
-                    PlaybackStatus::Playing if self.state.playback.last_heard_at.is_some() => {
-                        Some((track.id, PlaybackStatus::Playing, None))
-                    }
-                    PlaybackStatus::Paused => Some((
-                        track.id,
-                        PlaybackStatus::Paused,
-                        self.state.playback.last_heard_at,
-                    )),
-                    _ => None,
-                });
+        let playback = Self::current_playback(&self.state);
         let source = &self.state.library.history;
         let rem_size = window.rem_size();
         let font_size_scale = rivu_ui::theme::font_size_scale(cx);
@@ -236,7 +197,7 @@ impl History {
             for (index, item) in source.iter().enumerate() {
                 widths[0] = widths[0].max(numeric_width((index + 1).to_string().into()));
                 widths[1] = widths[1].max(numeric_width(item.play_count.to_string().into()));
-                let last_played = self.format_played_at(Some(item.played_at), false);
+                let last_played = self.format_played_at(Some(item.played_at));
                 times.include(item.track_id, text_width(last_played.into()));
             }
             widths[2] = times.width(None, px(0.));
@@ -253,15 +214,15 @@ impl History {
         }
         if self.column_widths.as_ref().unwrap().playback != playback {
             let label = playback
-                .filter(|(id, _, _)| source.iter().any(|item| item.track_id == *id))
-                .map(|(id, _, _)| {
-                    let text: SharedString = self.last_played_text(id, None).into();
+                .filter(|(id, _)| source.iter().any(|item| item.track_id == *id))
+                .map(|(id, _)| {
+                    let text = self.tr(playback_label(playback, id).unwrap());
                     let width = text_width(text.clone());
                     (text, width)
                 });
             let cache = self.column_widths.as_mut().unwrap();
             cache.widths[2] = cache.times.width(
-                playback.map(|(id, _, _)| id),
+                playback.map(|(id, _)| id),
                 label.as_ref().map_or(px(0.), |(_, width)| *width),
             );
             cache.playback = playback;
@@ -356,9 +317,9 @@ impl History {
                                 item.title.clone()
                             };
                             let last_played = this.column_widths.as_ref()
-                                .filter(|cache| cache.playback.is_some_and(|(track, _, _)| track == id))
+                                .filter(|cache| cache.playback.is_some_and(|(track, _)| track == id))
                                 .and_then(|cache| cache.playback_text.clone())
-                                .unwrap_or_else(|| this.last_played_text(id, Some(item.played_at)).into());
+                                .unwrap_or_else(|| this.format_played_at(Some(item.played_at)).into());
                             let selected = this.model.contains(id);
                             let generation = this.model.generation();
                             let drag_owner = cx.weak_entity();

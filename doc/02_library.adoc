@@ -546,6 +546,12 @@ that track. These transfers do not remove history entries or change Library
 selection. Double-click plays the clicked track. Columns remain sortable and
 shrink to fit; hovering a row exposes its individual favorite toggle.
 
+The loaded playback track shows only `Playing`, `Paused`, or `Stopped` in the
+Last played column, even before playback has confirmed any audio was heard.
+This follows the playback track, not the Recent tracks selection. Other rows
+show their stored last-played timestamps. Loading a track does not add a history
+entry; only tracks already present in history appear here.
+
 == Albums
 
 Add the dockable `Albums` panel to browse a continuously scrolling cover grid.
