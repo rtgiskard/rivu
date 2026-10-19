@@ -1,3 +1,8 @@
+---
+name: rivu-gui-verification
+description: Rivu GUI 验证的项目适配；涉及真实界面、输入与平台行为时，结合通用 GUI 验证方法使用，提供 GPUI、Wayland、隔离实例及清理约定
+---
+
 # Rivu GUI 验证
 
 ## 目标与边界
@@ -6,7 +11,7 @@
 
 本 skill 是项目验证流程，不附带已安装的输入工具或自动化框架。先发现现有工具和任务产物，再复用；历史 `.cache/` 辅助程序可能已经清理，不能假定存在。
 
-涉及视觉回归或资源对照时，结合 [可视化保真与资源对照](visual-comparison.md) 使用；本文件仅为 Rivu 的 GPUI/Wayland 适配，非所有项目的默认路线。
+通用流程见 [GUI 验证](skill://gskd-gui-verification)，视觉与资源对照见 [比较方法](skill://gskd-gui-verification/references/visual-comparison.md)。本文件仅为 Rivu 的 GPUI/Wayland 适配，非所有项目的默认路线。
 
 当前行为以仓库根目录的 `doc/01_config.adoc`、`doc/23_visuals.adoc`、`doc/22_cache.adoc` 及相关实现为准；布局问题补读 `doc/24_layout.adoc`。这些是 Rivu 项目路径，不是 Skill 内文件；不要把这里的历史案例当作当前实测。
 
