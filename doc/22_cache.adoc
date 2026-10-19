@@ -264,14 +264,24 @@ frequency mapping, and sampling-size changes rebuild affected publications so co
 retained history is shown with current settings. FFT-size or window changes
 discard history rather than recoloring data with a different analysis meaning.
 
-Visible Spectrogram panels share one bounded history sized for the largest
+Drawable Spectrogram panels share one bounded history sized for the largest
 requested plot width, capped by configured history seconds multiplied by
 analysis FPS, with a minimum capacity of two columns. Shared sampling resolution
-follows the largest visible panel height, capped by the configured row limit and
+follows the largest drawable panel height, capped by the configured row limit and
 the startup shared GPU budget. Narrow and wide panels therefore do not compete
 to resize it during painting. Capacity
 changes preserve the newest chronological columns. Recoloring compatible
 history does not discard its underlying frequency data.
+
+Prepaint retains measurements for cached panels until their bounds or visibility
+change. A canvas at most 64 logical pixels wide or 40 logical pixels high shows
+the insufficient-space hint and retires only its own drawable-size request;
+measurements from drawable cached siblings remain authoritative. If every active
+panel is too small, shared history shrinks to its two newest columns and shared
+panel height becomes zero. Unchanged small frames neither clear nor reallocate
+that history. Enlarging a panel registers its measured size again and preserves
+the retained columns while normal accumulation resumes. Analysis demand is
+unchanged by this size-only transition.
 
 When no Spectrogram panel is visible, including when the window is hidden,
 its numerical publications and CPU history and derived storage are released.

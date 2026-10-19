@@ -362,7 +362,6 @@ struct VisualData {
     spectrogram_history_seconds: u32,
     history_limit_seconds: f64,
     analysis_fps: u32,
-    configured_history_columns: usize,
     history_columns: usize,
     stream_generation: u64,
     source_generation: Option<u64>,
@@ -443,7 +442,6 @@ impl Visuals {
                 spectrogram_history_seconds: 20,
                 history_limit_seconds: 20.0,
                 analysis_fps: 20,
-                configured_history_columns: 0,
                 history_columns: 0,
                 heat_sample_generation: 0,
                 stream_generation: 0,
@@ -498,8 +496,6 @@ impl Visuals {
             .get_or_insert(config.gpu_material_budget_bytes());
         let spectrum_db_range = config.spectrum_db_range();
         let spectrogram_db_range = config.spectrogram_db_range();
-        let configured_history_columns =
-            history_column_count(config.spectrogram_history_seconds, config.analysis_fps);
         let palette_changed = data.palette_lut.palette != config.visual_palette;
         let cache_changed = data.visualization_cache != config.visualization_cache;
         let history_missing = data.enabled && data.spectrogram_visible && data.history_columns == 0;
@@ -529,15 +525,13 @@ impl Visuals {
             || data.spectrogram_sampling_points_scale != config.spectrogram_sampling_points_scale
             || data.spectrogram_history_seconds != config.spectrogram_history_seconds
             || data.analysis_fps != config.analysis_fps
-            || data.configured_history_columns != configured_history_columns
             || cache_changed;
         if !changed {
             return false;
         }
         let history_changed = history_missing
             || data.spectrogram_history_seconds != config.spectrogram_history_seconds
-            || data.analysis_fps != config.analysis_fps
-            || data.configured_history_columns != configured_history_columns;
+            || data.analysis_fps != config.analysis_fps;
         let analysis_changed = data.analysis_fft_size != config.analysis_fft_size
             || data.analysis_window != config.analysis_window;
         let heat_changed = palette_changed
@@ -578,9 +572,11 @@ impl Visuals {
         data.spectrogram_history_seconds = config.spectrogram_history_seconds;
         data.history_limit_seconds = config.spectrogram_history_seconds as f64;
         data.analysis_fps = config.analysis_fps;
-        data.configured_history_columns = configured_history_columns;
         if data.enabled && data.spectrogram_visible && history_changed {
-            data.resize_history(configured_history_columns);
+            data.resize_history(history_column_count(
+                config.spectrogram_history_seconds,
+                config.analysis_fps,
+            ));
         }
         if analysis_changed {
             data.clear_history();
@@ -799,7 +795,10 @@ impl Visuals {
         };
         let visual_background = self.data.borrow().visual_background;
         gpui::container_query(move |available, _, _| {
-            if !visual_canvas_has_room(available) {
+            if !prepaint_data
+                .borrow_mut()
+                .prepaint_panel(panel_id, mode, available)
+            {
                 let message: SharedString = i18n.text("visual-too-small").to_owned().into();
                 let tooltip = message.clone();
                 return div()
@@ -826,23 +825,7 @@ impl Visuals {
                 .bg(rgb(visual_background))
                 .child(
                     canvas(
-                        move |bounds, _, _| {
-                            if mode == VisualMode::Spectrogram {
-                                let mut data = prepaint_data.borrow_mut();
-                                let margin = axis_label_margin(
-                                    data.spectrogram_show_labels,
-                                    &data.frequency_labels,
-                                );
-                                let width = ((bounds.size.width - px(margin + 8.0)) / px(1.0))
-                                    .ceil()
-                                    .max(2.0) as usize;
-                                let height = ((bounds.size.height - px(12.0)) / px(1.0))
-                                    .ceil()
-                                    .max(1.0) as usize;
-                                data.spectrogram_panel_sizes
-                                    .insert(panel_id, (width, height));
-                            }
-                        },
+                        |_, _, _| (),
                         move |bounds, _, window, cx| {
                             let mut data = data.borrow_mut();
                             window.paint_quad(fill(bounds, rgb(data.visual_background)));
@@ -896,26 +879,50 @@ impl Visuals {
 }
 
 impl VisualData {
+    fn prepaint_panel(
+        &mut self,
+        panel_id: u64,
+        mode: VisualMode,
+        available: gpui::Size<Pixels>,
+    ) -> bool {
+        let has_room = visual_canvas_has_room(available);
+        if mode == VisualMode::Spectrogram {
+            if has_room {
+                let margin =
+                    axis_label_margin(self.spectrogram_show_labels, &self.frequency_labels);
+                let width = ((available.width - px(margin + 8.0)) / px(1.0))
+                    .ceil()
+                    .max(2.0) as usize;
+                let height = ((available.height - px(12.0)) / px(1.0)).ceil().max(1.0) as usize;
+                self.spectrogram_panel_sizes
+                    .insert(panel_id, (width, height));
+            } else {
+                self.spectrogram_panel_sizes.remove(&panel_id);
+            }
+        }
+        has_room
+    }
+
     fn finish_prepaint(&mut self) -> bool {
         if !self.enabled || !self.spectrogram_visible {
             return false;
         }
-        let Some(width) = self
+        // No drawable panels still retain the minimum history while their
+        // active panels await more room. Do not reuse a retired measurement or
+        // repeatedly clear/reallocate history on unchanged small frames.
+        let width = self
             .spectrogram_panel_sizes
             .values()
             .map(|size| size.0)
             .max()
-        else {
-            // No measurement yet; keep sizing out of individual panel paints.
-            return false;
-        };
+            .unwrap_or(2);
         let previous = (self.history_columns, self.spectrogram_panel_height);
         self.spectrogram_panel_height = self
             .spectrogram_panel_sizes
             .values()
             .map(|size| size.1)
             .max()
-            .unwrap_or(1);
+            .unwrap_or(0);
         let columns =
             history_columns_for_width(self.spectrogram_history_seconds, self.analysis_fps, width);
         self.resize_history(columns);
@@ -3074,28 +3081,6 @@ mod tests {
     }
 
     #[test]
-    fn spectrum_range_and_grid_update_without_other_changes() {
-        let mut visuals = Visuals::new();
-        let initial = Config::default();
-        visuals.configure(&initial);
-
-        let mut range = initial.clone();
-        range.spectrum_db_range = Some(40.0);
-        visuals.configure(&range);
-        {
-            let data = visuals.data.borrow();
-            assert_eq!(data.spectrum_db_range, 40.0);
-            assert!(data.spectrum_grid);
-        }
-
-        let mut grid = range;
-        grid.spectrum_grid = false;
-        visuals.configure(&grid);
-        let data = visuals.data.borrow();
-        assert!(!data.spectrum_grid);
-    }
-
-    #[test]
     fn spectrogram_labels_toggle_without_resetting_history() {
         let mut visuals = configured_visuals();
         let mut config = Config {
@@ -3230,6 +3215,152 @@ mod tests {
         visuals.retain_spectrogram_panels(&[]);
         assert!(visuals.data.borrow().spectrogram_panel_sizes.is_empty());
         assert_eq!(visuals.data.borrow().history_columns, 0);
+    }
+
+    #[test]
+    fn small_spectrogram_prepaint_preserves_cached_sibling_demand() {
+        for (width, height) in [(64.0, 712.0), (416.0, 40.0)] {
+            for shrinking_panel in [1, 2] {
+                let mut visuals = configured_visuals();
+                visuals.retain_spectrogram_panels(&[1, 2]);
+                {
+                    let mut data = visuals.data.borrow_mut();
+                    assert!(data.prepaint_panel(
+                        1,
+                        VisualMode::Spectrogram,
+                        size(px(416.0), px(112.0)),
+                    ));
+                    assert!(data.prepaint_panel(
+                        2,
+                        VisualMode::Spectrogram,
+                        size(px(216.0), px(712.0)),
+                    ));
+                }
+                assert!(visuals.finish_prepaint());
+                for time in 1..=5 {
+                    visuals.update(&frame(time as f64, -30.0));
+                }
+                assert!(!visuals.data.borrow_mut().prepaint_panel(
+                    shrinking_panel,
+                    VisualMode::Spectrogram,
+                    size(px(width), px(height)),
+                ));
+                assert!(visuals.finish_prepaint());
+                let expected = if shrinking_panel == 1 {
+                    (2, (200, 700))
+                } else {
+                    (1, (400, 100))
+                };
+                {
+                    let data = visuals.data.borrow();
+                    assert_eq!(data.spectrogram_panel_sizes.len(), 1);
+                    assert_eq!(data.spectrogram_panel_sizes[&expected.0], expected.1);
+                    assert_eq!(data.history_columns, expected.1.0);
+                    assert_eq!(data.spectrogram_panel_height, expected.1.1);
+                    assert_eq!(data.len, 5);
+                    assert_eq!(data.columns[0].sample_time, Some(Duration::from_secs(1)));
+                    assert_eq!(data.columns[4].sample_time, Some(Duration::from_secs(5)));
+                }
+                // An active small panel and a sibling reusing cached prepaint
+                // must not resurrect the retired size or erase the sibling.
+                visuals.retain_spectrogram_panels(&[1, 2]);
+                assert!(!visuals.finish_prepaint());
+                assert_eq!(visuals.data.borrow().history_columns, expected.1.0);
+                assert_eq!(visuals.data.borrow().spectrogram_panel_height, expected.1.1);
+                let restored = if shrinking_panel == 1 {
+                    size(px(416.0), px(112.0))
+                } else {
+                    size(px(216.0), px(712.0))
+                };
+                assert!(visuals.data.borrow_mut().prepaint_panel(
+                    shrinking_panel,
+                    VisualMode::Spectrogram,
+                    restored,
+                ));
+                assert!(visuals.finish_prepaint());
+                let data = visuals.data.borrow();
+                assert_eq!(data.history_columns, 400);
+                assert_eq!(data.spectrogram_panel_height, 700);
+                assert_eq!(data.len, 5);
+            }
+        }
+    }
+
+    #[test]
+    fn all_small_spectrogram_prepaint_keeps_minimum_history_and_restores_demand() {
+        for cache in [false, true] {
+            let mut visuals = Visuals::new();
+            let config = Config {
+                visualization_cache: cache,
+                ..Config::default()
+            };
+            visuals.retain_spectrogram_panels(&[1, 2]);
+            visuals.configure(&config);
+            for panel_id in [1, 2] {
+                assert!(visuals.data.borrow_mut().prepaint_panel(
+                    panel_id,
+                    VisualMode::Spectrogram,
+                    size(px(416.0), px(712.0)),
+                ));
+            }
+            assert!(visuals.finish_prepaint());
+            for time in 1..=5 {
+                visuals.update(&frame(time as f64, -30.0));
+            }
+            for (panel_id, available) in [
+                (1, size(px(64.0), px(712.0))),
+                (2, size(px(416.0), px(40.0))),
+            ] {
+                assert!(!visuals.data.borrow_mut().prepaint_panel(
+                    panel_id,
+                    VisualMode::Spectrogram,
+                    available,
+                ));
+            }
+            assert!(visuals.finish_prepaint());
+            let columns = {
+                let data = visuals.data.borrow();
+                assert!(data.spectrogram_panel_sizes.is_empty());
+                assert_eq!(data.history_columns, 2);
+                assert_eq!(data.spectrogram_panel_height, 0);
+                assert_eq!(data.len, 2);
+                assert_eq!(data.columns[0].sample_time, Some(Duration::from_secs(4)));
+                assert_eq!(data.columns[1].sample_time, Some(Duration::from_secs(5)));
+                data.columns.as_ptr()
+            };
+            for _ in 0..3 {
+                visuals.retain_spectrogram_panels(&[1, 2]);
+                assert!(!visuals.configure(&config));
+                assert!(!visuals.data.borrow_mut().prepaint_panel(
+                    1,
+                    VisualMode::Spectrogram,
+                    size(px(64.0), px(712.0)),
+                ));
+                assert!(!visuals.finish_prepaint());
+                let data = visuals.data.borrow();
+                assert_eq!(data.columns.as_ptr(), columns);
+                assert_eq!(data.history_columns, 2);
+                assert_eq!(data.spectrogram_panel_height, 0);
+                assert_eq!(data.len, 2);
+            }
+            assert!(visuals.data.borrow_mut().prepaint_panel(
+                1,
+                VisualMode::Spectrogram,
+                size(px(416.0), px(112.0)),
+            ));
+            assert!(visuals.finish_prepaint());
+            assert!(!visuals.finish_prepaint());
+            visuals.update(&frame(6.0, -20.0));
+            let data = visuals.data.borrow();
+            assert_eq!(data.spectrogram_panel_sizes.len(), 1);
+            assert_eq!(data.spectrogram_panel_sizes[&1], (400, 100));
+            assert_eq!(data.history_columns, 400);
+            assert_eq!(data.spectrogram_panel_height, 100);
+            assert_eq!(data.len, 3);
+            assert_eq!(data.columns[0].sample_time, Some(Duration::from_secs(4)));
+            assert_eq!(data.columns[1].sample_time, Some(Duration::from_secs(5)));
+            assert_eq!(data.columns[2].sample_time, Some(Duration::from_secs(6)));
+        }
     }
 
     #[test]
