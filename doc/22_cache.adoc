@@ -345,6 +345,9 @@ band-energy payloads as their last display demand disappears. Unchanged demand
 keeps its buffers; losing all analysis demand also discards the shared spectrum
 copy. Restoring demand waits for a publication with the current display token
 and generation rather than restoring hidden results.
+Staging reuse requires an unchanged publication sequence, generation, FFT settings
+and display token. Continuity loss can invalidate a frame before the next sequence
+increment; that invalidation replaces staging rather than replaying its old payload.
 
 Density keeps one 256 by 256 accumulation field and three fixed immutable
 snapshot slots: 1 MiB of cell storage per active analyzer, excluding rendering and

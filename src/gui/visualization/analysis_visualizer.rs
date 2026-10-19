@@ -87,6 +87,9 @@ struct PlotData {
     spatial_mapping: SpatialMapping,
     gpu: Option<Arc<GpuState>>,
     gpu_error_reported: bool,
+    // CPU acceptance is independent of GPU success. Retry pending content at
+    // most once per existing update opportunity, without advancing sample time.
+    publication_pending: bool,
     stereo_metrics: [Option<f32>; 3],
     readout: SharedString,
     range_label: SharedString,
@@ -156,6 +159,7 @@ impl AnalysisVisualizer {
                 spatial_mapping: SpatialMapping::default(),
                 gpu,
                 gpu_error_reported: false,
+                publication_pending: false,
                 stereo_metrics: [None; 3],
                 readout: "".into(),
                 range_label: "".into(),
@@ -266,6 +270,7 @@ impl PlotData {
         self.sample_rate = 0;
         self.sample_time = None;
         self.sequence = None;
+        self.publication_pending = false;
         self.stereo_metrics = [None; 3];
         self.readout = "".into();
         self.high_label = "".into();
@@ -295,6 +300,7 @@ impl PlotData {
             return;
         }
         if self.sequence == Some(frame.sequence) || self.sample_time == Some(frame.sample_time) {
+            self.retry_publication();
             return;
         }
         if self
@@ -359,12 +365,12 @@ impl PlotData {
                     let Some(x) = spatial_column(bin.pan) else {
                         continue;
                     };
-                    if !bin.power_db.is_finite() {
+                    if !bin.power.is_finite() {
                         continue;
                     }
                     // Peak hold per cell avoids making louder colors simply because
                     // more FFT bins share a logarithmic row. It retains calibrated power.
-                    let power = 10.0_f32.powf(bin.power_db.min(0.0) * 0.1);
+                    let power = bin.power.clamp(1e-14, 1.0);
                     let cell = &mut self.spatial_next[y * SPATIAL_WIDTH + x];
                     *cell = cell.max(power);
                 }
@@ -379,6 +385,8 @@ impl PlotData {
         self.sequence = Some(frame.sequence);
         if changed {
             self.publish();
+        } else {
+            self.retry_publication();
         }
     }
 
@@ -391,11 +399,25 @@ impl PlotData {
     }
 
     fn publish(&mut self) {
+        self.publication_pending = true;
+        self.retry_publication();
+    }
+
+    fn retry_publication(&mut self) {
+        if !self.publication_pending {
+            return;
+        }
+        // This deterministic configuration error cannot recover by publishing
+        // again. Keep the field pending until a valid configuration arrives.
+        if !self.db_range.is_finite() || self.db_range <= 0.0 {
+            self.publication_failed("publication", &"invalid logarithmic power range");
+            return;
+        }
         let (Some(gpu), Some(palette)) = (&self.gpu, &self.palette) else {
             return;
         };
         let (width, height) = field_dimensions(self.style);
-        if let Err(error) = gpu.publish_field(
+        match gpu.publish_field(
             width,
             height,
             self.field(),
@@ -406,12 +428,24 @@ impl PlotData {
                 },
             },
         ) {
-            // A failed replacement must not leave old power or palette under new labels.
-            gpu.clear();
-            if !self.gpu_error_reported {
-                self.gpu_error_reported = true;
-                eprintln!("rivu analysis visualizer GPU publication: {error}");
+            Ok(()) => {
+                self.publication_pending = false;
+                self.gpu_error_reported = false;
             }
+            Err(error) => self.publication_failed("publication", &error),
+        }
+    }
+
+    fn publication_failed(&mut self, operation: &str, error: &impl std::fmt::Display) {
+        // A failed replacement/paint must not leave stale power or palette
+        // under new labels. Keep accepted CPU values and their sample clock.
+        if let Some(gpu) = &self.gpu {
+            gpu.clear();
+        }
+        self.publication_pending = true;
+        if !self.gpu_error_reported {
+            self.gpu_error_reported = true;
+            eprintln!("rivu analysis visualizer GPU {operation}: {error}");
         }
     }
 
@@ -460,11 +494,7 @@ impl PlotData {
         if let Some(gpu) = &self.gpu
             && let Err(error) = window.paint_gpu(plot, GpuSource::Dynamic(Arc::clone(gpu)))
         {
-            gpu.clear();
-            if !self.gpu_error_reported {
-                self.gpu_error_reported = true;
-                eprintln!("rivu analysis visualizer GPU paint: {error}");
-            }
+            self.publication_failed("paint", &error);
         }
         if options.reference_lines {
             for fraction in [0.0, 0.25, 0.5, 0.75, 1.0] {
@@ -876,7 +906,7 @@ mod tests {
                 spatial: vec![SpatialBin {
                     frequency_hz: 1000.0,
                     pan: 0.0,
-                    power_db: -30.0,
+                    power: 0.001,
                 }],
                 density: if style == AudioVisualizerStyle::StereoDensity {
                     vec![0.0; DENSITY_SIDE * DENSITY_SIDE].into()
@@ -909,7 +939,7 @@ mod tests {
                     .map(|bin| SpatialBin {
                         frequency_hz: bin as f32 * sample_rate as f32 / fft_size as f32,
                         pan: 0.0,
-                        power_db: -30.0,
+                        power: 0.001,
                     })
                     .collect();
                 let mut mapping = SpatialMapping::default();
@@ -941,7 +971,7 @@ mod tests {
                     .map(|frequency_hz| SpatialBin {
                         frequency_hz,
                         pan: 0.0,
-                        power_db: -30.0,
+                        power: 0.001,
                     }),
                 );
                 // Include logarithmic row-rounding boundaries and their adjacent floats.
@@ -956,7 +986,7 @@ mod tests {
                                 (frequency.to_bits() as i64 + offset as i64) as u32,
                             ),
                             pan: 0.0,
-                            power_db: -30.0,
+                            power: 0.001,
                         }));
                     }
                 }
@@ -982,13 +1012,13 @@ mod tests {
             .map(|bin| SpatialBin {
                 frequency_hz: bin as f32 * 48_000.0 / 8192.0,
                 pan: 0.0,
-                power_db: -30.0,
+                power: 0.001,
             })
             .collect();
         let mut mapping = SpatialMapping::default();
         for tick in 0..120 {
             bins[0].pan = tick as f32 / 120.0;
-            bins[0].power_db = -(tick as f32);
+            bins[0].power = tick as f32 / 120.0;
             mapping.prepare(48_000, 8192, &bins);
         }
         assert_eq!(mapping.rebuilds, 1);
@@ -1088,6 +1118,42 @@ mod tests {
         assert_eq!(spatial_cell(19.0, 0.0, 20_000.0), None);
         assert_eq!(spatial_cell(1000.0, f32::NAN, 20_000.0), None);
         assert_eq!(spatial_cell(3000.0, 0.0, 2000.0), None);
+    }
+
+    #[test]
+    fn spatial_power_keeps_floor_ceiling_finite_filter_and_cell_max() {
+        let plot = plot(AudioVisualizerStyle::SpatialSpectrum);
+        let mut frame = frame(AudioVisualizerStyle::SpatialSpectrum);
+        let cases = [
+            (-1.0, -2.0, 1e-14),
+            (-0.75, 0.0, 1e-14),
+            (-0.5, 1e-16, 1e-14),
+            (-0.25, 1e-12, 1e-12),
+            (0.0, 0.25, 0.25),
+            (0.25, 2.0, 1.0),
+            (0.5, f32::NAN, 0.0),
+            (0.75, f32::INFINITY, 0.0),
+            (1.0, f32::NEG_INFINITY, 0.0),
+        ];
+        frame.visualizer.spatial = cases
+            .iter()
+            .map(|&(pan, power, _)| SpatialBin {
+                frequency_hz: 1000.0,
+                pan,
+                power,
+            })
+            .collect();
+        frame.visualizer.spatial.push(SpatialBin {
+            frequency_hz: 1001.0,
+            pan: 0.0,
+            power: 0.125,
+        });
+        plot.update(&frame);
+        let data = plot.data.borrow();
+        for (pan, _, expected) in cases {
+            let (x, y) = spatial_cell(1000.0, pan, 20_000.0).unwrap();
+            assert_eq!(data.field[y * SPATIAL_WIDTH + x], expected);
+        }
     }
 
     #[test]
@@ -1264,7 +1330,7 @@ mod tests {
     }
 
     #[test]
-    fn rejected_publication_revokes_old_content_without_retrying_identical_input() {
+    fn invalid_mapping_revokes_content_and_waits_for_reconfiguration() {
         let plot = plot(AudioVisualizerStyle::StereoDensity);
         let mut frame = frame(AudioVisualizerStyle::StereoDensity);
         plot.update(&frame);
@@ -1273,14 +1339,96 @@ mod tests {
             data.db_range = f32::NAN;
             data.publish();
             assert!(data.gpu_error_reported);
+            assert!(data.publication_pending);
         }
         assert!(publication(&plot).is_none());
-        frame.sample_time += Duration::from_millis(100);
-        frame.sequence += 1;
-        plot.update(&frame);
-        assert!(publication(&plot).is_none());
+        for _ in 0..4 {
+            frame.sample_time += Duration::from_millis(100);
+            frame.sequence += 1;
+            let value = frame.sequence as f32 * 0.001;
+            set_density_cell(&mut frame, 0, value);
+            plot.update(&frame);
+            assert!(publication(&plot).is_none());
+        }
         plot.configure(&Config::default());
         assert!(publication(&plot).is_some());
+        assert!(!plot.data.borrow().gpu_error_reported);
+        assert!(!plot.data.borrow().publication_pending);
+    }
+
+    // Real admission failure exercises recovery without forcing an allocation failure.
+    fn undersized_slot(palette: Arc<GpuPalette>) -> Arc<GpuState> {
+        let limits = GpuLimits {
+            max_palette_colors: FIELD_COLOR_COUNT,
+            ..GpuLimits::default()
+        };
+        let empty = GpuFrame::field(
+            0,
+            0,
+            &[],
+            palette,
+            GpuFieldParams {
+                mapping: GpuValueMapping::Logarithmic { db_range: 80.0 },
+            },
+            limits,
+        )
+        .unwrap();
+        GpuState::new(empty, limits).unwrap()
+    }
+
+    #[test]
+    fn failed_publication_recovers_same_or_equal_new_input_without_reaccepting_values() {
+        for (style, advance) in [
+            (AudioVisualizerStyle::StereoDensity, false),
+            (AudioVisualizerStyle::SpatialSpectrum, false),
+            (AudioVisualizerStyle::StereoDensity, true),
+            (AudioVisualizerStyle::SpatialSpectrum, true),
+        ] {
+            let plot = plot(style);
+            let mut frame = frame(style);
+            let usable = {
+                let mut data = plot.data.borrow_mut();
+                let rejected = undersized_slot(Arc::clone(data.palette.as_ref().unwrap()));
+                data.gpu.replace(rejected).unwrap()
+            };
+            plot.update(&frame);
+            assert!(publication(&plot).is_none());
+            let values = plot.data.borrow().field().to_vec();
+            for _ in 0..4 {
+                plot.update(&frame);
+                assert!(publication(&plot).is_none());
+                let data = plot.data.borrow();
+                assert_eq!(data.sequence, Some(frame.sequence));
+                assert_eq!(data.sample_time, Some(frame.sample_time));
+                assert_eq!(data.field(), values.as_slice());
+            }
+            {
+                let mut data = plot.data.borrow_mut();
+                assert!(data.gpu_error_reported);
+                assert!(data.publication_pending);
+                data.gpu = Some(usable);
+            }
+            if advance {
+                frame.sequence += 1;
+                frame.sample_time += Duration::from_millis(50);
+            }
+            // Retry both before the sequence early return and after final-field equality.
+            plot.update(&frame);
+            let published = publication(&plot).unwrap();
+            let data = plot.data.borrow();
+            assert_eq!(data.sequence, Some(frame.sequence));
+            assert_eq!(data.sample_time, Some(frame.sample_time));
+            assert_eq!(data.field(), values.as_slice());
+            assert!(!data.publication_pending);
+            assert!(!data.gpu_error_reported);
+            let gpui::GpuContent::Field { values: actual, .. } = published.content() else {
+                panic!("analysis must publish accepted numerical values");
+            };
+            assert_eq!(actual.as_ref(), values.as_slice());
+            drop(data);
+            plot.update(&frame);
+            assert!(Arc::ptr_eq(&published, &publication(&plot).unwrap()));
+        }
     }
 
     #[test]
@@ -1340,7 +1488,7 @@ mod tests {
         ));
         frame.sequence += 1;
         frame.sample_time += Duration::from_millis(50);
-        frame.visualizer.spatial[0].power_db = -10.0;
+        frame.visualizer.spatial[0].power = 0.1;
         density.update(&frame);
         spatial.update(&frame);
         assert!(publication(&density).is_none());

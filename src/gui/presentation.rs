@@ -465,10 +465,15 @@ pub(super) fn stage_analysis_frame(
     frame: &AnalysisFrame,
     frame_is_current: bool,
 ) -> bool {
-    if !frame_is_current
-        || (frame.sequence == *sequence && !(needs_refresh && staging.settings.is_some()))
-    {
+    if !frame_is_current {
         return false;
+    }
+    if frame.sequence == *sequence
+        && frame.generation == staging.generation
+        && frame.settings == staging.settings
+        && frame.display_token == staging.display_token
+    {
+        return needs_refresh && staging.settings.is_some();
     }
     staging.frequencies_hz.clone_from(&frame.frequencies_hz);
     staging.spectrum_db.clone_from(&frame.spectrum_db);
@@ -489,6 +494,48 @@ pub(super) fn stage_analysis_frame(
 mod tests {
     use super::*;
     use crate::core::Runtime;
+
+    #[test]
+    fn same_sequence_invalidation_retires_staged_visualizer_data() {
+        let mut frame = AnalysisFrame {
+            sequence: 7,
+            generation: 1,
+            settings: Some((&Config::default()).into()),
+            ..Default::default()
+        };
+        frame.visualizer.demand.band_energy = true;
+        frame.visualizer.band_rms = [0.5; 3];
+        let mut staging = AnalysisFrame::default();
+        let mut sequence = 0;
+        assert!(stage_analysis_frame(
+            &mut staging,
+            &mut sequence,
+            false,
+            &frame,
+            true
+        ));
+
+        // Continuity loss invalidates the worker frame before another FFT is ready.
+        frame.generation += 1;
+        frame.settings = None;
+        frame.visualizer = Default::default();
+        assert!(stage_analysis_frame(
+            &mut staging,
+            &mut sequence,
+            true,
+            &frame,
+            true
+        ));
+        assert!(staging.settings.is_none());
+        assert_eq!(staging.visualizer.band_rms, [0.0; 3]);
+        assert!(!stage_analysis_frame(
+            &mut staging,
+            &mut sequence,
+            true,
+            &frame,
+            true
+        ));
+    }
 
     #[gpui::test]
     fn presentation_bounds_frames_and_cancels_hidden_still_and_shutdown_demand(

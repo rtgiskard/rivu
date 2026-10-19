@@ -89,7 +89,9 @@ pub struct SpatialBin {
     pub frequency_hz: f32,
     /// Energy balance, not a phase-derived source position.
     pub pan: f32,
-    pub power_db: f32,
+    /// Coherent-gain-normalized mean channel power. Finite values are in
+    /// 1e-14..=1; positive infinity remains missing data for the GUI to filter.
+    pub power: f32,
 }
 
 #[derive(Debug, Default)]
@@ -745,6 +747,7 @@ impl SpectrumAnalyzer {
         }
         if self.visualizer.demand.spatial_spectrum {
             self.visualizer.spatial.clear();
+            let normalization_squared = self.normalization * self.normalization;
             for bin in 1..=n / 2 {
                 let packed = self.frequency[bin];
                 let partner = self.frequency[(n - bin) % n].conj();
@@ -762,7 +765,7 @@ impl SpectrumAnalyzer {
                     } else {
                         0.0
                     },
-                    power_db: (power.sqrt() * self.normalization).max(1e-7).log10() * 20.0,
+                    power: calibrated_spatial_power(power, normalization_squared),
                 });
             }
         }
@@ -799,6 +802,20 @@ impl SpectrumAnalyzer {
         frame.sample_time = sample_time;
         frame.sequence = frame.sequence.wrapping_add(1);
         true
+    }
+}
+
+fn calibrated_spatial_power(power: f32, normalization_squared: f32) -> f32 {
+    let normalized = power * normalization_squared;
+    if normalized == f32::INFINITY {
+        // A finite PCM sample can still overflow FFT power. Do not turn a
+        // previously missing bin into a saturated bright cell.
+        normalized
+    } else if normalized.is_nan() {
+        // Preserve the old amplitude floor for undefined FFT power.
+        1e-14
+    } else {
+        normalized.clamp(1e-14, 1.0)
     }
 }
 
@@ -1136,7 +1153,7 @@ mod tests {
         for (actual, expected) in payload.spatial.iter().zip(&separate[1].visualizer.spatial) {
             assert_eq!(actual.frequency_hz, expected.frequency_hz);
             assert_eq!(actual.pan, expected.pan);
-            assert_eq!(actual.power_db, expected.power_db);
+            assert_eq!(actual.power, expected.power);
         }
         assert_eq!(payload.band_rms, separate[2].visualizer.band_rms);
         for (band, (frequency, amplitude)) in tones.into_iter().enumerate() {
@@ -1147,7 +1164,7 @@ mod tests {
                 .find(|bin| bin.frequency_hz == frequency)
                 .unwrap();
             assert!(bin.pan.abs() < 0.0001);
-            assert!((bin.power_db - 20.0 * amplitude.log10()).abs() < 0.001);
+            assert!((bin.power - amplitude * amplitude).abs() < 1e-5);
         }
         let mut frame = AnalysisFrame::default();
         combined.publish(&mut frame, rms, Duration::from_millis(125));
@@ -1493,7 +1510,7 @@ mod tests {
 
     #[test]
     fn spatial_channel_tones_preserve_frequency_energy_and_phase() {
-        for channels in [[1.0, 0.0], [0.0, 1.0], [1.0, -1.0]] {
+        for channels in [[1.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, -1.0], [1.0, 0.5]] {
             let mut analyzer = visualizer_analyzer(SPATIAL_DEMAND);
             for i in 0..512 {
                 let tone = 0.5 * (std::f32::consts::TAU * i as f32 / 32.0).sin();
@@ -1504,22 +1521,15 @@ mod tests {
                 .visualizer
                 .spatial
                 .iter()
-                .max_by(|a, b| a.power_db.total_cmp(&b.power_db))
+                .max_by(|a, b| a.power.total_cmp(&b.power))
                 .unwrap();
             assert_eq!(strongest.frequency_hz, 160.0);
-            let expected_pan = if channels[0] == 0.0 {
-                1.0
-            } else if channels[1] == 0.0 {
-                -1.0
-            } else {
-                0.0
-            };
+            let channel_power = channels.map(|channel| channel * channel);
+            let expected_pan =
+                (channel_power[1] - channel_power[0]) / (channel_power[0] + channel_power[1]);
             assert!((strongest.pan - expected_pan).abs() < 1e-5);
-            let expected_db = 20.0
-                * (0.5
-                    * ((channels[0] * channels[0] + channels[1] * channels[1]) * 0.5_f32).sqrt())
-                .log10();
-            assert!((strongest.power_db - expected_db).abs() < 0.001);
+            let expected_power = 0.25 * (channel_power[0] + channel_power[1]) * 0.5;
+            assert!((strongest.power - expected_power).abs() < 1e-5);
         }
         let mut analyzer = visualizer_analyzer(SPATIAL_DEMAND);
         for i in 0..512 {
@@ -1535,7 +1545,7 @@ mod tests {
                 .find(|bin| bin.frequency_hz == hz)
                 .unwrap();
             assert!((bin.pan - pan).abs() < 1e-5);
-            assert!(bin.power_db > -20.0);
+            assert!(bin.power > 0.01);
         }
     }
 
@@ -1549,9 +1559,8 @@ mod tests {
         let nyquist = analyzer.visualizer.spatial.last().unwrap();
         assert_eq!(nyquist.frequency_hz, 2560.0);
         assert_eq!(nyquist.pan, -1.0);
-        let expected_db = 20.0 * (0.5 / 2.0_f32.sqrt()).log10();
-        assert!((nyquist.power_db - expected_db).abs() < 0.001);
-        assert!((nyquist.power_db - analyzer.levels.last().unwrap()).abs() < 0.001);
+        assert!((nyquist.power - 0.125).abs() < 1e-5);
+        assert!((10.0 * nyquist.power.log10() - analyzer.levels.last().unwrap()).abs() < 0.001);
     }
 
     #[test]
@@ -1721,7 +1730,7 @@ mod tests {
                     .visualizer
                     .spatial
                     .iter()
-                    .all(|bin| bin.power_db == -140.0)
+                    .all(|bin| bin.power == 1e-14)
             );
             assert_eq!(frame.visualizer.band_rms, [0.0; 3]);
         }
@@ -2333,7 +2342,7 @@ mod tests {
                 .visualizer
                 .spatial
                 .iter()
-                .all(|bin| bin.power_db == -140.0)
+                .all(|bin| bin.power == 1e-14)
         );
         assert_eq!(frame.visualizer.band_rms, [0.0; 3]);
         let published = frame.sequence;
@@ -2465,6 +2474,7 @@ mod tests {
                 // A1760 is both a musical center and FFT-bin aligned at every size.
                 let rate = 56_320;
                 let mut analyzer = SpectrumAnalyzer::new(settings, rate);
+                analyzer.set_visualizer_demand(SPATIAL_DEMAND);
                 for i in 0..fft_size {
                     let sample = 0.5 * (std::f32::consts::TAU * i as f32 / 32.0).sin();
                     analyzer.push([sample, -sample]);
@@ -2482,6 +2492,14 @@ mod tests {
                 );
                 assert!((rms[0] - 0.5 / 2.0_f32.sqrt()).abs() < 0.001);
                 assert_eq!(rms[0], rms[1]);
+                let spatial = analyzer
+                    .visualizer
+                    .spatial
+                    .iter()
+                    .find(|bin| bin.frequency_hz == 1760.0)
+                    .unwrap();
+                assert!((spatial.power - 0.25).abs() < 0.001);
+                assert!(spatial.pan.abs() < 1e-5);
                 let strongest = analyzer
                     .levels
                     .iter()
@@ -2504,19 +2522,69 @@ mod tests {
                 window: AnalysisWindow::None,
                 signal: VisualizationSignal::After,
             };
-            for amplitude in [0.5_f32, 1e-6] {
+            for amplitude in [0.5_f32, 1e-6, 1e-8, 0.0, 2.0] {
                 let mut analyzer = SpectrumAnalyzer::new(settings, 48_000);
+                analyzer.set_visualizer_demand(SPATIAL_DEMAND);
                 for i in 0..fft_size + 137 {
                     let sample = if i % 2 == 0 { amplitude } else { -amplitude };
                     analyzer.push([sample, -sample * 0.5]);
                 }
                 let rms = analyzer.transform();
-                let expected = 20.0 * (amplitude * 0.625_f32.sqrt()).log10();
-                assert!((analyzer.levels.last().unwrap() - expected).abs() < 0.001);
-                assert!((rms[0] - amplitude).abs() < amplitude * 0.001);
-                assert!((rms[1] - amplitude * 0.5).abs() < amplitude * 0.001);
+                let expected_amplitude = amplitude * 0.625_f32.sqrt();
+                let expected_db = 20.0 * expected_amplitude.max(1e-7).log10();
+                assert!((analyzer.levels.last().unwrap() - expected_db).abs() < 0.001);
+                let nyquist = analyzer.visualizer.spatial.last().unwrap();
+                let expected_power = (amplitude * amplitude * 0.625).clamp(1e-14, 1.0);
+                assert!((nyquist.power - expected_power).abs() <= expected_power * 0.001);
+                assert!((nyquist.pan + 0.6).abs() < 1e-5 || amplitude == 0.0);
+                assert!(
+                    analyzer
+                        .visualizer
+                        .spatial
+                        .iter()
+                        .all(|bin| { bin.power.is_finite() && (1e-14..=1.0).contains(&bin.power) })
+                );
+                assert!((rms[0] - amplitude).abs() <= amplitude * 0.001);
+                assert!((rms[1] - amplitude * 0.5).abs() <= amplitude * 0.001);
             }
         }
+    }
+
+    #[test]
+    fn spatial_power_calibration_preserves_floor_saturation_and_overflow() {
+        let mut analyzer = visualizer_analyzer(SPATIAL_DEMAND);
+        let normalization_squared = analyzer.normalization * analyzer.normalization;
+        for power in [f32::NAN, f32::NEG_INFINITY, -1.0, 0.0, f32::MIN_POSITIVE] {
+            assert_eq!(
+                calibrated_spatial_power(power, normalization_squared),
+                1e-14
+            );
+        }
+        assert_eq!(
+            calibrated_spatial_power(f32::MAX, normalization_squared),
+            1.0
+        );
+        assert_eq!(
+            calibrated_spatial_power(f32::INFINITY, normalization_squared),
+            f32::INFINITY,
+        );
+        for expected in [1e-12, 0.125, 0.5] {
+            let raw = expected / normalization_squared;
+            assert!(
+                (calibrated_spatial_power(raw, normalization_squared) - expected).abs()
+                    <= expected * 1e-6
+            );
+        }
+        // Sanitization preserves finite over-range PCM. The FFT stays finite
+        // here, but squaring its Nyquist coefficient overflows in real analysis.
+        for i in 0..512 {
+            analyzer.push([if i % 2 == 0 { 1e20 } else { -1e20 }, 0.0]);
+        }
+        analyzer.transform();
+        assert_eq!(
+            analyzer.visualizer.spatial.last().unwrap().power,
+            f32::INFINITY
+        );
     }
 
     #[test]
