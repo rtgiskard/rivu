@@ -568,12 +568,15 @@ Rotation follows playback rather than audio energy. Pausing or hiding the panel
 preserves its angle; resuming does not catch up on suspended time.
 Stopping, changing the current track, or selecting static mode resets the cover
 upright. A track without artwork uses Playback's generated default cover with
-the same animation, interaction, and lifecycle rules as a real cover. Pending
-animation work is cancelled while paused, hidden, or static, and resuming never
-produces a catch-up burst. Still Mode does not affect artwork acquisition,
-display, track changes, or rotation. Rendering uses GPU transforms, without
-rotating geometry on the CPU every frame or introducing an application image
-cache. Metadata's full preview is unchanged.
+the same rotation, interaction, and lifecycle rules as a real cover. Pending
+rotation work is cancelled while paused, hidden, or static, and resuming never
+produces a catch-up burst. Animated source covers can continue while paused or
+static and share the same FPS cap; lower caps skip displayed frames without
+slowing the source timeline. Hiding the panel stops both kinds of animation.
+Still Mode does not affect artwork acquisition, display, track changes, or
+animation. Rendering uses GPU transforms, without rotating geometry on the CPU
+every frame or introducing an application image cache. Metadata's full preview
+does not use the Album artwork FPS cap.
 
 
 == Layout

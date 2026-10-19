@@ -98,13 +98,17 @@ persistence, defaults, and the frame-rate range are documented in
 link:01_config.adoc#_album_artwork[Album artwork].
 
 Zero frame-rate cap follows display callbacks without a timer throttle; positive
-values cap animation requests per second independently of the analysis rate. A lower cap
-reduces rendering work and resource use at the expense of motion smoothness;
-display-following mode can do more work on high-refresh displays. Each owner has
-at most one pending frame or timer; pausing, hiding, and static mode cancel
-pending work, and resuming does not replay missed frames. Still Mode affects
-only audio visualizations, not artwork. Styles introduce neither per-frame CPU
-geometry rotation nor a new application cache system.
+values cap animation requests per second independently of the analysis rate.
+Rotation and animated source covers share one frame/timer gate across artwork
+panels; individual images do not create a second animation loop. Lower caps drop
+displayed source frames rather than slowing the source timeline. Cursor catch-up
+is bounded by frame count even after a long delay; all-zero-delay sources advance
+one frame per redraw. Each element retains its own cursor over shared decoded data.
+Pausing or static mode stops rotation, but a visible animated source can continue.
+Hiding, window deactivation, or reduced motion cancels pending animation work.
+Resuming rotation does not replay suspended time. Still Mode affects only audio
+visualizations, not artwork. Styles introduce neither per-frame CPU geometry
+rotation nor a new application cache system.
 
 === Maintenance boundary and removal criteria
 
@@ -186,6 +190,9 @@ never refresh the business root. Native callbacks, local redraws, and core
 wakeups share one pending frame or deadline rather than parallel analysis loops.
 A frame consumes the latest publication and requests the next one; paused
 business updates permit a single refresh without starting an idle clock.
+A configuration-only refresh reuses the current staging frame when its analysis
+sequence is unchanged. It reapplies presentation settings without copying the
+spectrum, density, or spatial payload again or advancing accepted audio time.
 
 Only affected visual panel entities are invalidated by analysis or waveform
 updates. Cached scenes retain their measured panel dimensions until geometry or
@@ -431,6 +438,10 @@ as zero. Spatial Spectrum maps individual FFT bins by frequency and channel
 power balance into a fixed 256 by 128 field. Cells retain the strongest power
 rather than summing crowded logarithmic rows, which would make color depend on
 bin density instead of signal level.
+The analyzer publishes calibrated linear bin power, including the single-sided
+DC/Nyquist endpoint normalization. The field consumes it without a CPU dB-to-power
+round trip, retaining the squared amplitude floor and full-scale saturation.
+Overflowing power is omitted rather than promoted to a saturated bright cell.
 
 Both styles retain fixed-resolution numerical fields and share one GPU publication
 per style across panels. Enlargement does not multiply source resolution, publish
@@ -494,6 +505,12 @@ instead of rebuilding 27 CPU light paths. Flow limits each integration step to
 fading, and respawn retain those
 substeps, but render segments are rebuilt only from the final state. A gap longer
 than half a second resets the scene instead of attempting unbounded catch-up.
+FFT/window changes revoke the scene until compatible audio arrives. Color or Bloom
+changes republish material over the accepted geometry without advancing simulation;
+background changes only repaint. Sensitivity and display-range changes affect future
+accepted audio, preserving the paused geometry and publication. Beams construction
+and reset initialize state without building geometry that the first accepted frame
+would immediately replace.
 
 == Failure boundaries
 
@@ -508,7 +525,13 @@ the source, saved-hint, request-generation, and suspension checks described unde
 <<_waveform,Waveform>> govern pending and completed previews.
 
 Spectrum tessellation and Waveform/Spectrogram GPU publication/paint failures are
-surfaced as visualization errors. Stereo-analysis publication/paint failures are reported separately.
+surfaced as visualization errors. Accepted analysis clears data-consistency errors;
+a successful paint clears rendering errors even while audio is paused.
+Stereo-analysis publication/paint failures revoke stale GPU content while retaining
+accepted CPU values. Pending publication gets at most one attempt per ordinary
+update, including unchanged input, until success; no retry timer or catch-up loop
+is added. An invalid mapping is rejected before publication and waits for valid
+configuration. Success also clears its error-reporting latch.
 These rendering failures do not issue playback commands or make the audio
 callback wait for graphics. Very small plots can omit geometry rather than
 attempting invalid dimensions.

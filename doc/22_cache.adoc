@@ -248,11 +248,14 @@ have already been submitted still follow the retirement boundary below.
 
 ==== Waveform
 
-Waveform separates display-column aggregation from one immutable numerical GPU
-publication per panel. The effective column count is the smaller of drawable width
-and available source bins. Source revision, amplitude mapping or effective-count
-changes trigger aggregation; only changed mapped values or a changed palette
-replace the publication. Missing values remain distinct from decoded silence.
+Waveform separates per-panel display keys from shared immutable column data and
+numerical GPU publications. Panels with the same source/display identity and
+effective column data share storage; changed values fork only the affected owner.
+The effective column count is the smaller of drawable width and available source
+bins. Source revision, amplitude mapping or effective-count changes trigger
+aggregation; only changed mapped values or a changed palette replace the
+publication. Mapping changes that produce identical values retain it. Missing
+values remain distinct from decoded silence.
 A full-scan result keeps its request generation as display identity while rolling
 PCM updates replace its bins. Cache keys do not retain full-preview snapshots;
 unchanged pooled values retain their publication, while a replacement scan has
@@ -265,12 +268,19 @@ movement reuse the publication. Cache-off recomputes derived values and does not
 retain a publication, without discarding source samples. The renderer owns upload
 reuse and completion-aware retirement; there are no rectangle tiles, tile
 fingerprints, colored images or application image-retirement queues.
+Full-preview aggregation checks the playback suspension generation under the
+shared read lock, then releases it before pooling independent preview data.
+Progressive aggregation borrows its bounded source bins without a per-paint copy;
+the guard ends before GPU publication and painting.
 
 ==== Spectrum
 
-Spectrum retains body geometry and frequency-band grouping per panel. Differently
-sized panels do not replace one another's grouping. Repaints can reuse geometry,
-including across analysis updates whose effective body levels are unchanged.
+Spectrum retains body geometry, frequency-band grouping, and logarithmic
+interpolation samples per panel. Differently sized panels do not replace one
+another's mapping. New signal levels reuse that mapping; frequency-axis or display
+slot changes rebuild it. Repaints can reuse geometry, including across analysis
+updates whose effective body levels are unchanged. Background, grid, and label
+changes repaint without discarding the body or Spectrogram's open pooling interval.
 Envelope reinitialization and changes to panel geometry, frequency grouping, or
 display mapping still invalidate reuse. Hold timing and Peak markers advance
 independently of the cached body; Peak markers are drawn separately. Restoring a
@@ -291,6 +301,9 @@ Scrolling only changes tile placement. Palette, display range,
 frequency mapping, and sampling-size changes rebuild affected publications so compatible
 retained history is shown with current settings. FFT-size or window changes
 discard history rather than recoloring data with a different analysis meaning.
+Unrelated Spectrum and presentation settings preserve the current bucket and its
+time boundaries. History-duration or analysis-rate changes resize retained history
+and begin a new pooling interval; appearance changes do not rebucket old audio.
 
 Drawable Spectrogram panels share one bounded history sized for the largest
 requested plot width, capped by configured history seconds multiplied by
