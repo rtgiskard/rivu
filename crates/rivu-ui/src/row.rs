@@ -71,8 +71,8 @@ pub fn list_row_height(window: &Window, cx: &gpui::App) -> gpui::Pixels {
     (window.rem_size() * LIST_ROW_REMS).max(line_height(0.875) + line_height(0.75) + gpui::px(2.))
 }
 
-/// Uniform single-line option height; borders remain physical layout pixels.
-pub(crate) fn dropdown_row_height(window: &Window, cx: &gpui::App) -> gpui::Pixels {
+/// Uniform single-line list and option height; borders remain physical layout pixels.
+pub fn single_line_row_height(window: &Window, cx: &gpui::App) -> gpui::Pixels {
     (window.rem_size() * DROPDOWN_ROW_REMS).max(
         (gpui::phi().to_pixels(gpui::rems(0.875).into(), window.rem_size())
             * crate::theme::font_size_scale(cx))

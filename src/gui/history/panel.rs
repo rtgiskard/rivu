@@ -368,7 +368,7 @@ impl History {
                                     ("history-entry", id as u64),
                                     selected,
                                 )
-                                .h(rivu_ui::list_row_height(window, cx))
+                                .h(rivu_ui::single_line_row_height(window, cx))
                                 .gap_0()
                                 .group("history-track-row")
                                 .relative()

@@ -4,7 +4,7 @@ use crate::{
     list::VirtualList,
     menu::POPOVER_MAX_REMS,
     overlay::text_tooltip,
-    row::{DROPDOWN_ROW_REMS, dropdown_row, dropdown_row_height},
+    row::{DROPDOWN_ROW_REMS, dropdown_row, single_line_row_height},
     surface::Popover,
     theme::palette,
 };
@@ -228,7 +228,7 @@ impl ChoicePopup {
         let count = choices.candidates.filtered().count();
         let selected = choices.selected_index();
         let revision = choices.revision;
-        let height = (count as f32 * f32::from(dropdown_row_height(window, cx)))
+        let height = (count as f32 * f32::from(single_line_row_height(window, cx)))
             .min(f32::from(window.rem_size()) * POPOVER_MAX_REMS)
             .min(f32::from(window.viewport_size().height) * 0.45);
         let list = VirtualList::new(
@@ -255,7 +255,7 @@ impl ChoicePopup {
                                 selected == Some(index),
                                 label,
                             )
-                            .h(dropdown_row_height(window, cx))
+                            .h(single_line_row_height(window, cx))
                             .role(Role::ListBoxOption)
                             .aria_label(hint.clone())
                             .aria_selected(selected == Some(index))

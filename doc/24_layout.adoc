@@ -282,6 +282,10 @@ and below the centered text block. Its primary text color can be overridden on
 the returned element.
 Track numbering, playback markers and selection remain application composition.
 `row_tooltip` can be attached separately and is not gated on measured overflow.
+Recent tracks is a single-line table and uses the shared single-line row height:
+at least 2rem, growing with its text when necessary. It does not reserve the
+two-line list height used by playlist catalog and track entries.
+
 `text_tooltip` captures resolved text and builds the tooltip when opened. Dynamic
 content that must read current input or defer formatting keeps a native tooltip
 builder; neither helper introduces subscriptions or eager data reads.
