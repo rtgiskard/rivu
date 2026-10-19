@@ -74,6 +74,12 @@ than force overflow into neighboring panels; longer headings do not increase
 the layout minimum. The existing separator minima are therefore retained rather
 than adding panel-specific hard minima that the smallest supported viewport
 cannot always satisfy.
+The shell owns the outer content inset for every docked panel. Panel roots and
+standalone headings, empty-state captions, and error captions do not repeat that
+edge padding. Cards, list rows (including placeholder rows), and form groups
+retain their internal spacing; scrollable content remains bounded by the shell's
+inset and clipping region.
+
 Each list heading reserves at least 3 rem within its header row. Its title and
 count each stay on one line and truncate independently when space is limited;
 expanding search does not turn either into a multi-line block.

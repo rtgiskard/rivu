@@ -907,7 +907,7 @@ impl Render for AlbumBrowser {
         self.scroll_views.borrow_mut().begin_panel(self.panel_id);
         let theme = rivu_ui::theme::palette(cx);
         let total = self.model.total();
-        let mut header = row().items_end().flex_shrink_0().min_w_0().px_2();
+        let mut header = row().items_end().flex_shrink_0().min_w_0();
         if let Some(key) = self.model.selected() {
             let play_key = key.clone();
             let enqueue_key = key.clone();
@@ -1013,7 +1013,6 @@ impl Render for AlbumBrowser {
         let content = if self.model.selected().is_some() {
             if self.model.tracks().is_empty() {
                 column()
-                    .px_2()
                     .child(caption(
                         theme,
                         self.tr(if self.model.tracks_query().is_some() && total != Some(0) {
@@ -1164,7 +1163,6 @@ impl Render for AlbumBrowser {
             }
         } else if self.model.albums().is_empty() {
             column()
-                .px_2()
                 .child(caption(
                     theme,
                     if self.model.query().is_some() && total != Some(0) {
@@ -1258,10 +1256,9 @@ impl Render for AlbumBrowser {
         };
         self.scroll_views.borrow_mut().finish_frame();
         panel_surface("albums-browser")
-            .p_2()
             .child(header)
             .when_some(self.error.clone(), |view, error| {
-                view.child(caption(theme, error).px_2())
+                view.child(caption(theme, error))
             })
             .child(div().flex_1().min_h_0().min_w_0().child(content))
     }

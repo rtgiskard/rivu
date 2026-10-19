@@ -336,7 +336,7 @@ impl History {
                     "search-empty"
                 } else {
                     "search-no-matches"
-                })).p_3())
+                })))
             })
             .child(list_viewport(
                 column().size_full().child(header).child(VirtualList::new(("history-rows", panel_id), history_len, &scroll, cx.processor(move |this, range: std::ops::Range<usize>, window, cx| {

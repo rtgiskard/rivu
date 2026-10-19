@@ -18,7 +18,6 @@ pub(in crate::gui) mod session;
 mod tests;
 
 use super::{
-    UI_INSET,
     artwork::{Artwork, ArtworkImages, ArtworkLoader, ArtworkView},
     components::{artwork::artwork_preview, metadata::metadata_item},
     feature::FeatureContext,
@@ -982,7 +981,6 @@ impl Metadata {
             .child(
                 column()
                     .flex_shrink_0()
-                    .p(px(UI_INSET))
                     .gap_3()
                     .child(
                         column()
