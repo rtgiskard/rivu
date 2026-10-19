@@ -377,7 +377,7 @@ impl MetadataSession {
         })
     }
 
-    /// Acknowledge only submitted fields; never write widgets or read progress/presence.
+    /// Confirm the submitted baseline; only reads may replace accepted track data.
     pub(in crate::gui) fn complete_save(
         &mut self,
         token: SaveToken,
@@ -392,28 +392,6 @@ impl MetadataSession {
         }
         self.saving = None;
         if ok {
-            let track = match &mut self.availability {
-                MetadataAvailability::Present(track) => Some(track),
-                MetadataAvailability::Unavailable(track) => track.as_mut(),
-                MetadataAvailability::Unknown => None,
-            };
-            if let (Some(track), Some(baseline)) = (track, self.baseline.as_ref()) {
-                let track = Arc::make_mut(track);
-                // Refreshes may have updated untouched fields while saving. Acknowledge
-                // only the submitted patch, keeping later edits and unrelated data intact.
-                if values.title != baseline.title {
-                    track.title.clone_from(&values.title);
-                }
-                if values.artist != baseline.artist {
-                    track.artist.clone_from(&values.artist);
-                }
-                if values.album != baseline.album {
-                    track.album.clone_from(&values.album);
-                }
-                if values.decoder_hint != baseline.decoder_hint {
-                    track.decoder_hint = values.decoder_hint;
-                }
-            }
             self.baseline = Some(values);
         }
         true
@@ -468,7 +446,6 @@ mod tests {
             ..submitted.clone()
         };
         assert!(session.complete_save(saved, submitted.clone(), true));
-        assert_eq!(session.track().unwrap().decoder_hint, DecoderHint::Ffmpeg);
         assert_eq!(session.track().unwrap().title, "remote title");
         assert!(!session.dirty(submitted.as_draft()));
         assert!(session.dirty(edited_during_save.as_draft()));
@@ -541,27 +518,6 @@ mod tests {
         session
             .accept_load(token, Some(track(id, title)), values("").as_draft())
             .unwrap()
-    }
-
-    #[test]
-    fn shared_track_snapshots_are_stable_across_save_and_selection() {
-        let mut session = MetadataSession::default();
-        load(&mut session, 1, "original");
-        let original = session.track_snapshot().unwrap();
-        assert!(Arc::ptr_eq(&original, &session.track_snapshot().unwrap()));
-
-        let submitted = values("saved");
-        let (token, _) = session.begin_save(submitted.as_draft()).unwrap();
-        assert!(session.complete_save(token, submitted, true));
-        let saved = session.track_snapshot().unwrap();
-        assert_eq!(original.title, "original");
-        assert_eq!(saved.title, "saved");
-        assert!(!Arc::ptr_eq(&original, &saved));
-
-        session.clear_selection();
-        assert!(session.track_snapshot().is_none());
-        assert_eq!(saved.id, 1);
-        assert_eq!(saved.title, "saved");
     }
 
     #[test]
@@ -761,7 +717,7 @@ mod tests {
         assert_eq!(artist, None);
         assert_eq!(album, None);
         let load_token = session.begin_load(1);
-        let mut remote = track(1, "saved title");
+        let mut remote = track(1, "newer remote title");
         remote.artist = "External artist".into();
         let newer_draft = values("typed while saving");
         assert!(
@@ -772,6 +728,7 @@ mod tests {
         assert!(session.complete_save(token, submitted.clone(), true));
         assert!(!session.dirty(submitted.as_draft()));
         assert_eq!(session.track().unwrap().artist, "External artist");
+        assert_eq!(session.track().unwrap().title, "newer remote title");
         assert!(session.dirty(newer_draft.as_draft()));
         let (_, command) = session.begin_save(newer_draft.as_draft()).unwrap();
         let Command::EditTrack {
@@ -1022,7 +979,6 @@ mod tests {
             MetadataAvailability::Unavailable(_)
         ));
         assert_eq!(session.identity(), Some(1));
-        assert_eq!(session.track().unwrap().title, "submitted");
         assert!(!session.dirty(submitted.as_draft()));
         assert!(session.dirty(newer.as_draft()));
         assert!(session.begin_save(newer.as_draft()).is_none());
@@ -1351,7 +1307,6 @@ mod tests {
                 .is_none()
         );
         assert!(session.complete_save(save, submitted, true));
-        assert_eq!(session.track().unwrap().title, "submitted");
 
         assert!(
             session
@@ -1362,7 +1317,6 @@ mod tests {
             session.availability(),
             MetadataAvailability::Unavailable(_)
         ));
-        assert_eq!(session.track().unwrap().title, "submitted");
         assert!(session.dirty(newer.as_draft()));
         assert!(!session.can_save(newer.as_draft()));
 

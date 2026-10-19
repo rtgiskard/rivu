@@ -362,14 +362,15 @@ Passing an empty string explicitly clears that field's displayed text.
 In Track details, a background refresh preserves unsaved title, artist, album,
 and decoder-hint edits. Save commits changed fields together; edits made while
 saving remain unsaved. A successful acknowledgement advances only the submitted
-draft's saved baseline; it cannot replace later edits or affect details that were
-closed, switched, or reopened in the meantime. A failed write preserves the draft
-for correction or retry; a committed-change refresh error does not mean the edit
-was rolled back.
+draft's saved baseline, never overwrites accepted track data, and requests a fresh
+read for manually selected details. It cannot replace later edits or affect details
+that were closed, switched, or reopened in the meantime. A failed write preserves
+the draft for correction or retry; a committed-change refresh error does not mean
+the edit was rolled back.
 When a successful save leaves no unsaved edits, details also adopts newer values
-already loaded for untouched fields. This includes saves that make no database
-change because another client has already saved the same values. The displayed
-values become the next edit's baseline, so clearing a newly displayed value still
+already loaded, including later edits to the same fields. This includes saves that
+make no database change because another client has already saved the same values.
+The displayed values become the next edit's baseline, so clearing a newly displayed value still
 explicitly clears that field. Later edits and unavailable records stay protected.
 Only one track's draft is retained at a time. Playback continues normally when
 the playing track changes; unsaved or saving details stay on the original track
@@ -414,9 +415,9 @@ saving drafts require Discard or Cancel first; after confirmation the action use
 the then-current Playback track. Without a current track, details are cleared.
 A record confirmed unavailable disables saving; an existing draft remains available
 to inspect or discard. Starting or failing a reload does not restore saving.
-An earlier save acknowledgement confirms
-its submitted changes without changing that unavailable state or cancelling a
-newer query. Cached playback details cannot restore saving either; only a reload
+An earlier save acknowledgement confirms its submitted baseline without changing
+that unavailable state. A successful save refreshes selected details even if no
+change notification arrives. Cached playback details cannot restore saving either; only a reload
 that finds the record enables it again. If there are no unsaved changes or pending
 save when the record is confirmed unavailable, details are cleared. Otherwise,
 the retained fields remain available to inspect, copy, or edit. Restoring those

@@ -497,6 +497,11 @@ impl Metadata {
             return;
         }
         if ack.ok {
+            if let Some(id) = self.metadata.selected() {
+                self.request_track(id, cx);
+            } else {
+                self.sync_metadata_default(cx);
+            }
             cx.emit(MetadataEvent::TrackChanged);
         } else {
             self.report_error(

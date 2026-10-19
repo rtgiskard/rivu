@@ -253,6 +253,51 @@ fn hidden_save_completion_releases_only_clean_drafts_and_rejects_old_epochs(
     });
 }
 
+#[gpui::test]
+fn save_ack_preserves_newer_details_and_refreshes_an_unchanged_projection(cx: &mut TestAppContext) {
+    let (_directory, _runtime, metadata) = fixture(cx);
+    metadata.update(cx, |this, cx| {
+        artwork_selection(this, track(7, "original"), cx);
+        let submitted = MetadataValues {
+            title: "submitted".into(),
+            artist: "submitted artist".into(),
+            album: "submitted album".into(),
+            decoder_hint: DecoderHint::Ffmpeg,
+        };
+        this.set_metadata_values(submitted.clone(), cx);
+        let (save, _) = this.metadata.begin_save(submitted.as_draft()).unwrap();
+        let read = this.metadata.begin_load(7);
+        let mut newer = track(7, "newer");
+        newer.artist = "newer artist".into();
+        newer.album = "newer album".into();
+        newer.decoder_hint = DecoderHint::Native;
+        assert!(
+            this.metadata
+                .accept_load(read, Some(newer), submitted.as_draft())
+                .is_none()
+        );
+        this.finish_save(save, submitted, None, ack(true), cx);
+        assert_eq!(this.metadata.track().unwrap().title, "newer");
+        assert_eq!(this.inputs[&Field::Title].read(cx).text(), "newer");
+        assert_eq!(this.inputs[&Field::Artist].read(cx).text(), "newer artist");
+        assert_eq!(this.inputs[&Field::Album].read(cx).text(), "newer album");
+        assert_eq!(this.metadata_decoder_hint, DecoderHint::Native);
+        assert!(!this.dirty(cx));
+        // No publication changed: the acknowledgement itself must demand a read.
+        let now = Instant::now();
+        let task = this
+            .metadata_read
+            .prepare(&mut this.metadata, true, now)
+            .expect("the accepted save must refresh authoritative details");
+        assert!(matches!(task.read.query(), Query::Track { track_id: 7 }));
+        assert!(
+            this.metadata_read
+                .prepare(&mut this.metadata, true, now)
+                .is_none()
+        );
+    });
+}
+
 fn artwork_selection(owner: &mut Metadata, track: Track, cx: &mut Context<Metadata>) {
     owner.metadata.select(track.id);
     let token = owner.metadata.begin_load(track.id);
