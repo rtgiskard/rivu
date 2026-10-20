@@ -237,6 +237,9 @@ favorite, history and references survive at the destination; its redundant row
 is removed. Destinations with user state or references, active source/destination
 playback, changed files or database identities, and a reappearing source are
 rejected rather than merged. Correct the reported conflict before retrying.
+Verification reads at most the destination size validated at its start; later
+growth does not extend that read budget. File identity is still checked after
+hashing and again before commit, so changed destinations are rejected.
 
 Closing the review requests cancellation of its ongoing verification. Cancellation
 before commit leaves identities unchanged; it cannot undo a completed commit.

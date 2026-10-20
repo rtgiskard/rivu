@@ -98,7 +98,7 @@ fn verify_target(
         FileIdentity::read(&std::fs::metadata(&prepared.target.path)?)? == identity,
         "Relocation target path changed while opening"
     );
-    let mut reader = &file;
+    let mut reader = (&file).take(identity.size);
     let mut buffer = [0u8; 128 * 1024];
     let mut hasher = blake3::Hasher::new();
     loop {
