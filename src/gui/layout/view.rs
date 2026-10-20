@@ -279,6 +279,7 @@ impl GuiApp {
                 let mut tabs = row()
                     .items_stretch()
                     .flex_shrink_0()
+                    .min_w_0()
                     .px_2()
                     .py_0p5()
                     .gap_1()
@@ -301,6 +302,8 @@ impl GuiApp {
                             .tab_index(0)
                             .focus(|style| style.border_color(rgb(theme.accent)))
                             .relative()
+                            .min_w_0()
+                            .flex_shrink(1.)
                             .flex()
                             .items_center()
                             .gap_2()
@@ -380,7 +383,8 @@ impl GuiApp {
                                     cx.new(|_| drag.clone())
                                 })
                             })
-                            .child(title)
+                            .tooltip(rivu_ui::text_tooltip(title.clone()))
+                            .child(div().min_w_0().truncate().child(title))
                             .child(self.measurement(Measured::Tab(panel_id)))
                             .when(!self.workspace.layouts.current().locked, |view| {
                                 view.child(
