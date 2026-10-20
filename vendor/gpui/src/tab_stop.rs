@@ -75,14 +75,19 @@ impl Default for TabStopMap {
 }
 
 impl TabStopMap {
-    pub fn insert(&mut self, focus_handle: &FocusHandle) {
+    pub fn insert(&mut self, focus_handle: &FocusHandle, tab_stop_override: Option<bool>) {
+        // Store the effective frame-local policy for cached subtree replay, without
+        // mutating the owner's handle or the shared FocusMap.
+        let mut registered_handle = focus_handle.clone();
+        registered_handle.tab_stop = tab_stop_override.unwrap_or(focus_handle.tab_stop);
+        let tab_stop = registered_handle.tab_stop;
         self.insertion_history
-            .push(TabStopOperation::Insert(focus_handle.clone()));
+            .push(TabStopOperation::Insert(registered_handle));
         let mut path = self.current_path.clone();
         path.0.push(focus_handle.tab_index);
         let order = TabStopNode {
             node_insertion_index: self.insertion_history.len() - 1,
-            tab_stop: focus_handle.tab_stop,
+            tab_stop,
             path,
         };
         self.by_id.insert(focus_handle.id, order.clone());
@@ -185,7 +190,7 @@ impl TabStopMap {
     pub fn replay(&mut self, nodes: &[TabStopOperation]) {
         for node in nodes {
             match node {
-                TabStopOperation::Insert(focus_handle) => self.insert(focus_handle),
+                TabStopOperation::Insert(focus_handle) => self.insert(focus_handle, None),
                 TabStopOperation::Group(tab_index) => self.begin_group(*tab_index),
                 TabStopOperation::GroupEnd => self.end_group(),
             }
@@ -335,7 +340,7 @@ mod tests {
         ];
 
         for handle in focus_handles.iter() {
-            tab_index_map.insert(handle);
+            tab_index_map.insert(handle, None);
         }
         let expected = [
             focus_handles[0].clone(),
@@ -416,18 +421,50 @@ mod tests {
         // Check that we can query next from a non-stop tab
         let tab_non_stop_1 = FocusHandle::new(&focus_map).tab_stop(false).tab_index(1);
         let tab_stop_2 = FocusHandle::new(&focus_map).tab_stop(true).tab_index(2);
-        tab_index_map.insert(&tab_non_stop_1);
-        tab_index_map.insert(&tab_stop_2);
+        tab_index_map.insert(&tab_non_stop_1, None);
+        tab_index_map.insert(&tab_stop_2, None);
         let result = tab_index_map.next(Some(&tab_non_stop_1.id)).unwrap();
         assert_eq!(result.id, tab_stop_2.id);
 
         // Check that we skip over non-stop tabs
         let tab_stop_0 = FocusHandle::new(&focus_map).tab_stop(true).tab_index(0);
         let tab_non_stop_0 = FocusHandle::new(&focus_map).tab_stop(false).tab_index(0);
-        tab_index_map.insert(&tab_stop_0);
-        tab_index_map.insert(&tab_non_stop_0);
+        tab_index_map.insert(&tab_stop_0, None);
+        tab_index_map.insert(&tab_non_stop_0, None);
         let result = tab_index_map.next(Some(&tab_stop_0.id)).unwrap();
         assert_eq!(result.id, tab_stop_2.id);
+    }
+
+    #[test]
+    fn test_tab_stop_override_is_frame_local_and_replayed() {
+        let focus_map = Arc::new(FocusMap::default());
+        for original_tab_stop in [true, false] {
+            let before = FocusHandle::new(&focus_map).tab_stop(true).tab_index(0);
+            let item = FocusHandle::new(&focus_map)
+                .tab_stop(original_tab_stop)
+                .tab_index(1);
+            let after = FocusHandle::new(&focus_map).tab_stop(true).tab_index(2);
+            for enabled in [false, true, false] {
+                let mut frame = TabStopMap::default();
+                frame.insert(&before, None);
+                frame.insert(&item, (!enabled).then_some(false));
+                frame.insert(&after, None);
+                let expected = if enabled && original_tab_stop {
+                    item.id
+                } else {
+                    after.id
+                };
+                assert_eq!(frame.next(Some(&before.id)).unwrap().id, expected);
+                let mut replayed = TabStopMap::default();
+                replayed.replay(&frame.insertion_history);
+                assert_eq!(replayed.next(Some(&before.id)).unwrap().id, expected);
+                assert_eq!(item.tab_stop, original_tab_stop);
+                assert_eq!(
+                    item.downgrade().upgrade().unwrap().tab_stop,
+                    original_tab_stop
+                );
+            }
+        }
     }
 
     #[must_use]
@@ -452,7 +489,7 @@ mod tests {
             let handle = FocusHandle::new(&self.focus_map)
                 .tab_stop(false)
                 .tab_index(index);
-            self.tab_map.insert(&handle);
+            self.tab_map.insert(&handle, None);
             self
         }
 
@@ -461,7 +498,7 @@ mod tests {
             let handle = FocusHandle::new(&self.focus_map)
                 .tab_stop(true)
                 .tab_index(index);
-            self.tab_map.insert(&handle);
+            self.tab_map.insert(&handle, None);
             self.expected.push((expected, handle.id));
             self.expected.sort_by_key(|(expected, _)| *expected);
             self

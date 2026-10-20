@@ -796,9 +796,12 @@ pub trait InteractiveElement: Sized {
     /// When false, the element remains in tab-index order but cannot be reached via keyboard navigation.
     /// Useful for container elements: focus the container, then call `window.focus_next(cx)` to focus
     /// the first tab stop inside it while having the container element itself be unreachable via the keyboard.
+    /// For an explicitly tracked focus handle, this overrides Tab participation for this
+    /// element only. Without an explicit call, the handle's policy is preserved.
     /// Should only be used with `tab_index`.
     fn tab_stop(mut self, tab_stop: bool) -> Self {
         self.interactivity().tab_stop = tab_stop;
+        self.interactivity().tab_stop_override = Some(tab_stop);
         self
     }
 
@@ -810,6 +813,7 @@ pub trait InteractiveElement: Sized {
         self.interactivity().focusable = true;
         self.interactivity().tab_index = Some(index);
         self.interactivity().tab_stop = true;
+        self.interactivity().tab_stop_override = None;
         self
     }
 
@@ -2189,6 +2193,7 @@ pub struct Interactivity {
     pub(crate) tab_index: Option<isize>,
     pub(crate) tab_group: bool,
     pub(crate) tab_stop: bool,
+    pub(crate) tab_stop_override: Option<bool>,
 
     pub(crate) a11y_action_listeners:
         Vec<(accesskit::Action, crate::window::a11y::A11yActionListener)>,
@@ -2557,7 +2562,10 @@ impl Interactivity {
                                         // every item, and `focus_next` from a container would jump
                                         // to the first item in the whole window instead of its own.
                                         if let Some(focus_handle) = &self.tracked_focus_handle {
-                                            window.next_frame.tab_stops.insert(focus_handle);
+                                            window
+                                                .next_frame
+                                                .tab_stops
+                                                .insert(focus_handle, self.tab_stop_override);
                                         }
                                         if let Some(hitbox) = hitbox {
                                             #[cfg(debug_assertions)]
