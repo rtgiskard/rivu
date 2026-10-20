@@ -5112,6 +5112,7 @@ name = "rivu-ui"
 version = "0.1.0"
 dependencies = [
  "gpui",
+ "gpui_platform",
  "unicode-segmentation",
 ]
 

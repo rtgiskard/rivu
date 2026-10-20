@@ -1450,7 +1450,9 @@ impl GuiApp {
         match dragging {
             Dragging::Split(_) => self.drag_split(position, alt, cx),
             Dragging::Seek(_) => {
-                let fraction = ((position.x - bounds.origin.x) / bounds.size.width).clamp(0., 1.);
+                let Some(fraction) = rivu_ui::Slider::value_at(bounds, position) else {
+                    return;
+                };
                 if self
                     .workspace
                     .interaction
@@ -1461,7 +1463,9 @@ impl GuiApp {
                 }
             }
             Dragging::Volume(_) => {
-                let value = ((position.x - bounds.origin.x) / bounds.size.width).clamp(0., 1.);
+                let Some(value) = rivu_ui::Slider::value_at(bounds, position) else {
+                    return;
+                };
                 self.playback
                     .update(cx, |owner, cx| owner.set_volume(value, cx));
             }

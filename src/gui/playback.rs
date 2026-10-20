@@ -9,12 +9,10 @@ use crate::{
     model::{Command, PlaybackState, PlaybackStatus, RepeatMode},
     projection::GuiSnapshot,
 };
-use gpui::{
-    AnyElement, Context, ElementId, EventEmitter, Modifiers, MouseButton, MouseDownEvent, Pixels,
-    Point, Window, div, prelude::*, px, relative, rgb,
-};
+use gpui::{AnyElement, Context, EventEmitter, Pixels, Point, Window, div, prelude::*, rgb};
 use rivu_ui::{
-    active_control, caption, column, disabled_control, icon_button, quiet_icon_button, row,
+    IconButton, IconButtonDensity, IconButtonGroup, IconButtonStyle, Slider, SliderInput,
+    SliderKey, caption, column, disabled_control, icon_button, quiet_icon_button, row,
 };
 use std::rc::Rc;
 
@@ -30,29 +28,6 @@ pub(super) enum PlaybackEvent {
         key: SliderKey,
     },
     Error(String),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum SliderKey {
-    Decrease,
-    Increase,
-    Start,
-    End,
-}
-
-impl SliderKey {
-    fn resolve(key: &str, modifiers: Modifiers) -> Option<Self> {
-        if modifiers != Modifiers::default() {
-            return None;
-        }
-        match key {
-            "left" | "down" => Some(Self::Decrease),
-            "right" | "up" => Some(Self::Increase),
-            "home" => Some(Self::Start),
-            "end" => Some(Self::End),
-            _ => None,
-        }
-    }
 }
 
 fn slider_command(
@@ -226,108 +201,95 @@ impl Playback {
             .or_else(|| track.and_then(|track| track.duration));
         let preview_position = self.seek_preview.unwrap_or(self.state.playback.position);
         let progress = duration
-            .filter(|duration| *duration > 0.)
+            .filter(|duration| duration.is_finite() && *duration > 0.)
             .map_or(0., |duration| (preview_position / duration) as f32);
-        let seek = self.slider(
+        let seek_enabled = self.state.queue.current_id.is_some()
+            && self
+                .state
+                .playback
+                .duration
+                .is_some_and(|value| value.is_finite() && value > 0.);
+        let seek = Slider::new(
             ("seek", panel_id),
             progress,
-            Dragging::Seek(panel_id),
-            seek_measurement,
-            cx,
-        );
-        let volume = self.slider(
+            self.context.tr("gl-seek-position"),
+        )
+        .disabled(!seek_enabled)
+        .dragging(matches!(self.dragging, Some(Dragging::Seek(id)) if id == panel_id))
+        .render(cx, move |_, input, _, cx| {
+            cx.emit(Self::slider_event(Dragging::Seek(panel_id), input));
+        })
+        .child(seek_measurement);
+        let volume = Slider::new(
             ("volume", panel_id),
             self.state.playback.volume,
-            Dragging::Volume(panel_id),
-            volume_measurement,
-            cx,
-        );
-        let controls = row()
-            .gap_1()
-            .flex_shrink_0()
-            .justify_center()
-            .child(active_control(
-                theme,
-                quiet_icon_button(
-                    theme,
-                    icon_button(
+            self.context.tr("gl-volume-level"),
+        )
+        .dragging(matches!(self.dragging, Some(Dragging::Volume(id)) if id == panel_id))
+        .render(cx, move |_, input, _, cx| {
+            cx.emit(Self::slider_event(Dragging::Volume(panel_id), input));
+        })
+        .child(volume_measurement);
+        let controls = row().gap_1().flex_shrink_0().justify_center().child(
+            IconButtonGroup::new(IconButtonStyle::Quiet, IconButtonDensity::Regular)
+                .button_with(
+                    IconButton::new(
                         ("shuffle", panel_id),
                         "󰒟",
-                        if self.state.playback.shuffle {
-                            self.context.tr("gl-shuffle-on")
+                        self.context.tr(if self.state.playback.shuffle {
+                            "gl-shuffle-on"
                         } else {
-                            self.context.tr("gl-shuffle-off")
-                        },
-                        cx,
-                        |this, _, cx| this.send(Command::ToggleShuffle, cx),
-                    ),
+                            "gl-shuffle-off"
+                        }),
+                    )
+                    .toggled(self.state.playback.shuffle),
+                    cx,
+                    |this, _, cx| this.send(Command::ToggleShuffle, cx),
+                    |button| button.rounded_full().text_lg(),
                 )
-                .rounded_full()
-                .text_lg()
-                .aria_toggled(if self.state.playback.shuffle {
-                    gpui::Toggled::True
-                } else {
-                    gpui::Toggled::False
-                }),
-                self.state.playback.shuffle,
-            ))
-            .child(
-                quiet_icon_button(
-                    theme,
-                    icon_button(
+                .button_with(
+                    IconButton::new(
                         ("previous", panel_id),
                         "󰒮",
                         self.context.tr("gl-previous-track"),
-                        cx,
-                        |this, _, cx| this.send(Command::Previous, cx),
                     ),
+                    cx,
+                    |this, _, cx| this.send(Command::Previous, cx),
+                    |button| button.rounded_full().text_lg(),
                 )
-                .rounded_full()
-                .text_lg(),
-            )
-            .child(
-                quiet_icon_button(
-                    theme,
-                    icon_button(
+                .button_with(
+                    IconButton::new(
                         ("toggle", panel_id),
                         if self.state.playback.status == PlaybackStatus::Playing {
                             "󰏤"
                         } else {
                             ""
                         },
-                        if self.state.playback.status == PlaybackStatus::Playing {
-                            self.context.tr("gl-pause")
-                        } else {
-                            self.context.tr("gl-play")
-                        },
-                        cx,
-                        |this, _, cx| this.send(Command::Toggle, cx),
+                        self.context
+                            .tr(if self.state.playback.status == PlaybackStatus::Playing {
+                                "gl-pause"
+                            } else {
+                                "gl-play"
+                            }),
                     ),
+                    cx,
+                    |this, _, cx| this.send(Command::Toggle, cx),
+                    |button| {
+                        button
+                            .bg(rgb(theme.control))
+                            .text_color(rgb(theme.text))
+                            .rounded_full()
+                            .text_xl()
+                    },
                 )
-                .bg(rgb(theme.control))
-                .text_color(rgb(theme.text))
-                .rounded_full()
-                .text_xl(),
-            )
-            .child(
-                quiet_icon_button(
-                    theme,
-                    icon_button(
-                        ("next", panel_id),
-                        "󰒭",
-                        self.context.tr("gl-next-track"),
-                        cx,
-                        |this, _, cx| this.send(Command::Next, cx),
-                    ),
+                .button_with(
+                    IconButton::new(("next", panel_id), "󰒭", self.context.tr("gl-next-track")),
+                    cx,
+                    |this, _, cx| this.send(Command::Next, cx),
+                    |button| button.rounded_full().text_lg(),
                 )
-                .rounded_full()
-                .text_lg(),
-            )
-            .child(active_control(
-                theme,
-                quiet_icon_button(
-                    theme,
-                    icon_button(
+                .button_with(
+                    IconButton::new(
                         ("repeat", panel_id),
                         if self.state.playback.repeat == RepeatMode::One {
                             "󰑘"
@@ -339,19 +301,22 @@ impl Playback {
                             RepeatMode::All => self.context.tr("gl-repeat-all"),
                             RepeatMode::One => self.context.tr("gl-repeat-one"),
                         },
-                        cx,
-                        |this, _, cx| this.send(Command::CycleRepeat, cx),
-                    ),
+                    )
+                    .selected(self.state.playback.repeat != RepeatMode::Off),
+                    cx,
+                    |this, _, cx| this.send(Command::CycleRepeat, cx),
+                    |button| {
+                        button.rounded_full().text_lg().aria_value(
+                            match self.state.playback.repeat {
+                                RepeatMode::Off => self.context.tr("gl-repeat-off"),
+                                RepeatMode::All => self.context.tr("gl-repeat-all"),
+                                RepeatMode::One => self.context.tr("gl-repeat-one"),
+                            },
+                        )
+                    },
                 )
-                .rounded_full()
-                .text_lg()
-                .aria_value(match self.state.playback.repeat {
-                    RepeatMode::Off => self.context.tr("gl-repeat-off"),
-                    RepeatMode::All => self.context.tr("gl-repeat-all"),
-                    RepeatMode::One => self.context.tr("gl-repeat-one"),
-                }),
-                self.state.playback.repeat != RepeatMode::Off,
-            ));
+                .into_div(),
+        );
         let volume_control = row()
             .gap_1()
             .w(gpui::rems(9.))
@@ -452,6 +417,7 @@ impl Playback {
                         view.child(super::components::track::track_favorite_toggle(
                             ("playback-favorite", panel_id),
                             favorite,
+                            IconButtonDensity::Regular,
                             |key| self.context.tr(key),
                             cx,
                             move |this, _, cx| {
@@ -519,111 +485,18 @@ impl Playback {
             .into_any_element()
     }
 
-    fn slider(
-        &self,
-        id: impl Into<ElementId>,
-        value: f32,
-        dragging: Dragging,
-        measurement: AnyElement,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let theme = rivu_ui::theme::palette(cx);
-        let value = value.clamp(0., 1.);
-        let is_dragging = match (self.dragging, dragging) {
-            (Some(Dragging::Seek(active)), Dragging::Seek(id))
-            | (Some(Dragging::Volume(active)), Dragging::Volume(id)) => active == id,
-            _ => false,
-        };
-        div()
-            .id(id)
-            .tab_index(0)
-            .role(gpui::Role::Slider)
-            .aria_label(self.context.tr(match dragging {
-                Dragging::Seek(_) => "gl-seek-position",
-                Dragging::Volume(_) => "gl-volume-level",
-                Dragging::Split(_) => unreachable!("split handles are not playback sliders"),
-            }))
-            .rounded_sm()
-            .focus_visible(|style| {
-                style.shadow(vec![
-                    gpui::BoxShadow::new(px(0.), px(0.), rgb(theme.accent).into())
-                        .spread_radius(px(1.))
-                        .inset(),
-                ])
-            })
-            .group("playback-slider")
-            .relative()
-            .h(px(20.))
-            .w_full()
-            .min_w(px(60.))
-            .cursor_pointer()
-            .flex()
-            .items_center()
-            .child(
-                div()
-                    .w_full()
-                    .h(px(4.))
-                    .flex_shrink_0()
-                    .rounded_full()
-                    .bg(rgb(theme.border))
-                    .child(
-                        div()
-                            .h_full()
-                            .w(relative(value))
-                            .rounded_full()
-                            .bg(rgb(theme.accent)),
-                    ),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .inset_0()
-                    .mx(px(5.))
-                    .flex()
-                    .items_center()
-                    .opacity(0.)
-                    .group_hover("playback-slider", |style| style.opacity(1.))
-                    .when(is_dragging, |view| view.opacity(1.))
-                    .child(
-                        div()
-                            .relative()
-                            .left(relative(value))
-                            .ml(px(-5.))
-                            .size(px(10.))
-                            .flex_shrink_0()
-                            .rounded_full()
-                            .bg(rgb(theme.text)),
-                    ),
-            )
-            .child(measurement)
-            .on_key_down(cx.listener(move |_, event: &gpui::KeyDownEvent, _, cx| {
-                if let Some(key) =
-                    SliderKey::resolve(event.keystroke.key.as_str(), event.keystroke.modifiers)
-                {
-                    // The window cancels any pointer session before dispatching this key.
-                    cx.emit(PlaybackEvent::SliderKey {
-                        slider: dragging,
-                        key,
-                    });
-                    cx.stop_propagation();
-                }
-            }))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |_, event: &MouseDownEvent, _, cx| {
-                    cx.emit(PlaybackEvent::SliderDown {
-                        dragging,
-                        position: event.position,
-                        alt: event.modifiers.alt,
-                    });
-                }),
-            )
-            .when(is_dragging, |view| {
-                // Volume release has no command; repaint after the root clears the drag.
-                view.on_mouse_up(MouseButton::Left, cx.listener(|_, _, _, cx| cx.notify()))
-                    .on_mouse_up_out(MouseButton::Left, cx.listener(|_, _, _, cx| cx.notify()))
-            })
-            .into_any_element()
+    fn slider_event(dragging: Dragging, input: SliderInput) -> PlaybackEvent {
+        match input {
+            SliderInput::PointerDown { position, alt } => PlaybackEvent::SliderDown {
+                dragging,
+                position,
+                alt,
+            },
+            SliderInput::Key(key) => PlaybackEvent::SliderKey {
+                slider: dragging,
+                key,
+            },
+        }
     }
 }
 
@@ -631,50 +504,6 @@ impl Playback {
 mod tests {
     use super::*;
     use crate::gui::layout::interaction::{DragCommit, LayoutInteraction};
-
-    #[test]
-    fn slider_keys_are_local_and_unmodified() {
-        for (key, expected) in [
-            ("left", SliderKey::Decrease),
-            ("down", SliderKey::Decrease),
-            ("right", SliderKey::Increase),
-            ("up", SliderKey::Increase),
-            ("home", SliderKey::Start),
-            ("end", SliderKey::End),
-        ] {
-            assert_eq!(
-                SliderKey::resolve(key, Modifiers::default()),
-                Some(expected)
-            );
-            for modifiers in [
-                Modifiers {
-                    control: true,
-                    ..Default::default()
-                },
-                Modifiers {
-                    alt: true,
-                    ..Default::default()
-                },
-                Modifiers {
-                    shift: true,
-                    ..Default::default()
-                },
-                Modifiers {
-                    platform: true,
-                    ..Default::default()
-                },
-                Modifiers {
-                    function: true,
-                    ..Default::default()
-                },
-            ] {
-                assert_eq!(SliderKey::resolve(key, modifiers), None);
-            }
-        }
-        for key in ["tab", "enter", "space", "[", "]", "pageup", "pagedown"] {
-            assert_eq!(SliderKey::resolve(key, Modifiers::default()), None);
-        }
-    }
 
     #[test]
     fn seek_keys_require_queue_identity_and_finite_positive_duration() {

@@ -399,17 +399,35 @@ Library's sparse tree, album grid projection, and History's column geometry rema
 feature-owned; bounded heterogeneous duplicate-review pages use ordinary scroll
 areas rather than uniform-row virtualization.
 
+`ProgressBar` displays a host-provided fraction without input handling. `Slider`
+adds focus, disabled presentation, pointer-start and keyboard intent handling.
+Both use the host palette; neither owns playback state or performs Core commands.
+Disabled sliders reject activation and Tab navigation and suppress native
+pointer-focus transfer, preserving focus on another control when clicked.
+Their pointer releases still reach the window owner so an existing drag can finish
+when released over a disabled slider.
+Slider values and step policy remain host-owned. The window arbitrates pointer
+sessions, while the playback owner retains seek target identity, preview and
+commit/cancellation semantics. Keyboard takeover cancels an existing pointer
+session before dispatch, so a later pointer release cannot overwrite it.
+
 The package uses this workspace's pinned GPUI revision and local patches. It is
 not a renderer-independent API or a promise of compatibility with arbitrary GPUI
 versions. `make lint` and `make build` include the component package;
 `cargo test -p rivu-ui` runs its interaction and viewport regression tests.
 
-Run `cargo run --example rivu_ui` on a Wayland desktop for a small consumer example.
+Run `make ui-demo` (or `cargo run -p rivu-ui --example showcase --features showcase`)
+on a Wayland desktop for a small consumer example.
+The component package owns this example; its optional `showcase` feature is disabled
+by default and enables the platform dependency needed to run it.
 It installs host appearance, retains inputs and subscriptions, filters a virtual
-list, and demonstrates choice, checkbox, disabled and error-recovery behavior.
+list, and demonstrates choice, checkbox, progress, slider, disabled and error-recovery behavior.
 Its explicit Begin/Fail/Finish controls exercise presentation transitions without
 pretending to perform network or database work. The example uses the same pinned
 GPUI and requires the normal build and font prerequisites.
+Its font-size controls adjust 8–18pt in 1pt steps, independently of UI scale;
+root text and shared typography use the same point-to-logical-pixel conversion.
+The page scrolls to keep controls accessible at larger font sizes.
 
 Playback seek/volume drag transactions and Settings validation remain application
 responsibilities; the package does not provide an automatic form submission,

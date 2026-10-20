@@ -156,28 +156,265 @@ pub fn icon_button<T: 'static>(
     cx: &mut Context<T>,
     action: impl Fn(&mut T, &mut Window, &mut Context<T>) + 'static,
 ) -> Stateful<Div> {
-    let hint = hint.into();
     let theme = crate::theme::palette(cx);
     activate_control(
-        control_surface(theme, id)
-            .role(Role::Button)
-            .aria_label(hint.clone())
-            .child(self::icon(icon, cx).font_size_scale(crate::theme::font_size_scale(cx))),
+        icon_button_surface(theme, id, icon, hint, cx, IconButtonSizing::Natural),
         cx,
         action,
     )
-    .w_auto()
-    .h_auto()
-    .min_w_8()
-    .min_h_8()
-    .text_size(gpui::rems(1.))
-    .line_height(gpui::relative(1.))
-    .p_2()
-    .flex()
-    .items_center()
-    .justify_center()
-    .flex_shrink_0()
-    .tooltip(text_tooltip(hint))
+}
+
+enum IconButtonSizing {
+    Natural,
+    Square,
+}
+
+fn icon_button_surface(
+    theme: &'static crate::theme::Palette,
+    id: impl Into<ElementId>,
+    icon: impl Into<SharedString>,
+    hint: impl Into<SharedString>,
+    cx: &gpui::App,
+    sizing: IconButtonSizing,
+) -> Stateful<Div> {
+    let hint = hint.into();
+    let font_scale = crate::theme::font_size_scale(cx);
+    let glyph = self::icon(icon, cx).font_size_scale(font_scale);
+    let glyph = match sizing {
+        IconButtonSizing::Natural => glyph,
+        IconButtonSizing::Square => glyph
+            .size(gpui::rems(font_scale))
+            .flex()
+            .items_center()
+            .justify_center(),
+    };
+    control_surface(theme, id)
+        .role(Role::Button)
+        .aria_label(hint.clone())
+        .child(glyph)
+        .w_auto()
+        .h_auto()
+        .min_w_8()
+        .min_h_8()
+        .text_size(gpui::rems(1.))
+        .line_height(gpui::relative(1.))
+        .p_2()
+        .flex()
+        .items_center()
+        .justify_center()
+        .flex_shrink_0()
+        .tooltip(text_tooltip(hint))
+}
+
+/// Material shared by every icon button in a group.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IconButtonStyle {
+    Surface,
+    Quiet,
+    Bare,
+}
+
+/// Natural icon-button padding and minimum hit area, independent of glyph size.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IconButtonDensity {
+    Regular,
+    Compact,
+}
+
+#[derive(Clone, Copy)]
+enum IconButtonSemantics {
+    Action,
+    Toggled(bool),
+    Switch(bool),
+}
+
+/// A controlled icon action. Its owner supplies all business state and callbacks.
+pub struct IconButton {
+    id: ElementId,
+    icon: SharedString,
+    hint: SharedString,
+    enabled: bool,
+    selected: bool,
+    semantics: IconButtonSemantics,
+}
+
+impl IconButton {
+    pub fn new(
+        id: impl Into<ElementId>,
+        icon: impl Into<SharedString>,
+        hint: impl Into<SharedString>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            icon: icon.into(),
+            hint: hint.into(),
+            enabled: true,
+            selected: false,
+            semantics: IconButtonSemantics::Action,
+        }
+    }
+
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    /// Appearance only; does not imply selected or toggled accessibility semantics.
+    pub fn selected(mut self, selected: bool) -> Self {
+        self.selected = selected;
+        self
+    }
+
+    /// A toggle button, such as Favorite; remains a Button, not a Switch.
+    pub fn toggled(mut self, toggled: bool) -> Self {
+        self.semantics = IconButtonSemantics::Toggled(toggled);
+        self.selected = toggled;
+        self
+    }
+
+    /// A boolean setting with Switch semantics and matching selected appearance.
+    pub fn switch(mut self, on: bool) -> Self {
+        self.semantics = IconButtonSemantics::Switch(on);
+        self.selected = on;
+        self
+    }
+
+    /// Build a standalone item with the same styling and behavior as a group item.
+    pub fn build<T: 'static>(
+        self,
+        style: IconButtonStyle,
+        density: IconButtonDensity,
+        cx: &mut Context<T>,
+        action: impl Fn(&mut T, &mut Window, &mut Context<T>) + 'static,
+    ) -> Stateful<Div> {
+        self.build_with(style, density, cx, action, |control| control)
+    }
+
+    fn build_with<T: 'static>(
+        self,
+        style: IconButtonStyle,
+        density: IconButtonDensity,
+        cx: &mut Context<T>,
+        action: impl Fn(&mut T, &mut Window, &mut Context<T>) + 'static,
+        customize: impl FnOnce(Stateful<Div>) -> Stateful<Div>,
+    ) -> Stateful<Div> {
+        let theme = crate::theme::palette(cx);
+        let mut control = icon_button_surface(
+            theme,
+            self.id,
+            self.icon,
+            self.hint,
+            cx,
+            IconButtonSizing::Natural,
+        );
+        if density == IconButtonDensity::Compact {
+            control = control.px_1().py_2().min_w_6().min_h_8();
+        }
+        if style != IconButtonStyle::Surface {
+            control = quiet_icon_button(theme, control);
+        }
+        if let IconButtonSemantics::Toggled(on) | IconButtonSemantics::Switch(on) = self.semantics {
+            control = control.aria_toggled(if on { Toggled::True } else { Toggled::False });
+            if matches!(self.semantics, IconButtonSemantics::Switch(_)) {
+                control = control.role(Role::Switch);
+            }
+        }
+        control = active_control(theme, control, self.selected);
+        if self.enabled {
+            if style == IconButtonStyle::Bare && !self.selected {
+                control = control.group_hover("control", |style| {
+                    style
+                        .bg(gpui::transparent_black())
+                        .text_color(rgb(theme.accent))
+                });
+            }
+            control = activate_control(control, cx, action);
+        }
+        let control = customize(control);
+        if self.enabled {
+            control
+        } else {
+            let background = if self.selected {
+                rgb(theme.selected).into()
+            } else if style == IconButtonStyle::Surface {
+                rgb(theme.control).into()
+            } else {
+                gpui::transparent_black()
+            };
+            let border = if style == IconButtonStyle::Surface {
+                rgb(theme.structure_border).into()
+            } else {
+                gpui::transparent_black()
+            };
+            disable_control_interaction(
+                control
+                    .text_color(rgb(theme.disabled))
+                    .border_color(border)
+                    .focus(move |style| style.border_color(border))
+                    .bg(background)
+                    .group_hover("control", move |style| {
+                        style.bg(background).text_color(rgb(theme.disabled))
+                    }),
+            )
+        }
+    }
+}
+
+/// A layout of centrally constructed icon controls, without business state or
+/// positioning/visibility policy. Convert to a Div before applying a hover shell.
+pub struct IconButtonGroup {
+    surface: Div,
+    style: IconButtonStyle,
+    density: IconButtonDensity,
+}
+
+impl IconButtonGroup {
+    pub fn new(style: IconButtonStyle, density: IconButtonDensity) -> Self {
+        Self {
+            surface: div()
+                .flex()
+                .items_center()
+                .min_w_0()
+                .gap_0()
+                .flex_shrink_0()
+                .when(density == IconButtonDensity::Regular, |group| group.gap_1()),
+            style,
+            density,
+        }
+    }
+
+    pub fn wrap(mut self) -> Self {
+        self.surface = self.surface.flex_wrap();
+        self
+    }
+
+    pub fn button<T: 'static>(
+        self,
+        item: IconButton,
+        cx: &mut Context<T>,
+        action: impl Fn(&mut T, &mut Window, &mut Context<T>) + 'static,
+    ) -> Self {
+        self.button_with(item, cx, action, |control| control)
+    }
+
+    /// Preserve item-specific event handlers or primary/secondary emphasis while
+    /// sharing construction. Disabled interaction barriers are applied afterward.
+    pub fn button_with<T: 'static>(
+        mut self,
+        item: IconButton,
+        cx: &mut Context<T>,
+        action: impl Fn(&mut T, &mut Window, &mut Context<T>) + 'static,
+        customize: impl FnOnce(Stateful<Div>) -> Stateful<Div>,
+    ) -> Self {
+        self.surface =
+            self.surface
+                .child(item.build_with(self.style, self.density, cx, action, customize));
+        self
+    }
+
+    pub fn into_div(self) -> Div {
+        self.surface
+    }
 }
 
 /// Low-emphasis inline action; preserve the shared icon hit area and tooltip.
@@ -198,38 +435,44 @@ pub fn disabled_control(
     disabled: bool,
 ) -> Stateful<Div> {
     control.when(disabled, |view| {
-        view.text_color(rgb(theme.disabled))
-            .border_color(rgb(theme.structure_border))
-            .group_hover("control", |style| style.bg(rgb(theme.control)))
-            .cursor_default()
-            .tab_stop(false)
-            .a11y_synthetic_children(|builder| {
-                let node = builder.parent_node();
-                node.set_disabled();
-                node.remove_action(gpui::AccessibleAction::Click);
-                node.remove_action(gpui::AccessibleAction::Focus);
-            })
-            .capture_key_down(|event, window, cx| {
-                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                    window.prevent_default();
-                    cx.stop_propagation();
-                }
-            })
-            .capture_key_up(|event, window, cx| {
-                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                    window.prevent_default();
-                    cx.stop_propagation();
-                }
-            })
-            .capture_any_mouse_down(|_, window, cx| {
-                window.prevent_default();
-                cx.stop_propagation();
-            })
-            .capture_any_mouse_up(|_, window, cx| {
-                window.prevent_default();
-                cx.stop_propagation();
-            })
+        disable_control_interaction(
+            view.text_color(rgb(theme.disabled))
+                .border_color(rgb(theme.structure_border))
+                .group_hover("control", |style| style.bg(rgb(theme.control))),
+        )
     })
+}
+
+fn disable_control_interaction(control: Stateful<Div>) -> Stateful<Div> {
+    control
+        .cursor_default()
+        .tab_stop(false)
+        .a11y_synthetic_children(|builder| {
+            let node = builder.parent_node();
+            node.set_disabled();
+            node.remove_action(gpui::AccessibleAction::Click);
+            node.remove_action(gpui::AccessibleAction::Focus);
+        })
+        .capture_key_down(|event, window, cx| {
+            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                window.prevent_default();
+                cx.stop_propagation();
+            }
+        })
+        .capture_key_up(|event, window, cx| {
+            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                window.prevent_default();
+                cx.stop_propagation();
+            }
+        })
+        .capture_any_mouse_down(|_, window, cx| {
+            window.prevent_default();
+            cx.stop_propagation();
+        })
+        .capture_any_mouse_up(|_, window, cx| {
+            window.prevent_default();
+            cx.stop_propagation();
+        })
 }
 
 /// Destructive text remains visible on hover; keep the shared focus treatment.
@@ -242,7 +485,7 @@ pub fn danger_control(
         .border_color(rgb(theme.error))
 }
 
-/// Compact toggle button used by visual and system settings.
+/// Independent square switch; Regular padding and minimum size follow UI scale.
 pub fn toggle_button<T: 'static>(
     id: impl Into<ElementId>,
     icon: impl Into<SharedString>,
@@ -254,10 +497,15 @@ pub fn toggle_button<T: 'static>(
     let theme = crate::theme::palette(cx);
     active_control(
         theme,
-        icon_button(id, icon, hint, cx, move |this, _, cx| {
-            action(this, cx);
-            cx.notify();
-        })
+        activate_control(
+            icon_button_surface(theme, id, icon, hint, cx, IconButtonSizing::Square),
+            cx,
+            move |this, _, cx| {
+                action(this, cx);
+                cx.notify();
+            },
+        )
+        .self_start()
         .role(Role::Switch)
         .aria_toggled(if enabled {
             Toggled::True
@@ -346,12 +594,30 @@ mod tests {
     struct Controls {
         focus: FocusHandle,
         disabled: bool,
+        grouped: bool,
         clicks: usize,
     }
 
     impl Render for Controls {
         fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             let theme = crate::theme::palette(cx);
+            if self.grouped {
+                return div().size_full().child(
+                    IconButtonGroup::new(IconButtonStyle::Quiet, IconButtonDensity::Compact)
+                        .button_with(
+                            IconButton::new("action", "♥", "Favorite")
+                                .toggled(true)
+                                .enabled(!self.disabled),
+                            cx,
+                            |this, _, cx| {
+                                this.clicks += 1;
+                                cx.notify();
+                            },
+                            |control| control.track_focus(&self.focus),
+                        )
+                        .into_div(),
+                );
+            }
             div().size_full().child(disabled_control(
                 theme,
                 button("action", "Apply", cx, |this, _, cx| {
@@ -368,10 +634,16 @@ mod tests {
     #[gpui::test]
     fn disabled_controls_block_pointer_and_native_keyboard_clicks(cx: &mut TestAppContext) {
         cx.update(crate::theme::init_test);
+        assert_disabled_controls(cx, false);
+        assert_disabled_controls(cx, true);
+    }
+
+    fn assert_disabled_controls(cx: &mut TestAppContext, grouped: bool) {
         let focus = cx.update(|cx| cx.focus_handle());
         let window = cx.add_window(|_, _| Controls {
             focus: focus.clone(),
             disabled: true,
+            grouped,
             clicks: 0,
         });
         let controls = window.root(cx).unwrap();
@@ -430,11 +702,174 @@ mod tests {
     }
 
     #[gpui::test]
+    fn grouped_icons_preserve_boolean_semantics_when_disabled(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init_test);
+        let entity = cx.new(|cx| Controls {
+            focus: cx.focus_handle(),
+            disabled: false,
+            grouped: true,
+            clicks: 0,
+        });
+        entity.update(cx, |_, cx| {
+            for enabled in [true, false] {
+                for on in [true, false] {
+                    for switch in [true, false] {
+                        let item =
+                            IconButton::new("boolean", "♥", "Host-owned state").enabled(enabled);
+                        let item = if switch {
+                            item.switch(on)
+                        } else {
+                            item.toggled(on)
+                        };
+                        let control = item.build(
+                            IconButtonStyle::Quiet,
+                            IconButtonDensity::Compact,
+                            cx,
+                            |_, _, _| {},
+                        );
+                        let mut node = gpui::accesskit::Node::new(control.a11y_role().unwrap());
+                        control.write_a11y_info(&mut node);
+                        assert_eq!(
+                            node.role(),
+                            if switch { Role::Switch } else { Role::Button }
+                        );
+                        assert_eq!(node.label(), Some("Host-owned state"));
+                        assert_eq!(
+                            node.toggled(),
+                            Some(if on { Toggled::True } else { Toggled::False })
+                        );
+                        assert_eq!(node.is_selected(), None);
+                        assert_eq!(node.supports_action(gpui::AccessibleAction::Click), enabled);
+                    }
+                }
+            }
+            let control = IconButton::new("selected-action", "+", "Selected appearance")
+                .selected(true)
+                .build(
+                    IconButtonStyle::Bare,
+                    IconButtonDensity::Regular,
+                    cx,
+                    |_, _, _| {},
+                );
+            let mut node = gpui::accesskit::Node::new(control.a11y_role().unwrap());
+            control.write_a11y_info(&mut node);
+            assert_eq!(node.role(), Role::Button);
+            assert_eq!(node.toggled(), None);
+            assert_eq!(node.is_selected(), None);
+        });
+    }
+
+    struct GroupFocus {
+        before: FocusHandle,
+        external: Option<FocusHandle>,
+        enabled: bool,
+        activated: usize,
+    }
+
+    impl Render for GroupFocus {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .child(button("before", "Before", cx, |_, _, _| {}).track_focus(&self.before))
+                .child(
+                    IconButtonGroup::new(IconButtonStyle::Bare, IconButtonDensity::Compact)
+                        .button_with(
+                            IconButton::new("favorite", "♥", "Favorite")
+                                .toggled(true)
+                                .enabled(self.enabled),
+                            cx,
+                            |this, _, _| this.activated = 1,
+                            |control| {
+                                if let Some(focus) = &self.external {
+                                    control.track_focus(focus)
+                                } else {
+                                    control
+                                }
+                            },
+                        )
+                        .into_div(),
+                )
+                .child(button("after", "After", cx, |this, _, _| {
+                    this.activated = 2
+                }))
+        }
+    }
+
+    #[gpui::test]
+    fn disabled_group_items_are_skipped_by_tab_navigation(cx: &mut TestAppContext) {
+        assert_group_tab_navigation(cx, None);
+    }
+
+    #[gpui::test]
+    fn disabled_group_external_focus_restores_original_tab_policy(cx: &mut TestAppContext) {
+        for tab_stop in [true, false] {
+            assert_group_tab_navigation(cx, Some(tab_stop));
+        }
+    }
+
+    fn assert_group_tab_navigation(cx: &mut TestAppContext, external_tab_stop: Option<bool>) {
+        cx.update(crate::theme::init_test);
+        let window = cx.add_window(|_, cx| GroupFocus {
+            before: cx.focus_handle().tab_stop(true),
+            external: external_tab_stop.map(|tab_stop| cx.focus_handle().tab_stop(tab_stop)),
+            enabled: false,
+            activated: 0,
+        });
+        let root = window.root(cx).unwrap();
+        let before = root.read_with(cx, |this, _| this.before.clone());
+        let external = root.read_with(cx, |this, _| this.external.clone());
+        for enabled in [false, true, false] {
+            window
+                .update(cx, |this, _, cx| {
+                    this.enabled = enabled;
+                    this.activated = 0;
+                    cx.notify();
+                })
+                .unwrap();
+            cx.run_until_parked();
+            cx.update_window(window.into(), |_, window, cx| {
+                window.draw(cx).clear(cx);
+                window.focus(&before, cx);
+                if let Some(focus) = &external {
+                    assert_eq!(focus.tab_stop, external_tab_stop.unwrap());
+                    assert_eq!(
+                        focus.downgrade().upgrade().unwrap().tab_stop,
+                        external_tab_stop.unwrap(),
+                        "rendering must not change the external handle's shared policy"
+                    );
+                }
+                window.focus_next(cx);
+                let keystroke = gpui::Keystroke::parse("enter").unwrap();
+                window.dispatch_event(
+                    gpui::KeyDownEvent {
+                        keystroke: keystroke.clone(),
+                        is_held: false,
+                        prefer_character_input: false,
+                    }
+                    .to_platform_input(),
+                    cx,
+                );
+                window.dispatch_event(gpui::KeyUpEvent { keystroke }.to_platform_input(), cx);
+            })
+            .unwrap();
+            cx.run_until_parked();
+            assert_eq!(
+                root.read_with(cx, |this, _| this.activated),
+                if enabled && external_tab_stop.unwrap_or(true) {
+                    1
+                } else {
+                    2
+                }
+            );
+        }
+    }
+
+    #[gpui::test]
     fn icon_names_and_boolean_roles_are_not_visual_glyphs(cx: &mut TestAppContext) {
         cx.update(crate::theme::init_test);
         let entity = cx.new(|cx| Controls {
             focus: cx.focus_handle(),
             disabled: false,
+            grouped: false,
             clicks: 0,
         });
         entity.update(cx, |_, cx| {
