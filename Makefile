@@ -5,7 +5,7 @@ CARGO_TARGET_DIR ?= .cache/target
 
 export CARGO_TARGET_DIR
 
-.PHONY: build lint clean install
+.PHONY: build lint ui-demo clean install
 
 build:
 	RIVU_GIT_VERSION="$(RIVU_GIT_VERSION)" cargo build --workspace --release
@@ -13,6 +13,9 @@ build:
 lint:
 	cargo fmt --all -- --check
 	cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+ui-demo:
+	cargo run -p rivu-ui --example showcase --features showcase
 
 clean:
 	cargo clean
