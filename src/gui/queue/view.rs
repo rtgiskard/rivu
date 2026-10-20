@@ -12,9 +12,9 @@ use crate::{
 };
 use gpui::{AnyElement, Context, Div, EntityId, SharedString, Window, prelude::*, px, rgb};
 use rivu_ui::{
-    StatusKind, VirtualList, button, caption, disabled_control, hover_actions, icon_button,
-    list_panel_header, list_viewport, panel_surface, panel_toolbar, quiet_icon_button, row,
-    status_message,
+    IconButton, IconButtonDensity, IconButtonGroup, IconButtonStyle, StatusKind, VirtualList,
+    button, caption, disabled_control, hover_actions, icon_button, list_panel_header,
+    list_viewport, panel_surface, panel_toolbar, row, status_message,
 };
 use std::cell::RefCell;
 
@@ -342,12 +342,17 @@ impl Queue {
                                     .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
                                         cx.stop_propagation();
                                     })
-                                    .child(quiet_icon_button(
-                                        theme,
-                                        icon_button(
-                                            ("queue-entry-play", id),
-                                            "",
-                                            this.tr("gl-play-queue-entry"),
+                                    .child(
+                                        IconButtonGroup::new(
+                                            IconButtonStyle::Quiet,
+                                            IconButtonDensity::Compact,
+                                        )
+                                        .button(
+                                            IconButton::new(
+                                                ("queue-entry-play", id),
+                                                "",
+                                                this.tr("gl-play-queue-entry"),
+                                            ),
                                             cx,
                                             move |this, _, cx| {
                                                 this.send_queue_row_action(
@@ -356,21 +361,35 @@ impl Queue {
                                                     cx,
                                                 )
                                             },
-                                        ),
-                                    ))
-                                    .child(this.track_favorite_toggle(
-                                        ("queue-entry-favorite", id),
-                                        "queue-track-row",
-                                        track_id,
-                                        favorite,
-                                        cx,
-                                    ))
-                                    .child(quiet_icon_button(
-                                        theme,
-                                        icon_button(
-                                            ("queue-entry-remove", id),
-                                            "",
-                                            this.tr("gl-remove-queue"),
+                                        )
+                                        .button(
+                                            IconButton::new(
+                                                ("queue-entry-favorite", id),
+                                                if favorite { "󰓎" } else { "󰓐" },
+                                                this.tr(if favorite {
+                                                    "gl-unfavorite"
+                                                } else {
+                                                    "gl-favorite"
+                                                }),
+                                            )
+                                            .toggled(favorite),
+                                            cx,
+                                            move |this, _, cx| {
+                                                this.send(
+                                                    Command::SetFavorite {
+                                                        track_ids: vec![track_id],
+                                                        favorite: !favorite,
+                                                    },
+                                                    cx,
+                                                )
+                                            },
+                                        )
+                                        .button(
+                                            IconButton::new(
+                                                ("queue-entry-remove", id),
+                                                "",
+                                                this.tr("gl-remove-queue"),
+                                            ),
                                             cx,
                                             move |this, _, cx| {
                                                 this.send_queue_row_action(
@@ -381,58 +400,51 @@ impl Queue {
                                                     cx,
                                                 )
                                             },
-                                        ),
-                                    ))
-                                    .child(disabled_control(
-                                        theme,
-                                        quiet_icon_button(
-                                            theme,
-                                            icon_button(
+                                        )
+                                        .button(
+                                            IconButton::new(
                                                 ("queue-entry-up", id),
                                                 "",
                                                 this.tr("gl-entry-up"),
-                                                cx,
-                                                move |this, _, cx| {
-                                                    if position > 0 {
-                                                        this.send_queue_row_action(
-                                                            revision,
-                                                            Command::MoveQueue {
-                                                                queue_id: id,
-                                                                index: position - 1,
-                                                            },
-                                                            cx,
-                                                        );
-                                                    }
-                                                },
-                                            ),
-                                        ),
-                                        position == 0,
-                                    ))
-                                    .child(disabled_control(
-                                        theme,
-                                        quiet_icon_button(
-                                            theme,
-                                            icon_button(
+                                            )
+                                            .enabled(position > 0),
+                                            cx,
+                                            move |this, _, cx| {
+                                                if position > 0 {
+                                                    this.send_queue_row_action(
+                                                        revision,
+                                                        Command::MoveQueue {
+                                                            queue_id: id,
+                                                            index: position - 1,
+                                                        },
+                                                        cx,
+                                                    );
+                                                }
+                                            },
+                                        )
+                                        .button(
+                                            IconButton::new(
                                                 ("queue-entry-down", id),
                                                 "",
                                                 this.tr("gl-entry-down"),
-                                                cx,
-                                                move |this, _, cx| {
-                                                    if can_move_down {
-                                                        this.send_queue_row_action(
-                                                            revision,
-                                                            Command::MoveQueue {
-                                                                queue_id: id,
-                                                                index: position + 1,
-                                                            },
-                                                            cx,
-                                                        );
-                                                    }
-                                                },
-                                            ),
-                                        ),
-                                        !can_move_down,
-                                    )),
+                                            )
+                                            .enabled(can_move_down),
+                                            cx,
+                                            move |this, _, cx| {
+                                                if can_move_down {
+                                                    this.send_queue_row_action(
+                                                        revision,
+                                                        Command::MoveQueue {
+                                                            queue_id: id,
+                                                            index: position + 1,
+                                                        },
+                                                        cx,
+                                                    );
+                                                }
+                                            },
+                                        )
+                                        .into_div(),
+                                    ),
                                 )
                                 .on_mouse_down(
                                     gpui::MouseButton::Right,
@@ -681,33 +693,6 @@ impl Queue {
             }
         );
         (track.title.clone(), detail)
-    }
-
-    pub(super) fn track_favorite_toggle(
-        &self,
-        id: impl Into<gpui::ElementId>,
-        group: &'static str,
-        track_id: i64,
-        favorite: bool,
-        cx: &mut Context<Self>,
-    ) -> gpui::Stateful<Div> {
-        crate::gui::components::track::track_favorite_toggle(
-            id,
-            favorite,
-            |key| self.tr(key),
-            cx,
-            move |this, _, cx| {
-                this.send(
-                    Command::SetFavorite {
-                        track_ids: vec![track_id],
-                        favorite: !favorite,
-                    },
-                    cx,
-                )
-            },
-        )
-        .opacity(0.)
-        .group_hover(group, |style| style.opacity(1.))
     }
 
     pub(super) fn paged_loading_row(

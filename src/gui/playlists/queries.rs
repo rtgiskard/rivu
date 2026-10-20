@@ -359,30 +359,4 @@ impl Playlists {
             },
         )
     }
-    pub(super) fn track_favorite_toggle(
-        &self,
-        id: impl Into<gpui::ElementId>,
-        group: &'static str,
-        track_id: i64,
-        favorite: bool,
-        cx: &mut Context<Self>,
-    ) -> gpui::Stateful<Div> {
-        crate::gui::components::track::track_favorite_toggle(
-            id,
-            favorite,
-            |key| self.tr(key),
-            cx,
-            move |this, _, cx| {
-                this.send(
-                    Command::SetFavorite {
-                        track_ids: vec![track_id],
-                        favorite: !favorite,
-                    },
-                    cx,
-                );
-            },
-        )
-        .opacity(0.)
-        .group_hover(group, |style| style.opacity(1.))
-    }
 }

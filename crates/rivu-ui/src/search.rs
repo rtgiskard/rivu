@@ -211,7 +211,6 @@ impl Render for SearchField {
         }
         let mut field = row()
             .gap_0()
-            .px_0p5()
             .h_full()
             .w_full()
             .min_w_0()
@@ -233,11 +232,21 @@ impl Render for SearchField {
                     |this, window, cx| this.toggle(window, cx),
                 )
                 .border_0()
+                .p_1()
+                .min_w_6()
+                .min_h_6()
                 .bg(gpui::transparent_black())
                 .rounded_none(),
             );
         field = field
-            .child(div().flex_1().min_w_0().h_full().child(self.input.clone()))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .px_1()
+                    .child(self.input.clone()),
+            )
             .when(!self.input.read(cx).text().is_empty(), |field| {
                 field.child(
                     icon_button(
@@ -252,6 +261,9 @@ impl Render for SearchField {
                         },
                     )
                     .border_0()
+                    .p_1()
+                    .min_w_6()
+                    .min_h_6()
                     .bg(gpui::transparent_black())
                     .rounded_none(),
                 )

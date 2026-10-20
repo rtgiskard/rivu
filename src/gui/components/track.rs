@@ -65,30 +65,21 @@ fn track_row_text(
 pub(in crate::gui) fn track_favorite_toggle<T: 'static>(
     id: impl Into<ElementId>,
     favorite: bool,
+    density: rivu_ui::IconButtonDensity,
     text: impl Fn(&str) -> SharedString,
     cx: &mut gpui::Context<T>,
     action: impl Fn(&mut T, &mut gpui::Window, &mut gpui::Context<T>) + 'static,
 ) -> Stateful<Div> {
-    let theme = rivu_ui::theme::palette(cx);
-    rivu_ui::quiet_icon_button(
-        theme,
-        rivu_ui::icon_button(
-            id,
-            if favorite { "󰓎" } else { "󰓐" },
-            text(if favorite {
-                "gl-unfavorite"
-            } else {
-                "gl-favorite"
-            }),
-            cx,
-            action,
-        ),
+    rivu_ui::IconButton::new(
+        id,
+        if favorite { "󰓎" } else { "󰓐" },
+        text(if favorite {
+            "gl-unfavorite"
+        } else {
+            "gl-favorite"
+        }),
     )
-    .when(favorite, |view| view.text_color(rgb(theme.accent)))
-    .aria_toggled(if favorite {
-        gpui::Toggled::True
-    } else {
-        gpui::Toggled::False
-    })
+    .toggled(favorite)
+    .build(rivu_ui::IconButtonStyle::Quiet, density, cx, action)
     .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
 }

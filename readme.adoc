@@ -190,8 +190,10 @@ link:doc/23_visuals.adoc#_pinned_gpu_extensions[GPU extension boundaries and mai
 The `rivu-ui` workspace package contains reusable GUI controls; see
 link:doc/24_layout.adoc#_reusable_gpui_controls[component boundaries and host setup].
 `make lint` and `make build` cover the workspace, including this package.
-Run `cargo run --example rivu_ui` on a Wayland desktop to explore component
-composition, keyboard controls, native semantics and host-owned state.
+Run `make ui-demo` on a Wayland desktop to explore component composition,
+keyboard controls, native semantics and host-owned state. This runs
+`cargo run -p rivu-ui --example showcase --features showcase`.
+The `showcase` feature is disabled by default; normal builds do not build the example.
 
 About and `rivu -V` report the build version. `make build` obtains it from Git;
 plain Cargo uses the package version unless `RIVU_GIT_VERSION` is supplied.

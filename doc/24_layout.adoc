@@ -332,10 +332,28 @@ Button composition uses the base surface, then a visual variant, selected stylin
 and finally disabled state. These style decorators are not commutative.
 `active_control` is visual only: the semantic role and checked/selected/value state
 must match the actual operation. `input_aligned_control` opts text buttons and
-select triggers into form geometry; icon buttons and switches retain their natural
-content sizing. Quiet icon buttons preserve the same hit area as ordinary ones.
+select triggers into form geometry; ordinary icon buttons retain natural content
+sizing. Independent `toggle_button` switches use a centered square glyph slot,
+Regular padding and minimum hit area, and start alignment rather than stretching
+to a parent column. The square grows with configured typography and UI scale.
+Within each icon-button density, Quiet and Bare retain the Surface hit area.
 Uniform tree rows reserve enough height for inline icon actions; two-line text
 gap and line height remain separate from outer row spacing.
+
+`IconButtonGroup` constructs related actions with one visual style and density;
+it does not own their state or commands. Surface uses the control material,
+Quiet reveals it on hover, and Bare emphasizes the glyph without a hover fill.
+Regular keeps the standard icon-button geometry and group gap; Compact reduces
+horizontal padding and minimum width, retains vertical padding and minimum
+height, and has no group gap. Both follow configured icon typography.
+Disabled items reject activation and leave the Tab order while preserving their
+selected appearance; Quiet and Bare do not acquire a disabled border.
+Tab suppression belongs to the rendered disabled item, not its owner's focus
+handle; re-enabling preserves the handle's original Tab participation policy.
+`IconButton::selected` changes appearance only, `toggled` exposes a toggle Button,
+and `switch` exposes a Switch. Standalone items can use the same construction.
+Settings keeps independent configuration switches; only its Apply/Discard footer
+actions form a group.
 
 Input owns text, selection, IME conversion, focus and pointer-selection capture.
 Editable combo inputs can use the select-trigger surface without changing input

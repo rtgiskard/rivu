@@ -23,36 +23,13 @@ use super::{
     scrolling::ScrollViews,
 };
 use rivu_ui::{
-    ButtonTooltip, VirtualList, caption, column, icon_button, panel_surface, quiet_icon_button,
-    row,
+    ButtonTooltip, IconButton, IconButtonDensity, IconButtonGroup, IconButtonStyle, VirtualList,
+    caption, column, icon_button, panel_surface, row,
     search::{SearchEvent, SearchField},
 };
 
 mod model;
 use model::{AlbumModel, DataChange, Published, Request};
-
-fn card_icon_button(
-    id: impl Into<ElementId>,
-    icon: &'static str,
-    hint: impl Into<SharedString>,
-    cx: &mut Context<AlbumBrowser>,
-    action: impl Fn(&mut AlbumBrowser, &mut Window, &mut Context<AlbumBrowser>) + 'static,
-) -> Stateful<Div> {
-    let theme = rivu_ui::theme::palette(cx);
-    quiet_icon_button(theme, icon_button(id, icon, hint, cx, action))
-        .rounded_none()
-        .border_0()
-        .opacity(0.)
-        .group_hover("album-card", |style| style.opacity(1.))
-        .focus(|style| style.opacity(1.).border_0())
-        .bg(gpui::transparent_black())
-        .text_color(rgb(theme.muted))
-        .hover(|style| {
-            style
-                .bg(gpui::transparent_black())
-                .text_color(rgb(theme.text))
-        })
-}
 
 const ALBUM_FADE_FRACTION: f32 = 0.4;
 
@@ -728,35 +705,47 @@ impl AlbumBrowser {
             })
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(|_, _, cx| cx.stop_propagation())
-            .child(card_icon_button(
-                ("play-album", index),
-                "",
-                self.tr("gl-play-album"),
-                cx,
-                move |this, window, cx| {
-                    this.dismissed_actions = Some(play_key.clone());
-                    cx.notify();
-                    window.blur(cx);
-                    cx.emit(AlbumPlayRequest(play_key.clone()));
-                },
-            ))
-            .child(card_icon_button(
-                ("enqueue-album", index),
-                "󰐕",
-                self.tr("gl-enqueue-album"),
-                cx,
-                move |this, window, cx| {
-                    this.dismissed_actions = Some(enqueue_key.clone());
-                    cx.notify();
-                    window.blur(cx);
-                    this.send(
-                        Command::EnqueueAlbum {
-                            key: enqueue_key.clone(),
-                        },
+            .child(
+                IconButtonGroup::new(IconButtonStyle::Bare, IconButtonDensity::Compact)
+                    .button_with(
+                        IconButton::new(("play-album", index), "", self.tr("gl-play-album")),
                         cx,
+                        move |this, window, cx| {
+                            this.dismissed_actions = Some(play_key.clone());
+                            cx.notify();
+                            window.blur(cx);
+                            cx.emit(AlbumPlayRequest(play_key.clone()));
+                        },
+                        |button| {
+                            button
+                                .opacity(0.)
+                                .group_hover("album-card", |style| style.opacity(1.))
+                                .focus(|style| style.opacity(1.))
+                        },
                     )
-                },
-            ));
+                    .button_with(
+                        IconButton::new(("enqueue-album", index), "󰐕", self.tr("gl-enqueue-album")),
+                        cx,
+                        move |this, window, cx| {
+                            this.dismissed_actions = Some(enqueue_key.clone());
+                            cx.notify();
+                            window.blur(cx);
+                            this.send(
+                                Command::EnqueueAlbum {
+                                    key: enqueue_key.clone(),
+                                },
+                                cx,
+                            )
+                        },
+                        |button| {
+                            button
+                                .opacity(0.)
+                                .group_hover("album-card", |style| style.opacity(1.))
+                                .focus(|style| style.opacity(1.))
+                        },
+                    )
+                    .into_div(),
+            );
         column()
             .id(("album-card", index))
             .group("album-card")
@@ -1116,24 +1105,28 @@ impl Render for AlbumBrowser {
                                             cx.stop_propagation()
                                         })
                                         .on_click(|_, _, cx| cx.stop_propagation())
-                                        .child(quiet_icon_button(
-                                            theme,
-                                            icon_button(
-                                                ("album-track-play", id as u64),
-                                                "",
-                                                this.tr("gl-play-track"),
+                                        .child(
+                                            IconButtonGroup::new(
+                                                IconButtonStyle::Quiet,
+                                                IconButtonDensity::Compact,
+                                            )
+                                            .button(
+                                                IconButton::new(
+                                                    ("album-track-play", id as u64),
+                                                    "",
+                                                    this.tr("gl-play-track"),
+                                                ),
                                                 cx,
                                                 move |this, _, cx| {
                                                     this.send(Command::Play { track_id: id }, cx)
                                                 },
-                                            ),
-                                        ))
-                                        .child(quiet_icon_button(
-                                            theme,
-                                            icon_button(
-                                                ("album-track-add", id as u64),
-                                                "󰐕",
-                                                this.tr("gl-enqueue-track"),
+                                            )
+                                            .button(
+                                                IconButton::new(
+                                                    ("album-track-add", id as u64),
+                                                    "󰐕",
+                                                    this.tr("gl-enqueue-track"),
+                                                ),
                                                 cx,
                                                 move |this, _, cx| {
                                                     this.send(
@@ -1143,8 +1136,9 @@ impl Render for AlbumBrowser {
                                                         cx,
                                                     )
                                                 },
-                                            ),
-                                        )),
+                                            )
+                                            .into_div(),
+                                        ),
                                 )
                                 .into_any_element()
                             })

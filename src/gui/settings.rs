@@ -23,8 +23,9 @@ use anyhow::{Context as _, Result};
 use gpui::{prelude::*, *};
 use rivu_ui::{
     ButtonTooltip, ChoiceAction, ChoiceMode, ChoicePopup, ChoiceState, Dialog, DropdownItem,
-    FocusScope, StatusKind, activate_control, active_control, column, copyable_message,
-    disabled_control, dropdown_trigger, form_field, icon_button as common_icon_button,
+    FocusScope, IconButton, IconButtonDensity, IconButtonGroup, IconButtonStyle, StatusKind,
+    activate_control, active_control, column, copyable_message, dropdown_trigger, form_field,
+    icon_button as common_icon_button,
     input::{Input, InputEvent},
     input_aligned_control, row, section_group, status_message,
     theme::{Palette, palette},
@@ -269,6 +270,18 @@ impl Field {
             .when(!hint.is_empty(), |control| {
                 control.tooltip(rivu_ui::text_tooltip(hint))
             });
+        if self == Self::ArtworkDecodeBudget {
+            return column()
+                .w_full()
+                .flex_shrink_0()
+                .gap_1()
+                .child(settings.artwork_cache_label(
+                    theme,
+                    settings.tr(self.label_id()),
+                    "settings-artwork-memory-help",
+                ))
+                .child(control);
+        }
         form_field(theme, settings.tr(self.label_id()), control)
     }
 }
@@ -314,38 +327,33 @@ fn visual_switch(
     cx: &mut Context<Settings>,
     toggle: impl Fn(&mut Config) + 'static,
 ) -> Stateful<Div> {
-    let label: SharedString = label.into();
+    let label = label.into();
     let hint = match id {
-        "settings-tray" => i18n.text("settings-restart-hint").to_owned(),
-        "settings-still-mode" => i18n.text("settings-still-mode-hint").to_owned(),
-        "visual-cache" => i18n.text("settings-rendering-cache-hint").to_owned(),
-        "audio-visualizer-fade-idle" => i18n.text("settings-visualizer-fade-hint").to_owned(),
-        "audio-visualizer-grid" => i18n.text("settings-visualizer-guides-hint").to_owned(),
-        _ => String::new(),
+        "settings-tray" => i18n.text("settings-restart-hint"),
+        "settings-still-mode" => i18n.text("settings-still-mode-hint"),
+        "visual-cache" => i18n.text("settings-rendering-cache-hint"),
+        "audio-visualizer-fade-idle" => i18n.text("settings-visualizer-fade-hint"),
+        "audio-visualizer-grid" => i18n.text("settings-visualizer-guides-hint"),
+        _ => "",
     };
     let label: SharedString = if hint.is_empty() {
         label
     } else {
         format!("{label} ({hint})").into()
     };
-    rivu_ui::toggle_button(
-        id,
-        icon,
-        format!(
-            "{label}: {}",
-            i18n.text(if enabled {
-                "settings-on"
-            } else {
-                "settings-off"
-            })
-        ),
-        enabled,
-        cx,
-        move |this, cx| {
-            toggle(&mut this.model.draft);
-            this.sync_field_enabled(cx);
-        },
+    let hint: SharedString = format!(
+        "{label}: {}",
+        i18n.text(if enabled {
+            "settings-on"
+        } else {
+            "settings-off"
+        })
     )
+    .into();
+    rivu_ui::toggle_button(id, icon, hint, enabled, cx, move |this, cx| {
+        toggle(&mut this.model.draft);
+        this.sync_field_enabled(cx);
+    })
 }
 
 fn settings_group(
@@ -1886,7 +1894,7 @@ impl Settings {
         };
         panel = panel.child(
             row()
-                .gap_3()
+                .gap_1()
                 .flex_shrink_0()
                 .px_2()
                 .py_2()
@@ -1901,24 +1909,29 @@ impl Settings {
                         .text_sm()
                         .child(feedback),
                 )
-                .child(disabled_control(
-                    colors,
-                    icon_button(
-                        "settings-apply",
-                        "",
-                        self.tr("settings-apply-settings"),
-                        cx,
-                        |this, _, cx| this.apply_settings(cx),
-                    ),
-                    self.model.applying(),
-                ))
-                .child(icon_button(
-                    "settings-discard",
-                    "",
-                    self.tr("settings-discard-changes-and-close"),
-                    cx,
-                    |this, _, cx| this.cancel(cx),
-                )),
+                .child(
+                    IconButtonGroup::new(IconButtonStyle::Surface, IconButtonDensity::Regular)
+                        .button(
+                            IconButton::new(
+                                "settings-apply",
+                                "",
+                                self.tr("settings-apply-settings"),
+                            )
+                            .enabled(!self.model.applying()),
+                            cx,
+                            |this, _, cx| this.apply_settings(cx),
+                        )
+                        .button(
+                            IconButton::new(
+                                "settings-discard",
+                                "",
+                                self.tr("settings-discard-changes-and-close"),
+                            ),
+                            cx,
+                            |this, _, cx| this.cancel(cx),
+                        )
+                        .into_div(),
+                ),
         );
         if self.dropdown.is_open() {
             let bounds = self.measured.borrow().get(&self.dropdown_anchor).copied();

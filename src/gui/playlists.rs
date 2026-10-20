@@ -27,11 +27,12 @@ use crate::projection::GuiSnapshot;
 use gpui::{App, Entity, EventEmitter, FocusHandle, Focusable, Subscription};
 use rivu_ui::loading::LoadingText;
 use rivu_ui::{
-    FocusScope, LIST_ROW_REMS, StatusKind, VirtualList, caption, column, danger_control,
-    disabled_control, hover_actions, icon_button,
+    FocusScope, IconButton, IconButtonDensity, IconButtonGroup, IconButtonStyle, LIST_ROW_REMS,
+    StatusKind, VirtualList, caption, column, danger_control, disabled_control, hover_actions,
+    icon_button,
     input::{Input, InputEvent},
     list_panel_header, list_row, list_row_height, list_viewport, panel_header, panel_surface,
-    panel_toolbar, quiet_icon_button, row,
+    panel_toolbar, row,
     search::{SearchEvent, SearchField},
     status_message,
 };
@@ -1127,14 +1128,16 @@ impl Playlists {
                                 .format("gl-track-count", &[("count", (p.entry_count).into())]),
                         ))
                         .child(
-                            quiet_icon_button(
-                                theme,
-                                icon_button(
-                                    ("playlist-row-play", id as u64),
-                                    "",
-                                    this.tr("gl-play-playlist"),
-                                    cx,
-                                    move |this, window, cx| {
+                            row()
+                                .opacity(0.)
+                                .group_hover("playlist-catalog-row", |style| style.opacity(1.))
+                                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                .child(
+                                    IconButtonGroup::new(IconButtonStyle::Quiet, IconButtonDensity::Compact)
+                                        .button(
+                                            IconButton::new(("playlist-row-play", id as u64), "", this.tr("gl-play-playlist")).enabled(playable),
+                                            cx,
+                                            move |this, window, cx| {
                                         if !playable {
                                             return;
                                         }
@@ -1147,25 +1150,11 @@ impl Playlists {
                                             cx,
                                         );
                                     },
-                                ),
-                            )
-                            .opacity(0.)
-                            .group_hover("playlist-catalog-row", move |style| {
-                                style.opacity(if playable { 1. } else { 0.4 })
-                            })
-                            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
-                                cx.stop_propagation()
-                            }),
-                        )
-                        .child(
-                            quiet_icon_button(
-                                theme,
-                                icon_button(
-                                    ("playlist-row-menu", id as u64),
-                                    "󰇙",
-                                    this.tr("gl-playlist-actions"),
-                                    cx,
-                                    move |this, window, cx| {
+                                        )
+                                        .button(
+                                            IconButton::new(("playlist-row-menu", id as u64), "󰇙", this.tr("gl-playlist-actions")),
+                                            cx,
+                                            move |this, window, cx| {
                                         this.focus_layout(window, cx);
                                         cx.emit(PlaylistEvent::ClearMenus);
 
@@ -1178,13 +1167,9 @@ impl Playlists {
                                         ));
                                         cx.notify();
                                     },
+                                        )
+                                        .into_div(),
                                 ),
-                            )
-                            .opacity(0.)
-                            .group_hover("playlist-catalog-row", |style| style.opacity(1.))
-                            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
-                                cx.stop_propagation()
-                            }),
                         )
                         .on_mouse_down(
                             gpui::MouseButton::Right,
@@ -1394,65 +1379,74 @@ impl Playlists {
                                     "playlist-track-row",
                                     this.browser.playlists().track_selection.contains(id),
                                 )
+                                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                                    cx.stop_propagation()
+                                })
                                 .child(
-                                    quiet_icon_button(
-                                        theme,
-                                        icon_button(
+                                    IconButtonGroup::new(
+                                        IconButtonStyle::Quiet,
+                                        IconButtonDensity::Compact,
+                                    )
+                                    .button(
+                                        IconButton::new(
                                             ("playlist-entry-play", id as u64),
                                             "",
                                             this.tr("gl-play-track"),
-                                            cx,
-                                            move |this, _, cx| {
-                                                this.send(Command::Play { track_id }, cx)
-                                            },
                                         ),
+                                        cx,
+                                        move |this, _, cx| {
+                                            this.send(Command::Play { track_id }, cx)
+                                        },
                                     )
-                                    .opacity(0.)
-                                    .group_hover("playlist-track-row", |style| style.opacity(1.))
-                                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
-                                        cx.stop_propagation()
-                                    }),
-                                )
-                                .child(this.track_favorite_toggle(
-                                    ("playlist-entry-favorite", id as u64),
-                                    "playlist-track-row",
-                                    track_id,
-                                    favorite,
-                                    cx,
-                                ))
-                                .child(
-                                    quiet_icon_button(
-                                        theme,
-                                        icon_button(
+                                    .button(
+                                        IconButton::new(
+                                            ("playlist-entry-favorite", id as u64),
+                                            if favorite { "󰓎" } else { "󰓐" },
+                                            this.tr(if favorite {
+                                                "gl-unfavorite"
+                                            } else {
+                                                "gl-favorite"
+                                            }),
+                                        )
+                                        .toggled(favorite),
+                                        cx,
+                                        move |this, _, cx| {
+                                            this.send(
+                                                Command::SetFavorite {
+                                                    track_ids: vec![track_id],
+                                                    favorite: !favorite,
+                                                },
+                                                cx,
+                                            )
+                                        },
+                                    )
+                                    .button(
+                                        IconButton::new(
                                             ("playlist-entry-remove", id as u64),
                                             "",
                                             this.tr("gl-remove-playlist"),
-                                            cx,
-                                            move |this, _, cx| {
-                                                this.refresh(cx);
-                                                if this.browser.playlists().selected()
-                                                    != Some(playlist_id)
-                                                    || this.playlist_occurrence_stamp(playlist_id)
-                                                        != stamp
-                                                {
-                                                    return;
-                                                }
-                                                this.send(
-                                                    Command::RemovePlaylistEntries {
-                                                        playlist_id,
-                                                        entry_ids: vec![id],
-                                                        expected_revision: revision,
-                                                    },
-                                                    cx,
-                                                );
-                                            },
                                         ),
+                                        cx,
+                                        move |this, _, cx| {
+                                            this.refresh(cx);
+                                            if this.browser.playlists().selected()
+                                                != Some(playlist_id)
+                                                || this.playlist_occurrence_stamp(playlist_id)
+                                                    != stamp
+                                            {
+                                                return;
+                                            }
+                                            this.send(
+                                                Command::RemovePlaylistEntries {
+                                                    playlist_id,
+                                                    entry_ids: vec![id],
+                                                    expected_revision: revision,
+                                                },
+                                                cx,
+                                            );
+                                        },
                                     )
-                                    .opacity(0.)
-                                    .group_hover("playlist-track-row", |style| style.opacity(1.))
-                                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
-                                        cx.stop_propagation()
-                                    }),
+                                    .into_div(),
                                 ),
                             )
                             .on_mouse_down(

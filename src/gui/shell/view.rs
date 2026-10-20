@@ -1,5 +1,8 @@
 use super::*;
-use rivu_ui::{Dialog, Popover, caption, column, icon_button, menu_item, row};
+use rivu_ui::{
+    Dialog, IconButton, IconButtonDensity, IconButtonGroup, IconButtonStyle, Popover, caption,
+    column, icon_button, menu_item, row,
+};
 
 impl Render for GuiApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -205,74 +208,56 @@ impl Render for GuiApp {
                     }),
                 ),
         );
-        let tools = row()
-            .gap_1()
-            .flex_shrink_0()
-            .child(
-                rivu_ui::active_control(
-                    theme,
-                    rivu_ui::quiet_icon_button(
-                        theme,
-                        icon_button(
-                            "layout",
-                            if self.workspace.layouts.current().locked {
-                                "󰌾"
-                            } else {
-                                ""
-                            },
-                            if self.workspace.layouts.current().locked {
-                                self.tr("shell-layout-locked-hint")
-                            } else {
-                                self.tr("shell-layout-unlocked-hint")
-                            },
-                            cx,
-                            |this, _, cx| {
-                                if this.workspace.layouts.current().locked {
-                                    return;
-                                }
-                                this.shell.toggle(shell::Surface::PanelCatalog);
-                                this.panel_menu = None;
-                                cx.notify();
-                            },
-                        ),
-                    ),
-                    self.shell.is_open(shell::Surface::PanelCatalog),
+        let toggle_layout_lock = cx.listener(|this, _: &gpui::MouseDownEvent, window, cx| {
+            let cancellation = this.workspace.interaction.lock_layout();
+            if cancellation.docking {
+                cx.stop_active_drag(window);
+            }
+            cancellation.restore_split(this.workspace.layouts.current_mut());
+            cx.stop_propagation();
+            this.workspace.layouts.current_mut().locked = !this.workspace.layouts.current().locked;
+            this.shell.dismiss(shell::Surface::PanelCatalog);
+            this.panel_menu = None;
+            cx.notify();
+        });
+        let tools = IconButtonGroup::new(IconButtonStyle::Quiet, IconButtonDensity::Compact)
+            .button_with(
+                IconButton::new(
+                    "layout",
+                    if self.workspace.layouts.current().locked {
+                        "󰌾"
+                    } else {
+                        ""
+                    },
+                    if self.workspace.layouts.current().locked {
+                        self.tr("shell-layout-locked-hint")
+                    } else {
+                        self.tr("shell-layout-unlocked-hint")
+                    },
                 )
-                .on_mouse_down(
-                    MouseButton::Right,
-                    cx.listener(|this, _, window, cx| {
-                        let cancellation = this.workspace.interaction.lock_layout();
-                        if cancellation.docking {
-                            cx.stop_active_drag(window);
-                        }
-                        cancellation.restore_split(this.workspace.layouts.current_mut());
-                        cx.stop_propagation();
-                        this.workspace.layouts.current_mut().locked =
-                            !this.workspace.layouts.current().locked;
-                        this.shell.dismiss(shell::Surface::PanelCatalog);
-                        this.panel_menu = None;
-                        cx.notify();
-                    }),
-                ),
+                .selected(self.shell.is_open(shell::Surface::PanelCatalog)),
+                cx,
+                |this, _, cx| {
+                    if this.workspace.layouts.current().locked {
+                        return;
+                    }
+                    this.shell.toggle(shell::Surface::PanelCatalog);
+                    this.panel_menu = None;
+                    cx.notify();
+                },
+                |button| button.on_mouse_down(MouseButton::Right, toggle_layout_lock),
             )
-            .child(rivu_ui::active_control(
-                theme,
-                rivu_ui::quiet_icon_button(
-                    theme,
-                    icon_button(
-                        "app-menu",
-                        "",
-                        self.tr("shell-menu"),
-                        cx,
-                        |this, _, cx| {
-                            this.shell.toggle(shell::Surface::AppMenu);
-                            this.panel_menu = None;
-                            cx.notify();
-                        },
-                    ),
-                ),
-                self.shell.is_open(shell::Surface::AppMenu),
-            ));
+            .button(
+                IconButton::new("app-menu", "", self.tr("shell-menu"))
+                    .selected(self.shell.is_open(shell::Surface::AppMenu)),
+                cx,
+                |this, _, cx| {
+                    this.shell.toggle(shell::Surface::AppMenu);
+                    this.panel_menu = None;
+                    cx.notify();
+                },
+            )
+            .into_div();
         footer = footer.child(tools);
         let mut footer_popup = None;
         if self.shell.is_open(shell::Surface::AppMenu) {
@@ -281,16 +266,8 @@ impl Render for GuiApp {
                 cx.notify();
             });
             footer_popup = Some(
-                Popover::surface(theme, "app-menu-popup")
-                    .role(gpui::Role::Menu)
-                    .flex()
-                    .flex_col()
-                    .min_w_0()
-                    .min_h_0()
+                Popover::menu(theme, "app-menu-popup", window)
                     .map(|surface| self.menu_surface(surface, cx))
-                    .p_1()
-                    .gap_1()
-                    .rounded_md()
                     .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                         this.shell.dismiss(shell::Surface::AppMenu);
                         cx.stop_propagation();

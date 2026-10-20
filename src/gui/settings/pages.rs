@@ -17,80 +17,87 @@ use crate::{
 };
 use gpui::{Context, Div, SharedString, div, prelude::*, rems, rgb};
 use rivu_ui::{
-    DropdownItem, StatusKind, active_control, button, caption, column, copyable_message,
-    disabled_control, form_field, row, status_message, text_tooltip, theme::palette, two_column,
+    DropdownItem, StatusKind, button, caption, column, copyable_message, disabled_control,
+    form_field, row, status_message, text_tooltip, theme::palette, two_column,
 };
 
 impl Settings {
-    fn artwork_cache_settings(&self, cx: &mut Context<Self>) -> Div {
-        let colors = palette(cx);
-        let busy = self.artwork_cache_busy.is_some();
-        let help = |id: &'static str, key| {
+    pub(super) fn artwork_cache_label(
+        &self,
+        colors: &'static rivu_ui::theme::Palette,
+        label: SharedString,
+        help_key: &'static str,
+    ) -> Div {
+        row().gap_2().child(caption(colors, label)).child(
             div()
-                .id(id)
+                .id(help_key)
+                .flex_shrink_0()
                 .child(
                     caption(colors, "")
                         .opacity(0.6)
                         .text_color(rgb(colors.text)),
                 )
-                .tooltip(text_tooltip(self.tr(key)))
-        };
-        let mut content = column().gap_2().child(form_field(
-            colors,
-            self.tr("settings-expire-files-older-than-days"),
-            row()
-                .items_end()
-                .flex_wrap()
-                .gap_2()
-                .child(
-                    div()
-                        .id("settings-artwork-cache-age")
-                        .w(rems(7.))
-                        .flex_shrink_0()
-                        .child(self.artwork_cache_age.clone()),
-                )
+                .tooltip(text_tooltip(self.tr(help_key))),
+        )
+    }
+
+    fn artwork_cache_settings(&self, cx: &mut Context<Self>) -> Div {
+        let colors = palette(cx);
+        let busy = self.artwork_cache_busy.is_some();
+        let mut content = column().gap_2().child(
+            column()
+                .w_full()
+                .flex_shrink_0()
+                .gap_1()
+                .child(self.artwork_cache_label(
+                    colors,
+                    self.tr("settings-expire-files-older-than-days"),
+                    "settings-artwork-disk-help",
+                ))
                 .child(
                     row()
+                        .items_end()
+                        .flex_wrap()
                         .gap_2()
-                        .flex_shrink_0()
-                        .child(disabled_control(
-                            colors,
-                            icon_button(
-                                "settings-artwork-cache-calculate",
-                                "󰃬",
-                                self.tr("settings-calculate-usage"),
-                                cx,
-                                |this, _, cx| this.maintain_artwork_cache(false, cx),
-                            ),
-                            busy,
-                        ))
-                        .child(disabled_control(
-                            colors,
-                            icon_button(
-                                "settings-artwork-cache-clean",
-                                "󰆴",
-                                self.tr("settings-clean-expired"),
-                                cx,
-                                |this, _, cx| this.maintain_artwork_cache(true, cx),
-                            ),
-                            busy,
-                        )),
-                )
-                .child(help(
-                    "settings-artwork-disk-help",
-                    "settings-artwork-disk-help",
-                )),
-        ));
+                        .child(
+                            div()
+                                .id("settings-artwork-cache-age")
+                                .w(rems(7.))
+                                .flex_shrink_0()
+                                .child(self.artwork_cache_age.clone()),
+                        )
+                        .child(
+                            row()
+                                .gap_2()
+                                .flex_shrink_0()
+                                .child(disabled_control(
+                                    colors,
+                                    icon_button(
+                                        "settings-artwork-cache-calculate",
+                                        "󰃬",
+                                        self.tr("settings-calculate-usage"),
+                                        cx,
+                                        |this, _, cx| this.maintain_artwork_cache(false, cx),
+                                    ),
+                                    busy,
+                                ))
+                                .child(disabled_control(
+                                    colors,
+                                    icon_button(
+                                        "settings-artwork-cache-clean",
+                                        "󰆴",
+                                        self.tr("settings-clean-expired"),
+                                        cx,
+                                        |this, _, cx| this.maintain_artwork_cache(true, cx),
+                                    ),
+                                    busy,
+                                )),
+                        ),
+                ),
+        );
         content = column()
             .gap_2()
-            .child(
-                self.single(Field::ArtworkDecodeBudget, cx)
-                    .gap_2()
-                    .child(help(
-                        "settings-artwork-memory-help",
-                        "settings-artwork-memory-help",
-                    )),
-            )
+            .child(self.single(Field::ArtworkDecodeBudget, cx))
             .child(content);
         if let Some((days, clean)) = self.artwork_cache_busy {
             content = content.child(status_message(
@@ -396,40 +403,35 @@ impl Settings {
                     row()
                         .flex_wrap()
                         .gap_2()
-                        .child(active_control(
-                            palette(cx),
-                            icon_button(
-                                "settings-ffmpeg",
-                                "\u{f384}",
-                                self.i18n.format(
-                                    "settings-ffmpeg-status",
-                                    &[
-                                        (
-                                            "state",
-                                            self.i18n
-                                                .text(if ffmpeg {
-                                                    "settings-on"
-                                                } else {
-                                                    "settings-off"
-                                                })
-                                                .into(),
-                                        ),
-                                        (
-                                            "detail",
-                                            ffmpeg_hint(&self.i18n, &self.ffmpeg_status)
-                                                .to_owned()
-                                                .into(),
-                                        ),
-                                    ],
-                                ),
-                                cx,
-                                |this, _, cx| {
-                                    this.model.draft.ffmpeg_enabled =
-                                        !this.model.draft.ffmpeg_enabled;
-                                    cx.notify();
-                                },
+                        .child(rivu_ui::toggle_button(
+                            "settings-ffmpeg",
+                            "\u{f384}",
+                            self.i18n.format(
+                                "settings-ffmpeg-status",
+                                &[
+                                    (
+                                        "state",
+                                        self.i18n
+                                            .text(if ffmpeg {
+                                                "settings-on"
+                                            } else {
+                                                "settings-off"
+                                            })
+                                            .into(),
+                                    ),
+                                    (
+                                        "detail",
+                                        ffmpeg_hint(&self.i18n, &self.ffmpeg_status)
+                                            .to_owned()
+                                            .into(),
+                                    ),
+                                ],
                             ),
                             ffmpeg,
+                            cx,
+                            |this, _| {
+                                this.model.draft.ffmpeg_enabled = !this.model.draft.ffmpeg_enabled;
+                            },
                         ))
                         .child(visual_switch(
                             &self.i18n,
@@ -560,30 +562,26 @@ impl Settings {
             row()
                 .flex_wrap()
                 .gap_2()
-                .child(active_control(
-                    palette(cx),
-                    icon_button(
-                        "settings-mpris",
-                        "󰐹",
-                        self.i18n.format(
-                            "settings-mpris-status",
-                            &[
-                                (
-                                    "state",
-                                    self.i18n
-                                        .text(if mpris { "settings-on" } else { "settings-off" })
-                                        .into(),
-                                ),
-                                ("detail", self.mpris_status.to_owned().into()),
-                            ],
-                        ),
-                        cx,
-                        |this, _, cx| {
-                            this.model.draft.mpris_enabled = !this.model.draft.mpris_enabled;
-                            cx.notify();
-                        },
+                .child(rivu_ui::toggle_button(
+                    "settings-mpris",
+                    "󰐹",
+                    self.i18n.format(
+                        "settings-mpris-status",
+                        &[
+                            (
+                                "state",
+                                self.i18n
+                                    .text(if mpris { "settings-on" } else { "settings-off" })
+                                    .into(),
+                            ),
+                            ("detail", self.mpris_status.to_owned().into()),
+                        ],
                     ),
                     mpris,
+                    cx,
+                    |this, _| {
+                        this.model.draft.mpris_enabled = !this.model.draft.mpris_enabled;
+                    },
                 ))
                 .child(visual_switch(
                     &self.i18n,
@@ -843,7 +841,12 @@ impl Settings {
                 } else {
                     "settings-new-instance-defaults"
                 }),
-                form_field(colors, settings.tr("settings-style"), style),
+                row().child(
+                    form_field(colors, settings.tr("settings-style"), style)
+                        .w(gpui::relative(0.5))
+                        .min_w(rems(180. / 16.))
+                        .pr_2(),
+                ),
             ))
             .child(settings_group(
                 colors,
@@ -1022,7 +1025,7 @@ impl Settings {
                             .gap_2()
                             .child(
                                 row()
-                                    .gap_2()
+                                    .flex_wrap()
                                     .child(visual_switch(
                                         &self.i18n,
                                         "settings-still-mode",
@@ -1102,7 +1105,6 @@ impl Settings {
                             .child(
                                 row()
                                     .flex_wrap()
-                                    .gap_2()
                                     .child(visual_switch(
                                         &self.i18n,
                                         "spectrum-interpolate",

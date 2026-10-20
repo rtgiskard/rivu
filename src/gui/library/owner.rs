@@ -292,6 +292,7 @@ impl Library {
         crate::gui::components::track::track_favorite_toggle(
             id,
             favorite,
+            rivu_ui::IconButtonDensity::Compact,
             |key| self.tr(key),
             cx,
             move |this, _, cx| {
