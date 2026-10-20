@@ -223,7 +223,7 @@ impl Queue {
         let revisions = self.state.query_revisions(None);
         match request {
             QueueSelectionRequest::Row { id, shift, multi } => {
-                if self.model.busy && (shift || multi) {
+                if !self.model.ready() && (shift || multi) {
                     cx.emit(QueueEvent::SelectionFailed(intent));
                     return;
                 }

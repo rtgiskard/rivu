@@ -182,6 +182,8 @@ pub(super) struct QueueSelection {
     pub(super) reconcile_projection: QueryProjection,
     pub(super) reconcile_pending: Option<QueueReconcileJob>,
     pub(super) busy: bool,
+    // Retained identities need relocation before their positions can authorize actions.
+    positions_stale: bool,
     pub(super) selection_error: Option<String>,
     pub(super) navigation: Option<usize>,
     pub(super) active: Option<QueueIdentity>,
@@ -198,7 +200,7 @@ impl QueueSelection {
         self.selected.contains_key(id)
     }
     pub(super) fn ready(&self) -> bool {
-        !self.busy
+        !self.busy && !self.positions_stale
     }
     pub(super) fn identity(&self, id: u64) -> Option<QueueIdentity> {
         self.ready()
@@ -206,7 +208,7 @@ impl QueueSelection {
             .flatten()
     }
     pub(super) fn ordered(&self) -> Vec<QueueIdentity> {
-        if self.busy {
+        if !self.ready() {
             return Vec::new();
         }
         let mut rows: Vec<_> = self.selected.values().copied().collect();
@@ -214,7 +216,7 @@ impl QueueSelection {
         rows
     }
     pub(super) fn ordered_ids(&self) -> Vec<u64> {
-        if self.busy {
+        if !self.ready() {
             return Vec::new();
         }
         let mut ids: Vec<_> = self.selected.keys().copied().collect();
@@ -248,7 +250,15 @@ impl QueueSelection {
     }
     pub(in crate::gui) fn cancel_manual(&mut self) {
         if self.manual.is_some() {
-            self.cancel();
+            self.projection.cancel();
+            self.navigation = None;
+            self.pending = None;
+            self.manual = None;
+            // A manual action never owns reconciliation or its failure.
+            self.busy = self.positions_stale && self.selection_error.is_none();
+            if !self.positions_stale {
+                self.selection_error = None;
+            }
         }
     }
     pub(super) fn clear(&mut self) {
@@ -256,6 +266,7 @@ impl QueueSelection {
         self.selected.clear();
         self.anchor = None;
         self.active = None;
+        self.positions_stale = false;
         self.rows.pin(None);
     }
     pub(super) fn change_search(&mut self, query: Option<String>) {
@@ -266,6 +277,7 @@ impl QueueSelection {
     }
     pub(super) fn select(&mut self, row: QueueIdentity, multi: bool) {
         self.cancel();
+        self.positions_stale = false;
         if !multi {
             self.selected.clear();
         }
@@ -285,6 +297,9 @@ impl QueueSelection {
         shift: bool,
         multi: bool,
     ) -> Option<QueueCommit> {
+        if !self.ready() && (shift || multi) {
+            return None;
+        }
         self.manual = Some(intent);
         self.navigation = Some(row.offset);
         let stamp = self.query().stamp(revisions);
@@ -402,7 +417,7 @@ impl QueueSelection {
 
     pub(super) fn retry_page(&mut self, revisions: QueryRevisions, total: usize) -> Range<usize> {
         self.rows.retry();
-        if self.busy {
+        if !self.ready() {
             self.retry_selection(revisions, total);
         }
         self.rows.visible()
@@ -450,6 +465,7 @@ impl QueueSelection {
         }
         let query = self.reconcile_query();
         self.reconcile_projection.sync(&query, revisions);
+        self.positions_stale = true;
         self.busy = true;
         self.reconcile_pending = Some(QueueReconcileJob {
             ids,
@@ -467,6 +483,28 @@ impl QueueSelection {
         self.reconcile_projection
             .accepts(&query, job.generation, revisions)
             && query.stamp(revisions) == job.stamp
+    }
+    pub(super) fn finish_reconcile(
+        &mut self,
+        job: &QueueReconcileJob,
+        revisions: QueryRevisions,
+        result: Result<Vec<QueueIdentity>, String>,
+    ) -> bool {
+        if !self.reconcile_current(job, revisions) {
+            return false;
+        }
+        match result {
+            Ok(rows) => self.reconcile(rows),
+            Err(error) => {
+                // Identity survives, but its old positions cannot authorize selection or ranges.
+                self.busy = false;
+                self.selection_error = Some(error);
+                self.reconcile_projection.cancel();
+                self.reconcile_pending = None;
+                // Only physical completion releases the worker gate.
+            }
+        }
+        true
     }
     pub(super) fn take_reconcile_job(&mut self) -> Option<QueueReconcileJob> {
         if self.worker.is_some() {
@@ -533,6 +571,8 @@ impl QueueSelection {
             .map(|row| (row.id, row))
             .collect();
         self.busy = false;
+        self.positions_stale = false;
+        self.selection_error = None;
         self.rows.pin(self.active().map(|row| row.offset));
     }
     pub(super) fn take_job(&mut self) -> Option<QueueJob> {
@@ -570,6 +610,7 @@ impl QueueSelection {
         self.anchor = Some(anchor);
         self.active = Some(target);
         self.busy = false;
+        self.positions_stale = false;
         self.navigation = None;
         self.manual = None;
         self.rows.pin(Some(target.offset));
@@ -1061,13 +1102,18 @@ mod tests {
         assert!(queue.reconcile_current(&latest, revisions(9)));
         assert_eq!(latest.ids.len(), 2);
         queue.release_reconcile_worker(latest.generation);
-        queue.selection_error = Some("offline".into());
+        assert!(queue.finish_reconcile(&latest, revisions(9), Err("offline".into())));
         assert!(!queue.sync(revisions(9), 10));
         assert!(queue.take_reconcile_job().is_none());
         assert_eq!(queue.selected.len(), 2);
         assert!(queue.retry_selection(revisions(9), 10));
-        assert!(queue.take_reconcile_job().is_some());
-        queue.reconcile(vec![identity(10, 0), identity(11, 1)]);
+        let retry = queue.take_reconcile_job().unwrap();
+        assert!(queue.finish_reconcile(
+            &retry,
+            revisions(9),
+            Ok(vec![identity(10, 0), identity(11, 1)]),
+        ));
+        queue.release_reconcile_worker(retry.generation);
         assert_eq!(queue.ordered_ids(), vec![10, 11]);
     }
     #[test]
@@ -1089,5 +1135,99 @@ mod tests {
         assert!(queue.reconcile_pending.is_none());
         queue.page_worker = false;
         assert!(queue.demand_page(0..10, 40).is_some());
+    }
+
+    #[test]
+    fn reconcile_failure_parks_positions_and_retry_rejects_late_completion() {
+        for error in ["offline", "timeout"] {
+            let mut queue = queue(7);
+            queue.select(identity(10, 100), false);
+            queue.sync(revisions(8), 200);
+            let old = queue.take_reconcile_job().unwrap();
+            assert!(queue.finish_reconcile(&old, revisions(8), Err(error.into())));
+            assert_eq!(queue.selection_error.as_deref(), Some(error));
+            assert!(queue.contains(&10));
+            assert_eq!(queue.anchor, Some(identity(10, 100)));
+            queue.cancel_manual();
+            assert!(!queue.ready());
+            assert!(queue.identity(10).is_none());
+            assert!(queue.active().is_none());
+            assert!(queue.ordered().is_empty());
+            let intent = crate::gui::coordination::manual_actions::ManualIntents::default().begin();
+            assert!(
+                queue
+                    .begin_selection(intent, revisions(8), identity(11, 4), true, false)
+                    .is_none()
+            );
+            assert!(queue.pending.is_none());
+            assert!(!queue.sync(revisions(8), 200));
+            assert!(queue.take_reconcile_job().is_none());
+            assert!(queue.retry_selection(revisions(8), 200));
+            assert!(queue.take_reconcile_job().is_none());
+            assert!(!queue.finish_reconcile(&old, revisions(8), Ok(vec![identity(10, 100)])));
+            assert!(!queue.ready());
+            queue.release_reconcile_worker(old.generation);
+            let retry = queue.take_reconcile_job().unwrap();
+            assert!(queue.finish_reconcile(&retry, revisions(8), Ok(vec![identity(10, 2)])));
+            assert_eq!(queue.active(), Some(identity(10, 2)));
+            assert!(queue.selection_error.is_none());
+            queue.release_reconcile_worker(retry.generation);
+            assert!(!queue.finish_reconcile(&old, revisions(8), Ok(vec![identity(10, 100)])));
+            assert_eq!(queue.active(), Some(identity(10, 2)));
+            assert!(
+                queue
+                    .begin_selection(intent, revisions(8), identity(11, 4), true, false)
+                    .is_none()
+            );
+            let range = queue.take_job().unwrap();
+            assert_eq!(range.anchor, Some(identity(10, 2)));
+        }
+    }
+
+    #[test]
+    fn manual_range_failure_restores_valid_old_selection() {
+        let mut queue = queue(7);
+        queue.select(identity(10, 2), false);
+        let intent = crate::gui::coordination::manual_actions::ManualIntents::default().begin();
+        assert!(
+            queue
+                .begin_selection(intent, revisions(7), identity(11, 4), true, false)
+                .is_none()
+        );
+        let job = queue.take_job().unwrap();
+        assert!(queue.finish_selection(&job, Some(&"offline".to_owned())));
+        queue.cancel_manual();
+        assert!(queue.ready());
+        assert_eq!(queue.active(), Some(identity(10, 2)));
+        queue.release_worker(job.generation);
+    }
+    #[test]
+    fn cancelling_replacement_does_not_validate_retained_positions() {
+        let mut queue = queue(7);
+        queue.select(identity(10, 100), false);
+        queue.sync(revisions(8), 200);
+        let old = queue.take_reconcile_job().unwrap();
+        assert!(queue.finish_reconcile(&old, revisions(8), Err("offline".into())));
+        let intent = crate::gui::coordination::manual_actions::ManualIntents::default().begin();
+        let replacement = queue
+            .begin_selection(intent, revisions(8), identity(11, 4), false, false)
+            .unwrap();
+        queue.cancel_manual();
+        assert!(!queue.ready());
+        assert!(queue.active().is_none());
+        assert!(queue.ordered_ids().is_empty());
+        assert_eq!(queue.selection_error.as_deref(), Some("offline"));
+        assert!(!queue.current(replacement.generation, replacement.stamp));
+        assert!(
+            queue
+                .begin_selection(intent, revisions(8), identity(12, 6), true, false)
+                .is_none()
+        );
+        queue.release_reconcile_worker(old.generation);
+        assert!(queue.retry_selection(revisions(8), 200));
+        let retry = queue.take_reconcile_job().unwrap();
+        assert!(queue.finish_reconcile(&retry, revisions(8), Ok(vec![identity(10, 2)])));
+        queue.release_reconcile_worker(retry.generation);
+        assert_eq!(queue.active(), Some(identity(10, 2)));
     }
 }

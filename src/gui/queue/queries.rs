@@ -272,9 +272,11 @@ impl Queue {
                                     && let Err(error) = response.result
                                 {
                                     let error = error.to_string();
-                                    this.model.selection_error = Some(error.clone());
-                                    this.model.busy = false;
-                                    this.model.reconcile_projection.cancel();
+                                    this.model.finish_reconcile(
+                                        &job,
+                                        response.revisions,
+                                        Err(error.clone()),
+                                    );
                                     cx.emit(QueueEvent::Error(error));
                                     cx.notify();
                                 }
@@ -310,10 +312,20 @@ impl Queue {
                     .reconcile_current(&job, this.state.query_revisions(None))
                 {
                     match result {
-                        Ok(Some(selected)) => this.model.reconcile(selected),
+                        Ok(Some(selected)) => {
+                            this.model.finish_reconcile(
+                                &job,
+                                this.state.query_revisions(None),
+                                Ok(selected),
+                            );
+                        }
                         Err(error) => {
-                            cx.emit(QueueEvent::Error(error.clone()));
-                            this.model.selection_error = Some(error);
+                            this.model.finish_reconcile(
+                                &job,
+                                this.state.query_revisions(None),
+                                Err(error.clone()),
+                            );
+                            cx.emit(QueueEvent::Error(error));
                         }
                         Ok(None) => {
                             // A newer snapshot will schedule fresh reconciliation.
@@ -393,7 +405,7 @@ impl Queue {
         cx: &mut Context<Self>,
     ) {
         self.refresh(cx);
-        if self.model.busy && (shift || multi) {
+        if !self.model.ready() && (shift || multi) {
             return;
         }
         let Some(row) = self
@@ -453,7 +465,7 @@ impl Queue {
     pub(in crate::gui) fn navigate_queue(&mut self, down: bool, cx: &mut Context<Self>) {
         self.refresh(cx);
         let total = self.model.rows.len();
-        if total == 0 || (self.model.busy && self.model.navigation.is_none()) {
+        if total == 0 || (!self.model.ready() && self.model.navigation.is_none()) {
             return;
         }
         let current = self
@@ -475,7 +487,7 @@ impl Queue {
     pub(in crate::gui) fn jump_queue_edge(&mut self, last: bool, cx: &mut Context<Self>) {
         self.refresh(cx);
         let total = self.model.rows.len();
-        if total == 0 || (self.model.busy && self.model.navigation.is_none()) {
+        if total == 0 || (!self.model.ready() && self.model.navigation.is_none()) {
             return;
         }
         self.start_queue_navigation(if last { total - 1 } else { 0 }, false, cx);

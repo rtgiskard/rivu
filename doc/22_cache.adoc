@@ -123,6 +123,11 @@ retained failures. For unchanged data and page boundaries, a retained failed pag
 requires explicit retry; eviction can make that page eligible for demand again.
 An accepted error consumes its reservation rather than leaving a loading
 placeholder; it is not a successful data publication.
+Queue identity reconciliation failures retain occurrence identities but keep their
+old positions unavailable until explicit retry succeeds or a new single selection
+replaces them. Timeout and ordinary errors have the same publication boundary.
+Position validity is independent of operation progress: cancelling a replacement
+selection does not validate retained positions or cancel their reconciliation.
 Cancelling a generation cannot release a physical worker gate: completion owns
 that release, and only the latest queued demand may then run. Metadata drafts/save baselines,
 occurrence identities, unavailable state, and relocation operations remain
