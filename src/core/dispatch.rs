@@ -9,6 +9,8 @@ impl Core {
         control: &RuntimeControl,
     ) {
         let not_polling = crossbeam_channel::never();
+        let no_export = crossbeam_channel::never();
+        let no_optimization = crossbeam_channel::never();
         let mut ffmpeg_status_ticks = None;
         loop {
             // Only an unresolved one-time load needs polling, including loads
@@ -21,21 +23,27 @@ impl Core {
                 ffmpeg_status_ticks = None;
             }
             let ffmpeg_status_tick = ffmpeg_status_ticks.as_ref().unwrap_or(&not_polling);
+            let export_finished = self
+                .active_export
+                .as_ref()
+                .map(|task| &task.finished)
+                .unwrap_or(&no_export);
+            let optimization_finished = self
+                .active_optimization
+                .as_ref()
+                .map(|task| &task.finished)
+                .unwrap_or(&no_optimization);
             select! {
                 recv(shutdown) -> _ => {
                     self.state.system.shutting_down = true;
+                    self.publish();
+                    control.acknowledge(Ack::from_result(Ok(()), self.state.system.revision));
                     let result = self.stop();
                     if let Err(error) = &result {
                         self.state.system.last_error = Some(format!("{error:#}"));
+                        tracing::error!(error = %error, "shutdown_playback_stop_failed");
                     }
                     self.publish();
-                    control.acknowledge(Ack {
-                        ok: result.is_ok(),
-                        error: result.err().map(|error| format!("{error:#}")),
-                        revision: self.state.system.revision,
-                        scan_id: None,
-                        relocation_id: None,
-                    });
                     break;
                 }
                 recv(requests) -> request => {
@@ -50,6 +58,8 @@ impl Core {
                         Operation::Command(command) => {
                             let starts_scan = matches!(&command, Command::Scan { .. } | Command::ImportPlaylist { .. });
                             let starts_relocation = matches!(&command, Command::RelocateTrack { .. });
+                            let starts_export = matches!(&command, Command::ExportPlaylist { .. });
+                            let starts_optimization = matches!(&command, Command::OptimizeDatabase);
                             let result = self.command(command);
                             if let Err(error) = &result {
                                 self.state.system.last_error = Some(format!("{error:#}"));
@@ -57,34 +67,38 @@ impl Core {
                             self.publish();
                             let scan_id = if result.is_ok() && starts_scan { self.active_scan.as_ref().map(|task| task.status.id) } else { None };
                             let relocation_id = if result.is_ok() && starts_relocation { self.active_relocation.as_ref().map(|task| task.status.id) } else { None };
+                            if result.is_ok() && starts_export {
+                                self.active_export.as_mut().expect("export was accepted").reply = request.reply;
+                                continue;
+                            }
+                            if result.is_ok() && starts_optimization {
+                                self.active_optimization.as_mut().expect("optimization was accepted").reply = request.reply;
+                                continue;
+                            }
                             if let Some(reply) = request.reply {
                                 let _ = reply.send(CoreResponse::Ack(Ack {
-                                    ok: result.is_ok(),
-                                    error: result.err().map(|error| format!("{error:#}")),
-                                    revision: self.state.system.revision,
                                     scan_id,
                                     relocation_id,
+                                    ..Ack::from_result(result, self.state.system.revision)
                                 }));
                             }
                         }
                         operation @ (Operation::GuiConfig(_) | Operation::Navigate(_)) => {
-                            let result = match operation {
-                                Operation::GuiConfig(change) => self.update_gui_config(change),
-                                Operation::Navigate(direction) => self.navigate(direction),
-                                _ => unreachable!("operation matched above"),
+                            let result = if self.database_maintenance_active() {
+                                Err(anyhow::anyhow!("Database maintenance is in progress; this operation was not executed"))
+                            } else {
+                                match operation {
+                                    Operation::GuiConfig(change) => self.update_gui_config(change),
+                                    Operation::Navigate(direction) => self.navigate(direction),
+                                    _ => unreachable!("operation matched above"),
+                                }
                             };
                             if let Err(error) = &result {
                                 self.state.system.last_error = Some(format!("{error:#}"));
                             }
                             self.publish();
                             if let Some(reply) = request.reply {
-                                let _ = reply.send(CoreResponse::Ack(Ack {
-                                    ok: result.is_ok(),
-                                    error: result.err().map(|error| format!("{error:#}")),
-                                    revision: self.state.system.revision,
-                                    scan_id: None,
-                                    relocation_id: None,
-                                }));
+                                let _ = reply.send(CoreResponse::Ack(Ack::from_result(result, self.state.system.revision)));
                             }
                         }
                     }
@@ -102,7 +116,18 @@ impl Core {
                 recv(self.relocation_rx) -> event => {
                     if let Ok(event) = event {
                         self.relocation_event(event);
+                        self.resume_pending_scan();
                     }
+                }
+                recv(export_finished) -> result => {
+                    let result = result.unwrap_or_else(|_| Err(anyhow::anyhow!("Playlist export ended without a result; inspect the destination before retrying")));
+                    let (reply, result) = self.finish_export(result);
+                    self.complete_background(reply, result);
+                }
+                recv(optimization_finished) -> result => {
+                    let result = result.unwrap_or_else(|_| Err(anyhow::anyhow!("Database optimization ended without a result; the database may already have changed")));
+                    let (reply, result) = self.finish_optimization(result);
+                    self.complete_background(reply, result);
                 }
                 recv(ffmpeg_status_tick) -> _ => {
                     if audio::ffmpeg_load_attempted() {
@@ -112,8 +137,31 @@ impl Core {
                     }
                 }
             }
+            if !self.database_maintenance_active()
+                && (self.playback_write_deferred || self.pending_navigation.is_some())
+            {
+                if let Err(error) = self.flush_deferred_playback() {
+                    self.state.system.last_error =
+                        Some(format!("Saving deferred playback statistics: {error:#}"));
+                }
+                self.publish();
+            }
         }
 
+        self.state.system.shutting_down = true;
+        // Retire background database users before final writes on Core's connection.
+        if let Some((reply, result)) = self.shutdown_export() {
+            self.complete_background(reply, result);
+        }
+        self.shutdown_scan();
+        self.shutdown_relocation();
+        if let Some((reply, result)) = self.shutdown_optimization() {
+            self.complete_background(reply, result);
+        }
+        if let Err(error) = self.flush_deferred_playback() {
+            self.state.system.last_error =
+                Some(format!("Saving deferred playback statistics: {error:#}"));
+        }
         if let Err(error) = self.stop() {
             self.state.system.last_error = Some(format!("Saving play count: {error:#}"));
         }
@@ -125,11 +173,22 @@ impl Core {
             self.state.system.last_error = Some(format!("Final save failed: {error:#}"));
         }
         let _ = self.engine.send(AudioCommand::Shutdown);
-        self.shutdown_scan();
-        self.shutdown_relocation();
         self.state.playback.status = PlaybackStatus::Stopped;
         self.state.system.shutting_down = true;
         self.publish();
+    }
+
+    fn complete_background(&mut self, reply: Option<Sender<CoreResponse>>, result: Result<()>) {
+        if let Err(error) = &result {
+            self.state.system.last_error = Some(format!("{error:#}"));
+        }
+        self.publish();
+        if let Some(reply) = reply {
+            let _ = reply.send(CoreResponse::Ack(Ack::from_result(
+                result,
+                self.state.system.revision,
+            )));
+        }
     }
 
     pub(in crate::core) fn publish(&mut self) {
@@ -215,6 +274,13 @@ impl Core {
     }
 
     pub(in crate::core) fn view(&self, query: &Query) -> Result<ViewResponse, QueryError> {
+        if self.database_maintenance_active()
+            && !matches!(query, Query::ScanTask { .. } | Query::RelocationTask { .. })
+        {
+            return Err(QueryError::Message(
+                "Database maintenance is in progress; retry this read after it finishes".into(),
+            ));
+        }
         let current = self.state.query_revisions_for(query);
         let current_stamp = query.stamp(current);
         let expected = match query {
@@ -263,10 +329,9 @@ impl Core {
                 *offset,
                 *limit,
             )?),
-            Query::DuplicateGroups { offset, limit } => ViewResponse::DuplicateGroups(
-                self.store
-                    .duplicate_groups_page(*offset, (*limit).min(MAX_QUERY_ROWS))?,
-            ),
+            Query::DuplicateGroups { offset, limit } => {
+                ViewResponse::DuplicateGroups(self.store.duplicate_groups_page(*offset, *limit)?)
+            }
             Query::DuplicateMembers {
                 fingerprint,
                 offset,
@@ -274,7 +339,7 @@ impl Core {
             } => ViewResponse::DuplicateMembers(self.store.duplicate_members_page(
                 fingerprint,
                 *offset,
-                (*limit).min(MAX_QUERY_ROWS),
+                *limit,
             )?),
             Query::DuplicateMemberSelection {
                 fingerprint,

@@ -195,13 +195,7 @@ impl AppHandle {
             AppCommand::Core(command) => self.core.request_ack(command),
             AppCommand::ShowWindow => {
                 let result = self.raise();
-                Ack {
-                    ok: result.is_ok(),
-                    error: result.err().map(|error| error.to_string()),
-                    revision: self.core.revision(),
-                    scan_id: None,
-                    relocation_id: None,
-                }
+                Ack::from_result(result, self.core.revision())
             }
             AppCommand::Shutdown => {
                 let _ = self.request_shutdown();
@@ -247,7 +241,7 @@ impl App {
     /// Import paths must already be resolved against the calling client's cwd.
     pub fn open_gui(data_dir: PathBuf, config_path: PathBuf, paths: Vec<PathBuf>) -> Result<()> {
         match ipc::request_ack(&data_dir, &AppCommand::ShowWindow) {
-            Ok(ack) if ack.ok => {
+            Ok(ack) if ack.is_success() => {
                 if !paths.is_empty() {
                     let ack = ipc::request_ack(
                         &data_dir,
@@ -256,7 +250,7 @@ impl App {
                             force: false,
                         },
                     )?;
-                    if !ack.ok {
+                    if !ack.is_success() {
                         bail!("{}", ack.error.as_deref().unwrap_or("Command failed"));
                     }
                 }
@@ -956,7 +950,7 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(15))
             .unwrap();
         let ack = ipc::request_ack(directory.path(), &AppCommand::Shutdown).unwrap();
-        assert!(ack.ok);
+        assert!(ack.is_success());
         worker.join().unwrap().unwrap();
         assert!(ipc::SocketOwner::acquire(directory.path()).is_ok());
     }

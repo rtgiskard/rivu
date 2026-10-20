@@ -28,7 +28,7 @@ fn app_commands_route_over_ipc_without_changing_business_state() {
     client.query(&Query::ScanTask { id: 0 }).unwrap();
     let before = client.get_state(StateSections::ALL).unwrap();
     let rejected = client.request_ack(&AppCommand::ShowWindow).unwrap();
-    assert!(!rejected.ok);
+    assert!(!rejected.is_success());
     assert!(
         rejected
             .error
@@ -43,7 +43,7 @@ fn app_commands_route_over_ipc_without_changing_business_state() {
         serde_json::to_value(after).unwrap()
     );
     let ack = client.request_ack(&AppCommand::Shutdown).unwrap();
-    assert!(ack.ok);
+    assert!(ack.is_success());
     runtime.join().unwrap();
     assert!(runtime.handle.is_shutting_down());
     assert!(ack.revision <= runtime.handle.revision());
@@ -278,6 +278,8 @@ fn scan_task_status_wire_round_trip_preserves_all_phases() {
             },
             message: "task status".into(),
             error: Some("task error".into()),
+            library_committed: false,
+            playlist_id: None,
         };
         let response = QueryResponse {
             revisions: QueryRevisions::default(),
@@ -570,7 +572,7 @@ fn library_root_queries_run_through_real_owner_and_ipc_session() {
             favorite: true,
         })
         .unwrap();
-    assert!(ack.ok);
+    assert!(ack.is_success());
     let updated = session.query(&count_query).unwrap();
     assert_ne!(updated.revisions.library, first.revisions.library);
     assert_eq!(updated.revisions.structure, first.revisions.structure);
@@ -702,7 +704,7 @@ fn playlist_content_lifetimes_and_batches_are_isolated_from_the_catalog() {
                 expected_revision: first.revisions.playlist_entries.unwrap().revision,
             })
             .unwrap()
-            .ok
+            .is_success()
     );
     let after = session.get_state(sections).unwrap();
     assert_ne!(before.revisions.library, after.revisions.library);
@@ -777,7 +779,7 @@ fn playlist_content_lifetimes_and_batches_are_isolated_from_the_catalog() {
                 expected_revision: first.revisions.playlist_entries.unwrap().revision,
             })
             .unwrap()
-            .ok
+            .is_success()
     );
     assert!(
         session
@@ -787,7 +789,7 @@ fn playlist_content_lifetimes_and_batches_are_isolated_from_the_catalog() {
                 expected_revision: moved_token,
             })
             .unwrap()
-            .ok
+            .is_success()
     );
     let removed = session
         .query(&Query::PlaylistEntryLocations {
@@ -811,7 +813,7 @@ fn playlist_content_lifetimes_and_batches_are_isolated_from_the_catalog() {
                 name: "renamed".into()
             })
             .unwrap()
-            .ok
+            .is_success()
     );
     let library = session.get_state(sections).unwrap().library.unwrap();
     assert_ne!(library.playlist_revision, expected.playlist);
@@ -839,7 +841,7 @@ fn playlist_content_lifetimes_and_batches_are_isolated_from_the_catalog() {
                 name: "other renamed".into(),
             })
             .unwrap()
-            .ok
+            .is_success()
     );
     assert!(
         session
@@ -848,7 +850,7 @@ fn playlist_content_lifetimes_and_batches_are_isolated_from_the_catalog() {
                 track_ids: vec![3],
             })
             .unwrap()
-            .ok
+            .is_success()
     );
     let member_change = session.query(&batch(10, None)).unwrap();
     assert_ne!(
@@ -866,7 +868,7 @@ fn playlist_content_lifetimes_and_batches_are_isolated_from_the_catalog() {
                 expected_revision: expected.playlist_entries.unwrap().revision,
             })
             .unwrap()
-            .ok
+            .is_success()
     );
     let continuation = session
         .query(&Query::PlaylistEntryBatch {
@@ -921,7 +923,7 @@ fn playlist_content_lifetimes_and_batches_are_isolated_from_the_catalog() {
                 expected_revision: other.revisions.playlist_entries.unwrap().revision,
             })
             .unwrap()
-            .ok
+            .is_success()
     );
     let current = session.query(&batch(20, None)).unwrap();
     assert_ne!(
@@ -950,7 +952,7 @@ fn playlist_content_lifetimes_and_batches_are_isolated_from_the_catalog() {
                 expected_revision: other.revisions.playlist_entries.unwrap().revision,
             })
             .unwrap()
-            .ok
+            .is_success()
     );
     let before_noop = session.get_state(sections).unwrap().library.unwrap();
     assert!(
@@ -960,7 +962,7 @@ fn playlist_content_lifetimes_and_batches_are_isolated_from_the_catalog() {
                 track_ids: vec![1],
             })
             .unwrap()
-            .ok
+            .is_success()
     );
     assert!(
         session
@@ -971,7 +973,7 @@ fn playlist_content_lifetimes_and_batches_are_isolated_from_the_catalog() {
                 expected_revision: current.revisions.playlist_entries.unwrap().revision,
             })
             .unwrap()
-            .ok
+            .is_success()
     );
     let after_noop = session.get_state(sections).unwrap().library.unwrap();
     assert_eq!(
@@ -988,7 +990,7 @@ fn playlist_content_lifetimes_and_batches_are_isolated_from_the_catalog() {
         session
             .request_ack(&Command::DeletePlaylist { playlist_id: 20 })
             .unwrap()
-            .ok
+            .is_success()
     );
     let deleted = session.get_state(sections).unwrap().library.unwrap();
     assert_eq!(deleted.playlist_entry_revisions.len(), 1);
@@ -1017,7 +1019,7 @@ fn playlist_content_lifetimes_and_batches_are_isolated_from_the_catalog() {
                     expected_revision: current.revisions.playlist_entries.unwrap().revision,
                 })
                 .unwrap()
-                .ok
+                .is_success()
         );
         assert!(
             !session
@@ -1028,7 +1030,7 @@ fn playlist_content_lifetimes_and_batches_are_isolated_from_the_catalog() {
                     expected_revision: current.revisions.playlist_entries.unwrap().revision,
                 })
                 .unwrap()
-                .ok
+                .is_success()
         );
     }
     assert!(
@@ -1037,7 +1039,7 @@ fn playlist_content_lifetimes_and_batches_are_isolated_from_the_catalog() {
                 name: "replacement".into()
             })
             .unwrap()
-            .ok
+            .is_success()
     );
     let recreated = session.get_state(sections).unwrap().library.unwrap();
     assert_eq!(recreated.playlist_entry_revisions.len(), 2);
@@ -1066,7 +1068,7 @@ fn playlist_content_lifetimes_and_batches_are_isolated_from_the_catalog() {
                 expected_revision: current.revisions.playlist_entries.unwrap().revision,
             })
             .unwrap()
-            .ok
+            .is_success()
     );
     assert!(
         session
@@ -1076,7 +1078,7 @@ fn playlist_content_lifetimes_and_batches_are_isolated_from_the_catalog() {
                 expected_revision: new_revision,
             })
             .unwrap()
-            .ok
+            .is_success()
     );
     assert!(
         session
@@ -1085,7 +1087,7 @@ fn playlist_content_lifetimes_and_batches_are_isolated_from_the_catalog() {
                 track_ids: vec![1],
             })
             .unwrap()
-            .ok
+            .is_success()
     );
     let populated = session.query(&batch(new_id, None)).unwrap();
     let ViewResponse::PlaylistEntryBatch(page) = populated.result.unwrap() else {
@@ -1097,7 +1099,7 @@ fn playlist_content_lifetimes_and_batches_are_isolated_from_the_catalog() {
                 entry_id: page.rows[0].id,
             })
             .unwrap()
-            .ok
+            .is_success()
     );
     let emptied = session.query(&batch(new_id, None)).unwrap();
     assert_ne!(
@@ -1117,7 +1119,7 @@ fn playlist_content_lifetimes_and_batches_are_isolated_from_the_catalog() {
 #[test]
 fn ack_wire_round_trip_has_explicit_response_type() {
     let ack = Ack {
-        ok: false,
+        status: crate::response::AckStatus::Failed,
         error: Some("failed".into()),
         revision: 42,
         scan_id: Some(u64::MAX),
@@ -1868,7 +1870,7 @@ fn client_session_reuses_connection_after_command_and_request_rejections() {
         reply_test_ack(
             &mut stream,
             Ack {
-                ok: false,
+                status: crate::response::AckStatus::Failed,
                 error: Some("rejected".into()),
                 revision: 3,
                 scan_id: None,
@@ -1903,7 +1905,7 @@ fn client_session_reuses_connection_after_command_and_request_rejections() {
     let ack = session
         .request_ack(&Command::CreatePlaylist { name: "new".into() })
         .unwrap();
-    assert!(!ack.ok);
+    assert!(!ack.is_success());
     assert_eq!(ack.revision, 3);
     let query = Query::PlaylistSummaries {
         query: None,
@@ -1934,7 +1936,7 @@ fn client_session_discards_partial_failed_response_before_next_explicit_request(
         let mut frame = Vec::new();
         encode_response_frame_into(
             &WireResponse::Ack(Ack {
-                ok: true,
+                status: crate::response::AckStatus::Succeeded,
                 error: None,
                 revision: 1,
                 scan_id: None,
@@ -1955,7 +1957,7 @@ fn client_session_discards_partial_failed_response_before_next_explicit_request(
         reply_test_ack(
             &mut stream,
             Ack {
-                ok: true,
+                status: crate::response::AckStatus::Succeeded,
                 error: None,
                 revision: 2,
                 scan_id: None,
@@ -1965,19 +1967,21 @@ fn client_session_discards_partial_failed_response_before_next_explicit_request(
     });
     let mut session = client_session(directory.path()).unwrap();
     session.bind_instance(1).unwrap();
-    assert!(
-        session
-            .request_ack(&Command::CreatePlaylist {
-                name: "first".into()
-            })
-            .is_err()
+    let error = session
+        .request_ack(&Command::CreatePlaylist {
+            name: "first".into(),
+        })
+        .unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<CommandFailure>().unwrap().status,
+        crate::response::AckStatus::Unknown
     );
     let ack = session
         .request_ack(&Command::CreatePlaylist {
             name: "second".into(),
         })
         .unwrap();
-    assert!(ack.ok);
+    assert!(ack.is_success());
     assert_eq!(ack.revision, 2);
     server.join().unwrap();
 }
@@ -2066,6 +2070,10 @@ fn pinned_session_rejects_initial_replacement_before_commands_queries_or_state()
         })
         .unwrap_err();
     assert!(error.is::<InstanceChanged>());
+    assert_eq!(
+        error.downcast_ref::<CommandFailure>().unwrap().status,
+        crate::response::AckStatus::NotAdmitted
+    );
     let error = session
         .query(&Query::PlaylistSummaries {
             query: None,
@@ -2138,7 +2146,7 @@ fn independent_cli_session_can_explicitly_reconnect_to_a_new_instance() {
         reply_test_ack(
             &mut stream,
             Ack {
-                ok: true,
+                status: crate::response::AckStatus::Succeeded,
                 error: None,
                 revision: 2,
                 scan_id: None,
@@ -2161,7 +2169,7 @@ fn independent_cli_session_can_explicitly_reconnect_to_a_new_instance() {
                 name: "second".into()
             })
             .unwrap()
-            .ok
+            .is_success()
     );
     assert_eq!(session.instance_id(), Some(2));
     server.join().unwrap();
@@ -2498,7 +2506,7 @@ fn filtered_occurrence_continuations_round_trip_and_reject_stale_ipc_scopes() {
                 decoder_hint: None,
             })
             .unwrap()
-            .ok
+            .is_success()
     );
     assert_eq!(
         session

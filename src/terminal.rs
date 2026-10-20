@@ -208,7 +208,7 @@ where
         let (commands, queries) = workers.as_mut().expect("Initial state starts TUI workers");
         while let Ok(result) = commands.results.try_recv() {
             match result {
-                Ok(ack) if !ack.ok => {
+                Ok(ack) if !ack.is_success() => {
                     tui.ui.set_notice(
                         ack.error
                             .unwrap_or_else(|| i18n.text("terminal-command-rejected").into()),

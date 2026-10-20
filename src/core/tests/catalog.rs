@@ -1,5 +1,10 @@
 use super::*;
 
+// Scan commits use another connection; all catalog task tests need a real DB.
+fn fixture() -> (tempfile::TempDir, Core) {
+    fixture_with_database(Some(10.0), true)
+}
+
 #[test]
 fn committed_scan_invalidates_before_failed_refresh() {
     let (directory, mut core) = fixture_with_database(Some(10.0), true);
@@ -23,8 +28,9 @@ fn committed_scan_invalidates_before_failed_refresh() {
         )
         .unwrap();
     let before = core.state.query_revisions();
-    let error = core
-        .finish_scan(ScanFinished {
+    let status = save_prepared_scan(
+        &mut core,
+        ScanFinished {
             id: 1,
             result: Ok(ScanResult {
                 roots: vec![path],
@@ -32,15 +38,17 @@ fn committed_scan_invalidates_before_failed_refresh() {
             }),
             import: None,
             progress: ScanProgress {
-                phase: ScanPhase::Saving,
+                phase: ScanPhase::ReadingMetadata,
                 processed: 1,
                 total: Some(1),
                 errors: 0,
                 path: None,
             },
-        })
-        .unwrap_err();
-    assert!(error.to_string().contains("Scan committed"));
+        },
+    );
+    assert_eq!(status.progress.phase, ScanPhase::Failed);
+    assert!(status.library_committed);
+    assert!(status.error.as_deref().unwrap().contains("Scan committed"));
     let missing: bool = connection
         .query_row("SELECT missing FROM tracks WHERE id=1", [], |row| {
             row.get(0)
@@ -233,7 +241,6 @@ fn unchanged_scans_keep_query_results_valid_and_still_import_playlists() {
                     "unchanged import".into(),
                     vec![M3uItem {
                         path: directory.path().join("1.wav"),
-                        name: None,
                         cue_track: None,
                     }],
                 )
@@ -246,7 +253,10 @@ fn unchanged_scans_keep_query_results_valid_and_still_import_playlists() {
                 path: None,
             },
         };
-        assert!(core.finish_scan(scan).unwrap());
+        let status = save_prepared_scan(&mut core, scan);
+        assert_eq!(status.progress.phase, ScanPhase::Completed);
+        assert!(status.library_committed);
+        assert_eq!(status.playlist_id.is_some(), import);
         let after = core.state.query_revisions();
         assert_eq!(after.library, before.library);
         assert_eq!(after.structure, before.structure);
@@ -367,6 +377,9 @@ fn import_task_errors_distinguish_scan_save_from_playlist_creation_failure() {
     for scan_saved in [false, true] {
         let (directory, mut core) = fixture_with_database(Some(10.0), true);
         let source = directory.path().join("new.wav");
+        core.create_playlist_with_tracks("Existing".into(), vec![1])
+            .unwrap();
+        let scopes = Arc::clone(&core.state.library.playlist_entry_revisions);
         write_pcm(&source);
         let path = directory.path().join("mix.m3u8");
         std::fs::write(&path, "new.wav\n").unwrap();
@@ -388,6 +401,8 @@ fn import_task_errors_distinguish_scan_save_from_playlist_creation_failure() {
             panic!("Expected task");
         };
         let error = task.error.as_deref().unwrap();
+        assert_eq!(task.library_committed, scan_saved);
+        assert_eq!(task.playlist_id, None);
         if scan_saved {
             assert!(task.message.contains("Scan saved"));
             assert!(task.message.contains("playlist creation"));
@@ -410,9 +425,84 @@ fn import_task_errors_distinguish_scan_save_from_playlist_creation_failure() {
         );
         assert_eq!(
             core.store.playlist_summary_page(None, 0, 0).unwrap().total,
-            0
+            1
+        );
+        assert!(Arc::ptr_eq(
+            &scopes,
+            &core.state.library.playlist_entry_revisions
+        ));
+    }
+}
+
+#[test]
+fn playlist_refresh_failure_preserves_both_committed_results() {
+    let (directory, mut core) = fixture();
+    core.create_playlist_with_tracks("Existing".into(), vec![1])
+        .unwrap();
+    let scopes = Arc::clone(&core.state.library.playlist_entry_revisions);
+    core.store.set_queue_current(Some(1)).unwrap();
+    core.refresh_queue_tracks().unwrap();
+    let source = directory.path().join("imported.wav");
+    write_pcm(&source);
+    let path = directory.path().join("mix.m3u8");
+    std::fs::write(&path, "imported.wav\n").unwrap();
+    let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER fail_import_refresh AFTER INSERT ON playlists
+             BEGIN UPDATE tracks SET channels='unreadable' WHERE id=1; END;",
+        )
+        .unwrap();
+    let before = core.state.query_revisions();
+    core.command(Command::ImportPlaylist { path, name: None })
+        .unwrap();
+    assert!(!settle_scan(&mut core));
+    let status = core.scan_results.back().unwrap();
+    assert_eq!(status.progress.phase, ScanPhase::Failed);
+    assert!(status.library_committed);
+    let playlist_id = status
+        .playlist_id
+        .expect("Committed playlist identity survives refresh failure");
+    assert!(
+        status
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("refreshing views failed")
+    );
+    assert_eq!(
+        core.store
+            .playlist_track_ids(playlist_id, 10)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(core.state.library.track_total, 5);
+    assert_eq!(core.state.library.playlist_total, 2);
+    assert!(
+        core.state
+            .library
+            .playlist_entry_revisions
+            .contains_key(&playlist_id)
+    );
+    for (id, revision) in scopes.iter() {
+        assert_eq!(
+            core.state.library.playlist_entry_revisions.get(id),
+            Some(revision)
         );
     }
+    assert_eq!(scopes.len(), 1);
+    assert!(!scopes.contains_key(&playlist_id));
+    assert_eq!(core.state.library.playlist_entry_revisions.len(), 2);
+    let imported_revision = core.state.library.playlist_entry_revisions[&playlist_id];
+    assert!(
+        scopes
+            .values()
+            .all(|revision| *revision < imported_revision)
+    );
+    let after = core.state.query_revisions();
+    assert_ne!(after.library, before.library);
+    assert_ne!(after.playlist, before.playlist);
 }
 
 #[test]
@@ -451,9 +541,12 @@ fn failed_playlist_import_keeps_committed_scan_visible() {
             path: None,
         },
     };
-    let error = core.finish_scan(scan).unwrap_err();
-    assert!(error.to_string().contains("Scan saved"));
-    assert!(error.to_string().contains("playlist creation"));
+    let status = save_prepared_scan(&mut core, scan);
+    assert!(status.library_committed);
+    assert_eq!(status.playlist_id, None);
+    let error = status.error.as_deref().unwrap();
+    assert!(error.contains("Scan saved"));
+    assert!(error.contains("playlist creation"));
     assert_eq!(
         core.store.queue_page(None, 0, 1).unwrap().rows[0]
             .track
@@ -539,12 +632,10 @@ fn failed_cue_import_never_reuses_old_entries_but_keeps_readable_items() {
                 vec![
                     M3uItem {
                         path: sheet,
-                        name: None,
                         cue_track: Some(1),
                     },
                     M3uItem {
                         path,
-                        name: None,
                         cue_track: None,
                     },
                 ],
@@ -557,10 +648,12 @@ fn failed_cue_import_never_reuses_old_entries_but_keeps_readable_items() {
                 path: None,
             },
         };
-        let result = core.finish_scan(scan);
+        let status = save_prepared_scan(&mut core, scan);
+        assert_eq!(status.progress.phase, ScanPhase::Failed);
+        assert!(status.library_committed);
         assert!(core.store.track(old_id).unwrap().is_some());
         if readable {
-            assert!(!result.unwrap());
+            assert!(status.playlist_id.is_some());
             let rows = core
                 .store
                 .playlist_entries_page(1, None, 0, MAX_QUERY_ROWS)
@@ -568,7 +661,7 @@ fn failed_cue_import_never_reuses_old_entries_but_keeps_readable_items() {
                 .rows;
             assert_eq!(rows.iter().map(|row| row.track_id).collect::<Vec<_>>(), [2]);
         } else {
-            assert!(result.is_err());
+            assert_eq!(status.playlist_id, None);
             assert_eq!(core.state.library.playlist_total, 0);
         }
     }
@@ -614,6 +707,94 @@ fn settle_scan(core: &mut Core) -> bool {
         core.scan_event(event);
     }
     core.scan_results.back().unwrap().progress.phase == ScanPhase::Completed
+}
+
+#[test]
+fn resumed_import_preserves_latest_playlist_tokens_and_snapshot_isolation() {
+    for shutdown in [false, true] {
+        let (directory, mut core) = fixture();
+        core.create_playlist_with_tracks("Existing".into(), vec![1])
+            .unwrap();
+        let existing_id = core.store.playlist_ids().unwrap()[0];
+        let old_scopes = Arc::clone(&core.state.library.playlist_entry_revisions);
+        write_pcm(&directory.path().join("imported.wav"));
+        let path = directory.path().join("mix.m3u8");
+        std::fs::write(&path, "imported.wav\n").unwrap();
+        core.import_playlist(path, "Imported".into()).unwrap();
+        let finished = loop {
+            match core.scan_rx.recv_timeout(Duration::from_secs(5)).unwrap() {
+                ScanEvent::Finished(scan) => break scan,
+                event => core.scan_event(event),
+            }
+        };
+        // A relocation may defer an otherwise completed traversal. Playlist
+        // changes before resuming must be in the snapshot Saving captures.
+        core.active_scan.as_mut().unwrap().pending_save = Some(finished);
+        core.add_playlist(existing_id, vec![2]).unwrap();
+        core.create_playlist("Created while waiting".into())
+            .unwrap();
+        let scopes = Arc::clone(&core.state.library.playlist_entry_revisions);
+        assert_ne!(scopes[&existing_id], old_scopes[&existing_id]);
+        let before = core.state.query_revisions();
+        core.resume_pending_scan();
+        assert_eq!(
+            core.active_scan.as_ref().unwrap().status.progress.phase,
+            ScanPhase::Saving
+        );
+        if shutdown {
+            core.shutdown_scan();
+        } else {
+            assert!(settle_scan(&mut core));
+        }
+        let status = core.scan_results.back().unwrap();
+        assert_eq!(status.progress.phase, ScanPhase::Completed);
+        assert!(status.library_committed);
+        let imported_id = status.playlist_id.unwrap();
+        let revisions = &core.state.library.playlist_entry_revisions;
+        for (id, revision) in scopes.iter() {
+            assert_eq!(revisions.get(id), Some(revision));
+        }
+        let imported_revision = revisions[&imported_id];
+        assert!(
+            scopes
+                .values()
+                .all(|revision| *revision < imported_revision)
+        );
+        assert_eq!(revisions.len(), 3);
+        assert_eq!(scopes.len(), 2);
+        assert!(!scopes.contains_key(&imported_id));
+        assert_eq!(old_scopes.len(), 1);
+        assert_ne!(core.state.query_revisions().playlist, before.playlist);
+        core.add_playlist(imported_id, vec![1]).unwrap();
+        assert!(core.state.library.playlist_entry_revisions[&imported_id] > imported_revision);
+        assert_eq!(
+            core.state.library.playlist_entry_revisions[&existing_id],
+            scopes[&existing_id]
+        );
+    }
+}
+
+fn save_prepared_scan(core: &mut Core, scan: ScanFinished) -> ScanTaskStatus {
+    assert!(core.active_scan.is_none());
+    core.active_scan = Some(ScanTask {
+        status: ScanTaskStatus {
+            id: scan.id,
+            progress: ScanProgress {
+                phase: ScanPhase::ReadingMetadata,
+                ..scan.progress.clone()
+            },
+            message: String::new(),
+            library_committed: false,
+            playlist_id: None,
+            error: None,
+        },
+        cancellation: library::ScanCancellation::default(),
+        worker: thread::spawn(|| {}),
+        pending_save: None,
+    });
+    core.scan_event(ScanEvent::Finished(scan));
+    settle_scan(core);
+    core.scan_results.back().unwrap().clone()
 }
 
 #[test]
@@ -811,7 +992,7 @@ fn scan_start_ack_binds_the_accepted_task() {
     let CoreResponse::Ack(ack) = ack.recv().unwrap() else {
         panic!("Expected ack");
     };
-    assert!(ack.ok);
+    assert!(ack.is_success());
     let id = ack
         .scan_id
         .expect("Accepted scans must expose their identity");
@@ -845,13 +1026,10 @@ fn completed_scan_wait_is_independent_of_later_scans_and_global_errors() {
 #[test]
 fn verification_only_scan_invalidates_member_facts_not_display_or_playlist_pages() {
     let (_directory, mut core) = fixture();
-    let known = core
-        .store
-        .known_source(&core.track(1).unwrap().path)
-        .unwrap()
-        .unwrap();
+    let path = core.track(1).unwrap().path;
+    let known = core.store.known_source(&path).unwrap().unwrap();
     let mut record = ScanRecord {
-        path: known.path,
+        path,
         cue: known.cue,
         size: known.size,
         modified_ns: known.modified_ns,
@@ -877,8 +1055,9 @@ fn verification_only_scan_invalidates_member_facts_not_display_or_playlist_pages
     let before = core.state.query_revisions();
     record.modified_ns += 1;
     let fingerprint = record.fingerprint.clone().unwrap();
-    assert!(
-        core.finish_scan(ScanFinished {
+    let status = save_prepared_scan(
+        &mut core,
+        ScanFinished {
             id: 1,
             result: Ok(ScanResult {
                 records: vec![record],
@@ -886,15 +1065,15 @@ fn verification_only_scan_invalidates_member_facts_not_display_or_playlist_pages
             }),
             import: None,
             progress: ScanProgress {
-                phase: ScanPhase::Saving,
+                phase: ScanPhase::ReadingMetadata,
                 processed: 1,
                 total: Some(1),
                 errors: 0,
-                path: None
+                path: None,
             },
-        })
-        .unwrap()
+        },
     );
+    assert_eq!(status.progress.phase, ScanPhase::Completed);
     let after = core.state.query_revisions();
     assert_eq!(
         (
@@ -982,6 +1161,7 @@ fn cancelling_finished_but_uncommitted_scan_discards_its_result() {
             ScanEvent::Progress { .. } => {}
             event @ ScanEvent::KnownSource { .. } => core.scan_event(event),
             ScanEvent::Finished(scan) => break scan,
+            ScanEvent::Saved(_) => panic!("Scan cannot save before Core authorizes it"),
         }
     };
     core.command(Command::CancelScan { id }).unwrap();
@@ -992,6 +1172,61 @@ fn cancelling_finished_but_uncommitted_scan_discards_its_result() {
         ScanPhase::Cancelled
     );
     assert!(core.active_scan.is_none());
+    assert!(!core.scan_results.back().unwrap().library_committed);
+    assert_eq!(core.scan_results.back().unwrap().playlist_id, None);
+}
+
+#[test]
+fn saving_scan_rejects_cancellation_and_invalidates_the_owner_cache() {
+    let (directory, mut core) = fixture();
+    let cached = core.track(1).unwrap();
+    let source = cached.path.clone();
+    write_pcm(&source);
+    core.scan(vec![source], true).unwrap();
+    let finished = loop {
+        match core.scan_rx.recv_timeout(Duration::from_secs(5)).unwrap() {
+            ScanEvent::Progress { .. } => {}
+            event @ ScanEvent::KnownSource { .. } => core.scan_event(event),
+            ScanEvent::Finished(scan) => break scan,
+            ScanEvent::Saved(_) => panic!("Saving requires Core authorization"),
+        }
+    };
+    let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+    connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+    core.scan_event(ScanEvent::Finished(finished));
+    let status = &core.active_scan.as_ref().unwrap().status;
+    let id = status.id;
+    assert_eq!(status.progress.phase, ScanPhase::Saving);
+    assert!(!status.library_committed);
+    assert!(core.database_maintenance_active());
+    assert_eq!(
+        core.shared
+            .read()
+            .system
+            .scan_progress
+            .as_ref()
+            .unwrap()
+            .phase,
+        ScanPhase::Saving
+    );
+    let error = core.cancel_scan(id).unwrap_err();
+    assert!(error.to_string().contains("can no longer be cancelled"));
+    assert!(
+        !core
+            .active_scan
+            .as_ref()
+            .unwrap()
+            .cancellation
+            .is_cancelled()
+    );
+    connection.execute_batch("ROLLBACK").unwrap();
+    assert!(settle_scan(&mut core));
+    assert!(!core.database_maintenance_active());
+    assert!(core.scan_results.back().unwrap().library_committed);
+    let refreshed = core.track(1).unwrap();
+    assert_ne!(refreshed.title, cached.title);
+    let observer = Store::open(&directory.path().join("library.db")).unwrap();
+    assert_eq!(refreshed, observer.track(1).unwrap().unwrap());
 }
 #[test]
 fn stale_scan_events_cannot_replace_the_active_task() {
@@ -1500,7 +1735,7 @@ fn committed_impacts_refresh_current_track_activity_and_probe_metadata() {
 
 #[test]
 fn database_optimization_requires_stopped_playback_and_no_scan() {
-    let (_directory, mut core) = fixture();
+    let (_directory, mut core) = fixture_with_database(Some(10.0), true);
     playing(&mut core, 1);
     core.state.system.database_optimization = Some(DatabaseOptimization {
         database_bytes_before: 1,
@@ -1518,6 +1753,8 @@ fn database_optimization_requires_stopped_playback_and_no_scan() {
     core.state.system.scanning = false;
     core.enqueue(&[4]).unwrap();
     core.command(Command::OptimizeDatabase).unwrap();
+    assert!(core.state.system.database_optimization.is_none());
+    settle_optimization(&mut core).unwrap();
     assert!(core.state.system.database_optimization.is_some());
     assert_eq!(core.store.history(200).unwrap()[0].track_id, 1);
     assert_eq!(play_count(&core, 1), 0);
@@ -1629,26 +1866,29 @@ fn cue_playlist_import_deduplicates_segments_in_first_occurrence_order() {
             },
         })
         .collect();
-    core.finish_scan(ScanFinished {
-        id: 0,
-        result: Ok(ScanResult {
-            roots: vec![sheet],
-            records,
-            ..ScanResult::default()
-        }),
-        import: Some((
-            "CUE occurrences".into(),
-            vec![items[1].clone(), items[0].clone(), items[1].clone()],
-        )),
-        progress: ScanProgress {
-            phase: ScanPhase::ReadingMetadata,
-            processed: 1,
-            total: Some(1),
-            errors: 0,
-            path: None,
+    let status = save_prepared_scan(
+        &mut core,
+        ScanFinished {
+            id: 0,
+            result: Ok(ScanResult {
+                roots: vec![sheet],
+                records,
+                ..ScanResult::default()
+            }),
+            import: Some((
+                "CUE occurrences".into(),
+                vec![items[1].clone(), items[0].clone(), items[1].clone()],
+            )),
+            progress: ScanProgress {
+                phase: ScanPhase::ReadingMetadata,
+                processed: 1,
+                total: Some(1),
+                errors: 0,
+                path: None,
+            },
         },
-    })
-    .unwrap();
+    );
+    assert_eq!(status.progress.phase, ScanPhase::Completed);
     let playlist_id = core.store.playlist_summary_page(None, 0, 1).unwrap().rows[0].id;
     let entries = core
         .store
@@ -1764,4 +2004,88 @@ fn accepted_import_allows_dispatch_and_cancellation_before_commit() {
         core.store.playlist_summary_page(None, 0, 0).unwrap().total,
         0
     );
+}
+
+fn settle_optimization(core: &mut Core) -> Result<()> {
+    let result = core
+        .active_optimization
+        .as_ref()
+        .unwrap()
+        .finished
+        .recv_timeout(Duration::from_secs(15))
+        .unwrap();
+    let (reply, result) = core.finish_optimization(result);
+    assert!(reply.is_none());
+    assert!(core.active_optimization.is_none());
+    result
+}
+
+#[test]
+fn database_optimization_remains_single_flight_after_requester_disconnects() {
+    let (_directory, mut core) = fixture_with_database(Some(10.0), true);
+    core.command(Command::OptimizeDatabase).unwrap();
+    let (reply, requester) = bounded(1);
+    core.active_optimization.as_mut().unwrap().reply = Some(reply);
+    drop(requester);
+    assert!(core.command(Command::OptimizeDatabase).is_err());
+    assert!(core.active_optimization.is_some());
+    let result = core
+        .active_optimization
+        .as_ref()
+        .unwrap()
+        .finished
+        .recv_timeout(Duration::from_secs(15))
+        .unwrap();
+    // Even an available result does not retire the operation or replay it.
+    assert!(core.command(Command::OptimizeDatabase).is_err());
+    let (reply, result) = core.finish_optimization(result);
+    result.unwrap();
+    assert!(reply.is_some());
+    assert!(core.active_optimization.is_none());
+    assert!(core.state.system.database_optimization.is_some());
+    core.command(Command::OptimizeDatabase).unwrap();
+    settle_optimization(&mut core).unwrap();
+}
+
+#[test]
+fn database_optimization_checkpoint_failure_retires_owner_and_allows_explicit_retry() {
+    let (directory, mut core) = fixture_with_database(Some(10.0), true);
+    core.command(Command::SetFavorite {
+        track_ids: vec![1],
+        favorite: true,
+    })
+    .unwrap();
+    let queue = core.queue_ids.clone();
+    let reader = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+    reader
+        .execute_batch("BEGIN; SELECT * FROM tracks;")
+        .unwrap();
+    core.command(Command::OptimizeDatabase).unwrap();
+    let error = settle_optimization(&mut core).unwrap_err();
+    // This is a post-VACUUM failure, not evidence that the database was untouched.
+    assert!(format!("{error:#}").contains("checkpoint"));
+    assert!(core.state.system.database_optimization.is_none());
+    assert_eq!(core.queue_ids, queue);
+    assert!(core.store.track(1).unwrap().unwrap().favorite);
+    reader.execute_batch("ROLLBACK").unwrap();
+    drop(reader);
+    core.command(Command::OptimizeDatabase).unwrap();
+    settle_optimization(&mut core).unwrap();
+    let report = core.state.system.database_optimization.as_ref().unwrap();
+    assert!(report.database_bytes_after > 0);
+    assert_eq!(report.wal_bytes_after, 0);
+    assert_eq!(core.queue_ids, queue);
+    assert!(core.store.track(1).unwrap().unwrap().favorite);
+}
+
+#[test]
+fn database_optimization_shutdown_waits_for_final_worker_result() {
+    let (_directory, mut core) = fixture_with_database(Some(10.0), true);
+    core.command(Command::OptimizeDatabase).unwrap();
+    let (reply, result) = core.shutdown_optimization().unwrap();
+    result.unwrap();
+    assert!(reply.is_none());
+    assert!(core.active_optimization.is_none());
+    assert!(core.state.system.database_optimization.is_some());
+    assert!(core.shutdown_optimization().is_none());
 }

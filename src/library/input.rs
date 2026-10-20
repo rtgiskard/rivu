@@ -1,11 +1,6 @@
 use super::ScanCancellation;
 use anyhow::{Result, ensure};
-use std::{
-    fs::{self, OpenOptions},
-    io::Read,
-    os::unix::fs::OpenOptionsExt,
-    path::Path,
-};
+use std::{io::Read, path::Path};
 
 pub(super) const MAX_CUE_BYTES: usize = 1024 * 1024;
 
@@ -15,17 +10,8 @@ pub(super) fn read_input(
     cancellation: &ScanCancellation,
 ) -> Result<Vec<u8>> {
     cancellation.check()?;
-    // O_NONBLOCK prevents a FIFO substituted between metadata and open from hanging.
-    ensure!(
-        fs::metadata(path)?.is_file(),
-        "input is not an ordinary file"
-    );
-    let mut file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NONBLOCK)
-        .open(path)?;
+    let mut file = crate::file_input::open_regular_file(path)?;
     let metadata = file.metadata()?;
-    ensure!(metadata.is_file(), "input is not an ordinary file");
     ensure!(
         metadata.len() <= limit as u64,
         "input exceeds {limit} bytes"

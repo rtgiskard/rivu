@@ -150,9 +150,10 @@ another playlist does not reload the selected playlist's contents. Track metadat
 edits update displayed information without changing entry identities or positions.
 Empty playlists remain valid collections, not deleted or unloaded playlists.
 
-If membership or order changes during a listing or export, restart the traversal;
-renaming or changing another playlist does not interrupt it. Stale group operations
-are rejected without partial changes. See
+If membership or order changes during a listing, restart the traversal;
+renaming or changing another playlist does not interrupt it. Export instead uses
+one consistent database snapshot, independent of edits made while writing.
+Stale group operations are rejected without partial changes. See
 link:02_library.adoc#_paged_views[Paged views] for incomplete CLI output and retries,
 link:21_ipc.adoc#_revisions_and_watching[IPC revisions] and
 link:21_ipc.adoc#_query_results_and_pagination[query validity] for the internal
@@ -177,9 +178,10 @@ Another import or scan cannot start while scanning is active.
 
 An accepted import returns a scan task ID; acceptance is not proof of completion.
 Use `--wait` to observe input, scan, or playlist-creation errors. Playlist reads,
-decoding, CUE expansion, and metadata scanning run in the background, so other
-commands remain available. Scan cancellation and shutdown also cancel input
-processing; a cancelled import does not save scan results or create a playlist.
+decoding, CUE expansion, and metadata scanning run in the background. Cancellation
+and shutdown cancel preparation without saving results or creating a playlist.
+Once Saving begins, the link:02_library.adoc#_cancellation[scan maintenance and cancellation rules]
+apply instead.
 
 Import inputs must be ordinary files, including CUE sheets referenced by M3U;
 directories, devices, and FIFOs are rejected without waiting for a writer. M3U
@@ -200,11 +202,16 @@ Scan saving, playlist creation, and playlist refresh are separate stages. A
 failure to save the scan does not create a playlist. Once the scan has been
 saved, a later library refresh or playlist creation failure does not roll back
 the saved tracks; once the playlist has been created, a playlist refresh failure
-does not delete it. Task errors identify these committed stages. The import is
-not automatically replayed after a failure.
+does not delete it. Task results retain `library_committed` and `playlist_id` for
+confirmed commits, including failures of later steps. The import is not replayed
+automatically; inspect the result before retrying a missing step.
 
 Listings and exports include every entry, not only the visible rows. For listing
 changes and retry behavior, see link:02_library.adoc#_paged_views[Paged views].
+Export runs in the background and permits only one active export. Its command
+reply reports final output, not startup. Concurrent edits do not alter its snapshot.
+Failure or shutdown cancellation before replacement preserves the old target;
+a response timeout does not cancel the worker or prove that replacement failed.
 
 [source,sh]
 ----

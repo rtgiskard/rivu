@@ -73,6 +73,16 @@ impl CueSegment {
     }
 }
 
+/// Only the metadata needed to write a playlist export.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlaylistExportTrack {
+    pub path: PathBuf,
+    pub title: String,
+    pub artist: String,
+    pub duration: Option<f64>,
+    pub cue: Option<CueSegment>,
+}
+
 /// User-selected decoder routing, applied when opening a track for playback.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -422,6 +432,12 @@ pub struct ScanTaskStatus {
     pub id: u64,
     pub progress: ScanProgress,
     pub message: String,
+    /// The library commit was confirmed, even if a later task step failed.
+    /// On failure, false does not guarantee that no database changes occurred.
+    pub library_committed: bool,
+    /// A playlist was committed by this import, independent of refresh success.
+    /// On failure, None does not prove that no playlist was created.
+    pub playlist_id: Option<i64>,
     pub error: Option<String>,
 }
 

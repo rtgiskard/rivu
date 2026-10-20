@@ -307,8 +307,11 @@ pub(super) async fn write_request_frame_buffered<S: AsyncWrite + Unpin>(
     stream: &mut S,
     request: &WireRequest,
     buffer: &mut Vec<u8>,
+    write_started: &mut bool,
 ) -> Result<()> {
     encode_request_frame_into(request, buffer)?;
+    // Encoding failure is known not sent; any attempted socket write is unknown.
+    *write_started = true;
     stream
         .write_all(buffer)
         .await

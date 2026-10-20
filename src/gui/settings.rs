@@ -1581,7 +1581,7 @@ impl Settings {
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                let result = if response.ok {
+                let result = if response.is_success() {
                     Ok(())
                 } else {
                     Err(response
@@ -2101,7 +2101,7 @@ mod tests {
         patch: ConfigPatch,
     ) -> (Arc<Config>, std::result::Result<(), String>) {
         let response = runtime.handle.apply_gui_settings(patch);
-        let result = if response.ok {
+        let result = if response.is_success() {
             Ok(())
         } else {
             Err(response.error.unwrap())
@@ -2270,7 +2270,7 @@ mod tests {
             runtime
                 .handle
                 .request_ack(Command::Volume { value: 0.2 })
-                .ok
+                .is_success()
         );
         let (committed, result) = execute(&runtime, patch);
         assert!(result.is_ok());
@@ -2308,7 +2308,7 @@ mod tests {
             runtime
                 .handle
                 .request_ack(Command::Volume { value: 0.3 })
-                .ok
+                .is_success()
         );
         let (committed, result) = execute(&runtime, patch);
         assert!(result.is_ok());
@@ -2426,7 +2426,7 @@ mod tests {
             runtime
                 .handle
                 .request_ack(Command::Volume { value: 0.2 })
-                .ok
+                .is_success()
         );
         let (patch, submission) = submit(&settings, cx);
         let (committed, result) = execute(&runtime, patch);

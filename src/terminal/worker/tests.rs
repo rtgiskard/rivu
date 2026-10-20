@@ -383,7 +383,7 @@ fn command_worker_reports_ambiguous_failure_without_replaying_the_mutation() {
         reply_test_ack(
             &mut stream,
             Ack {
-                ok: true,
+                status: crate::response::AckStatus::Succeeded,
                 error: None,
                 revision: 2,
                 scan_id: None,
@@ -400,13 +400,13 @@ fn command_worker_reports_ambiguous_failure_without_replaying_the_mutation() {
             name: "first".into(),
         })
         .unwrap();
-    assert!(
-        worker
-            .results
-            .recv_timeout(Duration::from_secs(5))
-            .unwrap()
-            .is_err()
-    );
+    let failure = worker
+        .results
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap()
+        .unwrap_err();
+    assert!(failure.message.contains("Command outcome unknown"));
+    assert!(failure.message.contains("do not automatically retry"));
     worker
         .sender
         .as_ref()
@@ -420,7 +420,7 @@ fn command_worker_reports_ambiguous_failure_without_replaying_the_mutation() {
         .recv_timeout(Duration::from_secs(5))
         .unwrap()
         .unwrap();
-    assert!(ack.ok);
+    assert!(ack.is_success());
     assert_eq!(ack.revision, 2);
     drop(worker);
     server.join().unwrap();

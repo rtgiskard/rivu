@@ -139,10 +139,6 @@ impl QueryRevisions {
     }
 }
 
-#[expect(
-    clippy::large_enum_variant,
-    reason = "Single-track query results stay inline without an extra allocation on read and decode"
-)]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ViewResponse {
     Albums(Page<crate::model::AlbumSummary>),
@@ -248,15 +244,50 @@ impl StateResponse {
     }
 }
 
+/// What is known about a command, not a guarantee of transaction rollback.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AckStatus {
+    Succeeded,
+    /// The business owner returned an error; effects may already be committed.
+    Failed,
+    /// The command was not admitted to its business owner.
+    NotAdmitted,
+    /// Admission or completion cannot be established. Never replay automatically.
+    Unknown,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Ack {
-    pub ok: bool,
+    pub status: AckStatus,
     pub error: Option<String>,
     pub revision: u64,
     /// Present only when this command accepted a new scan/import task.
     pub scan_id: Option<u64>,
     /// Present only when this command accepted a manual relocation task.
     pub relocation_id: Option<u64>,
+}
+
+impl Ack {
+    pub fn from_result(result: anyhow::Result<()>, revision: u64) -> Self {
+        match result {
+            Ok(()) => Self::new(AckStatus::Succeeded, None, revision),
+            Err(error) => Self::new(AckStatus::Failed, Some(format!("{error:#}")), revision),
+        }
+    }
+
+    pub fn new(status: AckStatus, error: Option<String>, revision: u64) -> Self {
+        Self {
+            status,
+            error,
+            revision,
+            scan_id: None,
+            relocation_id: None,
+        }
+    }
+
+    pub fn is_success(&self) -> bool {
+        self.status == AckStatus::Succeeded
+    }
 }
 
 #[cfg(test)]

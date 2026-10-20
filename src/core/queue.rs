@@ -32,6 +32,8 @@ impl Core {
         }
     }
 
+    // Queue mutations persist their own transaction. Playback selection uses
+    // this boundary too; shutdown retries final persistence.
     pub(in crate::core) fn save_queue(&mut self) -> Result<()> {
         self.store.set_queue_current(self.state.queue.current_id)?;
         self.state.queue = self.store.queue_projection(self.queue_ids.len())?;

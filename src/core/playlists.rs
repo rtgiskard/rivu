@@ -58,7 +58,7 @@ impl Core {
         }
         Ok(())
     }
-    fn next_playlist_entry_revision(&mut self) -> u64 {
+    pub(in crate::core) fn next_playlist_entry_revision(&mut self) -> u64 {
         self.state.playlist_content_sequence = self
             .state
             .playlist_content_sequence
@@ -83,6 +83,11 @@ impl Core {
         let revision = self.next_playlist_entry_revision();
         Arc::make_mut(&mut self.state.library.playlist_entry_revisions)
             .insert(playlist_id, revision);
+        self.invalidate_playlist_creation(has_members);
+        self.refresh_playlist_count()
+    }
+
+    pub(in crate::core) fn invalidate_playlist_creation(&mut self, has_members: bool) {
         if has_members {
             self.state.library.duplicate_members_revision = self
                 .state
@@ -90,7 +95,7 @@ impl Core {
                 .duplicate_members_revision
                 .wrapping_add(1);
         }
-        self.reload_playlists()
+        self.state.library.playlist_revision = self.state.library.playlist_revision.wrapping_add(1);
     }
 
     pub(in crate::core) fn playlist_deleted(
@@ -190,33 +195,5 @@ impl Core {
             self.advance_playlist_entry_revision(playlist_id);
         }
         Ok(())
-    }
-
-    pub(in crate::core) fn export_playlist(&self, playlist_id: i64, path: &Path) -> Result<()> {
-        let mut after = None;
-        let mut rows = Vec::new().into_iter();
-        let mut done = false;
-        let tracks = std::iter::from_fn(|| {
-            loop {
-                if let Some(track) = rows.next() {
-                    return Some(Ok(track));
-                }
-                if done {
-                    return None;
-                }
-                let batch = match self.store.playlist_track_batch(
-                    playlist_id,
-                    after,
-                    crate::model::MAX_QUERY_ROWS,
-                ) {
-                    Ok(batch) => batch,
-                    Err(error) => return Some(Err(error)),
-                };
-                after = batch.next;
-                done = after.is_none();
-                rows = batch.rows.into_iter();
-            }
-        });
-        library::export_m3u(path, tracks)
     }
 }

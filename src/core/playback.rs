@@ -118,6 +118,17 @@ impl Core {
         let Some((source, before)) = playback.source.as_ref() else {
             return false;
         };
+        if self.database_maintenance_active() {
+            if exact
+                || !self
+                    .pending_bitrate
+                    .is_some_and(|(_, pending_exact)| pending_exact)
+            {
+                self.pending_bitrate = Some((bitrate, exact));
+            }
+            self.playback_write_deferred = true;
+            return false;
+        }
         if !std::fs::metadata(&source.path).is_ok_and(|after| same_source_file(before, &after))
             || !self
                 .store
@@ -181,6 +192,11 @@ impl Core {
         if status != PlaybackStatus::Stopped && !track.path.is_file() {
             bail!("Missing audio file: {}", track.path.display());
         }
+        // Independent controls do not depend on database recovery. Only a new
+        // playback owner must settle the previous producer before replacing it.
+        if self.retired_playback.is_some() {
+            self.flush_deferred_playback()?;
+        }
         self.stop()?;
         // Retiring Started/Ended bookkeeping can enrich this same track in the store.
         // Keep the missing-file preflight above, but load the authoritative snapshot now.
@@ -226,6 +242,10 @@ impl Core {
         self.save_queue()
     }
     pub(in crate::core) fn count_play(&mut self) -> Result<()> {
+        if self.database_maintenance_active() {
+            self.playback_write_deferred = true;
+            return Ok(());
+        }
         let Some(duration) = self
             .state
             .playback
@@ -267,13 +287,17 @@ impl Core {
             .as_ref()
             .and_then(|playback| playback.paused_at)
             .map_or(played_at, |paused_at| played_at.min(paused_at));
-        let stats = match self.store.mark_played(track_id, played_at) {
-            Ok(stats) => stats,
-            Err(error) => {
-                // Rejected bookkeeping cannot be revived by another queued start
-                // or counted from the output's final snapshot.
-                self.playback = None;
-                return Err(error);
+        let stats = if self.database_maintenance_active() {
+            self.playback_write_deferred = true;
+            None
+        } else {
+            match self.store.mark_played(track_id, played_at) {
+                Ok(stats) => Some(stats),
+                Err(error) => {
+                    // A rejected start cannot be revived by a later output snapshot.
+                    self.playback = None;
+                    return Err(error);
+                }
             }
         };
         // Coalesce this content change with the existing start bookkeeping's
@@ -284,6 +308,9 @@ impl Core {
         let playback = self.playback.as_mut().expect("playback was checked above");
         playback.started = true;
         playback.last_heard_at = Some(played_at);
+        if stats.is_none() {
+            playback.activity_updated = true;
+        }
         self.state.playback.last_heard_at = Some(played_at);
         self.state.playback.duration = info
             .duration
@@ -293,10 +320,12 @@ impl Core {
                 .playback
                 .duration
                 .filter(|duration| duration.is_finite() && *duration > 0.0));
-        self.update_track_stats(track_id, stats)?;
-        self.state.library.history = Arc::new(self.store.history(MAX_QUERY_ROWS).context(
-            "Playback start committed, but refreshing history failed; previous history retained",
-        )?);
+        if let Some(stats) = stats {
+            self.update_track_stats(track_id, stats)?;
+            self.state.library.history = Arc::new(self.store.history(MAX_QUERY_ROWS).context(
+                "Playback start committed, but refreshing history failed; previous history retained",
+            )?);
+        }
         self.count_play()
     }
     pub(in crate::core) fn playback_progress(&mut self, position: f64, heard: f64) -> Result<()> {
@@ -405,6 +434,17 @@ impl Core {
                 final_activity = playback.last_heard_at.map(|at| (playback.track_id, at));
             }
         }
+        if self.database_maintenance_active() {
+            if let Some(stats) = self.playback.take() {
+                debug_assert!(self.retired_playback.is_none());
+                self.retired_playback = Some(RetiredPlayback {
+                    stats,
+                    duration: self.state.playback.duration,
+                });
+                self.playback_write_deferred = true;
+            }
+            return bookkeeping;
+        }
         let result = (|| -> Result<()> {
             bookkeeping?;
             if let Some((track_id, played_at)) = final_activity {
@@ -451,6 +491,13 @@ impl Core {
         natural: bool,
         status: PlaybackStatus,
     ) -> Result<()> {
+        if self.database_maintenance_active() {
+            if natural {
+                self.pending_navigation = Some(status);
+                return Ok(());
+            }
+            bail!("Database maintenance is in progress; navigation was not executed");
+        }
         if self.queue_ids.is_empty() {
             return self.stop();
         }
@@ -534,6 +581,84 @@ impl Core {
         self.audio(AudioCommand::Seek(seconds))?;
         self.state.playback.position = seconds;
         self.state.playback.seek_revision = self.state.playback.seek_revision.wrapping_add(1);
+        Ok(())
+    }
+
+    /// Replay only retained producer facts, never timed-out user commands.
+    pub(in crate::core) fn flush_deferred_playback(&mut self) -> Result<()> {
+        if self.database_maintenance_active() {
+            return Ok(());
+        }
+        let retired = self.retired_playback.take();
+        let retired_duration = retired.as_ref().map(|playback| playback.duration);
+        if let Some(retired) = retired {
+            debug_assert!(self.playback.is_none());
+            self.playback = Some(retired.stats);
+        }
+        let duration = self.state.playback.duration;
+        if let Some(retired_duration) = retired_duration {
+            self.state.playback.duration = retired_duration;
+        }
+        let result = (|| -> Result<()> {
+            if !std::mem::take(&mut self.playback_write_deferred) && retired_duration.is_none() {
+                return Ok(());
+            }
+            if let Some((bitrate, exact)) = self.pending_bitrate.take()
+                && self.persist_playback_bitrate(bitrate, exact)
+            {
+                let track_id = self
+                    .playback
+                    .as_ref()
+                    .expect("bitrate needs playback")
+                    .track_id;
+                self.state
+                    .library
+                    .change_metadata(Some(&[track_id]), Some(&[]));
+            }
+            // The count's committed bit precedes projection reads. Attempt both
+            // producer facts even if one projection fails; never count twice.
+            let count = self.count_play();
+            let activity = if let Some((track_id, at)) =
+                self.playback.as_ref().and_then(|playback| {
+                    playback
+                        .started
+                        .then_some((playback.track_id, playback.last_heard_at))
+                        .and_then(|(id, at)| at.map(|at| (id, at)))
+                }) {
+                self.store.mark_played(track_id, at).and_then(|stats| {
+                    let projection = self.update_track_stats(track_id, stats);
+                    let history = self.store.history(MAX_QUERY_ROWS).map(|history| {
+                        self.state.library.history = Arc::new(history);
+                    });
+                    projection.and(history)
+                })
+            } else {
+                Ok(())
+            };
+            count.and(activity)
+        })();
+        if retired_duration.is_some() {
+            if let Some(stats) = self.playback.take()
+                && result.is_err()
+            {
+                // Park facts on failure; explicit commands and shutdown recover
+                // them before another playback can replace this bounded owner.
+                self.retired_playback = Some(RetiredPlayback {
+                    stats,
+                    duration: self.state.playback.duration,
+                });
+            }
+            self.state.playback.duration = duration;
+        }
+        if result.is_err() {
+            self.pending_navigation = None;
+        }
+        result?;
+        if let Some(status) = self.pending_navigation.take()
+            && !self.state.system.shutting_down
+        {
+            self.advance_with_status(true, status)?;
+        }
         Ok(())
     }
 }

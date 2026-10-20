@@ -136,6 +136,13 @@ impl Core {
         if track_ids.is_empty() {
             return Ok(());
         }
+        if self
+            .retired_playback
+            .as_ref()
+            .is_some_and(|retired| track_ids.contains(&retired.stats.track_id))
+        {
+            self.flush_deferred_playback()?;
+        }
         let removal = self.store.prepare_track_removal(&track_ids)?;
         if self
             .state
@@ -203,6 +210,9 @@ impl Core {
     }
 
     pub(in crate::core) fn remove_missing_tracks(&mut self) -> Result<()> {
+        if self.retired_playback.is_some() {
+            self.flush_deferred_playback()?;
+        }
         if self
             .state
             .current_track()
@@ -277,11 +287,8 @@ impl Core {
         entry.play_count = track.play_count;
     }
 
-    /// Announce committed producer facts before any fallible cached projection read.
-    pub(in crate::core) fn apply_scan_impacts(
-        &mut self,
-        impacts: crate::store::ScanImpacts,
-    ) -> Result<()> {
+    /// Publish committed facts without reading potentially large projections.
+    pub(in crate::core) fn invalidate_scan_impacts(&mut self, impacts: crate::store::ScanImpacts) {
         if impacts.library {
             self.state.library.revision = self.state.library.revision.wrapping_add(1);
         }
@@ -300,6 +307,14 @@ impl Core {
                 .duplicate_members_revision
                 .wrapping_add(1);
         }
+    }
+
+    /// Announce committed producer facts before any fallible cached projection read.
+    pub(in crate::core) fn apply_scan_impacts(
+        &mut self,
+        impacts: crate::store::ScanImpacts,
+    ) -> Result<()> {
+        self.invalidate_scan_impacts(impacts);
         let library = if impacts.structure {
             self.store
                 .track_count()

@@ -8,7 +8,7 @@ use crate::{
     app::AppCommand,
     core::CoreHandle,
     model::Query,
-    response::{Ack, QueryResponse, StateResponse, StateRevisions, StateSections},
+    response::{Ack, AckStatus, QueryResponse, StateResponse, StateRevisions, StateSections},
 };
 use anyhow::{Context, Result, bail};
 use bytes::BytesMut;
@@ -32,6 +32,23 @@ impl std::fmt::Display for InstanceChanged {
 }
 
 impl std::error::Error for InstanceChanged {}
+
+/// Transport evidence for a failed command exchange; no mutation is replayed.
+#[derive(Debug)]
+pub struct CommandFailure {
+    pub status: AckStatus,
+}
+
+impl std::fmt::Display for CommandFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self.status {
+            AckStatus::NotAdmitted => "Command not admitted (not sent)",
+            _ => "Command outcome unknown; do not automatically retry",
+        })
+    }
+}
+
+impl std::error::Error for CommandFailure {}
 
 #[derive(Clone, Default)]
 pub struct SessionStop {
@@ -156,6 +173,15 @@ impl ClientSession {
     }
 
     fn exchange(&mut self, request: &WireRequest, wait_timeout: Duration) -> Result<WireResponse> {
+        self.exchange_with_write_evidence(request, wait_timeout, &mut false)
+    }
+
+    fn exchange_with_write_evidence(
+        &mut self,
+        request: &WireRequest,
+        wait_timeout: Duration,
+        write_started: &mut bool,
+    ) -> Result<WireResponse> {
         let result = self.runtime.block_on(async {
             tokio::select! {
                 biased;
@@ -170,7 +196,7 @@ impl ClientSession {
                         })?);
                     }
                     let stream = self.stream.as_mut().unwrap();
-                    write_request_frame_buffered(stream, request, &mut self.write_buffer).await?;
+                    write_request_frame_buffered(stream, request, &mut self.write_buffer, write_started).await?;
                     let response = read_response_frame(stream, &mut self.read_buffer);
                     if matches!(request, WireRequest::Watch(_)) {
                         response.await
@@ -238,14 +264,30 @@ impl ClientSession {
     }
 
     pub fn request_ack(&mut self, command: &(impl Clone + Into<AppCommand>)) -> Result<Ack> {
-        self.ensure_handshake()?;
+        self.ensure_handshake().context(CommandFailure {
+            status: AckStatus::NotAdmitted,
+        })?;
         let command: AppCommand = command.clone().into();
         let wait_timeout = command.wait_timeout();
         let request = WireRequest::Command(WireCommand::from(command));
-        match unpack_error(self.exchange(&request, wait_timeout)?)? {
-            WireResponse::Ack(response) => Ok(response),
-            _ => bail!("IPC response was not an acknowledgement"),
+        let mut write_started = false;
+        let result = self
+            .exchange_with_write_evidence(&request, wait_timeout, &mut write_started)
+            .and_then(unpack_error)
+            .and_then(|response| match response {
+                WireResponse::Ack(response) => Ok(response),
+                _ => bail!("IPC response was not an acknowledgement"),
+            });
+        if result.is_err() {
+            self.disconnect();
         }
+        result.context(CommandFailure {
+            status: if write_started {
+                AckStatus::Unknown
+            } else {
+                AckStatus::NotAdmitted
+            },
+        })
     }
 
     pub fn watch(&mut self, revisions: StateRevisions) -> Result<StateRevisions> {
@@ -280,7 +322,11 @@ pub fn get_state(data_dir: &Path, sections: StateSections) -> Result<StateRespon
 }
 
 pub fn request_ack(data_dir: &Path, command: &(impl Clone + Into<AppCommand>)) -> Result<Ack> {
-    client_session(data_dir)?.request_ack(command)
+    client_session(data_dir)
+        .context(CommandFailure {
+            status: AckStatus::NotAdmitted,
+        })?
+        .request_ack(command)
 }
 
 #[cfg(test)]
@@ -356,7 +402,7 @@ mod tests {
                 write_frame_buffered(
                     &mut stream,
                     &WireResponse::Ack(Ack {
-                        ok: true,
+                        status: AckStatus::Succeeded,
                         error: None,
                         revision: 17,
                         scan_id: None,
@@ -372,9 +418,116 @@ mod tests {
         };
 
         let ack = client.request_ack(&Command::OptimizeDatabase).unwrap();
-        assert!(ack.ok);
+        assert!(ack.is_success());
         assert_eq!(ack.revision, 17);
         drop(client.runtime.block_on(server).unwrap());
+    }
+
+    #[test]
+    fn command_timeout_is_unknown_and_next_request_is_not_a_replay() {
+        use super::super::tests::{complete_test_handshake, read_test_command, reply_test_ack};
+        use crate::model::Command;
+        use std::{io::Read, os::unix::net::UnixListener};
+
+        let directory = super::super::tests::socket_test_directory();
+        let listener =
+            UnixListener::bind_addr(&super::super::endpoint::address(directory.path()).unwrap())
+                .unwrap();
+        let (read, command_read) = tokio::sync::oneshot::channel();
+        let server = std::thread::spawn(move || {
+            let mut stream = listener.accept().unwrap().0;
+            complete_test_handshake(&mut stream);
+            assert!(
+                matches!(read_test_command(&mut stream), Command::CreatePlaylist { name } if name == "first")
+            );
+            read.send(()).unwrap();
+            assert_eq!(stream.read(&mut [0]).unwrap(), 0);
+            let mut stream = listener.accept().unwrap().0;
+            complete_test_handshake(&mut stream);
+            assert!(
+                matches!(read_test_command(&mut stream), Command::CreatePlaylist { name } if name == "second")
+            );
+            reply_test_ack(&mut stream, Ack::from_result(Ok(()), 2));
+        });
+        let mut client = client_session(directory.path()).unwrap();
+        let guard = {
+            let _entered = client.runtime.enter();
+            tokio::time::pause();
+            // Keep real socket I/O from triggering Tokio's automatic time advance.
+            let guard = tokio::spawn(async {
+                loop {
+                    tokio::task::yield_now().await;
+                }
+            });
+            tokio::spawn(async move {
+                command_read.await.unwrap();
+                tokio::time::advance(
+                    super::super::transport::response_timeout(CoreHandle::query_wait_timeout())
+                        + Duration::from_secs(1),
+                )
+                .await;
+            });
+            guard
+        };
+        let error = client
+            .request_ack(&Command::CreatePlaylist {
+                name: "first".into(),
+            })
+            .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<CommandFailure>().unwrap().status,
+            AckStatus::Unknown
+        );
+        assert!(format!("{error:#}").contains("do not automatically retry"));
+        assert!(
+            client
+                .request_ack(&Command::CreatePlaylist {
+                    name: "second".into()
+                })
+                .unwrap()
+                .is_success()
+        );
+        guard.abort();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn handshake_and_encoding_failures_do_not_send_a_command() {
+        use super::super::tests::complete_test_handshake;
+        use crate::model::Command;
+        use std::{io::Read, os::unix::net::UnixListener};
+
+        let directory = super::super::tests::socket_test_directory();
+        let listener =
+            UnixListener::bind_addr(&super::super::endpoint::address(directory.path()).unwrap())
+                .unwrap();
+        let server = std::thread::spawn(move || {
+            // First connection closes before Hello completes, so nothing was sent.
+            drop(listener.accept().unwrap().0);
+            let mut stream = listener.accept().unwrap().0;
+            complete_test_handshake(&mut stream);
+            // An oversized command fails encoding and the session closes it.
+            assert_eq!(stream.read(&mut [0]).unwrap(), 0);
+        });
+        let mut client = client_session(directory.path()).unwrap();
+        let error = client.request_ack(&Command::Pause).unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<CommandFailure>().unwrap().status,
+            AckStatus::NotAdmitted
+        );
+        let error = client
+            .request_ack(&Command::Scan {
+                paths: vec![PathBuf::from(
+                    "x".repeat(super::super::protocol::MAX_REQUEST),
+                )],
+                force: false,
+            })
+            .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<CommandFailure>().unwrap().status,
+            AckStatus::NotAdmitted
+        );
+        server.join().unwrap();
     }
 
     #[test]

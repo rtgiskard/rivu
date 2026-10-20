@@ -7,7 +7,7 @@ use crate::{
     model::*,
     projection::{GuiSnapshot, MprisSnapshot, TraySnapshot},
     response::{
-        Ack, PlaybackSnapshot, QueryError, QueryResponse, QueryRevisions, StateResponse,
+        Ack, AckStatus, PlaybackSnapshot, QueryError, QueryResponse, QueryRevisions, StateResponse,
         StateRevisions, StateSections, ViewResponse,
     },
     store::Store,
@@ -147,9 +147,9 @@ impl CoreState {
 #[derive(Clone)]
 pub struct CoreHandle {
     state: Arc<RwLock<CoreState>>,
-    pub analysis: Arc<RwLock<AnalysisFrame>>,
+    pub(crate) analysis: Arc<RwLock<AnalysisFrame>>,
     analysis_control: Arc<AnalysisControl>,
-    pub waveform: Arc<RwLock<audio::WaveformFrame>>,
+    pub(crate) waveform: Arc<RwLock<audio::WaveformFrame>>,
     sender: Sender<Request>,
     wakeup: Arc<RwLock<Option<Wakeup>>>,
     subscribers: Arc<RwLock<Vec<Sender<()>>>>,
@@ -218,6 +218,7 @@ impl CoreHandle {
             })
             .context("Rivu is busy or stopped")
     }
+    #[cfg(test)]
     pub fn is_shutting_down(&self) -> bool {
         self.state.read().system.shutting_down
     }
@@ -394,24 +395,23 @@ impl CoreHandle {
             operation,
             reply: Some(tx),
         };
-        let response = self
-            .sender
-            .send_timeout(request, ADMISSION_TIMEOUT)
-            .map_err(|error| format!("Core unavailable: {error}"))
-            .and_then(|()| {
-                rx.recv_timeout(duration)
-                    .map_err(|error| format!("Core response unavailable: {error}"))
-            });
-        match response {
+        if let Err(error) = self.sender.send_timeout(request, ADMISSION_TIMEOUT) {
+            return Ack::new(
+                AckStatus::NotAdmitted,
+                Some(format!("Core command not admitted: {error}")),
+                self.revision(),
+            );
+        }
+        match rx.recv_timeout(duration) {
             Ok(CoreResponse::Ack(ack)) => ack,
             Ok(CoreResponse::Query(_)) => unreachable!("command request returned query"),
-            Err(error) => Ack {
-                ok: false,
-                error: Some(error),
-                revision: self.revision(),
-                scan_id: None,
-                relocation_id: None,
-            },
+            Err(error) => Ack::new(
+                AckStatus::Unknown,
+                Some(format!(
+                    "Core command outcome unknown: {error}; do not automatically retry"
+                )),
+                self.revision(),
+            ),
         }
     }
 }
@@ -457,6 +457,7 @@ impl RuntimeControl {
         }
     }
 
+    /// Acknowledges the shutdown request, not completion of runtime teardown.
     pub(crate) fn shutdown_ack(&self, revision: impl Fn() -> u64) -> Ack {
         let requested = self.request_shutdown();
         let mut state = self.completion.state.lock();
@@ -468,19 +469,21 @@ impl RuntimeControl {
             }
             self.completion.acknowledged.wait_for(&mut state, remaining);
         }
-        state.ack.clone().unwrap_or_else(|| Ack {
-            ok: false,
-            error: Some(
-                if state.finished {
-                    "Core stopped before shutdown acknowledgement"
+        state.ack.clone().unwrap_or_else(|| {
+            let status = if requested.is_err() {
+                AckStatus::NotAdmitted
+            } else {
+                AckStatus::Unknown
+            };
+            Ack::new(
+                status,
+                Some(if status == AckStatus::NotAdmitted {
+                    "Core stopped; shutdown request not admitted".into()
                 } else {
-                    "Core shutdown acknowledgement unavailable"
-                }
-                .into(),
-            ),
-            revision: revision(),
-            scan_id: None,
-            relocation_id: None,
+                    "Core shutdown outcome unknown; do not automatically retry".into()
+                }),
+                revision(),
+            )
         })
     }
 
@@ -534,6 +537,7 @@ impl Runtime {
         Config::load(config_path)
     }
 
+    #[cfg(test)]
     /// Start a standalone core without installing or owning process logging.
     pub fn start(data_dir: &Path, config_path: &Path) -> Result<Self> {
         Self::start_inner(
@@ -624,6 +628,12 @@ impl Runtime {
                     output_settings_request: 0,
                     queue_ids: Vec::new(),
                     playback: None,
+                    retired_playback: None,
+                    playback_write_deferred: false,
+                    pending_bitrate: None,
+                    pending_navigation: None,
+                    active_export: None,
+                    active_optimization: None,
                     scan_tx,
                     scan_rx,
                     active_scan: None,
@@ -724,6 +734,11 @@ impl PlaybackStats {
         true
     }
 }
+struct RetiredPlayback {
+    stats: PlaybackStats,
+    duration: Option<f64>,
+}
+
 struct ScanFinished {
     id: u64,
     result: Result<ScanResult>,
@@ -741,12 +756,14 @@ enum ScanEvent {
         reply: Sender<Result<Option<library::KnownFile>>>,
     },
     Finished(ScanFinished),
+    Saved(catalog::ScanSaved),
 }
 const MAX_RETAINED_SCAN_RESULTS: usize = 32;
 struct ScanTask {
     status: ScanTaskStatus,
     cancellation: library::ScanCancellation,
     worker: JoinHandle<()>,
+    pending_save: Option<ScanFinished>,
 }
 struct RelocationTask {
     status: RelocationTaskStatus,
@@ -779,6 +796,13 @@ struct Core {
     // The only full queue projection: compact occurrence IDs, never shared with clients.
     queue_ids: Vec<u64>,
     playback: Option<PlaybackStats>,
+    // At most one playback can retire while database writes are excluded.
+    retired_playback: Option<RetiredPlayback>,
+    playback_write_deferred: bool,
+    pending_bitrate: Option<(u64, bool)>,
+    pending_navigation: Option<PlaybackStatus>,
+    active_export: Option<export::ExportTask>,
+    active_optimization: Option<maintenance::OptimizationTask>,
     scan_tx: Sender<ScanEvent>,
     scan_rx: Receiver<ScanEvent>,
     active_scan: Option<ScanTask>,
@@ -824,6 +848,9 @@ impl Core {
 mod catalog;
 mod command;
 mod dispatch;
+mod export;
+mod maintenance;
+mod persistence;
 mod playback;
 mod playlists;
 mod queue;

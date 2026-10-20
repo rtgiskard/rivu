@@ -60,6 +60,7 @@ fn queue_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueueRow> {
 }
 
 impl Store {
+    #[cfg(test)]
     pub fn queue_state(&self) -> Result<QueueState> {
         let total = self
             .conn
@@ -136,6 +137,7 @@ impl Store {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn queue_page(
         &self,
         query: Option<&str>,

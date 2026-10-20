@@ -1056,7 +1056,7 @@ unsafe fn copy_samples<T: Copy>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::audio::open_regular_file;
+    use crate::file_input::open_regular_file;
 
     #[test]
     fn encoded_duration_restores_skip_discard_and_rejects_manual_or_malformed_trim() {

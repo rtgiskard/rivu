@@ -104,39 +104,68 @@ fn relocation_key<'a>(hash: &'a str, cue: Option<&CueSegment>) -> RelocationKey<
 }
 
 #[cfg(test)]
-const KNOWN_COLUMNS: &str =
-    "id,path,file_size,modified_ns,fingerprint,raw_title,raw_artist,raw_album,
+const KNOWN_COLUMNS: &str = "file_size,modified_ns,fingerprint,raw_title,raw_artist,raw_album,
     duration,codec,channels,sample_rate,cue_sheet,cue_number,cue_start_frame,
     cue_end_frame,probe_version,bitrate_bps,track_number,disc_number,
-    bits_per_sample,release_date,bitrate_exact";
+    bits_per_sample,release_date,bitrate_exact,id,path";
 
 fn known_file_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<KnownFile> {
     Ok(KnownFile {
-        track_id: r.get(0)?,
-        path: PathBuf::from(r.get::<_, String>(1)?),
-        size: r.get::<_, i64>(2)? as u64,
-        modified_ns: r.get(3)?,
-        fingerprint: fingerprint_from_row(r, 4)?,
-        cue: cue_from_row(r, 12)?,
-        media: if r.get::<_, i64>(16)? == PROBE_VERSION {
+        size: r.get::<_, i64>(0)? as u64,
+        modified_ns: r.get(1)?,
+        fingerprint: fingerprint_from_row(r, 2)?,
+        cue: cue_from_row(r, 10)?,
+        media: if r.get::<_, i64>(14)? == PROBE_VERSION {
             Some(MediaInfo {
-                title: r.get(5)?,
-                artist: r.get(6)?,
-                album: r.get(7)?,
-                duration: r.get(8)?,
-                codec: r.get(9)?,
-                channels: r.get::<_, i64>(10)? as u16,
-                sample_rate: r.get::<_, i64>(11)? as u32,
-                bitrate_bps: r.get::<_, Option<i64>>(17)?.map(|value| value as u64),
-                bitrate_exact: r.get(22)?,
-                track_number: r.get(18)?,
-                disc_number: r.get(19)?,
-                bits_per_sample: r.get(20)?,
-                release_date: r.get(21)?,
+                title: r.get(3)?,
+                artist: r.get(4)?,
+                album: r.get(5)?,
+                duration: r.get(6)?,
+                codec: r.get(7)?,
+                channels: r.get::<_, i64>(8)? as u16,
+                sample_rate: r.get::<_, i64>(9)? as u32,
+                bitrate_bps: r.get::<_, Option<i64>>(15)?.map(|value| value as u64),
+                bitrate_exact: r.get(20)?,
+                track_number: r.get(16)?,
+                disc_number: r.get(17)?,
+                bits_per_sample: r.get(18)?,
+                release_date: r.get(19)?,
             })
         } else {
             None
         },
+    })
+}
+
+/// Raw database identity and metadata used by integration test fixtures.
+#[cfg(test)]
+pub(crate) struct StoredScanFile {
+    pub track_id: i64,
+    pub path: PathBuf,
+    pub size: u64,
+    pub modified_ns: i64,
+    pub fingerprint: Option<String>,
+    pub media: Option<MediaInfo>,
+    pub cue: Option<CueSegment>,
+}
+
+#[cfg(test)]
+fn stored_scan_file_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<StoredScanFile> {
+    let KnownFile {
+        size,
+        modified_ns,
+        fingerprint,
+        media,
+        cue,
+    } = known_file_from_row(r)?;
+    Ok(StoredScanFile {
+        track_id: r.get(21)?,
+        path: PathBuf::from(r.get::<_, String>(22)?),
+        size,
+        modified_ns,
+        fingerprint,
+        media,
+        cue,
     })
 }
 
@@ -146,7 +175,7 @@ impl Store {
     pub fn known_source(&self, path: &Path) -> Result<Option<KnownFile>> {
         let path = path.to_str().context("Scan source path is not UTF-8")?;
         let mut q = self.conn.prepare_cached(
-            "SELECT id,path,file_size,modified_ns,fingerprint,raw_title,raw_artist,raw_album,
+            "SELECT file_size,modified_ns,fingerprint,raw_title,raw_artist,raw_album,
                     duration,codec,channels,sample_rate,cue_sheet,cue_number,cue_start_frame,
                     cue_end_frame,probe_version,bitrate_bps,track_number,disc_number,
                     bits_per_sample,release_date,bitrate_exact
@@ -162,7 +191,7 @@ impl Store {
 
     /// Inspect stored raw metadata for test fixtures, including every CUE identity.
     #[cfg(test)]
-    pub(crate) fn stored_scan_files(&self, paths: &[PathBuf]) -> Result<Vec<KnownFile>> {
+    pub(crate) fn stored_scan_files(&self, paths: &[PathBuf]) -> Result<Vec<StoredScanFile>> {
         let (exact, prefixes) = scan_scope(paths)?;
         let mut q = self.conn.prepare(&format!(
             "SELECT {KNOWN_COLUMNS} FROM tracks WHERE id IN ({SCAN_SCOPE_IDS}) ORDER BY id"
@@ -172,7 +201,7 @@ impl Store {
                 serde_json::to_string(&exact)?,
                 serde_json::to_string(&prefixes)?
             ],
-            known_file_from_row,
+            stored_scan_file_from_row,
         )?
         .collect::<rusqlite::Result<Vec<_>>>()?)
     }
@@ -191,6 +220,7 @@ impl Store {
                 }
             }
         }
+        let transaction_started = std::time::Instant::now();
         let tx = self.conn.unchecked_transaction()?;
         let (mut exact, prefixes) = scan_scope(&result.roots)?;
         exact.extend(result.records.iter().map(|record| {
@@ -632,6 +662,11 @@ impl Store {
         }
         drop(mark_missing);
         tx.commit()?;
+        tracing::info!(
+            elapsed_ms = transaction_started.elapsed().as_millis(),
+            records = result.records.len(),
+            "library_scan_transaction_committed"
+        );
         impacts.changed = changed_tracks != 0;
         if impacts.library {
             self.track_cache.borrow_mut().entries.clear();
@@ -1224,7 +1259,6 @@ mod tests {
         );
         let known = store.known_source(&path).unwrap().unwrap();
         assert!(known.cue.is_none());
-        assert_eq!(known.path, path);
         assert!(
             store
                 .known_source(&directory.path().join("missing.wav"))
@@ -1233,11 +1267,13 @@ mod tests {
         );
         store
             .conn
-            .execute("DELETE FROM tracks WHERE id=?1", [known.track_id])
+            .execute(
+                "DELETE FROM tracks WHERE path=?1 AND cue_sheet IS NULL",
+                [path.to_str().unwrap()],
+            )
             .unwrap();
         let segment = store.known_source(&path).unwrap().unwrap();
         assert!(segment.cue.is_some());
-        assert_eq!(segment.path, path);
         assert_eq!(segment.fingerprint, known.fingerprint);
     }
 

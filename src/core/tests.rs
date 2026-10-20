@@ -5,6 +5,7 @@ use std::sync::atomic::Ordering;
 mod catalog;
 mod display;
 mod lifecycle;
+mod long_operations;
 mod navigation;
 mod playback;
 mod query;
@@ -87,6 +88,12 @@ fn fixture_with_database(duration: Option<f64>, persistent: bool) -> (tempfile::
         output_settings_request: 0,
         queue_ids: Vec::new(),
         playback: None,
+        retired_playback: None,
+        playback_write_deferred: false,
+        pending_bitrate: None,
+        pending_navigation: None,
+        active_export: None,
+        active_optimization: None,
         scan_tx,
         scan_rx,
         active_scan: None,

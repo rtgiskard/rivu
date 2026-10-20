@@ -1,7 +1,7 @@
 use super::ScanCancellation;
 use super::input::{MAX_CUE_BYTES, read_input};
 use super::paths::{is_cue_path, logical_path};
-use crate::model::Track;
+use crate::model::PlaylistExportTrack;
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use std::collections::HashMap;
 use std::io::{self, BufWriter, Write};
@@ -10,7 +10,6 @@ use std::path::{Path, PathBuf};
 #[derive(Clone, Debug)]
 pub struct M3uItem {
     pub path: PathBuf,
-    pub name: Option<String>,
     pub cue_track: Option<u32>,
 }
 
@@ -26,11 +25,13 @@ pub(crate) struct PlaylistImport {
 }
 
 /// Import a bounded CUE sheet in sheet order, or a UTF-8 M3U/M3U8 playlist.
+#[cfg(test)]
 pub fn import_playlist(path: &Path) -> Result<Vec<M3uItem>> {
     Ok(prepare_playlist_import(path, &ScanCancellation::default(), None)?.items)
 }
 
 /// Read a bounded UTF-8 M3U/M3U8, expanding complete CUE sheets in order.
+#[cfg(test)]
 pub fn import_m3u(path: &Path) -> Result<Vec<M3uItem>> {
     Ok(prepare_import(path, false, &ScanCancellation::default(), None)?.items)
 }
@@ -108,16 +109,13 @@ fn prepare_import(
             );
             for track in &sheet.tracks {
                 cancellation.check()?;
-                *expanded_bytes += std::mem::size_of::<M3uItem>()
-                    + path.as_os_str().len()
-                    + track.title.as_ref().map_or(0, String::len);
+                *expanded_bytes += std::mem::size_of::<M3uItem>() + path.as_os_str().len();
                 ensure!(
                     *expanded_bytes <= MAX_RETAINED_BYTES,
                     "import expansion exceeds retained data limit"
                 );
                 result.items.push(M3uItem {
                     path: path.to_path_buf(),
-                    name: track.title.clone(),
                     cue_track: Some(track.number),
                 });
             }
@@ -130,15 +128,10 @@ fn prepare_import(
         let text = std::str::from_utf8(bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes))
             .with_context(|| format!("Decoding import playlist {} as UTF-8", path.display()))?;
         let parent = path.parent().unwrap_or_else(|| Path::new("."));
-        let mut pending_name = None;
         for raw_line in text.lines() {
             cancellation.check()?;
             let line = raw_line.trim_end_matches('\r');
             if line.is_empty() {
-                continue;
-            }
-            if let Some(info) = line.strip_prefix("#EXTINF:") {
-                pending_name = info.split_once(',').map(|(_, name)| name.trim().to_owned());
                 continue;
             }
             if line.starts_with('#') {
@@ -157,7 +150,6 @@ fn prepare_import(
                     item_path.display()
                 );
             }
-            let name = pending_name.take();
             if is_cue_path(&item_path) {
                 add_cue(&item_path, &mut result, &mut expanded_bytes)?;
             } else {
@@ -165,16 +157,13 @@ fn prepare_import(
                     result.items.len() < MAX_IMPORT_ENTRIES,
                     "import expansion exceeds {MAX_IMPORT_ENTRIES} entries"
                 );
-                expanded_bytes += std::mem::size_of::<M3uItem>()
-                    + item_path.as_os_str().len()
-                    + name.as_ref().map_or(0, String::len);
+                expanded_bytes += std::mem::size_of::<M3uItem>() + item_path.as_os_str().len();
                 ensure!(
                     expanded_bytes <= MAX_RETAINED_BYTES,
                     "import expansion exceeds retained data limit"
                 );
                 result.items.push(M3uItem {
                     path: item_path,
-                    name,
                     cue_track: None,
                 });
             }
@@ -190,10 +179,11 @@ fn prepare_import(
 
 /// Export a database-ordered stream of unique playlist tracks atomically.
 /// SQLite enforces uniqueness; retain only the current CUE validation run.
-pub fn export_m3u<I>(path: &Path, tracks: I) -> Result<()>
+pub fn export_m3u<I>(path: &Path, tracks: I, cancellation: &ScanCancellation) -> Result<()>
 where
-    I: IntoIterator<Item = Result<Track>>,
+    I: IntoIterator<Item = Result<PlaylistExportTrack>>,
 {
+    cancellation.check()?;
     let path = logical_path(path)?;
     let parent = path.parent().context("playlist has no parent directory")?;
     let mut temporary =
@@ -203,6 +193,7 @@ where
         writer.write_all(b"#EXTM3U\n")?;
         let mut cue_run: Option<(PathBuf, super::cue::CueSheet, usize)> = None;
         for item in tracks {
+            cancellation.check()?;
             let mut track = item?;
             track.path = logical_path(&track.path)?;
             if let Some(cue) = &mut track.cue {
@@ -242,10 +233,9 @@ where
                 continue;
             }
             if let Some(cue) = &track.cue {
-                let cancellation = ScanCancellation::default();
-                let bytes = read_input(&cue.sheet, MAX_CUE_BYTES, &cancellation)
+                let bytes = read_input(&cue.sheet, MAX_CUE_BYTES, cancellation)
                     .with_context(|| format!("Reading export CUE {}", cue.sheet.display()))?;
-                let sheet = super::cue::parse_input(&bytes, &cue.sheet, &cancellation)?;
+                let sheet = super::cue::parse_input(&bytes, &cue.sheet, cancellation)?;
                 let expected = sheet
                     .tracks
                     .first()
@@ -289,6 +279,8 @@ where
         }
         writer.flush().context("flush playlist")?;
     }
+    // This is the file commit boundary: a later cancellation cannot undo replacement.
+    cancellation.check()?;
     temporary
         .persist(&path)
         .with_context(|| format!("replace playlist {}", path.display()))?;
@@ -329,22 +321,20 @@ fn write_relative_path(writer: &mut impl Write, parent: &Path, track: &Path) -> 
 }
 
 fn path_relative_to(parent: &Path, target: &Path) -> PathBuf {
-    let parent_components: Vec<_> = parent.components().collect();
-    let target_components: Vec<_> = target.components().collect();
-    let mut common = 0;
-    while common < parent_components.len()
-        && common < target_components.len()
-        && parent_components[common] == target_components[common]
+    let mut parent_components = parent.components().peekable();
+    let mut target_components = target.components().peekable();
+    while parent_components.peek().is_some() && parent_components.peek() == target_components.peek()
     {
-        common += 1;
+        parent_components.next();
+        target_components.next();
     }
     let mut relative = PathBuf::new();
-    for component in &parent_components[common..] {
+    for component in parent_components {
         if !matches!(component, std::path::Component::Prefix(_)) {
             relative.push("..");
         }
     }
-    for component in &target_components[common..] {
+    for component in target_components {
         relative.push(component.as_os_str());
     }
     if relative.as_os_str().is_empty() {

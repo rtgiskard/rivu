@@ -159,7 +159,11 @@ impl Core {
             "A relocation verification is already running"
         );
         self.require_relocation_playback_idle(source_id, target_id)?;
-        self.save_queue()?;
+        if self.retired_playback.as_ref().is_some_and(|retired| {
+            retired.stats.track_id == source_id || retired.stats.track_id == target_id
+        }) {
+            self.flush_deferred_playback()?;
+        }
         let prepared = self.store.prepare_relocation(source_id, target_id)?;
         let id = self.next_relocation_id;
         let next_id = id.checked_add(1).context("Relocation task IDs exhausted")?;

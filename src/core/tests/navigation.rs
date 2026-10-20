@@ -57,7 +57,7 @@ fn navigation_endpoint_preserves_execution_status_and_occurrence_selection() {
             let commands = recording_audio(&mut core);
             let (handle, control, worker, publications) = navigation_runtime(core);
             let ack = handle.navigate(direction);
-            assert!(ack.ok, "{:?}", ack.error);
+            assert!(ack.is_success(), "{:?}", ack.error);
             let snapshot = handle.mpris_snapshot();
             assert_eq!(snapshot.playback.status, status);
             assert_eq!(snapshot.queue.current_id, Some(expected));
@@ -174,7 +174,7 @@ fn queued_pause_is_authoritative_for_navigation_not_the_callers_snapshot() {
         PlaybackStatus::Playing
     );
     handle.send(Command::Pause).unwrap();
-    assert!(handle.navigate(Navigation::Next).ok);
+    assert!(handle.navigate(Navigation::Next).is_success());
     assert_eq!(
         handle.mpris_snapshot().playback.status,
         PlaybackStatus::Paused
@@ -210,7 +210,7 @@ fn previous_resets_position_without_loading_or_changing_status() {
         let seek_revision = core.state.playback.seek_revision;
         let commands = recording_audio(&mut core);
         let (handle, control, worker, publications) = navigation_runtime(core);
-        assert!(handle.navigate(Navigation::Previous).ok);
+        assert!(handle.navigate(Navigation::Previous).is_success());
         let snapshot = handle.mpris_snapshot();
         assert_eq!(snapshot.playback.status, status);
         assert_eq!(snapshot.queue.current_id, current);
@@ -251,7 +251,7 @@ fn shuffle_previous_preserves_status_and_follows_occurrence_history() {
         let commands = recording_audio(&mut core);
         let (handle, control, worker, publications) = navigation_runtime(core);
         for expected in [ids[2], ids[0]] {
-            assert!(handle.navigate(Navigation::Previous).ok);
+            assert!(handle.navigate(Navigation::Previous).is_success());
             let snapshot = handle.mpris_snapshot();
             assert_eq!(snapshot.queue.current_id, Some(expected));
             assert_eq!(snapshot.playback.status, status);
@@ -277,7 +277,7 @@ fn existing_wire_navigation_still_starts_paused_and_stopped_tracks() {
             let (_directory, mut core) = navigation_fixture(status);
             let commands = recording_audio(&mut core);
             let (handle, control, worker, _) = navigation_runtime(core);
-            assert!(handle.request_ack(command).ok);
+            assert!(handle.request_ack(command).is_success());
             let snapshot = handle.mpris_snapshot();
             assert_eq!(snapshot.playback.status, PlaybackStatus::Playing);
             assert_navigation_audio(
@@ -327,7 +327,7 @@ fn preserving_navigation_reuses_repeat_and_single_occurrence_shuffle_selection()
             core.state.playback.repeat = repeat;
             let commands = recording_audio(&mut core);
             let (handle, control, worker, publications) = navigation_runtime(core);
-            assert!(handle.navigate(Navigation::Next).ok);
+            assert!(handle.navigate(Navigation::Next).is_success());
             let snapshot = handle.mpris_snapshot();
             assert_eq!(snapshot.queue.current_id, Some(expected));
             assert_eq!(snapshot.playback.status, status);
@@ -354,7 +354,7 @@ fn stopped_shuffle_previous_without_history_at_first_occurrence_is_noop() {
     core.state.playback.shuffle = true;
     let commands = recording_audio(&mut core);
     let (handle, control, worker, _) = navigation_runtime(core);
-    assert!(handle.navigate(Navigation::Previous).ok);
+    assert!(handle.navigate(Navigation::Previous).is_success());
     assert_eq!(handle.mpris_snapshot().queue.current_id, Some(current));
     assert_eq!(
         handle.mpris_snapshot().playback.status,

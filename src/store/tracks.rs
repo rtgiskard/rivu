@@ -836,6 +836,7 @@ impl Store {
         }
         Ok(impact)
     }
+    #[cfg(test)]
     pub fn remove_tracks(&self, ids: &[i64]) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         let removal = self.prepare_track_removal(ids)?;

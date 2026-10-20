@@ -328,13 +328,38 @@ fn listing_result<T>(i18n: &Localizer, result: std::result::Result<T, QueryError
     }
 }
 
-pub(super) fn show_ack(i18n: &Localizer, ack: &rivu::response::Ack, json: bool) -> Result<()> {
-    if !ack.ok {
-        bail!("{}", ack.error.as_deref().unwrap_or("Command failed"));
+pub(super) fn command_ack(
+    result: Result<rivu::response::Ack>,
+    json: bool,
+) -> Result<rivu::response::Ack> {
+    if json
+        && let Err(error) = &result
+        && let Some(failure) = error.downcast_ref::<rivu::ipc::CommandFailure>()
+    {
+        // Transport evidence has no authoritative Core revision or task IDs.
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "status": failure.status,
+                "error": format!("{error:#}"),
+            }))?
+        );
     }
+    result
+}
+
+pub(super) fn show_ack(i18n: &Localizer, ack: &rivu::response::Ack, json: bool) -> Result<()> {
     if json {
         println!("{}", serde_json::to_string_pretty(ack)?);
-    } else {
+    }
+    if !ack.is_success() {
+        bail!(
+            "{:?}: {}",
+            ack.status,
+            ack.error.as_deref().unwrap_or("Command failed")
+        );
+    }
+    if !json {
         println!(
             "{}",
             i18n.format(

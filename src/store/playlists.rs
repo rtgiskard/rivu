@@ -1,10 +1,10 @@
 use super::positions::{PositionScope, close_gaps, move_selection};
-use super::rows::{TRACK_COLUMNS, track_from_row};
+use super::rows::cue_from_row;
 use super::tracks::{SOURCE_FILTER, search_filter, search_query, validate_encoded_track_ids};
 use super::{Store, batch_limit, changed};
 use crate::model::{
     Batch, BatchContinuation, Page, PlaylistEntryCursor, PlaylistEntryLocation, PlaylistEntryRow,
-    PlaylistSummary, QueryStamp, Track,
+    PlaylistExportTrack, PlaylistSummary, QueryStamp,
 };
 use anyhow::{Context, Result, anyhow, bail};
 use rusqlite::{OptionalExtension, Transaction, params};
@@ -277,31 +277,27 @@ impl Store {
         Ok(Batch { rows, next })
     }
 
-    pub(crate) fn playlist_track_batch(
+    /// Traverse an already-validated export snapshot without rechecking its playlist.
+    pub(crate) fn playlist_export_batch(
         &self,
         playlist_id: i64,
         after: Option<PlaylistEntryCursor>,
         limit: usize,
-    ) -> Result<Batch<Track, PlaylistEntryCursor>> {
+    ) -> Result<Batch<PlaylistExportTrack, PlaylistEntryCursor>> {
         let limit = batch_limit(limit)?;
-        let exists = self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM playlists WHERE id=?1)",
-            [playlist_id],
-            |row| row.get::<_, bool>(0),
-        )?;
-        if !exists {
-            bail!("Playlist not found");
-        }
-        // The derived table reuses the full Track projection and decoder. A LEFT JOIN
-        // keeps orphan entries visible so export fails rather than skipping them.
+        // A LEFT JOIN keeps orphan entries visible so export fails rather than
+        // silently dropping them. Project no playback, album or fingerprint data.
         let suffix = if after.is_some() {
             " AND (e.position,e.id)>(?2,?3) ORDER BY e.position,e.id LIMIT ?4"
         } else {
             " ORDER BY e.position,e.id LIMIT ?2"
         };
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT t.*,e.position AS entry_position,e.id AS entry_id
-             FROM playlist_entries e LEFT JOIN (SELECT {TRACK_COLUMNS} FROM tracks) t
+            "SELECT t.id,t.path,COALESCE(t.title_override,t.raw_title),
+                    COALESCE(t.artist_override,t.raw_artist),t.duration,
+                    t.cue_sheet,t.cue_number,t.cue_start_frame,t.cue_end_frame,
+                    e.position AS entry_position,e.id AS entry_id
+             FROM playlist_entries e LEFT JOIN tracks t
              ON t.id=e.track_id WHERE e.playlist_id=?1{suffix}"
         ))?;
         let mut db_rows = if let Some(after) = after {
@@ -319,7 +315,13 @@ impl Store {
             }
             row.get::<_, Option<i64>>(0)?
                 .context("Playlist contains a missing library track")?;
-            rows.push(track_from_row(row)?);
+            rows.push(PlaylistExportTrack {
+                path: PathBuf::from(row.get::<_, String>(1)?),
+                title: row.get(2)?,
+                artist: row.get(3)?,
+                duration: row.get(4)?,
+                cue: cue_from_row(row, 5)?,
+            });
             last_cursor = Some(PlaylistEntryCursor {
                 position: row.get("entry_position")?,
                 id: row.get("entry_id")?,
@@ -379,6 +381,7 @@ impl Store {
         Ok(Page { total, rows })
     }
 
+    #[cfg(test)]
     pub fn playlist_track_ids(&self, playlist_id: i64, limit: usize) -> Result<Vec<i64>> {
         let mut stmt = self.conn.prepare("SELECT track_id FROM playlist_entries WHERE playlist_id=?1 ORDER BY position,id LIMIT ?2")?;
         let limit = limit.min(i64::MAX as usize) as i64;
@@ -1029,11 +1032,18 @@ mod export_tests {
              SELECT ?1-id+1000,1,id,?1-id FROM tracks",
             [total as i64],
         )?;
-        let first = store.playlist_track_batch(1, None, MAX_QUERY_ROWS)?;
+        let first = store.playlist_export_batch(1, None, MAX_QUERY_ROWS)?;
         assert_eq!(first.rows.len(), MAX_QUERY_ROWS);
         assert_eq!(
-            first.rows.iter().map(|track| track.id).collect::<Vec<_>>(),
-            (4..=total as i64).rev().collect::<Vec<_>>()
+            first
+                .rows
+                .iter()
+                .map(|track| track.path.clone())
+                .collect::<Vec<_>>(),
+            (4..=total as i64)
+                .rev()
+                .map(|id| PathBuf::from(format!("track-{id}")))
+                .collect::<Vec<_>>()
         );
         assert_eq!(
             first.next,
@@ -1042,17 +1052,24 @@ mod export_tests {
                 id: MAX_QUERY_ROWS as i64 + 999,
             })
         );
-        let tail = store.playlist_track_batch(1, first.next, MAX_QUERY_ROWS)?;
+        let tail = store.playlist_export_batch(1, first.next, MAX_QUERY_ROWS)?;
         assert_eq!(
-            tail.rows.iter().map(|track| track.id).collect::<Vec<_>>(),
-            [3, 2, 1]
+            tail.rows
+                .iter()
+                .map(|track| track.path.clone())
+                .collect::<Vec<_>>(),
+            [
+                PathBuf::from("track-3"),
+                PathBuf::from("track-2"),
+                PathBuf::from("track-1")
+            ]
         );
         assert!(tail.next.is_none());
         // A full final batch must terminate without an extra empty-page fetch.
-        let exact_tail = store.playlist_track_batch(1, first.next, 3)?;
+        let exact_tail = store.playlist_export_batch(1, first.next, 3)?;
         assert_eq!(exact_tail.rows, tail.rows);
         assert!(exact_tail.next.is_none());
-        let exhausted = store.playlist_track_batch(
+        let exhausted = store.playlist_export_batch(
             1,
             Some(PlaylistEntryCursor {
                 position: total as i64 - 1,
@@ -1066,17 +1083,16 @@ mod export_tests {
     }
 
     #[test]
-    fn track_batches_distinguish_empty_unknown_and_orphaned_playlists() -> Result<()> {
+    fn export_batches_handle_empty_lists_limits_and_orphaned_entries() -> Result<()> {
         let store = Store::open(Path::new(":memory:"))?;
         let empty = store.create_playlist("empty")?;
-        let batch = store.playlist_track_batch(empty, None, 1)?;
+        let batch = store.playlist_export_batch(empty, None, 1)?;
         assert!(batch.rows.is_empty());
         assert!(batch.next.is_none());
-        assert!(store.playlist_track_batch(i64::MAX, None, 1).is_err());
-        assert!(store.playlist_track_batch(empty, None, 0).is_err());
+        assert!(store.playlist_export_batch(empty, None, 0).is_err());
         assert!(
             store
-                .playlist_track_batch(empty, None, MAX_QUERY_ROWS + 1)
+                .playlist_export_batch(empty, None, MAX_QUERY_ROWS + 1)
                 .is_err()
         );
         store.conn.execute_batch(
@@ -1085,12 +1101,42 @@ mod export_tests {
              VALUES(10,1,1,0),(20,1,2,1),(30,1,3,2);",
         )?;
         // An orphan in the lookahead must produce a cursor, not a false end of stream.
-        let first = store.playlist_track_batch(empty, None, 1)?;
-        assert_eq!(first.rows[0].id, 1);
+        let first = store.playlist_export_batch(empty, None, 1)?;
+        assert_eq!(first.rows[0].path, Path::new("one"));
         assert!(first.next.is_some());
         for (after, limit) in [(None, 3), (first.next, 1)] {
-            assert!(store.playlist_track_batch(empty, after, limit).is_err());
+            assert!(store.playlist_export_batch(empty, after, limit).is_err());
         }
+        Ok(())
+    }
+
+    #[test]
+    fn export_batches_keep_entry_id_order_when_positions_tie() -> Result<()> {
+        let store = Store::open(Path::new(":memory:"))?;
+        store.conn.execute_batch(
+            "INSERT INTO tracks(id,path) VALUES(1,'one'),(2,'two'),(3,'three');
+             INSERT INTO playlists(id,name) VALUES(1,'ties');
+             INSERT INTO playlist_entries(id,playlist_id,track_id,position)
+             VALUES(30,1,1,0),(10,1,3,0),(20,1,2,0);",
+        )?;
+        let mut after = None;
+        let mut paths = Vec::new();
+        loop {
+            let batch = store.playlist_export_batch(1, after, 1)?;
+            paths.extend(batch.rows.into_iter().map(|track| track.path));
+            after = batch.next;
+            if after.is_none() {
+                break;
+            }
+        }
+        assert_eq!(
+            paths,
+            [
+                PathBuf::from("three"),
+                PathBuf::from("two"),
+                PathBuf::from("one")
+            ]
+        );
         Ok(())
     }
 }

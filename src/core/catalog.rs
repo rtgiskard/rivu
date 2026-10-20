@@ -1,5 +1,6 @@
 use super::*;
 use anyhow::{bail, ensure};
+use std::collections::BTreeMap;
 
 fn scan_message(progress: &ScanProgress) -> String {
     let unit = progress.total.map_or_else(
@@ -50,6 +51,180 @@ enum ScanInput {
     Import { path: PathBuf, name: String },
 }
 
+struct ImportPlaylistRevisions {
+    revision: u64,
+    entries: Arc<BTreeMap<i64, u64>>,
+}
+
+/// A worker's committed facts and prepared projections survive later failures.
+pub(super) struct ScanSaved {
+    id: u64,
+    progress: ScanProgress,
+    library_committed: bool,
+    playlist_id: Option<i64>,
+    playlist_entry_revisions: Option<Arc<BTreeMap<i64, u64>>>,
+    outcome_uncertain: bool,
+    impacts: Option<crate::store::ScanImpacts>,
+    summary: String,
+    scan_errors: Option<String>,
+    error: Option<anyhow::Error>,
+    library_total: Option<Result<usize>>,
+    history: Option<Result<Vec<HistoryEntry>>>,
+    playlist_total: Option<Result<usize>>,
+}
+
+struct ScanSavingCompletion {
+    sender: Sender<ScanEvent>,
+    saved: Option<ScanSaved>,
+}
+
+impl Drop for ScanSavingCompletion {
+    fn drop(&mut self) {
+        if let Some(mut saved) = self.saved.take() {
+            if thread::panicking() {
+                saved.outcome_uncertain = true;
+                saved.error = Some(anyhow::anyhow!(
+                    "Scan saving worker panicked; database changes may already be committed and some projections may be stale; inspect the library before retrying"
+                ));
+            }
+            // The owner drains this one completion before joining on shutdown.
+            let _ = self.sender.send(ScanEvent::Saved(saved));
+        }
+    }
+}
+
+fn save_scan(
+    database_path: &Path,
+    current_id: Option<u64>,
+    scan: ScanFinished,
+    import_revisions: Option<ImportPlaylistRevisions>,
+    sender: Sender<ScanEvent>,
+) {
+    let mut completion = ScanSavingCompletion {
+        sender,
+        saved: Some(ScanSaved {
+            id: scan.id,
+            progress: scan.progress,
+            library_committed: false,
+            playlist_id: None,
+            playlist_entry_revisions: None,
+            outcome_uncertain: false,
+            impacts: None,
+            summary: String::new(),
+            scan_errors: None,
+            error: None,
+            library_total: None,
+            history: None,
+            playlist_total: None,
+        }),
+    };
+    let saved = completion.saved.as_mut().unwrap();
+    let result = match scan.result {
+        Ok(result) => result,
+        Err(error) => {
+            saved.error = Some(error);
+            return;
+        }
+    };
+    if !result.errors().is_empty() {
+        saved.scan_errors = Some(result.errors().join("\n"));
+    }
+    let store = match Store::open(database_path).context("Opening scan saving database failed") {
+        Ok(store) => store,
+        Err(error) => {
+            saved.error = Some(error);
+            return;
+        }
+    };
+    if let Err(error) = store.set_queue_current(current_id) {
+        saved.error = Some(error.context("Saving queue position failed; scan has not been saved"));
+        return;
+    }
+    let save_started = Instant::now();
+    let impacts = match store.apply_scan(&result).with_context(|| {
+        if scan.import.is_some() {
+            "Failed to save scan; playlist not created"
+        } else {
+            "Failed to save scan"
+        }
+    }) {
+        Ok(impacts) => impacts,
+        Err(error) => {
+            saved.error = Some(error);
+            return;
+        }
+    };
+    saved.library_committed = true;
+    saved.impacts = Some(impacts);
+    saved.summary = result.summary(impacts.skipped_short_tracks);
+    tracing::info!(
+        id = saved.id,
+        elapsed_ms = save_started.elapsed().as_millis(),
+        "library_scan_saved"
+    );
+    if let Some((name, items)) = scan.import {
+        let playlist = (|| -> Result<i64> {
+            let accessible: HashSet<_> = result
+                .records
+                .iter()
+                .map(|record| match &record.cue {
+                    Some(cue) => (cue.sheet.as_path(), Some(cue.number)),
+                    None => (record.path.as_path(), None),
+                })
+                .collect();
+            let mut ids = Vec::with_capacity(items.len());
+            for item in items {
+                let path = library::logical_path(&item.path)?;
+                if !accessible.contains(&(path.as_path(), item.cue_track)) {
+                    continue;
+                }
+                if let Some(id) = store.track_id_for_source(&path, item.cue_track)? {
+                    ids.push(id);
+                }
+            }
+            ensure!(
+                !ids.is_empty(),
+                "Playlist contains no supported, accessible audio tracks"
+            );
+            store.create_playlist_with_tracks(&name, &ids)
+        })()
+        .context("Scan saved, but playlist creation failed");
+        match playlist {
+            Ok(id) => {
+                // Record the DB fact before preparing projections, so unwinding
+                // or any later refresh failure cannot erase the created id.
+                saved.playlist_id = Some(id);
+                let mut revisions =
+                    import_revisions.expect("Import saving reserves its playlist content revision");
+                Arc::make_mut(&mut revisions.entries).insert(id, revisions.revision);
+                saved.playlist_entry_revisions = Some(revisions.entries);
+            }
+            Err(error) => saved.error = Some(error),
+        }
+    }
+    // Counts and history can scan substantial DB state. Prepare them here;
+    // Core only applies these projections and performs indexed queue reads.
+    let refresh_started = Instant::now();
+    if impacts.structure {
+        saved.library_total = Some(store.track_count());
+    }
+    if impacts.library {
+        saved.history = Some(store.history(MAX_QUERY_ROWS));
+    }
+    if saved.playlist_id.is_some() {
+        saved.playlist_total = Some(
+            store
+                .playlist_summary_page(None, 0, 0)
+                .map(|page| page.total),
+        );
+    }
+    tracing::info!(
+        id = saved.id,
+        elapsed_ms = refresh_started.elapsed().as_millis(),
+        "library_scan_refresh_prepared"
+    );
+}
+
 impl Core {
     pub(in crate::core) fn scan(&mut self, paths: Vec<PathBuf>, force: bool) -> Result<()> {
         self.start_scan(ScanInput::Paths { paths, force })
@@ -83,8 +258,6 @@ impl Core {
                 );
             }
         }
-        // Flush the queue before accepting a task, never fail its acknowledgement afterward.
-        self.save_queue()?;
         let ffmpeg_enabled = config.ffmpeg_enabled;
         tracing::info!(
             input = ?input,
@@ -134,6 +307,7 @@ impl Core {
                         }
                     }
                 };
+                let preparation_started = Instant::now();
                 let mut import = None;
                 let result = (|| {
                     let (paths, sheets, force) = match input {
@@ -177,6 +351,11 @@ impl Core {
                         result
                     })
                 })();
+                tracing::info!(
+                    id,
+                    elapsed_ms = preparation_started.elapsed().as_millis(),
+                    "library_scan_prepared"
+                );
                 match &result {
                     Ok(result) => tracing::info!(
                         records = result.records.len(),
@@ -204,10 +383,13 @@ impl Core {
                     path: None,
                 },
                 message: "Discovering audio files…".into(),
+                library_committed: false,
+                playlist_id: None,
                 error: None,
             },
             cancellation,
             worker,
+            pending_save: None,
         });
         self.project_scan();
         Ok(())
@@ -232,7 +414,15 @@ impl Core {
             .as_ref()
             .filter(|task| task.status.id == id)
             .context("Scan task is not running")?;
+        ensure!(
+            task.status.progress.phase != ScanPhase::Saving,
+            "Scan is saving; its commit can no longer be cancelled"
+        );
         task.cancellation.cancel();
+        if let Some(scan) = self.active_scan.as_mut().unwrap().pending_save.take() {
+            self.begin_scan_save(scan);
+            self.project_scan();
+        }
         Ok(())
     }
 
@@ -261,73 +451,8 @@ impl Core {
                 task.status.message = scan_message(&progress);
                 task.status.progress = progress;
             }
-            ScanEvent::Finished(scan) => {
-                if !self
-                    .active_scan
-                    .as_ref()
-                    .is_some_and(|task| task.status.id == scan.id)
-                {
-                    return;
-                }
-                let cancelled = self
-                    .active_scan
-                    .as_ref()
-                    .unwrap()
-                    .cancellation
-                    .is_cancelled();
-                if !cancelled {
-                    let task = self.active_scan.as_mut().unwrap();
-                    task.status.progress = ScanProgress {
-                        phase: ScanPhase::Saving,
-                        ..scan.progress.clone()
-                    };
-                    task.status.message = "Saving library…".into();
-                    self.project_scan();
-                    self.publish();
-                }
-                let scan_errors = scan
-                    .result
-                    .as_ref()
-                    .ok()
-                    .filter(|result| !result.errors().is_empty())
-                    .map(|result| result.errors().join("\n"));
-                let progress = scan.progress.clone();
-                let outcome = if cancelled {
-                    Ok(false)
-                } else {
-                    self.finish_scan(scan)
-                };
-                let mut task = self.active_scan.take().unwrap();
-                let _ = task.worker.join();
-                task.status.progress = progress;
-                if cancelled {
-                    task.status.progress.phase = ScanPhase::Cancelled;
-                    task.status.message = "Scan cancelled".into();
-                    task.status.error = Some("Scan cancelled".into());
-                } else {
-                    match outcome {
-                        Ok(successful) => {
-                            task.status.progress.phase = if successful {
-                                ScanPhase::Completed
-                            } else {
-                                ScanPhase::Failed
-                            };
-                            task.status.error = scan_errors;
-                        }
-                        Err(error) => {
-                            task.status.progress.phase = ScanPhase::Failed;
-                            task.status.progress.errors =
-                                task.status.progress.errors.saturating_add(1);
-                            task.status.message = error.to_string();
-                            task.status.error = Some(format!("{error:#}"));
-                        }
-                    }
-                }
-                if let Some(error) = &task.status.error {
-                    self.state.system.last_error = Some(error.clone());
-                }
-                self.retain_scan_result(task.status);
-            }
+            ScanEvent::Finished(scan) => self.begin_scan_save(scan),
+            ScanEvent::Saved(saved) => self.complete_saved_scan(saved),
         }
         self.project_scan();
         self.publish();
@@ -341,76 +466,338 @@ impl Core {
     }
 
     pub(in crate::core) fn shutdown_scan(&mut self) {
-        if let Some(task) = &self.active_scan {
-            task.cancellation.cancel();
+        if self
+            .active_scan
+            .as_ref()
+            .is_some_and(|task| task.status.progress.phase == ScanPhase::Saving)
+        {
+            // Saving is an accepted commit, not cancellable traversal. Drain its
+            // sole completion before joining, even if delivery is backpressured.
+            while self.active_scan.is_some() {
+                match self.scan_rx.recv() {
+                    Ok(event) => self.scan_event(event),
+                    Err(_) => {
+                        let task = self.active_scan.take().unwrap();
+                        self.complete_unsaved_scan(
+                            task,
+                            Err(anyhow::anyhow!(
+                                "Scan saving completion disconnected; database changes may already be committed; inspect the library before retrying"
+                            )),
+                            false,
+                        );
+                    }
+                }
+            }
+        } else {
+            if let Some(task) = &self.active_scan {
+                task.cancellation.cancel();
+            }
+            // Disconnect before joining: final traversal delivery may be full.
+            self.scan_rx = crossbeam_channel::never();
+            if let Some(task) = self.active_scan.take() {
+                self.complete_unsaved_scan(task, Ok(()), true);
+            }
         }
-        // Disconnect before joining: final delivery may be backpressured.
         self.scan_rx = crossbeam_channel::never();
-        if let Some(mut task) = self.active_scan.take() {
-            // A blocking probe finishes naturally; traversal/hash observe cancellation.
-            let _ = task.worker.join();
-            task.status.progress.phase = ScanPhase::Cancelled;
-            task.status.message = "Scan cancelled by shutdown".into();
-            task.status.error = Some(task.status.message.clone());
-            self.retain_scan_result(task.status);
-        }
         self.project_scan();
     }
 
-    pub(in crate::core) fn finish_scan(&mut self, scan: ScanFinished) -> Result<bool> {
-        let result = scan.result?;
-        let successful = result.errors().is_empty();
-        let saved = self.store.apply_scan(&result);
-        let impacts = if scan.import.is_some() {
-            saved.context("Failed to save scan; playlist not created")
+    pub(in crate::core) fn resume_pending_scan(&mut self) {
+        if self.active_relocation.is_some() {
+            return;
+        }
+        if let Some(scan) = self
+            .active_scan
+            .as_mut()
+            .and_then(|task| task.pending_save.take())
+        {
+            self.begin_scan_save(scan);
+            self.project_scan();
+            self.publish();
+        }
+    }
+
+    fn begin_scan_save(&mut self, scan: ScanFinished) {
+        if !self.active_scan.as_ref().is_some_and(|task| {
+            task.status.id == scan.id && task.status.progress.phase != ScanPhase::Saving
+        }) {
+            return;
+        }
+        let mut task = self.active_scan.take().unwrap();
+        task.status.progress = scan.progress.clone();
+        if task.cancellation.is_cancelled() {
+            self.complete_unsaved_scan(task, Ok(()), true);
+            return;
+        }
+        if scan.result.is_err() {
+            self.complete_unsaved_scan(task, scan.result.map(|_| ()), false);
+            return;
+        }
+        if self.active_relocation.is_some() {
+            task.status.message = "Waiting for track relocation before saving library…".into();
+            task.pending_save = Some(scan);
+            self.active_scan = Some(task);
+            return;
+        }
+        if self.retired_playback.is_some()
+            && let Err(error) = self.flush_deferred_playback()
+        {
+            self.complete_unsaved_scan(
+                task,
+                Err(error.context(
+                    "Saving deferred playback statistics before committing scan failed; scan has not been saved",
+                )),
+                false,
+            );
+            return;
+        }
+        let database_path = match self.store.database_path() {
+            Ok(path) => path,
+            Err(error) => {
+                self.complete_unsaved_scan(task, Err(error), false);
+                return;
+            }
+        };
+        // Capture only after relocation has retired: Saving rejects DB edits,
+        // so this O(1) snapshot cannot overwrite concurrent playlist changes.
+        // The worker pays for the shared BTreeMap copy only if import succeeds.
+        let import_revisions = scan.import.as_ref().map(|_| ImportPlaylistRevisions {
+            revision: self.next_playlist_entry_revision(),
+            entries: Arc::clone(&self.state.library.playlist_entry_revisions),
+        });
+        let sender = self.scan_tx.clone();
+        let current_id = self.state.queue.current_id;
+        let worker = thread::Builder::new()
+            .name("rivu-scan-saving".into())
+            .spawn(move || save_scan(&database_path, current_id, scan, import_revisions, sender));
+        match worker {
+            Ok(worker) => {
+                // Finished is emitted only after traversal has stopped; the old
+                // worker has no remaining I/O or owner request to wait for.
+                let previous = std::mem::replace(&mut task.worker, worker);
+                let _ = previous.join();
+                task.status.progress.phase = ScanPhase::Saving;
+                task.status.message = "Saving library…".into();
+                self.active_scan = Some(task);
+            }
+            Err(error) => self.complete_unsaved_scan(task, Err(error.into()), false),
+        }
+    }
+
+    fn complete_unsaved_scan(&mut self, mut task: ScanTask, result: Result<()>, cancelled: bool) {
+        let _ = task.worker.join();
+        if cancelled {
+            task.status.progress.phase = ScanPhase::Cancelled;
+            task.status.message = "Scan cancelled".into();
+            task.status.error = Some(task.status.message.clone());
+        } else if let Err(error) = result {
+            task.status.progress.phase = ScanPhase::Failed;
+            task.status.progress.errors = task.status.progress.errors.saturating_add(1);
+            task.status.message = error.to_string();
+            task.status.error = Some(format!("{error:#}"));
+        }
+        self.retain_scan_outcome(task.status);
+    }
+
+    fn complete_saved_scan(&mut self, saved: ScanSaved) {
+        if !self.active_scan.as_ref().is_some_and(|task| {
+            task.status.id == saved.id && task.status.progress.phase == ScanPhase::Saving
+        }) {
+            return;
+        }
+        // Retire maintenance ownership before any projection refresh may stop
+        // playback. The worker has released its writable connection already.
+        let mut task = self.active_scan.take().unwrap();
+        let _ = task.worker.join();
+        task.status.progress = saved.progress;
+        task.status.library_committed = saved.library_committed;
+        task.status.playlist_id = saved.playlist_id;
+        task.status.message = saved.summary;
+        task.status.error = saved.scan_errors;
+        let refresh_started = Instant::now();
+        let mut errors = Vec::new();
+        if let Some(error) = saved.error {
+            errors.push(error);
+        }
+        if saved.library_committed || saved.outcome_uncertain {
+            self.store.invalidate_caches();
+        }
+        let impacts = if saved.outcome_uncertain {
+            // An unwind can happen after SQLite committed but before the next
+            // fact assignment. Invalidate possibly affected domains, without
+            // inventing a successful commit or doing unbounded recovery SQL.
+            if saved.playlist_id.is_none() {
+                self.state.library.playlist_revision =
+                    self.state.library.playlist_revision.wrapping_add(1);
+            }
+            Some(crate::store::ScanImpacts {
+                changed: true,
+                library: true,
+                structure: true,
+                duplicate_groups: true,
+                duplicate_members: true,
+                ..crate::store::ScanImpacts::default()
+            })
         } else {
-            saved.context("Failed to save scan")
-        }?;
-        let summary = result.summary(impacts.skipped_short_tracks);
-        if impacts.changed {
-            let refreshed = self.apply_scan_impacts(impacts);
-            if scan.import.is_some() {
-                refreshed
-                    .context("Scan saved, but library refresh failed before playlist creation; some projections may be stale")?;
-            } else {
-                refreshed.context(
-                    "Scan committed, but refreshing views failed; some projections may be stale",
-                )?;
+            saved.impacts
+        };
+        if let Some(impacts) = impacts {
+            self.invalidate_scan_impacts(impacts);
+            if let Some(total) = saved.library_total {
+                match total {
+                    Ok(total) => self.state.library.track_total = total,
+                    Err(error) => errors.push(
+                        error.context("Refreshing library count failed; previous count retained"),
+                    ),
+                }
+            }
+            if let Some(history) = saved.history {
+                match history {
+                    Ok(history) => self.state.library.history = Arc::new(history),
+                    Err(error) => errors.push(
+                        error.context("Refreshing history failed; previous history retained"),
+                    ),
+                }
+            }
+            if impacts.library
+                && let Err(error) = self.refresh_queue_tracks()
+            {
+                errors.push(error.context(if saved.library_committed {
+                    "Scan committed, but refreshing views failed; some projections may be stale"
+                } else {
+                    "Scan saving failed and refreshing views failed; database changes may already be committed"
+                }));
             }
         }
-        if let Some((name, items)) = scan.import {
-            let id = (|| -> Result<i64> {
-                let accessible: HashSet<_> = result
-                    .records
-                    .iter()
-                    .map(|record| match &record.cue {
-                        Some(cue) => (cue.sheet.as_path(), Some(cue.number)),
-                        None => (record.path.as_path(), None),
-                    })
-                    .collect();
-                let mut ids = Vec::with_capacity(items.len());
-                for item in items {
-                    let path = library::logical_path(&item.path)?;
-                    if !accessible.contains(&(path.as_path(), item.cue_track)) {
-                        continue;
-                    }
-                    if let Some(id) = self.store.track_id_for_source(&path, item.cue_track)? {
-                        ids.push(id);
+        if saved.playlist_id.is_some() {
+            if let Some(revisions) = saved.playlist_entry_revisions {
+                self.state.library.playlist_entry_revisions = revisions;
+            }
+            self.invalidate_playlist_creation(true);
+            if let Some(total) = saved.playlist_total {
+                match total {
+                    Ok(total) => self.state.library.playlist_total = total,
+                    Err(error) => {
+                        errors.push(error.context(
+                            "Scan saved and playlist created, but playlist refresh failed",
+                        ))
                     }
                 }
-                ids.dedup();
-                if ids.is_empty() {
-                    bail!("Playlist contains no supported, accessible audio tracks");
+            }
+        }
+        if !errors.is_empty() {
+            task.status.progress.errors = task.status.progress.errors.saturating_add(errors.len());
+            task.status.message = errors[0].to_string();
+            let mut detail = task.status.error.take().unwrap_or_default();
+            for error in errors {
+                if !detail.is_empty() {
+                    detail.push('\n');
                 }
-                self.store.create_playlist_with_tracks(&name, &ids)
-            })()
-            .context("Scan saved, but playlist creation failed")?;
-            self.playlist_created(id, true)
-                .context("Scan saved and playlist created, but playlist refresh failed")?;
+                detail.push_str(&format!("{error:#}"));
+            }
+            task.status.error = Some(detail);
         }
-        if let Some(task) = &mut self.active_scan {
-            task.status.message = summary;
+        task.status.progress.phase = if task.status.error.is_some() {
+            ScanPhase::Failed
+        } else {
+            ScanPhase::Completed
+        };
+        tracing::info!(
+            id = saved.id,
+            elapsed_ms = refresh_started.elapsed().as_millis(),
+            "library_scan_refreshed"
+        );
+        self.retain_scan_outcome(task.status);
+    }
+
+    fn retain_scan_outcome(&mut self, status: ScanTaskStatus) {
+        if let Some(error) = &status.error {
+            self.state.system.last_error = Some(error.clone());
         }
-        Ok(successful)
+        self.retain_scan_result(status);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn saving_unwind_reports_uncertainty_and_preserves_confirmed_commit_facts() {
+        for committed in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let database_path = directory.path().join("library.db");
+            drop(Store::open(&database_path).unwrap());
+            let (sender, receiver) = bounded(1);
+            let worker = thread::spawn(move || {
+                let mut completion = ScanSavingCompletion {
+                    sender,
+                    saved: Some(ScanSaved {
+                        id: 1,
+                        progress: ScanProgress {
+                            phase: ScanPhase::Saving,
+                            processed: 0,
+                            total: Some(0),
+                            errors: 0,
+                            path: None,
+                        },
+                        library_committed: false,
+                        playlist_id: None,
+                        playlist_entry_revisions: None,
+                        outcome_uncertain: false,
+                        impacts: None,
+                        summary: String::new(),
+                        scan_errors: None,
+                        error: None,
+                        library_total: None,
+                        history: None,
+                        playlist_total: None,
+                    }),
+                };
+                if committed {
+                    let store = Store::open(&database_path).unwrap();
+                    let saved = completion.saved.as_mut().unwrap();
+                    saved.impacts = Some(store.apply_scan(&ScanResult::default()).unwrap());
+                    saved.library_committed = true;
+                    saved.playlist_id = Some(store.create_playlist("Saved before panic").unwrap());
+                    saved.playlist_entry_revisions =
+                        Some(Arc::new(BTreeMap::from([(saved.playlist_id.unwrap(), 1)])));
+                }
+                panic!("saving worker failure");
+            });
+            let ScanEvent::Saved(saved) = receiver.recv_timeout(Duration::from_secs(5)).unwrap()
+            else {
+                panic!("Expected saving completion");
+            };
+            assert!(worker.join().is_err());
+            assert!(saved.outcome_uncertain);
+            assert_eq!(saved.library_committed, committed);
+            assert_eq!(saved.playlist_id.is_some(), committed);
+            assert_eq!(
+                saved
+                    .playlist_entry_revisions
+                    .as_ref()
+                    .map(|entries| entries.len()),
+                committed.then_some(1)
+            );
+            if let Some(id) = saved.playlist_id {
+                assert_eq!(
+                    saved.playlist_entry_revisions.as_ref().unwrap().get(&id),
+                    Some(&1)
+                );
+            }
+            assert!(
+                saved
+                    .error
+                    .unwrap()
+                    .to_string()
+                    .contains("may already be committed")
+            );
+            let store = Store::open(&directory.path().join("library.db")).unwrap();
+            assert_eq!(
+                store.playlist_summary_page(None, 0, 0).unwrap().total,
+                usize::from(committed)
+            );
+        }
     }
 }

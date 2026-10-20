@@ -3,19 +3,10 @@ use anyhow::{bail, ensure};
 
 impl Core {
     pub(in crate::core) fn command(&mut self, command: Command) -> Result<()> {
-        // Scan acceptance is the asynchronous commit boundary. scan() flushes
-        // pending state before spawning; never turn acceptance into an error later.
-        if matches!(
-            &command,
-            Command::Scan { .. } | Command::ImportPlaylist { .. } | Command::RelocateTrack { .. }
-        ) {
-            return self.apply_command(command);
+        if self.database_maintenance_active() && self.maintenance_control(&command)? {
+            return Ok(());
         }
-        // Queue edits commit within their SQL operation; persist the current
-        // occurrence even if a later audio load fails after replacing the queue.
-        let result = self.apply_command(command);
-        let saved = self.save_queue();
-        result.and(saved)
+        self.apply_command(command)
     }
 
     fn apply_command(&mut self, command: Command) -> Result<()> {
@@ -101,11 +92,13 @@ impl Core {
                 }
             }
             Command::Toggle => {
-                return self.command(if self.state.playback.status == PlaybackStatus::Playing {
-                    Command::Pause
-                } else {
-                    Command::Resume
-                });
+                return self.apply_command(
+                    if self.state.playback.status == PlaybackStatus::Playing {
+                        Command::Pause
+                    } else {
+                        Command::Resume
+                    },
+                );
             }
             Command::Stop => self.stop()?,
             Command::Next => self.advance(false)?,
@@ -291,18 +284,7 @@ impl Core {
                 }
                 return Ok(());
             }
-            Command::OptimizeDatabase => {
-                self.state.system.database_optimization = None;
-                if self.state.playback.status != PlaybackStatus::Stopped
-                    || self.state.system.scanning
-                {
-                    bail!("Database optimization requires stopped playback and no active scan");
-                }
-                self.save_queue()?;
-                self.state.system.database_optimization = Some(self.store.optimize()?);
-                // Current state is already persisted; finalization does not rewrite queue rows.
-                return Ok(());
-            }
+            Command::OptimizeDatabase => return self.optimize_database(),
         }
         Ok(())
     }

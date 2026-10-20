@@ -5,8 +5,8 @@ mod server;
 mod transport;
 
 pub use client::{
-    ClientSession, InstanceChanged, SessionStop, client_session, client_session_with_cancel,
-    get_state, query, request_ack,
+    ClientSession, CommandFailure, InstanceChanged, SessionStop, client_session,
+    client_session_with_cancel, get_state, query, request_ack,
 };
 pub use server::{Server, SocketOwner, is_no_instance};
 

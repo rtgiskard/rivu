@@ -221,7 +221,7 @@ impl Root {
 
     fn quit(&self) -> fdo::Result<()> {
         let ack = self.app.request_ack(AppCommand::Shutdown);
-        if ack.ok {
+        if ack.is_success() {
             Ok(())
         } else {
             Err(fdo::Error::Failed(
@@ -489,7 +489,7 @@ fn request(handle: &CoreHandle, command: Command) -> fdo::Result<()> {
 }
 
 fn acknowledge(response: crate::response::Ack) -> fdo::Result<()> {
-    if response.ok {
+    if response.is_success() {
         Ok(())
     } else {
         Err(fdo::Error::Failed(

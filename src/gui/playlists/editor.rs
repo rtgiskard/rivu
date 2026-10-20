@@ -96,7 +96,7 @@ impl Playlists {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.refresh(cx);
-                if ack.ok {
+                if ack.is_success() {
                     this.playlist_editor = None;
                     this.name_input
                         .update(cx, |input, cx| input.set_text("", cx));

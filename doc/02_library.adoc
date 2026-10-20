@@ -156,6 +156,11 @@ and segments, and hash-read chunks check the scan owner's shared cancellation
 token. A blocking audio probe is checked
 before and after, but is not itself interruptible. A cancelled scan returns no result
 for merging, so even tracks read before cancellation are not saved.
+Once the task enters Saving, cancellation is refused: its atomic database merge
+and optional playlist creation finish in the background. State/task status and
+existing-playback controls remain responsive; database reads and edits report
+maintenance in progress instead of waiting. Shutdown waits for the actual saving
+result. A failed result can still contain committed library or playlist changes.
 
 == Desktop list search
 
@@ -683,15 +688,20 @@ values or JSON data.
   `library`, and `system`. `queue list` streams occurrence rows; `library history`
   requests only `library`; `library optimize` requests only `system`.
   Unrequested sections are `null`, not empty data.
-* Successful ordinary mutations return an acknowledgement with `ok`, `error`,
-  `revision`, `scan_id`, and `relocation_id`. The task IDs are `null` except for
-  accepted scan/import and manual relocation tasks respectively.
-  Acceptance does not mean the asynchronous task has completed.
-  Rejected commands and failed scan/import or relocation waits report an error
-  on stderr and exit unsuccessfully rather than printing a JSON acknowledgement.
-* Successful scan/import with `--wait` returns the submitted task's
-  `{id, progress, message, error}` status, not a global state snapshot. Later
-  scans and unrelated command errors do not change that result.
+* Ordinary command acknowledgements contain `status`, `error`, `revision`,
+  `scan_id`, and `relocation_id`. Status is `Succeeded`, `Failed`, `NotAdmitted`,
+  or `Unknown`; `Failed` does not guarantee rollback, and `Unknown` must not be
+  automatically retried. Task IDs are present only for accepted scan/import or
+  relocation startup. Export replies after writing, not at worker startup.
+  JSON prints failed acknowledgements too, with an unsuccessful exit status.
+  Transport command failures print only `status` and `error`, without invented
+  revisions or task IDs. Diagnostics also go to stderr.
+* Scan/import with `--wait` returns the submitted task's
+  `{id, progress, message, library_committed, playlist_id, error}` status, including
+  failed/cancelled terminal results in JSON. The exit status still distinguishes
+  success. Confirmed commits survive later refresh failures; a failed result with
+  no confirmation is not proof of zero effects after an uncertain worker failure.
+  Later scans and unrelated command errors do not change that task result.
 * `library relocate` without `--wait` returns the acknowledgement; use its
   `relocation_id` with `library relocation-status`. Successful relocation with
   `--wait` and every successful `relocation-status` query return
@@ -826,7 +836,11 @@ playback is stopped and no scan is active, then run:
 rivu library optimize
 ----
 
-Optimization is rejected while playback or scanning is active. It reports
-database and WAL sizes before and after maintenance; failures are returned as
-errors. A failed optimization remains pending but is not retried during startup.
-Close any blocking database reader and explicitly run optimization again.
+Optimization requires stopped playback and no active scan, relocation or export.
+It runs in a single background worker; the command waits for its final size report.
+While it runs, database operations are refused promptly, but published state,
+volume and shutdown requests remain available. A waiting timeout does not stop
+the worker or permit a second optimization. Shutdown waits for physical retirement
+without a hard deadline. VACUUM may already have changed the database if a later
+optimization/checkpoint step fails; failure is not a rollback guarantee. Inspect
+the result, close blocking readers, and explicitly retry only when appropriate.

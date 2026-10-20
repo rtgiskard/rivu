@@ -116,7 +116,7 @@ mod worker;
 
 use channels::Channel;
 pub use output::devices;
-pub(crate) use source::{SourceIdentity, metadata_budget, open_regular_file, probe_file};
+pub(crate) use source::{SourceIdentity, metadata_budget, probe_file};
 pub use source::{probe, probe_details};
 pub use waveform::WaveformFrame;
 

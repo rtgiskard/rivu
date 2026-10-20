@@ -1,5 +1,6 @@
 use super::paths::{is_audio_path, is_cue_path, logical_path};
-use crate::audio::{SourceIdentity, open_regular_file, probe_file};
+use crate::audio::{SourceIdentity, probe_file};
+use crate::file_input::open_regular_file;
 use crate::model::{CueSegment, MediaInfo, ScanPhase};
 use anyhow::{Context, Result, anyhow, bail};
 use std::collections::{HashMap, HashSet};
@@ -83,8 +84,6 @@ pub(super) fn cache_modified_ns(modified: Option<SystemTime>) -> i64 {
 /// The filesystem information and cached probe result known to the database.
 #[derive(Clone, Debug)]
 pub struct KnownFile {
-    pub track_id: i64,
-    pub path: PathBuf,
     pub size: u64,
     /// Signed Unix nanoseconds; i64::MIN is reserved for uncacheable mtimes.
     pub modified_ns: i64,
@@ -237,6 +236,7 @@ impl ScanResult {
 /// `max_depth` is relative to each requested directory, which is itself depth 0.
 /// Cancellation returns an error, never a partial result. Checks surround blocking
 /// probes and lookups, but an in-flight probe itself is not interruptible.
+#[cfg(test)]
 pub fn scan_paths(
     paths: &[PathBuf],
     known_source: impl FnMut(&Path) -> Result<Option<KnownFile>>,

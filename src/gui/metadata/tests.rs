@@ -116,7 +116,11 @@ fn edit_text(
 
 fn ack(ok: bool) -> Ack {
     Ack {
-        ok,
+        status: if ok {
+            crate::response::AckStatus::Succeeded
+        } else {
+            crate::response::AckStatus::Failed
+        },
         error: (!ok).then(|| "save failed".into()),
         revision: 0,
         scan_id: None,

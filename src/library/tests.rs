@@ -3,24 +3,30 @@ use super::scan::{
     UNCACHEABLE_MODIFIED_NS, cache_modified_ns,
 };
 use super::*;
-use crate::model::{CueSegment, ScanPhase, Track};
+use crate::model::{CueSegment, PlaylistExportTrack, ScanPhase, Track};
 use anyhow::{Context, Result};
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
 
-fn known_source(known: &[KnownFile]) -> impl FnMut(&Path) -> Result<Option<KnownFile>> + '_ {
+fn known_source(
+    known: &[(PathBuf, KnownFile)],
+) -> impl FnMut(&Path) -> Result<Option<KnownFile>> + '_ {
     move |path| {
         Ok(known
             .iter()
-            .filter(|file| file.path == path)
-            .min_by_key(|file| file.cue.is_some())
-            .cloned())
+            .filter(|(key, _)| key == path)
+            .min_by_key(|(_, file)| file.cue.is_some())
+            .map(|(_, file)| file.clone()))
     }
 }
 
-fn scan_paths(paths: &[PathBuf], known: &[KnownFile], ffmpeg_enabled: bool) -> Result<ScanResult> {
+fn scan_paths(
+    paths: &[PathBuf],
+    known: &[(PathBuf, KnownFile)],
+    ffmpeg_enabled: bool,
+) -> Result<ScanResult> {
     let library_roots: Vec<_> = paths
         .iter()
         .map(|path| logical_path(path))
@@ -182,7 +188,7 @@ fn new_and_retargeted_cue_sheets_reuse_known_sources_outside_request_scope() -> 
 
 fn scan_paths_at_depth(
     paths: &[PathBuf],
-    known: &[KnownFile],
+    known: &[(PathBuf, KnownFile)],
     ffmpeg_enabled: bool,
     max_depth: u32,
     progress: impl FnMut(ScanPhase, usize, Option<usize>, usize, Option<&Path>),
@@ -501,7 +507,7 @@ fn fifo_cue_sources_are_local_errors_and_allow_subsequent_scans() -> Result<()> 
                 replace(&audio);
                 // Even a matching cache entry must not authorize a nonregular source.
                 let metadata = fs::metadata(&audio)?;
-                let source = known.iter_mut().find(|file| file.path == audio).unwrap();
+                let (_, source) = known.iter_mut().find(|(path, _)| *path == audio).unwrap();
                 source.size = metadata.len();
                 source.modified_ns = cache_modified_ns(metadata.modified().ok());
             }
@@ -669,7 +675,7 @@ fn in_place_source_changes_fail_scans_instead_of_mixing_versions() -> Result<()>
             let audio = root.join("audio.wav");
             wav(&audio, 225)?;
             let baseline = scan_paths(std::slice::from_ref(&audio), &[], enabled)?;
-            let known = known_records(&baseline.records).pop().unwrap();
+            let (_, known) = known_records(&baseline.records).pop().unwrap();
             let mut changed = false;
             let result = super::scan_paths(
                 std::slice::from_ref(&audio),
@@ -753,7 +759,8 @@ fn nonregular_audio_is_a_local_error_preserving_only_its_existing_identity() -> 
                         replace(&audio);
                         // A matching cache entry cannot authorize nonregular input.
                         let metadata = fs::metadata(&audio)?;
-                        let cached = known.iter_mut().find(|file| file.path == audio).unwrap();
+                        let (_, cached) =
+                            known.iter_mut().find(|(path, _)| *path == audio).unwrap();
                         cached.size = metadata.len();
                         cached.modified_ns = cache_modified_ns(metadata.modified().ok());
                     }
@@ -1762,18 +1769,20 @@ fn cue_sources_require_logical_membership_in_any_configured_root() -> Result<()>
     Ok(())
 }
 
-fn known_records(records: &[ScanRecord]) -> Vec<KnownFile> {
+fn known_records(records: &[ScanRecord]) -> Vec<(PathBuf, KnownFile)> {
     records
         .iter()
-        .enumerate()
-        .map(|(index, record)| KnownFile {
-            track_id: index as i64 + 1,
-            path: record.path.clone(),
-            size: record.size,
-            modified_ns: record.modified_ns,
-            fingerprint: record.fingerprint.clone(),
-            media: Some(record.media.clone()),
-            cue: record.cue.clone(),
+        .map(|record| {
+            (
+                record.path.clone(),
+                KnownFile {
+                    size: record.size,
+                    modified_ns: record.modified_ns,
+                    fingerprint: record.fingerprint.clone(),
+                    media: Some(record.media.clone()),
+                    cue: record.cue.clone(),
+                },
+            )
         })
         .collect()
 }
@@ -1803,8 +1812,6 @@ fn signed_mtime_cache_keys_preserve_epoch_and_reject_unavailable_or_out_of_range
         let modified_ns = cache_modified_ns(modified);
         assert_eq!(modified_ns, expected);
         let known = KnownFile {
-            track_id: 1,
-            path: PathBuf::from("audio.wav"),
             size: 1,
             modified_ns,
             fingerprint: None,
@@ -1834,8 +1841,8 @@ fn ordinary_scan_rehashes_same_size_wav_after_pre_epoch_mtime_change() -> Result
     let store = crate::store::Store::open(Path::new(":memory:"))?;
     store.apply_scan(&original)?;
     let id = store.track_id_for_source(&audio, None)?.unwrap();
-    let known = store.stored_scan_files(std::slice::from_ref(&audio))?;
-    assert_eq!(known[0].modified_ns, -2_000_000_000);
+    let known = vec![(audio.clone(), store.known_source(&audio)?.unwrap())];
+    assert_eq!(known[0].1.modified_ns, -2_000_000_000);
 
     let mut contents = fs::read(&audio)?;
     *contents.last_mut().unwrap() = 1;
@@ -2214,15 +2221,25 @@ fn cue_source_errors_are_reused_for_later_sheets_and_ordinary_audio() -> Result<
     Ok(())
 }
 
+fn export_track(track: &Track) -> PlaylistExportTrack {
+    PlaylistExportTrack {
+        path: track.path.clone(),
+        title: track.title.clone(),
+        artist: track.artist.clone(),
+        duration: track.duration,
+        cue: track.cue.clone(),
+    }
+}
+
 fn playlist_tracks<'a>(
     track_ids: &'a [i64],
     tracks: &'a [Track],
-) -> impl Iterator<Item = Result<Track>> + 'a {
+) -> impl Iterator<Item = Result<PlaylistExportTrack>> + 'a {
     track_ids.iter().map(|id| {
         tracks
             .iter()
             .find(|track| track.id == *id)
-            .cloned()
+            .map(export_track)
             .context("Missing fixture track")
     })
 }
@@ -2258,7 +2275,11 @@ fn logical_cue_alias_paths_roundtrip_complete_sheets() -> Result<()> {
         .collect();
     sequence.push(tracks.iter().find(|track| track.cue.is_none()).unwrap().id);
     let path = alias.join("playlist.m3u8");
-    export_m3u(&path, playlist_tracks(&sequence, &tracks))?;
+    export_m3u(
+        &path,
+        playlist_tracks(&sequence, &tracks),
+        &ScanCancellation::default(),
+    )?;
     let imported = import_playlist(&path)?;
     let expected = [sequence[0], sequence[1], *sequence.last().unwrap()];
     assert_eq!(imported.len(), expected.len());
@@ -2295,7 +2316,14 @@ fn unrepresentable_cue_exports_preserve_existing_destination() -> Result<()> {
     let path = directory.path().join("existing.m3u8");
     fs::write(&path, "original playlist\n")?;
     for sequence in [vec![1], vec![2], vec![2, 1]] {
-        assert!(export_m3u(&path, playlist_tracks(&sequence, &tracks)).is_err());
+        assert!(
+            export_m3u(
+                &path,
+                playlist_tracks(&sequence, &tracks),
+                &ScanCancellation::default()
+            )
+            .is_err()
+        );
         assert_eq!(fs::read_to_string(&path)?, "original playlist\n");
     }
     // A sheet changed outside Rivu must not silently change exported ranges.
@@ -2304,7 +2332,14 @@ fn unrepresentable_cue_exports_preserve_existing_destination() -> Result<()> {
         &sheet,
         fs::read_to_string(&sheet)?.replace("00:01:00", "00:02:00"),
     )?;
-    assert!(export_m3u(&path, playlist_tracks(&stale_sequence, &tracks)).is_err());
+    assert!(
+        export_m3u(
+            &path,
+            playlist_tracks(&stale_sequence, &tracks),
+            &ScanCancellation::default()
+        )
+        .is_err()
+    );
     assert_eq!(fs::read_to_string(&path)?, "original playlist\n");
     Ok(())
 }
@@ -2325,7 +2360,11 @@ fn cue_export_rejects_fifo_and_oversized_sheets_without_replacing_destination() 
         .collect();
     let destination = directory.path().join("existing.m3u8");
     let sequence = [1, 2];
-    export_m3u(&destination, playlist_tracks(&sequence, &tracks))?;
+    export_m3u(
+        &destination,
+        playlist_tracks(&sequence, &tracks),
+        &ScanCancellation::default(),
+    )?;
     assert_eq!(import_playlist(&destination)?.len(), 2);
     let original = fs::read(&destination)?;
 
@@ -2336,7 +2375,11 @@ fn cue_export_rejects_fifo_and_oversized_sheets_without_replacing_destination() 
     let (completed, receive) = std::sync::mpsc::channel();
     let export_path = destination.clone();
     let worker = std::thread::spawn(move || {
-        let result = export_m3u(&export_path, playlist_tracks(&sequence, &tracks));
+        let result = export_m3u(
+            &export_path,
+            playlist_tracks(&sequence, &tracks),
+            &ScanCancellation::default(),
+        );
         completed.send(result).unwrap();
     });
     // Do not join on timeout: a regression must fail rather than hang the suite.
@@ -2355,8 +2398,8 @@ fn cue_export_rejects_fifo_and_oversized_sheets_without_replacing_destination() 
         .records
         .iter()
         .enumerate()
-        .map(|(index, record)| Ok(track_from_record(index as i64 + 1, record)));
-    assert!(export_m3u(&destination, tracks).is_err());
+        .map(|(index, record)| Ok(export_track(&track_from_record(index as i64 + 1, record))));
+    assert!(export_m3u(&destination, tracks, &ScanCancellation::default()).is_err());
     assert_eq!(fs::read(&destination)?, original);
     Ok(())
 }
@@ -2399,7 +2442,11 @@ fn assert_playlist_roundtrip(path: &Path) -> Result<()> {
         fs::write(&track.path, b"playlist path fixture")?;
     }
     let sequence = [2, 1];
-    export_m3u(path, playlist_tracks(&sequence, &tracks))?;
+    export_m3u(
+        path,
+        playlist_tracks(&sequence, &tracks),
+        &ScanCancellation::default(),
+    )?;
     let text = fs::read_to_string(logical_path(path)?)?;
     assert_eq!(
         text.lines().filter(|line| *line == "./#song.wav").count(),
@@ -2411,8 +2458,6 @@ fn assert_playlist_roundtrip(path: &Path) -> Result<()> {
         assert_eq!(item.path, tracks[index].path);
         assert_eq!(item.cue_track, None);
     }
-    assert_eq!(imported[0].name.as_deref(), Some("other song.wav"));
-    assert_eq!(imported[1].name.as_deref(), Some("Artist - #song.wav"));
     Ok(())
 }
 
@@ -2449,7 +2494,11 @@ fn m3u_metadata_line_breaks_preserve_imported_path_sequence() -> Result<()> {
     tracks[2].title.clear();
     let sequence = [3, 1, 2];
     let destination = directory.path().join("playlist.m3u8");
-    export_m3u(&destination, playlist_tracks(&sequence, &tracks))?;
+    export_m3u(
+        &destination,
+        playlist_tracks(&sequence, &tracks),
+        &ScanCancellation::default(),
+    )?;
     let imported = import_m3u(&destination)?;
     assert_eq!(imported.len(), sequence.len());
     for (item, id) in imported.iter().zip(sequence) {
@@ -2457,15 +2506,6 @@ fn m3u_metadata_line_breaks_preserve_imported_path_sequence() -> Result<()> {
         assert_eq!(item.path, expected.path);
         assert_eq!(item.cue_track, None);
     }
-    assert_eq!(
-        imported[0].name.as_deref(),
-        Some("Artist only extra.wav Tail")
-    );
-    assert_eq!(
-        imported[1].name.as_deref(),
-        Some("Artist  extra.wav - Title #EXTINF:9,Injected Tail")
-    );
-    assert_eq!(imported[2].name.as_deref(), Some("Title only  extra.wav"));
     let text = fs::read_to_string(&destination)?;
     assert!(!text.contains('\r'));
     assert!(text.lines().any(|line| line == "./#first.wav"));
@@ -2489,7 +2529,12 @@ fn m3u_path_line_breaks_preserve_existing_destination_bytes() -> Result<()> {
         invalid.id = 2;
         invalid.path = directory.path().join(name);
         fs::copy(&audio, &invalid.path)?;
-        let error = export_m3u(&destination, [Ok(valid.clone()), Ok(invalid)]).unwrap_err();
+        let error = export_m3u(
+            &destination,
+            [Ok(export_track(&valid)), Ok(export_track(&invalid))],
+            &ScanCancellation::default(),
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("path containing CR or LF"));
         assert_eq!(fs::read(&destination)?, original);
     }
@@ -2510,12 +2555,11 @@ fn m3u_cue_sheet_line_breaks_preserve_existing_destination_bytes() -> Result<()>
         let scan = scan_paths(std::slice::from_ref(&sheet), &[], false)?;
         assert!(scan.errors.is_empty(), "{:?}", scan.errors);
         assert_eq!(scan.records.len(), 2);
-        let tracks = scan
-            .records
-            .iter()
-            .enumerate()
-            .map(|(index, record)| Ok(track_from_record(index as i64 + 1, record)));
-        let error = export_m3u(&destination, tracks).unwrap_err();
+        let tracks =
+            scan.records.iter().enumerate().map(|(index, record)| {
+                Ok(export_track(&track_from_record(index as i64 + 1, record)))
+            });
+        let error = export_m3u(&destination, tracks, &ScanCancellation::default()).unwrap_err();
         assert!(error.to_string().contains("path containing CR or LF"));
         assert_eq!(fs::read(&destination)?, original);
     }
@@ -2540,5 +2584,51 @@ fn m3u_roundtrip_normalizes_parent_component_without_resolving_symlink() -> Resu
     assert_playlist_roundtrip(&path)?;
     assert!(directory.path().join("playlist.m3u8").is_file());
     assert!(!directory.path().join("physical/playlist.m3u8").exists());
+    Ok(())
+}
+
+#[test]
+fn m3u_roundtrip_preserves_ancestor_sibling_and_descendant_paths() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let parent = directory.path().join("playlists");
+    fs::create_dir_all(parent.join("nested"))?;
+    fs::create_dir_all(directory.path().join("music"))?;
+    let paths = [
+        directory.path().join("#ancestor.wav"),
+        directory.path().join("music/sibling.wav"),
+        parent.join("nested/descendant.wav"),
+    ];
+    for path in &paths {
+        fs::write(path, b"playlist fixture")?;
+    }
+    let tracks = paths.iter().map(|path| {
+        Ok(PlaylistExportTrack {
+            path: path.clone(),
+            title: String::new(),
+            artist: String::new(),
+            duration: None,
+            cue: None,
+        })
+    });
+    let destination = parent.join("playlist.m3u8");
+    export_m3u(&destination, tracks, &ScanCancellation::default())?;
+    let text = fs::read_to_string(&destination)?;
+    let entries: Vec<_> = text.lines().filter(|line| !line.starts_with('#')).collect();
+    assert_eq!(
+        entries,
+        [
+            "../#ancestor.wav",
+            "../music/sibling.wav",
+            "nested/descendant.wav"
+        ]
+    );
+    let imported = import_m3u(&destination)?;
+    assert_eq!(
+        imported
+            .into_iter()
+            .map(|item| item.path)
+            .collect::<Vec<_>>(),
+        paths
+    );
     Ok(())
 }

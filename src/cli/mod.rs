@@ -7,8 +7,8 @@ use self::{
         localize_help, terminal_cli_error,
     },
     output::{
-        Terminal, list_library, list_playlists, list_queue, show_ack, show_scan, show_state,
-        terminal_text,
+        Terminal, command_ack, list_library, list_playlists, list_queue, show_ack, show_scan,
+        show_state, terminal_text,
     },
 };
 use anyhow::{Context, Result, bail};
@@ -238,7 +238,7 @@ pub(super) fn run() -> Result<()> {
                 album,
                 decoder_hint: None,
             };
-            let ack = ipc::request_ack(&data_dir, &command)?;
+            let ack = command_ack(ipc::request_ack(&data_dir, &command), args.json)?;
             show_ack(&i18n, &ack, args.json)
         }
         Action::Library(LibraryAction::Duplicates {
@@ -397,12 +397,15 @@ pub(super) fn run() -> Result<()> {
             wait,
         }) => {
             let mut session = ipc::client_session(&data_dir)?;
-            let ack = session.request_ack(&Command::RelocateTrack {
-                source_id,
-                target_id,
-            })?;
-            if !ack.ok {
-                bail!("{}", ack.error.as_deref().unwrap_or("Relocation refused"));
+            let ack = command_ack(
+                session.request_ack(&Command::RelocateTrack {
+                    source_id,
+                    target_id,
+                }),
+                args.json,
+            )?;
+            if !ack.is_success() {
+                return show_ack(&i18n, &ack, args.json);
             }
             let id = ack
                 .relocation_id
@@ -444,7 +447,7 @@ pub(super) fn run() -> Result<()> {
                                 )
                             );
                             if let Some(error) = task.error {
-                                eprintln!("{}", Terminal(error));
+                                eprintln!("Warning: {}", Terminal(error));
                             }
                         }
                         return Ok(());
@@ -457,8 +460,11 @@ pub(super) fn run() -> Result<()> {
             }
         }
         Action::Library(LibraryAction::Optimize) => {
-            let ack = ipc::request_ack(&data_dir, &Command::OptimizeDatabase)?;
-            if !ack.ok {
+            let ack = command_ack(
+                ipc::request_ack(&data_dir, &Command::OptimizeDatabase),
+                args.json,
+            )?;
+            if !ack.is_success() {
                 return show_ack(&i18n, &ack, args.json);
             }
             let response = ipc::get_state(
@@ -498,15 +504,18 @@ pub(super) fn run() -> Result<()> {
             Ok(())
         }
         Action::Quit => {
-            let ack = ipc::request_ack(&data_dir, &rivu::app::AppCommand::Shutdown)?;
+            let ack = command_ack(
+                ipc::request_ack(&data_dir, &rivu::app::AppCommand::Shutdown),
+                args.json,
+            )?;
             show_ack(&i18n, &ack, args.json)
         }
         action => {
             let (command, wait_scan) = translate(action)?;
             let mut session = ipc::client_session(&data_dir)?;
-            let ack = session.request_ack(&command)?;
-            if !ack.ok {
-                bail!("{}", ack.error.as_deref().unwrap_or("Command failed"));
+            let ack = command_ack(session.request_ack(&command), args.json)?;
+            if !ack.is_success() {
+                return show_ack(&i18n, &ack, args.json);
             }
             if wait_scan {
                 let id = ack.scan_id.context("Scan startup omitted task ID")?;
@@ -531,6 +540,9 @@ pub(super) fn run() -> Result<()> {
                             return Ok(());
                         }
                         rivu::model::ScanPhase::Failed | rivu::model::ScanPhase::Cancelled => {
+                            if args.json {
+                                println!("{}", serde_json::to_string_pretty(&task)?);
+                            }
                             bail!("{}", task.error.as_deref().unwrap_or(&task.message));
                         }
                         _ => {}

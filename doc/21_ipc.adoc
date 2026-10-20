@@ -8,6 +8,12 @@ that core; frontends do not maintain independent authoritative playback or
 library state. Audio output and analysis have their own workers, so client
 transport and rendering are outside the audio callback.
 
+The root Rust crate is an application library for its own executable, not a
+stable embedding SDK. Storage transactions, mutable analysis publication, and
+frontend implementation modules are crate-internal capabilities. External
+clients use the command/query protocol rather than bypassing Core's validation
+through direct storage commits.
+
 === Ordered collections and transaction ownership
 
 Queue and playlist positions remain contiguous and zero-based. Deletion captures
@@ -147,12 +153,45 @@ preceding prefixes. Each batch also pays an indexed keyset seek. No full-list
 cache, per-client map or retained SQLite snapshot is introduced. Random-access
 filtered pages keep their independent exact count/OFFSET path.
 
-Playlist export reads full tracks in playlist order with bounded keyset batches,
-without entry-summary projection, per-track queries, or the interactive track
-cache. Each batch retains at most 256 decoded tracks; a lookahead row determines
-continuation. Missing library references fail export rather than disappearing
-from the sequence. The existing M3U writer still validates CUE runs across batch
-boundaries and replaces the destination only after successful output.
+Playlist export runs as one Core-owned background worker with its own read-only
+SQLite connection and one consistent snapshot, established by validating the
+playlist once before output I/O. It reads only export fields in playlist order
+with bounded keyset batches, without per-track queries or the interactive track
+cache. Each batch retains at most 256 decoded rows. Concurrent edits do not mix
+versions in the output; missing references fail rather than disappear.
+The writer validates CUE runs across batches and atomically replaces the target
+only after complete output and a final cancellation check. Shutdown requests
+cooperative cancellation and joins the actual worker. A response timeout neither
+cancels export nor frees its single-flight slot. The snapshot can retain WAL pages
+until the worker exits; database optimization cannot run concurrently with it.
+
+Scan preparation remains independently cancellable. Core authorizes Saving only
+after any accepted relocation has retired; Saving runs queue-position persistence,
+the atomic scan merge, playlist creation and expensive count/history projections
+on a worker-owned connection. Saving is the cancellation cutoff, not a claim that a commit has
+already succeeded. For playlist imports, Core reserves a content revision and
+shares the latest revision-map snapshot when Saving begins; the worker copies
+and extends that map only after playlist creation succeeds. Completion returns
+confirmed commit facts and prepared projections, including the revision map;
+Core installs it, invalidates its caches and publishes revisions before reads resume.
+Shutdown drains a Saving completion rather than falsely recording cancellation.
+
+Database optimization also has one physical worker and keeps the original reply
+until completion. During Saving or optimization, database commands and queries
+are rejected promptly instead of waiting on the maintenance connection. Task
+status and published state remain readable; volume, seek, pause/resume of existing
+playback, stop and cancellation requests remain serviceable. Playback accounting
+coalesces in one active or retired record; EOF navigation waits for maintenance
+and retains later pause/stop intent. Failed retired-record persistence does not
+gate independent controls. Deferred writes must settle before a new playback
+can replace a retired record, or deletion, relocation or scan saving can remove
+its track identity. There is no automatic replay of user mutations.
+
+Queue mutations persist their own transactions. Playback selection persists the
+current occurrence; unrelated controls do not rewrite queue metadata, and Toggle
+dispatches its selected pause/resume operation only once.
+Shutdown acknowledges acceptance before stopping playback; stop or final-save
+failures remain published errors rather than rejecting an already accepted exit.
 
 Directory and root queries use BINARY path ranges: a normalized nonempty prefix
 ends in `/`, and replacing that delimiter with `0` gives its exclusive upper
@@ -438,14 +477,14 @@ Response types:
 * `Hello` — returns the server instance ID and selected state
 * `State` — returns selected state sections
 * `Query` — returns query revisions and the query result
-* `Ack` — returns command success, error, publication revision, and optional scan or relocation task ID
+* `Ack` — returns command outcome, error, publication revision, and optional scan or relocation task ID
 * `Watch` — returns changed state revisions
 * `Error` — returns a protocol or request error
 
 Wire enum variant and field order are part of the binary schema. Incompatible
 schema changes require a new protocol version and coordinated client and host
 updates; there is no obligation to preserve earlier schemas.
-The current protocol version is `3`; hosts and clients must both use this version.
+The current protocol version is `4`; hosts and clients must both use this version.
 
 == Revisions and watching
 
@@ -551,8 +590,8 @@ exists. Missing scoped collections attach no token and fail the query. Successfu
 standalone single-entry lookups attach the discovered scope; missing lookups have
 none, so selection relocation uses the explicitly scoped locations query.
 Consumer generations independently reject abandoned identity/intent submissions;
-fresh data cannot authorize an obsolete operation. Acknowledgements carry success
-or error plus publication revision, never replacement state.
+fresh data cannot authorize an obsolete operation. Acknowledgements carry outcome
+and diagnostic information plus publication revision, never replacement state.
 
 Playlist entry page and batch rows include effective duration, codec, and favorite
 state alongside display metadata. Duration is optional and describes the CUE
@@ -639,8 +678,8 @@ duration. A different current occurrence or stopped playback makes it a no-op.
 interactive start/end seeks use it, with the end captured from that occurrence's
 known duration. Neither command can seek a replacement occurrence of the same track.
 CLI `Seek` and `Volume`, and MPRIS absolute properties, retain their absolute semantics.
-The new wire command variants are appended without renumbering existing tags;
-protocol version 3 requires coordinated host and client updates.
+Protocol version 4 changes acknowledgement and scan-result schemas and requires
+coordinated host and client updates; there is no older-protocol compatibility path.
 
 `DirectoryPage {path, query, favorite, missing, offset, limit}` returns immediate
 directory children and tracks as `Page<DirectoryRow>`. Search, favorite, and missing
@@ -808,11 +847,20 @@ An abandoned opening cannot publish Started or Failed for a later generation.
 Container setup, seeking and individual decoder, file or device calls can still
 block; these work bounds are not wall-clock deadlines.
 
-A timeout or client disconnect is not command cancellation: an operation
-already queued at the core may still execute. An unsuccessful acknowledgement
-caused by a response timeout therefore does not prove the requested mutation
-was absent. Clients must consult current state before deciding whether to repeat
-a non-idempotent operation.
+`Ack.status` is `Succeeded`, `Failed`, `NotAdmitted`, or `Unknown`. `Succeeded`
+means the owner returned success; scan/import/relocation startup still requires
+its task's terminal result. `Failed` means the owner returned an error, not that
+all effects were rolled back. `NotAdmitted` means no business request was admitted.
+Once admitted, a missing response is `Unknown`: the operation may still execute.
+Do not automatically repeat a mutation; inspect authoritative state or the output.
+If startup timed out before its task ID arrived and reconciliation is unavailable,
+keep the result unknown rather than guessing that no task started.
+
+IPC command failures before handshake/encoding completes are `NotAdmitted`;
+once writing the command has begun, exchange failures are conservatively `Unknown`.
+The client exposes `CommandFailure` without inventing a Core revision or task ID.
+Shutdown acknowledgement means accepted shutdown, not final persistence or worker
+retirement. Blocking I/O and cooperative cancellation provide no hard exit deadline.
 
 Failed exchanges discard the client connection. A later explicit request can
 reconnect and perform a fresh Hello, but clients never automatically replay a
@@ -833,13 +881,17 @@ JSON completion output contains the task status rather than a global state snaps
 Startup and waiting share one connection; disconnection fails the wait rather
 than binding the same numeric task ID to a newly started instance.
 
-`ViewResponse::ScanTask` contains `{id, progress, message, error}`. The progress
-phases are `Discovering`, `ReadingMetadata`, `Saving`, `Completed`, `Failed`, and
-`Cancelled`; the last three are terminal. The core retains the active task and
-the latest 32 terminal task results. Unknown or evicted IDs return a query error.
-`Command::CancelScan { id }` requests cancellation of that task; cancellation
-does not merge partial scan results. A failed wait never automatically replays
-the startup command.
+`ViewResponse::ScanTask` contains `{id, progress, message, library_committed,
+playlist_id, error}`. The phases are `Discovering`, `ReadingMetadata`, `Saving`,
+`Completed`, `Failed`, and `Cancelled`; the last three are terminal. The core
+retains the active task and latest 32 terminal results. Unknown/evicted IDs fail.
+`library_committed=true` confirms the scan merge; `playlist_id` confirms the
+subsequent playlist commit even if refresh failed. A failed task is not evidence
+of zero side effects; after an uncertain worker failure, absent confirmation is
+not proof that no commit happened. Retry only the missing step after inspection.
+`CancelScan` requests cancellation before Saving and is rejected during Saving;
+its Ack never proves worker retirement. Only the task terminal result resolves it.
+A failed wait never automatically replays startup.
 
 == Wire schemas
 

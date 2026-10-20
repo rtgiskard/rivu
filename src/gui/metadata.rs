@@ -488,15 +488,15 @@ impl Metadata {
         cx: &mut Context<Self>,
     ) {
         // A committed source change survives editor selection/discard.
-        if ack.ok
+        if ack.is_success()
             && let Some(track) = hint_change
         {
             cx.emit(SavedHintChanged(track));
         }
-        if !self.metadata.complete_save(token, values, ack.ok) {
+        if !self.metadata.complete_save(token, values, ack.is_success()) {
             return;
         }
-        if ack.ok {
+        if ack.is_success() {
             if let Some(id) = self.metadata.selected() {
                 self.request_track(id, cx);
             } else {

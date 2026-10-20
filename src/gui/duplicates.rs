@@ -179,7 +179,7 @@ impl DuplicateReview {
         if !self.open || self.epoch != epoch {
             return false;
         }
-        if !ack.ok {
+        if !ack.is_success() {
             self.busy = None;
             self.feedback = Some(match ack.error {
                 Some(error) => ReviewFeedback::Text(error, StatusKind::Error),
@@ -215,9 +215,10 @@ impl DuplicateReview {
             return false;
         }
         self.feedback = Some(match task.phase {
-            RelocationPhase::Completed => {
-                ReviewFeedback::Localized("gl-relocation-completed", StatusKind::Success)
-            }
+            RelocationPhase::Completed => match &task.error {
+                Some(error) => ReviewFeedback::Text(format!("Warning: {error}"), StatusKind::Info),
+                None => ReviewFeedback::Localized("gl-relocation-completed", StatusKind::Success),
+            },
             RelocationPhase::Cancelled => {
                 ReviewFeedback::Localized("gl-verification-cancelled", StatusKind::Info)
             }
@@ -1797,6 +1798,8 @@ fn has_target_state(member: &DuplicateMember) -> bool {
 #[cfg(test)]
 mod tests {
     use crate::config::ConfigPersistence;
+    use rivu_ui::StatusKind;
+
     use super::{Busy, DuplicateReview, Member, ReviewFeedback, TaskReadOutcome};
     use crate::{
         model::{Command, DuplicateMember, Page, RelocationPhase, RelocationTaskStatus, Track},
@@ -2304,7 +2307,11 @@ mod tests {
 
     fn ack(ok: bool, relocation_id: Option<u64>) -> Ack {
         Ack {
-            ok,
+            status: if ok {
+                crate::response::AckStatus::Succeeded
+            } else {
+                crate::response::AckStatus::Failed
+            },
             error: None,
             revision: 0,
             scan_id: None,
@@ -2402,6 +2409,22 @@ mod tests {
             Some(ReviewFeedback::Localized("gl-relocation-completed", _))
         ));
         assert!(!review.accept_task(&task(7, RelocationPhase::Cancelled)));
+    }
+
+    #[test]
+    fn committed_relocation_refresh_failure_warns_in_existing_feedback() {
+        let mut review = ready_review();
+        review.confirm(true);
+        let (epoch, _) = review.submit(false).unwrap();
+        review.accept_ack(epoch, false, ack(true, Some(7)));
+        let mut completed = task(7, RelocationPhase::Completed);
+        completed.error = Some("Relocation committed; refreshing views failed: unavailable".into());
+        assert!(review.accept_task(&completed));
+        assert!(review.busy.is_none());
+        assert!(matches!(
+            review.feedback,
+            Some(ReviewFeedback::Text(_, StatusKind::Info))
+        ));
     }
 
     #[test]
