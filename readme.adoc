@@ -10,7 +10,7 @@ terminal, and headless modes that share one playback instance.
 * link:doc/02_library.adoc#_albums[Album browsing], playlists with M3U/M3U8
   import/export, and editable playback queues
 * PipeWire output with multichannel routing and optional FFmpeg decoding
-* Desktop GUI, CLI, TUI, and headless operation; optional MPRIS and system tray
+* Optional MPRIS and system tray integration
 * Named desktop layouts with dockable panels and configurable appearance
 * Waveform, spectrum, spectrogram, audio visualizers, and album artwork
 
@@ -20,7 +20,7 @@ The desktop requires Wayland; audio output requires a running PipeWire 1.2 or ne
 
 == First use
 
-. Build and install using the <<_build_and_install,instructions below>>.
+. Install Rivu using the <<_build_and_install,instructions below>>.
 . Run `rivu` (equivalent to `rivu gui`) to open the desktop UI.
 . Add a music directory with the Library `+` button, then trigger a scan from
   the Library controls. Adding a directory and starting Rivu do not scan it automatically.
@@ -56,9 +56,6 @@ enabled. A `serve` instance must be stopped before starting a graphical host in
 the same data directory.
 Ctrl-C or SIGTERM also shuts down the core cleanly.
 
-The optional desktop tray provides window, playback, and quit controls. See
-link:doc/04_playback.adoc[Playback] for tray and MPRIS behavior.
-
 == CLI
 
 CLI/TUI controls require a running core; `library probe` and `playback devices`
@@ -76,10 +73,9 @@ rivu playback toggle
 rivu playback volume 50
 ----
 
-Mutating commands, including `quit`, normally acknowledge acceptance, not completion.
-Use `--wait` for scan/import completion. Paths are relative to the invoking client.
-`--json` selects command-specific machine-readable output; see
-link:doc/02_library.adoc#_cli_output[CLI output] for shapes and incomplete-listing errors.
+For scan/import/relocation commands, use `--wait` to wait for completion.
+A timeout can leave a mutation's result unknown; do not repeat it blindly.
+See link:doc/02_library.adoc#_cli_output[CLI output] for reply semantics and JSON output.
 
 == Files and data directories
 
@@ -113,11 +109,23 @@ IPC access and upgrade constraints are described in link:doc/21_ipc.adoc[IPC].
 ** link:doc/26_migration.adoc[Database and configuration migration boundaries]
 * Project status
 ** link:doc/90_open_issues.adoc[Open issues and deferred investigations]
+* Agent development skills
+** https://github.com/rtgiskard/gskd-craft[gskd-craft]: reusable agent development skills
 
 == Build and install
 
-Rivu currently targets Linux; the desktop UI uses Wayland. On Arch Linux, install
-the build and runtime prerequisites:
+=== Arch Linux package
+
+Install the `rivu-git` AUR package with paru:
+
+[source,sh]
+----
+paru -S rivu-git
+----
+
+=== Build from source
+
+On Arch Linux, install the build and runtime prerequisites:
 
 [source,sh]
 ----
@@ -130,15 +138,9 @@ The install command builds the default variant and installs `rivu`, `rivu-migrat
 the desktop entry, and icons. Ensure `~/.local/bin` is on `PATH`.
 Use `make build` to build without installing, or `cargo build --release` directly.
 Build outputs default to `.cache/target/`; `CARGO_TARGET_DIR` overrides that path.
-Static application resources live under `data/` (icons, artwork, desktop entries,
-and translations); test-only samples live under `tests/fixtures/`. These source
-directories are separate from the runtime data directory selected by `--data-dir`.
 
 Linux builds prefer `mold` when available and otherwise use the toolchain's
 default linker. Install it optionally with `sudo pacman -S --needed mold`.
-
-Audio output requires PipeWire 1.2 or newer and a running PipeWire server;
-there is no direct ALSA backend. PipeWire performs device-rate conversion.
 
 === FFmpeg and native-only builds
 
@@ -185,15 +187,9 @@ Embedding affects the GUI only; TUI glyphs come from the displaying terminal.
 Release builds strip symbols. For troubleshooting, set
 `CARGO_PROFILE_RELEASE_STRIP=none` when building or installing.
 
-The pinned GPUI renderer has local extensions under `vendor/`; see
-link:doc/23_visuals.adoc#_pinned_gpu_extensions[GPU extension boundaries and maintenance].
-The `rivu-ui` workspace package contains reusable GUI controls; see
-link:doc/24_layout.adoc#_reusable_gpui_controls[component boundaries and host setup].
-`make lint` and `make build` cover the workspace, including this package.
-Run `make ui-demo` on a Wayland desktop to explore component composition,
-keyboard controls, native semantics and host-owned state. This runs
-`cargo run -p rivu-ui --example showcase --features showcase`.
-The `showcase` feature is disabled by default; normal builds do not build the example.
+Run `make ui-demo` on a Wayland desktop to explore the reusable GUI controls.
+See link:doc/24_layout.adoc#_reusable_gpui_controls[component boundaries and host setup]
+and link:doc/23_visuals.adoc#_pinned_gpu_extensions[local GPUI extensions].
 
 About and `rivu -V` report the build version. `make build` obtains it from Git;
 plain Cargo uses the package version unless `RIVU_GIT_VERSION` is supplied.
@@ -201,31 +197,6 @@ Source archives can set that variable explicitly when Git metadata is absent.
 
 Set `SOURCE_DATE_EPOCH` to nonnegative Unix seconds for a reproducible build
 timestamp. Invalid values fail the build; About displays the timestamp locally.
-
-=== Source navigation
-
-* `src/main.rs` starts the binary; `src/cli/` separates argument/help handling,
-  command execution, and terminal-safe output with paginated reads.
-* `src/model/query.rs` owns query identities and selected revision stamps;
-  `src/model.rs` exposes the shared model API. Responses and consumer projections
-  remain in `src/response.rs` and `src/projection.rs`.
-* `crates/rivu-format` owns current configuration and database format contracts;
-  `src/config/persistence.rs` owns application configuration I/O. Field-based
-  Settings patches remain in `src/config.rs`, independently of disk schema versions.
-* `crates/rivu-migrate` owns historical format recognition and offline conversion;
-  the application does not depend on it.
-* `src/audio/source.rs` applies playback ranges and seek-prefix discard to decoded
-  PCM through one shared step; codec-specific trimming remains with each decoder.
-* `src/gui/visualization.rs` owns the ordered audio-visualizer style catalog used
-  by both Settings and panel menus; rendering remains with the individual backends.
-* `src/gui/queue.rs` owns the Queue entity and integration events; its `model`,
-  `queries`, and `view` modules separate state, asynchronous work, and rendering.
-* `src/gui/settings.rs` owns settings controls and session integration;
-  `settings/model.rs` owns the edit transaction and `settings/pages.rs` composes pages.
-* `src/core/tests.rs` holds shared fixtures; `src/core/tests/` groups behavior
-  tests by responsibility. Feature-local tests remain with their owners.
-
-
 
 == License
 
