@@ -95,6 +95,7 @@ pub struct Input {
     trailing_space: Pixels,
     trailing_text: Option<SharedString>,
     embedded: bool,
+    control_surface: bool,
     scroll_offset: Pixels,
     selected_range: Range<usize>,
     selection_reversed: bool,
@@ -126,6 +127,7 @@ impl Input {
             trailing_space: px(7.),
             trailing_text: None,
             embedded: false,
+            control_surface: false,
             scroll_offset: px(0.),
             selected_range: end..end,
             selection_reversed: false,
@@ -139,6 +141,12 @@ impl Input {
     /// Reserve room for an overlaid trailing control without overlapping text.
     pub fn with_trailing_space(mut self, space: Pixels) -> Self {
         self.trailing_space = space;
+        self
+    }
+
+    /// Match select-trigger colors for an editable combo without changing input geometry.
+    pub fn with_control_surface(mut self) -> Self {
+        self.control_surface = true;
         self
     }
 
@@ -1133,14 +1141,21 @@ impl Render for Input {
             }))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .when(!self.embedded, |view| {
-                view.bg(rgb(theme.input))
-                    .border_1()
-                    .border_color(if focused {
-                        rgb(theme.accent)
-                    } else {
-                        rgb(theme.border)
-                    })
-                    .rounded(px(4.) * scale)
+                view.bg(rgb(if self.control_surface {
+                    theme.control
+                } else {
+                    theme.input
+                }))
+                .border_1()
+                .border_color(if focused {
+                    rgb(theme.accent)
+                } else {
+                    rgb(theme.border)
+                })
+                .rounded(px(if self.control_surface { 2. } else { 4. }) * scale)
+                .when(self.control_surface && self.enabled, |view| {
+                    view.hover(|style| style.bg(rgb(theme.highlight)))
+                })
             })
             .when(self.embedded, |view| {
                 view.w_full().h_full().min_w_0().min_h_0()

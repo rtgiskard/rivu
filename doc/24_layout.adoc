@@ -338,6 +338,8 @@ Uniform tree rows reserve enough height for inline icon actions; two-line text
 gap and line height remain separate from outer row spacing.
 
 Input owns text, selection, IME conversion, focus and pointer-selection capture.
+Editable combo inputs can use the select-trigger surface without changing input
+geometry or editing behavior; ordinary standalone inputs keep their input surface.
 Disabling an input keeps its draft while rejecting edits and removing its Tab
 stop. `SearchField` owns expansion, clear/Escape interaction and a cancellable
 debounce task; the host supplies the delay, text and count formatter. Clearing or

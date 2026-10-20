@@ -719,6 +719,7 @@ impl Settings {
                         cx,
                     )
                     .with_trailing_space(px(28.))
+                    .with_control_surface()
                 } else {
                     Input::new(self.tr(field.label_id()), "", self.tr(field.label_id()), cx)
                 }
@@ -1446,6 +1447,8 @@ impl Settings {
                     .cursor_pointer()
                     .font_family(super::appearance::fonts::SYMBOLS_FAMILY)
                     .font_size_scale(1.)
+                    .text_size(rems(0.875))
+                    .text_color(rgb(palette(cx).muted))
                     .child("󰅀")
                     .on_mouse_down(
                         MouseButton::Left,
