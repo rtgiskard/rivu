@@ -162,6 +162,7 @@ impl GuiApp {
             .interaction
             .begin_split(drag, original_fraction, root);
         self.apply_interaction_cancellation(cancellation, cx);
+        cx.notify();
     }
     pub(in crate::gui) fn render_node(
         &mut self,
@@ -184,15 +185,32 @@ impl GuiApp {
                 for (index, child) in children.iter().enumerate() {
                     let content = self.render_node(child, window, cx);
                     let gutter = (index + 1 < children.len()).then(|| {
+                        let unlocked = !self.workspace.layouts.current().locked;
+                        let dragging = matches!(
+                            self.workspace.interaction.dragging(),
+                            Some(Dragging::Split(drag)) if drag.id == id && drag.index == index
+                        );
+                        let indicator = div()
+                            .bg(rgb(theme.accent))
+                            .opacity(if unlocked && dragging { 1. } else { 0. })
+                            .when(unlocked, |view| {
+                                view.group_hover("split-gutter", |style| style.opacity(1.))
+                            })
+                            .when(axis == Axis::Horizontal, |view| view.w(px(2.)).h_full())
+                            .when(axis == Axis::Vertical, |view| view.h(px(2.)).w_full());
                         div()
                             .id(("split", index))
+                            .group("split-gutter")
                             .absolute()
                             .bg(rgb(theme.bg))
-                            .when(!self.workspace.layouts.current().locked, |view| {
-                                view.hover(|style| style.bg(rgb(theme.accent)))
-                                    .when(axis == Axis::Horizontal, |view| view.cursor_col_resize())
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .when(unlocked, |view| {
+                                view.when(axis == Axis::Horizontal, |view| view.cursor_col_resize())
                                     .when(axis == Axis::Vertical, |view| view.cursor_row_resize())
                             })
+                            .child(indicator)
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
