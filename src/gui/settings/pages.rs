@@ -1252,13 +1252,20 @@ impl Settings {
                     },
                     column()
                         .gap_2()
-                        .child(form_field(
-                            palette(cx),
-                            settings.tr("settings-style"),
-                            style.when(!hint.is_empty(), |control| {
-                                control.tooltip(text_tooltip(hint))
-                            }),
-                        ))
+                        .child(
+                            row().child(
+                                form_field(
+                                    palette(cx),
+                                    settings.tr("settings-style"),
+                                    style.when(!hint.is_empty(), |control| {
+                                        control.tooltip(text_tooltip(hint))
+                                    }),
+                                )
+                                .w(gpui::relative(0.5))
+                                .min_w(rems(180. / 16.))
+                                .pr_2(),
+                            ),
+                        )
                         .child(
                             row()
                                 .flex_wrap()
