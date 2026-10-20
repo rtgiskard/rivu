@@ -283,6 +283,8 @@ Exceeding the budget shows the default cover rather than a partial animation.
 Increasing it does not relax the fixed workspace admission estimate or dimension
 limits, and is not a process/GPU memory cap. See
 link:22_cache.adoc#_artwork_lookup_retention[Artwork resource boundaries].
+The information icons explain decode, memory, and disk-cache limits. Cache
+operation results and errors remain visible in the card rather than in tooltips.
 
 Hover settings fields for accepted ranges and input syntax; inactive fields explain
 which setting enables them. Apply errors retain the specific cause; hover to read

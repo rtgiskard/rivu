@@ -25,6 +25,16 @@ impl Settings {
     fn artwork_cache_settings(&self, cx: &mut Context<Self>) -> Div {
         let colors = palette(cx);
         let busy = self.artwork_cache_busy.is_some();
+        let help = |id: &'static str, key| {
+            div()
+                .id(id)
+                .child(
+                    caption(colors, "")
+                        .opacity(0.6)
+                        .text_color(rgb(colors.text)),
+                )
+                .tooltip(text_tooltip(self.tr(key)))
+        };
         let mut content = column().gap_2().child(form_field(
             colors,
             self.tr("settings-expire-files-older-than-days"),
@@ -65,13 +75,22 @@ impl Settings {
                             ),
                             busy,
                         )),
-                ),
+                )
+                .child(help(
+                    "settings-artwork-disk-help",
+                    "settings-artwork-disk-help",
+                )),
         ));
         content = column()
             .gap_2()
-            .child(self.single(Field::ArtworkDecodeBudget, cx))
-            .child(caption(colors, self.tr("settings-artwork-memory-help")))
-            .child(caption(colors, self.tr("settings-artwork-disk-help")))
+            .child(
+                self.single(Field::ArtworkDecodeBudget, cx)
+                    .gap_2()
+                    .child(help(
+                        "settings-artwork-memory-help",
+                        "settings-artwork-memory-help",
+                    )),
+            )
             .child(content);
         if let Some((days, clean)) = self.artwork_cache_busy {
             content = content.child(status_message(
