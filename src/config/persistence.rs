@@ -1,22 +1,25 @@
 //! Configuration persistence: loading, saving, and destination resolution.
 //!
-//! TOML field mapping stays in `file`; runtime configuration and patches stay
-//! in the parent module. This module owns filesystem effects and their failure
-//! guarantees, including following symbolic links before atomic replacement.
+//! The format crate owns TOML mapping and validation. This module owns filesystem
+//! effects and atomic replacement, including symbolic-link destinations.
 
-use super::{Config, file};
+use super::Config;
 use anyhow::{Context, Result, ensure};
 use std::{
-    borrow::Cow,
     fs,
     io::{ErrorKind, Write},
     path::{Path, PathBuf},
 };
 
-impl Config {
+pub trait ConfigPersistence: Sized {
+    fn load(path: &Path) -> Result<Self>;
+    fn save(&self, path: &Path) -> Result<()>;
+}
+
+impl ConfigPersistence for Config {
     /// Read settings without creating files or directories. Only a missing file
     /// selects defaults; unreadable, malformed, and invalid files are errors.
-    pub fn load(path: &Path) -> Result<Self> {
+    fn load(path: &Path) -> Result<Self> {
         let contents = match fs::read_to_string(path) {
             Ok(contents) => contents,
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Self::default()),
@@ -25,17 +28,8 @@ impl Config {
                     .with_context(|| format!("cannot read configuration {}", path.display()));
             }
         };
-        let file: file::FileConfig = toml::from_str(&contents)
-            .with_context(|| format!("cannot parse TOML configuration {}", path.display()))?;
-        let mut config = file.into_config();
-        config.ui_language = crate::i18n::normalize_language(&config.ui_language).to_owned();
-        if config.ui_font.is_empty() {
-            config.ui_font = "monospace".to_owned();
-        }
-        config
-            .validate()
-            .with_context(|| format!("invalid configuration {}", path.display()))?;
-        Ok(config)
+        rivu_format::config::from_toml(&contents)
+            .with_context(|| format!("invalid configuration {}", path.display()))
     }
 
     /// Validate, serialize, and atomically replace the destination using a
@@ -47,12 +41,10 @@ impl Config {
     /// This deliberately does not fsync the file or directory: configuration
     /// writes must not block on storage flushes. Existing directory
     /// permissions are never changed.
-    pub fn save(&self, path: &Path) -> Result<()> {
-        self.validate()
-            .with_context(|| format!("cannot save invalid configuration {}", path.display()))?;
-        let contents = toml::to_string_pretty(&file::FileConfigView::from(self))
+    fn save(&self, path: &Path) -> Result<()> {
+        let contents = rivu_format::config::to_toml(self)
             .with_context(|| format!("cannot serialize configuration {}", path.display()))?;
-        let destination = configuration_destination(path)
+        let destination = rivu_format::ownership::configuration_destination(path)
             .with_context(|| format!("cannot resolve configuration {}", path.display()))?;
         let path = destination.as_ref();
         ensure!(
@@ -100,35 +92,6 @@ impl Config {
                 format!("cannot atomically replace configuration {}", path.display())
             })?;
         Ok(())
-    }
-}
-
-fn configuration_destination(path: &Path) -> Result<Cow<'_, Path>> {
-    let mut destination = Cow::Borrowed(path);
-    let mut followed = 0;
-    loop {
-        match fs::symlink_metadata(destination.as_ref()) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {}
-            Ok(_) => return Ok(destination),
-            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(destination),
-            Err(error) => return Err(error.into()),
-        }
-        // Match Linux's bounded link traversal, including cycles and dangling
-        // chains, without requiring the final file to already exist.
-        ensure!(
-            followed < 40,
-            "configuration symbolic link traversal exceeds 40 links"
-        );
-        let target = fs::read_link(destination.as_ref())?;
-        destination = Cow::Owned(if target.is_absolute() {
-            target
-        } else {
-            destination
-                .parent()
-                .unwrap_or_else(|| Path::new("."))
-                .join(target)
-        });
-        followed += 1;
     }
 }
 

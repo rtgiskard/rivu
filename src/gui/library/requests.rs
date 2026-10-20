@@ -1,5 +1,7 @@
 //! Library logical demand and physical worker gates have separate lifetimes.
 use super::Library;
+#[cfg(test)]
+use crate::config::ConfigPersistence;
 use crate::gui::library;
 use crate::{
     model::Query,

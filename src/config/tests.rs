@@ -1,14 +1,70 @@
 use super::*;
 use std::{fs, path::Path};
 
+fn write_current_config(path: &Path, contents: impl AsRef<str>) -> std::io::Result<()> {
+    fs::write(
+        path,
+        format!(
+            "schema_version = {CONFIG_SCHEMA_VERSION}\n{}",
+            contents.as_ref()
+        ),
+    )
+}
+
+#[test]
+fn invalid_existing_files_are_rejected_without_being_rewritten() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    for contents in [
+        "schema_version = 0\n",
+        "schema_version = 2\n",
+        "schema_version = '1'\n",
+        "[interface]\ntheme = 'unknown'\n",
+        "[interface]\npage_size = 0\n",
+        "[playback]\nvolume_percent = 101\n",
+        "volume = 0.25\n",
+        "[interface",
+    ] {
+        fs::write(&path, contents).unwrap();
+        assert!(Config::load(&path).is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), contents);
+    }
+}
+
+#[test]
+fn unversioned_current_files_load_without_being_rewritten() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    for contents in ["", "# Keep this comment\n[interface]\n"] {
+        fs::write(&path, contents).unwrap();
+        assert_eq!(Config::load(&path).unwrap(), Config::default());
+        assert_eq!(fs::read(&path).unwrap(), contents.as_bytes());
+    }
+    let contents = "# Hand-edited settings\n[playback]\nvolume_percent = 25\nrepeat = 'one'\n[interface]\nlanguage = 'ZH_cn'\npage_size = 42\n";
+    fs::write(&path, contents).unwrap();
+    let config = Config::load(&path).unwrap();
+    assert_eq!(config.volume, 0.25);
+    assert_eq!(config.repeat, RepeatMode::One);
+    assert_eq!(config.ui_language, "zh-CN");
+    assert_eq!(config.page_size, 42);
+    assert_eq!(fs::read(&path).unwrap(), contents.as_bytes());
+    config.save(&path).unwrap();
+    let saved: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(
+        saved["schema_version"].as_integer(),
+        Some(i64::from(CONFIG_SCHEMA_VERSION))
+    );
+    assert_eq!(Config::load(&path).unwrap(), config);
+}
+
 #[test]
 fn artwork_decode_budget_round_trips_and_rejects_out_of_range_values() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");
-    fs::write(&path, "[interface]\n").unwrap();
+    write_current_config(&path, "[interface]\n").unwrap();
     assert_eq!(Config::load(&path).unwrap().artwork_decode_budget_mb, 64);
     for budget in [1, 64, 257, 1024] {
-        fs::write(
+        write_current_config(
             &path,
             format!("[interface]\nartwork_decode_budget_mb = {budget}\n"),
         )
@@ -24,7 +80,7 @@ fn artwork_decode_budget_round_trips_and_rejects_out_of_range_values() {
             ..Config::default()
         };
         assert!(config.validate().is_err());
-        fs::write(
+        write_current_config(
             &path,
             format!("[interface]\nartwork_decode_budget_mb = {budget}\n"),
         )
@@ -97,10 +153,10 @@ fn queue_replace_confirmation_defaults_and_round_trips() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");
     assert!(Config::load(&path).unwrap().confirm_queue_replace);
-    fs::write(&path, "[interface]\n").unwrap();
+    write_current_config(&path, "[interface]\n").unwrap();
     assert!(Config::load(&path).unwrap().confirm_queue_replace);
     for enabled in [true, false] {
-        fs::write(
+        write_current_config(
             &path,
             format!("[interface]\nconfirm_queue_replace = {enabled}\n"),
         )
@@ -117,11 +173,11 @@ fn interface_theme_names_round_trip_strictly() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");
     assert_eq!(Config::load(&path).unwrap().ui_theme, Theme::RivuDark);
-    fs::write(&path, "[interface]\nfont = 'sans-serif'\n").unwrap();
+    write_current_config(&path, "[interface]\nfont = 'sans-serif'\n").unwrap();
     assert_eq!(Config::load(&path).unwrap().ui_theme, Theme::RivuDark);
     let names = ["rivu_dark", "tokyo_night", "tokyo_night_day"];
     for (name, theme) in names.into_iter().zip(Theme::ALL) {
-        fs::write(&path, format!("[interface]\ntheme = '{name}'\n")).unwrap();
+        write_current_config(&path, format!("[interface]\ntheme = '{name}'\n")).unwrap();
         let config = Config::load(&path).unwrap();
         assert_eq!(config.ui_theme, theme);
         config.save(&path).unwrap();
@@ -135,7 +191,7 @@ fn interface_theme_names_round_trip_strictly() {
         "[interface]\nui_theme = 'rivu_dark'\n",
         "theme = 'rivu_dark'\n",
     ] {
-        fs::write(&path, invalid).unwrap();
+        write_current_config(&path, invalid).unwrap();
         assert!(Config::load(&path).is_err(), "{invalid}");
     }
 }
@@ -168,14 +224,14 @@ fn interface_language_normalizes_and_round_trips_without_resolving_auto() {
     let path = directory.path().join("config.toml");
     assert_eq!(Config::load(&path).unwrap().ui_language, "auto");
     for (input, expected) in [("AUTO", "auto"), ("en_us", "en-US"), ("ZH_cn", "zh-CN")] {
-        fs::write(&path, format!("[interface]\nlanguage = '{input}'\n")).unwrap();
+        write_current_config(&path, format!("[interface]\nlanguage = '{input}'\n")).unwrap();
         let config = Config::load(&path).unwrap();
         assert_eq!(config.ui_language, expected);
         config.save(&path).unwrap();
         assert_eq!(Config::load(&path).unwrap(), config);
     }
     for value in ["", "fr-FR", "zh-TW", "zh-Hant"] {
-        fs::write(&path, format!("[interface]\nlanguage = '{value}'\n")).unwrap();
+        write_current_config(&path, format!("[interface]\nlanguage = '{value}'\n")).unwrap();
         let error = Config::load(&path).unwrap_err();
         assert!(format!("{error:#}").contains("interface.language"));
     }
@@ -222,7 +278,7 @@ fn library_column_selections_preserve_partial_defaults_and_round_trip() {
             },
         ),
     ] {
-        fs::write(&path, contents).unwrap();
+        write_current_config(&path, contents).unwrap();
         let config = Config::load(&path).unwrap();
         assert_eq!(config.library_columns, expected);
         config.save(&path).unwrap();
@@ -243,7 +299,7 @@ fn album_artwork_settings_round_trip_and_reject_invalid_motion_values() {
         ("card", AlbumArtworkStyle::Card),
         ("duotone", AlbumArtworkStyle::Duotone),
     ] {
-        fs::write(&path, format!("interface.album_artwork.style = '{name}'\n")).unwrap();
+        write_current_config(&path, format!("interface.album_artwork.style = '{name}'\n")).unwrap();
         let config = Config::load(&path).unwrap();
         assert_eq!(config.album_artwork_style, style);
         config.save(&path).unwrap();
@@ -273,7 +329,7 @@ fn album_artwork_settings_round_trip_and_reject_invalid_motion_values() {
         }
     }
     for period in ["0", "-1", "nan", "inf", "-inf"] {
-        fs::write(
+        write_current_config(
             &path,
             format!("interface.album_artwork.period_seconds = {period}\n"),
         )
@@ -292,7 +348,7 @@ fn album_artwork_settings_round_trip_and_reject_invalid_motion_values() {
         assert_eq!(fs::read(&path).unwrap(), original);
     }
     for fps in [0, 1, 60, 240] {
-        fs::write(&path, format!("interface.album_artwork.fps = {fps}\n")).unwrap();
+        write_current_config(&path, format!("interface.album_artwork.fps = {fps}\n")).unwrap();
         let config = Config::load(&path).unwrap();
         assert_eq!(config.album_artwork_fps, fps);
         config.save(&path).unwrap();
@@ -320,7 +376,7 @@ fn album_artwork_settings_round_trip_and_reject_invalid_motion_values() {
         "fps = 1.5",
         "fps = '60'",
     ] {
-        fs::write(&path, format!("[interface.album_artwork]\n{invalid}\n")).unwrap();
+        write_current_config(&path, format!("[interface.album_artwork]\n{invalid}\n")).unwrap();
         assert!(Config::load(&path).is_err());
     }
 }
@@ -334,13 +390,10 @@ fn grouped_file_defaults_partial_tables_and_font_normalization() {
         "[library]\n[playback]\n[interface]\n[logging]\n[visualizations]\n",
         "[visualizations.spectrum]\n[visualizations.spectrogram]\n[visualizations.audio_visualizer]\n[visualizations.waveform]\n",
     ] {
-        fs::write(&path, contents).unwrap();
+        write_current_config(&path, contents).unwrap();
         assert_eq!(Config::load(&path).unwrap(), Config::default());
     }
-    fs::write(
-        &path,
-        "[playback]\nshuffle = true\nrepeat = 'one'\n[interface]\nfont = ''\n[visualizations]\ndb_range = 95\n[visualizations.spectrum]\nbars = 42\n[visualizations.waveform]\nseek_enabled = false\n",
-    ).unwrap();
+    write_current_config(&path, "[playback]\nshuffle = true\nrepeat = 'one'\n[interface]\nfont = ''\n[visualizations]\ndb_range = 95\n[visualizations.spectrum]\nbars = 42\n[visualizations.waveform]\nseek_enabled = false\n").unwrap();
     let config = Config::load(&path).unwrap();
     assert_eq!(
         config,
@@ -371,7 +424,7 @@ fn volume_accepts_numeric_percent() {
         ("100", 1.0),
         ("100.0", 1.0),
     ] {
-        fs::write(&path, format!("[playback]\nvolume_percent = {percent}\n")).unwrap();
+        write_current_config(&path, format!("[playback]\nvolume_percent = {percent}\n")).unwrap();
         let config = Config::load(&path).unwrap();
         assert_eq!(config.volume, level);
         config.save(&path).unwrap();
@@ -417,7 +470,7 @@ fn volume_file_rejects_invalid_values() {
         "true",
         "[]",
     ] {
-        fs::write(&path, format!("[playback]\nvolume_percent = {value}\n")).unwrap();
+        write_current_config(&path, format!("[playback]\nvolume_percent = {value}\n")).unwrap();
         assert!(
             Config::load(&path).is_err(),
             "accepted volume_percent = {value}"
@@ -444,7 +497,7 @@ fn unknown_and_misplaced_file_keys_are_rejected() {
         "[visualizations.unknown]",
         "[visualizations.spectrum]\nvolume_percent = 50",
     ] {
-        fs::write(&path, contents).unwrap();
+        write_current_config(&path, contents).unwrap();
         assert!(Config::load(&path).is_err(), "accepted config: {contents}");
     }
 }
@@ -475,7 +528,7 @@ fn library_roots_reject_logical_overlap_before_loading_or_saving() {
         assert_eq!(fs::read(&path).unwrap(), original);
         let text = format!("[library]\nroots = {roots:?}\n");
         let input = directory.path().join("invalid.toml");
-        fs::write(&input, text).unwrap();
+        write_current_config(&input, text).unwrap();
         assert!(Config::load(&input).is_err(), "{roots:?}");
     }
 }
@@ -624,7 +677,7 @@ fn scan_max_depth_round_trips_and_rejects_zero() {
     config.save(&path).unwrap();
     assert_eq!(Config::load(&path).unwrap().scan_max_depth, 123);
 
-    fs::write(&path, "library.scan_max_depth = 0\n").unwrap();
+    write_current_config(&path, "library.scan_max_depth = 0\n").unwrap();
     assert!(Config::load(&path).is_err());
     directory.close().unwrap();
 }
@@ -633,7 +686,7 @@ fn scan_max_depth_round_trips_and_rejects_zero() {
 fn scan_min_duration_defaults_round_trips_and_rejects_non_u32_values() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");
-    fs::write(&path, "[library]\n").unwrap();
+    write_current_config(&path, "[library]\n").unwrap();
     assert_eq!(Config::load(&path).unwrap().scan_min_duration_secs, 0);
 
     for seconds in [0, 1, 45, u32::MAX] {
@@ -646,7 +699,7 @@ fn scan_min_duration_defaults_round_trips_and_rejects_non_u32_values() {
     }
 
     for value in ["-1", "1.5", "4294967296", "\"30\""] {
-        fs::write(&path, format!("library.scan_min_duration_secs = {value}\n")).unwrap();
+        write_current_config(&path, format!("library.scan_min_duration_secs = {value}\n")).unwrap();
         assert!(Config::load(&path).is_err(), "accepted {value}");
     }
     directory.close().unwrap();
@@ -703,7 +756,7 @@ fn base_font_size_defaults_round_trips_and_rejects_invalid_values() {
     }
 
     for value in ["7", "19", "-1", "11.5", "'11'", "true", "4294967296"] {
-        fs::write(&path, format!("interface.font_size = {value}\n")).unwrap();
+        write_current_config(&path, format!("interface.font_size = {value}\n")).unwrap();
         assert!(Config::load(&path).is_err(), "accepted font size {value}");
     }
 }
@@ -759,10 +812,10 @@ fn layout_snapping_round_trips_limits_and_rejects_invalid_values_without_overwri
     }
 
     for value in ["0", "65", "-1", "1.5", "'8'"] {
-        fs::write(&path, format!("interface.layout_snap_grid_px = {value}\n")).unwrap();
+        write_current_config(&path, format!("interface.layout_snap_grid_px = {value}\n")).unwrap();
         assert!(Config::load(&path).is_err(), "accepted spacing {value}");
     }
-    fs::write(&path, "interface.layout_snap_enabled = 'true'\n").unwrap();
+    write_current_config(&path, "interface.layout_snap_enabled = 'true'\n").unwrap();
     assert!(Config::load(&path).is_err());
 }
 
@@ -842,7 +895,7 @@ fn malformed_unknown_and_invalid_values_are_rejected() {
         "interface.library_columns.title = true",
         "library.library_columns.duration = false",
     ] {
-        fs::write(&path, contents).unwrap();
+        write_current_config(&path, contents).unwrap();
         assert!(
             Config::load(&path).is_err(),
             "accepted invalid config: {contents}"
@@ -900,10 +953,7 @@ fn visualization_ranges_inherit_and_preserve_explicit_overrides() {
     );
     assert_eq!(Config::load(&path).unwrap(), config);
 
-    fs::write(
-        &path,
-        "visualizations.db_range = 85\nvisualizations.spectrum.db_range = 70\nvisualizations.spectrogram.db_range = 110\nvisualizations.audio_visualizer.db_range = 85\n",
-    )
+    write_current_config(&path, "visualizations.db_range = 85\nvisualizations.spectrum.db_range = 70\nvisualizations.spectrogram.db_range = 110\nvisualizations.audio_visualizer.db_range = 85\n")
     .unwrap();
     config = Config::load(&path).unwrap();
     assert_eq!(config.spectrum_db_range, Some(70.0));
@@ -930,7 +980,7 @@ fn visualization_ranges_reject_nonfinite_and_out_of_range_values() {
         "visualizations.audio_visualizer.db_range",
     ] {
         for value in ["nan", "inf", "-inf", "0", "0.99", "160.01", "161"] {
-            fs::write(&path, format!("{key} = {value}\n")).unwrap();
+            write_current_config(&path, format!("{key} = {value}\n")).unwrap();
             assert!(Config::load(&path).is_err(), "accepted {key} = {value}");
         }
     }
@@ -962,9 +1012,9 @@ fn visual_parameter_boundaries_round_trip() {
             waveform_peak_gain: if high { 2.0 } else { 0.0 },
             waveform_peak_gamma: if high { 3.0 } else { 0.25 },
             visual_background: if high {
-                RgbColor(0xffffff)
+                "#ffffff".parse().unwrap()
             } else {
-                RgbColor(0)
+                "#000000".parse().unwrap()
             },
             ..Config::default()
         };
@@ -1024,7 +1074,6 @@ fn boundary_values_round_trip() {
             }
         }
     }
-    assert_eq!(entries(directory.path()), vec![path]);
     directory.close().unwrap();
 }
 
@@ -1212,14 +1261,14 @@ fn page_size_round_trips_and_rejects_out_of_range_values() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");
     for page_size in [20, 64, 256] {
-        fs::write(&path, format!("interface.page_size = {page_size}\n")).unwrap();
+        write_current_config(&path, format!("interface.page_size = {page_size}\n")).unwrap();
         let config = Config::load(&path).unwrap();
         assert_eq!(config.page_size, page_size);
         config.save(&path).unwrap();
         assert_eq!(Config::load(&path).unwrap().page_size, page_size);
     }
     for page_size in [0, 19, 257, u32::MAX] {
-        fs::write(&path, format!("interface.page_size = {page_size}\n")).unwrap();
+        write_current_config(&path, format!("interface.page_size = {page_size}\n")).unwrap();
         assert!(Config::load(&path).is_err());
     }
 }

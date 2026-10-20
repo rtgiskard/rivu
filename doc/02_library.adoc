@@ -741,10 +741,58 @@ For the JSON history shape and `--limit` behavior, see <<_cli_output,CLI output>
 
 Rivu creates and opens only schema version 1 library databases. Other versions
 and unversioned databases are rejected without changing the schema or user data.
-There is no automatic schema-version migration, reset, or deletion. Within version 1,
-Rivu updates its album-summary trigger definitions transactionally when needed,
-without rebuilding summaries or changing user records. Reopening an up-to-date
-database does not reinstall those triggers.
+There is no automatic schema-version migration, reset, or deletion. The schema
+version identifies the persistent structure and semantics, not the application release.
+Within that schema, Rivu maintains its current album-summary triggers transactionally.
+`album_trigger_revision` is an internal derived-structure maintenance marker, not a
+second database schema version. Installing triggers does not by itself repair
+historical summary data. Up-to-date definitions are not reinstalled; future
+maintenance revisions are rejected rather than downgraded.
+
+=== Independent migration tool
+
+`rivu-migrate check` opens the database read-only without modifying user data or
+configuration; SQLite may create or update WAL shared-memory sidecars for reader
+coordination. `rivu-migrate apply` performs supported upgrades while the host is
+stopped. Both accept `--data-dir` and `--config` with the same defaults as Rivu.
+The application does not invoke the tool automatically.
+The tool supports the current version 1 database contract. Configuration is strictly
+validated against the current schema; omitting `schema_version` means current, not
+an upgrade request. The tool never rewrites or backs up configuration, and does not
+create a configuration lock. Unknown database structures, unsupported explicit
+versions, and invalid configurations are errors, not instructions to discard data.
+No historical database conversion is inferred from a missing version number.
+Missing resources are not created; an explicitly selected missing library database
+is an error.
+`check` exits with `0` when no changes are needed, `1` when supported changes are
+needed, and `2` on error. `apply` exits with `0` on success and `2` on error;
+errors include the resource status and any backup paths already created.
+
+Apply acquires the same directory identity ownership as the application, including
+directory aliases. Stop external database writers before applying. Configuration
+is read-only in the tool. Normal application configuration saves use atomic
+replacement without a configuration writer lock.
+
+Before modifying the database, the tool creates a non-overwriting backup and reports
+its location. SQLite backups include committed WAL contents through SQLite's backup
+API; copying only a live `.db` file is not equivalent. Database updates use
+transactions; a failed maintenance transaction rolls back without changing the
+configuration.
+Backups reside beside the database, named `library.db.YYYYMMDD-HHMMSS.bak`
+using the system local time without a timezone suffix. Name collisions append
+`.1`, `.2`, and so on before `.bak`; existing backups are never renamed or overwritten.
+
+On failure, inspect the reported state and explicitly rerun with the same target
+paths: already-current resources are skipped. Backups are not overwritten on retry.
+There is no automatic downgrade, paired restore, or recovery-state database. Keep
+the original backups if you need to restore manually. A successful apply means the
+selected existing resources satisfy the current contracts; it does not start the
+application.
+The dependency, version authority, derived-structure maintenance, and ownership
+contracts are defined in link:26_migration.adoc[Database and configuration migration].
+
+
+=== Database operations
 
 Unchanged playback timestamps, queue positions during deduplication, and derived
 album artists are not rewritten. Actual listening statistics, queue changes, and

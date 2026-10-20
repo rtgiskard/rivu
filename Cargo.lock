@@ -1982,6 +1982,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs2"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9564fc758e15025b46aa6643b1b77d047d1a56a1aea6e01002ac0c7026876213"
+dependencies = [
+ "libc",
+ "winapi",
+]
+
+[[package]]
 name = "futures"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5050,6 +5060,7 @@ dependencies = [
  "rand 0.10.3",
  "ratatui",
  "ringbuf",
+ "rivu-format",
  "rivu-ui",
  "rusqlite",
  "rustfft",
@@ -5069,6 +5080,31 @@ dependencies = [
  "url",
  "walkdir",
  "zbus",
+]
+
+[[package]]
+name = "rivu-format"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "rusqlite",
+ "serde",
+ "tempfile",
+ "toml 1.1.8+spec-1.1.0",
+]
+
+[[package]]
+name = "rivu-migrate"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "directories",
+ "fs2",
+ "rivu-format",
+ "rusqlite",
+ "tempfile",
 ]
 
 [[package]]

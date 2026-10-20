@@ -2,9 +2,11 @@
 
 Rivu reads `~/.config/rivu/config.toml` by default (or the XDG configuration
 directory); path overrides are described in link:../readme.adoc[the README].
-A missing file, group, or field uses the existing defaults. Unreadable files,
-malformed TOML, unknown keys at the root or in any group or nested view table,
-misplaced fields, and invalid values are errors, not a reason to fall back to defaults.
+A missing file uses the existing defaults. Existing files may omit top-level
+`schema_version`; omission means the current schema (`1`), not a historical format.
+Omitted setting groups and fields use their defaults. Unreadable files, malformed
+TOML, unknown keys, misplaced fields, unsupported explicit schema versions, and
+invalid values are errors, not a reason to fall back to defaults.
 Paths are literal: `~` and environment variables are not expanded.
 The configuration file path must be valid UTF-8, including a path derived from
 `--data-dir`. A new host rejects an unrepresentable path before reading or saving
@@ -13,6 +15,14 @@ instance does not validate a configuration path that the instance will not use.
 Configuration symlinks are followed when saving, including relative chains and
 missing targets; saving atomically replaces the target file, not the links.
 Link loops and inaccessible targets are reported as errors without replacing the links.
+Configuration saves do not create a lock file. GUI and TUI changes share the same
+host core; data-directory ownership prevents a second host for that directory.
+Separate hosts sharing one configuration file, or external editors, are not
+coordinated: the last save wins, without merging external changes. Exit Rivu before
+editing the file manually, then restart to load the changes. Legacy
+`.config.toml.rivu-lock` files are ignored and not automatically removed; remove
+them only after all older Rivu instances using that configuration have exited.
+
 Configuration is organized into `[library]`, `[playback]`,
 `[interface]`, `[logging]`, and `[visualizations]`. Audio visualization settings
 live in `[visualizations.spectrum]`, `[visualizations.spectrogram]`,
@@ -41,6 +51,26 @@ level = "warning"
 [visualizations]
 still_mode = false
 ----
+
+== Configuration upgrades
+
+The application reads only the current configuration schema. A valid unversioned
+file needs no migration and is not rewritten merely to add a version. Normal
+application saves include the current `schema_version`.
+
+When an unversioned file fails current parsing or validation, the error retains
+the specific cause and explains the current-schema assumption. If it is an older
+configuration, declare its original top-level `schema_version` explicitly before
+using a compatible migration tool; do not label old content with the current
+version to bypass validation. Malformed TOML must first be corrected so its
+version can be read. File-access errors are not version errors.
+
+Explicit noncurrent versions are rejected without trying historical decoders.
+The current `rivu-migrate` validates configuration but does not convert or rewrite
+it. See link:02_library.adoc#_sqlite_maintenance[SQLite maintenance] for the tool's
+commands, supported inputs, backups, and retry guarantees. Configuration and
+database schemas evolve independently; neither is an application release number.
+Layout files are outside this migration scope.
 
 == Parameters
 
@@ -223,8 +253,8 @@ If creating the writer or saving the configuration fails, the previous logging
 settings remain active.
 
 Color settings use quoted `"#RRGGBB"` values. The file schema is defined in
-link:../src/config/file.rs[the grouped file adapter]; runtime defaults and
-validation remain in link:../src/config.rs[`Config`].
+link:../crates/rivu-format/src/config/file.rs[the grouped file adapter]; current defaults
+and validation live in link:../crates/rivu-format/src/config.rs[`Config`].
 
 == Desktop settings
 

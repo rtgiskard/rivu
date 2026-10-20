@@ -9,6 +9,8 @@
 //! coordinator receives typed cross-feature intents for confirmation and metadata.
 //! Physical page retirement precedes snapshot reconciliation, then publication.
 
+#[cfg(test)]
+use crate::config::ConfigPersistence;
 mod model;
 mod queries;
 mod view;
@@ -284,7 +286,7 @@ mod tests {
     #[gpui::test]
     fn search_replacement_retires_loading_before_worker_release(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
-            rivu_ui::theme::set_palette(crate::theme::Theme::default().palette(), cx);
+            rivu_ui::theme::set_palette(crate::theme::palette(crate::theme::Theme::default()), cx);
             rivu_ui::theme::set_typography(
                 gpui::font("sans-serif"),
                 crate::gui::appearance::fonts::SYMBOLS_FAMILY,

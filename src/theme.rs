@@ -3,35 +3,14 @@
 //! Tokyo Night colors: https://github.com/folke/tokyonight.nvim/tree/main/lua/tokyonight/colors
 //! Day uses the upstream generated extras/lua/tokyonight_day.lua palette.
 
+pub use rivu_format::config::Theme;
 use rivu_ui::theme::Palette;
-use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Theme {
-    #[default]
-    RivuDark,
-    TokyoNight,
-    TokyoNightDay,
-}
-
-impl Theme {
-    pub const ALL: [Self; 3] = [Self::RivuDark, Self::TokyoNight, Self::TokyoNightDay];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::RivuDark => "Rivu Dark",
-            Self::TokyoNight => "Tokyo Night",
-            Self::TokyoNightDay => "Tokyo Night Day",
-        }
-    }
-
-    pub fn palette(self) -> &'static Palette {
-        match self {
-            Self::RivuDark => &RIVU_DARK,
-            Self::TokyoNight => &TOKYO_NIGHT,
-            Self::TokyoNightDay => &TOKYO_NIGHT_DAY,
-        }
+pub fn palette(theme: Theme) -> &'static Palette {
+    match theme {
+        Theme::RivuDark => &RIVU_DARK,
+        Theme::TokyoNight => &TOKYO_NIGHT,
+        Theme::TokyoNightDay => &TOKYO_NIGHT_DAY,
     }
 }
 
@@ -144,7 +123,7 @@ mod tests {
     #[test]
     fn presets_keep_text_and_accent_labels_readable() {
         for theme in Theme::ALL {
-            let palette = theme.palette();
+            let palette = palette(theme);
             let text_levels = [
                 palette.text,
                 palette.secondary,

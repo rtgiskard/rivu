@@ -27,19 +27,7 @@ const ZH: &str = concat!(
     "\n",
 );
 
-/// Canonicalize supported configuration values; preserve unknown values so
-/// configuration validation can reject them rather than silently changing intent.
-pub fn normalize_language(language: &str) -> &str {
-    if language.eq_ignore_ascii_case("auto") {
-        "auto"
-    } else if language.eq_ignore_ascii_case("en-US") || language.eq_ignore_ascii_case("en_US") {
-        "en-US"
-    } else if language.eq_ignore_ascii_case("zh-CN") || language.eq_ignore_ascii_case("zh_CN") {
-        "zh-CN"
-    } else {
-        language
-    }
-}
+pub use rivu_format::config::normalize_language;
 
 fn environment_language<'a>(values: impl IntoIterator<Item = Option<&'a str>>) -> &'static str {
     let value = values

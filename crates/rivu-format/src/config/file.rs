@@ -253,6 +253,7 @@ struct VisualizationsView<'a> {
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(super) struct FileConfig {
+    schema_version: Option<u32>,
     library: Library,
     playback: Playback,
     interface: Interface,
@@ -262,6 +263,10 @@ pub(super) struct FileConfig {
 
 impl FileConfig {
     pub(super) fn into_config(self) -> Config {
+        debug_assert_eq!(
+            self.schema_version.unwrap_or(CONFIG_SCHEMA_VERSION),
+            CONFIG_SCHEMA_VERSION
+        );
         let mut config = Config::default();
         self.library.apply(&mut config);
         self.playback.apply(&mut config);
@@ -301,6 +306,7 @@ impl FileConfig {
 
 #[derive(Serialize)]
 pub(super) struct FileConfigView<'a> {
+    schema_version: u32,
     library: LibraryView<'a>,
     playback: PlaybackView<'a>,
     interface: InterfaceView<'a>,
@@ -311,6 +317,7 @@ pub(super) struct FileConfigView<'a> {
 impl<'a> From<&'a Config> for FileConfigView<'a> {
     fn from(config: &'a Config) -> Self {
         Self {
+            schema_version: CONFIG_SCHEMA_VERSION,
             library: config.into(),
             playback: config.into(),
             interface: config.into(),

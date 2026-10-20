@@ -8,91 +8,6 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
-const SCHEMA_VERSION: i64 = 1;
-
-const TRACK_TABLE: &str = "CREATE TABLE tracks(
-    id INTEGER PRIMARY KEY AUTOINCREMENT,path TEXT NOT NULL,
-    fingerprint BLOB CHECK(fingerprint IS NULL OR (typeof(fingerprint)='blob' AND length(fingerprint)=32)),
-    file_size INTEGER NOT NULL DEFAULT 0,modified_ns INTEGER NOT NULL DEFAULT 0,
-    raw_title TEXT NOT NULL DEFAULT '',raw_artist TEXT NOT NULL DEFAULT '',
-    raw_album TEXT NOT NULL DEFAULT '',title_override TEXT,artist_override TEXT,
-    album_override TEXT,duration REAL,codec TEXT NOT NULL DEFAULT '',
-    channels INTEGER NOT NULL DEFAULT 0,sample_rate INTEGER NOT NULL DEFAULT 0,
-    missing INTEGER NOT NULL DEFAULT 0,play_count INTEGER NOT NULL DEFAULT 0,
-    last_played INTEGER,cue_sheet TEXT,cue_number INTEGER,
-    cue_start_frame INTEGER,cue_end_frame INTEGER,
-    probe_version INTEGER NOT NULL DEFAULT 0,
-    bitrate_bps INTEGER,track_number INTEGER,disc_number INTEGER,
-    bitrate_exact INTEGER NOT NULL DEFAULT 0 CHECK(bitrate_exact IN (0,1)),
-    bits_per_sample INTEGER,release_date TEXT,
-    favorite INTEGER NOT NULL DEFAULT 0 CHECK(favorite IN (0,1)),
-    relocation_independent INTEGER NOT NULL DEFAULT 0 CHECK(relocation_independent IN (0,1)),
-    decoder_hint INTEGER NOT NULL DEFAULT 0 CHECK(decoder_hint IN (0,1,2))
-);";
-
-const TRACK_INDEXES: &str = "
-    CREATE INDEX tracks_fingerprint ON tracks(fingerprint);
-    CREATE UNIQUE INDEX tracks_path ON tracks(path) WHERE cue_sheet IS NULL;
-    CREATE INDEX tracks_directory ON tracks(path);
-    CREATE UNIQUE INDEX tracks_cue ON tracks(cue_sheet,cue_number) WHERE cue_sheet IS NOT NULL;
-    CREATE INDEX tracks_recent ON tracks(last_played DESC,id DESC) WHERE last_played IS NOT NULL;
-    CREATE INDEX tracks_album ON tracks(COALESCE(album_override,raw_album), CASE WHEN COALESCE(album_override,raw_album)<>'' THEN COALESCE(disc_number,4294967295) END, CASE WHEN COALESCE(album_override,raw_album)<>'' THEN COALESCE(track_number,4294967295) END, COALESCE(title_override,raw_title));
-    CREATE INDEX tracks_most_played ON tracks(play_count DESC);";
-
-const QUEUE_METADATA_TRIGGER: &str = "
-    CREATE TRIGGER queue_metadata AFTER UPDATE OF raw_title,raw_artist,raw_album,
-        title_override,artist_override,album_override,duration,favorite,missing,
-        play_count,codec,bitrate_bps,bitrate_exact ON tracks
-    WHEN (COALESCE(old.title_override,old.raw_title) IS NOT COALESCE(new.title_override,new.raw_title)
-        OR COALESCE(old.artist_override,old.raw_artist) IS NOT COALESCE(new.artist_override,new.raw_artist)
-        OR COALESCE(old.album_override,old.raw_album) IS NOT COALESCE(new.album_override,new.raw_album)
-        OR old.duration IS NOT new.duration
-        OR old.favorite IS NOT new.favorite OR old.missing IS NOT new.missing
-        OR old.play_count IS NOT new.play_count OR old.codec IS NOT new.codec
-        OR old.bitrate_bps IS NOT new.bitrate_bps OR old.bitrate_exact IS NOT new.bitrate_exact)
-        AND EXISTS(SELECT 1 FROM queue_entries WHERE track_id=new.id) BEGIN
-        UPDATE queue_meta SET revision=revision+1;
-    END;";
-
-fn create_schema(conn: &Connection) -> Result<()> {
-    let tx = conn.unchecked_transaction()?;
-    tx.execute_batch(TRACK_TABLE)?;
-    tx.execute_batch(
-        "CREATE TABLE schema_meta(key TEXT PRIMARY KEY,value INTEGER NOT NULL);
-        CREATE TABLE playlists(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL);
-        CREATE TABLE playlist_entries(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            playlist_id INTEGER NOT NULL REFERENCES playlists(id) ON DELETE CASCADE,
-            track_id INTEGER NOT NULL,position INTEGER NOT NULL
-        );
-        CREATE INDEX playlist_order ON playlist_entries(playlist_id,position);
-        CREATE UNIQUE INDEX playlist_track ON playlist_entries(playlist_id,track_id);
-        CREATE INDEX playlist_track_lookup ON playlist_entries(track_id,playlist_id);
-        CREATE TABLE queue_entries(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            track_id INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
-            position INTEGER NOT NULL
-        );
-        CREATE INDEX queue_order ON queue_entries(position);
-        CREATE INDEX queue_track ON queue_entries(track_id);
-        CREATE TABLE queue_meta(
-            singleton INTEGER PRIMARY KEY CHECK(singleton=1),
-            current_id INTEGER REFERENCES queue_entries(id) ON DELETE SET NULL,
-            revision INTEGER NOT NULL DEFAULT 0
-        );
-        INSERT INTO queue_meta(singleton) VALUES(1);",
-    )?;
-    tx.execute(
-        "INSERT INTO schema_meta(key,value) VALUES('version',?1)",
-        [SCHEMA_VERSION],
-    )?;
-    tx.execute_batch(TRACK_INDEXES)?;
-    tx.execute_batch(QUEUE_METADATA_TRIGGER)?;
-    super::albums::create_summary_schema(&tx)?;
-    tx.commit()?;
-    Ok(())
-}
-
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(p) = path.parent()
@@ -104,30 +19,13 @@ impl Store {
         let c =
             Connection::open(path).with_context(|| format!("open database {}", path.display()))?;
         c.busy_timeout(std::time::Duration::from_secs(5))?;
+        if rivu_format::database::inspect(&c)? != rivu_format::database::DatabaseState::Empty {
+            rivu_format::database::validate_current(&c)?;
+        }
         c.pragma_update(None, "journal_mode", "WAL")?;
         c.pragma_update(None, "foreign_keys", "ON")?;
         c.execute_batch("PRAGMA synchronous=NORMAL;")?;
-        let populated: bool = c.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%')",
-            [], |row| row.get(0),
-        )?;
-        if !populated {
-            create_schema(&c)?;
-        } else {
-            let version: i64 = c
-                .query_row(
-                    "SELECT value FROM schema_meta WHERE key='version'",
-                    [],
-                    |row| row.get(0),
-                )
-                .context("Unsupported library database; back up the database and WAL before replacing it; rescanning cannot restore user state")?;
-            if version != SCHEMA_VERSION {
-                bail!(
-                    "Unsupported database version {version}; back up the database and WAL before replacing it; rescanning cannot restore user state"
-                );
-            }
-            super::albums::ensure_summary_triggers(&c)?;
-        }
+        rivu_format::database::ensure_current(&c)?;
         // SQLite's built-in lower() is ASCII-only; preserve frontend Unicode search.
         c.create_scalar_function(
             "lower",

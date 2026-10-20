@@ -1,7 +1,7 @@
 use crate::{
     analysis::{AnalysisControl, AnalysisFrame, DisplayDemand},
     audio::{self, AudioCommand, AudioEngine, AudioEvent},
-    config::{Config, ConfigPatch, LibraryColumn},
+    config::{Config, ConfigPatch, ConfigPersistence, LibraryColumn},
     library::{self, M3uItem, ScanResult},
     logging,
     model::*,

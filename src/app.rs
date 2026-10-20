@@ -1,6 +1,8 @@
 //! Application lifecycle and services shared by graphical and headless instances.
 //! CLI parsing and client-relative path translation remain at the binary boundary.
 
+#[cfg(test)]
+use crate::config::ConfigPersistence;
 use crate::{
     artwork::ArtworkManager,
     core::{CoreHandle, REPLY_TIMEOUT, Runtime, RuntimeControl},

@@ -64,7 +64,7 @@ fn startup_and_unchanged_exit_preserve_config_bytes_and_comments() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");
     let original = format!(
-        "# Keep user comments and formatting\n[playback]\nvolume_percent = 75 # chosen volume\n[library]\nroots = [\"{}/unused/..\"]\n",
+        "# Keep user comments and formatting\nschema_version = 1\n[playback]\nvolume_percent = 75 # chosen volume\n[library]\nroots = [\"{}/unused/..\"]\n",
         directory.path().display(),
     ).into_bytes();
     std::fs::write(&path, &original).unwrap();

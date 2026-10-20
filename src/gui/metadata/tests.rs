@@ -1,4 +1,5 @@
 use super::*;
+use crate::config::ConfigPersistence;
 use crate::{config::Config, core::Runtime, i18n::Localizer, response::Ack};
 use gpui::{EntityInputHandler, TestAppContext};
 

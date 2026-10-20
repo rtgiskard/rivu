@@ -353,6 +353,7 @@ impl Library {
 }
 #[cfg(test)]
 mod tests {
+    use crate::config::ConfigPersistence;
 
     #[test]
     fn library_search_counts_query_deduplicates_roots_and_resumes_cancelled_reads() {

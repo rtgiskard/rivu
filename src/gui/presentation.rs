@@ -3,6 +3,8 @@
 //! refreshes the application root. Panel entities are the only redraw targets.
 
 use super::{layout, visualization};
+#[cfg(test)]
+use crate::config::ConfigPersistence;
 use crate::{
     analysis::{AnalysisFrame, DisplayDemand, VisualizerDemand},
     config::{AudioVisualizerOptions, AudioVisualizerStyle, Config},

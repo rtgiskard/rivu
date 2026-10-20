@@ -13,6 +13,7 @@ use self::{
 };
 use anyhow::{Context, Result, bail};
 use clap::{CommandFactory, FromArgMatches};
+use rivu::config::ConfigPersistence;
 use rivu::{
     app::App,
     audio, config,

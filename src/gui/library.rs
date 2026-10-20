@@ -1238,6 +1238,7 @@ impl Library {
 #[cfg(test)]
 mod library_root_tests {
     use super::{FeatureContext, Library};
+    use crate::config::ConfigPersistence;
     use crate::{
         config::Config,
         core::{CoreHandle, GuiConfigChange, Runtime},
@@ -1295,7 +1296,7 @@ mod library_root_tests {
         cx: &mut gpui::TestAppContext,
     ) {
         cx.update(|cx| {
-            rivu_ui::theme::set_palette(crate::theme::Theme::default().palette(), cx);
+            rivu_ui::theme::set_palette(crate::theme::palette(crate::theme::Theme::default()), cx);
             rivu_ui::theme::set_typography(
                 gpui::font("sans-serif"),
                 crate::gui::appearance::fonts::SYMBOLS_FAMILY,

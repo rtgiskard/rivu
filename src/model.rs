@@ -225,7 +225,7 @@ pub struct LibraryRootCount {
 }
 
 /// Maximum number of rows in a query batch or interactive page.
-pub const MAX_QUERY_ROWS: usize = 256;
+pub use rivu_format::config::MAX_QUERY_ROWS;
 
 /// Quiet interval before interactive search submits its final query.
 pub(crate) const SEARCH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(150);
@@ -261,14 +261,7 @@ pub enum PlaybackStatus {
     Paused,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RepeatMode {
-    #[default]
-    Off,
-    All,
-    One,
-}
+pub use rivu_format::config::RepeatMode;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HistoryEntry {

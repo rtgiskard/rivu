@@ -1,3 +1,5 @@
+#[cfg(test)]
+use crate::config::ConfigPersistence;
 mod model;
 mod pages;
 
@@ -2032,7 +2034,7 @@ mod tests {
 
     fn fixture(cx: &mut TestAppContext) -> (tempfile::TempDir, Runtime, Entity<Settings>) {
         cx.update(|cx| {
-            rivu_ui::theme::set_palette(Theme::default().palette(), cx);
+            rivu_ui::theme::set_palette(crate::theme::palette(Theme::default()), cx);
             rivu_ui::theme::set_typography(
                 gpui::font("sans-serif"),
                 crate::gui::appearance::fonts::SYMBOLS_FAMILY,

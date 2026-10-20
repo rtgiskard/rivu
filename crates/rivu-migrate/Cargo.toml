@@ -1,0 +1,17 @@
+[package]
+name = "rivu-migrate"
+version = "0.2.0"
+edition = "2024"
+description = "Offline configuration validation and database maintenance for Rivu"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+directories = "6"
+fs2 = "0.4"
+rivu-format = { path = "../rivu-format" }
+rusqlite = { version = "0.40.2", features = ["bundled", "backup"] }
+
+[dev-dependencies]
+tempfile = "3.27"

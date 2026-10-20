@@ -10,6 +10,8 @@
 //! Pointer captures require a live interactive panel, not just cached peaks.
 //! Losing that surface cancels its generation and the matching window seek;
 //! ordinary MouseUp keeps the queued final Seek valid until consumption.
+#[cfg(test)]
+use crate::config::ConfigPersistence;
 use crate::i18n::Localizer;
 
 use std::{
@@ -885,7 +887,7 @@ impl Waveform {
         let palette = super::visuals::active_palette_lut(config.visual_palette);
         let config_palette = config.visual_palette;
         let error_i18n = Arc::clone(i18n);
-        let error_theme = config.ui_theme.palette();
+        let error_theme = crate::theme::palette(config.ui_theme);
         let water = rgb(config.waveform_cursor_color.rgb());
         let background = rgb(config.visual_background.rgb());
         let glow = config.waveform_glow;

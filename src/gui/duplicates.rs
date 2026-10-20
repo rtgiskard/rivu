@@ -1796,6 +1796,7 @@ fn has_target_state(member: &DuplicateMember) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use crate::config::ConfigPersistence;
     use super::{Busy, DuplicateReview, Member, ReviewFeedback, TaskReadOutcome};
     use crate::{
         model::{Command, DuplicateMember, Page, RelocationPhase, RelocationTaskStatus, Track},

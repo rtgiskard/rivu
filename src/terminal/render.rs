@@ -33,7 +33,7 @@ struct TerminalColors {
 
 impl TerminalColors {
     fn new(theme: crate::theme::Theme) -> Self {
-        let palette = theme.palette();
+        let palette = crate::theme::palette(theme);
         let rgb = |color: u32| {
             ratatui::style::Color::Rgb((color >> 16) as u8, (color >> 8) as u8, color as u8)
         };
