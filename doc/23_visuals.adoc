@@ -326,6 +326,8 @@ pattern in logical coordinates, including the partial segment at the body's top,
 rather than tessellating every segment on the CPU. Outline uses up to four
 nonoverlapping edge rectangles per visible slot. Line and Solid retain their
 curve and fill geometry through the shared GPU Path material.
+Solid fill closes at the plot baseline. Display slots at or below the configured
+decibel floor remain empty rather than creating a minimum-height colored band.
 
 All styles normalize the gradient to the full plot bounds, with the strongest
 color at the top and the visible minimum at the bottom. A curve below the plot's

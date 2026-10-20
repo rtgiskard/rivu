@@ -1362,7 +1362,13 @@ impl VisualData {
                         }
                     }
                     SpectrumStyle::Line | SpectrumStyle::Solid => {
-                        let y = (bottom - bar_height).clamp(top + px(1.0), bottom - px(1.0));
+                        // Only the stroked line needs clearance from the plot edge.
+                        // Filled areas retain zero and subpixel signal heights.
+                        let y = if style == SpectrumStyle::Line {
+                            (bottom - bar_height).clamp(top + px(1.0), bottom - px(1.0))
+                        } else {
+                            bottom - bar_height
+                        };
                         self.spectrum_points.push(point(x + width * 0.5, y));
                     }
                 }
@@ -2249,6 +2255,34 @@ mod tests {
                         .all(|vertex| vertex.xy_position.y <= plot.bottom() + px(1.0))
                 );
             }
+        }
+    }
+
+    #[test]
+    fn solid_spectrum_preserves_subpixel_and_full_height_signal() {
+        for level in [-99.9, -75.0, 0.0] {
+            let mut visuals = configured_visuals();
+            visuals.configure(&Config {
+                spectrum_style: SpectrumStyle::Solid,
+                spectrum_interpolate: false,
+                spectrum_db_range: Some(100.0),
+                ..Config::default()
+            });
+            visuals.update(&frame(1.0, level));
+            let body = prepared_body(&visuals, 1, 100.0, 100.0).unwrap();
+            let gpui::GpuContent::Path { path, .. } = body.content() else {
+                panic!("expected filled spectrum path")
+            };
+            let minimum_y = path
+                .vertices
+                .iter()
+                .map(|vertex| vertex.xy_position.y)
+                .fold(px(f32::INFINITY), |a, b| a.min(b));
+            let expected_y = px(121.5 - (level + 100.0));
+            assert!(
+                (minimum_y - expected_y).abs() < px(0.001),
+                "{level} dB must retain its measured height, not a stroke inset"
+            );
         }
     }
 
