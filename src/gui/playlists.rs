@@ -889,6 +889,10 @@ impl Playlists {
             error
         } else if pending {
             self.i18n.text("gl-loading")
+        } else if kind == ViewRequestKind::Entries
+            && self.browser.playlists().selected_total().is_none()
+        {
+            self.i18n.text("gl-playlist-count-unknown")
         } else if (kind == ViewRequestKind::Entries
             && self.browser.playlists().entries().query.is_some()
             && self
@@ -1048,6 +1052,35 @@ impl Playlists {
                     ))
                 },
             ));
+        let summary_status = self.browser.playlist_lookup_failure().map(|(key, error)| {
+            let message: SharedString = self
+                .i18n
+                .format(
+                    "gl-playlist-summary-unavailable",
+                    &[("error", error.into())],
+                )
+                .into();
+            row()
+                .flex_shrink_0()
+                .min_w_0()
+                .h_8()
+                .overflow_hidden()
+                .child(
+                    status_message(theme, message.clone(), StatusKind::Error)
+                        .id(("playlist-summary-status", panel_id))
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .tooltip(rivu_ui::text_tooltip(message)),
+                )
+                .child(icon_button(
+                    ("retry-playlist-summary", panel_id),
+                    "󰑐",
+                    self.tr("gl-retry"),
+                    cx,
+                    move |this, _, cx| this.retry_playlist_selection(key, cx),
+                ))
+        });
         let catalog_len = self.browser.playlists().summaries().rows.len();
         self.context.scroll.borrow_mut().register_list(
             ("playlist-catalog", panel_id),
@@ -1824,6 +1857,7 @@ impl Playlists {
                     )),
             )
             .when(selection_unavailable, |panel| panel.child(selection_status))
+            .when_some(summary_status, |panel, status| panel.child(status))
             .child(lists)
             .into_any_element()
     }

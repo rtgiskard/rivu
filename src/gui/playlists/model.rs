@@ -108,6 +108,7 @@ impl PlaylistBrowser {
 
     pub(super) fn invalidate_summaries(&mut self) {
         self.summaries.rows.invalidate();
+        self.selected_total = None;
     }
 
     pub(super) fn configure_page_size(&mut self, page_size: usize) {
@@ -269,7 +270,15 @@ impl PlaylistBrowser {
         }
     }
 
-    pub(super) fn accept_summaries(&mut self, page: Page<PlaylistSummary>) {
+    pub(super) fn accept_summaries(&mut self, page: Page<PlaylistSummary>) -> bool {
+        let contains_selected =
+            if let Some(summary) = page.rows.iter().find(|row| Some(row.id) == self.selected) {
+                self.selected_name.clone_from(&summary.name);
+                self.selected_total = Some(summary.entry_count);
+                true
+            } else {
+                false
+            };
         self.summaries.rows.accept(page);
         if let Some(index) = self
             .summaries
@@ -278,15 +287,7 @@ impl PlaylistBrowser {
         {
             self.summaries.rows.pin(Some(index));
         }
-        if let Some(summary) = self
-            .summaries
-            .rows
-            .iter()
-            .find(|row| Some(row.id) == self.selected)
-        {
-            self.selected_name.clone_from(&summary.name);
-            self.selected_total = Some(summary.entry_count);
-        }
+        contains_selected
     }
 
     pub(super) fn accept_entries(&mut self, page: Page<PlaylistEntryRow>) {

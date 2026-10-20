@@ -167,6 +167,22 @@ impl Playlists {
         self.request_view(prepared, cx);
     }
 
+    pub(super) fn retry_playlist_selection(
+        &mut self,
+        key: requests::SelectionKey,
+        cx: &mut Context<Self>,
+    ) {
+        self.refresh(cx);
+        if !self.panel_demand("playlists") {
+            return;
+        }
+        let prepared = self
+            .browser
+            .retry_playlist_lookup(key, self.state.query_revisions(None));
+        self.request_view(prepared, cx);
+        cx.notify();
+    }
+
     pub(in crate::gui) fn request_playlist_summaries(
         &mut self,
         offset: usize,

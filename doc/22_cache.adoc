@@ -128,6 +128,10 @@ old positions unavailable until explicit retry succeeds or a new single selectio
 replaces them. Timeout and ordinary errors have the same publication boundary.
 Position validity is independent of operation progress: cancelling a replacement
 selection does not validate retained positions or cancel their reconciliation.
+Selected-playlist summary lookups also park failures by selection and catalog
+stamp, with their own explicit retry. Catalog invalidation forgets the selected
+count; a current lookup or summary page restores it. Retry reuses the existing
+reader lane and cannot bypass an outstanding physical worker.
 Cancelling a generation cannot release a physical worker gate: completion owns
 that release, and only the latest queued demand may then run. Metadata drafts/save baselines,
 occurrence identities, unavailable state, and relocation operations remain

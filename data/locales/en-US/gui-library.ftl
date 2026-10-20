@@ -125,6 +125,10 @@ gl-loading = Loading…
 
 gl-playlist-empty = This playlist is empty
 
+gl-playlist-count-unknown = Playlist track count unavailable
+
+gl-playlist-summary-unavailable = Playlist summary unavailable: { $error }
+
 gl-no-playlists = No playlists yet
 
 gl-retry = Retry

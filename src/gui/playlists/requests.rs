@@ -33,6 +33,8 @@ struct ViewDemand {
     quiet_until: Instant,
 }
 
+pub(in crate::gui) type SelectionKey = (u64, crate::model::QueryStamp);
+
 #[derive(Default)]
 pub(in crate::gui) struct ViewRequests {
     generation: u64,
@@ -43,7 +45,8 @@ pub(in crate::gui) struct ViewRequests {
     // Latest intent outlives logical cancellation, hiding and worker completion.
     demands: HashMap<ViewRequestKind, ViewDemand>,
     immediate: HashSet<ViewRequestKind>,
-    selection_baseline: Option<(u64, crate::model::QueryStamp)>,
+    selection_baseline: Option<SelectionKey>,
+    selection_failure: Option<(SelectionKey, String)>,
 }
 
 impl ViewRequests {
@@ -234,11 +237,28 @@ impl PlaylistState {
         self.playlists.clear_selection();
     }
 
-    fn accept_playlist_summaries(&mut self, page: Page<PlaylistSummary>) {
+    fn accept_playlist_summaries(
+        &mut self,
+        page: Page<PlaylistSummary>,
+        revisions: QueryRevisions,
+    ) {
         if page.total == 0 && self.playlists.summaries().query.is_none() {
             self.remove_playlist_selection();
         }
-        self.playlists.accept_summaries(page);
+        let contains_selected = self.playlists.accept_summaries(page);
+        if contains_selected {
+            let key = self.playlist_lookup(revisions).map(|(_, key)| key);
+            if self
+                .requests
+                .selection_failure
+                .as_ref()
+                .map(|(key, _)| *key)
+                == key
+            {
+                // A page can restore the fact, but cannot retire a newer lookup intent.
+                self.requests.selection_failure = None;
+            }
+        }
     }
 
     /// The first row after `id - 1` proves existence without scanning other pages.
@@ -248,6 +268,7 @@ impl PlaylistState {
         }
         if let Some(summary) = first.filter(|summary| summary.id == id) {
             self.playlists.accept_selected_summary(summary);
+            self.requests.selection_failure = None;
         } else {
             self.remove_playlist_selection();
         }
@@ -297,6 +318,7 @@ impl PlaylistState {
         if refresh.summaries {
             self.cancel_playlist_read(ViewRequestKind::Summaries);
             self.playlists.invalidate_summaries();
+            self.requests.selection_failure = None;
         }
         if refresh.entries {
             self.cancel_playlist_read(ViewRequestKind::Entries);
@@ -323,7 +345,10 @@ impl PlaylistState {
         match kind {
             ViewRequestKind::Summaries => self.playlists.cancel_page(false),
             ViewRequestKind::Entries => self.playlists.cancel_page(true),
-            ViewRequestKind::Selection => self.requests.selection_baseline = None,
+            ViewRequestKind::Selection => {
+                self.requests.selection_baseline = None;
+                self.requests.selection_failure = None;
+            }
         }
     }
 
@@ -444,27 +469,60 @@ impl PlaylistState {
         self.prepare_playlist_page(entries, offset, page_size, false, revisions)
     }
 
-    pub(in crate::gui) fn prepare_playlist_lookup(
-        &mut self,
-        revisions: QueryRevisions,
-    ) -> ViewRequest {
-        let Some(id) = self.playlists.selected() else {
-            return self.playlist_request(ViewRequestKind::Selection);
-        };
+    fn playlist_lookup(&self, revisions: QueryRevisions) -> Option<(Query, SelectionKey)> {
+        let id = self.playlists.selected()?;
         let query = Query::PlaylistSummaryBatch {
             query: None,
             after: id.checked_sub(1),
             limit: 1,
             expected: None,
         };
-        let baseline = (
+        let key = (
             self.playlists.selection_generation(),
             query.stamp(revisions),
         );
-        if self.requests.selection_baseline == Some(baseline) {
+        Some((query, key))
+    }
+
+    pub(super) fn playlist_lookup_failure(&self) -> Option<(SelectionKey, &str)> {
+        self.requests
+            .selection_failure
+            .as_ref()
+            .map(|(key, message)| (*key, message.as_str()))
+    }
+
+    pub(in crate::gui) fn prepare_playlist_lookup(
+        &mut self,
+        revisions: QueryRevisions,
+    ) -> ViewRequest {
+        let Some((query, key)) = self.playlist_lookup(revisions) else {
+            return self.playlist_request(ViewRequestKind::Selection);
+        };
+        if self.requests.selection_baseline == Some(key) {
             return self.playlist_request(ViewRequestKind::Selection);
         }
-        self.requests.selection_baseline = Some(baseline);
+        self.requests.selection_failure = None;
+        self.requests.selection_baseline = Some(key);
+        let generation = self.requests.next_generation();
+        self.prepare_playlist_read(query, generation, revisions)
+    }
+
+    pub(super) fn retry_playlist_lookup(
+        &mut self,
+        failed_key: SelectionKey,
+        revisions: QueryRevisions,
+    ) -> ViewRequest {
+        let Some((query, key)) = self.playlist_lookup(revisions) else {
+            return self.playlist_request(ViewRequestKind::Selection);
+        };
+        if key != failed_key
+            || self.playlist_lookup_failure().map(|(key, _)| key) != Some(failed_key)
+            || self.requests.pending(ViewRequestKind::Selection)
+        {
+            return self.playlist_request(ViewRequestKind::Selection);
+        }
+        self.requests.selection_failure = None;
+        self.requests.selection_baseline = Some(key);
         let generation = self.requests.next_generation();
         self.prepare_playlist_read(query, generation, revisions)
     }
@@ -601,14 +659,17 @@ impl PlaylistState {
                 match read.kind {
                     ViewRequestKind::Summaries => self.playlists.fail_page(false, message.clone()),
                     ViewRequestKind::Entries => self.playlists.fail_page(true, message.clone()),
-                    _ => {}
+                    ViewRequestKind::Selection => {
+                        let key = (read.selection_generation, read.query.stamp(current));
+                        self.requests.selection_failure = Some((key, message.clone()));
+                    }
                 }
                 Some(message)
             }
             Ok(ViewResponse::PlaylistSummaries(page))
                 if read.kind == ViewRequestKind::Summaries =>
             {
-                self.accept_playlist_summaries(page);
+                self.accept_playlist_summaries(page, current);
                 None
             }
             Ok(ViewResponse::PlaylistEntries(page)) if read.kind == ViewRequestKind::Entries => {
@@ -636,6 +697,324 @@ mod tests {
     use super::*;
     use crate::projection::GuiLibrarySnapshot;
     use std::sync::Arc;
+
+    fn summary(id: i64, entry_count: usize) -> PlaylistSummary {
+        PlaylistSummary {
+            id,
+            name: format!("playlist {id}"),
+            entry_count,
+        }
+    }
+
+    fn lookup_error(revisions: QueryRevisions, message: &str) -> QueryResponse {
+        QueryResponse {
+            revisions,
+            result: Err(crate::response::QueryError::Message(message.into())),
+        }
+    }
+
+    fn lookup_success(revisions: QueryRevisions, id: i64, count: usize) -> QueryResponse {
+        QueryResponse {
+            revisions,
+            result: Ok(ViewResponse::PlaylistSummaryBatch(crate::model::Batch {
+                rows: vec![summary(id, count)],
+                next: None,
+            })),
+        }
+    }
+
+    #[test]
+    fn failed_summary_parks_until_explicit_retry_and_recovers_in_place() {
+        let mut browser = PlaylistState::default();
+        let revisions = QueryRevisions::default();
+        browser.select_playlist(41, "one".into(), 0);
+        let (read, _) = browser
+            .prepare_playlist_lookup(revisions)
+            .into_read()
+            .unwrap();
+        assert_eq!(
+            browser.complete_playlist_read(&read, revisions, lookup_error(revisions, "offline")),
+            Some("offline".into())
+        );
+        let (key, error) = browser.playlist_lookup_failure().unwrap();
+        assert_eq!(error, "offline");
+        for _ in 0..3 {
+            assert!(
+                browser
+                    .prepare_playlist_lookup(revisions)
+                    .into_read()
+                    .is_none()
+            );
+            assert!(!browser.view_pending(ViewRequestKind::Selection));
+        }
+        browser.search_playlist_entries(Some("song".into()));
+        browser.playlist_selection_mut().cancel_manual();
+        browser.configure_page_size(40);
+        browser.cancel_window_reads();
+        assert_eq!(browser.playlist_lookup_failure(), Some((key, "offline")));
+        let (retry, _) = browser
+            .retry_playlist_lookup(key, revisions)
+            .into_read()
+            .unwrap();
+        assert_ne!(retry.generation, read.generation);
+        assert_eq!(browser.playlist_lookup_failure(), None);
+        assert!(
+            browser
+                .prepare_playlist_lookup(revisions)
+                .into_read()
+                .is_none()
+        );
+        assert!(
+            browser
+                .retry_playlist_lookup(key, revisions)
+                .into_read()
+                .is_none()
+        );
+        browser.complete_playlist_read(&retry, revisions, lookup_success(revisions, 41, 7));
+        assert_eq!(browser.playlists.selected(), Some(41));
+        assert_eq!(browser.playlists.selected_total(), Some(7));
+        assert_eq!(browser.playlist_lookup_failure(), None);
+        assert!(!browser.view_pending(ViewRequestKind::Selection));
+    }
+
+    #[test]
+    fn timed_out_summary_retry_waits_for_original_worker_and_ignores_late_results() {
+        let mut browser = PlaylistState::default();
+        let revisions = QueryRevisions::default();
+        browser.select_playlist(41, "one".into(), 0);
+        let (old, _) = browser
+            .prepare_playlist_lookup(revisions)
+            .into_read()
+            .unwrap();
+        browser.timeout_playlist_read(&old, revisions, lookup_error(revisions, "timeout"));
+        let key = browser.playlist_lookup_failure().unwrap().0;
+        assert!(
+            browser
+                .prepare_playlist_lookup(revisions)
+                .into_read()
+                .is_none()
+        );
+        let queued = browser.retry_playlist_lookup(key, revisions);
+        let generation = queued.pending_generation().unwrap();
+        assert!(queued.into_read().is_none());
+        assert_ne!(generation, old.generation);
+        assert_eq!(browser.playlist_lookup_failure(), None);
+        assert_eq!(
+            browser.timeout_playlist_read(&old, revisions, lookup_error(revisions, "late timeout")),
+            None
+        );
+        assert!(browser.view_loading(ViewRequestKind::Selection, generation));
+        assert_eq!(
+            browser.complete_playlist_read(&old, revisions, lookup_success(revisions, 41, 99)),
+            None
+        );
+        assert_eq!(browser.playlists.selected_total(), None);
+        assert!(browser.view_loading(ViewRequestKind::Selection, generation));
+        let (retry, _) = browser
+            .queued_playlist_read(ViewRequestKind::Selection, true, revisions)
+            .into_read()
+            .unwrap();
+        assert_eq!(retry.generation, generation);
+        browser.complete_playlist_read(&retry, revisions, lookup_success(revisions, 41, 3));
+        assert_eq!(browser.playlists.selected_total(), Some(3));
+        assert!(!browser.view_pending(ViewRequestKind::Selection));
+    }
+
+    #[test]
+    fn summary_revision_rejects_old_retry_and_old_timeout_cannot_replace_new_failure() {
+        let mut browser = PlaylistState::default();
+        let revisions = QueryRevisions::default();
+        browser.select_playlist(41, "one".into(), 0);
+        let (old, _) = browser
+            .prepare_playlist_lookup(revisions)
+            .into_read()
+            .unwrap();
+        browser.timeout_playlist_read(&old, revisions, lookup_error(revisions, "old timeout"));
+        let old_key = browser.playlist_lookup_failure().unwrap().0;
+        let current = QueryRevisions {
+            playlist: 1,
+            ..revisions
+        };
+        browser.refresh_playlists(PlaylistRefresh {
+            summaries: true,
+            entries: false,
+        });
+        assert_eq!(browser.playlist_lookup_failure(), None);
+        let obsolete_retry = browser.retry_playlist_lookup(old_key, current);
+        assert!(obsolete_retry.into_read().is_none());
+        let queued = browser.prepare_playlist_lookup(current);
+        let generation = queued.pending_generation().unwrap();
+        assert!(queued.into_read().is_none());
+        browser.complete_playlist_read(&old, current, lookup_error(revisions, "old final"));
+        assert!(browser.view_loading(ViewRequestKind::Selection, generation));
+        let (new, _) = browser
+            .queued_playlist_read(ViewRequestKind::Selection, true, current)
+            .into_read()
+            .unwrap();
+        browser.timeout_playlist_read(&new, current, lookup_error(current, "new timeout"));
+        let new_key = browser.playlist_lookup_failure().unwrap().0;
+        assert_ne!(old_key, new_key);
+        browser.timeout_playlist_read(&old, current, lookup_error(revisions, "obsolete"));
+        assert_eq!(
+            browser.playlist_lookup_failure(),
+            Some((new_key, "new timeout"))
+        );
+        assert!(
+            browser
+                .retry_playlist_lookup(old_key, current)
+                .into_read()
+                .is_none()
+        );
+        assert!(!browser.view_pending(ViewRequestKind::Selection));
+        assert!(
+            browser
+                .prepare_playlist_lookup(current)
+                .into_read()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn current_catalog_page_restores_summary_without_cancelling_retry() {
+        let mut browser = PlaylistState::default();
+        let revisions = QueryRevisions::default();
+        browser.select_playlist(41, "one".into(), 0);
+        let (read, _) = browser
+            .prepare_playlist_lookup(revisions)
+            .into_read()
+            .unwrap();
+        browser.complete_playlist_read(&read, revisions, lookup_error(revisions, "offline"));
+        browser.playlists.prepare_page(false, 0, 20);
+        browser.accept_playlist_summaries(
+            Page {
+                total: 1,
+                rows: vec![summary(41, 5)],
+            },
+            revisions,
+        );
+        assert_eq!(browser.playlists.selected_total(), Some(5));
+        assert_eq!(browser.playlist_lookup_failure(), None);
+        assert!(
+            browser
+                .prepare_playlist_lookup(revisions)
+                .into_read()
+                .is_none()
+        );
+
+        browser.cancel_playlist_read(ViewRequestKind::Selection);
+        let (read, _) = browser
+            .prepare_playlist_lookup(revisions)
+            .into_read()
+            .unwrap();
+        browser.complete_playlist_read(&read, revisions, lookup_error(revisions, "offline"));
+        let key = browser.playlist_lookup_failure().unwrap().0;
+        let (retry, _) = browser
+            .retry_playlist_lookup(key, revisions)
+            .into_read()
+            .unwrap();
+        browser.playlists.prepare_page(false, 0, 20);
+        browser.accept_playlist_summaries(
+            Page {
+                total: 1,
+                rows: vec![summary(41, 8)],
+            },
+            revisions,
+        );
+        assert_eq!(browser.playlists.selected_total(), Some(8));
+        assert!(browser.playlist_read_current(&retry, revisions));
+        browser.complete_playlist_read(&retry, revisions, lookup_success(revisions, 41, 8));
+        assert_eq!(browser.playlists.selected_total(), Some(8));
+    }
+
+    #[test]
+    fn catalog_revision_makes_count_unknown_until_selected_summary_is_current() {
+        let mut browser = PlaylistState::default();
+        let revisions = QueryRevisions::default();
+        browser.select_playlist(41, "one".into(), 0);
+        browser.accept_playlist_lookup(41, Some(summary(41, 0)));
+        assert_eq!(browser.playlists.selected_total(), Some(0));
+        browser.refresh_playlists(PlaylistRefresh {
+            summaries: true,
+            entries: false,
+        });
+        assert_eq!(browser.playlists.selected_total(), None);
+        browser.playlists.prepare_page(false, 0, 20);
+        browser.accept_playlist_summaries(
+            Page {
+                total: 2,
+                rows: vec![summary(1, 4)],
+            },
+            revisions,
+        );
+        assert_eq!(browser.playlists.selected_total(), None);
+        let (read, _) = browser
+            .prepare_playlist_lookup(revisions)
+            .into_read()
+            .unwrap();
+        browser.complete_playlist_read(&read, revisions, lookup_error(revisions, "offline"));
+        assert_eq!(browser.playlists.selected_total(), None);
+        let failure = browser.playlist_lookup_failure().unwrap().0;
+        browser.playlists.prepare_page(false, 0, 20);
+        browser.accept_playlist_summaries(
+            Page {
+                total: 2,
+                rows: vec![summary(1, 4)],
+            },
+            revisions,
+        );
+        assert_eq!(browser.playlists.selected_total(), None);
+        assert_eq!(
+            browser.playlist_lookup_failure(),
+            Some((failure, "offline"))
+        );
+        browser.playlists.prepare_page(false, 0, 20);
+        browser.accept_playlist_summaries(
+            Page {
+                total: 2,
+                rows: vec![summary(41, 9)],
+            },
+            revisions,
+        );
+        assert_eq!(browser.playlists.selected_total(), Some(9));
+        assert_eq!(browser.playlist_lookup_failure(), None);
+    }
+
+    #[test]
+    fn selection_cancellation_change_and_removal_clear_summary_failure() {
+        for action in 0..3 {
+            let mut browser = PlaylistState::default();
+            let revisions = QueryRevisions::default();
+            browser.select_playlist(41, "one".into(), 0);
+            let (read, _) = browser
+                .prepare_playlist_lookup(revisions)
+                .into_read()
+                .unwrap();
+            browser.complete_playlist_read(&read, revisions, lookup_error(revisions, "offline"));
+            let key = browser.playlist_lookup_failure().unwrap().0;
+            match action {
+                0 => browser.cancel_playlist_read(ViewRequestKind::Selection),
+                1 => {
+                    browser.select_playlist(42, "two".into(), 1);
+                }
+                _ => browser.remove_playlist_selection(),
+            }
+            assert_eq!(browser.playlist_lookup_failure(), None);
+            assert!(
+                browser
+                    .retry_playlist_lookup(key, revisions)
+                    .into_read()
+                    .is_none()
+            );
+            if action != 2 {
+                assert!(
+                    browser
+                        .prepare_playlist_lookup(revisions)
+                        .into_read()
+                        .is_some()
+                );
+            }
+        }
+    }
 
     #[test]
     fn view_timeout_publishes_once_and_retains_every_lane_until_retirement() {
@@ -1207,10 +1586,13 @@ mod tests {
         browser.playlists.prepare_page(false, 0, 20);
         browser.requests.begin(ViewRequestKind::Summaries, 2);
         assert!(browser.requests.finish(ViewRequestKind::Summaries, 2));
-        browser.accept_playlist_summaries(crate::model::Page {
-            total: 0,
-            rows: Vec::new(),
-        });
+        browser.accept_playlist_summaries(
+            crate::model::Page {
+                total: 0,
+                rows: Vec::new(),
+            },
+            QueryRevisions::default(),
+        );
         assert_eq!(browser.playlists.selected(), None);
         assert_eq!(browser.playlists.entries().playlist_id, None);
         assert!(browser.playlists.entries().rows.is_empty());

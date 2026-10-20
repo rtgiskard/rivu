@@ -125,6 +125,10 @@ gl-loading = 正在加载…
 
 gl-playlist-empty = 此播放列表为空
 
+gl-playlist-count-unknown = 暂无法获取播放列表曲目数
+
+gl-playlist-summary-unavailable = 无法获取播放列表摘要：{ $error }
+
 gl-no-playlists = 暂无播放列表
 
 gl-retry = 重试
