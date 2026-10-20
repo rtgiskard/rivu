@@ -580,9 +580,7 @@ impl Library {
                                                                 this.library.retry_directory(&branch);
                                                                 this.request_directory_page(branch.clone(), offset, cx);
                                                             },
-                                                        ))
-                                                        .min_h_0()
-                                                        .size_6(),
+                                                        )),
                                                     )
                                                 }),
                                         ),
@@ -753,7 +751,7 @@ impl Library {
                                         })
                                         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                                         .on_click(|_, _, cx| cx.stop_propagation())
-                                        .child(scan.min_h_0().size_6()),
+                                        .child(scan),
                                 )
                             });
                         let menu_node = id.clone();
@@ -959,18 +957,22 @@ impl Library {
                     ScanPhase::Completed | ScanPhase::Failed | ScanPhase::Cancelled
                 )
             });
-        let dismiss = div().size_8().flex_shrink_0().when(dismissible, |slot| {
-            slot.child(quiet_icon_button(
-                theme,
-                icon_button(
-                    ("dismiss-scan-result", panel_id),
-                    "",
-                    self.tr("gl-dismiss-scan"),
-                    cx,
-                    |this, _, cx| this.send(Command::DismissScanResult, cx),
-                ),
-            ))
-        });
+        let dismiss = div()
+            .min_w_8()
+            .min_h_8()
+            .flex_shrink_0()
+            .when(dismissible, |slot| {
+                slot.child(quiet_icon_button(
+                    theme,
+                    icon_button(
+                        ("dismiss-scan-result", panel_id),
+                        "",
+                        self.tr("gl-dismiss-scan"),
+                        cx,
+                        |this, _, cx| this.send(Command::DismissScanResult, cx),
+                    ),
+                ))
+            });
         let mut bar = div()
             .w_full()
             .h(px(3.))

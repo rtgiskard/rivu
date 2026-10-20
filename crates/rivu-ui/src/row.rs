@@ -81,14 +81,10 @@ pub fn single_line_row_height(window: &Window, cx: &gpui::App) -> gpui::Pixels {
     )
 }
 
-/// Uniform tree height, accommodating the root's 14px text and row borders.
+/// Uniform tree height, accommodating text, inline actions and row borders.
 pub fn tree_row_height(window: &Window, cx: &gpui::App) -> gpui::Pixels {
-    (window.rem_size() * 1.75).max(
-        (gpui::phi().to_pixels(gpui::rems(0.875).into(), window.rem_size())
-            * crate::theme::font_size_scale(cx))
-        .round()
-            + gpui::px(2.),
-    )
+    single_line_row_height(window, cx)
+        .max(crate::control::icon_button_height(window, cx) + gpui::px(2.))
 }
 
 /// Shared row geometry and idle background; each caller owns its single hover style.

@@ -278,7 +278,7 @@ fn icon_button(
     cx: &mut Context<Settings>,
     action: impl Fn(&mut Settings, &mut Window, &mut Context<Settings>) + 'static,
 ) -> Stateful<Div> {
-    input_aligned_control(common_icon_button(id, icon, hint, cx, action), cx)
+    common_icon_button(id, icon, hint, cx, action)
 }
 
 fn dropdown_button(
@@ -326,26 +326,23 @@ fn visual_switch(
     } else {
         format!("{label} ({hint})").into()
     };
-    input_aligned_control(
-        rivu_ui::toggle_button(
-            id,
-            icon,
-            format!(
-                "{label}: {}",
-                i18n.text(if enabled {
-                    "settings-on"
-                } else {
-                    "settings-off"
-                })
-            ),
-            enabled,
-            cx,
-            move |this, cx| {
-                toggle(&mut this.model.draft);
-                this.sync_field_enabled(cx);
-            },
+    rivu_ui::toggle_button(
+        id,
+        icon,
+        format!(
+            "{label}: {}",
+            i18n.text(if enabled {
+                "settings-on"
+            } else {
+                "settings-off"
+            })
         ),
+        enabled,
         cx,
+        move |this, cx| {
+            toggle(&mut this.model.draft);
+            this.sync_field_enabled(cx);
+        },
     )
 }
 

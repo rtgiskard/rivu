@@ -405,25 +405,21 @@ impl GuiApp {
                             .child(div().min_w_0().truncate().child(title))
                             .child(self.measurement(Measured::Tab(panel_id)))
                             .when(!self.workspace.layouts.current().locked, |view| {
-                                view.child(
-                                    rivu_ui::quiet_icon_button(
-                                        theme,
-                                        icon_button(
-                                            ("close", panel_id),
-                                            "",
-                                            self.tr("shell-remove-panel"),
-                                            cx,
-                                            move |this, _, cx| {
-                                                if this.workspace.layouts.current().locked {
-                                                    return;
-                                                }
-                                                this.remove_layout_panel(panel_id, cx);
-                                            },
-                                        ),
-                                    )
-                                    .size_4()
-                                    .min_h_0(),
-                                )
+                                view.child(rivu_ui::quiet_icon_button(
+                                    theme,
+                                    icon_button(
+                                        ("close", panel_id),
+                                        "",
+                                        self.tr("shell-remove-panel"),
+                                        cx,
+                                        move |this, _, cx| {
+                                            if this.workspace.layouts.current().locked {
+                                                return;
+                                            }
+                                            this.remove_layout_panel(panel_id, cx);
+                                        },
+                                    ),
+                                ))
                             }),
                     );
                 }

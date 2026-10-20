@@ -1773,7 +1773,7 @@ mod tests {
     fn aligned_controls_follow_input_height_across_font_and_interface_scales() {
         struct Controls {
             input: Entity<Input>,
-            heights: std::rc::Rc<std::cell::Cell<[Pixels; 4]>>,
+            heights: std::rc::Rc<std::cell::Cell<[Pixels; 3]>>,
         }
         impl Render for Controls {
             fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1794,7 +1794,6 @@ mod tests {
                 };
                 let theme = crate::theme::palette(cx);
                 let button = crate::button("aligned-text", "Apply", cx, |_, _, _| {});
-                let icon = crate::icon_button("aligned-icon", "+", "Toggle", cx, |_, _, _| {});
                 let dropdown =
                     crate::dropdown_trigger(theme, "aligned-dropdown", "Choice", false, cx);
                 div()
@@ -1810,17 +1809,13 @@ mod tests {
                     ))
                     .child(measure(
                         2,
-                        input_aligned_control(icon, cx).into_any_element(),
-                    ))
-                    .child(measure(
-                        3,
                         input_aligned_control(dropdown, cx).into_any_element(),
                     ))
             }
         }
         let mut cx = gpui::TestAppContext::single();
         cx.update(crate::theme::init_test);
-        let heights = std::rc::Rc::new(std::cell::Cell::new([px(0.); 4]));
+        let heights = std::rc::Rc::new(std::cell::Cell::new([px(0.); 3]));
         let window = cx.add_window({
             let heights = heights.clone();
             move |_, cx| Controls {
@@ -1843,9 +1838,9 @@ mod tests {
                     window.draw(cx).clear(cx);
                 })
                 .unwrap();
-                let [input, button, icon, dropdown] = heights.get();
+                let [input, button, dropdown] = heights.get();
                 assert!(input > px(font_size as f32 * (4. / 3.) * interface_scale));
-                for control in [button, icon, dropdown] {
+                for control in [button, dropdown] {
                     assert!(
                         (f32::from(input - control)).abs() <= 1.,
                         "font={font_size}, scale={interface_scale}: input={input:?}, control={control:?}"

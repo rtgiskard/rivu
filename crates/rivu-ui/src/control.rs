@@ -141,13 +141,14 @@ pub fn sortable_header<T: 'static>(
     control
 }
 
-/// Shared outer height for toolbar actions and collapsed or expanded search.
-pub(crate) fn toolbar_control_height(cx: &gpui::App) -> gpui::Rems {
-    gpui::rems((1.25 * crate::theme::font_size_scale(cx)).max(2.))
+// Uniform tree rows must reserve the default button's natural line, padding and border.
+pub(crate) fn icon_button_height(window: &Window, cx: &gpui::App) -> gpui::Pixels {
+    let rem = window.rem_size();
+    (rem * 2.).max((rem * crate::theme::font_size_scale(cx)).round() + rem + gpui::px(2.))
 }
 
 /// Icon button with the Nerd symbol font and shared tooltip behavior.
-/// Control text sizing is overridable; the glyph resets the base-text scale.
+/// Glyph size follows configured typography; padding and minimum hit area follow UI scale.
 pub fn icon_button<T: 'static>(
     id: impl Into<ElementId>,
     icon: impl Into<SharedString>,
@@ -161,14 +162,17 @@ pub fn icon_button<T: 'static>(
         control_surface(theme, id)
             .role(Role::Button)
             .aria_label(hint.clone())
-            .child(self::icon(icon, cx)),
+            .child(self::icon(icon, cx).font_size_scale(crate::theme::font_size_scale(cx))),
         cx,
         action,
     )
-    .w_8()
-    .h(toolbar_control_height(cx))
+    .w_auto()
+    .h_auto()
+    .min_w_8()
+    .min_h_8()
     .text_size(gpui::rems(1.))
-    .p_0()
+    .line_height(gpui::relative(1.))
+    .p_2()
     .flex()
     .items_center()
     .justify_center()
@@ -290,13 +294,6 @@ pub fn dropdown_trigger(
                 .text_size(gpui::rems(0.875))
                 .child("󰅀"),
         )
-}
-
-pub fn compact_icon_button(
-    theme: &'static crate::theme::Palette,
-    control: gpui::Stateful<Div>,
-) -> gpui::Stateful<Div> {
-    quiet_icon_button(theme, control).w_6()
 }
 
 /// Decorative Nerd Font glyph; the owning control supplies its accessible name.

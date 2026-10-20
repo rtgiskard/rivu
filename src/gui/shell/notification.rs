@@ -7,9 +7,6 @@ fn notification_button(
 ) -> gpui::Stateful<gpui::Div> {
     rivu_ui::quiet_icon_button(theme, control)
         .group_hover("control", |style| style.bg(rgb(theme.text).alpha(0.08)))
-        .min_h_6()
-        .size_6()
-        .p_0()
         .flex_shrink_0()
 }
 

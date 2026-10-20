@@ -12,8 +12,8 @@ use crate::{
 };
 use gpui::{AnyElement, Context, Div, EntityId, SharedString, Window, prelude::*, px, rgb};
 use rivu_ui::{
-    StatusKind, VirtualList, button, caption, compact_icon_button, disabled_control, hover_actions,
-    icon_button, list_panel_header, list_viewport, panel_surface, panel_toolbar, row,
+    StatusKind, VirtualList, button, caption, disabled_control, hover_actions, icon_button,
+    list_panel_header, list_viewport, panel_surface, panel_toolbar, quiet_icon_button, row,
     status_message,
 };
 use std::cell::RefCell;
@@ -184,7 +184,7 @@ impl Queue {
                 ("".into(), StatusKind::Info)
             };
         let status = row()
-            .h_8()
+            .min_h_8()
             .flex_shrink_0()
             .overflow_hidden()
             .child(
@@ -342,7 +342,7 @@ impl Queue {
                                     .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
                                         cx.stop_propagation();
                                     })
-                                    .child(compact_icon_button(
+                                    .child(quiet_icon_button(
                                         theme,
                                         icon_button(
                                             ("queue-entry-play", id),
@@ -365,7 +365,7 @@ impl Queue {
                                         favorite,
                                         cx,
                                     ))
-                                    .child(compact_icon_button(
+                                    .child(quiet_icon_button(
                                         theme,
                                         icon_button(
                                             ("queue-entry-remove", id),
@@ -385,7 +385,7 @@ impl Queue {
                                     ))
                                     .child(disabled_control(
                                         theme,
-                                        compact_icon_button(
+                                        quiet_icon_button(
                                             theme,
                                             icon_button(
                                                 ("queue-entry-up", id),
@@ -410,7 +410,7 @@ impl Queue {
                                     ))
                                     .child(disabled_control(
                                         theme,
-                                        compact_icon_button(
+                                        quiet_icon_button(
                                             theme,
                                             icon_button(
                                                 ("queue-entry-down", id),

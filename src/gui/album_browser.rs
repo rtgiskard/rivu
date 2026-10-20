@@ -23,7 +23,7 @@ use super::{
     scrolling::ScrollViews,
 };
 use rivu_ui::{
-    ButtonTooltip, VirtualList, caption, column, compact_icon_button, icon_button, panel_surface,
+    ButtonTooltip, VirtualList, caption, column, icon_button, panel_surface, quiet_icon_button,
     row,
     search::{SearchEvent, SearchField},
 };
@@ -39,8 +39,7 @@ fn card_icon_button(
     action: impl Fn(&mut AlbumBrowser, &mut Window, &mut Context<AlbumBrowser>) + 'static,
 ) -> Stateful<Div> {
     let theme = rivu_ui::theme::palette(cx);
-    compact_icon_button(theme, icon_button(id, icon, hint, cx, action))
-        .h_8()
+    quiet_icon_button(theme, icon_button(id, icon, hint, cx, action))
         .rounded_none()
         .border_0()
         .opacity(0.)
@@ -1117,7 +1116,7 @@ impl Render for AlbumBrowser {
                                             cx.stop_propagation()
                                         })
                                         .on_click(|_, _, cx| cx.stop_propagation())
-                                        .child(compact_icon_button(
+                                        .child(quiet_icon_button(
                                             theme,
                                             icon_button(
                                                 ("album-track-play", id as u64),
@@ -1129,7 +1128,7 @@ impl Render for AlbumBrowser {
                                                 },
                                             ),
                                         ))
-                                        .child(compact_icon_button(
+                                        .child(quiet_icon_button(
                                             theme,
                                             icon_button(
                                                 ("album-track-add", id as u64),

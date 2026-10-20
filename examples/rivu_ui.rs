@@ -3,8 +3,8 @@
 use gpui::{prelude::*, *};
 use rivu_ui::{
     ChoiceAction, ChoiceMode, ChoicePopup, ChoiceState, DropdownItem, FocusScope, VirtualList,
-    active_control, button, checkbox, column, compact_icon_button, disabled_control,
-    dropdown_trigger, form_field, icon_button,
+    active_control, button, checkbox, column, disabled_control, dropdown_trigger, form_field,
+    icon_button,
     input::{Input, InputEvent},
     input_aligned_control, list_row,
     loading::{LoadingRowLabels, LoadingText, paged_loading_row},
@@ -233,7 +233,7 @@ impl Render for Showcase {
             .child(row().flex_wrap()
                 .child(disabled_control(colors, button("action", "Action", cx, |this,_,cx| { this.clicks += 1; cx.notify(); }), !self.enabled))
                 .child(active_control(colors, quiet_icon_button(colors, icon_button("quiet", "✓", "Quiet selected action", cx, |this,_,cx| { this.checked = !this.checked; cx.notify(); })),self.checked))
-                .child(compact_icon_button(colors, icon_button("compact", "+", "Compact inline action", cx, |this,_,cx| { this.clicks += 1; cx.notify(); })))
+                .child(quiet_icon_button(colors, icon_button("inline", "+", "Inline action", cx, |this,_,cx| { this.clicks += 1; cx.notify(); })))
                 .child(input_aligned_control(button("aligned", "Input-aligned", cx, |this,_,cx| { this.clicks += 1; cx.notify(); }), cx))
                 .child(format!("Activations: {}",self.clicks)))
             .child(checkbox("enabled", "Enable action and editor", self.enabled, true, cx, |this,next,cx| {

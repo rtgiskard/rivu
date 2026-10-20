@@ -591,14 +591,12 @@ fn metadata_copy(
     let hint = hint.filter(|_| !value.is_empty() && value.as_ref() != "—")?;
     let theme = rivu_ui::theme::palette(cx);
     Some(
-        rivu_ui::compact_icon_button(
+        rivu_ui::quiet_icon_button(
             theme,
             icon_button(label, "", hint, cx, move |_, _, cx| {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(value.to_string()));
             }),
         )
-        .h_5()
-        .min_h_0()
         .text_size(gpui::rems(0.75))
         .opacity(0.)
         .group_hover("metadata-field", |style| style.opacity(1.))

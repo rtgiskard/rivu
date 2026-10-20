@@ -15,9 +15,9 @@ pub mod theme;
 
 pub use choice::{ChoiceAction, ChoiceMode, ChoicePopup, ChoiceState, DropdownItem};
 pub use control::{
-    activate_control, active_control, button, button_style, checkbox, compact_icon_button,
-    danger_control, disabled_control, dropdown_trigger, icon, icon_button, quiet_icon_button,
-    sortable_header, toggle_button,
+    activate_control, active_control, button, button_style, checkbox, danger_control,
+    disabled_control, dropdown_trigger, icon, icon_button, quiet_icon_button, sortable_header,
+    toggle_button,
 };
 pub use focus::{FocusScope, context_menu_key, dropdown_key, tab_key};
 pub use input::input_aligned_control;

@@ -70,7 +70,7 @@ pub(in crate::gui) fn track_favorite_toggle<T: 'static>(
     action: impl Fn(&mut T, &mut gpui::Window, &mut gpui::Context<T>) + 'static,
 ) -> Stateful<Div> {
     let theme = rivu_ui::theme::palette(cx);
-    rivu_ui::compact_icon_button(
+    rivu_ui::quiet_icon_button(
         theme,
         rivu_ui::icon_button(
             id,

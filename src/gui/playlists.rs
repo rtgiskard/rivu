@@ -27,11 +27,11 @@ use crate::projection::GuiSnapshot;
 use gpui::{App, Entity, EventEmitter, FocusHandle, Focusable, Subscription};
 use rivu_ui::loading::LoadingText;
 use rivu_ui::{
-    FocusScope, LIST_ROW_REMS, StatusKind, VirtualList, caption, column, compact_icon_button,
-    danger_control, disabled_control, hover_actions, icon_button,
+    FocusScope, LIST_ROW_REMS, StatusKind, VirtualList, caption, column, danger_control,
+    disabled_control, hover_actions, icon_button,
     input::{Input, InputEvent},
     list_panel_header, list_row, list_row_height, list_viewport, panel_header, panel_surface,
-    panel_toolbar, row,
+    panel_toolbar, quiet_icon_button, row,
     search::{SearchEvent, SearchField},
     status_message,
 };
@@ -1020,7 +1020,7 @@ impl Playlists {
         let selection_status = row()
             .flex_shrink_0()
             .min_w_0()
-            .h_8()
+            .min_h_8()
             .overflow_hidden()
             .child(
                 status_message(theme, selection_message.clone(), StatusKind::Info)
@@ -1030,7 +1030,7 @@ impl Playlists {
                     .truncate()
                     .tooltip(rivu_ui::text_tooltip(selection_message)),
             )
-            .child(div().w_16().h_full().flex_shrink_0().when(
+            .child(div().min_w_16().min_h_8().flex_shrink_0().when(
                 selection_unavailable && !selection_pending,
                 |slot| {
                     slot.child(icon_button(
@@ -1063,7 +1063,7 @@ impl Playlists {
             row()
                 .flex_shrink_0()
                 .min_w_0()
-                .h_8()
+                .min_h_8()
                 .overflow_hidden()
                 .child(
                     status_message(theme, message.clone(), StatusKind::Error)
@@ -1127,7 +1127,7 @@ impl Playlists {
                                 .format("gl-track-count", &[("count", (p.entry_count).into())]),
                         ))
                         .child(
-                            compact_icon_button(
+                            quiet_icon_button(
                                 theme,
                                 icon_button(
                                     ("playlist-row-play", id as u64),
@@ -1158,7 +1158,7 @@ impl Playlists {
                             }),
                         )
                         .child(
-                            compact_icon_button(
+                            quiet_icon_button(
                                 theme,
                                 icon_button(
                                     ("playlist-row-menu", id as u64),
@@ -1395,7 +1395,7 @@ impl Playlists {
                                     this.browser.playlists().track_selection.contains(id),
                                 )
                                 .child(
-                                    compact_icon_button(
+                                    quiet_icon_button(
                                         theme,
                                         icon_button(
                                             ("playlist-entry-play", id as u64),
@@ -1421,7 +1421,7 @@ impl Playlists {
                                     cx,
                                 ))
                                 .child(
-                                    compact_icon_button(
+                                    quiet_icon_button(
                                         theme,
                                         icon_button(
                                             ("playlist-entry-remove", id as u64),

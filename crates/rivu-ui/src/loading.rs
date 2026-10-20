@@ -227,7 +227,7 @@ pub fn paged_loading_row<T: 'static>(
             |row, error| {
                 row.role(gpui::Role::Group)
                     .aria_label(error.clone())
-                    .child(crate::compact_icon_button(
+                    .child(crate::quiet_icon_button(
                         theme,
                         crate::icon_button(
                             "copy-error",
@@ -241,7 +241,7 @@ pub fn paged_loading_row<T: 'static>(
                             },
                         ),
                     ))
-                    .child(crate::compact_icon_button(
+                    .child(crate::quiet_icon_button(
                         theme,
                         crate::icon_button("retry", "󰑐", labels.retry, cx, retry),
                     ))
