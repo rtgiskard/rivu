@@ -1133,7 +1133,7 @@ impl Render for Input {
             }))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .when(!self.embedded, |view| {
-                view.bg(rgb(theme.control))
+                view.bg(rgb(theme.input))
                     .border_1()
                     .border_color(if focused {
                         rgb(theme.accent)
