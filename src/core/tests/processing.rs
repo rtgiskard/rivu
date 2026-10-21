@@ -1405,6 +1405,7 @@ fn auto_graph_prepares_off_thread_and_opens_stopped_source_paused() {
         core.state.system.processing.as_ref().unwrap().phase,
         ProcessingPhase::Queued
     );
+    assert!(core.state.processing_audition.is_none());
     complete(&mut core);
     let task = core.processing_status(1).unwrap();
     assert_eq!(task.phase, ProcessingPhase::Complete, "{:?}", task.error);
@@ -1415,6 +1416,14 @@ fn auto_graph_prepares_off_thread_and_opens_stopped_source_paused() {
     assert_eq!(task.graph_plan.as_ref().unwrap().latency_frames, 0);
     assert_eq!(core.state.playback.status, PlaybackStatus::Paused);
     assert_eq!(core.state.current_track.as_ref().unwrap().id, 1);
+    assert_eq!(
+        core.state.processing_audition,
+        Some(crate::model::ProcessingAudition {
+            id: 1,
+            output: Some(graph_port(2, 0)),
+            mode: Some(GraphExecutionMode::Realtime),
+        })
+    );
     loop {
         let command = commands.recv_timeout(Duration::from_secs(2)).unwrap();
         if let AudioCommand::GraphAudition { paused, runner, .. } = command {
@@ -1430,6 +1439,64 @@ fn auto_graph_prepares_off_thread_and_opens_stopped_source_paused() {
         ProcessingPhase::Cancelled
     );
     assert!(core.processing.audition.is_none());
+    assert!(core.state.processing_audition.is_none());
+}
+
+#[test]
+fn cached_audition_tracks_the_selected_port_without_following_new_results() {
+    let (directory, mut core) = fixture();
+    source(directory.path());
+    core.processing_graph_run(1, graph_port(2, 0), GraphExecutionMode::Offline)
+        .unwrap();
+    complete(&mut core);
+    assert!(core.state.processing_audition.is_none());
+    let _commands = recording_audio(&mut core);
+    core.processing_graph_audition(1, graph_port(2, 0)).unwrap();
+    let admitted = crate::model::ProcessingAudition {
+        id: 1,
+        output: Some(graph_port(2, 0)),
+        mode: Some(GraphExecutionMode::Offline),
+    };
+    assert_eq!(core.state.processing_audition, Some(admitted));
+    core.publish();
+    assert_eq!(
+        crate::projection::GuiSnapshot::from_core(&core.shared.read())
+            .system
+            .processing_audition,
+        Some(admitted)
+    );
+    assert!(
+        core.processing_graph_audition(1, graph_port(2, 99))
+            .is_err()
+    );
+    assert_eq!(core.state.processing_audition, Some(admitted));
+    core.processing_graph_audition(1, graph_port(1, 0)).unwrap();
+    let selected = crate::model::ProcessingAudition {
+        output: Some(graph_port(1, 0)),
+        ..admitted
+    };
+    assert_eq!(core.state.processing_audition, Some(selected));
+    core.processing_graph_run(1, graph_port(2, 0), GraphExecutionMode::Offline)
+        .unwrap();
+    complete(&mut core);
+    assert_eq!(core.state.system.processing.as_ref().unwrap().id, 2);
+    assert_eq!(core.state.processing_audition, Some(selected));
+    core.publish();
+    assert_eq!(
+        crate::projection::GuiSnapshot::from_core(&core.shared.read())
+            .system
+            .processing_audition,
+        Some(selected)
+    );
+    core.stop().unwrap();
+    assert!(core.state.processing_audition.is_none());
+    core.publish();
+    assert!(
+        crate::projection::GuiSnapshot::from_core(&core.shared.read())
+            .system
+            .processing_audition
+            .is_none()
+    );
 }
 
 #[test]

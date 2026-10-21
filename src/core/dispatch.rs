@@ -224,6 +224,7 @@ impl Core {
             if changed.playback {
                 shared.playback = self.state.playback.clone();
                 shared.current_track = self.state.current_track.clone();
+                shared.processing_audition = self.state.processing_audition;
             }
             if changed.queue {
                 shared.queue = self.state.queue.clone();

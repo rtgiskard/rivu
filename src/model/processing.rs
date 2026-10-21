@@ -6,7 +6,7 @@ pub use rivu_format::config::processing_graph::{
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum EqBandEdit {
     Enabled(bool),
     Solo(bool),
@@ -22,7 +22,7 @@ pub enum EqBandEdit {
     GainSteps(i32),
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum EqualizerEdit {
     Enabled(bool),
     PreampDb(f64),
@@ -39,6 +39,155 @@ pub enum EqualizerEdit {
     ImportPreset { path: PathBuf, name: String },
     ExportPreset { path: PathBuf, name: String },
     SwapAb,
+}
+
+impl EqualizerEdit {
+    /// Apply monitor/node-independent parameter edits to a caller-owned candidate.
+    /// Returns owner-only preset/A-B operations untouched. The caller validates
+    /// and commits the whole candidate atomically; errors must discard it.
+    pub(crate) fn apply_config(
+        self,
+        config: &mut EqualizerConfig,
+        sample_rate: Option<u32>,
+    ) -> anyhow::Result<Option<Self>> {
+        use EqualizerEdit::*;
+        use anyhow::{Context, ensure};
+        match self {
+            Enabled(value) => config.enabled = value,
+            PreampDb(value) => config.preamp_db = value,
+            OutputGainDb(value) => config.output_gain_db = value,
+            Band { index, band } => {
+                *config
+                    .bands
+                    .get_mut(index)
+                    .context("Equalizer band no longer exists")? = band
+            }
+            BandField { index, field } => {
+                let band = config
+                    .bands
+                    .get_mut(index)
+                    .context("Equalizer band no longer exists")?;
+                match field {
+                    EqBandEdit::Enabled(v) => band.enabled = v,
+                    EqBandEdit::Solo(v) => band.solo = v,
+                    EqBandEdit::Kind(v) => {
+                        band.kind = v;
+                        band.stages = 1;
+                    }
+                    EqBandEdit::FrequencyHz(v) => band.frequency_hz = v,
+                    EqBandEdit::GainDb(v) => band.gain_db = v,
+                    EqBandEdit::Q(v) => band.q = v,
+                    EqBandEdit::ShelfSlope(v) => band.shelf_slope = v,
+                    EqBandEdit::Stages(v) => band.stages = v,
+                    EqBandEdit::Channels(v) => band.channels = v,
+                    EqBandEdit::Position {
+                        frequency_hz,
+                        gain_db,
+                    } => {
+                        band.frequency_hz = frequency_hz;
+                        band.gain_db = gain_db;
+                    }
+                    EqBandEdit::FrequencySteps { steps, maximum_hz } => {
+                        ensure!(
+                            maximum_hz.is_finite() && maximum_hz >= 20.0,
+                            "Invalid equalizer frequency bound"
+                        );
+                        let maximum_hz =
+                            sample_rate
+                                .filter(|rate| *rate > 0)
+                                .map_or(maximum_hz, |rate| {
+                                    maximum_hz.min(
+                                        f64::from(rate)
+                                            * rivu_dsp::equalizer::MAX_FREQUENCY_RATE_RATIO,
+                                    )
+                                });
+                        ensure!(
+                            maximum_hz >= 20.0,
+                            "Current stream has no usable equalizer frequency range"
+                        );
+                        band.frequency_hz = (band.frequency_hz
+                            * 2.0_f64.powf(f64::from(steps) / 12.0))
+                        .clamp(20.0, maximum_hz);
+                    }
+                    EqBandEdit::GainSteps(steps) => {
+                        band.gain_db = (band.gain_db + f64::from(steps) * 0.5).clamp(-24.0, 24.0)
+                    }
+                }
+            }
+            AddBand { band } => config.bands.push(band),
+            AddBands { count } => {
+                use rivu_dsp::equalizer::{EqBand, MAX_BANDS, MAX_FREQUENCY_RATE_RATIO};
+                let bands = &mut config.bands;
+                ensure!(count > 0, "Equalizer band count must be positive");
+                ensure!(
+                    count <= MAX_BANDS.saturating_sub(bands.len()),
+                    "Equalizer supports at most {MAX_BANDS} bands"
+                );
+                let maximum_hz = sample_rate
+                    .filter(|rate| *rate > 0)
+                    .map_or(20_000.0, |rate| {
+                        20_000.0_f64.min(f64::from(rate) * MAX_FREQUENCY_RATE_RATIO)
+                    });
+                ensure!(
+                    maximum_hz >= 20.0,
+                    "Current stream has no usable equalizer frequency range"
+                );
+                let minimum_log = 20.0_f64.ln();
+                let maximum_log = maximum_hz.ln();
+                bands.reserve(count);
+                if bands.is_empty() {
+                    for index in 0..count {
+                        let fraction = (index as f64 + 0.5) / count as f64;
+                        bands.push(EqBand {
+                            frequency_hz: (minimum_log + fraction * (maximum_log - minimum_log))
+                                .exp()
+                                .clamp(20.0, maximum_hz),
+                            ..Default::default()
+                        });
+                    }
+                } else {
+                    // Only placement anchors are clamped and sorted; old bands keep
+                    // their order and every setting, including out-of-range Hz.
+                    let mut anchors = [0.0; MAX_BANDS + 2];
+                    let mut length = bands.len() + 2;
+                    anchors[0] = minimum_log;
+                    for (anchor, band) in anchors[1..length - 1].iter_mut().zip(bands.iter()) {
+                        *anchor = band.frequency_hz.clamp(20.0, maximum_hz).ln();
+                    }
+                    anchors[length - 1] = maximum_log;
+                    anchors[..length].sort_unstable_by(f64::total_cmp);
+                    for _ in 0..count {
+                        let mut largest_gap = 0;
+                        for index in 1..length - 1 {
+                            if anchors[index + 1] - anchors[index]
+                                > anchors[largest_gap + 1] - anchors[largest_gap]
+                            {
+                                largest_gap = index;
+                            }
+                        }
+                        let midpoint = (anchors[largest_gap] + anchors[largest_gap + 1]) * 0.5;
+                        bands.push(EqBand {
+                            frequency_hz: midpoint.exp().clamp(20.0, maximum_hz),
+                            ..Default::default()
+                        });
+                        anchors.copy_within(largest_gap + 1..length, largest_gap + 2);
+                        anchors[largest_gap + 1] = midpoint;
+                        length += 1;
+                    }
+                }
+            }
+            RemoveBand { index } => {
+                ensure!(
+                    index < config.bands.len(),
+                    "Equalizer band no longer exists"
+                );
+                config.bands.remove(index);
+            }
+            Replace { config: value } => *config = value,
+            owner_edit => return Ok(Some(owner_edit)),
+        }
+        Ok(None)
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -209,4 +358,97 @@ pub struct GraphOutputContext {
     pub path: PathBuf,
     /// Source-relative frame represented by the first context frame.
     pub start_frame: i64,
+}
+
+/// Selected audio source admitted by Core, independent of the latest task and editor.
+/// Transport status remains separate: a selected source can be paused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProcessingAudition {
+    pub id: u64,
+    pub output: Option<GraphPort>,
+    /// Cached graph output is Offline; a prepared live runner is Realtime or Hybrid.
+    /// Legacy denoise/separation audition has no graph mode.
+    pub mode: Option<GraphExecutionMode>,
+}
+
+#[cfg(test)]
+mod equalizer_edit_tests {
+    use super::*;
+
+    #[test]
+    fn node_candidates_share_parameter_semantics_without_mutating_monitor_config() {
+        let monitor = EqualizerConfig {
+            enabled: true,
+            preamp_db: -1.125,
+            bands: vec![EqBand {
+                frequency_hz: 731.25,
+                gain_db: 2.625,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let baseline = monitor.clone();
+        let mut node = monitor.clone();
+        assert!(
+            EqualizerEdit::BandField {
+                index: 0,
+                field: EqBandEdit::Position {
+                    frequency_hz: 1523.875,
+                    gain_db: -3.0625,
+                }
+            }
+            .apply_config(&mut node, Some(48_000))
+            .unwrap()
+            .is_none()
+        );
+        assert!(
+            EqualizerEdit::AddBands { count: 31 }
+                .apply_config(&mut node, Some(48_000))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(monitor, baseline);
+        assert_eq!(node.bands.len(), 32);
+        assert_eq!(node.bands[0].frequency_hz, 1523.875);
+        assert_eq!(node.bands[0].gain_db, -3.0625);
+        assert_eq!(node.preamp_db, monitor.preamp_db);
+        let full = node.clone();
+        assert!(
+            EqualizerEdit::AddBands { count: 1 }
+                .apply_config(&mut node, Some(48_000))
+                .is_err()
+        );
+        assert_eq!(node, full);
+    }
+
+    #[test]
+    fn preset_and_ab_operations_remain_with_the_monitor_owner() {
+        let baseline = EqualizerConfig {
+            enabled: true,
+            output_gain_db: -2.75,
+            ..Default::default()
+        };
+        for edit in [
+            EqualizerEdit::SwapAb,
+            EqualizerEdit::LoadPreset {
+                name: "Reference".to_owned(),
+            },
+            EqualizerEdit::ImportPreset {
+                path: "not-read.json".into(),
+                name: "Reference".to_owned(),
+            },
+            EqualizerEdit::ExportPreset {
+                path: "not-written.json".into(),
+                name: "Reference".to_owned(),
+            },
+        ] {
+            let mut candidate = baseline.clone();
+            let expected = edit.clone();
+            assert_eq!(
+                edit.apply_config(&mut candidate, Some(48_000)).unwrap(),
+                Some(expected)
+            );
+            assert_eq!(candidate, baseline);
+        }
+    }
 }

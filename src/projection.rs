@@ -48,6 +48,7 @@ pub struct GuiSystemSnapshot {
     pub shutting_down: bool,
     pub relocation_task: Option<crate::model::RelocationTaskStatus>,
     pub processing: Option<crate::model::ProcessingTaskStatus>,
+    pub processing_audition: Option<crate::model::ProcessingAudition>,
 }
 
 impl GuiSnapshot {
@@ -84,6 +85,7 @@ impl GuiSnapshot {
                 shutting_down: state.system.shutting_down,
                 relocation_task: state.system.relocation_task.clone(),
                 processing: state.system.processing.clone(),
+                processing_audition: state.processing_audition,
             },
         }
     }

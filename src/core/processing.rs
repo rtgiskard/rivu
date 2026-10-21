@@ -68,7 +68,13 @@ impl Core {
             let path = output.path.clone();
             let track_id = result.track.id;
             self.establish_graph_source_context(track_id)?;
-            return self.audition_path(id, Some(path));
+            self.audition_path(id, Some(path))?;
+            self.state.processing_audition = Some(crate::model::ProcessingAudition {
+                id,
+                output: Some(node),
+                mode: Some(GraphExecutionMode::Offline),
+            });
+            return Ok(());
         }
         let mut config = self.effective_config();
         config.processing_graph = graph;
@@ -293,207 +299,81 @@ impl Core {
     pub(in crate::core) fn equalizer_edit(&mut self, edit: EqualizerEdit) -> Result<()> {
         use EqualizerEdit::*;
         let mut config = self.effective_config();
-        match edit {
-            Enabled(value) => config.equalizer.enabled = value,
-            PreampDb(value) => config.equalizer.preamp_db = value,
-            OutputGainDb(value) => config.equalizer.output_gain_db = value,
-            Band { index, band } => {
-                *config
-                    .equalizer
-                    .bands
-                    .get_mut(index)
-                    .context("Equalizer band no longer exists")? = band
-            }
-            BandField { index, field } => {
-                let band = config
-                    .equalizer
-                    .bands
-                    .get_mut(index)
-                    .context("Equalizer band no longer exists")?;
-                match field {
-                    EqBandEdit::Enabled(v) => band.enabled = v,
-                    EqBandEdit::Solo(v) => band.solo = v,
-                    EqBandEdit::Kind(v) => {
-                        band.kind = v;
-                        band.stages = 1;
-                    }
-                    EqBandEdit::FrequencyHz(v) => band.frequency_hz = v,
-                    EqBandEdit::GainDb(v) => band.gain_db = v,
-                    EqBandEdit::Q(v) => band.q = v,
-                    EqBandEdit::ShelfSlope(v) => band.shelf_slope = v,
-                    EqBandEdit::Stages(v) => band.stages = v,
-                    EqBandEdit::Channels(v) => band.channels = v,
-                    EqBandEdit::Position {
-                        frequency_hz,
-                        gain_db,
-                    } => {
-                        band.frequency_hz = frequency_hz;
-                        band.gain_db = gain_db;
-                    }
-                    EqBandEdit::FrequencySteps { steps, maximum_hz } => {
-                        ensure!(
-                            maximum_hz.is_finite() && maximum_hz >= 20.0,
-                            "Invalid equalizer frequency bound"
-                        );
-                        let maximum_hz = self
-                            .state
-                            .current_track
-                            .as_ref()
-                            .filter(|track| track.sample_rate > 0)
-                            .map_or(maximum_hz, |track| {
-                                maximum_hz.min(
-                                    f64::from(track.sample_rate)
-                                        * rivu_dsp::equalizer::MAX_FREQUENCY_RATE_RATIO,
-                                )
+        let sample_rate = self
+            .state
+            .current_track
+            .as_ref()
+            .map(|track| track.sample_rate);
+        if let Some(edit) = edit.apply_config(&mut config.equalizer, sample_rate)? {
+            match edit {
+                SwapAb => {
+                    let previous = config.equalizer_ab.take().unwrap_or_default();
+                    config.equalizer_ab = Some(std::mem::replace(&mut config.equalizer, previous));
+                }
+                SavePreset { name } => {
+                    if let Some(preset) =
+                        config.equalizer_presets.iter_mut().find(|p| p.name == name)
+                    {
+                        preset.config = config.equalizer.clone();
+                    } else {
+                        config
+                            .equalizer_presets
+                            .push(rivu_format::config::EqualizerPreset {
+                                name,
+                                config: config.equalizer.clone(),
                             });
-                        ensure!(
-                            maximum_hz >= 20.0,
-                            "Current stream has no usable equalizer frequency range"
-                        );
-                        band.frequency_hz = (band.frequency_hz
-                            * 2.0_f64.powf(f64::from(steps) / 12.0))
-                        .clamp(20.0, maximum_hz);
-                    }
-                    EqBandEdit::GainSteps(steps) => {
-                        band.gain_db = (band.gain_db + f64::from(steps) * 0.5).clamp(-24.0, 24.0)
                     }
                 }
-            }
-            AddBand { band } => config.equalizer.bands.push(band),
-            AddBands { count } => {
-                use rivu_dsp::equalizer::{EqBand, MAX_BANDS, MAX_FREQUENCY_RATE_RATIO};
-                let bands = &mut config.equalizer.bands;
-                ensure!(count > 0, "Equalizer band count must be positive");
-                ensure!(
-                    count <= MAX_BANDS.saturating_sub(bands.len()),
-                    "Equalizer supports at most {MAX_BANDS} bands"
-                );
-                let maximum_hz = self
-                    .state
-                    .current_track
-                    .as_ref()
-                    .filter(|track| track.sample_rate > 0)
-                    .map_or(20_000.0, |track| {
-                        20_000.0_f64.min(f64::from(track.sample_rate) * MAX_FREQUENCY_RATE_RATIO)
-                    });
-                ensure!(
-                    maximum_hz >= 20.0,
-                    "Current stream has no usable equalizer frequency range"
-                );
-                let minimum_log = 20.0_f64.ln();
-                let maximum_log = maximum_hz.ln();
-                bands.reserve(count);
-                if bands.is_empty() {
-                    for index in 0..count {
-                        let fraction = (index as f64 + 0.5) / count as f64;
-                        bands.push(EqBand {
-                            frequency_hz: (minimum_log + fraction * (maximum_log - minimum_log))
-                                .exp()
-                                .clamp(20.0, maximum_hz),
-                            ..Default::default()
-                        });
-                    }
-                } else {
-                    // Only placement anchors are clamped and sorted; old bands keep
-                    // their order and every setting, including out-of-range Hz.
-                    let mut anchors = [0.0; MAX_BANDS + 2];
-                    let mut length = bands.len() + 2;
-                    anchors[0] = minimum_log;
-                    for (anchor, band) in anchors[1..length - 1].iter_mut().zip(bands.iter()) {
-                        *anchor = band.frequency_hz.clamp(20.0, maximum_hz).ln();
-                    }
-                    anchors[length - 1] = maximum_log;
-                    anchors[..length].sort_unstable_by(f64::total_cmp);
-                    for _ in 0..count {
-                        let mut largest_gap = 0;
-                        for index in 1..length - 1 {
-                            if anchors[index + 1] - anchors[index]
-                                > anchors[largest_gap + 1] - anchors[largest_gap]
-                            {
-                                largest_gap = index;
-                            }
-                        }
-                        let midpoint = (anchors[largest_gap] + anchors[largest_gap + 1]) * 0.5;
-                        bands.push(EqBand {
-                            frequency_hz: midpoint.exp().clamp(20.0, maximum_hz),
-                            ..Default::default()
-                        });
-                        anchors.copy_within(largest_gap + 1..length, largest_gap + 2);
-                        anchors[largest_gap + 1] = midpoint;
-                        length += 1;
-                    }
-                }
-            }
-            RemoveBand { index } => {
-                ensure!(
-                    index < config.equalizer.bands.len(),
-                    "Equalizer band no longer exists"
-                );
-                config.equalizer.bands.remove(index);
-            }
-            Replace { config: value } => config.equalizer = value,
-            SwapAb => {
-                let previous = config.equalizer_ab.take().unwrap_or_default();
-                config.equalizer_ab = Some(std::mem::replace(&mut config.equalizer, previous));
-            }
-            SavePreset { name } => {
-                if let Some(preset) = config.equalizer_presets.iter_mut().find(|p| p.name == name) {
-                    preset.config = config.equalizer.clone();
-                } else {
-                    config
+                LoadPreset { name } => {
+                    config.equalizer = config
                         .equalizer_presets
-                        .push(rivu_format::config::EqualizerPreset {
-                            name,
-                            config: config.equalizer.clone(),
-                        });
+                        .iter()
+                        .find(|p| p.name == name)
+                        .context("Unknown equalizer preset")?
+                        .config
+                        .clone()
                 }
-            }
-            LoadPreset { name } => {
-                config.equalizer = config
-                    .equalizer_presets
-                    .iter()
-                    .find(|p| p.name == name)
-                    .context("Unknown equalizer preset")?
-                    .config
-                    .clone()
-            }
-            DeletePreset { name } => {
-                ensure!(
-                    config.equalizer_presets.iter().any(|p| p.name == name),
-                    "Unknown equalizer preset"
-                );
-                config.equalizer_presets.retain(|p| p.name != name);
-            }
-            ImportPreset { path, name } => {
-                let metadata = std::fs::metadata(&path)?;
-                ensure!(metadata.len() <= 65536, "Preset exceeds 64 KiB");
-                let value: rivu_dsp::equalizer::EqualizerConfig =
-                    serde_json::from_slice(&std::fs::read(path)?)?;
-                value.validate()?;
-                if let Some(preset) = config.equalizer_presets.iter_mut().find(|p| p.name == name) {
-                    preset.config = value;
-                } else {
-                    config
+                DeletePreset { name } => {
+                    ensure!(
+                        config.equalizer_presets.iter().any(|p| p.name == name),
+                        "Unknown equalizer preset"
+                    );
+                    config.equalizer_presets.retain(|p| p.name != name);
+                }
+                ImportPreset { path, name } => {
+                    let metadata = std::fs::metadata(&path)?;
+                    ensure!(metadata.len() <= 65536, "Preset exceeds 64 KiB");
+                    let value: rivu_dsp::equalizer::EqualizerConfig =
+                        serde_json::from_slice(&std::fs::read(path)?)?;
+                    value.validate()?;
+                    if let Some(preset) =
+                        config.equalizer_presets.iter_mut().find(|p| p.name == name)
+                    {
+                        preset.config = value;
+                    } else {
+                        config
+                            .equalizer_presets
+                            .push(rivu_format::config::EqualizerPreset {
+                                name,
+                                config: value,
+                            });
+                    }
+                }
+                ExportPreset { path, name } => {
+                    let preset = config
                         .equalizer_presets
-                        .push(rivu_format::config::EqualizerPreset {
-                            name,
-                            config: value,
-                        });
+                        .iter()
+                        .find(|p| p.name == name)
+                        .context("Unknown equalizer preset")?;
+                    use std::io::Write;
+                    let mut file = std::fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(path)?;
+                    file.write_all(&serde_json::to_vec_pretty(&preset.config)?)?;
+                    return Ok(());
                 }
-            }
-            ExportPreset { path, name } => {
-                let preset = config
-                    .equalizer_presets
-                    .iter()
-                    .find(|p| p.name == name)
-                    .context("Unknown equalizer preset")?;
-                use std::io::Write;
-                let mut file = std::fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(path)?;
-                file.write_all(&serde_json::to_vec_pretty(&preset.config)?)?;
-                return Ok(());
+                _ => unreachable!("parameter edits are handled by apply_config"),
             }
         }
         self.commit_processing_config(config)
@@ -1100,6 +980,14 @@ impl Core {
         }
         self.processing.audition = (!original || is_graph).then_some(id);
         self.processing.audition_generation = self.processing.audition.map(|_| self.generation);
+        self.state.processing_audition =
+            self.processing
+                .audition
+                .map(|id| crate::model::ProcessingAudition {
+                    id,
+                    output: is_graph.then_some(status.settings.graph_target).flatten(),
+                    mode: is_graph.then_some(status.settings.graph_mode).flatten(),
+                });
         Ok(())
     }
 }

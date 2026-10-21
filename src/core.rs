@@ -78,6 +78,7 @@ pub(crate) struct CoreState {
     pub(crate) queue: QueueState,
     pub(crate) current_track: Option<Arc<Track>>,
     pub(crate) playback: PlaybackState,
+    pub(crate) processing_audition: Option<crate::model::ProcessingAudition>,
     pub(crate) system: SystemState,
     pub(crate) revisions: StateRevisions,
     pub(crate) playlist_content_sequence: u64,
@@ -111,7 +112,9 @@ impl CoreState {
         let system = &self.system;
         let old = &previous.system;
         StateSections {
-            playback: self.playback != previous.playback || current_track_changed,
+            playback: self.playback != previous.playback
+                || current_track_changed
+                || self.processing_audition != previous.processing_audition,
             queue: self.queue != previous.queue,
             library: self.library.revision != previous.library.revision
                 || self.library.structure_revision != previous.library.structure_revision
