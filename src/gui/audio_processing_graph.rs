@@ -7,6 +7,16 @@ use rivu_format::config::processing_graph::{
     ProcessingGraph,
 };
 
+#[path = "audio_processing_workbench.rs"]
+mod workbench;
+use workbench::WorkbenchPanel;
+#[path = "audio_processing_results.rs"]
+mod results;
+
+#[path = "audio_processing_graph_fields.rs"]
+mod inspector;
+use inspector::{DraftStamp, SubmittedField};
+
 const NODE_WIDTH: f32 = 220.;
 const HEADER: f32 = 36.;
 const PORT_ROW: f32 = 28.;
@@ -22,7 +32,9 @@ enum HistoryAction {
 struct PendingEdit {
     before: ProcessingGraph,
     action: HistoryAction,
-    submitted: Option<(String, String)>,
+    submitted: Vec<SubmittedField>,
+    equalizer_submitted: Option<super::equalizer_editor::NodeEqualizerSubmission>,
+    equalizer_target: Option<u64>,
     accepted: bool,
     select_after: Option<u64>,
 }
@@ -49,6 +61,7 @@ struct PanelInput {
 pub(super) struct GraphUi {
     selected: Option<u64>,
     connecting: Option<GraphPort>,
+    highlight_connection: Option<GraphPort>,
     target_port: u16,
     pan: [f32; 2],
     zoom: f32,
@@ -61,6 +74,16 @@ pub(super) struct GraphUi {
     pub(super) pointer: Option<GraphPointer>,
     pub(super) bounds: HashMap<u64, MeasuredGraph>,
     panel_inputs: HashMap<u64, HashMap<String, PanelInput>>,
+    draft_stamps: HashMap<String, DraftStamp>,
+    draft_generation: u64,
+    field_errors: HashMap<String, String>,
+    expanded_backends: std::collections::HashSet<u64>,
+    choosing_path: Option<String>,
+    chooser_generation: u64,
+    export_draft_generation: u64,
+    workbenches: HashMap<u64, WorkbenchPanel>,
+    result_details: std::collections::HashSet<u64>,
+    result_errors: HashMap<u64, String>,
 }
 
 impl Default for GraphUi {
@@ -68,6 +91,7 @@ impl Default for GraphUi {
         Self {
             selected: None,
             connecting: None,
+            highlight_connection: None,
             target_port: 0,
             pan: [24., 24.],
             zoom: 1.,
@@ -80,6 +104,16 @@ impl Default for GraphUi {
             pointer: None,
             bounds: HashMap::new(),
             panel_inputs: HashMap::new(),
+            draft_stamps: HashMap::new(),
+            draft_generation: 0,
+            field_errors: HashMap::new(),
+            expanded_backends: std::collections::HashSet::new(),
+            choosing_path: None,
+            chooser_generation: 0,
+            export_draft_generation: 0,
+            workbenches: HashMap::new(),
+            result_details: std::collections::HashSet::new(),
+            result_errors: HashMap::new(),
         }
     }
 }
@@ -95,6 +129,10 @@ impl GraphUi {
 
     pub(super) fn retain_panel_inputs(&mut self, layout: &super::super::layout::Layout) {
         self.panel_inputs.retain(|id, _| layout.contains_panel(*id));
+        self.workbenches.retain(|id, _| layout.contains_panel(*id));
+        self.result_details.retain(|id| layout.contains_panel(*id));
+        self.result_errors
+            .retain(|id, _| layout.contains_panel(*id));
     }
 }
 
@@ -123,6 +161,15 @@ fn node_height(kind: &GraphNodeKind) -> f32 {
 }
 
 fn scalar_fields(value: &Value, path: &str, fields: &mut Vec<(String, Value)>) {
+    if path.ends_with("/implementation") {
+        let fir = value.pointer("/linear_phase/taps").and_then(Value::as_u64);
+        fields.push((
+            path.to_owned(),
+            json!(if fir.is_some() { "linear_phase" } else { "iir" }),
+        ));
+        fields.push((format!("{path}/taps"), json!(fir.unwrap_or(2049))));
+        return;
+    }
     if path.ends_with("/channels") {
         fields.push((path.to_owned(), value.clone()));
         return;
@@ -170,11 +217,8 @@ impl AudioProcessing {
         let name = key.to_owned();
         let edited = cx.subscribe(&input, move |this, input, event, cx| match event {
             InputEvent::Changed { user: true } => {
-                if let Some(field) = this.fields.get_mut(&name) {
-                    field.dirty = true;
-                    let text = input.read(cx).text().to_owned();
-                    field.input.update(cx, |input, cx| input.set_text(text, cx));
-                }
+                let text = input.read(cx).text().to_owned();
+                this.stage_graph_text(&name, text, cx);
                 cx.notify();
             }
             InputEvent::Submit => this.apply_field(&name, cx),
@@ -200,11 +244,13 @@ impl AudioProcessing {
         input
     }
 
-    fn graph_busy(&self) -> bool {
+    pub(super) fn graph_busy(&self) -> bool {
         self.graph_ui.pending.is_some() || self.pending > 0
     }
 
     pub(super) fn reconcile_graph(&mut self, cx: &mut Context<Self>) {
+        let mut equalizer_completed = None;
+        let mut equalizer_rebased = None;
         let graph = &self.state.system.config.processing_graph;
         let revision = graph.revision;
         if self.graph_ui.revision != Some(revision) {
@@ -220,7 +266,14 @@ impl AudioProcessing {
             && revision > pending.before.revision
         {
             let pending = self.graph_ui.pending.take().expect("pending graph edit");
+            let accepted_revision = pending.before.revision + 1;
+            equalizer_completed = pending
+                .equalizer_submitted
+                .map(|submission| (submission, revision == accepted_revision));
             if revision == pending.before.revision + 1 {
+                equalizer_rebased = pending
+                    .equalizer_target
+                    .map(|id| (id, accepted_revision - 1, revision));
                 if let Some(id) = pending.select_after {
                     self.graph_ui.selected = Some(id);
                     self.graph_ui.target_port = 0;
@@ -249,15 +302,26 @@ impl AudioProcessing {
                 self.graph_ui.undo.clear();
                 self.graph_ui.redo.clear();
             }
-            if let Some((key, value)) = pending.submitted
-                && let Some(field) = self.fields.get_mut(&key)
-                && field.input.read(cx).text().trim() == value
-            {
-                field.dirty = false;
-                let committed = field.committed.clone();
-                field
-                    .input
-                    .update(cx, |input, cx| input.set_text(committed, cx));
+            if revision == accepted_revision {
+                for stamp in self.graph_ui.draft_stamps.values_mut() {
+                    if stamp.revision + 1 == revision {
+                        stamp.revision = revision;
+                    }
+                }
+                for submitted in pending.submitted {
+                    if inspector::submission_current(
+                        self.graph_ui.draft_stamps.get(&submitted.key),
+                        &submitted,
+                        self.fields
+                            .get(&submitted.key)
+                            .map(|field| field.input.read(cx).text()),
+                    ) && let Some(field) = self.fields.get_mut(&submitted.key)
+                    {
+                        field.dirty = false;
+                        self.graph_ui.draft_stamps.remove(&submitted.key);
+                        self.graph_ui.field_errors.remove(&submitted.key);
+                    }
+                }
             }
         }
         if self
@@ -286,16 +350,45 @@ impl AudioProcessing {
                 .and_then(|(id, _)| id.parse::<u64>().ok());
             graph.nodes.iter().any(|n| Some(n.id) == id) && (id == selected || field.dirty)
         });
+        self.graph_ui
+            .draft_stamps
+            .retain(|key, _| self.fields.contains_key(key));
+        self.graph_ui
+            .field_errors
+            .retain(|key, _| self.fields.contains_key(key));
+        self.graph_ui
+            .expanded_backends
+            .retain(|id| graph.nodes.iter().any(|node| node.id == *id));
         self.sync_graph_fields(cx);
+        if let Some((id, from_revision, to_revision)) = equalizer_rebased {
+            self.rebase_node_equalizer_drafts(id, from_revision, to_revision, cx);
+        }
+        if let Some((submission, accepted)) = equalizer_completed {
+            self.finish_node_equalizer_submission(submission, accepted, cx);
+        }
     }
 
     pub(super) fn graph_ack(&mut self, success: bool, cx: &mut Context<Self>) {
         if !success {
-            if self.graph_ui.pending.take().is_some_and(|pending| {
-                pending.before.revision != self.state.system.config.processing_graph.revision
-            }) {
-                self.graph_ui.undo.clear();
-                self.graph_ui.redo.clear();
+            if let Some(pending) = self.graph_ui.pending.take() {
+                if pending.before.revision != self.state.system.config.processing_graph.revision {
+                    self.graph_ui.undo.clear();
+                    self.graph_ui.redo.clear();
+                }
+                let error = self
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| self.tr("processing-command-failed").to_string());
+                for submitted in pending.submitted {
+                    if self.fields.contains_key(&submitted.key) {
+                        self.graph_ui
+                            .field_errors
+                            .insert(submitted.key, error.clone());
+                    }
+                }
+                if let Some(submission) = pending.equalizer_submitted {
+                    self.finish_node_equalizer_submission(submission, false, cx);
+                }
             }
         } else if let Some(pending) = self.graph_ui.pending.as_mut() {
             pending.accepted = true;
@@ -303,15 +396,25 @@ impl AudioProcessing {
         self.reconcile_graph(cx);
     }
 
-    fn graph_edit(&mut self, edit: GraphEdit, cx: &mut Context<Self>) {
-        self.graph_submit(edit, HistoryAction::Edit, None, cx);
+    pub(super) fn graph_edit(&mut self, edit: GraphEdit, cx: &mut Context<Self>) {
+        self.graph_submit(edit, HistoryAction::Edit, Vec::new(), None, cx);
+    }
+
+    pub(super) fn graph_edit_equalizer(
+        &mut self,
+        edit: GraphEdit,
+        submitted: Option<super::equalizer_editor::NodeEqualizerSubmission>,
+        cx: &mut Context<Self>,
+    ) {
+        self.graph_submit(edit, HistoryAction::Edit, Vec::new(), submitted, cx);
     }
 
     fn graph_submit(
         &mut self,
         edit: GraphEdit,
         action: HistoryAction,
-        submitted: Option<(String, String)>,
+        submitted: Vec<SubmittedField>,
+        equalizer_submitted: Option<super::equalizer_editor::NodeEqualizerSubmission>,
         cx: &mut Context<Self>,
     ) {
         // Preserve the revision that produced the intent; Core rejects stale edits.
@@ -322,10 +425,19 @@ impl AudioProcessing {
         let revision = graph.revision;
         let select_after = matches!(&edit, GraphEdit::Add { .. } | GraphEdit::Duplicate { .. })
             .then_some(graph.next_id);
+        let equalizer_target = match &edit {
+            GraphEdit::Replace {
+                id,
+                kind: GraphNodeKind::Equalizer { .. },
+            } => Some(*id),
+            _ => None,
+        };
         self.graph_ui.pending = Some(PendingEdit {
             before: graph,
             action,
             submitted,
+            equalizer_submitted,
+            equalizer_target,
             accepted: false,
             select_after,
         });
@@ -340,6 +452,9 @@ impl AudioProcessing {
 
     fn graph_history(&mut self, redo: bool, cx: &mut Context<Self>) {
         self.reconcile(self.context.snapshot(), cx);
+        if self.graph_dirty_count(cx) > 0 {
+            return;
+        }
         let graph = if redo {
             self.graph_ui.redo.back()
         } else {
@@ -354,6 +469,7 @@ impl AudioProcessing {
                 } else {
                     HistoryAction::Undo
                 },
+                Vec::new(),
                 None,
                 cx,
             );
@@ -401,7 +517,8 @@ impl AudioProcessing {
         let mut active_keys = std::collections::HashSet::with_capacity(fields.len());
         for (path, value) in fields {
             if path.is_empty()
-                || path.ends_with("/implementation")
+                || (matches!(node.kind, GraphNodeKind::Equalizer { .. })
+                    && path.starts_with("/equalizer/config/"))
                 || (path.ends_with("/profile") && value.is_null())
             {
                 continue;
@@ -420,6 +537,10 @@ impl AudioProcessing {
                 match value {
                     Value::String(s) => s,
                     Value::Null => String::new(),
+                    // DSP parameters are f32; source-relative timestamps are f64.
+                    Value::Number(number) if number.is_f64() && !path.ends_with("_seconds") => {
+                        (number.as_f64().expect("floating point number") as f32).to_string()
+                    }
                     _ => value.to_string(),
                 }
             };
@@ -476,6 +597,9 @@ impl AudioProcessing {
             "stages" => self.tr("processing-stages").to_string(),
             "channels" => self.tr("processing-channels").to_string(),
             "taps" => self.tr("processing-graph-taps").to_string(),
+            "implementation" => self.tr("processing-fields-implementation").to_string(),
+            "mode" => self.tr("processing-denoise-mode").to_string(),
+            "device" => self.tr("processing-device").to_string(),
             "start_seconds" => self.tr("processing-profile-start").to_string(),
             "end_seconds" => self.tr("processing-profile-end").to_string(),
             _ => self.parameter_label(key),
@@ -499,67 +623,7 @@ impl AudioProcessing {
     }
 
     pub(super) fn apply_graph_field(&mut self, key: &str, cx: &mut Context<Self>) {
-        let result = (|| -> Result<GraphEdit, String> {
-            let (id, path) = key
-                .strip_prefix("graph.")
-                .and_then(|s| s.split_once('/'))
-                .ok_or("Invalid node field")?;
-            let id = id.parse::<u64>().map_err(|e| e.to_string())?;
-            let node = self
-                .state
-                .system
-                .config
-                .processing_graph
-                .nodes
-                .iter()
-                .find(|n| n.id == id)
-                .ok_or("Node was removed")?;
-            let mut value = serde_json::to_value(&node.kind).map_err(|e| e.to_string())?;
-            let slot = value
-                .pointer_mut(&format!("/{path}"))
-                .ok_or("Node field changed")?;
-            let text = self.text(key, cx);
-            *slot = match slot {
-                _ if path.ends_with("_manifest") && text.is_empty() => Value::Null,
-                _ if path.ends_with("/channels") => {
-                    if text == "all" {
-                        json!("all")
-                    } else {
-                        let channels = text
-                            .split(',')
-                            .map(|part| {
-                                part.trim()
-                                    .parse::<usize>()
-                                    .ok()
-                                    .and_then(|n| n.checked_sub(1))
-                                    .ok_or_else(|| {
-                                        self.tr("processing-graph-channels-invalid").to_string()
-                                    })
-                            })
-                            .collect::<Result<Vec<_>, _>>()?;
-                        json!({"selected": channels})
-                    }
-                }
-                Value::String(_) => Value::String(text),
-                Value::Null if text.is_empty() => Value::Null,
-                Value::Null => Value::String(text),
-                _ => serde_json::from_str(&text).map_err(|e| e.to_string())?,
-            };
-            let kind = serde_json::from_value(value).map_err(|e| e.to_string())?;
-            Ok(GraphEdit::Replace { id, kind })
-        })();
-        match result {
-            Ok(edit) => self.graph_submit(
-                edit,
-                HistoryAction::Edit,
-                Some((key.to_owned(), self.text(key, cx))),
-                cx,
-            ),
-            Err(error) => {
-                self.error = Some(error);
-                cx.notify();
-            }
-        }
+        self.submit_graph_fields(vec![key.to_owned()], cx);
     }
 
     fn graph_add(&mut self, panel: u64, kind: GraphNodeKind, cx: &mut Context<Self>) {
@@ -579,6 +643,13 @@ impl AudioProcessing {
     }
 
     fn graph_remove(&mut self, cx: &mut Context<Self>) {
+        if self
+            .graph_ui
+            .selected
+            .is_some_and(|id| self.graph_node_dirty_count(id, cx) > 0)
+        {
+            return;
+        }
         if let Some(node) = self
             .state
             .system
@@ -595,6 +666,13 @@ impl AudioProcessing {
     }
 
     fn graph_duplicate(&mut self, cx: &mut Context<Self>) {
+        if self
+            .graph_ui
+            .selected
+            .is_some_and(|id| self.graph_node_dirty_count(id, cx) > 0)
+        {
+            return;
+        }
         if let Some(node) = self
             .state
             .system
@@ -834,6 +912,7 @@ impl AudioProcessing {
                 "+" | "=" => self.graph_zoom(1.2, [250., 160.], cx),
                 "-" => self.graph_zoom(1. / 1.2, [250., 160.], cx),
                 "home" => {
+                    self.cancel_pointer(cx);
                     self.graph_ui.pan = [24., 24.];
                     self.graph_ui.zoom = 1.;
                     cx.notify();
@@ -847,6 +926,7 @@ impl AudioProcessing {
                         _ => [0., step],
                     };
                     if modifiers.alt {
+                        self.cancel_pointer(cx);
                         self.graph_ui.pan[0] += delta[0];
                         self.graph_ui.pan[1] += delta[1];
                         cx.notify();
@@ -881,6 +961,7 @@ impl AudioProcessing {
         let theme = rivu_ui::theme::palette(cx);
         let graph = &self.state.system.config.processing_graph;
         let edges = graph.edges.clone();
+        let highlighted = self.graph_ui.highlight_connection;
         let pan = self.graph_pan();
         let zoom = self.graph_ui.zoom;
         let measured = self
@@ -1021,8 +1102,8 @@ impl AudioProcessing {
             .id(("routing-canvas", panel))
             .relative()
             .w_full()
-            .h(px(380.))
-            .flex_shrink_0()
+            .h_full()
+            .min_h_0()
             .overflow_hidden()
             .bg(rgb(theme.bg))
             .border_1()
@@ -1122,7 +1203,8 @@ impl AudioProcessing {
                                             * zoom),
                                 );
                             let reach = px((f32::from(b.x - a.x).abs() * 0.5).max(40.));
-                            let mut path = PathBuilder::stroke(px(2.));
+                            let selected = highlighted == Some(edge.to);
+                            let mut path = PathBuilder::stroke(px(if selected { 4. } else { 2. }));
                             path.move_to(a);
                             path.cubic_bezier_to(
                                 b,
@@ -1130,7 +1212,14 @@ impl AudioProcessing {
                                 b - point(reach, px(0.)),
                             );
                             if let Ok(path) = path.build() {
-                                window.paint_path(path, rgb(theme.accent));
+                                window.paint_path(
+                                    path,
+                                    rgb(if selected {
+                                        theme.highlight
+                                    } else {
+                                        theme.accent
+                                    }),
+                                );
                             }
                         }
                     },
@@ -1142,7 +1231,14 @@ impl AudioProcessing {
     }
 
     fn graph_run_target(&mut self, output: bool, cx: &mut Context<Self>) {
-        if self.graph_busy() {
+        if self.graph_busy()
+            || self
+                .state
+                .system
+                .processing
+                .as_ref()
+                .is_some_and(|task| !task.phase.is_terminal())
+        {
             return;
         }
         let graph = &self.state.system.config.processing_graph;
@@ -1177,950 +1273,9 @@ impl AudioProcessing {
     pub(super) fn routing_graph_view(
         &mut self,
         panel: u64,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Div {
-        self.reconcile_graph(cx);
-        let theme = rivu_ui::theme::palette(cx);
-        let busy = self.graph_busy();
-        let mut library = row()
-            .flex_wrap()
-            .gap_1()
-            .child(caption(theme, self.tr("processing-graph-add")));
-        for (name, kind) in [
-            (
-                "eq",
-                GraphNodeKind::Equalizer {
-                    config: rivu_dsp::equalizer::EqualizerConfig {
-                        enabled: true,
-                        ..Default::default()
-                    },
-                    implementation: EqImplementation::Iir,
-                },
-            ),
-            (
-                "denoise",
-                GraphNodeKind::Denoise {
-                    config: self.state.system.config.denoise.clone(),
-                    profile: None,
-                },
-            ),
-            (
-                "speech",
-                GraphNodeKind::Speech {
-                    config: self.state.system.config.neural.clone(),
-                },
-            ),
-            (
-                "separate",
-                GraphNodeKind::Separate {
-                    config: self.state.system.config.neural.clone(),
-                },
-            ),
-            (
-                "mix",
-                GraphNodeKind::Mix {
-                    gains_db: vec![0.; 2],
-                    muted: vec![false; 2],
-                    solo: vec![false; 2],
-                },
-            ),
-            ("output", GraphNodeKind::Output),
-        ] {
-            library = library.child(disabled_control(
-                theme,
-                button(
-                    SharedString::from(format!("graph-add-{panel}-{name}")),
-                    self.tr(node_label(&kind)),
-                    cx,
-                    move |this, _, cx| this.graph_add(panel, kind.clone(), cx),
-                ),
-                busy,
-            ));
-        }
-        let tools = row()
-            .flex_wrap()
-            .gap_1()
-            .child(disabled_control(
-                theme,
-                button(
-                    ("graph-undo", panel),
-                    self.tr("processing-graph-undo"),
-                    cx,
-                    |this, _, cx| this.graph_history(false, cx),
-                ),
-                busy || self.graph_ui.undo.is_empty(),
-            ))
-            .child(disabled_control(
-                theme,
-                button(
-                    ("graph-redo", panel),
-                    self.tr("processing-graph-redo"),
-                    cx,
-                    |this, _, cx| this.graph_history(true, cx),
-                ),
-                busy || self.graph_ui.redo.is_empty(),
-            ))
-            .child(button(
-                ("graph-zoom-out", panel),
-                "−",
-                cx,
-                |this, _, cx| this.graph_zoom(1. / 1.2, [250., 160.], cx),
-            ))
-            .child(caption(theme, format!("{:.0}%", self.graph_ui.zoom * 100.)))
-            .child(button(("graph-zoom-in", panel), "+", cx, |this, _, cx| {
-                this.graph_zoom(1.2, [250., 160.], cx)
-            }))
-            .child(button(
-                ("graph-reset-view", panel),
-                self.tr("processing-graph-reset-view"),
-                cx,
-                |this, _, cx| {
-                    this.cancel_pointer(cx);
-                    this.graph_ui.pan = [24., 24.];
-                    this.graph_ui.zoom = 1.;
-                    cx.notify();
-                },
-            ));
-        let mut content = column()
-            // The outer processing viewport scrolls this entire section. Its
-            // bounds must include the inspector, not just the fixed canvas.
-            .flex_shrink_0()
-            .gap_2()
-            .child(caption(theme, self.tr("processing-graph-independent")))
-            .child(caption(
-                theme,
-                format!(
-                    "{} {}",
-                    self.tr("processing-graph-version"),
-                    self.state.system.config.processing_graph.revision
-                ),
-            ))
-            .child(library)
-            .child(tools)
-            .child(self.routing_canvas(panel, cx))
-            .child(caption(theme, self.tr("processing-graph-editor-help")));
-        if let Some(port) = self.graph_ui.connecting {
-            content = content.child(
-                row()
-                    .flex_wrap()
-                    .gap_1()
-                    .child(caption(
-                        theme,
-                        format!(
-                            "{} #{}:{} → {}",
-                            self.tr("processing-graph-connect-from"),
-                            port.node,
-                            port.port,
-                            self.tr("processing-graph-choose-input")
-                        ),
-                    ))
-                    .child(button(
-                        ("graph-cancel-connect", panel),
-                        self.tr("processing-cancel"),
-                        cx,
-                        |this, _, cx| {
-                            this.graph_ui.connecting = None;
-                            cx.notify();
-                        },
-                    )),
-            );
-        }
-        content = content.child(self.graph_inspector(panel, cx));
-        let edges = self.state.system.config.processing_graph.edges.clone();
-        let mut connections = column()
-            .flex_shrink_0()
-            .gap_1()
-            .child(caption(theme, self.tr("processing-graph-connections")));
-        for edge in edges {
-            let to = edge.to;
-            connections = connections.child(
-                row()
-                    .flex_wrap()
-                    .gap_1()
-                    .child(caption(
-                        theme,
-                        format!(
-                            "#{}:{} PCM → #{}:{} PCM",
-                            edge.from.node, edge.from.port, to.node, to.port
-                        ),
-                    ))
-                    .child(disabled_control(
-                        theme,
-                        button(
-                            SharedString::from(format!(
-                                "graph-disconnect-{panel}-{}-{}",
-                                to.node, to.port
-                            )),
-                            self.tr("processing-graph-disconnect"),
-                            cx,
-                            move |this, _, cx| this.graph_edit(GraphEdit::Disconnect { to }, cx),
-                        ),
-                        busy,
-                    )),
-            );
-        }
-        content = content.child(connections);
-        let mut modes = row().flex_wrap().gap_1();
-        for (mode, label) in [
-            (GraphExecutionMode::Auto, "processing-graph-auto"),
-            (GraphExecutionMode::Offline, "processing-graph-offline"),
-            (GraphExecutionMode::Realtime, "processing-graph-realtime"),
-            (GraphExecutionMode::Hybrid, "processing-graph-hybrid"),
-        ] {
-            modes = modes.child(
-                button(
-                    SharedString::from(format!("graph-mode-{panel}-{mode:?}")),
-                    self.tr(label),
-                    cx,
-                    move |this, _, cx| {
-                        this.graph_ui.mode = mode;
-                        cx.notify();
-                    },
-                )
-                .when(self.graph_ui.mode == mode, |v| v.bg(rgb(theme.selected))),
-            );
-        }
-        let running = self.state.system.processing.as_ref().is_some_and(|t| {
-            matches!(
-                t.phase,
-                ProcessingPhase::Queued | ProcessingPhase::Rendering | ProcessingPhase::Processing
-            )
-        });
-        content
-            .child(modes)
-            .child(caption(theme, self.tr("processing-graph-mode-help")))
-            .child(
-                row()
-                    .flex_wrap()
-                    .gap_1()
-                    .child(disabled_control(
-                        theme,
-                        button(
-                            ("graph-preview", panel),
-                            self.tr("processing-graph-preview"),
-                            cx,
-                            |this, _, cx| this.graph_run_target(false, cx),
-                        ),
-                        busy || running || self.input_track().is_none(),
-                    ))
-                    .child(disabled_control(
-                        theme,
-                        button(
-                            ("graph-run", panel),
-                            self.tr("processing-graph-run"),
-                            cx,
-                            |this, _, cx| this.graph_run_target(true, cx),
-                        ),
-                        busy || running
-                            || self.input_track().is_none()
-                            || !self
-                                .state
-                                .system
-                                .config
-                                .processing_graph
-                                .nodes
-                                .iter()
-                                .any(|node| matches!(node.kind, GraphNodeKind::Output)),
-                    )),
-            )
-    }
-
-    fn graph_inspector(&mut self, panel: u64, cx: &mut Context<Self>) -> Div {
-        let theme = rivu_ui::theme::palette(cx);
-        let busy = self.graph_busy();
-        let Some(node) = self
-            .state
-            .system
-            .config
-            .processing_graph
-            .nodes
-            .iter()
-            .find(|n| Some(n.id) == self.graph_ui.selected)
-            .cloned()
-        else {
-            return column();
-        };
-        let id = node.id;
-        let fixed = matches!(node.kind, GraphNodeKind::Source);
-        let mut content = column()
-            .flex_shrink_0()
-            .gap_2()
-            .p_2()
-            .border_1()
-            .border_color(rgb(theme.border))
-            .child(caption(
-                theme,
-                format!(
-                    "{} · {} #{id}",
-                    self.tr("processing-graph-inspector"),
-                    self.tr(node_label(&node.kind))
-                ),
-            ))
-            .child(
-                row()
-                    .flex_wrap()
-                    .gap_1()
-                    .child(disabled_control(
-                        theme,
-                        button(
-                            ("graph-duplicate", panel),
-                            self.tr("processing-graph-duplicate"),
-                            cx,
-                            |this, _, cx| this.graph_duplicate(cx),
-                        ),
-                        busy || fixed,
-                    ))
-                    .child(disabled_control(
-                        theme,
-                        button(
-                            ("graph-delete", panel),
-                            self.tr("processing-graph-delete"),
-                            cx,
-                            |this, _, cx| this.graph_remove(cx),
-                        ),
-                        busy || fixed,
-                    )),
-            );
-        if let GraphNodeKind::Equalizer {
-            config,
-            implementation,
-        } = &node.kind
-        {
-            let mut algorithms = row().flex_wrap().gap_1();
-            for (choice, label) in [
-                (EqImplementation::Iir, "processing-graph-iir"),
-                (
-                    EqImplementation::LinearPhase { taps: 2049 },
-                    "processing-graph-fir",
-                ),
-            ] {
-                let config = config.clone();
-                algorithms = algorithms.child(disabled_control(
-                    theme,
-                    button(
-                        SharedString::from(format!("graph-eq-{panel}-{choice:?}")),
-                        self.tr(label),
-                        cx,
-                        move |this, _, cx| {
-                            this.graph_edit(
-                                GraphEdit::Replace {
-                                    id,
-                                    kind: GraphNodeKind::Equalizer {
-                                        config: config.clone(),
-                                        implementation: choice,
-                                    },
-                                },
-                                cx,
-                            )
-                        },
-                    )
-                    .when(
-                        std::mem::discriminant(implementation) == std::mem::discriminant(&choice),
-                        |v| v.bg(rgb(theme.selected)),
-                    ),
-                    busy,
-                ));
-            }
-            let mut next = config.clone();
-            next.bands.push(EqBand::default());
-            let add_kind = GraphNodeKind::Equalizer {
-                config: next,
-                implementation: *implementation,
-            };
-            let mut next = config.clone();
-            next.bands.pop();
-            let remove_kind = GraphNodeKind::Equalizer {
-                config: next,
-                implementation: *implementation,
-            };
-            content = content.child(algorithms).child(
-                row()
-                    .flex_wrap()
-                    .gap_1()
-                    .child(disabled_control(
-                        theme,
-                        button(
-                            ("graph-add-band", panel),
-                            self.tr("processing-add-band"),
-                            cx,
-                            move |this, _, cx| {
-                                this.graph_edit(
-                                    GraphEdit::Replace {
-                                        id,
-                                        kind: add_kind.clone(),
-                                    },
-                                    cx,
-                                )
-                            },
-                        ),
-                        busy || config.bands.len() >= MAX_BANDS,
-                    ))
-                    .child(disabled_control(
-                        theme,
-                        button(
-                            ("graph-remove-band", panel),
-                            self.tr("processing-remove-band"),
-                            cx,
-                            move |this, _, cx| {
-                                this.graph_edit(
-                                    GraphEdit::Replace {
-                                        id,
-                                        kind: remove_kind.clone(),
-                                    },
-                                    cx,
-                                )
-                            },
-                        ),
-                        busy || config.bands.is_empty(),
-                    )),
-            );
-        }
-        if let GraphNodeKind::Denoise { config, profile } = &node.kind {
-            let mut modes = row().flex_wrap().gap_1();
-            for (mode, label) in [
-                ("off", "processing-off"),
-                ("stationary", "processing-stationary"),
-                ("profile", "processing-profile"),
-                ("adaptive", "processing-adaptive"),
-            ] {
-                let mut value = serde_json::to_value(config).expect("serializable denoise");
-                value["mode"] = json!(mode);
-                let config: rivu_dsp::denoise::DenoiseConfig =
-                    serde_json::from_value(value).expect("known denoise mode");
-                let profile = *profile;
-                modes = modes.child(disabled_control(
-                    theme,
-                    button(
-                        SharedString::from(format!("graph-denoise-{panel}-{mode}")),
-                        self.tr(label),
-                        cx,
-                        move |this, _, cx| {
-                            this.graph_edit(
-                                GraphEdit::Replace {
-                                    id,
-                                    kind: GraphNodeKind::Denoise {
-                                        config: config.clone(),
-                                        profile,
-                                    },
-                                },
-                                cx,
-                            )
-                        },
-                    ),
-                    busy,
-                ));
-            }
-            content = content.child(modes);
-            if profile.is_none() {
-                let config = config.clone();
-                content = content.child(disabled_control(
-                    theme,
-                    button(
-                        ("graph-profile", panel),
-                        self.tr("processing-graph-add-profile"),
-                        cx,
-                        move |this, _, cx| {
-                            this.graph_edit(
-                                GraphEdit::Replace {
-                                    id,
-                                    kind: GraphNodeKind::Denoise {
-                                        config: config.clone(),
-                                        profile: Some(
-                                            rivu_format::config::processing_graph::NoiseSelection {
-                                                start_seconds: 0.,
-                                                end_seconds: 1.,
-                                            },
-                                        ),
-                                    },
-                                },
-                                cx,
-                            )
-                        },
-                    ),
-                    busy,
-                ));
-            }
-        }
-        if let GraphNodeKind::Mix {
-            gains_db,
-            muted,
-            solo,
-        } = &node.kind
-        {
-            let mut gains = gains_db.clone();
-            gains.push(0.);
-            let mut m = muted.clone();
-            m.push(false);
-            let mut s = solo.clone();
-            s.push(false);
-            let add = GraphNodeKind::Mix {
-                gains_db: gains,
-                muted: m,
-                solo: s,
-            };
-            let mut gains = gains_db.clone();
-            gains.pop();
-            let mut m = muted.clone();
-            m.pop();
-            let mut s = solo.clone();
-            s.pop();
-            let remove = GraphNodeKind::Mix {
-                gains_db: gains,
-                muted: m,
-                solo: s,
-            };
-            content = content
-                .child(caption(theme, self.tr("processing-graph-mix-help")))
-                .child(
-                    row()
-                        .flex_wrap()
-                        .gap_1()
-                        .child(disabled_control(
-                            theme,
-                            button(
-                                ("graph-add-lane", panel),
-                                self.tr("processing-graph-add-lane"),
-                                cx,
-                                move |this, _, cx| {
-                                    this.graph_edit(
-                                        GraphEdit::Replace {
-                                            id,
-                                            kind: add.clone(),
-                                        },
-                                        cx,
-                                    )
-                                },
-                            ),
-                            busy || gains_db.len() >= 16,
-                        ))
-                        .child(disabled_control(
-                            theme,
-                            button(
-                                ("graph-remove-lane", panel),
-                                self.tr("processing-graph-remove-lane"),
-                                cx,
-                                move |this, _, cx| {
-                                    this.graph_edit(
-                                        GraphEdit::Replace {
-                                            id,
-                                            kind: remove.clone(),
-                                        },
-                                        cx,
-                                    )
-                                },
-                            ),
-                            busy || gains_db.len() <= 2,
-                        )),
-                );
-        }
-        if matches!(
-            node.kind,
-            GraphNodeKind::Speech { .. } | GraphNodeKind::Separate { .. }
-        ) {
-            content = content.child(caption(theme, self.tr("processing-graph-model-help")));
-        }
-        let mut fields = Vec::new();
-        scalar_fields(
-            &serde_json::to_value(&node.kind).expect("serializable node"),
-            "",
-            &mut fields,
-        );
-        for (path, value) in fields {
-            let key = format!("graph.{id}{path}");
-            if !self.fields.contains_key(&key) {
-                continue;
-            }
-            let label = self.graph_parameter_label(&path);
-            if let Value::Bool(enabled) = value {
-                let kind = node.kind.clone();
-                let path_copy = path.clone();
-                content = content.child(checkbox(
-                    SharedString::from(format!("graph-bool-{panel}-{id}-{path}")),
-                    SharedString::from(label),
-                    enabled,
-                    !busy,
-                    cx,
-                    move |this, value, cx| {
-                        let mut serialized =
-                            serde_json::to_value(&kind).expect("serializable node");
-                        if let Some(slot) = serialized.pointer_mut(&path_copy) {
-                            *slot = json!(value);
-                        }
-                        if let Ok(kind) = serde_json::from_value(serialized) {
-                            this.graph_edit(GraphEdit::Replace { id, kind }, cx);
-                        }
-                    },
-                ));
-            } else {
-                let input = self.graph_panel_input(panel, &key, &label, cx);
-                let label = if self.fields[&key].dirty {
-                    format!("{label} · {}", self.tr("processing-draft"))
-                } else {
-                    label
-                };
-                content = content.child(
-                    column().gap_1().child(caption(theme, label)).child(
-                        row()
-                            .gap_1()
-                            .child(div().flex_1().min_w_0().child(input))
-                            .child(disabled_control(
-                                theme,
-                                button(
-                                    SharedString::from(format!("graph-apply-{panel}-{key}")),
-                                    self.tr("processing-apply"),
-                                    cx,
-                                    move |this, _, cx| this.apply_graph_field(&key, cx),
-                                ),
-                                busy,
-                            )),
-                    ),
-                );
-            }
-        }
-        if output_count(&node.kind) > 1 {
-            let mut ports = row().flex_wrap().gap_1();
-            for port in 0..output_count(&node.kind) {
-                ports = ports.child(
-                    button(
-                        SharedString::from(format!("graph-target-{panel}-{port}")),
-                        self.tr(if port == 0 {
-                            "processing-graph-vocals"
-                        } else {
-                            "processing-graph-accompaniment"
-                        }),
-                        cx,
-                        move |this, _, cx| {
-                            this.graph_ui.target_port = port as u16;
-                            cx.notify();
-                        },
-                    )
-                    .when(self.graph_ui.target_port == port as u16, |v| {
-                        v.bg(rgb(theme.selected))
-                    }),
-                );
-            }
-            content = content.child(ports);
-        }
-        content
-    }
-
-    pub(super) fn graph_task_status(&mut self, panel: u64, cx: &mut Context<Self>) -> Div {
-        let theme = rivu_ui::theme::palette(cx);
-        let export_input = if self
-            .state
-            .system
-            .processing
-            .as_ref()
-            .is_some_and(|task| task.phase == ProcessingPhase::Complete)
-        {
-            Some(self.graph_panel_input(
-                panel,
-                "graph_export",
-                &self.tr("processing-export-path"),
-                cx,
-            ))
-        } else {
-            None
-        };
-        let Some(task) = self.state.system.processing.as_ref() else {
-            return column();
-        };
-        let id = task.id;
-        let terminal = matches!(
-            task.phase,
-            ProcessingPhase::Complete | ProcessingPhase::Cancelled | ProcessingPhase::Failed
-        );
-        let phase = self.tr(match task.phase {
-            ProcessingPhase::Queued => "processing-queued",
-            ProcessingPhase::Rendering => "processing-rendering",
-            ProcessingPhase::Processing => "processing-processing",
-            ProcessingPhase::Complete => "processing-complete",
-            ProcessingPhase::Cancelled => "processing-cancelled",
-            ProcessingPhase::Failed => "processing-failed",
-        });
-        let revision = task
-            .graph_revision
-            .map(|v| v.to_string())
-            .unwrap_or_else(|| "—".into());
-        let mut content = column()
-            .flex_shrink_0()
-            .gap_2()
-            .child(caption(
-                theme,
-                format!(
-                    "{} #{id} · {} #{} · {} {revision} · {phase}",
-                    self.tr("processing-task"),
-                    self.tr("processing-source"),
-                    task.track_id,
-                    self.tr("processing-graph-version")
-                ),
-            ))
-            .child(caption(
-                theme,
-                format!(
-                    "{}: {} / {}",
-                    self.tr("processing-progress"),
-                    task.completed,
-                    task.total
-                        .map(|v| v.to_string())
-                        .unwrap_or_else(|| "?".into())
-                ),
-            ));
-        if task
-            .settings
-            .graph
-            .as_ref()
-            .is_some_and(|graph| !graph.audio_eq(&self.state.system.config.processing_graph))
-        {
-            content = content.child(caption(theme, self.tr("processing-graph-result-older")));
-        }
-        if let Some(graph) = &task.settings.graph {
-            let mode = task
-                .settings
-                .graph_mode
-                .map(|mode| {
-                    self.tr(match mode {
-                        GraphExecutionMode::Auto => "processing-graph-auto",
-                        GraphExecutionMode::Offline => "processing-graph-offline",
-                        GraphExecutionMode::Realtime => "processing-graph-realtime",
-                        GraphExecutionMode::Hybrid => "processing-graph-hybrid",
-                    })
-                    .to_string()
-                })
-                .unwrap_or_else(|| "—".into());
-            content = content.child(caption(
-                theme,
-                format!(
-                    "{} · {}: {} · {}: {} · {mode}",
-                    self.tr("processing-captured-settings"),
-                    self.tr("processing-graph-nodes"),
-                    graph.nodes.len(),
-                    self.tr("processing-graph-connections"),
-                    graph.edges.len()
-                ),
-            ));
-            for node in &graph.nodes {
-                content = content.child(caption(
-                    theme,
-                    format!("#{} · {}", node.id, self.tr(node_label(&node.kind))),
-                ));
-                let neural = match &node.kind {
-                    GraphNodeKind::Speech { config } => Some((
-                        config,
-                        config.speech_manifest.as_ref(),
-                        &config.speech_interpreter,
-                    )),
-                    GraphNodeKind::Separate { config } => Some((
-                        config,
-                        config.separation_manifest.as_ref(),
-                        &config.separation_interpreter,
-                    )),
-                    _ => None,
-                };
-                if let Some((config, manifest, interpreter)) = neural {
-                    content = content
-                        .child(caption(
-                            theme,
-                            format!(
-                                "{} · {}",
-                                manifest
-                                    .map(|p| p.display().to_string())
-                                    .unwrap_or_else(|| "—".into()),
-                                interpreter.display()
-                            ),
-                        ))
-                        .child(caption(
-                            theme,
-                            format!(
-                                "{}: {} · {:?} · {} {}",
-                                self.tr("processing-worker"),
-                                config.worker.display(),
-                                config.device,
-                                config.threads,
-                                self.tr("processing-threads")
-                            ),
-                        ));
-                }
-            }
-        }
-        for node in &task.graph_nodes {
-            let phase = self.tr(match node.phase {
-                ProcessingPhase::Queued => "processing-queued",
-                ProcessingPhase::Rendering => "processing-rendering",
-                ProcessingPhase::Processing => "processing-processing",
-                ProcessingPhase::Complete => "processing-complete",
-                ProcessingPhase::Cancelled => "processing-cancelled",
-                ProcessingPhase::Failed => "processing-failed",
-            });
-            content = content.child(caption(theme, format!("#{} · {phase}", node.node)));
-            if let Some(model) = &node.model_id {
-                content = content.child(caption(
-                    theme,
-                    format!(
-                        "{model} · SHA-256 {}",
-                        node.model_sha256.as_deref().unwrap_or("—")
-                    ),
-                ));
-            }
-            if let Some(error) = &node.error {
-                content = content.child(caption(theme, error.clone()).text_color(rgb(theme.error)));
-            }
-        }
-        if let Some(plan) = &task.graph_plan {
-            content = content.child(caption(
-                theme,
-                format!(
-                    "{}: {} B · {}: {} · {}: {} · {}: {}",
-                    self.tr("processing-graph-plan-memory"),
-                    plan.estimated_state_bytes,
-                    self.tr("processing-graph-plan-work"),
-                    plan.estimated_work_per_frame,
-                    self.tr("processing-graph-plan-latency"),
-                    plan.latency_frames,
-                    self.tr("processing-graph-plan-tail"),
-                    plan.tail_frames
-                ),
-            ));
-        }
-        if !terminal {
-            content = content.child(button(
-                ("graph-cancel-task", panel),
-                self.tr("processing-cancel"),
-                cx,
-                move |this, _, cx| this.send(Command::CancelProcessing { id }, cx),
-            ));
-        }
-        if let Some(error) = &task.error {
-            content = content.child(caption(theme, error.clone()).text_color(rgb(theme.error)));
-        }
-        if let Some(boundary) = task.settings.graph_boundary {
-            content = content.child(caption(
-                theme,
-                format!(
-                    "{} #{}:{}",
-                    self.tr("processing-graph-boundary"),
-                    boundary.node,
-                    boundary.port
-                ),
-            ));
-        }
-        if let Some(path) = &task.graph_exported_path {
-            content = content.child(caption(
-                theme,
-                format!(
-                    "{}: {}",
-                    self.tr("processing-graph-exported"),
-                    path.display()
-                ),
-            ));
-        }
-        if task.phase == ProcessingPhase::Complete {
-            let live = matches!(
-                task.settings.graph_mode,
-                Some(GraphExecutionMode::Realtime | GraphExecutionMode::Hybrid)
-            );
-            let ready = if task.graph_exported_path.is_some() {
-                "processing-graph-export-ready"
-            } else if live {
-                "processing-graph-live-ready"
-            } else {
-                "processing-graph-file-ready"
-            };
-            content = content.child(caption(theme, self.tr(ready)));
-            if live {
-                content = content.child(button(
-                    ("graph-stop-live", panel),
-                    self.tr("processing-graph-stop-live"),
-                    cx,
-                    move |this, _, cx| this.send(Command::CancelProcessing { id }, cx),
-                ));
-            }
-            content = content.child(
-                column()
-                    .min_w_0()
-                    .gap_1()
-                    .child(caption(theme, self.tr("processing-export-path")))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(export_input.expect("complete graph task export input")),
-                    ),
-            );
-            let ports = task
-                .settings
-                .graph
-                .iter()
-                .flat_map(|graph| graph.nodes.iter())
-                .flat_map(|node| {
-                    (0..output_count(&node.kind)).map(move |index| GraphPort {
-                        node: node.id,
-                        port: index as u16,
-                    })
-                });
-            for port in ports {
-                let file = task.graph_outputs.iter().find(|output| output.port == port);
-                let availability = file
-                    .map(|output| {
-                        format!(
-                            "{} · {}",
-                            self.tr("processing-graph-cached"),
-                            output.path.display()
-                        )
-                    })
-                    .unwrap_or_else(|| self.tr("processing-graph-not-cached").to_string());
-                content = content.child(
-                    row()
-                        .flex_wrap()
-                        .gap_1()
-                        .child(caption(
-                            theme,
-                            format!("#{}:{} · {availability}", port.node, port.port),
-                        ))
-                        .child(button(
-                            SharedString::from(format!(
-                                "graph-audition-{panel}-{}-{}",
-                                port.node, port.port
-                            )),
-                            self.tr("processing-graph-audition"),
-                            cx,
-                            move |this, _, cx| {
-                                this.send(Command::ProcessingGraphAudition { id, node: port }, cx)
-                            },
-                        ))
-                        .child(button(
-                            SharedString::from(format!(
-                                "graph-export-{panel}-{}-{}",
-                                port.node, port.port
-                            )),
-                            self.tr("processing-graph-export"),
-                            cx,
-                            move |this, _, cx| {
-                                let path = this.text("graph_export", cx);
-                                if path.is_empty() {
-                                    this.error = Some(
-                                        this.context
-                                            .i18n
-                                            .text("processing-graph-export-required")
-                                            .to_owned(),
-                                    );
-                                    cx.notify();
-                                } else {
-                                    this.send(
-                                        Command::ProcessingGraphExport {
-                                            id,
-                                            node: port,
-                                            path: PathBuf::from(path),
-                                        },
-                                        cx,
-                                    );
-                                }
-                            },
-                        )),
-                );
-            }
-        }
-        content
+        self.graph_workspace(panel, window, cx)
     }
 }

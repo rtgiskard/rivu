@@ -33,17 +33,26 @@ No model download occurs implicitly during playback or a build.
 == Practical workflow
 
 Add the Audio processing panel from the layout panel catalog. Processing graph,
-Equalizer, Restoration, and Speech & separation pages share core-owned settings
-with the CLI. The Equalizer page controls the separate live playback EQ; graph
-nodes have independent settings. Restoration and neural jobs retain separate
+Monitor EQ, Restoration, and Speech & separation pages share core-owned settings
+with the CLI. Monitor EQ controls the separate live playback EQ; graph nodes
+have independent settings. The source selector and monitor-EQ bypass state stay
+visible above the working area. Restoration and neural jobs retain separate
 results. Processing never edits library media. Keep headroom when boosting or
 remixing: there is no implicit loudness matching or limiter.
+The selected-audio line is Core's admitted source, not a guess from the latest
+task: it identifies the retained run, exact graph port and live/hybrid/cached path,
+with Playing, Paused or Stopped reported separately. Completing an offline job
+does not select it. Return to original addresses the currently selected audition,
+even when the latest task belongs to a different run. Invalid node/port requests
+leave the prior selection unchanged; playback retirement clears it.
 
 === Node graph desktop workflow
 
 Add nodes from the graph library, then select a node to inspect its own algorithm
-and parameters below the canvas. Press and drag a node header or its non-port
-card surface to select and move it in one gesture; no preliminary click is needed.
+and parameters. Wide panels place the canvas and independently scrolling inspector
+side by side. Narrow panels expose Graph, Parameters, and Results & export tabs
+without putting execution controls below a long form. Press and drag a node header
+or its non-port card surface to select and move it in one gesture; no preliminary click is needed.
 A click without movement selects without editing the graph. Positions do not
 change execution order. Port labels and dots are separate connection controls:
 click an output port, then an input port explicitly. Disconnecting or deleting
@@ -51,17 +60,43 @@ a node never guesses replacement connections. Undo/Redo applies graph edits,
 not playback or completed results.
 
 Middle-drag or wheel over the canvas pans its viewport. Ctrl+wheel zooms around
-the pointer; the zoom buttons and Reset view provide alternatives. Scroll outside
-the canvas, or use the outer scrollbar, to reach the inspector, connections,
-execution mode, preview/run actions and retained-result export controls. Multiple
-processing panels share drafts and acknowledged settings, but each field has its
-own focus, cursor and hit-test geometry.
+the pointer; zoom buttons and Reset view provide alternatives. Fit graph includes
+all nodes, including those outside the current viewport; Locate selected centers
+the selected node. The Connections toggle exposes explicit source/destination
+pairs; selecting one locates its endpoints and highlights that wire. Disconnect
+remains a separate action. Canvas space follows the available panel height; short
+panels scroll the graph tools and canvas independently rather than letting them
+overlap the execution bar. Working-area scrolling never moves the source or
+execution bar. Multiple processing panels share typed graph drafts and
+acknowledged settings, but EQ editors retain panel-local drafts and reject
+conflicting values when applying them together. Each field has its own focus,
+cursor and hit-test geometry; each panel retains its own working-area tab and
+scroll positions.
+Node parameters use typed choices, toggles, precision numeric entry/steps and
+explicit file selection. Backend paths and parameters unused by the current
+algorithm are available in an expandable section, not discarded. Enter and
+Apply this field commit one draft. Apply all node drafts validates and commits
+the selected node atomically, including EQ drafts; Discard restores committed
+values. Stale graph revisions and rejected values retain the draft and report
+errors at the affected controls. Acknowledgements do not clear text edited after
+submission. File selection changes only the path draft and never starts a run.
+Deleting or duplicating a node requires its drafts to be applied or discarded;
+undo and redo require all graph drafts to be resolved. These guards apply to
+keyboard shortcuts as well as buttons. Keyboard viewport changes cancel active
+pointer gestures before changing pan or zoom.
+Monitor EQ and EQ nodes use the same curve, band and precision editor with
+independent explicit targets; presets and playback A/B remain monitor-owned.
 
 Choose Current track or Selected track, then an execution mode. Preview executes
 the selected node output's ancestors; Run executes an Output node. Algorithm and
 model settings belong to each node, so separate nodes can use different prepared
 backends. A completed task reports its frozen graph revision separately from
 later edits. Audition and export operate on that retained snapshot.
+Requested execution mode and selected output are editing choices, not proof of
+the current audio path. The persistent task summary reports captured settings,
+actual execution mode, progress and cancellation independently of the editor.
+Results & export contains retained outputs and destination controls. Running never
+applies field drafts implicitly; unapplied fields are reported at the execution bar.
 The desktop Export WAV path must be absolute and name a new file in an existing
 directory; relative destinations are supported by the CLI, not this field.
 

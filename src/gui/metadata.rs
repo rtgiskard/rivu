@@ -160,6 +160,7 @@ impl Metadata {
         self.state = state;
         if query_changed {
             self.sync_metadata_query();
+            self.demand_metadata(cx);
         }
         if current_changed {
             self.sync_metadata_default(cx);

@@ -16,8 +16,11 @@ or a separate UI-session state copy for each named layout. Layouts describe pane
 structure and instance preferences, not complete workspace sessions. View-local
 state need not be restored if its owner is replaced.
 
-The panel catalog includes `audio_processing` (Audio processing), with Equalizer,
-Restoration and Speech & separation pages. Its configuration and jobs belong to
+The panel catalog includes `audio_processing` (Audio processing), with Processing
+graph, Monitor EQ, Restoration and Speech & separation pages. Wide graphs place
+the canvas and inspector side by side; narrow graphs use working-area tabs.
+Source selection, admitted audition identity and task state remain outside the
+scrolling forms. Its configuration and jobs belong to
 the core, not the saved docking tree. Hiding the panel or switching layouts does
 not disable EQ or cancel a file job. Obsolete graph pointer gestures are cancelled
 when layout geometry changes; numerical drafts and response inspection do not
