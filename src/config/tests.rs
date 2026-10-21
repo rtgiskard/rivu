@@ -590,6 +590,7 @@ fn save_reload_replaces_file_and_leaves_no_temporary_files() {
         layout_snap_enabled: false,
         layout_snap_grid_px: 12,
         still_mode: true,
+        visualization_signal: crate::config::VisualizationSignal::Before,
         analysis_fps: 30,
         visualization_db_range: 90.0,
         spectrum_db_range: Some(80.0),
@@ -649,6 +650,12 @@ fn save_reload_replaces_file_and_leaves_no_temporary_files() {
         gpu_material_budget_mb: 64,
         visualization_cache: false,
         page_size: 32,
+        equalizer: Default::default(),
+        denoise: Default::default(),
+        neural: Default::default(),
+        equalizer_presets: Vec::new(),
+        equalizer_ab: None,
+        processing_graph: Default::default(),
     };
     config.save(&path).unwrap();
     assert_eq!(Config::load(&path).unwrap(), config);
@@ -851,6 +858,10 @@ fn malformed_unknown_and_invalid_values_are_rejected() {
         "visualizations.analysis_fft_size = 65536",
         "visualizations.analysis_fft_size = 1000",
         "visualizations.analysis_window = 'hamming'",
+        "visualizations.signal = 'After'",
+        "visualizations.signal = 'unknown'",
+        "visualization_signal = 'before'",
+        "visualizations.spectrum.signal = 'before'",
         "visualizations.spectrum.bar_width = 0.9",
         "visualizations.spectrum.bar_width = 21",
         "visualizations.spectrum.bar_width = nan",
@@ -922,6 +933,48 @@ fn analysis_windows_and_fft_sizes_round_trip() {
             assert_eq!(Config::load(&path).unwrap(), config);
         }
     }
+}
+
+#[test]
+fn visualization_signal_defaults_and_round_trips_in_shared_group() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    write_current_config(&path, "[visualizations]\n").unwrap();
+    assert_eq!(
+        Config::load(&path).unwrap().visualization_signal,
+        VisualizationSignal::After
+    );
+    for (visualization_signal, name) in [
+        (VisualizationSignal::Before, "before"),
+        (VisualizationSignal::After, "after"),
+    ] {
+        write_current_config(&path, format!("[visualizations]\nsignal = '{name}'\n")).unwrap();
+        let config = Config::load(&path).unwrap();
+        assert_eq!(config.visualization_signal, visualization_signal);
+        config.save(&path).unwrap();
+        let saved: toml::Table = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["visualizations"]["signal"].as_str(), Some(name));
+        assert_eq!(Config::load(&path).unwrap(), config);
+    }
+}
+
+#[test]
+fn visualization_signal_patch_preserves_unrelated_concurrent_changes() {
+    let baseline = Config::default();
+    let mut draft = baseline.clone();
+    draft.visualization_signal = VisualizationSignal::Before;
+    let patch = ConfigPatch::between(&baseline, &draft);
+    let mut current = baseline.clone();
+    current.analysis_fps = 30;
+    patch.apply_to(&mut current);
+    assert_eq!(current.visualization_signal, VisualizationSignal::Before);
+    assert_eq!(current.analysis_fps, 30);
+
+    let mut draft = baseline.clone();
+    draft.analysis_fps = 40;
+    ConfigPatch::between(&baseline, &draft).apply_to(&mut current);
+    assert_eq!(current.visualization_signal, VisualizationSignal::Before);
+    assert_eq!(current.analysis_fps, 40);
 }
 
 #[test]

@@ -36,6 +36,35 @@ impl Core {
             } => return self.relocate_track(source_id, target_id),
             Command::CancelRelocation { id } => self.cancel_relocation(id)?,
             Command::KeepTrackIndependent { track_id } => self.keep_track_independent(track_id)?,
+            Command::EqualizerEdit { edit } => self.equalizer_edit(edit)?,
+            Command::DenoiseEdit { patch } => self.denoise_edit(*patch)?,
+            Command::NeuralEdit { patch } => self.neural_edit(*patch)?,
+            Command::ProcessingGraphEdit { revision, edit } => {
+                self.processing_graph_edit(revision, *edit)?
+            }
+            Command::ProcessingGraphRun {
+                track_id,
+                target,
+                mode,
+            } => self.processing_graph_run(track_id, target, mode)?,
+            Command::ProcessingGraphAudition { id, node } => {
+                self.processing_graph_audition(id, node)?
+            }
+            Command::ProcessingGraphExport { id, node, path } => {
+                self.processing_graph_export(id, node, path)?
+            }
+            Command::StartProcessing {
+                track_id,
+                operation,
+                profile,
+            } => self.start_processing(track_id, operation, profile)?,
+            Command::CancelProcessing { id } => self.cancel_processing(id)?,
+            Command::AuditionProcessing {
+                id,
+                mode,
+                vocal_gain_db,
+                accompaniment_gain_db,
+            } => self.audition_processing(id, mode, vocal_gain_db, accompaniment_gain_db)?,
             Command::Play { track_id } => {
                 self.track(track_id)?;
                 let existing = self.store.queued_track(track_id)?;

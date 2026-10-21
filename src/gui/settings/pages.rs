@@ -7,7 +7,7 @@ use super::{
 use crate::{
     config::{
         AlbumArtworkDirection, AlbumArtworkMode, AnalysisWindow, AudioVisualizerStyle, LogLevel,
-        SpectrumStyle, VisualizationPalette,
+        SpectrumStyle, VisualizationPalette, VisualizationSignal,
     },
     gui::{
         album_artwork::ALBUM_ARTWORK_STYLES,
@@ -973,6 +973,34 @@ impl Settings {
                 )
                 .relative()
                 .child(self.measurement(Measured::SettingsWindow, cx));
+                let signal = dropdown_button(
+                    "visualization-signal",
+                    self.tr("settings-visualization-signal"),
+                    SettingChoice::Signal(draft.visualization_signal).label(&self.i18n),
+                    self.dropdown.is_open() && self.dropdown_anchor == Measured::SettingsSignal,
+                    cx,
+                    |this, _, _| {
+                        let values = [VisualizationSignal::Before, VisualizationSignal::After];
+                        let selected = values
+                            .iter()
+                            .position(|value| *value == this.model.draft.visualization_signal)
+                            .unwrap_or(1);
+                        this.open_setting_dropdown(
+                            values
+                                .into_iter()
+                                .map(|value| {
+                                    DropdownItem::new(
+                                        SettingChoice::Signal(value),
+                                        SettingChoice::Signal(value).label(&this.i18n),
+                                    )
+                                })
+                                .collect(),
+                            selected,
+                        );
+                    },
+                )
+                .relative()
+                .child(self.measurement(Measured::SettingsSignal, cx));
                 column()
                     .gap_3()
                     .child(settings_card(
@@ -1023,6 +1051,17 @@ impl Settings {
                         settings.tr("settings-processing-cache"),
                         column()
                             .gap_2()
+                            .child(
+                                form_field(
+                                    palette(cx),
+                                    settings.tr("settings-visualization-signal"),
+                                    signal,
+                                )
+                                .id("settings-visualization-signal-help")
+                                .tooltip(text_tooltip(
+                                    settings.tr("settings-visualization-signal-hint"),
+                                )),
+                            )
                             .child(
                                 row()
                                     .flex_wrap()

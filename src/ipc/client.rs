@@ -407,6 +407,7 @@ mod tests {
                         revision: 17,
                         scan_id: None,
                         relocation_id: None,
+                        processing_id: None,
                     }),
                     &mut buffer,
                 )

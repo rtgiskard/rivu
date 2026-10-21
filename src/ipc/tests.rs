@@ -1124,6 +1124,7 @@ fn ack_wire_round_trip_has_explicit_response_type() {
         revision: 42,
         scan_id: Some(u64::MAX),
         relocation_id: Some(42),
+        processing_id: Some(7),
     };
     let mut encoded = Vec::new();
     encode_response_frame_into(&WireResponse::Ack(ack.clone()), &mut encoded).unwrap();
@@ -1875,6 +1876,7 @@ fn client_session_reuses_connection_after_command_and_request_rejections() {
                 revision: 3,
                 scan_id: None,
                 relocation_id: None,
+                processing_id: None,
             },
         );
         assert!(matches!(
@@ -1941,6 +1943,7 @@ fn client_session_discards_partial_failed_response_before_next_explicit_request(
                 revision: 1,
                 scan_id: None,
                 relocation_id: None,
+                processing_id: None,
             }),
             &mut frame,
         )
@@ -1962,6 +1965,7 @@ fn client_session_discards_partial_failed_response_before_next_explicit_request(
                 revision: 2,
                 scan_id: None,
                 relocation_id: None,
+                processing_id: None,
             },
         );
     });
@@ -2151,6 +2155,7 @@ fn independent_cli_session_can_explicitly_reconnect_to_a_new_instance() {
                 revision: 2,
                 scan_id: None,
                 relocation_id: None,
+                processing_id: None,
             },
         );
     });
@@ -2564,4 +2569,230 @@ fn large_explicit_occurrence_selections_fit_bounded_request_frames() {
         panic!("wrong command");
     };
     assert_eq!(queue_ids.len(), 200_000);
+}
+
+#[test]
+fn processing_commands_and_configuration_use_current_positional_contract() {
+    use crate::model::{
+        EqBandEdit, EqualizerEdit, NeuralPatch, NoiseSelection, ProcessingOperation,
+    };
+    let commands = [
+        Command::StartProcessing {
+            track_id: 17,
+            operation: ProcessingOperation::Denoise,
+            profile: Some(NoiseSelection {
+                start_seconds: 1.0,
+                end_seconds: 2.0,
+            }),
+        },
+        Command::EqualizerEdit {
+            edit: EqualizerEdit::BandField {
+                index: 2,
+                field: EqBandEdit::Position {
+                    frequency_hz: 1200.0,
+                    gain_db: 4.0,
+                },
+            },
+        },
+        Command::NeuralEdit {
+            patch: Box::new(NeuralPatch {
+                speech_manifest: Some(None),
+                threads: Some(2),
+                ..Default::default()
+            }),
+        },
+    ];
+    for command in commands {
+        let expected = serde_json::to_value(&command).unwrap();
+        let wire = WireCommand::from(command);
+        let bytes = postcard::to_allocvec(&wire).unwrap();
+        let decoded: WireCommand = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(
+            serde_json::to_value(Command::try_from(decoded).unwrap()).unwrap(),
+            expected
+        );
+    }
+    let mut config = crate::config::Config::default();
+    config.equalizer.enabled = true;
+    config
+        .equalizer
+        .bands
+        .push(rivu_dsp::equalizer::EqBand::default());
+    config.neural.speech_manifest = Some("/models/speech.json".into());
+    config.neural.separation_overlap = 0.5;
+    let wire = WireConfig::from(&config);
+    let bytes = postcard::to_allocvec(&wire).unwrap();
+    let decoded: WireConfig = postcard::from_bytes(&bytes).unwrap();
+    assert_eq!(crate::config::Config::from(decoded), config);
+    assert_eq!(PROTOCOL_VERSION, 6);
+}
+
+#[test]
+fn graph_command_frames_preserve_revision_typed_edit_targets_modes_and_export_paths() {
+    use crate::model::{GraphEdit, GraphExecutionMode, GraphNodeKind, GraphPort};
+    let port = GraphPort {
+        node: u64::MAX,
+        port: u16::MAX,
+    };
+    let mut commands = vec![
+        Command::ProcessingGraphEdit {
+            revision: u64::MAX,
+            edit: Box::new(GraphEdit::Replace {
+                id: 7,
+                kind: GraphNodeKind::Mix {
+                    gains_db: vec![-6.0, -12.5],
+                    muted: vec![false, true],
+                    solo: vec![true, false],
+                },
+            }),
+        },
+        Command::ProcessingGraphAudition {
+            id: u64::MAX,
+            node: port,
+        },
+        Command::ProcessingGraphExport {
+            id: 91,
+            node: port,
+            path: "/rendered outputs/音楽 -6 dB.wav".into(),
+        },
+    ];
+    commands.extend(
+        [
+            GraphExecutionMode::Auto,
+            GraphExecutionMode::Offline,
+            GraphExecutionMode::Realtime,
+            GraphExecutionMode::Hybrid,
+        ]
+        .map(|mode| Command::ProcessingGraphRun {
+            track_id: 42,
+            target: port,
+            mode,
+        }),
+    );
+    for command in commands {
+        let expected = serde_json::to_value(&command).unwrap();
+        let mut encoded = Vec::new();
+        encode_request_frame_into(
+            &WireRequest::Command(WireCommand::from(command)),
+            &mut encoded,
+        )
+        .unwrap();
+        let WireRequest::Command(decoded) = decode_request_frame(&encoded[4..]).unwrap() else {
+            panic!("expected graph command frame");
+        };
+        assert_eq!(
+            serde_json::to_value(Command::try_from(decoded).unwrap()).unwrap(),
+            expected,
+        );
+    }
+}
+
+#[test]
+fn graph_configuration_round_trip_retains_authoritative_revision_nodes_and_edges() {
+    use crate::model::{GraphEdit, GraphNodeKind};
+    let mut config = crate::config::Config::default();
+    config
+        .processing_graph
+        .edit(
+            0,
+            GraphEdit::Add {
+                kind: GraphNodeKind::Mix {
+                    gains_db: vec![-6.0, -12.5],
+                    muted: vec![false, true],
+                    solo: vec![false, false],
+                },
+                position: [-40.0, 75.0],
+            },
+        )
+        .unwrap();
+    let mut encoded = Vec::new();
+    encode_request_frame_into(
+        &WireRequest::Command(WireCommand::from(Command::Configure {
+            config: Arc::new(config.clone()),
+        })),
+        &mut encoded,
+    )
+    .unwrap();
+    let WireRequest::Command(decoded) = decode_request_frame(&encoded[4..]).unwrap() else {
+        panic!("expected configure frame");
+    };
+    let Command::Configure { config: decoded } = Command::try_from(decoded).unwrap() else {
+        panic!("expected configure command");
+    };
+    assert_eq!(decoded.as_ref(), &config);
+}
+
+#[test]
+fn graph_task_query_frame_retains_snapshot_revision_and_multiple_node_output_paths() {
+    use crate::model::{
+        GraphExecutionMode, GraphNodeOutput, GraphPort, ProcessingGraph, ProcessingOperation,
+        ProcessingPhase, ProcessingSettings, ProcessingTaskStatus,
+    };
+    let target = GraphPort { node: 2, port: 0 };
+    let task = ProcessingTaskStatus {
+        id: 91,
+        track_id: 42,
+        operation: ProcessingOperation::Graph,
+        phase: ProcessingPhase::Complete,
+        completed: 48_000,
+        total: Some(48_000),
+        error: None,
+        outputs: None,
+        sample_rate: Some(48_000),
+        channels: Some(2),
+        frames: Some(48_000),
+        model_id: None,
+        model_sha256: None,
+        source_path: "/source music/original.wav".into(),
+        source_version: "original-version".into(),
+        source_cue: None,
+        settings: ProcessingSettings {
+            denoise: Default::default(),
+            neural: Default::default(),
+            profile: None,
+            graph: Some(ProcessingGraph::default()),
+            graph_target: Some(target),
+            graph_mode: Some(GraphExecutionMode::Offline),
+            graph_boundary: Some(GraphPort { node: 1, port: 0 }),
+            graph_export_path: Some("/rendered outputs/voice -6 dB.wav".into()),
+        },
+        graph_revision: Some(0),
+        graph_outputs: vec![
+            GraphNodeOutput {
+                port: GraphPort { node: 1, port: 0 },
+                path: "/cache/run 91/source.wav".into(),
+                context: None,
+            },
+            GraphNodeOutput {
+                port: target,
+                path: "/cache/run 91/output.wav".into(),
+                context: Some(crate::model::GraphOutputContext {
+                    path: "/cache/run 91/output-context.wav".into(),
+                    start_frame: -256,
+                }),
+            },
+        ],
+        graph_exported_path: Some("/rendered outputs/voice -6 dB.wav".into()),
+        graph_nodes: Vec::new(),
+        graph_plan: None,
+    };
+    let mut encoded = Vec::new();
+    encode_response_frame_into(
+        &WireResponse::Query(QueryResponse {
+            revisions: Default::default(),
+            result: Ok(crate::response::ViewResponse::ProcessingTask(Some(
+                Box::new(task.clone()),
+            ))),
+        }),
+        &mut encoded,
+    )
+    .unwrap();
+    let WireResponse::Query(decoded) = decode_response_frame(&encoded[4..]).unwrap() else {
+        panic!("expected graph task response");
+    };
+    let crate::response::ViewResponse::ProcessingTask(Some(decoded)) = decoded.result.unwrap()
+    else {
+        panic!("expected retained graph task");
+    };
+    assert_eq!(*decoded, task);
 }

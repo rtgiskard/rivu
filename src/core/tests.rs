@@ -8,6 +8,7 @@ mod lifecycle;
 mod long_operations;
 mod navigation;
 mod playback;
+mod processing;
 mod query;
 mod queue_playlists;
 mod relocation;
@@ -94,6 +95,8 @@ fn fixture_with_database(duration: Option<f64>, persistent: bool) -> (tempfile::
         pending_navigation: None,
         active_export: None,
         active_optimization: None,
+        processing: crate::processing::Service::new(directory.path().to_path_buf()),
+        processing_results: VecDeque::new(),
         scan_tx,
         scan_rx,
         active_scan: None,
@@ -120,14 +123,50 @@ fn recording_audio(core: &mut Core) -> Receiver<AudioCommand> {
     let (record, recorded) = crossbeam_channel::unbounded();
     let idle_commands = core.engine.replace_commands(commands);
     thread::spawn(move || {
+        let mut final_snapshot = audio::AudioSnapshot::default();
         while let Ok(command) = receive.recv() {
+            // No callback runs in this recorder. Reflect only admitted source
+            // changes and seeks; tests needing audible progress supply a clock.
+            match &command {
+                AudioCommand::Load {
+                    generation,
+                    start_seconds,
+                    ..
+                } => {
+                    final_snapshot = audio::AudioSnapshot {
+                        generation: *generation,
+                        position_seconds: *start_seconds,
+                        listened_seconds: 0.0,
+                    };
+                }
+                AudioCommand::Audition {
+                    generation,
+                    start_seconds,
+                    listened_seconds,
+                    ..
+                }
+                | AudioCommand::GraphAudition {
+                    generation,
+                    start_seconds,
+                    listened_seconds,
+                    ..
+                } => {
+                    final_snapshot = audio::AudioSnapshot {
+                        generation: *generation,
+                        position_seconds: *start_seconds,
+                        listened_seconds: *listened_seconds,
+                    };
+                }
+                AudioCommand::Seek(position) => final_snapshot.position_seconds = *position,
+                _ => {}
+            }
             let snapshot = match &command {
                 AudioCommand::StopAndSnapshot(reply) => Some(reply.clone()),
                 _ => None,
             };
             let _ = record.send(command);
             if let Some(reply) = snapshot {
-                let _ = reply.send((0, 0.0));
+                let _ = reply.send(final_snapshot);
             }
         }
         drop(idle_commands);
@@ -188,6 +227,7 @@ fn display_fixture() -> (
         fps: 60,
         fft_size: 512,
         window: crate::config::AnalysisWindow::None,
+        signal: crate::config::VisualizationSignal::After,
     });
     worker.set_playback_active(true);
     let (sender, receiver) = bounded(1);

@@ -1,11 +1,11 @@
 //! Progressive whole-track amplitude previews from the playback decoder.
 //!
-//! The audio worker owns bounded progressive bins. Explicit full previews own
-//! separate bounded results, never replacing playback's frame. Content changes,
-//! saved decoder hint edits or target switches cancel previews; hiding does not.
-//! Still Mode cancels scans and releases both owners' display data.
+//! Explicit scans provide a baseline for one rolling display. New playback PCM
+//! replaces visited intervals; untouched bins retain their previous statistics.
+//! Source/hint changes and Still Mode retire results; signal and EQ edits do not.
 //! Each panel publishes one immutable numerical frame; placement-only changes
 //! reuse it. RMS pooling weights decoded sample counts, preserving missing bins.
+//! Rational sample geometry excludes merely adjacent source bins from pooling.
 //!
 //! Pointer captures require a live interactive panel, not just cached peaks.
 //! Losing that surface cancels its generation and the matching window seek;
@@ -76,12 +76,343 @@ struct ManualRequest {
     source: Rc<Source>,
     suspension_generation: u64,
     cancelled: Arc<AtomicBool>,
+    progressive_revision: u64,
+    identity: Option<crate::audio::WaveformIdentity>,
 }
 
+#[derive(Clone)]
 struct FullPreview {
     source: Rc<Source>,
     suspension_generation: u64,
     frame: WaveformFrame,
+    progressive_revision: u64,
+    baseline_revision: u64,
+    identity: Option<crate::audio::WaveformIdentity>,
+}
+
+impl FullPreview {
+    fn matches_progressive(&self, progressive: &WaveformFrame) -> bool {
+        !self.source.matches_target(progressive)
+            || (self
+                .identity
+                .is_none_or(|identity| progressive.identity == Some(identity))
+                && scan_matches_progressive(&self.frame, progressive))
+    }
+}
+
+fn scan_matches_progressive(scan: &WaveformFrame, progressive: &WaveformFrame) -> bool {
+    match (scan.scan_source_identity, progressive.identity) {
+        (Some(scanned), Some(crate::audio::WaveformIdentity::Progressive { content, .. })) => {
+            scanned == content
+        }
+        _ => true,
+    }
+}
+
+type SnapshotReply =
+    crossbeam_channel::Receiver<Result<Option<crate::audio::WaveformScanSnapshot>, String>>;
+
+struct PreparedScan {
+    generation: u64,
+    snapshot: Option<anyhow::Result<SnapshotReply>>,
+    fallback: crate::audio::WaveformScanSnapshot,
+    buffer_mb: u32,
+    ffmpeg_enabled: bool,
+}
+
+#[derive(Clone, Copy)]
+struct WaveformBinGeometry {
+    numerator: u128,
+    denominator: u128,
+    sample_rate: u32,
+}
+
+fn waveform_gcd(mut left: u128, mut right: u128) -> u128 {
+    while right != 0 {
+        (left, right) = (right, left % right);
+    }
+    left
+}
+
+impl WaveformBinGeometry {
+    fn from_frame(frame: &WaveformFrame) -> Option<Self> {
+        let sample_rate = match frame.identity {
+            Some(crate::audio::WaveformIdentity::Progressive { sample_rate, .. })
+            | Some(crate::audio::WaveformIdentity::FullScan { sample_rate, .. }) => sample_rate,
+            None => 0,
+        };
+        if frame.bin_frames == 0 || frame.bin_count == 0 || sample_rate == 0 {
+            return None;
+        }
+        let denominator = u128::from(frame.bin_count) * u128::from(sample_rate);
+        let divisor = waveform_gcd(frame.bin_frames, denominator);
+        Some(Self {
+            numerator: frame.bin_frames / divisor,
+            denominator: denominator / divisor,
+            sample_rate,
+        })
+    }
+
+    /// Express both widths in common integer ticks, cancelling before products.
+    /// EOF truncation changes array lengths, not these rational bin widths.
+    fn relative_widths(self, source: Self) -> (u128, u128) {
+        let numerator_divisor = waveform_gcd(self.numerator, source.numerator);
+        let denominator_divisor = waveform_gcd(self.denominator, source.denominator);
+        (
+            (self.numerator / numerator_divisor) * (source.denominator / denominator_divisor),
+            (source.numerator / numerator_divisor) * (self.denominator / denominator_divisor),
+        )
+    }
+}
+
+/// Overlay new playback intervals onto the bounded full-scan geometry. Unknown
+/// duration coarsening grows the display only when PCM reaches beyond its end.
+fn merge_progressive(
+    display: &mut WaveformFrame,
+    progressive: &WaveformFrame,
+    after: u64,
+    baseline: u64,
+) {
+    if progressive.peaks.is_empty() {
+        return;
+    }
+    let Some(progressive_geometry) = WaveformBinGeometry::from_frame(progressive) else {
+        return;
+    };
+    let display_geometry = if display.peaks.is_empty() {
+        display.identity = progressive.identity;
+        progressive_geometry
+    } else if let Some(geometry) = WaveformBinGeometry::from_frame(display) {
+        geometry
+    } else {
+        return;
+    };
+    let (width, source_width) = display_geometry.relative_widths(progressive_geometry);
+    let exceeds_display = progressive
+        .rms_spans
+        .iter()
+        .flatten()
+        .map(|span| span.end)
+        .max()
+        .map_or_else(
+            || {
+                progressive
+                    .peaks
+                    .iter()
+                    .rposition(Option::is_some)
+                    .is_some_and(|bin| {
+                        (bin as u128 + 1) * source_width > display.peaks.len() as u128 * width
+                    })
+            },
+            |end| {
+                u128::from(end) * display_geometry.denominator
+                    > display_geometry.numerator
+                        * display.peaks.len() as u128
+                        * u128::from(progressive_geometry.sample_rate)
+            },
+        );
+    let geometry_changed = display.peaks.is_empty() || exceeds_display;
+    if geometry_changed {
+        let bins = progressive.peaks.len();
+        let (width, source_width) = progressive_geometry.relative_widths(display_geometry);
+        for (peaks, rms, counts) in [
+            (
+                &mut display.peaks,
+                &mut display.rms,
+                &mut display.rms_counts,
+            ),
+            (
+                &mut display.left_peaks,
+                &mut display.left_rms,
+                &mut display.left_rms_counts,
+            ),
+            (
+                &mut display.right_peaks,
+                &mut display.right_rms,
+                &mut display.right_rms_counts,
+            ),
+        ] {
+            // Only geometry growth needs replacement storage; never clone the
+            // frame's unrelated history, identities or channel metadata.
+            let old_peaks = std::mem::take(peaks);
+            let old_rms = std::mem::take(rms);
+            let old_counts = std::mem::take(counts);
+            peaks.reserve(bins);
+            rms.reserve(bins);
+            counts.reserve(bins);
+            for bin in 0..bins {
+                let start = bin as u128 * width;
+                let end = (bin as u128 + 1) * width;
+                let first = (start / source_width).min(old_peaks.len() as u128) as usize;
+                let last = end.div_ceil(source_width).min(old_peaks.len() as u128) as usize;
+                let mut peak: Option<f32> = None;
+                let mut energy = 0.0;
+                let mut count = 0.0;
+                for (source, value) in old_peaks.iter().copied().enumerate().take(last).skip(first)
+                {
+                    if let Some(value) = value {
+                        peak = Some(peak.unwrap_or(0.0).max(value));
+                    }
+                    let overlap = end.min((source as u128 + 1) * source_width)
+                        - start.max(source as u128 * source_width);
+                    let weight = old_counts.get(source).copied().unwrap_or(0) as f64
+                        * (overlap as f64 / source_width as f64);
+                    if let Some(value) = old_rms.get(source).copied().flatten() {
+                        energy += f64::from(value).powi(2) * weight;
+                        count += weight;
+                    }
+                }
+                peaks.push(peak);
+                rms.push((count > 0.0).then(|| (energy / count).sqrt() as f32));
+                counts.push(if count > 0.0 {
+                    (count.round() as u64).max(1)
+                } else {
+                    0
+                });
+            }
+        }
+        display.span_seconds = progressive.span_seconds;
+        // Keep the display's source identity, expressing the new width in its
+        // sample-rate domain even if a scan used another decoder's sample rate.
+        let divisor = waveform_gcd(
+            u128::from(display_geometry.sample_rate),
+            progressive_geometry.denominator,
+        );
+        display.bin_frames =
+            progressive_geometry.numerator * (u128::from(display_geometry.sample_rate) / divisor);
+        display.bin_count = (progressive_geometry.denominator / divisor) as u64;
+    }
+    let mut changed = geometry_changed;
+    let (width, source_width) = if geometry_changed {
+        (1, 1)
+    } else {
+        (width, source_width)
+    };
+    let identical_geometry = width == source_width;
+    for bin in 0..display.peaks.len() {
+        let start = bin as u128 * width;
+        let end = (bin as u128 + 1) * width;
+        let (first, last) = if identical_geometry {
+            let first = bin.min(progressive.peaks.len());
+            (first, (bin + 1).min(progressive.peaks.len()))
+        } else {
+            (
+                (start / source_width).min(progressive.peaks.len() as u128) as usize,
+                end.div_ceil(source_width)
+                    .min(progressive.peaks.len() as u128) as usize,
+            )
+        };
+        if !(first..last).any(|source| {
+            progressive
+                .bin_revisions
+                .get(source)
+                .is_some_and(|revision| *revision > after)
+        }) {
+            continue;
+        }
+        let epoch = if identical_geometry {
+            0
+        } else {
+            (first..last)
+                .filter(|source| {
+                    progressive
+                        .bin_revisions
+                        .get(*source)
+                        .is_some_and(|revision| *revision > baseline)
+                })
+                .map(|source| progressive.bin_epochs.get(source).copied().unwrap_or(0))
+                .max()
+                .unwrap_or(0)
+        };
+        for (peaks, rms, counts, source_peaks, source_rms, source_counts) in [
+            (
+                &mut display.peaks,
+                &mut display.rms,
+                &mut display.rms_counts,
+                &progressive.peaks,
+                &progressive.rms,
+                &progressive.rms_counts,
+            ),
+            (
+                &mut display.left_peaks,
+                &mut display.left_rms,
+                &mut display.left_rms_counts,
+                &progressive.left_peaks,
+                &progressive.left_rms,
+                &progressive.left_rms_counts,
+            ),
+            (
+                &mut display.right_peaks,
+                &mut display.right_rms,
+                &mut display.right_rms_counts,
+                &progressive.right_peaks,
+                &progressive.right_rms,
+                &progressive.right_rms_counts,
+            ),
+        ] {
+            if identical_geometry {
+                let included = progressive.bin_revisions[bin] > baseline;
+                peaks[bin] = source_peaks
+                    .get(bin)
+                    .copied()
+                    .flatten()
+                    .filter(|_| included);
+                let value = source_rms.get(bin).copied().flatten().filter(|_| included);
+                let count = if value.is_some() {
+                    source_counts.get(bin).copied().unwrap_or(0)
+                } else {
+                    0
+                };
+                rms[bin] = value.filter(|_| count > 0);
+                counts[bin] = count;
+                continue;
+            }
+            let mut peak: Option<f32> = None;
+            let mut energy = 0.0;
+            let mut count = 0.0;
+            for source in first..last {
+                if progressive
+                    .bin_revisions
+                    .get(source)
+                    .is_none_or(|revision| *revision <= baseline)
+                    || progressive.bin_epochs.get(source).copied().unwrap_or(0) != epoch
+                {
+                    continue;
+                }
+                if let Some(value) = source_peaks.get(source).copied().flatten() {
+                    peak = Some(peak.unwrap_or(0.0).max(value));
+                }
+                let overlap = end.min((source as u128 + 1) * source_width)
+                    - start.max(source as u128 * source_width);
+                let weight = source_counts.get(source).copied().unwrap_or(0) as f64
+                    * (overlap as f64 / source_width as f64);
+                if let Some(value) = source_rms.get(source).copied().flatten() {
+                    energy += f64::from(value).powi(2) * weight;
+                    count += weight;
+                }
+            }
+            peaks[bin] = peak;
+            rms[bin] = (count > 0.0).then(|| (energy / count).sqrt() as f32);
+            counts[bin] = if count > 0.0 {
+                (count.round() as u64).max(1)
+            } else {
+                0
+            };
+        }
+        changed = true;
+    }
+    if changed {
+        display.duration = display.duration.or(progressive.duration);
+        display.max_peak = display
+            .peaks
+            .iter()
+            .chain(&display.left_peaks)
+            .chain(&display.right_peaks)
+            .flatten()
+            .copied()
+            .fold(1.0, f32::max);
+        display.revision = display.revision.wrapping_add(1);
+    }
 }
 
 fn track_range(track: &Track) -> Option<PlaybackRange> {
@@ -410,6 +741,7 @@ pub(in crate::gui) struct Waveform {
     plot: Rc<RefCell<WaveformPlot>>,
     generation: u64,
     manual: Option<ManualRequest>,
+    prepared_scan: Option<PreparedScan>,
     full: Option<Rc<FullPreview>>,
     manual_error: Option<SharedString>,
     interaction: Rc<RefCell<WaveformInteraction>>,
@@ -428,6 +760,7 @@ impl Waveform {
             plot: Rc::new(RefCell::new(WaveformPlot::default())),
             generation: 0,
             manual: None,
+            prepared_scan: None,
             full: None,
             manual_error: None,
             interaction: Rc::new(RefCell::new(WaveformInteraction::default())),
@@ -543,9 +876,19 @@ impl Waveform {
             return false;
         }
         let source_changed = self.sync_source(track);
-        let (revision, suspension_generation) = {
+        let (revision, suspension_generation, provenance_changed) = {
             let shared = self.shared.read();
-            (shared.revision, shared.suspension_generation())
+            let changed = self
+                .full
+                .as_ref()
+                .is_some_and(|full| !full.matches_progressive(&shared))
+                || self.manual.as_ref().is_some_and(|request| {
+                    request.source.matches_target(&shared)
+                        && request
+                            .identity
+                            .is_some_and(|identity| shared.identity != Some(identity))
+                });
+            (shared.revision, shared.suspension_generation(), changed)
         };
         let suspended = self
             .manual
@@ -555,10 +898,27 @@ impl Waveform {
                 .full
                 .as_ref()
                 .is_some_and(|full| full.suspension_generation != suspension_generation);
-        if suspended {
+        if suspended || provenance_changed {
             self.cancel_full();
         }
-        let changed = source_changed || suspended || self.revision != Some(revision);
+        if let Some(full) = self.full.as_mut() {
+            let shared = self.shared.read();
+            if shared.revision != full.progressive_revision
+                && full.source.matches_target(&shared)
+                && full.matches_progressive(&shared)
+            {
+                let full = Rc::make_mut(full);
+                merge_progressive(
+                    &mut full.frame,
+                    &shared,
+                    full.progressive_revision,
+                    full.baseline_revision,
+                );
+                full.progressive_revision = shared.revision;
+            }
+        }
+        let changed =
+            source_changed || suspended || provenance_changed || self.revision != Some(revision);
         self.revision = Some(revision);
         changed
     }
@@ -611,50 +971,87 @@ impl Waveform {
         false
     }
 
-    /// Cancel immediately while the caller queries the latest saved track.
-    pub(in crate::gui) fn cancel_full_request(&mut self, cx: &mut Context<Self>) {
-        self.cancel_full();
+    /// Capture the click before querying the saved hint; keep the old display.
+    pub(in crate::gui) fn prepare_full(
+        &mut self,
+        track: &Track,
+        config: &Config,
+        snapshot: Option<anyhow::Result<SnapshotReply>>,
+        cx: &mut Context<Self>,
+    ) {
+        self.sync(Some(track), cx);
+        let (generation, _) = self.start_full(track.decoder_hint);
+        self.prepared_scan = Some(PreparedScan {
+            generation,
+            snapshot,
+            fallback: crate::audio::WaveformScanSnapshot::original(
+                track.path.clone(),
+                track_range(track),
+                track.decoder_hint,
+                config.visualization_signal,
+                Arc::new(config.equalizer.clone()),
+            ),
+            buffer_mb: config.media_read_buffer_mb,
+            ffmpeg_enabled: config.ffmpeg_enabled,
+        });
+        cx.notify();
+    }
+
+    pub(in crate::gui) fn fail_full_query(&mut self, error: String, cx: &mut Context<Self>) {
+        if let Some(request) = self.manual.take() {
+            request.cancelled.store(true, Ordering::Relaxed);
+        }
+        self.prepared_scan = None;
+        self.manual_error = Some(error.into());
         cx.notify();
     }
 
     /// Explicit context-menu action; ordinary sync never opens a decoder.
-    pub(in crate::gui) fn load_full(
-        &mut self,
-        track: Option<&Track>,
-        config: &Config,
-        cx: &mut Context<Self>,
-    ) {
-        if !self.enabled || config.still_mode {
+    pub(in crate::gui) fn load_full(&mut self, track: &Track, cx: &mut Context<Self>) {
+        let Some(mut setup) = self.prepared_scan.take() else {
+            return;
+        };
+        let Some(request) = self.manual.as_mut() else {
+            return;
+        };
+        if !self.enabled || setup.generation != self.generation {
             return;
         }
-        let Some(track) = track else {
-            return;
-        };
-        self.sync(Some(track), cx);
-        let Some(source) = self.source.as_ref() else {
-            return;
-        };
-        // Every explicit action replaces its predecessor, using the freshly
-        // queried saved hint rather than the active playback decoder.
-        let path = source.path.clone();
-        let range = source.range;
-        let buffer_mb = config.media_read_buffer_mb;
-        let ffmpeg_enabled = config.ffmpeg_enabled;
-        let decoder_hint = track.decoder_hint;
-        let (generation, cancelled) = self.start_full(decoder_hint);
-        cx.notify();
+        Rc::make_mut(&mut request.source).decoder_hint = track.decoder_hint;
+        setup.fallback.decoder_hint = track.decoder_hint;
+        let display_source = request.source.as_ref().clone();
+        let cancelled = Arc::clone(&request.cancelled);
+        let generation = setup.generation;
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    crate::audio::waveform(
-                        &path,
-                        range,
-                        decoder_hint,
-                        buffer_mb,
-                        ffmpeg_enabled,
+                    let mut snapshot = match setup.snapshot {
+                        Some(reply) => reply?
+                            .recv()
+                            .map_err(|error| anyhow::anyhow!(error))?
+                            .map_err(|error| anyhow::anyhow!(error))?
+                            .unwrap_or(setup.fallback),
+                        None => setup.fallback,
+                    };
+                    // Saved original-file hints must not be applied to an audition cache.
+                    if snapshot.path == display_source.path
+                        && snapshot.range == display_source.range
+                    {
+                        snapshot.decoder_hint = display_source.decoder_hint;
+                    }
+                    let mut frame = crate::audio::waveform(
+                        &snapshot,
+                        setup.buffer_mb,
+                        setup.ffmpeg_enabled,
                         &cancelled,
-                    )
+                    )?;
+                    // Scan validates the actual opened source. Display metadata and
+                    // seek interaction intentionally retain the original timeline.
+                    frame.path = Some(display_source.path.clone());
+                    frame.range = display_source.range;
+                    frame.decoder_hint = display_source.decoder_hint;
+                    Ok(frame)
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
@@ -667,7 +1064,7 @@ impl Waveform {
     }
 
     fn start_full(&mut self, decoder_hint: DecoderHint) -> (u64, Arc<AtomicBool>) {
-        self.cancel_full();
+        self.cancel_pending();
         let cancelled = Arc::new(AtomicBool::new(false));
         let mut shared = self.shared.write();
         shared.cancel_scan_on_suspend(&cancelled);
@@ -682,18 +1079,30 @@ impl Waveform {
             }),
             suspension_generation: shared.suspension_generation(),
             cancelled: Arc::clone(&cancelled),
+            progressive_revision: shared.revision,
+            identity: self
+                .source
+                .as_ref()
+                .filter(|source| source.matches_target(&shared))
+                .and(shared.identity),
         });
         self.manual_error = None;
         (self.generation, cancelled)
     }
 
     fn cancel_full(&mut self) {
-        self.generation = self.generation.wrapping_add(1);
-        if let Some(request) = self.manual.take() {
-            request.cancelled.store(true, Ordering::Relaxed);
-        }
+        self.cancel_pending();
         if self.full.take().is_some() {
             self.plot.borrow_mut().clear_cache();
+        }
+        self.manual_error = None;
+    }
+
+    fn cancel_pending(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.prepared_scan = None;
+        if let Some(request) = self.manual.take() {
+            request.cancelled.store(true, Ordering::Relaxed);
         }
         self.manual_error = None;
     }
@@ -721,14 +1130,31 @@ impl Waveform {
                 .as_ref()
                 .is_some_and(|source| source.same_target(&request.source))
                 || !request.source.matches(&result)
+                || (request.source.matches_target(&shared)
+                    && request
+                        .identity
+                        .is_some_and(|identity| shared.identity != Some(identity)))
+                || (request.source.matches_target(&shared)
+                    && !scan_matches_progressive(&result, &shared))
             {
                 anyhow::bail!("Full waveform source changed before completion");
             }
             result.complete = true;
+            if request.source.matches_target(&shared) {
+                merge_progressive(
+                    &mut result,
+                    &shared,
+                    request.progressive_revision,
+                    request.progressive_revision,
+                );
+            }
             completed = Some(Rc::new(FullPreview {
                 source: Rc::clone(&request.source),
                 suspension_generation: request.suspension_generation,
                 frame: result,
+                progressive_revision: shared.revision,
+                baseline_revision: request.progressive_revision,
+                identity: request.identity,
             }));
             Ok(())
         })();
@@ -744,6 +1170,7 @@ impl Waveform {
     fn full_preview(&self, progressive: &WaveformFrame) -> Option<&Rc<FullPreview>> {
         self.full.as_ref().filter(|full| {
             full.suspension_generation == progressive.suspension_generation()
+                && full.matches_progressive(progressive)
                 && self
                     .source
                     .as_ref()
@@ -1385,7 +1812,17 @@ mod tests {
             range: None,
             duration: Some(10.0),
             span_seconds: 10.0,
+            bin_frames: 80_000,
+            bin_count: peaks.len() as u64,
+            identity: Some(crate::audio::WaveformIdentity::FullScan {
+                duration: Some(10.0),
+                sample_rate: 8_000,
+            }),
             max_peak,
+            bin_revisions: peaks
+                .iter()
+                .map(|value| u64::from(value.is_some()))
+                .collect(),
             peaks: peaks.clone(),
             rms: peaks.clone(),
             rms_counts: peaks
@@ -1408,6 +1845,26 @@ mod tests {
             complete: false,
             ..WaveformFrame::default()
         }
+    }
+
+    fn geometry_frame(
+        peaks: Vec<Option<f32>>,
+        bin_frames: u128,
+        bin_count: u64,
+        sample_rate: u32,
+    ) -> WaveformFrame {
+        let mut result = frame(peaks);
+        result.bin_frames = bin_frames;
+        result.bin_count = bin_count;
+        result.span_seconds = result.peaks.len() as f64 * bin_frames as f64
+            / bin_count as f64
+            / f64::from(sample_rate);
+        result.duration = Some(result.span_seconds);
+        result.identity = Some(crate::audio::WaveformIdentity::FullScan {
+            duration: result.duration,
+            sample_rate,
+        });
+        result
     }
 
     fn amplitudes(columns: &[WaveformColumn]) -> Vec<Option<f32>> {
@@ -1942,44 +2399,264 @@ mod tests {
     }
 
     #[test]
-    fn full_result_is_independent_of_playback_changes_before_and_after_completion() {
-        let mut waveform = preview(frame(vec![Some(0.25), None]));
-        let (generation, _) = waveform.start_full(DecoderHint::Ffmpeg);
-        {
-            let mut shared = waveform.shared.write();
-            shared.path = Some(PathBuf::from("other.flac"));
-            shared.range = track_range(&cue_track());
-            shared.decoder_hint = DecoderHint::Native;
-            shared.peaks = vec![Some(0.1), None];
-            shared.revision += 1;
-        }
-        let mut result = frame(vec![Some(0.5), Some(0.75)]);
-        result.decoder_hint = DecoderHint::Ffmpeg;
-        assert!(waveform.finish_full(generation, Ok(result)));
-        assert!(waveform.manual_error.is_none());
+    fn late_full_scan_preserves_new_pcm_and_remains_progressively_overwritable() {
+        let mut waveform = preview(frame(vec![Some(1.0), None]));
+        let (request, _) = waveform.start_full(DecoderHint::Auto);
+        let mut fresh = frame(vec![Some(0.25), None]);
+        fresh.revision = 2;
+        fresh.bin_revisions = vec![2, 0];
+        *waveform.shared.write() = fresh;
+        assert!(waveform.finish_full(request, Ok(frame(vec![Some(1.0), Some(0.75)]))));
         {
             let shared = waveform.shared.read();
-            assert_eq!(
-                shared.path.as_deref(),
-                Some(std::path::Path::new("other.flac"))
-            );
-            assert_eq!(shared.peaks, vec![Some(0.1), None]);
-            assert_eq!(shared.revision, 2);
-            assert_eq!(
-                waveform.display_frame(&shared).peaks,
-                vec![Some(0.5), Some(0.75)]
-            );
+            let display = waveform.display_frame(&shared);
+            assert_eq!(display.peaks, [Some(0.25), Some(0.75)]);
+            assert_eq!(display.rms, [Some(0.25), Some(0.75)]);
+            assert_eq!(display.left_peaks, [Some(0.25), Some(0.75)]);
         }
-        *waveform.shared.write() = frame(vec![Some(0.2), Some(0.3)]);
+        let mut replay = frame(vec![Some(0.125), Some(0.0625)]);
+        replay.revision = 3;
+        replay.bin_revisions = vec![2, 3];
+        *waveform.shared.write() = replay;
+        waveform.sync_state(Some(&track("track.flac", DecoderHint::Auto)));
+        let shared = waveform.shared.read();
+        let display = waveform.display_frame(&shared);
+        // Bin zero was not revisited in revision three.
+        assert_eq!(display.peaks, [Some(0.25), Some(0.0625)]);
+        assert_eq!(display.rms, [Some(0.25), Some(0.0625)]);
+        assert_eq!(display.right_rms_counts, [1, 1]);
+    }
+
+    #[test]
+    fn new_full_request_and_failure_keep_the_existing_rolling_display() {
+        let mut waveform = preview(frame(vec![Some(0.25), None]));
+        let (first, _) = waveform.start_full(DecoderHint::Auto);
+        assert!(waveform.finish_full(first, Ok(frame(vec![Some(0.5), Some(0.75)]))));
+        let (obsolete, cancelled) = waveform.start_full(DecoderHint::Auto);
+        let (latest, _) = waveform.start_full(DecoderHint::Auto);
+        assert!(cancelled.load(Ordering::Relaxed));
+        assert!(!waveform.finish_full(obsolete, Ok(frame(vec![Some(1.0); 2]))));
+        assert!(waveform.finish_full(latest, Err(anyhow::anyhow!("decode failed"))));
         let shared = waveform.shared.read();
         assert_eq!(
             waveform.display_frame(&shared).peaks,
-            vec![Some(0.5), Some(0.75)]
+            [Some(0.5), Some(0.75)]
         );
+        assert!(
+            waveform
+                .manual_error
+                .as_ref()
+                .unwrap()
+                .contains("decode failed")
+        );
+    }
+
+    #[test]
+    fn full_after_progressive_installs_baseline_then_maps_different_geometries() {
+        let mut waveform = preview(frame(vec![Some(0.25), None]));
+        let (request, _) = waveform.start_full(DecoderHint::Auto);
+        assert!(waveform.finish_full(request, Ok(frame(vec![Some(1.0); 4]))));
+        let mut progress = frame(vec![Some(0.125), None]);
+        progress.revision = 2;
+        progress.bin_revisions = vec![2, 0];
+        *waveform.shared.write() = progress;
+        waveform.sync_state(Some(&track("track.flac", DecoderHint::Auto)));
+        let shared = waveform.shared.read();
+        let display = waveform.display_frame(&shared);
         assert_eq!(
-            waveform.display_frame(&shared).decoder_hint,
-            DecoderHint::Ffmpeg
+            display.peaks,
+            [Some(0.125), Some(0.125), Some(1.0), Some(1.0)]
         );
+        assert_eq!(display.left_rms, display.peaks);
+        assert_eq!(display.span_seconds, 10.0);
+    }
+
+    #[test]
+    fn coarse_full_bins_pool_new_packets_but_do_not_mix_traversals() {
+        let mut display = frame(vec![Some(1.0); 2]);
+        let mut progress = frame(vec![Some(0.25), None, None, None]);
+        progress.bin_revisions = vec![2, 0, 0, 0];
+        progress.bin_epochs = vec![2, 0, 0, 0];
+        merge_progressive(&mut display, &progress, 1, 1);
+        assert_eq!(display.left_rms[0], Some(0.25));
+        let mut next = frame(vec![Some(0.25), Some(0.75), None, None]);
+        next.bin_revisions = vec![2, 3, 0, 0];
+        next.bin_epochs = vec![2, 2, 0, 0];
+        merge_progressive(&mut display, &next, 2, 1);
+        assert_eq!(display.peaks[0], Some(0.75));
+        assert!((display.left_rms[0].unwrap() - (0.3125_f32).sqrt()).abs() < 1e-6);
+        assert_eq!(display.left_rms_counts[0], 2);
+        let mut replay = frame(vec![Some(0.125), Some(0.75), None, None]);
+        replay.bin_revisions = vec![4, 3, 0, 0];
+        replay.bin_epochs = vec![3, 2, 0, 0];
+        merge_progressive(&mut display, &replay, 3, 1);
+        assert_eq!(display.peaks, [Some(0.125), Some(1.0)]);
+        assert_eq!(display.left_rms[0], Some(0.125));
+        assert_eq!(display.left_rms_counts[0], 1);
+    }
+
+    #[test]
+    fn identical_geometry_preserves_the_unvisited_neighbor_at_point_three_seconds() {
+        for source_bins in [1024, 4] {
+            let mut display = geometry_frame(vec![Some(1.0); 1024], 1_024_000, 1024, 10_000);
+            let mut progress =
+                geometry_frame(vec![Some(0.125); source_bins], 1_024_000, 1024, 10_000);
+            progress.bin_revisions[3] = 2;
+            progress.bin_epochs = vec![2; source_bins];
+            progress.rms_spans = vec![None; source_bins];
+            progress.rms_spans[3] = Some(3_000..4_000);
+            progress.rms_counts[3] = 700;
+            progress.left_rms_counts[3] = 700;
+            progress.right_rms_counts[3] = 700;
+            merge_progressive(&mut display, &progress, 1, 1);
+
+            let mut expected = vec![Some(1.0); 1024];
+            expected[3] = Some(0.125);
+            for values in [
+                &display.peaks,
+                &display.rms,
+                &display.left_peaks,
+                &display.right_peaks,
+                &display.left_rms,
+                &display.right_rms,
+            ] {
+                assert_eq!(values, &expected);
+            }
+            let mut expected_counts = vec![1; 1024];
+            expected_counts[3] = 700;
+            for counts in [
+                &display.rms_counts,
+                &display.left_rms_counts,
+                &display.right_rms_counts,
+            ] {
+                assert_eq!(counts, &expected_counts);
+            }
+            assert_eq!(display.span_seconds, 102.4);
+        }
+    }
+
+    #[test]
+    fn rational_different_geometries_exclude_adjacent_bins_and_weight_partial_overlap() {
+        let mut display = geometry_frame(vec![Some(1.0); 512], 512_000, 512, 10_000);
+        // Source bins are 1/15 second at another sample rate; display bins are 1/10.
+        let mut progress = geometry_frame(vec![Some(0.25); 768], 768_000, 768, 15_000);
+        progress.bin_epochs = vec![1; 768];
+        progress.bin_revisions[6] = 2;
+        progress.bin_epochs[6] = 2;
+        progress.rms_counts.fill(600);
+        progress.left_rms_counts.fill(600);
+        progress.right_rms_counts.fill(600);
+        merge_progressive(&mut display, &progress, 1, 1);
+        assert_eq!(display.peaks[3], Some(1.0));
+        assert_eq!(display.peaks[4], Some(0.25));
+        assert_eq!(display.left_rms_counts[4], 600);
+
+        for values in [
+            &mut progress.peaks,
+            &mut progress.rms,
+            &mut progress.left_peaks,
+            &mut progress.right_peaks,
+            &mut progress.left_rms,
+            &mut progress.right_rms,
+        ] {
+            values[7] = Some(0.75);
+        }
+        progress.bin_revisions[7] = 3;
+        progress.bin_epochs[7] = 2;
+        merge_progressive(&mut display, &progress, 2, 1);
+        // Display bin four includes all 600 samples of source bin six and half
+        // of source bin seven's 600 samples, not the old scan or another epoch.
+        let expected_rms = ((0.25_f32.powi(2) * 600.0 + 0.75_f32.powi(2) * 300.0) / 900.0).sqrt();
+        for values in [&display.rms, &display.left_rms, &display.right_rms] {
+            assert!((values[4].unwrap() - expected_rms).abs() < 1e-6);
+            assert_eq!(values[3], Some(1.0));
+            assert_eq!(values[5], Some(0.75));
+            assert_eq!(values[6], Some(1.0));
+        }
+        for counts in [
+            &display.rms_counts,
+            &display.left_rms_counts,
+            &display.right_rms_counts,
+        ] {
+            assert_eq!(&counts[3..7], &[1, 900, 300, 1]);
+        }
+        assert_eq!(
+            &display.peaks[3..7],
+            &[Some(1.0), Some(0.75), Some(0.75), Some(1.0)]
+        );
+    }
+
+    #[test]
+    fn geometry_growth_remaps_without_spilling_peaks_then_accepts_direct_updates() {
+        let mut old = vec![Some(0.125); 1024];
+        old[6] = Some(1.0);
+        let mut display = geometry_frame(old, 409_600, 1024, 8_000);
+        let mut progress = geometry_frame(vec![Some(0.25); 1024], 1_024_000, 1024, 10_000);
+        progress.bin_epochs = vec![1; 1024];
+        progress.bin_revisions[600] = 2;
+        progress.bin_epochs[600] = 2;
+        progress.rms_spans = vec![None; 1024];
+        progress.rms_spans[600] = Some(600_000..601_000);
+        merge_progressive(&mut display, &progress, 1, 1);
+        assert_eq!(display.span_seconds, 102.4);
+        for values in [&display.peaks, &display.left_peaks, &display.right_peaks] {
+            assert_eq!(values[2], Some(0.125));
+            assert_eq!(values[3], Some(1.0));
+            assert_eq!(values[600], Some(0.25));
+        }
+        let pooled_rms = ((1.0_f32 + 0.125_f32.powi(2)) / 2.0).sqrt();
+        for values in [&display.rms, &display.left_rms, &display.right_rms] {
+            assert_eq!(values[2], Some(0.125));
+            assert!((values[3].unwrap() - pooled_rms).abs() < 1e-6);
+        }
+        assert_eq!(&display.left_rms_counts[2..4], &[2, 2]);
+
+        for values in [
+            &mut progress.peaks,
+            &mut progress.rms,
+            &mut progress.left_peaks,
+            &mut progress.right_peaks,
+            &mut progress.left_rms,
+            &mut progress.right_rms,
+        ] {
+            values[601] = Some(0.375);
+        }
+        progress.bin_revisions[601] = 3;
+        progress.bin_epochs[601] = 2;
+        progress.rms_spans[601] = Some(601_000..602_000);
+        merge_progressive(&mut display, &progress, 2, 1);
+        assert_eq!(display.peaks[2], Some(0.125));
+        assert_eq!(display.peaks[3], Some(1.0));
+        assert_eq!(&display.peaks[600..602], &[Some(0.25), Some(0.375)]);
+        assert_eq!(&display.left_rms_counts[600..602], &[1, 1]);
+    }
+
+    #[test]
+    fn scan_provenance_retires_a_preplay_baseline_when_actual_source_changes() {
+        let original = tempfile::tempfile().unwrap();
+        let replacement = tempfile::tempfile().unwrap();
+        let original = crate::audio::SourceIdentity::from_file(&original).unwrap();
+        let replacement = crate::audio::SourceIdentity::from_file(&replacement).unwrap();
+        let mut waveform = preview(frame(vec![None; 2]));
+        let (request, _) = waveform.start_full(DecoderHint::Auto);
+        let mut baseline = frame(vec![Some(0.75); 2]);
+        baseline.scan_source_identity = Some(original);
+        assert!(waveform.finish_full(request, Ok(baseline)));
+        {
+            let mut shared = waveform.shared.write();
+            shared.identity = Some(crate::audio::WaveformIdentity::Progressive {
+                content: replacement,
+                ffmpeg: false,
+                duration: Some(10.0),
+                sample_rate: 8_000,
+                channels: 1,
+            });
+            shared.revision += 1;
+        }
+        assert!(waveform.sync_state(Some(&track("track.flac", DecoderHint::Auto))));
+        assert!(waveform.full.is_none());
+        let shared = waveform.shared.read();
+        assert!(std::ptr::eq(waveform.display_frame(&shared), &*shared));
     }
 
     #[test]

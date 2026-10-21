@@ -55,11 +55,17 @@ impl Core {
                                 let _ = reply.send(CoreResponse::Query(response));
                             }
                         }
+                        Operation::WaveformSnapshot(reply) => {
+                            if let Err(error) = self.audio(AudioCommand::WaveformSnapshot(reply.clone())) {
+                                let _ = reply.try_send(Err(format!("{error:#}")));
+                            }
+                        }
                         Operation::Command(command) => {
                             let starts_scan = matches!(&command, Command::Scan { .. } | Command::ImportPlaylist { .. });
                             let starts_relocation = matches!(&command, Command::RelocateTrack { .. });
                             let starts_export = matches!(&command, Command::ExportPlaylist { .. });
                             let starts_optimization = matches!(&command, Command::OptimizeDatabase);
+                            let starts_processing = matches!(&command, Command::StartProcessing { .. } | Command::ProcessingGraphRun { .. } | Command::ProcessingGraphExport { .. } | Command::ProcessingGraphAudition { .. });
                             let result = self.command(command);
                             if let Err(error) = &result {
                                 self.state.system.last_error = Some(format!("{error:#}"));
@@ -67,6 +73,7 @@ impl Core {
                             self.publish();
                             let scan_id = if result.is_ok() && starts_scan { self.active_scan.as_ref().map(|task| task.status.id) } else { None };
                             let relocation_id = if result.is_ok() && starts_relocation { self.active_relocation.as_ref().map(|task| task.status.id) } else { None };
+                            let processing_id = if result.is_ok() && starts_processing { self.processing.active.as_ref().map(|task| task.id) } else { None };
                             if result.is_ok() && starts_export {
                                 self.active_export.as_mut().expect("export was accepted").reply = request.reply;
                                 continue;
@@ -79,6 +86,7 @@ impl Core {
                                 let _ = reply.send(CoreResponse::Ack(Ack {
                                     scan_id,
                                     relocation_id,
+                                    processing_id,
                                     ..Ack::from_result(result, self.state.system.revision)
                                 }));
                             }
@@ -119,6 +127,9 @@ impl Core {
                         self.resume_pending_scan();
                     }
                 }
+                recv(self.processing.receiver) -> event => {
+                    if let Ok(event) = event { self.processing_event(event); }
+                }
                 recv(export_finished) -> result => {
                     let result = result.unwrap_or_else(|_| Err(anyhow::anyhow!("Playlist export ended without a result; inspect the destination before retrying")));
                     let (reply, result) = self.finish_export(result);
@@ -155,6 +166,7 @@ impl Core {
         }
         self.shutdown_scan();
         self.shutdown_relocation();
+        self.processing.shutdown();
         if let Some((reply, result)) = self.shutdown_optimization() {
             self.complete_background(reply, result);
         }
@@ -275,7 +287,12 @@ impl Core {
 
     pub(in crate::core) fn view(&self, query: &Query) -> Result<ViewResponse, QueryError> {
         if self.database_maintenance_active()
-            && !matches!(query, Query::ScanTask { .. } | Query::RelocationTask { .. })
+            && !matches!(
+                query,
+                Query::ScanTask { .. }
+                    | Query::RelocationTask { .. }
+                    | Query::ProcessingTask { .. }
+            )
         {
             return Err(QueryError::Message(
                 "Database maintenance is in progress; retry this read after it finishes".into(),
@@ -348,6 +365,9 @@ impl Core {
                 self.store
                     .duplicate_member_selection(fingerprint, track_ids)?,
             ),
+            Query::ProcessingTask { id } => {
+                ViewResponse::ProcessingTask(self.processing_status(*id).map(Box::new))
+            }
             Query::RelocationTask { id } => ViewResponse::RelocationTask(
                 self.active_relocation
                     .as_ref()

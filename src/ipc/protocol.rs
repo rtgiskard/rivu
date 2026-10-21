@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-pub(super) const PROTOCOL_VERSION: u8 = 4;
+pub(super) const PROTOCOL_VERSION: u8 = 6;
 pub(super) const MAX_REQUEST: usize = 4 * 1024 * 1024;
 pub(super) const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 pub(super) const MAX_CLIENTS: usize = 16;
@@ -198,6 +198,9 @@ pub(super) enum WireQuery {
         limit: u64,
     },
     RelocationTask {
+        id: u64,
+    },
+    ProcessingTask {
         id: u64,
     },
     PlaylistEntryLocations {
@@ -399,6 +402,47 @@ pub(super) enum WireCommand {
     SeekRelative {
         queue_id: u64,
         delta: f64,
+    },
+    EqualizerEdit {
+        edit: crate::model::EqualizerEdit,
+    },
+    DenoiseEdit {
+        patch: Box<crate::model::DenoisePatch>,
+    },
+    NeuralEdit {
+        patch: Box<crate::model::NeuralPatch>,
+    },
+    StartProcessing {
+        track_id: i64,
+        operation: crate::model::ProcessingOperation,
+        profile: Option<crate::model::NoiseSelection>,
+    },
+    CancelProcessing {
+        id: u64,
+    },
+    AuditionProcessing {
+        id: u64,
+        mode: crate::model::AuditionMode,
+        vocal_gain_db: f32,
+        accompaniment_gain_db: f32,
+    },
+    ProcessingGraphEdit {
+        revision: u64,
+        edit: Box<crate::model::GraphEdit>,
+    },
+    ProcessingGraphRun {
+        track_id: i64,
+        target: crate::model::GraphPort,
+        mode: crate::model::GraphExecutionMode,
+    },
+    ProcessingGraphAudition {
+        id: u64,
+        node: crate::model::GraphPort,
+    },
+    ProcessingGraphExport {
+        id: u64,
+        node: crate::model::GraphPort,
+        path: PathBuf,
     },
 }
 
@@ -623,6 +667,7 @@ impl From<Query> for WireQuery {
                 track_ids,
             },
             Query::RelocationTask { id } => Self::RelocationTask { id },
+            Query::ProcessingTask { id } => Self::ProcessingTask { id },
         }
     }
 }
@@ -846,6 +891,7 @@ impl TryFrom<WireQuery> for Query {
                 track_ids,
             },
             WireQuery::RelocationTask { id } => Self::RelocationTask { id },
+            WireQuery::ProcessingTask { id } => Self::ProcessingTask { id },
         })
     }
 }
@@ -1012,6 +1058,48 @@ impl From<Command> for WireCommand {
             },
             Command::CancelRelocation { id } => Self::CancelRelocation { id },
             Command::KeepTrackIndependent { track_id } => Self::KeepTrackIndependent { track_id },
+            Command::EqualizerEdit { edit } => Self::EqualizerEdit { edit },
+            Command::DenoiseEdit { patch } => Self::DenoiseEdit { patch },
+            Command::NeuralEdit { patch } => Self::NeuralEdit { patch },
+            Command::ProcessingGraphEdit { revision, edit } => {
+                Self::ProcessingGraphEdit { revision, edit }
+            }
+            Command::ProcessingGraphRun {
+                track_id,
+                target,
+                mode,
+            } => Self::ProcessingGraphRun {
+                track_id,
+                target,
+                mode,
+            },
+            Command::ProcessingGraphAudition { id, node } => {
+                Self::ProcessingGraphAudition { id, node }
+            }
+            Command::ProcessingGraphExport { id, node, path } => {
+                Self::ProcessingGraphExport { id, node, path }
+            }
+            Command::StartProcessing {
+                track_id,
+                operation,
+                profile,
+            } => Self::StartProcessing {
+                track_id,
+                operation,
+                profile,
+            },
+            Command::CancelProcessing { id } => Self::CancelProcessing { id },
+            Command::AuditionProcessing {
+                id,
+                mode,
+                vocal_gain_db,
+                accompaniment_gain_db,
+            } => Self::AuditionProcessing {
+                id,
+                mode,
+                vocal_gain_db,
+                accompaniment_gain_db,
+            },
         }
     }
 }
@@ -1163,6 +1251,48 @@ impl TryFrom<WireCommand> for Command {
             WireCommand::KeepTrackIndependent { track_id } => {
                 Self::KeepTrackIndependent { track_id }
             }
+            WireCommand::EqualizerEdit { edit } => Self::EqualizerEdit { edit },
+            WireCommand::DenoiseEdit { patch } => Self::DenoiseEdit { patch },
+            WireCommand::NeuralEdit { patch } => Self::NeuralEdit { patch },
+            WireCommand::ProcessingGraphEdit { revision, edit } => {
+                Self::ProcessingGraphEdit { revision, edit }
+            }
+            WireCommand::ProcessingGraphRun {
+                track_id,
+                target,
+                mode,
+            } => Self::ProcessingGraphRun {
+                track_id,
+                target,
+                mode,
+            },
+            WireCommand::ProcessingGraphAudition { id, node } => {
+                Self::ProcessingGraphAudition { id, node }
+            }
+            WireCommand::ProcessingGraphExport { id, node, path } => {
+                Self::ProcessingGraphExport { id, node, path }
+            }
+            WireCommand::StartProcessing {
+                track_id,
+                operation,
+                profile,
+            } => Self::StartProcessing {
+                track_id,
+                operation,
+                profile,
+            },
+            WireCommand::CancelProcessing { id } => Self::CancelProcessing { id },
+            WireCommand::AuditionProcessing {
+                id,
+                mode,
+                vocal_gain_db,
+                accompaniment_gain_db,
+            } => Self::AuditionProcessing {
+                id,
+                mode,
+                vocal_gain_db,
+                accompaniment_gain_db,
+            },
         })
     }
 }
@@ -1222,6 +1352,7 @@ pub(super) struct WireConfig {
     layout_snap_enabled: bool,
     layout_snap_grid_px: u32,
     still_mode: bool,
+    visualization_signal: crate::config::VisualizationSignal,
     analysis_fps: u32,
     visual_background: crate::config::RgbColor,
     visual_palette: crate::config::VisualizationPalette,
@@ -1280,6 +1411,12 @@ pub(super) struct WireConfig {
     media_read_buffer_mb: u32,
     ffmpeg_enabled: bool,
     pipewire_auto_mix: bool,
+    equalizer: rivu_dsp::equalizer::EqualizerConfig,
+    denoise: rivu_dsp::denoise::DenoiseConfig,
+    neural: rivu_format::config::NeuralConfig,
+    equalizer_presets: Vec<rivu_format::config::EqualizerPreset>,
+    equalizer_ab: Option<rivu_dsp::equalizer::EqualizerConfig>,
+    processing_graph: crate::model::ProcessingGraph,
 }
 
 impl From<&crate::config::Config> for WireConfig {
@@ -1315,6 +1452,7 @@ impl From<&crate::config::Config> for WireConfig {
             layout_snap_enabled: value.layout_snap_enabled,
             layout_snap_grid_px: value.layout_snap_grid_px,
             still_mode: value.still_mode,
+            visualization_signal: value.visualization_signal,
             analysis_fps: value.analysis_fps,
             visual_background: value.visual_background,
             visual_palette: value.visual_palette,
@@ -1373,6 +1511,12 @@ impl From<&crate::config::Config> for WireConfig {
             media_read_buffer_mb: value.media_read_buffer_mb,
             ffmpeg_enabled: value.ffmpeg_enabled,
             pipewire_auto_mix: value.pipewire_auto_mix,
+            equalizer: value.equalizer.clone(),
+            denoise: value.denoise.clone(),
+            neural: value.neural.clone(),
+            equalizer_presets: value.equalizer_presets.clone(),
+            equalizer_ab: value.equalizer_ab.clone(),
+            processing_graph: value.processing_graph.clone(),
         }
     }
 }
@@ -1410,6 +1554,7 @@ impl From<WireConfig> for crate::config::Config {
             layout_snap_enabled: value.layout_snap_enabled,
             layout_snap_grid_px: value.layout_snap_grid_px,
             still_mode: value.still_mode,
+            visualization_signal: value.visualization_signal,
             analysis_fps: value.analysis_fps,
             visual_background: value.visual_background,
             visual_palette: value.visual_palette,
@@ -1468,6 +1613,12 @@ impl From<WireConfig> for crate::config::Config {
             media_read_buffer_mb: value.media_read_buffer_mb,
             ffmpeg_enabled: value.ffmpeg_enabled,
             pipewire_auto_mix: value.pipewire_auto_mix,
+            equalizer: value.equalizer,
+            denoise: value.denoise,
+            neural: value.neural,
+            equalizer_presets: value.equalizer_presets,
+            equalizer_ab: value.equalizer_ab,
+            processing_graph: value.processing_graph,
         }
     }
 }
@@ -1488,6 +1639,7 @@ pub(super) struct WireSystemState {
     database_optimization: Option<DatabaseOptimization>,
     shutting_down: bool,
     relocation_task: Option<crate::model::RelocationTaskStatus>,
+    processing: Option<crate::model::ProcessingTaskStatus>,
 }
 
 impl From<SystemState> for WireSystemState {
@@ -1507,6 +1659,7 @@ impl From<SystemState> for WireSystemState {
             database_optimization: value.database_optimization,
             shutting_down: value.shutting_down,
             relocation_task: value.relocation_task,
+            processing: value.processing,
         }
     }
 }
@@ -1528,6 +1681,7 @@ impl From<WireSystemState> for SystemState {
             database_optimization: value.database_optimization,
             shutting_down: value.shutting_down,
             relocation_task: value.relocation_task,
+            processing: value.processing,
         }
     }
 }

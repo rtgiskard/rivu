@@ -2316,6 +2316,7 @@ mod tests {
             revision: 0,
             scan_id: None,
             relocation_id,
+            processing_id: None,
         }
     }
 

@@ -16,6 +16,15 @@ or a separate UI-session state copy for each named layout. Layouts describe pane
 structure and instance preferences, not complete workspace sessions. View-local
 state need not be restored if its owner is replaced.
 
+The panel catalog includes `audio_processing` (Audio processing), with Equalizer,
+Restoration and Speech & separation pages. Its configuration and jobs belong to
+the core, not the saved docking tree. Hiding the panel or switching layouts does
+not disable EQ or cancel a file job. Obsolete graph pointer gestures are cancelled
+when layout geometry changes; numerical drafts and response inspection do not
+constitute a separate authoritative DSP configuration. See
+link:27_audio_processing.adoc[Audio processing usage and acceptance].
+
+
 Playback and accepted business operations keep their independent lifetimes.
 The current editor and in-flight metadata save remain alive even if Details is
 no longer visible. Switching cancels obsolete interactions and invalidates old

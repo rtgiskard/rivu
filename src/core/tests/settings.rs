@@ -221,7 +221,7 @@ fn queue_save_failure_does_not_prevent_final_config_save() {
 
 #[test]
 fn busy_audio_configuration_rejects_the_whole_batch_before_persistence() {
-    for available in [0, 1, 5, 6] {
+    for available in [0, 1, 5, 6, 7] {
         let (_directory, mut core) = fixture();
         core.state
             .system
@@ -244,7 +244,7 @@ fn busy_audio_configuration_rejects_the_whole_batch_before_persistence() {
         let result = core.command(Command::Configure {
             config: Arc::new(config.clone()),
         });
-        if available < 6 {
+        if available < 7 {
             assert!(result.unwrap_err().to_string().contains("not queued"));
             assert_eq!(*core.state.system.config, *baseline.system.config);
             assert_eq!(core.state.playback.volume, baseline.playback.volume);
@@ -287,7 +287,7 @@ fn busy_audio_configuration_rejects_the_whole_batch_before_persistence() {
                 AudioCommand::Volume(value) if value == index as f32
             ));
         }
-        if available == 6 {
+        if available == 7 {
             assert!(matches!(
                 receive.try_recv().unwrap(),
                 AudioCommand::StillMode(true)
@@ -304,6 +304,9 @@ fn busy_audio_configuration_rejects_the_whole_batch_before_persistence() {
                 receive.try_recv().unwrap(),
                 AudioCommand::AnalysisSettings(_)
             ));
+            assert!(
+                matches!(receive.try_recv().unwrap(), AudioCommand::Equalizer(config) if *config == core.state.system.config.equalizer)
+            );
             assert!(matches!(
                 receive.try_recv().unwrap(),
                 AudioCommand::FfmpegEnabled(false)

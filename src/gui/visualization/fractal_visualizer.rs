@@ -129,8 +129,9 @@ impl FractalVisualizer {
     pub(super) fn configure(&self, config: &Config) -> bool {
         let mut data = self.data.borrow_mut();
         let settings = AnalysisSettings::from(config);
-        let reset =
-            data.settings.fft_size != settings.fft_size || data.settings.window != settings.window;
+        let reset = data.settings.fft_size != settings.fft_size
+            || data.settings.window != settings.window
+            || data.settings.signal != settings.signal;
         let colors = [
             config.audio_visualizer_primary_color.rgb(),
             config.audio_visualizer_secondary_color.rgb(),
@@ -241,7 +242,9 @@ impl Data {
         // Never consume an undemanded payload or an old window during reconfiguration.
         if !frame.visualizer.demand.band_energy
             || !frame.settings.is_some_and(|s| {
-                s.fft_size == self.settings.fft_size && s.window == self.settings.window
+                s.fft_size == self.settings.fft_size
+                    && s.window == self.settings.window
+                    && s.signal == self.settings.signal
             })
         {
             return;
@@ -627,6 +630,37 @@ mod tests {
             visual.data.borrow().segments(),
             rewound.data.borrow().segments()
         );
+    }
+
+    #[test]
+    fn signal_switch_restarts_scene_and_rejects_old_drive() {
+        for style in [
+            AudioVisualizerStyle::FractalBeams,
+            AudioVisualizerStyle::FractalFlow,
+        ] {
+            let visual = plot(style);
+            visual.update(&frame(50));
+            visual.update(&frame(100));
+            let config = Config {
+                visualization_signal: crate::config::VisualizationSignal::Before,
+                ..Config::default()
+            };
+            visual.configure(&config);
+            visual.update(&frame(150));
+            assert_eq!(visual.data.borrow().last_time, None);
+            assert!(visual.data.borrow().gpu_frame.is_none());
+            let mut selected = frame(200);
+            selected.settings.as_mut().unwrap().signal = crate::config::VisualizationSignal::Before;
+            visual.update(&selected);
+            let fresh = plot(style);
+            fresh.configure(&config);
+            fresh.update(&selected);
+            assert_eq!(visual.data.borrow().last_time, Some(selected.sample_time));
+            assert_eq!(
+                visual.data.borrow().segments(),
+                fresh.data.borrow().segments()
+            );
+        }
     }
 
     #[test]

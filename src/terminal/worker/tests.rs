@@ -388,6 +388,7 @@ fn command_worker_reports_ambiguous_failure_without_replaying_the_mutation() {
                 revision: 2,
                 scan_id: None,
                 relocation_id: None,
+                processing_id: None,
             },
         );
     });

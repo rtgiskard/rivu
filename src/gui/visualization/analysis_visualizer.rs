@@ -165,8 +165,9 @@ impl AnalysisVisualizer {
     pub(super) fn configure(&self, config: &Config) -> bool {
         let mut data = self.data.borrow_mut();
         let settings = AnalysisSettings::from(config);
-        let reset =
-            settings.fft_size != data.settings.fft_size || settings.window != data.settings.window;
+        let reset = settings.fft_size != data.settings.fft_size
+            || settings.window != data.settings.window
+            || settings.signal != data.settings.signal;
         let colors_changed = data.primary != config.audio_visualizer_primary_color.rgb()
             || data.secondary != config.audio_visualizer_secondary_color.rgb();
         let recolor = colors_changed || data.db_range != config.audio_visualizer_db_range();
@@ -286,6 +287,7 @@ impl PlotData {
             || !frame.settings.is_some_and(|settings| {
                 settings.fft_size == self.settings.fft_size
                     && settings.window == self.settings.window
+                    && settings.signal == self.settings.signal
             })
         {
             return;
@@ -1149,6 +1151,28 @@ mod tests {
             plot.data.borrow().field.len(),
             SPATIAL_WIDTH * SPATIAL_HEIGHT
         );
+    }
+
+    #[test]
+    fn signal_switch_rejects_old_fields_until_selected_signal_arrives() {
+        for style in [
+            AudioVisualizerStyle::StereoDensity,
+            AudioVisualizerStyle::SpatialSpectrum,
+        ] {
+            let plot = plot(style);
+            let mut input = frame(style);
+            plot.update(&input);
+            let expected = plot.data.borrow().field().to_vec();
+            plot.configure(&Config {
+                visualization_signal: crate::config::VisualizationSignal::Before,
+                ..Config::default()
+            });
+            plot.update(&input);
+            assert!(plot.data.borrow().field().is_empty());
+            input.settings.as_mut().unwrap().signal = crate::config::VisualizationSignal::Before;
+            plot.update(&input);
+            assert_eq!(plot.data.borrow().field(), expected);
+        }
     }
 
     #[test]

@@ -13,6 +13,9 @@ terminal, and headless modes that share one playback instance.
 * Optional MPRIS and system tray integration
 * Named desktop layouts with dockable panels and configurable appearance
 * Waveform, spectrum, spectrogram, audio visualizers, and album artwork
+* Live parametric EQ, offline restoration, MossFormer2 speech enhancement and
+  Kim vocal/accompaniment separation; explicit local model preparation and
+  link:doc/27_audio_processing.adoc[usage, measured evidence and acceptance limits]
 
 Rivu plays local files; it does not fetch network media or cover art.
 The desktop requires Wayland; audio output requires a running PipeWire 1.2 or newer server.
@@ -107,6 +110,7 @@ IPC access and upgrade constraints are described in link:doc/21_ipc.adoc[IPC].
 ** link:doc/23_visuals.adoc[Audio analysis and visualization rendering]
 ** link:doc/24_layout.adoc[Desktop layout and docking]
 ** link:doc/26_migration.adoc[Database and configuration migration boundaries]
+** link:doc/27_audio_processing.adoc[Audio processing usage, design and quality acceptance]
 * Project status
 ** link:doc/90_open_issues.adoc[Open issues and deferred investigations]
 * Agent development skills

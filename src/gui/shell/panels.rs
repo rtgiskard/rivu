@@ -14,6 +14,7 @@ enum Owner {
     History(Entity<history::History>),
     Metadata(Entity<metadata::Metadata>),
     Playback(Entity<playback::Playback>),
+    Processing(Entity<crate::gui::audio_processing::AudioProcessing>),
 }
 
 pub(in crate::gui) struct PanelView {
@@ -41,6 +42,7 @@ impl PanelView {
             Owner::History(owner) => cx.observe(owner, |_, _, cx| cx.notify()),
             Owner::Metadata(owner) => cx.observe(owner, |_, _, cx| cx.notify()),
             Owner::Playback(owner) => cx.observe(owner, |_, _, cx| cx.notify()),
+            Owner::Processing(owner) => cx.observe(owner, |_, _, cx| cx.notify()),
         };
         Self {
             owner,
@@ -98,6 +100,9 @@ impl Render for PanelView {
             Owner::Metadata(owner) => {
                 owner.update(cx, |owner, cx| owner.render_panel(id, window, cx))
             }
+            Owner::Processing(owner) => {
+                owner.update(cx, |owner, cx| owner.render_panel(id, window, cx))
+            }
             Owner::Playback(owner) => {
                 let (seek, volume) = self.measurements.as_ref().expect("transport measurements");
                 owner.update(cx, |owner, cx| {
@@ -144,6 +149,7 @@ impl GuiApp {
             "history" => Owner::History(self.history.clone()),
             "metadata" => Owner::Metadata(self.metadata.clone()),
             "transport" => Owner::Playback(self.playback.clone()),
+            "audio_processing" => Owner::Processing(self.audio_processing.clone()),
             "albums" => return self.album_browser_panel(panel.id, window, cx),
             "album_artwork" => {
                 return self

@@ -13,7 +13,7 @@ use crate::{
     config::{
         AlbumArtworkDirection, AlbumArtworkMode, AlbumArtworkOptions, AlbumArtworkStyle,
         AnalysisWindow, AudioVisualizerOptions, AudioVisualizerStyle, Config, ConfigPatch,
-        LogLevel, RgbColor, SpectrumStyle, VisualizationPalette,
+        LogLevel, RgbColor, SpectrumStyle, VisualizationPalette, VisualizationSignal,
     },
     core::CoreHandle,
     i18n::Localizer,
@@ -46,6 +46,7 @@ enum SettingChoice {
     Palette(VisualizationPalette),
     LogLevel(LogLevel),
     Window(AnalysisWindow),
+    Signal(VisualizationSignal),
     AlbumArtworkStyle(AlbumArtworkStyle),
     AlbumArtworkMode(AlbumArtworkMode),
     AlbumArtworkDirection(AlbumArtworkDirection),
@@ -84,6 +85,12 @@ impl SettingChoice {
             Self::Window(AnalysisWindow::Hann) => "Hann".to_owned(),
             Self::Window(AnalysisWindow::BlackmanHarris) => "Blackman–Harris".to_owned(),
             Self::Window(AnalysisWindow::None) => i18n.text("settings-none").to_owned(),
+            Self::Signal(VisualizationSignal::Before) => {
+                i18n.text("settings-signal-before").to_owned()
+            }
+            Self::Signal(VisualizationSignal::After) => {
+                i18n.text("settings-signal-after").to_owned()
+            }
         }
     }
 }
@@ -453,6 +460,7 @@ enum Measured {
     SettingsFft,
     SettingsLogLevel,
     SettingsWindow,
+    SettingsSignal,
     AlbumArtworkStyle,
     AlbumArtworkMode,
     AlbumArtworkDirection,
@@ -1676,6 +1684,7 @@ impl Settings {
             SettingChoice::Fft(value) => self.model.draft.analysis_fft_size = value,
             SettingChoice::LogLevel(value) => self.model.draft.log_level = value,
             SettingChoice::Window(value) => self.model.draft.analysis_window = value,
+            SettingChoice::Signal(value) => self.model.draft.visualization_signal = value,
             SettingChoice::AlbumArtworkStyle(value) => self.model.draft.album_artwork_style = value,
             SettingChoice::AlbumArtworkMode(value) => self.model.draft.album_artwork_mode = value,
             SettingChoice::AlbumArtworkDirection(value) => {
@@ -1698,6 +1707,7 @@ impl Settings {
                 SettingChoice::Fft(_) => Measured::SettingsFft,
                 SettingChoice::LogLevel(_) => Measured::SettingsLogLevel,
                 SettingChoice::Window(_) => Measured::SettingsWindow,
+                SettingChoice::Signal(_) => Measured::SettingsSignal,
                 SettingChoice::AudioVisualizerStyle(_) => Measured::SettingsStyle,
                 SettingChoice::Palette(_) => Measured::SettingsStyle,
                 SettingChoice::Device(_) => Measured::Device,

@@ -233,7 +233,8 @@ impl AudioVisualizer {
             || data.secondary_color != config.audio_visualizer_secondary_color.rgb()
             || data.db_range != db_range
             || data.expected_settings.fft_size != expected_settings.fft_size
-            || data.expected_settings.window != expected_settings.window;
+            || data.expected_settings.window != expected_settings.window
+            || data.expected_settings.signal != expected_settings.signal;
         if !changed {
             return false;
         }
@@ -285,6 +286,7 @@ impl AudioVisualizer {
             || !frame.settings.is_some_and(|settings| {
                 settings.fft_size == data.expected_settings.fft_size
                     && settings.window == data.expected_settings.window
+                    && settings.signal == data.expected_settings.signal
             })
         {
             return;
@@ -1092,6 +1094,10 @@ mod tests {
             },
             Config {
                 analysis_window: crate::config::AnalysisWindow::Hann,
+                ..Config::default()
+            },
+            Config {
+                visualization_signal: crate::config::VisualizationSignal::Before,
                 ..Config::default()
             },
         ] {

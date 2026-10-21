@@ -28,7 +28,7 @@ use std::{
 
 use crate::{
     analysis::AnalysisFrame,
-    config::{AnalysisWindow, Config, SpectrumStyle, VisualizationPalette},
+    config::{AnalysisWindow, Config, SpectrumStyle, VisualizationPalette, VisualizationSignal},
 };
 
 const HISTORY_GAP_RESET: Duration = Duration::from_secs(1);
@@ -343,6 +343,7 @@ struct VisualData {
     spectrum_show_labels: bool,
     analysis_fft_size: u32,
     analysis_window: AnalysisWindow,
+    visualization_signal: VisualizationSignal,
     spectrum_style: SpectrumStyle,
     spectrum_gap: f32,
     spectrum_peaks: bool,
@@ -423,6 +424,7 @@ impl Visuals {
                 spectrum_show_labels: true,
                 analysis_fft_size: 8192,
                 analysis_window: AnalysisWindow::BlackmanHarris,
+                visualization_signal: VisualizationSignal::After,
                 spectrum_style: SpectrumStyle::Bars,
                 spectrum_gap: 1.0,
                 spectrum_peaks: true,
@@ -518,6 +520,7 @@ impl Visuals {
             || data.spectrogram_show_labels != config.spectrogram_labels
             || data.analysis_fft_size != config.analysis_fft_size
             || data.analysis_window != config.analysis_window
+            || data.visualization_signal != config.visualization_signal
             || data.spectrogram_interpolate != config.spectrogram_interpolate
             || data.spectrogram_interpolation_points != config.spectrogram_interpolation_points
             || data.spectrogram_sampling_points_scale != config.spectrogram_sampling_points_scale
@@ -531,7 +534,8 @@ impl Visuals {
             || data.spectrogram_history_seconds != config.spectrogram_history_seconds
             || data.analysis_fps != config.analysis_fps;
         let analysis_changed = data.analysis_fft_size != config.analysis_fft_size
-            || data.analysis_window != config.analysis_window;
+            || data.analysis_window != config.analysis_window
+            || data.visualization_signal != config.visualization_signal;
         let heat_changed = palette_changed
             || data.visual_background != config.visual_background.rgb()
             || data.spectrogram_db_range != spectrogram_db_range
@@ -561,6 +565,7 @@ impl Visuals {
         data.spectrogram_sampling_points_scale = config.spectrogram_sampling_points_scale;
         data.analysis_fft_size = config.analysis_fft_size;
         data.analysis_window = config.analysis_window;
+        data.visualization_signal = config.visualization_signal;
         data.spectrum_grid = config.spectrum_grid;
         data.spectrogram_db_range = spectrogram_db_range;
         data.visualization_cache = config.visualization_cache;
@@ -579,6 +584,14 @@ impl Visuals {
         if analysis_changed {
             data.clear_history();
             data.latest_levels.clear();
+            data.peaks.clear();
+            data.peak_deadlines.clear();
+            data.bar_levels.clear();
+            data.bar_deadlines.clear();
+            data.smoothed_levels.clear();
+            data.spectrum_geometry.clear();
+            data.spectrum_geometry_revision = data.spectrum_geometry_revision.wrapping_add(1);
+            data.last_analysis_sequence = None;
             data.last_update = None;
             data.envelope_initialized = false;
         } else if heat_changed {
@@ -601,7 +614,9 @@ impl Visuals {
             return;
         }
         if !frame.settings.is_some_and(|settings| {
-            settings.fft_size == data.analysis_fft_size && settings.window == data.analysis_window
+            settings.fft_size == data.analysis_fft_size
+                && settings.window == data.analysis_window
+                && settings.signal == data.visualization_signal
         }) {
             return;
         }
@@ -2718,6 +2733,58 @@ mod tests {
             visuals.update(&frame(2.2, -5.0));
             assert_eq!(visuals.data.borrow().latest_sample_time, before);
         }
+    }
+
+    #[test]
+    fn signal_switch_clears_history_and_rejects_stale_frames_but_eq_preserves_history() {
+        let mut visuals = configured_visuals();
+        visuals.update(&frame(1.0, -10.0));
+        visuals.update(&frame(1.1, -20.0));
+        assert_eq!(visuals.data.borrow().len, 2);
+
+        let mut config = Config {
+            visualization_signal: VisualizationSignal::Before,
+            ..Config::default()
+        };
+        assert!(visuals.configure(&config));
+        {
+            let data = visuals.data.borrow();
+            assert_eq!(data.len, 0);
+            assert!(data.latest_sample_time.is_none());
+            assert!(data.latest_levels.is_empty());
+            assert!(data.peaks.is_empty());
+            assert!(data.bar_levels.is_empty());
+            assert!(data.smoothed_levels.is_empty());
+            assert!(data.spectrum_geometry.is_empty());
+        }
+        visuals.update(&frame(1.2, -5.0));
+        assert_eq!(visuals.data.borrow().len, 0);
+        assert!(visuals.data.borrow().latest_levels.is_empty());
+
+        // Reusing a sequence is valid after switching the selected signal.
+        let mut before = frame(1.1, -40.0);
+        before.settings = Some(crate::analysis::AnalysisSettings::from(&config));
+        visuals.update(&before);
+        assert_eq!(visuals.data.borrow().len, 1);
+        assert_eq!(visuals.data.borrow().latest_levels, vec![-40.0; 4]);
+
+        config.equalizer.enabled = true;
+        config.equalizer.preamp_db = -6.0;
+        visuals.configure(&config);
+        {
+            let data = visuals.data.borrow();
+            assert_eq!(data.len, 1);
+            assert_eq!(data.latest_levels, vec![-40.0; 4]);
+            assert_eq!(data.latest_sample_time, Some(before.sample_time));
+        }
+        before.sequence += 1;
+        before.sample_time = Duration::from_secs_f64(1.2);
+        before.spectrum_db.fill(-50.0);
+        visuals.update(&before);
+        let data = visuals.data.borrow();
+        assert_eq!(data.len, 2);
+        assert_eq!(data.columns[0].levels, vec![-40.0; 4]);
+        assert_eq!(data.columns[1].levels, vec![-50.0; 4]);
     }
 
     #[test]

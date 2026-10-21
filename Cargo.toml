@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/rivu-ui", "crates/rivu-format", "crates/rivu-migrate"]
+members = ["crates/rivu-ui", "crates/rivu-format", "crates/rivu-migrate", "crates/rivu-dsp"]
 resolver = "3"
 
 [workspace.dependencies]
@@ -19,6 +19,8 @@ embed-nerd-font = []
 [dependencies]
 rivu-format = { path = "crates/rivu-format" }
 rivu-ui = { path = "crates/rivu-ui" }
+rivu-dsp = { path = "crates/rivu-dsp" }
+hound = "3.5"
 anyhow = "1"
 blake3 = "1"
 clap = { version = "4", features = ["derive", "string"] }

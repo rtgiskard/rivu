@@ -549,8 +549,16 @@ fn paused_confirmations_do_not_advance_activity_at_stop() {
     assert_eq!(core.playback.as_ref().unwrap().heard, 20.0);
     assert_eq!(play_count(&core, 1), 1);
     let generation = core.generation;
-    core.finish_playback(Ok(Some((generation, 20.0))), false, Ok(()))
-        .unwrap();
+    core.finish_playback(
+        Ok(Some(crate::audio::AudioSnapshot {
+            generation,
+            position_seconds: 20.0,
+            listened_seconds: 20.0,
+        })),
+        false,
+        Ok(()),
+    )
+    .unwrap();
     assert_eq!(
         core.store.history(200).unwrap()[0].played_at,
         core.state
@@ -616,8 +624,16 @@ fn final_stop_snapshot_counts_only_matching_generation_above_boundary() {
         progress(&mut core, 2.0, 2.0);
         let generation = core.generation;
         let snapshot_generation = if stale { generation - 1 } else { generation };
-        core.finish_playback(Ok(Some((snapshot_generation, heard))), false, Ok(()))
-            .unwrap();
+        core.finish_playback(
+            Ok(Some(audio::AudioSnapshot {
+                generation: snapshot_generation,
+                position_seconds: 2.0,
+                listened_seconds: heard,
+            })),
+            false,
+            Ok(()),
+        )
+        .unwrap();
         assert_eq!(play_count(&core, 1), expected);
         assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
         assert_ne!(core.generation, generation);
@@ -671,8 +687,16 @@ fn stop_ack_records_queued_start_and_snapshot_without_terminal_navigation() {
         sender
             .send(AudioEvent::DecoderStopped { generation })
             .unwrap();
-        core.finish_playback(Ok(Some((generation, heard))), false, Ok(()))
-            .unwrap();
+        core.finish_playback(
+            Ok(Some(crate::audio::AudioSnapshot {
+                generation,
+                position_seconds: heard,
+                listened_seconds: heard,
+            })),
+            false,
+            Ok(()),
+        )
+        .unwrap();
         assert_eq!(play_count(&core, 1), expected);
         assert_eq!(core.store.history(200).unwrap().len(), 1);
         assert_eq!(core.store.history(200).unwrap()[0].track_id, 1);
@@ -708,8 +732,16 @@ fn queued_start_rejection_fences_once_without_recursive_stop_or_count() {
         .unwrap();
     core.store.remove_tracks(&[1]).unwrap();
     assert!(
-        core.finish_playback(Ok(Some((generation, 10.0))), false, Ok(()))
-            .is_err()
+        core.finish_playback(
+            Ok(Some(crate::audio::AudioSnapshot {
+                generation,
+                position_seconds: 10.0,
+                listened_seconds: 10.0
+            })),
+            false,
+            Ok(())
+        )
+        .is_err()
     );
     assert_eq!(core.generation, generation.wrapping_add(1));
     assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);

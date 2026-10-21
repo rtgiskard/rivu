@@ -54,7 +54,7 @@ pub(crate) fn metadata_budget(visuals: bool) -> symphonia_metadata::budget::Meta
 
 /// Content version captured from the same file descriptor used by the decoder.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct SourceIdentity {
+pub struct SourceIdentity {
     device: u64,
     inode: u64,
     len: u64,
@@ -63,7 +63,7 @@ pub(crate) struct SourceIdentity {
 }
 
 impl SourceIdentity {
-    pub(crate) fn from_file(file: &File) -> Result<Self> {
+    pub fn from_file(file: &File) -> Result<Self> {
         let metadata = file.metadata()?;
         if !metadata.is_file() {
             bail!("Audio source is not an ordinary file");
@@ -434,7 +434,7 @@ impl Source {
         )
     }
 
-    fn open_file_with_cancel(
+    pub(super) fn open_file_with_cancel(
         path: &Path,
         file: File,
         buffer_len: usize,
@@ -739,7 +739,7 @@ impl Source {
         self.restrict_with_cancel(range, None)
     }
 
-    fn restrict_with_cancel(
+    pub(super) fn restrict_with_cancel(
         &mut self,
         range: super::PlaybackRange,
         cancelled: Option<&AtomicBool>,
@@ -874,7 +874,7 @@ impl Source {
         self.next_frames_with_cancel(None, budget)
     }
 
-    fn next_frames_with_cancel(
+    pub(super) fn next_frames_with_cancel(
         &mut self,
         cancelled: Option<&AtomicBool>,
         budget: &mut usize,
@@ -978,9 +978,7 @@ impl Source {
     }
 
     pub(super) fn waveform(
-        path: &Path,
-        range: Option<super::PlaybackRange>,
-        decoder_hint: DecoderHint,
+        snapshot: &super::WaveformScanSnapshot,
         media_read_buffer_mb: u32,
         ffmpeg_enabled: bool,
         cancelled: &AtomicBool,
@@ -990,19 +988,39 @@ impl Source {
             .context("Waveform media buffer size does not fit usize")?
             .saturating_mul(super::BYTES_PER_MEBIBYTE);
         let mut source = Self::open_with_cancel(
-            path,
+            &snapshot.path,
             buffer_len,
-            decoder_hint,
+            snapshot.decoder_hint,
             ffmpeg_enabled,
             Some(cancelled),
         )?;
         check_cancelled(Some(cancelled))?;
-        if let Some(range) = range {
+        if snapshot
+            .expected_identity
+            .is_some_and(|expected| expected != source.identity())
+        {
+            bail!("Waveform source differs from the captured active source");
+        }
+        if let Some(range) = snapshot.range {
             source.restrict_with_cancel(range, Some(cancelled))?;
         }
-        source.scan_waveform(path, range, decoder_hint, cancelled)
+        let context = snapshot
+            .graph
+            .as_ref()
+            .map(super::graph::GraphSnapshot::source_context);
+        let graph = if snapshot.signal == crate::config::VisualizationSignal::After {
+            snapshot
+                .graph
+                .as_ref()
+                .map(super::graph::GraphSnapshot::prepare)
+                .transpose()?
+        } else {
+            None
+        };
+        source.scan_waveform_processed(snapshot, cancelled, graph, context)
     }
 
+    #[cfg(test)]
     fn scan_waveform(
         &mut self,
         path: &Path,
@@ -1010,13 +1028,53 @@ impl Source {
         decoder_hint: DecoderHint,
         cancelled: &AtomicBool,
     ) -> Result<super::WaveformFrame> {
+        let snapshot = super::WaveformScanSnapshot::original(
+            path.to_owned(),
+            range,
+            decoder_hint,
+            crate::config::VisualizationSignal::Before,
+            std::sync::Arc::new(rivu_dsp::equalizer::EqualizerConfig::default()),
+        );
+        self.scan_waveform_processed(&snapshot, cancelled, None, None)
+    }
+
+    fn scan_waveform_processed(
+        &mut self,
+        snapshot: &super::WaveformScanSnapshot,
+        cancelled: &AtomicBool,
+        mut graph: Option<super::GraphRunner>,
+        context: Option<(usize, Option<u64>)>,
+    ) -> Result<super::WaveformFrame> {
         let mut frame = super::WaveformFrame::default();
         let sample_rate = self.info.sample_rate;
         let channels = self.layout.len();
-        frame.select(path, range, decoder_hint, self.info.duration, sample_rate);
+        frame.select(
+            &snapshot.path,
+            snapshot.range,
+            snapshot.decoder_hint,
+            self.info.duration,
+            sample_rate,
+        );
+        frame.scan_source_identity = Some(self.identity());
         let weights = super::channels::analysis_weights(&self.layout);
         frame.set_channel_weights(&weights);
-        let mut end_seconds = 0.0_f64;
+        let processed = snapshot.signal == crate::config::VisualizationSignal::After;
+        let mut equalizer = processed
+            .then(|| {
+                rivu_dsp::equalizer::Equalizer::new(&snapshot.equalizer, sample_rate, channels)
+            })
+            .transpose()?;
+        let mut skip = graph.as_ref().map_or_else(
+            || context.map_or(0, |context| context.0),
+            super::GraphRunner::latency_frames,
+        );
+        let mut remaining = context.and_then(|context| context.1);
+        let mut input_frames = 0_u64;
+        let mut published_frames = 0_u64;
+        let mut pending = Vec::new();
+        // Match waveform placement: round timestamps to PCM frames before
+        // adding decoded lengths, and convert to seconds only at EOF.
+        let mut end_frames = 0_u64;
         loop {
             let mut budget = DECODE_WORK_BUDGET;
             let (samples, start_seconds) =
@@ -1025,13 +1083,105 @@ impl Source {
                     DecodeStep::Yield => continue,
                     DecodeStep::Eof => break,
                 };
-            frame.push(start_seconds, samples, sample_rate, channels);
-            let end_frame =
-                (start_seconds * sample_rate as f64).round() + (samples.len() / channels) as f64;
-            end_seconds = end_seconds.max(end_frame / sample_rate as f64);
+            if !samples.len().is_multiple_of(channels) {
+                bail!("Waveform PCM contains an incomplete frame");
+            }
+            input_frames += (samples.len() / channels) as u64;
+            for (index, block) in samples
+                .chunks(super::graph::GRAPH_BLOCK_FRAMES * channels)
+                .enumerate()
+            {
+                check_cancelled(Some(cancelled))?;
+                if graph.is_none()
+                    && equalizer
+                        .as_ref()
+                        .is_none_or(rivu_dsp::equalizer::Equalizer::is_bypassed)
+                {
+                    let discard = skip.min(block.len() / channels);
+                    skip -= discard;
+                    let mut block = &block[discard * channels..];
+                    if let Some(remaining) = &mut remaining {
+                        let frames = (block.len() / channels).min(*remaining as usize);
+                        block = &block[..frames * channels];
+                        *remaining -= frames as u64;
+                    }
+                    let start = if context.is_some() {
+                        published_frames as f64 / sample_rate as f64
+                    } else {
+                        start_seconds
+                            + (index * super::graph::GRAPH_BLOCK_FRAMES + discard) as f64
+                                / sample_rate as f64
+                    };
+                    frame.push(start, block, sample_rate, channels);
+                    published_frames += (block.len() / channels) as u64;
+                    end_frames = end_frames.max(
+                        ((start * f64::from(sample_rate)).round() + (block.len() / channels) as f64)
+                            as u64,
+                    );
+                    continue;
+                }
+                pending.clear();
+                pending.extend_from_slice(block);
+                if processed && let Some(graph) = &mut graph {
+                    graph.process_interleaved(&mut pending)?;
+                }
+                let discard = skip.min(pending.len() / channels);
+                skip -= discard;
+                pending.drain(..discard * channels);
+                if let Some(remaining) = &mut remaining {
+                    let frames = (pending.len() / channels).min(*remaining as usize);
+                    pending.truncate(frames * channels);
+                    *remaining -= frames as u64;
+                }
+                if let Some(equalizer) = &mut equalizer {
+                    equalizer.process(&mut pending)?;
+                }
+                let start = if context.is_some() {
+                    published_frames as f64 / f64::from(sample_rate)
+                } else {
+                    start_seconds
+                        + (index * super::graph::GRAPH_BLOCK_FRAMES) as f64 / f64::from(sample_rate)
+                };
+                frame.push(start, &pending, sample_rate, channels);
+                published_frames += (pending.len() / channels) as u64;
+                end_frames = end_frames.max(
+                    ((start * f64::from(sample_rate)).round() + (pending.len() / channels) as f64)
+                        as u64,
+                );
+            }
+        }
+        if processed && let Some(graph) = &mut graph {
+            let mut remaining = remaining.unwrap_or(input_frames.saturating_sub(published_frames));
+            while remaining > 0 {
+                check_cancelled(Some(cancelled))?;
+                pending.resize(super::graph::GRAPH_BLOCK_FRAMES * channels, 0.0);
+                let produced = graph.finish_interleaved(&mut pending)?;
+                if produced == 0 {
+                    bail!("Active graph ended before its captured source timeline");
+                }
+                pending.truncate(produced * channels);
+                let discard = skip.min(produced);
+                skip -= discard;
+                pending.drain(..discard * channels);
+                let frames = (pending.len() / channels).min(remaining as usize);
+                pending.truncate(frames * channels);
+                equalizer
+                    .as_mut()
+                    .expect("processed scan EQ")
+                    .process(&mut pending)?;
+                frame.push(
+                    published_frames as f64 / f64::from(sample_rate),
+                    &pending,
+                    sample_rate,
+                    channels,
+                );
+                published_frames += frames as u64;
+                remaining -= frames as u64;
+                end_frames = published_frames;
+            }
         }
         check_cancelled(Some(cancelled))?;
-        frame.finish_scan(end_seconds);
+        frame.finish_scan(end_frames as f64 / f64::from(sample_rate));
         Ok(frame)
     }
 
@@ -2187,7 +2337,21 @@ mod tests {
                             .expect("A FIFO is not an audio source");
                         assert!(format!("{error:#}").contains("not an ordinary file"));
                         let error =
-                            Source::waveform(path, None, hint, 2, enabled, &cancelled).unwrap_err();
+                            Source::waveform(
+                                &super::super::WaveformScanSnapshot::original(
+                                    (path).to_owned(),
+                                    None,
+                                    hint,
+                                    crate::config::VisualizationSignal::Before,
+                                    std::sync::Arc::new(
+                                        rivu_dsp::equalizer::EqualizerConfig::default(),
+                                    ),
+                                ),
+                                2,
+                                enabled,
+                                &cancelled,
+                            )
+                            .unwrap_err();
                         assert!(format!("{error:#}").contains("not an ordinary file"));
                     }
                     let error = probe(path, enabled).err().unwrap();
@@ -2229,7 +2393,19 @@ mod tests {
                 let mut source = Source::open(&alias, PROBE_BUFFER_LEN, hint, enabled).unwrap();
                 assert_eq!(source.identity(), identity);
                 assert_eq!(decode_remaining(&mut source), expected);
-                let frame = Source::waveform(&alias, None, hint, 2, enabled, &cancelled).unwrap();
+                let frame = Source::waveform(
+                    &super::super::WaveformScanSnapshot::original(
+                        alias.to_owned(),
+                        None,
+                        hint,
+                        crate::config::VisualizationSignal::Before,
+                        std::sync::Arc::new(rivu_dsp::equalizer::EqualizerConfig::default()),
+                    ),
+                    2,
+                    enabled,
+                    &cancelled,
+                )
+                .unwrap();
                 assert!(frame.complete);
                 assert_eq!(frame.duration, Some(2.0));
             }
@@ -2329,8 +2505,19 @@ mod tests {
         assert!(source.info.duration.unwrap() < actual_duration / 2.0);
         assert_eq!(decode_remaining(&mut source).len(), actual_frames);
         let cancelled = AtomicBool::new(false);
-        let waveform =
-            Source::waveform(file.path(), None, DecoderHint::Native, 2, false, &cancelled).unwrap();
+        let waveform = Source::waveform(
+            &super::super::WaveformScanSnapshot::original(
+                (file.path()).to_owned(),
+                None,
+                DecoderHint::Native,
+                crate::config::VisualizationSignal::Before,
+                std::sync::Arc::new(rivu_dsp::equalizer::EqualizerConfig::default()),
+            ),
+            2,
+            false,
+            &cancelled,
+        )
+        .unwrap();
         assert!(waveform.complete);
         assert_eq!(waveform.duration, Some(actual_duration));
         assert!(waveform.span_seconds >= actual_duration);
@@ -2468,7 +2655,19 @@ mod tests {
         assert!(!super::super::ffmpeg::load_attempted());
         assert!(Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Ffmpeg, false).is_err());
         assert!(
-            Source::waveform(file.path(), None, DecoderHint::Ffmpeg, 2, false, &cancelled).is_err()
+            Source::waveform(
+                &super::super::WaveformScanSnapshot::original(
+                    file.path().to_owned(),
+                    None,
+                    DecoderHint::Ffmpeg,
+                    crate::config::VisualizationSignal::Before,
+                    std::sync::Arc::new(rivu_dsp::equalizer::EqualizerConfig::default()),
+                ),
+                2,
+                false,
+                &cancelled
+            )
+            .is_err()
         );
         assert!(!super::super::ffmpeg::load_attempted());
 
@@ -2483,8 +2682,19 @@ mod tests {
         native.seek(0.0).unwrap();
         assert!(!native.uses_ffmpeg());
         assert_eq!(decode_remaining(&mut native), expected);
-        let envelope =
-            Source::waveform(file.path(), None, DecoderHint::Native, 2, true, &cancelled).unwrap();
+        let envelope = Source::waveform(
+            &super::super::WaveformScanSnapshot::original(
+                (file.path()).to_owned(),
+                None,
+                DecoderHint::Native,
+                crate::config::VisualizationSignal::Before,
+                std::sync::Arc::new(rivu_dsp::equalizer::EqualizerConfig::default()),
+            ),
+            2,
+            true,
+            &cancelled,
+        )
+        .unwrap();
         assert!(envelope.complete);
 
         let mut unsupported = tempfile::NamedTempFile::new().unwrap();
@@ -2514,8 +2724,19 @@ mod tests {
                 .contains("FFmpeg extension is not compiled")
         );
         let cancelled = AtomicBool::new(false);
-        let error = Source::waveform(file.path(), None, DecoderHint::Ffmpeg, 2, true, &cancelled)
-            .unwrap_err();
+        let error = Source::waveform(
+            &super::super::WaveformScanSnapshot::original(
+                (file.path()).to_owned(),
+                None,
+                DecoderHint::Ffmpeg,
+                crate::config::VisualizationSignal::Before,
+                std::sync::Arc::new(rivu_dsp::equalizer::EqualizerConfig::default()),
+            ),
+            2,
+            true,
+            &cancelled,
+        )
+        .unwrap_err();
         assert!(
             error
                 .to_string()
@@ -2602,12 +2823,32 @@ mod tests {
                 end_seconds: Some(80.0 / 75.0),
             }),
         ] {
-            let native =
-                Source::waveform(file.path(), range, DecoderHint::Native, 2, true, &cancelled)
-                    .unwrap();
-            let forced =
-                Source::waveform(file.path(), range, DecoderHint::Ffmpeg, 2, true, &cancelled)
-                    .unwrap();
+            let native = Source::waveform(
+                &super::super::WaveformScanSnapshot::original(
+                    (file.path()).to_owned(),
+                    range,
+                    DecoderHint::Native,
+                    crate::config::VisualizationSignal::Before,
+                    std::sync::Arc::new(rivu_dsp::equalizer::EqualizerConfig::default()),
+                ),
+                2,
+                true,
+                &cancelled,
+            )
+            .unwrap();
+            let forced = Source::waveform(
+                &super::super::WaveformScanSnapshot::original(
+                    (file.path()).to_owned(),
+                    range,
+                    DecoderHint::Ffmpeg,
+                    crate::config::VisualizationSignal::Before,
+                    std::sync::Arc::new(rivu_dsp::equalizer::EqualizerConfig::default()),
+                ),
+                2,
+                true,
+                &cancelled,
+            )
+            .unwrap();
             assert!(super::super::ffmpeg::load_attempted());
             assert!(forced.complete);
             assert!(forced.matches(file.path(), range, DecoderHint::Ffmpeg));
@@ -2679,8 +2920,19 @@ mod tests {
         assert_eq!(source.info().title, "Logical title");
         assert_eq!(decode_remaining(&mut source).len(), 88_200);
         let cancelled = std::sync::atomic::AtomicBool::new(false);
-        let waveform =
-            Source::waveform(&alias, None, DecoderHint::Auto, 2, false, &cancelled).unwrap();
+        let waveform = Source::waveform(
+            &super::super::WaveformScanSnapshot::original(
+                alias.to_owned(),
+                None,
+                DecoderHint::Auto,
+                crate::config::VisualizationSignal::Before,
+                std::sync::Arc::new(rivu_dsp::equalizer::EqualizerConfig::default()),
+            ),
+            2,
+            false,
+            &cancelled,
+        )
+        .unwrap();
         assert!(waveform.complete);
         assert!(waveform.matches(&alias, None, DecoderHint::Auto));
         assert!(!waveform.matches(file.path(), None, DecoderHint::Auto));
@@ -2710,9 +2962,19 @@ mod tests {
                 let bin = index * count / samples.len();
                 expected[bin] = expected[bin].max(sample.abs());
             }
-            let actual =
-                Source::waveform(file.path(), range, DecoderHint::Auto, 2, false, &cancelled)
-                    .unwrap();
+            let actual = Source::waveform(
+                &super::super::WaveformScanSnapshot::original(
+                    (file.path()).to_owned(),
+                    range,
+                    DecoderHint::Auto,
+                    crate::config::VisualizationSignal::Before,
+                    std::sync::Arc::new(rivu_dsp::equalizer::EqualizerConfig::default()),
+                ),
+                2,
+                false,
+                &cancelled,
+            )
+            .unwrap();
             assert_eq!(
                 actual.peaks,
                 expected.into_iter().map(Some).collect::<Vec<_>>(),
@@ -2750,8 +3012,19 @@ mod tests {
             }
         }
         let cancelled = std::sync::atomic::AtomicBool::new(false);
-        let envelope =
-            Source::waveform(file.path(), None, DecoderHint::Auto, 2, false, &cancelled).unwrap();
+        let envelope = Source::waveform(
+            &super::super::WaveformScanSnapshot::original(
+                (file.path()).to_owned(),
+                None,
+                DecoderHint::Auto,
+                crate::config::VisualizationSignal::Before,
+                std::sync::Arc::new(rivu_dsp::equalizer::EqualizerConfig::default()),
+            ),
+            2,
+            false,
+            &cancelled,
+        )
+        .unwrap();
         assert_eq!(
             envelope.peaks,
             [
@@ -2829,8 +3102,19 @@ mod tests {
             file.write_all(&sample.to_le_bytes()).unwrap();
         }
         let cancelled = std::sync::atomic::AtomicBool::new(false);
-        let envelope =
-            Source::waveform(file.path(), None, DecoderHint::Auto, 2, false, &cancelled).unwrap();
+        let envelope = Source::waveform(
+            &super::super::WaveformScanSnapshot::original(
+                (file.path()).to_owned(),
+                None,
+                DecoderHint::Auto,
+                crate::config::VisualizationSignal::Before,
+                std::sync::Arc::new(rivu_dsp::equalizer::EqualizerConfig::default()),
+            ),
+            2,
+            false,
+            &cancelled,
+        )
+        .unwrap();
         assert_eq!(
             envelope.peaks,
             [
@@ -2848,8 +3132,19 @@ mod tests {
     #[test]
     fn waveform_cancellation_precedes_opening_the_file() {
         let cancelled = std::sync::atomic::AtomicBool::new(true);
-        let error = Source::waveform(Path::new(""), None, DecoderHint::Auto, 2, false, &cancelled)
-            .unwrap_err();
+        let error = Source::waveform(
+            &super::super::WaveformScanSnapshot::original(
+                (Path::new("")).to_owned(),
+                None,
+                DecoderHint::Auto,
+                crate::config::VisualizationSignal::Before,
+                std::sync::Arc::new(rivu_dsp::equalizer::EqualizerConfig::default()),
+            ),
+            2,
+            false,
+            &cancelled,
+        )
+        .unwrap_err();
         assert_eq!(error.to_string(), "Waveform loading cancelled");
     }
 

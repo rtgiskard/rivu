@@ -221,6 +221,7 @@ file_group!(AlbumArtwork, AlbumArtworkView {
 #[serde(default, deny_unknown_fields)]
 struct Visualizations {
     still_mode: Option<bool>,
+    signal: Option<VisualizationSignal>,
     analysis_fps: Option<u32>,
     background: Option<RgbColor>,
     palette: Option<VisualizationPalette>,
@@ -237,6 +238,7 @@ struct Visualizations {
 #[derive(Serialize)]
 struct VisualizationsView<'a> {
     still_mode: &'a bool,
+    signal: &'a VisualizationSignal,
     analysis_fps: &'a u32,
     background: &'a RgbColor,
     palette: &'a VisualizationPalette,
@@ -259,6 +261,12 @@ pub(super) struct FileConfig {
     interface: Interface,
     logging: Logging,
     visualizations: Visualizations,
+    equalizer: Option<EqualizerConfig>,
+    denoise: Option<DenoiseConfig>,
+    neural: Option<NeuralConfig>,
+    processing_graph: Option<ProcessingGraph>,
+    equalizer_presets: Option<Vec<EqualizerPreset>>,
+    equalizer_ab: Option<EqualizerConfig>,
 }
 
 impl FileConfig {
@@ -272,6 +280,25 @@ impl FileConfig {
         self.playback.apply(&mut config);
         self.interface.apply(&mut config);
         self.logging.apply(&mut config);
+        if let Some(value) = self.equalizer {
+            config.equalizer = value;
+        }
+        if let Some(value) = self.denoise {
+            config.denoise = value;
+        }
+        if let Some(value) = self.neural {
+            config.neural = value;
+        }
+        if let Some(value) = self.processing_graph {
+            config.processing_graph = value;
+        }
+        if let Some(value) = self.equalizer_presets {
+            config.equalizer_presets = value;
+        }
+        config.equalizer_ab = self.equalizer_ab;
+        if let Some(value) = self.visualizations.signal {
+            config.visualization_signal = value;
+        }
         if let Some(value) = self.visualizations.still_mode {
             config.still_mode = value;
         }
@@ -312,6 +339,13 @@ pub(super) struct FileConfigView<'a> {
     interface: InterfaceView<'a>,
     logging: LoggingView<'a>,
     visualizations: VisualizationsView<'a>,
+    equalizer: &'a EqualizerConfig,
+    denoise: &'a DenoiseConfig,
+    neural: &'a NeuralConfig,
+    processing_graph: &'a ProcessingGraph,
+    equalizer_presets: &'a Vec<EqualizerPreset>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    equalizer_ab: &'a Option<EqualizerConfig>,
 }
 
 impl<'a> From<&'a Config> for FileConfigView<'a> {
@@ -322,8 +356,15 @@ impl<'a> From<&'a Config> for FileConfigView<'a> {
             playback: config.into(),
             interface: config.into(),
             logging: config.into(),
+            equalizer: &config.equalizer,
+            denoise: &config.denoise,
+            neural: &config.neural,
+            processing_graph: &config.processing_graph,
+            equalizer_presets: &config.equalizer_presets,
+            equalizer_ab: &config.equalizer_ab,
             visualizations: VisualizationsView {
                 still_mode: &config.still_mode,
+                signal: &config.visualization_signal,
                 analysis_fps: &config.analysis_fps,
                 background: &config.visual_background,
                 palette: &config.visual_palette,

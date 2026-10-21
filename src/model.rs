@@ -1,3 +1,5 @@
+mod processing;
+pub use processing::*;
 mod duplicates;
 pub use duplicates::{DuplicateGroup, DuplicateMember};
 
@@ -470,6 +472,7 @@ pub struct SystemState {
     pub database_optimization: Option<DatabaseOptimization>,
     pub shutting_down: bool,
     pub relocation_task: Option<RelocationTaskStatus>,
+    pub processing: Option<ProcessingTaskStatus>,
 }
 impl Default for SystemState {
     fn default() -> Self {
@@ -488,6 +491,7 @@ impl Default for SystemState {
             database_optimization: None,
             shutting_down: false,
             relocation_task: None,
+            processing: None,
         }
     }
 }
@@ -777,6 +781,47 @@ pub enum Command {
     },
     KeepTrackIndependent {
         track_id: i64,
+    },
+    EqualizerEdit {
+        edit: EqualizerEdit,
+    },
+    DenoiseEdit {
+        patch: Box<DenoisePatch>,
+    },
+    NeuralEdit {
+        patch: Box<NeuralPatch>,
+    },
+    ProcessingGraphEdit {
+        revision: u64,
+        edit: Box<GraphEdit>,
+    },
+    ProcessingGraphRun {
+        track_id: i64,
+        target: GraphPort,
+        mode: GraphExecutionMode,
+    },
+    ProcessingGraphAudition {
+        id: u64,
+        node: GraphPort,
+    },
+    ProcessingGraphExport {
+        id: u64,
+        node: GraphPort,
+        path: PathBuf,
+    },
+    StartProcessing {
+        track_id: i64,
+        operation: ProcessingOperation,
+        profile: Option<NoiseSelection>,
+    },
+    CancelProcessing {
+        id: u64,
+    },
+    AuditionProcessing {
+        id: u64,
+        mode: AuditionMode,
+        vocal_gain_db: f32,
+        accompaniment_gain_db: f32,
     },
 }
 

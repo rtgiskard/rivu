@@ -61,6 +61,7 @@ impl Render for GuiApp {
                     && (this.workspace.interaction.docking().is_some()
                         || this.workspace.interaction.dragging().is_some()
                         || this.workspace.interaction.seek_preview().is_some()
+                        || this.audio_processing.read(cx).pointer_active()
                         || cx.has_active_drag())
                 {
                     this.cancel_interaction(window, cx);

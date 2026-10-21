@@ -1,5 +1,6 @@
 mod args;
 mod output;
+mod processing;
 
 use self::{
     args::{
@@ -53,6 +54,9 @@ pub(super) fn run() -> Result<()> {
             .unwrap_or_else(|| PathBuf::from(".rivu"))
     });
     let action = args.action.unwrap_or(Action::Gui { paths: Vec::new() });
+    if let Action::Processing(action) = action {
+        return processing::run(&data_dir, action, args.json);
+    }
     match action {
         Action::Gui { paths } => App::open_gui(
             data_dir,
@@ -678,6 +682,7 @@ fn translate(action: Action) -> Result<(Command, bool)> {
         | Action::Tui
         | Action::Quit
         | Action::Playback(PlaybackAction::Devices)
+        | Action::Processing(_)
         | Action::Library(
             LibraryAction::List { .. }
             | LibraryAction::Edit { .. }

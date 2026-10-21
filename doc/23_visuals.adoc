@@ -121,11 +121,15 @@ callers have migrated; a newer dependency version alone is not sufficient.
 
 == Analysis boundary
 
-Visualization analysis is separate from audio output and observes samples
-before output volume gain. The output callback sends a stereo analysis tap to a
-bounded ring; analysis consumes it off the real-time thread. Spectrum combines
-channel energy rather than averaging signed channels, so opposite-phase stereo
-does not cancel. Optional spatial analysis retains the channels' relationship.
+Visualization analysis is separate from audio output and observes samples before
+master volume gain. One global `visualizations.signal` setting selects `before`
+or `after` (default): before the active realtime processing chain, or after that
+chain including monitor EQ. The audio worker sends only the selected stereo
+signal to a bounded ring; analysis consumes it off the real-time thread. There
+is one FFT path, not parallel before/after analyzers. Worker-driven analysis need
+not be strictly synchronized to the output callback's audible clock. Spectrum
+combines channel energy rather than averaging signed channels, so opposite-phase
+stereo does not cancel. Optional spatial analysis retains the channels' relationship.
 
 The tap holds at most 32,768 frames. Analysis backpressure never blocks playback:
 dropped samples mark a discontinuity in the next accepted input. Ordinary
@@ -159,6 +163,12 @@ Spectrogram starts a new pooling interval at a break; compatible historical
 frequency buckets can remain visible. Its sample time follows accepted audio,
 not wall time or the track's seek position.
 
+Changing the selected signal resets the analysis sampling window and incompatible
+history. Monitor EQ edits preserve realtime analysis history; new samples reflect
+the edited processing. Neither operation automatically scans a track or clears
+the rolling waveform. Active audition visualization uses the actual audible
+source and admitted processing graph, not an arbitrary persisted graph recipe.
+
 GUI analysis demand follows visible views. Stereo density, spatial spectrum,
 and integrated band energy are independent requests combined across panels;
 one accepted audio window and stereo FFT supply all requested payloads. This
@@ -190,7 +200,7 @@ does not imply zero analysis work.
 == Still Mode
 
 Still Mode overrides visualization demand at both GUI and audio-worker
-boundaries. It stops the output tap and parks analysis without reopening
+boundaries. It stops the worker tap and parks analysis without reopening
 playback. Entry discards shared analysis results, Spectrogram history, stereo
 fields, fractal scenes, progressive and shared waveform bins, and any completed
 GUI full-waveform preview. FFT plans and working buffers remain reusable, but
@@ -238,9 +248,12 @@ or discarded PCM. For both native and FFmpeg decoding, its timestamp-continuity
 check allows one container tick when timestamps are coarser than samples;
 sample-accurate sources retain a half-sample threshold. Gaps within the container's
 timestamp precision cannot be distinguished reliably from quantization.
-An undecoded interval is distinct from decoded silence. Peaks can survive
-disjoint visits, but RMS represents a contiguous sample interval rather than
-repeatedly counting seeked or replayed samples.
+An undecoded interval is distinct from decoded silence. A new traversal, signal
+selection or EQ change retains the old display until PCM visits an interval;
+that bin's peak, RMS, channel energy and sample counts are then replaced by the
+new traversal's statistics. Lower gain can therefore decrease old peaks and RMS.
+Successive contiguous packets in the same traversal accumulate without counting
+overlapping samples twice; unvisited bins keep their prior values.
 
 Sample-to-bin mapping uses a retained integer ratio, not the rounded display
 span. EOF can truncate trailing bins and normalize the display timeline without
@@ -254,22 +267,27 @@ playback and full-waveform callers can continue on a later call. This bounds
 decode-loop work per call, not the duration of a single demux syscall or other
 blocking file/container/codec operation.
 
-A completed explicit full-track scan takes precedence in the GUI, without
-replacing the audio worker's progressive buffer. The GUI retains one bounded
-full result; playback continues to update its own bounded buffer. Rendering
-selects one result rather than copying or combining bins between decoders.
-Explicit preview identity is the file, optional playback range and library
-content fingerprint. A changed fingerprint, including after overwriting a file
-at the same path and forcing a scan, cancels a pending preview and retires its
-completed result. Late query responses, scan completions and display selection
-must still match that content identity. A target change has the same effect;
-ordinary metadata and panel visibility changes retain pending and completed
-previews and do not start a decoder. Saving a changed decoder hint cancels the
-matching request and retires its full result, leaving playback untouched. A
-subsequent explicit load reads the latest saved hint and replaces any pending
-request. Request generation, captured content/decode identity and suspension
-generation reject stale results independently of the playback buffer's hint or
-revision.
+An explicit full-track scan supplies a baseline for the same rolling display.
+The previous display remains visible during its Track query and decode, and on
+failure. Clicking captures the selected signal, monitor EQ and actual active
+audition source/graph; later EQ or signal edits neither change nor cancel that
+request. Before playback, the explicit scan uses the selected original source
+and the latest saved decoder hint without activating a persisted graph.
+
+Each progressive bin carries its last PCM revision. Installing a scan overlays
+only playback bins newer than the request; a late baseline cannot erase PCM
+visited since the click. Subsequent playback can overwrite the installed full
+result. Different full/progressive geometries are mapped by time overlap with
+sample-weighted RMS, retaining bounded bins and no whole-track PCM. There are
+no separate before/after waveform caches and no automatic full rescans.
+
+Explicit preview identity includes the file, optional playback range, library
+content fingerprint and captured opened-source provenance. Changed content,
+target or committed decoder hint retires affected requests/results; ordinary
+metadata and panel visibility changes retain them. A newer explicit request
+supersedes the old request without dropping the current display. Request and
+suspension generations reject stale completion independently of playback's
+statistics revisions. Still Mode cancels scans and discards the display.
 
 Progressive playback identity belongs to the opened decoder, not the latest
 library fingerprint. Each successful Load captures the actual opened regular
@@ -277,8 +295,9 @@ file's device/inode, size, modification and change timestamps, together with the
 path, range, decoder hint, actual backend, initial duration, sample rate and
 channel count. Atomic replacement or a changed decode/timeline format retires
 the prior envelope even at the same path. Seeking the existing decoder and
-reopening unchanged content retain cached coverage, including completed results
-and duration corrected at EOF. Identity is captured once at open: there is no
+reopening unchanged content retain the baseline and EOF-corrected timeline,
+but revisited bins replace old statistics, even after complete coverage.
+Identity is captured once at open: there is no
 per-frame filesystem lookup or extra whole-track PCM scan. A library refresh or
 saved hint change cannot relabel or discard data from an already opened old
 file descriptor; only a subsequent Load selects the replacement content.

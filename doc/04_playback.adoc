@@ -3,6 +3,20 @@
 Selecting a missing source manually leaves the current track running and reports
 an error. If the next entry cannot be opened at natural end, playback stops.
 
+== Equalizer and processed audition
+
+The link:27_audio_processing.adoc[Audio processing panel and CLI] provide live
+parametric EQ and offline restoration, speech enhancement and separation. EQ
+settings persist independently of the selected track; format/seek/source changes
+reset DSP history. Disabled settled EQ preserves the original sample path.
+Processing jobs never replace source media. Audition selects a retained aligned
+result and starts its original queue source when necessary; Original returns to
+source playback. Stem remix uses independent vocal/accompaniment gains, without
+implicit normalization or clipping protection. Results are session-owned temporary
+files, not a durable library export. Keep EQ and playback level fixed when
+comparing original/processed audio.
+
+
 == Transport and timing
 
 Use `rivu playback` for play, pause, resume (`play` without a track ID), stop,
@@ -163,8 +177,8 @@ and applies to the next track open or explicit full-waveform request. Saving it
 does not reopen current playback. Saving a changed hint cancels an in-flight
 full-waveform request and discards its completed preview, without restarting it;
 this also applies while the window is hidden. Explicit loading reads the latest
-saved hint and replaces any pending request. Its result is independent of the
-playing decoder and does not mix with the progressive playback waveform.
+saved hint and replaces any pending request. The scan owns its decoder; its
+result updates the rolling waveform without overwriting newer playback updates.
 
 In Auto mode, once FFmpeg is loaded and enabled, future WAVE opens use its format
 recognition; ordinary PCM still uses the native decoder. Recognition is not proof

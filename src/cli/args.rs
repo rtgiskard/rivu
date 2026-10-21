@@ -41,6 +41,9 @@ pub(super) enum Action {
     /// Manage, import, and export playlists.
     #[command(subcommand)]
     Playlist(PlaylistAction),
+    /// Configure audio processing, run offline jobs, and audition retained results.
+    #[command(subcommand)]
+    Processing(ProcessingAction),
     /// Shut down the running GUI/headless core.
     Quit,
 }
@@ -78,6 +81,118 @@ pub(super) enum PlaybackAction {
     Device {
         name: Option<String>,
     },
+}
+
+#[derive(Subcommand)]
+pub(super) enum ProcessingAction {
+    /// Show authoritative equalizer, denoise, neural settings and latest task.
+    Show,
+    /// Inspect, edit and execute the persisted audio node graph.
+    #[command(subcommand)]
+    Graph(ProcessingGraphAction),
+    /// Apply a field-based EqualizerEdit JSON value (including presets and A/B).
+    Eq {
+        edit: String,
+    },
+    /// Merge a DenoisePatch JSON object into current settings.
+    Denoise {
+        patch: String,
+    },
+    /// Merge local interpreter/manifest settings from a NeuralPatch JSON object.
+    Neural {
+        patch: String,
+    },
+    /// Process one library source without modifying it. Separation requires stereo.
+    Start {
+        track_id: i64,
+        #[arg(value_enum)]
+        operation: ProcessingKind,
+        #[arg(long)]
+        wait: bool,
+        #[arg(long, requires = "noise_end")]
+        noise_start: Option<f64>,
+        #[arg(long, requires = "noise_start")]
+        noise_end: Option<f64>,
+    },
+    Status {
+        id: u64,
+    },
+    Cancel {
+        id: u64,
+    },
+    /// Audition retained outputs, starting their original source queue item if needed.
+    Audition {
+        id: u64,
+        #[arg(value_enum)]
+        mode: ProcessingAudition,
+        #[arg(long, default_value_t = 0.0, allow_negative_numbers = true)]
+        vocal_gain_db: f32,
+        #[arg(long, default_value_t = 0.0, allow_negative_numbers = true)]
+        accompaniment_gain_db: f32,
+    },
+}
+
+#[derive(Subcommand)]
+pub(super) enum ProcessingGraphAction {
+    /// Show the authoritative graph, including its optimistic edit revision.
+    Show,
+    /// Apply one GraphEdit JSON value against the required current revision.
+    Edit {
+        #[arg(allow_hyphen_values = true)]
+        edit: String,
+        #[arg(long)]
+        revision: u64,
+    },
+    /// Process a track through the selected node output and its ancestors only.
+    Run {
+        track_id: i64,
+        node: u64,
+        #[arg(long, default_value_t = 0)]
+        port: u16,
+        #[arg(long, value_enum, default_value = "auto")]
+        mode: ProcessingGraphMode,
+        #[arg(long)]
+        wait: bool,
+    },
+    /// Audition a node output retained by a completed graph run.
+    Audition {
+        id: u64,
+        node: u64,
+        #[arg(long, default_value_t = 0)]
+        port: u16,
+    },
+    /// Render a retained graph snapshot offline to a path in this client's directory.
+    Export {
+        id: u64,
+        node: u64,
+        path: PathBuf,
+        #[arg(long, default_value_t = 0)]
+        port: u16,
+        #[arg(long)]
+        wait: bool,
+    },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+pub(super) enum ProcessingGraphMode {
+    Auto,
+    Offline,
+    Realtime,
+    Hybrid,
+}
+#[derive(Clone, Copy, ValueEnum)]
+pub(super) enum ProcessingKind {
+    Denoise,
+    Speech,
+    Separate,
+}
+#[derive(Clone, Copy, ValueEnum)]
+pub(super) enum ProcessingAudition {
+    Original,
+    Denoised,
+    Vocals,
+    Accompaniment,
+    Mix,
 }
 
 #[derive(Subcommand)]
@@ -375,6 +490,70 @@ mod tests {
             assert!(rendered.contains("\\x1b") || rendered.contains("\\u{009b}"));
             assert!(rendered.contains("\\n") || rendered.contains("\\t"));
             assert!(rendered.contains('\n'));
+        }
+    }
+}
+
+#[cfg(test)]
+mod graph_tests {
+    use super::{Action, Args, ProcessingAction, ProcessingGraphAction, ProcessingGraphMode};
+    use clap::Parser;
+
+    #[test]
+    fn graph_edit_requires_explicit_optimistic_revision_and_preserves_negative_json() {
+        let edit = r#"{"Replace":{"id":3,"kind":{"mix":{"gains_db":[-6.0,-12.5],"muted":[false,false],"solo":[false,false]}}}}"#;
+        assert!(Args::try_parse_from(["rivu", "processing", "graph", "edit", edit]).is_err());
+        let args = Args::try_parse_from([
+            "rivu",
+            "processing",
+            "graph",
+            "edit",
+            "--revision",
+            "19",
+            edit,
+        ])
+        .unwrap();
+        let Some(Action::Processing(ProcessingAction::Graph(ProcessingGraphAction::Edit {
+            edit: parsed,
+            revision,
+        }))) = args.action
+        else {
+            panic!("expected graph edit");
+        };
+        assert_eq!(revision, 19);
+        assert_eq!(parsed, edit);
+    }
+
+    #[test]
+    fn graph_run_defaults_to_auto_first_port_without_waiting() {
+        let args = Args::try_parse_from(["rivu", "processing", "graph", "run", "42", "7"]).unwrap();
+        assert!(matches!(
+            args.action,
+            Some(Action::Processing(ProcessingAction::Graph(
+                ProcessingGraphAction::Run {
+                    track_id: 42,
+                    node: 7,
+                    port: 0,
+                    mode: ProcessingGraphMode::Auto,
+                    wait: false,
+                }
+            )))
+        ));
+    }
+
+    #[test]
+    fn graph_arguments_reject_invalid_ports_modes_and_missing_targets() {
+        for arguments in [
+            vec!["run", "42"],
+            vec!["run", "42", "7", "--mode", "automatic"],
+            vec!["run", "42", "7", "--port", "65536"],
+            vec!["audition", "9", "7", "--port", "-1"],
+            vec!["export", "9", "7"],
+        ] {
+            assert!(
+                Args::try_parse_from(["rivu", "processing", "graph"].into_iter().chain(arguments))
+                    .is_err()
+            );
         }
     }
 }

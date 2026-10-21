@@ -47,6 +47,7 @@ pub struct GuiSystemSnapshot {
     pub database_optimization: Option<DatabaseOptimization>,
     pub shutting_down: bool,
     pub relocation_task: Option<crate::model::RelocationTaskStatus>,
+    pub processing: Option<crate::model::ProcessingTaskStatus>,
 }
 
 impl GuiSnapshot {
@@ -82,6 +83,7 @@ impl GuiSnapshot {
                 database_optimization: state.system.database_optimization.clone(),
                 shutting_down: state.system.shutting_down,
                 relocation_task: state.system.relocation_task.clone(),
+                processing: state.system.processing.clone(),
             },
         }
     }

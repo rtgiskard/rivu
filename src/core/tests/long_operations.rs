@@ -1,8 +1,22 @@
 use super::*;
 
 fn saving_with_write_lock() -> (tempfile::TempDir, Core, rusqlite::Connection) {
+    saving_with_write_lock_and_processing(false)
+}
+
+fn saving_with_write_lock_and_processing(
+    processing: bool,
+) -> (tempfile::TempDir, Core, rusqlite::Connection) {
     let (directory, mut core) = fixture_with_database(Some(10.0), true);
     write_pcm_frames(&directory.path().join("1.wav"), 100);
+    if processing {
+        core.command(Command::StartProcessing {
+            track_id: 1,
+            operation: ProcessingOperation::Denoise,
+            profile: None,
+        })
+        .unwrap();
+    }
     pending(&mut core, 1);
     core.command(Command::Scan {
         paths: vec![directory.path().join("1.wav")],
@@ -30,6 +44,31 @@ fn finish_saving(core: &mut Core, lock: rusqlite::Connection) {
         core.scan_event(event);
     }
     core.flush_deferred_playback().unwrap();
+}
+
+#[test]
+fn processing_cancellation_remains_available_while_scan_holds_saving_phase() {
+    let (_directory, mut core, lock) = saving_with_write_lock_and_processing(true);
+    assert!(core.database_maintenance_active());
+    core.command(Command::CancelProcessing { id: 1 }).unwrap();
+    loop {
+        let event = core
+            .processing
+            .receiver
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+        let finished = matches!(event, crate::processing::Event::Finished { .. });
+        core.processing_event(event);
+        if finished {
+            break;
+        }
+    }
+    assert_eq!(
+        core.processing_status(1).unwrap().phase,
+        ProcessingPhase::Cancelled
+    );
+    assert!(core.processing.results.is_empty());
+    finish_saving(&mut core, lock);
 }
 
 #[test]

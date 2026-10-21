@@ -351,6 +351,9 @@ impl GuiApp {
                 playlist_overlay = open;
             }),
             cx.observe(&self.metadata, |this, _, cx| {
+                let selected = this.metadata.read(cx).track_snapshot();
+                this.audio_processing
+                    .update(cx, |owner, cx| owner.set_selected(selected, cx));
                 if this.manual_confirmation_open() {
                     cx.notify();
                 }
@@ -434,10 +437,15 @@ impl GuiApp {
             .update(cx, |owner, cx| owner.reconcile(Rc::clone(&self.state), cx));
         self.playback
             .update(cx, |owner, cx| owner.reconcile(Rc::clone(&self.state), cx));
+        self.audio_processing
+            .update(cx, |owner, cx| owner.reconcile(Rc::clone(&self.state), cx));
         self.reconcile_feature_demand(cx);
     }
 
     pub(super) fn reconcile_feature_demand(&self, cx: &mut Context<Self>) {
+        self.audio_processing.update(cx, |owner, cx| {
+            owner.sync_panels(self.workspace.layouts.current(), self.window_visible, cx)
+        });
         let library_visible = self.panel_demand("library");
         let available = !self.workspace.layouts.current().locked
             || self
@@ -465,7 +473,10 @@ impl GuiApp {
             )
         });
         self.metadata.update(cx, |owner, cx| {
-            owner.set_visible(self.panel_demand("metadata"), cx)
+            owner.set_visible(
+                self.panel_demand("metadata") || self.panel_demand("audio_processing"),
+                cx,
+            )
         });
     }
 

@@ -2,7 +2,7 @@ use super::*;
 
 impl Core {
     // Compose on the Core thread; live playback controls override the saved snapshot.
-    fn effective_config(&self) -> Config {
+    pub(in crate::core) fn effective_config(&self) -> Config {
         let mut config = self.state.system.config.as_ref().clone();
         config.volume = self.state.playback.volume;
         config.shuffle = self.state.playback.shuffle;
@@ -59,6 +59,10 @@ impl Core {
         Ok(())
     }
     pub(in crate::core) fn configure(&mut self, mut config: Arc<Config>) -> Result<()> {
+        anyhow::ensure!(
+            config.processing_graph == self.state.system.config.processing_graph,
+            "Processing graph changes require revision-checked ProcessingGraphEdit commands"
+        );
         config.validate()?;
         let roots = config
             .library_roots
@@ -68,7 +72,7 @@ impl Core {
         Arc::make_mut(&mut config).library_roots = roots;
         // No other producer can consume these slots while Core persists.
         // Reject a busy batch before committing any desired settings.
-        self.engine.ensure_command_capacity(6)?;
+        self.engine.ensure_command_capacity(7)?;
         let ffmpeg_status = if !config.ffmpeg_enabled {
             "disabled".to_owned()
         } else {
@@ -96,6 +100,7 @@ impl Core {
             self.audio(AudioCommand::MediaReadBuffer(config.media_read_buffer_mb))?;
             self.audio(AudioCommand::Volume(config.volume))?;
             self.audio(AudioCommand::AnalysisSettings(config.as_ref().into()))?;
+            self.audio(AudioCommand::Equalizer(Arc::new(config.equalizer.clone())))?;
             self.audio(AudioCommand::FfmpegEnabled(config.ffmpeg_enabled))?;
             self.audio(AudioCommand::OutputSettings {
                 request,

@@ -1,7 +1,8 @@
 //! User-editable TOML settings, separate from the library database and GUI layout.
 //!
-//! The file has library, playback, interface, logging, and visualizations tables;
-//! interface contains theme and album_artwork; visualizations contains the four audio-data views.
+//! The file has library, playback, interface, logging, visualizations, and audio
+//! processing tables; `processing_graph` persists the node-local audio DAG and layout.
+//! Interface contains theme and album_artwork; visualizations contains the four audio-data views.
 //! Missing fields use [`Config::default`]; unknown or misplaced fields and invalid
 //! values are errors. `playback.repeat` accepts "off", "all", or "one". Omit
 //! `playback.output_device` to use the system default. Paths are literal filesystem
@@ -12,9 +13,97 @@ use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
 
 mod file;
+pub mod processing_graph;
 
 #[cfg(test)]
 mod tests;
+
+pub use processing_graph::ProcessingGraph;
+pub use rivu_dsp::{denoise::DenoiseConfig, equalizer::EqualizerConfig};
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NeuralDevice {
+    #[default]
+    Cpu,
+    Cuda,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct NeuralConfig {
+    pub speech_interpreter: PathBuf,
+    pub separation_interpreter: PathBuf,
+    pub worker: PathBuf,
+    pub speech_manifest: Option<PathBuf>,
+    pub separation_manifest: Option<PathBuf>,
+    pub device: NeuralDevice,
+    pub threads: u8,
+    pub speech_wet_mix: f32,
+    pub speech_attenuation_limit_db: f32,
+    pub speech_post_filter: bool,
+    pub separation_overlap: f32,
+}
+
+impl Default for NeuralConfig {
+    fn default() -> Self {
+        Self {
+            speech_interpreter: PathBuf::from("python3.11"),
+            separation_interpreter: PathBuf::from("python3.12"),
+            worker: PathBuf::from("tools/audio_processing/worker.py"),
+            speech_manifest: None,
+            separation_manifest: None,
+            device: NeuralDevice::Cpu,
+            threads: 1,
+            speech_wet_mix: 1.0,
+            speech_attenuation_limit_db: 80.0,
+            speech_post_filter: false,
+            separation_overlap: 0.75,
+        }
+    }
+}
+
+impl NeuralConfig {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            (1..=8).contains(&self.threads),
+            "neural.threads must be 1..8"
+        );
+        ensure!(
+            self.speech_wet_mix.is_finite() && (0.0..=1.0).contains(&self.speech_wet_mix),
+            "speech wet mix must be 0..1"
+        );
+        ensure!(
+            self.speech_attenuation_limit_db.is_finite()
+                && (0.0..=100.0).contains(&self.speech_attenuation_limit_db),
+            "speech attenuation limit must be 0..100 dB"
+        );
+        ensure!(
+            self.separation_overlap.is_finite() && (0.0..=0.875).contains(&self.separation_overlap),
+            "separation overlap must be 0..0.875"
+        );
+        ensure!(
+            !self.speech_interpreter.as_os_str().is_empty(),
+            "neural.speech_interpreter must not be empty"
+        );
+        ensure!(
+            !self.separation_interpreter.as_os_str().is_empty(),
+            "neural.separation_interpreter must not be empty"
+        );
+        ensure!(
+            !self.worker.as_os_str().is_empty(),
+            "neural.worker must not be empty"
+        );
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EqualizerPreset {
+    pub name: String,
+    pub config: EqualizerConfig,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -125,6 +214,15 @@ pub enum AnalysisWindow {
     Hann,
     BlackmanHarris,
     None,
+}
+
+/// Shared visualization tap, always before master playback volume.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VisualizationSignal {
+    Before,
+    #[default]
+    After,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -301,6 +399,7 @@ macro_rules! config_fields {
         pub layout_snap_grid_px: u32,
         /// Stop audio visualizations and their analysis without changing playback.
         pub still_mode: bool,
+        pub visualization_signal: VisualizationSignal,
         pub analysis_fps: u32,
         pub visual_background: RgbColor,
         pub visual_palette: VisualizationPalette,
@@ -370,6 +469,12 @@ macro_rules! config_fields {
         pub media_read_buffer_mb: u32,
         pub ffmpeg_enabled: bool,
         pub pipewire_auto_mix: bool,
+        pub equalizer: $crate::config::EqualizerConfig,
+        pub denoise: $crate::config::DenoiseConfig,
+        pub neural: $crate::config::NeuralConfig,
+        pub processing_graph: $crate::config::processing_graph::ProcessingGraph,
+        pub equalizer_presets: Vec<$crate::config::EqualizerPreset>,
+        pub equalizer_ab: Option<$crate::config::EqualizerConfig>,
             }
     };
 }
@@ -414,6 +519,7 @@ impl Default for Config {
             layout_snap_enabled: true,
             layout_snap_grid_px: 16,
             still_mode: false,
+            visualization_signal: VisualizationSignal::After,
             analysis_fps: 20,
             visual_background: RgbColor(0x08090c),
             visual_palette: VisualizationPalette::Deadbeef,
@@ -471,6 +577,12 @@ impl Default for Config {
             media_read_buffer_mb: 2,
             ffmpeg_enabled: false,
             pipewire_auto_mix: true,
+            equalizer: EqualizerConfig::default(),
+            denoise: DenoiseConfig::default(),
+            neural: NeuralConfig::default(),
+            processing_graph: ProcessingGraph::default(),
+            equalizer_presets: Vec::new(),
+            equalizer_ab: None,
         }
     }
 }
@@ -496,6 +608,29 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
+        self.equalizer.validate()?;
+        self.denoise.validate()?;
+        self.neural.validate()?;
+        self.processing_graph.validate()?;
+        ensure!(
+            self.equalizer_presets.len() <= 64,
+            "at most 64 equalizer presets are supported"
+        );
+        let mut preset_names = std::collections::HashSet::new();
+        for preset in &self.equalizer_presets {
+            ensure!(
+                !preset.name.trim().is_empty() && preset.name.len() <= 128,
+                "preset names must contain 1..128 bytes"
+            );
+            ensure!(
+                preset_names.insert(&preset.name),
+                "duplicate equalizer preset name"
+            );
+            preset.config.validate()?;
+        }
+        if let Some(config) = &self.equalizer_ab {
+            config.validate()?;
+        }
         let mut roots = self
             .library_roots
             .iter()

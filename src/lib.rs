@@ -13,6 +13,7 @@ pub(crate) mod library;
 pub(crate) mod logging;
 pub mod model;
 pub(crate) mod mpris;
+mod processing;
 pub mod projection;
 pub mod response;
 pub(crate) mod store;

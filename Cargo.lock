@@ -2684,6 +2684,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "hound"
+version = "3.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "62adaabb884c94955b19907d60019f4e145d091c75345379e70d1ee696f7854f"
+
+[[package]]
 name = "http"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5049,6 +5055,7 @@ dependencies = [
  "futures",
  "gpui",
  "gpui_platform",
+ "hound",
  "image",
  "libc",
  "libloading 0.9.0",
@@ -5060,6 +5067,7 @@ dependencies = [
  "rand 0.10.3",
  "ratatui",
  "ringbuf",
+ "rivu-dsp",
  "rivu-format",
  "rivu-ui",
  "rusqlite",
@@ -5083,10 +5091,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "rivu-dsp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "hound",
+ "rustfft",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "rivu-format"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "rivu-dsp",
  "rusqlite",
  "serde",
  "tempfile",

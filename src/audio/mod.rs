@@ -108,17 +108,22 @@ mod ffmpeg {
 }
 mod bitrate;
 mod channels;
+mod graph;
 mod output;
 mod playback;
+mod render;
 mod source;
 mod waveform;
 mod worker;
 
 use channels::Channel;
+pub(crate) use graph::GraphRunner;
 pub use output::devices;
-pub(crate) use source::{SourceIdentity, metadata_budget, probe_file};
-pub use source::{probe, probe_details};
+pub(crate) use render::render_source;
+pub use source::{SourceIdentity, probe, probe_details};
+pub(crate) use source::{metadata_budget, probe_file};
 pub use waveform::WaveformFrame;
+pub(crate) use waveform::WaveformIdentity;
 
 pub fn ffmpeg_status() -> anyhow::Result<String> {
     ffmpeg::availability()
@@ -128,24 +133,47 @@ pub fn ffmpeg_load_attempted() -> bool {
     ffmpeg::load_attempted()
 }
 
-/// Scan a full envelope only for an explicit user request. Normal playback
-/// publishes peaks directly from its existing decoded PCM instead.
+/// Immutable click-time description of the actual source and active processing.
+/// A persisted processing graph is intentionally not consulted by a scan.
+#[derive(Clone, Debug)]
+pub struct WaveformScanSnapshot {
+    pub path: PathBuf,
+    pub range: Option<PlaybackRange>,
+    pub decoder_hint: DecoderHint,
+    pub expected_identity: Option<SourceIdentity>,
+    pub signal: crate::config::VisualizationSignal,
+    pub equalizer: Arc<rivu_dsp::equalizer::EqualizerConfig>,
+    pub(crate) graph: Option<graph::GraphSnapshot>,
+}
+
+impl WaveformScanSnapshot {
+    pub fn original(
+        path: PathBuf,
+        range: Option<PlaybackRange>,
+        decoder_hint: DecoderHint,
+        signal: crate::config::VisualizationSignal,
+        equalizer: Arc<rivu_dsp::equalizer::EqualizerConfig>,
+    ) -> Self {
+        Self {
+            path,
+            range,
+            decoder_hint,
+            expected_identity: None,
+            signal,
+            equalizer,
+            graph: None,
+        }
+    }
+}
+
+/// Scan only on an explicit request, preserving the captured signal and graph.
 pub fn waveform(
-    path: &Path,
-    range: Option<PlaybackRange>,
-    decoder_hint: DecoderHint,
+    snapshot: &WaveformScanSnapshot,
     media_read_buffer_mb: u32,
     ffmpeg_enabled: bool,
     cancelled: &std::sync::atomic::AtomicBool,
 ) -> Result<WaveformFrame> {
-    source::Source::waveform(
-        path,
-        range,
-        decoder_hint,
-        media_read_buffer_mb,
-        ffmpeg_enabled,
-        cancelled,
-    )
+    source::Source::waveform(snapshot, media_read_buffer_mb, ffmpeg_enabled, cancelled)
 }
 
 use crate::analysis::{AnalysisControl, AnalysisFrame, AnalysisSettings, AnalysisWorker};
@@ -154,7 +182,7 @@ use anyhow::{Context, Result};
 use crossbeam_channel::{Receiver, Sender, TrySendError, after, bounded, select};
 use parking_lot::{Mutex, RwLock};
 use std::{
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::Arc,
     thread::{self, JoinHandle},
     time::Duration,
@@ -177,6 +205,16 @@ pub struct PlaybackMetadata {
     pub album: String,
 }
 
+/// Acknowledged final clock snapshot, sampled after the output stream retires.
+/// Position is selected-source-relative; listened time remains cumulative across
+/// seeks, device restarts and original/processed audition switches.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct AudioSnapshot {
+    pub generation: u64,
+    pub position_seconds: f64,
+    pub listened_seconds: f64,
+}
+
 pub enum AudioCommand {
     Load {
         path: PathBuf,
@@ -187,6 +225,36 @@ pub enum AudioCommand {
         start_seconds: f64,
         paused: bool,
     },
+    /// Switch between original and aligned processed audio without resetting heard time.
+    /// Processed WAV uses no range and Some(original_info); restore uses the
+    /// original path/range/decoder and None. Core retains the original Track.
+    Audition {
+        path: PathBuf,
+        range: Option<PlaybackRange>,
+        decoder_hint: DecoderHint,
+        source_info: Option<MediaInfo>,
+        metadata: Arc<PlaybackMetadata>,
+        generation: u64,
+        start_seconds: f64,
+        paused: bool,
+        listened_seconds: f64,
+    },
+    /// Consume one admitted, immutable graph runner (possibly a cached-prefix
+    /// suffix). Its opened descriptor must match the admitted identity and format.
+    /// Graph state never leaks into subsequent tracks.
+    GraphAudition {
+        path: PathBuf,
+        expected_identity: SourceIdentity,
+        range: Option<PlaybackRange>,
+        decoder_hint: DecoderHint,
+        source_info: Option<MediaInfo>,
+        metadata: Arc<PlaybackMetadata>,
+        generation: u64,
+        start_seconds: f64,
+        paused: bool,
+        listened_seconds: f64,
+        runner: Box<GraphRunner>,
+    },
     /// Update only the matching opening/playback generation, without reopening.
     Metadata {
         generation: u64,
@@ -196,6 +264,8 @@ pub enum AudioCommand {
     Stop,
     Seek(f64),
     Volume(f32),
+    /// Prepared and applied on the audio worker, never in the device callback.
+    Equalizer(Arc<rivu_dsp::equalizer::EqualizerConfig>),
     OutputSettings {
         request: u64,
         device: Option<String>,
@@ -207,7 +277,9 @@ pub enum AudioCommand {
     FfmpegEnabled(bool),
     /// Update analysis only; never reopen the decoder or output stream.
     AnalysisSettings(AnalysisSettings),
-    StopAndSnapshot(Sender<(u64, f64)>),
+    /// Capture the actual active source/graph without blocking device callbacks.
+    WaveformSnapshot(Sender<std::result::Result<Option<WaveformScanSnapshot>, String>>),
+    StopAndSnapshot(Sender<AudioSnapshot>),
     Shutdown,
 }
 #[derive(Clone, Debug)]
@@ -237,6 +309,11 @@ pub enum AudioEvent {
         request: u64,
         device: Option<String>,
         auto_mix: bool,
+        message: String,
+    },
+    EqualizerSettingsFailed {
+        generation: Option<u64>,
+        config: Arc<rivu_dsp::equalizer::EqualizerConfig>,
         message: String,
     },
 }
@@ -340,7 +417,7 @@ pub(crate) struct AudioStop {
 }
 
 impl AudioStop {
-    pub(crate) fn wait(self, observe: impl FnMut(AudioEvent)) -> Result<(u64, f64)> {
+    pub(crate) fn wait(self, observe: impl FnMut(AudioEvent)) -> Result<AudioSnapshot> {
         stop_and_snapshot(&self.commands, &self.events, observe)
     }
 }
@@ -350,7 +427,7 @@ fn stop_and_snapshot(
     commands: &Sender<AudioCommand>,
     events: &Receiver<AudioEvent>,
     mut observe: impl FnMut(AudioEvent),
-) -> Result<(u64, f64)> {
+) -> Result<AudioSnapshot> {
     let (reply, stopped) = bounded(1);
     let deadline = after(Duration::from_secs(5));
     loop {

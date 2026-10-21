@@ -2,6 +2,7 @@ mod album_artwork;
 mod album_browser;
 mod appearance;
 mod artwork;
+mod audio_processing;
 mod components;
 mod coordination;
 mod duplicates;
@@ -117,6 +118,10 @@ const PANELS: &[PanelSpec] = &[
     PanelSpec {
         kind: "audio_visualizer",
         title_id: "shell-panel-audio-visualizer",
+    },
+    PanelSpec {
+        kind: "audio_processing",
+        title_id: "shell-panel-audio-processing",
     },
 ];
 fn panel_spec(kind: &str) -> Option<&'static PanelSpec> {
@@ -341,6 +346,7 @@ pub(super) struct GuiApp {
     panel_views: HashMap<u64, Entity<shell::panels::PanelView>>,
     queue_replace: Option<coordination::queue_replace::QueueReplacement>,
     settings: Entity<settings::Settings>,
+    audio_processing: Entity<audio_processing::AudioProcessing>,
     presentation: Entity<presentation::Presentation>,
     layout_action: Option<layout::layout_manager::Action>,
     panel_menu: Option<PanelMenu>,
@@ -374,6 +380,7 @@ impl GuiApp {
             || self.playlists.read(cx).input_focused(window, cx)
             || self.history.read(cx).input_focused(window, cx)
             || self.metadata.read(cx).input_focused(window, cx)
+            || self.audio_processing.read(cx).input_focused(window, cx)
             || self
                 .album_browsers
                 .values()
@@ -952,6 +959,8 @@ impl GuiApp {
                 )
             }),
             duplicates: cx.new(|cx| duplicates::Duplicates::new(feature_context.clone(), cx)),
+            audio_processing: cx
+                .new(|cx| audio_processing::AudioProcessing::new(feature_context.clone(), cx)),
             playback: cx.new(|cx| playback::Playback::new(feature_context, cx)),
             manual_intents: coordination::manual_actions::ManualIntents::default(),
             shell: shell::WindowShell::new(cx),
@@ -1041,6 +1050,8 @@ impl GuiApp {
         cx: &mut Context<Self>,
     ) {
         self.workspace.restore_interaction(&cancellation);
+        self.audio_processing
+            .update(cx, |owner, cx| owner.invalidate_geometry(cx));
         self.waveform
             .update(cx, |waveform, _| waveform.cancel_seek());
         self.sync_waveform(cx);
@@ -1345,12 +1356,17 @@ impl GuiApp {
             .state
             .current_track()
             .or(self.metadata.read(cx).track())
+            .cloned()
         else {
             return;
         };
-        self.full_waveform_request.begin(track);
+        self.full_waveform_request.begin(&track);
+        let snapshot = self
+            .state
+            .current_track()
+            .map(|_| self.handle.waveform_snapshot());
         self.waveform.update(cx, |waveform, cx| {
-            waveform.cancel_full_request(cx);
+            waveform.prepare_full(&track, &self.state.system.config, snapshot, cx);
         });
         self.dispatch_full_waveform_query(cx);
     }
@@ -1381,6 +1397,9 @@ impl GuiApp {
                             && let Err(error) = response.result
                         {
                             this.error = Some(error.to_string());
+                            this.waveform.update(cx, |waveform, cx| {
+                                waveform.fail_full_query(error.to_string(), cx);
+                            });
                             this.full_waveform_request.invalidate();
                             cx.notify();
                         }
@@ -1400,6 +1419,13 @@ impl GuiApp {
                 if query.stamp(response.revisions) != stamp
                     || query.stamp(this.state.query_revisions_for(&query)) != stamp
                 {
+                    this.waveform.update(cx, |waveform, cx| {
+                        waveform.fail_full_query(
+                            "Full waveform metadata changed before decoding".into(),
+                            cx,
+                        );
+                    });
+                    this.full_waveform_request.invalidate();
                     return;
                 }
                 if !this.full_waveform_request.accepts(
@@ -1415,14 +1441,22 @@ impl GuiApp {
                         if this.full_waveform_request.accepts(generation, Some(&track)) =>
                     {
                         this.waveform.update(cx, |waveform, cx| {
-                            waveform.load_full(Some(&track), &this.state.system.config, cx);
+                            waveform.load_full(&track, cx);
                         });
                     }
                     Err(error) => {
                         this.error = Some(error.to_string());
+                        this.waveform.update(cx, |waveform, cx| {
+                            waveform.fail_full_query(error.to_string(), cx);
+                        });
                         cx.notify();
                     }
-                    _ => {}
+                    _ => this.waveform.update(cx, |waveform, cx| {
+                        waveform.fail_full_query(
+                            "Full waveform source changed before decoding".into(),
+                            cx,
+                        );
+                    }),
                 }
                 this.full_waveform_request.invalidate();
             });
@@ -1507,6 +1541,7 @@ mod state_tests {
             fps: 60,
             fft_size: 512,
             window: crate::config::AnalysisWindow::None,
+            signal: crate::config::VisualizationSignal::After,
         });
         worker.set_playback_active(true);
         let all = DisplayDemand {

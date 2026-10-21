@@ -142,6 +142,9 @@ pub enum Query {
         fingerprint: String,
         track_ids: Vec<i64>,
     },
+    ProcessingTask {
+        id: u64,
+    },
 }
 
 /// Selected equality tokens, owned by the query rather than its consumers.
@@ -224,6 +227,7 @@ pub enum QueryIdentity<'a> {
     DuplicateMembers(&'a str),
     RelocationTask(u64),
     DuplicateMemberSelection(&'a str, &'a [i64]),
+    ProcessingTask(u64),
 }
 
 impl Query {
@@ -295,7 +299,7 @@ impl Query {
                 stamp.duplicate_members = revisions.duplicate_members;
                 stamp.queue = revisions.queue;
             }
-            Self::ScanTask { .. } | Self::RelocationTask { .. } => {}
+            Self::ScanTask { .. } | Self::RelocationTask { .. } | Self::ProcessingTask { .. } => {}
         }
         QueryStamp(stamp)
     }
@@ -378,6 +382,7 @@ impl Query {
                 QueryIdentity::DuplicateMembers(fingerprint)
             }
             Self::RelocationTask { id } => QueryIdentity::RelocationTask(*id),
+            Self::ProcessingTask { id } => QueryIdentity::ProcessingTask(*id),
             Self::DuplicateMemberSelection {
                 fingerprint,
                 track_ids,

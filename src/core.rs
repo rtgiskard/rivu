@@ -49,6 +49,7 @@ enum Operation {
     Command(Command),
     GuiConfig(GuiConfigChange),
     Navigate(Navigation),
+    WaveformSnapshot(Sender<std::result::Result<Option<audio::WaveformScanSnapshot>, String>>),
 }
 
 #[derive(Clone, Copy)]
@@ -130,6 +131,7 @@ impl CoreState {
                 || system.scan_message != old.scan_message
                 || system.scan_progress != old.scan_progress
                 || system.relocation_task != old.relocation_task
+                || system.processing != old.processing
                 || system.last_error != old.last_error
                 || !Arc::ptr_eq(&system.devices, &old.devices)
                 || system.selected_device != old.selected_device
@@ -192,6 +194,20 @@ impl CoreHandle {
     /// Coalesce a GUI consumer frame into at most one pending analysis job.
     pub(crate) fn request_analysis_frame(&self) {
         self.analysis_control.request_frame();
+    }
+
+    /// Capture the active audio source and processing state without waiting on the GUI thread.
+    pub(crate) fn waveform_snapshot(
+        &self,
+    ) -> Result<Receiver<std::result::Result<Option<audio::WaveformScanSnapshot>, String>>> {
+        let (reply, receiver) = bounded(1);
+        self.sender
+            .try_send(Request {
+                operation: Operation::WaveformSnapshot(reply),
+                reply: None,
+            })
+            .context("Rivu is busy or stopped")?;
+        Ok(receiver)
     }
 
     pub(crate) fn update_gui_config(&self, change: GuiConfigChange) -> Result<()> {
@@ -610,6 +626,7 @@ impl Runtime {
             query_timeout: None,
         };
         let worker_control = control.clone();
+        let processing_data_dir = data_dir.to_path_buf();
         let worker = thread::Builder::new()
             .name("rivu-core".into())
             .spawn(move || {
@@ -634,6 +651,8 @@ impl Runtime {
                     pending_navigation: None,
                     active_export: None,
                     active_optimization: None,
+                    processing: crate::processing::Service::new(processing_data_dir),
+                    processing_results: VecDeque::new(),
                     scan_tx,
                     scan_rx,
                     active_scan: None,
@@ -675,6 +694,9 @@ impl Runtime {
                 let _ = core.audio(AudioCommand::AnalysisSettings(
                     core.state.system.config.as_ref().into(),
                 ));
+                let _ = core.audio(AudioCommand::Equalizer(Arc::new(
+                    core.state.system.config.equalizer.clone(),
+                )));
                 core.run(receiver, shutdown_receiver, &worker_control);
             })?;
         Ok(Self {
@@ -803,6 +825,8 @@ struct Core {
     pending_navigation: Option<PlaybackStatus>,
     active_export: Option<export::ExportTask>,
     active_optimization: Option<maintenance::OptimizationTask>,
+    processing: crate::processing::Service,
+    processing_results: VecDeque<ProcessingTaskStatus>,
     scan_tx: Sender<ScanEvent>,
     scan_rx: Receiver<ScanEvent>,
     active_scan: Option<ScanTask>,
@@ -853,6 +877,7 @@ mod maintenance;
 mod persistence;
 mod playback;
 mod playlists;
+mod processing;
 mod queue;
 mod relocation;
 mod settings;

@@ -376,7 +376,7 @@ The frame header is six bytes. `body_length` excludes the four-byte length field
 and includes the version, message type, and serialized body.
 
 Bodies use Postcard serialization without COBS framing. The current protocol
-version is `3`; clients and servers must use matching wire schemas. The four-byte
+version is `6`; clients and servers must use matching wire schemas. The four-byte
 frame length remains little-endian; body integers follow Postcard's encoding.
 Restart clients and hosts together after upgrading: incompatible versions are
 rejected before decoding the body. There is no compatibility alias or schema
@@ -492,10 +492,12 @@ Response types:
 * `Watch` — returns changed state revisions
 * `Error` — returns a protocol or request error
 
+
+
 Wire enum variant and field order are part of the binary schema. Incompatible
 schema changes require a new protocol version and coordinated client and host
 updates; there is no obligation to preserve earlier schemas.
-The current protocol version is `4`; hosts and clients must both use this version.
+The current protocol version is `6`; hosts and clients must both use this version.
 
 == Revisions and watching
 
@@ -925,3 +927,78 @@ with a client snapshot.
 The source of truth for exact schemas and adapters is
 link:../src/ipc/protocol.rs[protocol.rs];
 link:../src/ipc/tests.rs[protocol tests] cover compatibility and transport bounds.
+
+== Audio processing commands
+
+`EqualizerEdit { edit }` carries a field edit, preset operation or A/B swap;
+`DenoiseEdit { patch }` and `NeuralEdit { patch }` merge specified fields into
+current core configuration. Their boxed Rust patch storage does not add a JSON
+wrapper: a patch remains an ordinary JSON object. For example, command values are
+`{"DenoiseEdit":{"patch":{"mode":"adaptive","wet":0.8}}}` and
+`{"NeuralEdit":{"patch":{"threads":4}}}`. Equalizer edits use externally tagged
+variants, for example `{"EqualizerEdit":{"edit":{"Enabled":true}}}`. Send
+these inside the ordinary Command request after Hello, not as a new protocol.
+Unknown fields and invalid settings fail; omitted patch fields remain unchanged.
+For neural manifests, explicit JSON `null` clears the selected manifest, whereas
+an omitted manifest leaves it unchanged.
+
+`StartProcessing { track_id, operation, profile }` accepts `denoise`, `speech` or
+`separate`; profile is null or `{start_seconds,end_seconds}` in source-relative
+seconds. Acceptance returns a processing task ID, not completed output.
+`Query::ProcessingTask { id }` retrieves status; `CancelProcessing { id }`
+invalidates the active task. `AuditionProcessing { id, mode, vocal_gain_db,
+accompaniment_gain_db }` selects original/denoised/vocals/accompaniment/mix.
+System state exposes the latest `processing` status. Use the exact task query
+for completion rather than an unrelated latest-task field. Settings and model/
+source identity are captured with the job; retained output availability is
+session-bounded. See link:27_audio_processing.adoc[Audio processing] for CLI
+equivalents, terminal states, provisioning, scratch and audition lifetime.
+
+=== Immutable audio graph runs
+
+`ProcessingGraphEdit { revision, edit }` compares the authoritative graph revision
+before applying one typed edit. A stale revision rejects the entire edit. Node
+removal disconnects its edges; it never guesses replacement routing. Positions do
+not affect audio. Graphs allow at most 64 nodes and 128 typed, acyclic edges, with
+one connection per input and explicit mix nodes for fan-in.
+Generic `Configure` requests cannot replace this graph, including from a stale
+settings snapshot; graph changes use the revision-checked edit command.
+
+`ProcessingGraphRun { track_id, target: {node,port}, mode }` freezes the source and
+graph revision. `auto` is the default: worker admission chooses the exact realtime
+graph when supported, a useful hybrid suffix otherwise, and offline execution
+when no useful supported suffix remains. Explicit modes reject unsupported plans
+instead of changing algorithms. `settings.graph_mode` reports the actual selected
+mode. All source probing, FIR design and FFT planning occur on the processing
+worker, never Core dispatch or the device callback. Offline runs evaluate only
+the target's ancestors and share fan-out PCM. Realtime runs become `complete`
+when live-ready, without inventing cached files. A nonplaying selected source
+opens paused/live-ready; a prepared result cannot replace newer playback intent.
+Hybrid runs expose the actual offline prefix in `settings.graph_boundary`, then
+play its exact realtime suffix; parallel heavy branches may move the boundary
+through their downstream merge. `graph_plan` reports actual native-rate latency
+and tail frames, plus admission state/work estimates, not a deadline guarantee.
+
+`ProcessingGraphAudition { id, node: {node,port} }` selects retained PCM directly,
+or queues a new preparation task using the frozen snapshot when that output has
+no cache. `ProcessingGraphExport { id, node: {node,port}, path }` starts a distinct,
+cancellable offline task using that same graph and original source. Existing
+cached PCM is copied without re-decoding or running DSP again; an unrendered port
+executes only its ancestor closure. Queued operations acknowledge the new task ID.
+Destinations are
+absolute paths to new WAV files; existing files are never overwritten. Only a
+successful terminal task sets `graph_exported_path`: an accepted request is not
+an exported file. Cancelled or stale-source tasks publish neither partial PCM nor
+partial export files. `CancelProcessing` also stops the selected live audition,
+but only while its run and playback generation still match.
+
+`settings.graph`, `graph_target`, `graph_mode`, and `graph_revision` distinguish
+captured run state from later edits. `graph_outputs` lists only real cached output
+ports and paths (separation ports 0/1 are vocals/accompaniment). `graph_nodes`
+reports per-node execution state and actual neural model IDs/SHA256 hashes.
+Graph PCM caches are capped at 2 GiB per run and 4 GiB retained, with at most four
+retained runs; native source rendering additionally has the RIFF 4 GiB scratch
+limit. The selected audition stays pinned. Older status history is bounded to
+32 tasks. Layout positions, revision counters and node-ID allocation history do
+not affect `ProcessingGraph::audio_eq` or invalidate a frozen result.
+

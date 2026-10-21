@@ -30,6 +30,43 @@ live in `[visualizations.spectrum]`, `[visualizations.spectrogram]`,
 Album artwork settings live in `[interface.album_artwork]`.
 Desktop integration belongs to Interface; output and decoding belong to Playback;
 shared analysis belongs to Visualizations. Dotted names below identify file paths.
+Audio processing additionally uses top-level `[equalizer]`, `[denoise]`, and
+`[neural]` tables, `[[equalizer.bands]]`, named `[[equalizer_presets]]`, and an
+optional `[equalizer_ab]`. These are core settings, not layout preferences.
+
+[source,toml]
+----
+[equalizer]
+enabled = true
+preamp_db = -3.0
+output_gain_db = 0.0
+
+[[equalizer.bands]]
+kind = "peak"
+frequency_hz = 1200.0
+gain_db = 3.0
+q = 0.8
+
+[denoise]
+mode = "adaptive"
+strength = 1.0
+wet = 0.8
+
+[neural]
+worker = "/absolute/model-bundle/runtime/worker.py"
+speech_interpreter = "/absolute/moss-venv/bin/python"
+speech_manifest = "/absolute/moss-bundle/manifest.json"
+separation_interpreter = "/absolute/separate-venv/bin/python"
+separation_manifest = "/absolute/kim-bundle/manifest.json"
+device = "cpu"
+threads = 4
+----
+
+Replace paths with preparation output; no shell expansion occurs. Missing
+manifests leave neural operations unavailable, not automatically downloaded.
+See link:27_audio_processing.adoc[Audio processing] for filter semantics,
+profile capture, separate environments, licensing, CLI examples and bounds.
+
 A minimal example (all omitted settings retain their defaults):
 
 [source,toml]
@@ -325,6 +362,17 @@ Shift+Left/Right extends a selection beyond the visible text; Shift+Home/End
 selects to the beginning/end while preserving the selection anchor.
 
 Shared visualization settings apply as follows:
+
+* `visualizations.signal` selects one shared signal for all audio-data views:
+  `"before"` is before the active realtime processing chain; `"after"` (default)
+  includes the active chain and monitor EQ. Both are before master volume.
+  Change it under Visualizations → General → Processing / cache. Analysis runs
+  asynchronously; strict audio/visual synchronization is not guaranteed.
+  Changing the signal resets realtime analysis history, but does not clear the
+  rolling waveform or automatically start a full waveform scan. Equalizer changes
+  preserve realtime history; newly visited waveform intervals replace their old data.
+  An explicit full waveform scan snapshots the selected signal and processing when
+  requested, keeping the displayed waveform until results are available.
 
 * `visualizations.background` sets the background for all views; `visualizations.palette` is
   shared by Spectrum, Spectrogram, and Waveform. Audio Visualizer has independent

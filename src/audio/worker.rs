@@ -1,7 +1,8 @@
 //! Command handling, playback lifecycle, refill scheduling, and analyzer policy.
 
 use super::{
-    AudioCommand, AudioEvent, PlaybackMetadata, WaveformFrame,
+    AudioCommand, AudioEvent, AudioSnapshot, PlaybackMetadata, WaveformFrame,
+    graph::GraphRunner,
     output::validate_device,
     playback::{Playback, PlaybackOptions},
     source::Source,
@@ -11,6 +12,7 @@ use crate::model::DecoderHint;
 use anyhow::anyhow;
 use crossbeam_channel::{Receiver, Sender, TryRecvError, select};
 use parking_lot::RwLock;
+use rivu_dsp::equalizer::EqualizerConfig;
 use std::{
     path::PathBuf,
     sync::Arc,
@@ -73,6 +75,10 @@ struct Opening {
     start: f64,
     paused: bool,
     source: Option<Source>,
+    source_info: Option<super::MediaInfo>,
+    listened_seconds: f64,
+    graph: Option<GraphRunner>,
+    expected_identity: Option<super::SourceIdentity>,
 }
 
 impl Opening {
@@ -84,6 +90,11 @@ impl Opening {
                 self.decoder_hint,
                 ffmpeg_enabled,
             )?);
+            if let Some(expected) = self.expected_identity
+                && self.source.as_ref().unwrap().identity() != expected
+            {
+                anyhow::bail!("Opened source differs from the source admitted for graph audition");
+            }
         }
         self.source.as_mut().unwrap().poll_open()
     }
@@ -110,7 +121,8 @@ pub(super) struct Worker {
     still_mode: bool,
     ffmpeg_enabled: bool,
     pipewire_auto_mix: bool,
-    last_snapshot: (u64, f64),
+    equalizer: Arc<EqualizerConfig>,
+    last_snapshot: AudioSnapshot,
     progress: Instant,
     last_progress: Option<(u64, f64, f64)>,
 }
@@ -140,7 +152,8 @@ impl Worker {
             still_mode: false,
             ffmpeg_enabled: false,
             pipewire_auto_mix: true,
-            last_snapshot: (0, 0.0),
+            equalizer: Arc::new(EqualizerConfig::default()),
+            last_snapshot: AudioSnapshot::default(),
             progress: Instant::now(),
             last_progress: None,
         }
@@ -148,13 +161,17 @@ impl Worker {
     fn event(&self, event: AudioEvent) {
         send_event(&self.events, &self.shutdown, event);
     }
-    fn stop(&mut self) -> (u64, f64) {
+    fn stop(&mut self) -> AudioSnapshot {
         self.analyzer.set_playback_active(false);
         if let Some(opening) = self.opening.take() {
-            self.last_snapshot = (opening.generation, 0.0);
+            self.last_snapshot = AudioSnapshot {
+                generation: opening.generation,
+                position_seconds: opening.start,
+                listened_seconds: opening.listened_seconds,
+            };
         }
         if let Some(mut playback) = self.playback.take() {
-            self.last_snapshot = (playback.generation(), playback.close());
+            self.last_snapshot = playback.close();
         }
         self.last_snapshot
     }
@@ -190,6 +207,22 @@ impl Worker {
             }
             AudioCommand::AnalysisSettings(settings) => {
                 self.analyzer.configure(settings);
+                if let Some(playback) = self.playback.as_mut() {
+                    playback.set_signal(self.analyzer.settings().signal);
+                }
+            }
+            AudioCommand::WaveformSnapshot(reply) => {
+                let snapshot = if let Some(playback) = &self.playback {
+                    Ok(Some(playback.waveform_snapshot()))
+                } else if self.opening.is_some() {
+                    Err(
+                        "Audio source is still opening; try the explicit scan again after it opens"
+                            .to_owned(),
+                    )
+                } else {
+                    Ok(None)
+                };
+                let _ = reply.try_send(snapshot);
             }
             AudioCommand::FfmpegEnabled(enabled) => {
                 self.ffmpeg_enabled = enabled;
@@ -202,22 +235,28 @@ impl Worker {
                     source.disable_opening_fallback();
                 }
                 if !enabled && self.opening.as_ref().is_some_and(Opening::uses_ffmpeg) {
-                    let position = self.opening.as_ref().unwrap().start;
-                    let (generation, heard) = self.stop();
+                    let AudioSnapshot {
+                        generation,
+                        position_seconds,
+                        listened_seconds,
+                    } = self.stop();
                     self.event(AudioEvent::Progress {
                         generation,
-                        position_seconds: position,
-                        listened_seconds: heard,
+                        position_seconds,
+                        listened_seconds,
                     });
                     self.event(AudioEvent::DecoderStopped { generation });
                 }
                 if !enabled && self.playback.as_ref().is_some_and(Playback::uses_ffmpeg) {
-                    let position = self.playback.as_ref().unwrap().position();
-                    let (generation, heard) = self.stop();
+                    let AudioSnapshot {
+                        generation,
+                        position_seconds,
+                        listened_seconds,
+                    } = self.stop();
                     self.event(AudioEvent::Progress {
                         generation,
-                        position_seconds: position,
-                        listened_seconds: heard,
+                        position_seconds,
+                        listened_seconds,
                     });
                     self.event(AudioEvent::DecoderStopped { generation });
                 }
@@ -230,6 +269,86 @@ impl Worker {
                 if let Some(playback) = &self.playback {
                     playback.set_volume(volume);
                 }
+            }
+            AudioCommand::Equalizer(config) => {
+                self.equalizer = Arc::clone(&config);
+                let result = config
+                    .validate()
+                    .map_err(anyhow::Error::from)
+                    .and_then(|()| {
+                        if let Some(playback) = self.playback.as_mut() {
+                            playback.set_equalizer(&config)
+                        } else {
+                            Ok(())
+                        }
+                    });
+                if let Err(error) = result {
+                    self.event(AudioEvent::EqualizerSettingsFailed {
+                        generation: self
+                            .playback
+                            .as_ref()
+                            .map(Playback::generation)
+                            .or_else(|| self.opening.as_ref().map(|opening| opening.generation)),
+                        config,
+                        message: format!("{error:#}"),
+                    });
+                }
+            }
+            AudioCommand::Audition {
+                path,
+                range,
+                decoder_hint,
+                source_info,
+                metadata,
+                generation,
+                start_seconds,
+                paused,
+                listened_seconds,
+            } => {
+                self.stop();
+                self.opening = Some(Opening {
+                    path,
+                    range,
+                    decoder_hint,
+                    generation,
+                    metadata,
+                    start: start_seconds,
+                    paused,
+                    source: None,
+                    source_info,
+                    listened_seconds,
+                    graph: None,
+                    expected_identity: None,
+                });
+            }
+            AudioCommand::GraphAudition {
+                path,
+                expected_identity,
+                range,
+                decoder_hint,
+                source_info,
+                metadata,
+                generation,
+                start_seconds,
+                paused,
+                listened_seconds,
+                runner,
+            } => {
+                self.stop();
+                self.opening = Some(Opening {
+                    path,
+                    range,
+                    decoder_hint,
+                    generation,
+                    metadata,
+                    start: start_seconds,
+                    paused,
+                    source: None,
+                    source_info,
+                    listened_seconds,
+                    graph: Some(*runner),
+                    expected_identity: Some(expected_identity),
+                });
             }
             AudioCommand::Load {
                 path,
@@ -250,6 +369,10 @@ impl Worker {
                     start: start_seconds,
                     paused,
                     source: None,
+                    source_info: None,
+                    listened_seconds: 0.0,
+                    graph: None,
+                    expected_identity: None,
                 });
             }
             AudioCommand::Metadata {
@@ -337,7 +460,7 @@ impl Worker {
         Ok(())
     }
     fn fail(&mut self, error: anyhow::Error) {
-        let (generation, _) = self.stop();
+        let generation = self.stop().generation;
         self.event(AudioEvent::Failed {
             generation,
             message: format!("{error:#}"),
@@ -373,6 +496,10 @@ impl Worker {
                         volume: self.volume,
                         pipewire_auto_mix: self.pipewire_auto_mix,
                         still_mode: self.still_mode,
+                        equalizer: Arc::clone(&self.equalizer),
+                        source_info: opening.source_info,
+                        listened_seconds: opening.listened_seconds,
+                        graph: opening.graph,
                     },
                     &self.analyzer,
                     self.waveform.clone(),
@@ -477,14 +604,16 @@ impl Worker {
             }
             if self.playback.as_ref().unwrap().finished() {
                 let playback = self.playback.as_ref().unwrap();
-                let generation = playback.generation();
-                let position = playback.position();
                 let bitrate_bps = playback.completed_bitrate();
-                let (_, heard) = self.stop();
+                let AudioSnapshot {
+                    generation,
+                    position_seconds,
+                    listened_seconds,
+                } = self.stop();
                 self.event(AudioEvent::Progress {
                     generation,
-                    position_seconds: position,
-                    listened_seconds: heard,
+                    position_seconds,
+                    listened_seconds,
                 });
                 self.event(AudioEvent::Ended {
                     generation,
@@ -588,6 +717,52 @@ mod tests {
         #[cfg(not(feature = "ffmpeg"))]
         {
             vec![DecoderHint::Native]
+        }
+    }
+
+    #[test]
+    fn graph_audition_rejects_same_format_source_replacement_before_open() {
+        use rivu_format::config::processing_graph::{GraphPort, ProcessingGraph};
+        for hint in opening_hints() {
+            let original = super::super::source::opening_prefix_file(0, true);
+            let replacement = super::super::source::opening_prefix_file(0, true);
+            let expected_identity =
+                super::super::SourceIdentity::from_file(original.as_file()).unwrap();
+            let runner = GraphRunner::compile(
+                &ProcessingGraph::default(),
+                GraphPort { node: 2, port: 0 },
+                8_000,
+                1,
+            )
+            .unwrap();
+            let (mut worker, _commands, events, _shutdown) = opening_worker();
+            worker.ffmpeg_enabled = hint == DecoderHint::Ffmpeg;
+            worker.command(AudioCommand::GraphAudition {
+                path: original.path().to_owned(),
+                expected_identity,
+                range: None,
+                decoder_hint: hint,
+                source_info: None,
+                metadata: Arc::default(),
+                generation: 91,
+                start_seconds: 0.0,
+                paused: true,
+                listened_seconds: 0.0,
+                runner: Box::new(runner),
+            });
+            std::fs::rename(replacement.path(), original.path()).unwrap();
+            let opened = Source::open(original.path(), 65536, hint, worker.ffmpeg_enabled).unwrap();
+            assert_eq!(opened.info().sample_rate, 8_000);
+            assert_eq!(opened.info().channels, 1);
+            assert_ne!(opened.identity(), expected_identity);
+            worker.poll_opening();
+            assert!(worker.opening.is_none());
+            assert!(worker.playback.is_none());
+            let event = events.try_recv().unwrap();
+            assert!(
+                matches!(event, AudioEvent::Failed { generation: 91, message } if message.contains("admitted for graph audition"))
+            );
+            assert!(events.is_empty());
         }
     }
 
@@ -705,7 +880,13 @@ mod tests {
             let (reply, snapshot) = bounded(1);
             commands.send(AudioCommand::StopAndSnapshot(reply)).unwrap();
             assert!(worker.control_round());
-            assert_eq!(snapshot.try_recv().unwrap(), (41, 0.0));
+            assert_eq!(
+                snapshot.try_recv().unwrap(),
+                AudioSnapshot {
+                    generation: 41,
+                    ..Default::default()
+                }
+            );
             assert!(worker.opening.is_none());
             worker.poll_opening();
             assert!(events.is_empty());
@@ -920,7 +1101,7 @@ mod tests {
         });
         drop(shutdown);
         worker.join().unwrap();
-        assert_eq!(snapshot.unwrap(), (0, 0.0));
+        assert_eq!(snapshot.unwrap(), AudioSnapshot::default());
         assert_eq!(retired, [1, 2]);
     }
 
@@ -999,6 +1180,7 @@ mod tests {
             AudioCommand::Pause(true),
             AudioCommand::Stop,
             AudioCommand::Volume(0.5),
+            AudioCommand::Equalizer(Arc::default()),
             AudioCommand::OutputSettings {
                 request: 0,
                 device: None,
@@ -1290,5 +1472,72 @@ mod tests {
         });
         drop(stop);
         sender.join().unwrap();
+    }
+
+    #[test]
+    fn invalid_equalizer_settings_report_config_and_current_generation() {
+        let (mut worker, _commands, events, _shutdown) = opening_worker();
+        let invalid = Arc::new(EqualizerConfig {
+            preamp_db: f64::NAN,
+            ..Default::default()
+        });
+        worker.command(AudioCommand::Equalizer(invalid.clone()));
+        match events.try_recv().unwrap() {
+            AudioEvent::EqualizerSettingsFailed {
+                generation, config, ..
+            } => {
+                assert_eq!(generation, None);
+                assert!(Arc::ptr_eq(&config, &invalid));
+            }
+            _ => panic!("expected explicit idle equalizer settings failure"),
+        }
+        let file = super::super::source::opening_prefix_file(1024, true);
+        load_prefix(&mut worker, file.path(), DecoderHint::Native, 77);
+        worker.command(AudioCommand::Equalizer(invalid.clone()));
+        assert!(
+            matches!(events.try_recv().unwrap(), AudioEvent::EqualizerSettingsFailed {
+            generation: Some(77), config, ..
+        } if Arc::ptr_eq(&config, &invalid))
+        );
+        assert_eq!(worker.opening.as_ref().unwrap().generation, 77);
+    }
+
+    #[test]
+    fn cancelling_an_audition_opening_keeps_cumulative_heard_and_metadata() {
+        let file = super::super::source::opening_prefix_file(1024, true);
+        let info = Source::open(file.path(), 65_536, DecoderHint::Native, false)
+            .unwrap()
+            .info()
+            .clone();
+        let metadata = Arc::new(PlaybackMetadata {
+            title: "Original title".into(),
+            ..Default::default()
+        });
+        let (mut worker, _commands, events, _shutdown) = opening_worker();
+        worker.command(AudioCommand::Audition {
+            path: file.path().to_owned(),
+            range: None,
+            decoder_hint: DecoderHint::Native,
+            source_info: Some(info),
+            metadata: metadata.clone(),
+            generation: 91,
+            start_seconds: 0.125,
+            paused: true,
+            listened_seconds: 12.5,
+        });
+        worker.poll_opening();
+        let opening = worker.opening.as_ref().unwrap();
+        assert_eq!(opening.start, 0.125);
+        assert!(opening.paused);
+        assert!(Arc::ptr_eq(&opening.metadata, &metadata));
+        assert_eq!(
+            worker.stop(),
+            AudioSnapshot {
+                generation: 91,
+                position_seconds: 0.125,
+                listened_seconds: 12.5
+            }
+        );
+        assert!(events.is_empty());
     }
 }

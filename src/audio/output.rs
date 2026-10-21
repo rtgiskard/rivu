@@ -3,7 +3,7 @@
 //! The selected sink and its strict speaker routes are never silently replaced.
 
 use super::{Channel, PlaybackMetadata, channels};
-use crate::analysis::{AnalysisControl, AnalysisWorker, TapFrame};
+use crate::analysis::AnalysisWorker;
 use ::pipewire::{self as pw, properties::properties, spa};
 use anyhow::{Context, Result, bail};
 use crossbeam_channel::{Receiver, bounded};
@@ -266,14 +266,11 @@ impl Output {
         analyzer.reset(rate);
         let callback = OutputCallback {
             consumer,
-            tap: analyzer.producer(),
-            tap_gap: false,
-            control: analyzer.control.clone(),
             shared: shared.clone(),
             channels: source_channels,
             scratch,
             mapping: Vec::new(),
-            analysis_weights: channels::analysis_weights(source_layout),
+            source_channels,
             rate,
             clock: PlaybackClock::new(),
         };
@@ -395,14 +392,11 @@ impl Output {
 
 struct OutputCallback {
     consumer: HeapCons<f32>,
-    tap: HeapProd<TapFrame>,
-    tap_gap: bool,
     shared: Arc<OutputShared>,
-    control: Arc<AnalysisControl>,
     channels: usize,
     scratch: Vec<f32>,
     mapping: Vec<Option<usize>>,
-    analysis_weights: Vec<[f32; 2]>,
+    source_channels: usize,
     rate: u32,
     clock: PlaybackClock,
 }
@@ -429,10 +423,7 @@ impl OutputCallback {
             let _ = self.shared.wakeup.try_send(());
         }
         let volume = f32::from_bits(self.shared.volume.load(Ordering::Relaxed));
-        let demand_token = self.control.display_token();
-        let analyze = self.control.accepts_audio_for(demand_token);
-        let epoch = self.control.epoch.load(Ordering::Relaxed);
-        let source_channels = self.analysis_weights.len();
+        let source_channels = self.source_channels;
         // Snapshot availability: valid frames form one prefix, even if the
         // producer refills concurrently after an underflow.
         let mut count = if paused || self.shared.timing_error.load(Ordering::Acquire) != 0 {
@@ -465,32 +456,6 @@ impl OutputCallback {
             let scratch = &mut self.scratch[..samples];
             let consumed = self.consumer.pop_slice(scratch);
             debug_assert_eq!(consumed, samples);
-            if analyze {
-                let gap = self.tap_gap;
-                let weights = &self.analysis_weights;
-                let accepted =
-                    self.tap
-                        .push_iter(scratch.chunks_exact(source_channels).enumerate().map(
-                            |(index, frame)| {
-                                let mut samples = [0.0; 2];
-                                for (sample, weights) in frame.iter().zip(weights) {
-                                    samples[0] += sample * weights[0];
-                                    samples[1] += sample * weights[1];
-                                }
-                                TapFrame {
-                                    samples,
-                                    epoch,
-                                    demand_token,
-                                    gap: gap && index == 0,
-                                }
-                            },
-                        ));
-                // A partial block leaves a discontinuity for the next accepted frame.
-                self.tap_gap = accepted < samples / source_channels;
-                if self.tap_gap {
-                    self.control.tap_overflow.store(true, Ordering::Release);
-                }
-            }
             // Decoder PCM is finite and normalized volume gives gain in [0, 1].
             // Mapping and attenuation cannot introduce non-finite samples.
             for (output, frame) in block
@@ -992,7 +957,7 @@ fn run(
         })
         .process(move |stream, callback| {
             // Process runs on this dedicated loop, never on the UI/decoder thread.
-            // All sample, mapping, analysis and clock storage was preallocated.
+            // All sample, mapping and clock storage was preallocated.
             if processing.get() {
                 unsafe {
                     process(stream, callback, routed.get());
@@ -1537,7 +1502,7 @@ mod pcm_tests {
     }
 
     #[test]
-    fn block_render_preserves_wrapped_frames_mapping_and_analysis() {
+    fn block_render_preserves_wrapped_frames_and_mapping() {
         let frames = OutputCallback::BLOCK_FRAMES * 2 + 13;
         let source = [Channel::FrontLeft, Channel::FrontRight];
         let device = [
@@ -1550,15 +1515,6 @@ mod pcm_tests {
         // Offset the ring so the next full write wraps across its allocation.
         output.push(&[0.0; 34]);
         callback.render(&mut [0.0_f32; 51], timestamp(0, 20));
-        let (tap, mut analysis) = HeapRb::new(frames).split();
-        callback.tap = tap;
-        {
-            callback
-                .control
-                .playback_active
-                .store(true, Ordering::Release);
-            callback.control.set_display_enabled(true);
-        };
         let input: Vec<_> = (0..frames)
             .flat_map(|i| {
                 let value = i as f32 / frames as f32;
@@ -1574,90 +1530,18 @@ mod pcm_tests {
             .zip(input.chunks_exact(source.len()))
         {
             assert_eq!(actual, &[expected[1], expected[0], 0.0]);
-            let tap = analysis.try_pop().unwrap();
-            assert_eq!(tap.samples, [expected[0], expected[1]]);
-            assert!(!tap.gap);
         }
         assert!(
             data[frames * device.len()..]
                 .iter()
                 .all(|sample| *sample == 0.0)
         );
-        assert!(analysis.try_pop().is_none());
         assert_eq!(callback.consumer.occupied_len(), 0);
         assert_eq!(callback.scratch.as_ptr(), scratch);
         assert_eq!(
             callback.scratch.len(),
             OutputCallback::BLOCK_FRAMES * source.len()
         );
-    }
-
-    #[test]
-    fn tap_overflow_marks_the_next_accepted_frame() {
-        let (mut output, mut callback, _analyzer) = test_output(192_000, false);
-        let (tap, mut samples) = HeapRb::new(1).split();
-        callback.tap = tap;
-        {
-            callback
-                .control
-                .playback_active
-                .store(true, Ordering::Release);
-            callback.control.set_display_enabled(true);
-        };
-        output.push(&[0.5; 6]);
-        callback.render(&mut [0.0_f32; 6], timestamp(0, 20));
-        assert!(!samples.try_pop().unwrap().gap);
-        assert!(callback.tap_gap);
-        assert!(callback.control.tap_overflow.swap(false, Ordering::AcqRel));
-        output.push(&[0.25; 2]);
-        callback.render(&mut [0.0_f32; 2], timestamp(1, 21));
-        assert!(samples.try_pop().unwrap().gap);
-        assert!(!callback.tap_gap);
-        assert!(!callback.control.tap_overflow.load(Ordering::Acquire));
-        output.push(&[0.0; 2]);
-        callback.render(&mut [0.0_f32; 2], timestamp(2, 22));
-        assert!(!samples.try_pop().unwrap().gap);
-    }
-
-    #[test]
-    fn tap_partial_blocks_preserve_epoch_and_wrapped_gap() {
-        let stereo = [Channel::FrontLeft, Channel::FrontRight];
-        let frames = OutputCallback::BLOCK_FRAMES + 3;
-        let (mut output, mut callback, _analyzer) =
-            test_output_layout(192_000, false, &stereo, &stereo, frames * 2);
-        let (mut tap, mut samples) = HeapRb::new(4).split();
-        tap.push_iter((0..3).map(|_| TapFrame {
-            samples: [0.0; 2],
-            epoch: 0,
-            demand_token: 0,
-            gap: false,
-        }));
-        for _ in 0..3 {
-            samples.try_pop().unwrap();
-        }
-        callback.tap = tap;
-        {
-            callback
-                .control
-                .playback_active
-                .store(true, Ordering::Release);
-            callback.control.set_display_enabled(true);
-        };
-        callback.control.epoch.store(17, Ordering::Release);
-        output.push(&vec![0.5; frames * 2]);
-        callback.render(&mut vec![0.0_f32; frames * 2], timestamp(0, 20));
-        for _ in 0..4 {
-            let frame = samples.try_pop().unwrap();
-            assert_eq!(frame.samples, [0.5; 2]);
-            assert_eq!(frame.epoch, 17);
-            assert!(!frame.gap);
-        }
-        assert!(callback.tap_gap);
-        output.push(&[0.25; 4]);
-        callback.render(&mut [0.0_f32; 4], timestamp(1, 21));
-        assert!(samples.try_pop().unwrap().gap);
-        assert!(!samples.try_pop().unwrap().gap);
-        assert!(!callback.tap_gap);
     }
 
     fn test_output(rate: u32, paused: bool) -> (Output, OutputCallback, AnalysisWorker) {
@@ -1688,14 +1572,11 @@ mod pcm_tests {
         };
         let callback = OutputCallback {
             consumer,
-            tap: analyzer.producer(),
-            tap_gap: false,
             shared,
-            control: analyzer.control.clone(),
             channels: device.len(),
             scratch: vec![0.0; source.len() * OutputCallback::BLOCK_FRAMES],
             mapping: crate::audio::channels::mapping(source, device).unwrap(),
-            analysis_weights: channels::analysis_weights(source),
+            source_channels: source.len(),
             rate,
             clock: PlaybackClock::new(),
         };
@@ -2064,35 +1945,6 @@ mod pcm_tests {
             assert_eq!(output.heard(), 0.019);
             assert_eq!(output.position(), 0.019);
         }
-    }
-
-    #[test]
-    fn analyzer_downmix_never_replaces_native_lfe_or_surrounds() {
-        let source = speaker_layouts().pop().unwrap();
-        let (mut output, mut callback, _analyzer) =
-            test_output_layout(1000, false, &source, &source, 64);
-        let frame = [0.1_f32, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8];
-        {
-            callback
-                .control
-                .playback_active
-                .store(true, Ordering::Release);
-            callback.control.set_display_enabled(true);
-        };
-        output.push(&frame);
-        let mut data = [0.0_f32; 8];
-        callback.render(&mut data, timestamp(0, 10));
-        assert_eq!(data, frame);
-        {
-            callback
-                .control
-                .playback_active
-                .store(false, Ordering::Release);
-            callback.control.set_display_enabled(false);
-        };
-        output.push(&frame);
-        callback.render(&mut data, timestamp(1, 11));
-        assert_eq!(data, frame);
     }
 }
 

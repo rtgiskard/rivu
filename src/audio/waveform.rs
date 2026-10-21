@@ -99,8 +99,7 @@ pub struct WaveformFrame {
     pub max_peak: f32,
     /// `None` is not yet decoded; `Some(0.0)` is decoded silence.
     pub peaks: Vec<Option<f32>>,
-    /// RMS of one contiguous decoded interval per bin. Disjoint previews retain
-    /// peaks but enter RMS only when a later traversal connects their samples.
+    /// RMS of the current contiguous decoded interval in each rolling bin.
     pub(crate) rms: Vec<Option<f32>>,
     pub(crate) rms_counts: Vec<u64>,
     pub(crate) left_peaks: Vec<Option<f32>>,
@@ -112,10 +111,15 @@ pub struct WaveformFrame {
     pub(crate) channel_weights: Vec<[f32; 2]>,
     pub(crate) rms_spans: Vec<Option<std::ops::Range<u64>>>,
     pub(crate) rms_prefixes: Vec<Option<RmsPrefix>>,
+    /// Last PCM revision per bin, used to fence asynchronous full scans.
+    pub(crate) bin_revisions: Vec<u64>,
+    pub(crate) bin_epochs: Vec<u64>,
+    pub(crate) traversal: u64,
     pub(crate) suspended: bool,
     pub(crate) suspension_generation: u64,
     pub(crate) full_scan_cancelled: Weak<AtomicBool>,
     pub(crate) identity: Option<WaveformIdentity>,
+    pub(crate) scan_source_identity: Option<SourceIdentity>,
 }
 
 impl Default for WaveformFrame {
@@ -143,10 +147,14 @@ impl Default for WaveformFrame {
             channel_weights: Vec::new(),
             rms_spans: Vec::new(),
             rms_prefixes: Vec::new(),
+            bin_revisions: Vec::new(),
+            bin_epochs: Vec::new(),
+            traversal: 1,
             suspended: false,
             suspension_generation: 0,
             full_scan_cancelled: Weak::new(),
             identity: None,
+            scan_source_identity: None,
         }
     }
 }
@@ -231,12 +239,18 @@ pub(super) struct WaveformAccumulator {
 }
 
 impl WaveformAccumulator {
-    pub(super) fn new(frame: WaveformFrame) -> Self {
+    pub(super) fn new(mut frame: WaveformFrame) -> Self {
+        frame.begin_traversal();
         Self {
             published_revision: frame.revision,
             frame,
             dirty: None,
         }
+    }
+
+    /// Keep the rolling display, replacing a bin on its next visit.
+    pub(super) fn begin_traversal(&mut self) {
+        self.frame.begin_traversal();
     }
 
     pub(super) fn set_channel_weights(&mut self, weights: &[[f32; 2]]) {
@@ -254,14 +268,14 @@ impl WaveformAccumulator {
 
     /// The only operation requiring the shared write lock. At most MAX_BINS
     /// bins are copied (all bins only after timeline doubling); no PCM is read.
-    /// Completed progressive envelopes remain stable until their source resets.
+    /// EOF is coverage metadata, never a reason to freeze a rolling envelope.
     pub(super) fn publish(&mut self, shared: &mut WaveformFrame) {
         if shared.path != self.frame.path
             || shared.range != self.frame.range
             || shared.decoder_hint != self.frame.decoder_hint
             || shared.identity != self.frame.identity
             || shared.revision != self.published_revision
-            || shared.complete
+            || shared.suspended
         {
             self.frame.complete = true;
             self.dirty = None;
@@ -285,7 +299,9 @@ impl WaveformAccumulator {
             left_rms,
             right_rms,
             left_rms_counts,
-            right_rms_counts
+            right_rms_counts,
+            bin_revisions,
+            bin_epochs
         );
         shared.rms_spans[start..end].clone_from_slice(&self.frame.rms_spans[start..end]);
         shared.rms_spans.truncate(self.frame.rms_spans.len());
@@ -297,6 +313,7 @@ impl WaveformAccumulator {
         shared.bin_frames = self.frame.bin_frames;
         shared.bin_count = self.frame.bin_count;
         shared.max_peak = self.frame.max_peak;
+        shared.traversal = self.frame.traversal;
         if shared.channel_weights != self.frame.channel_weights {
             shared
                 .channel_weights
@@ -308,6 +325,37 @@ impl WaveformAccumulator {
 }
 
 impl WaveformFrame {
+    fn begin_traversal(&mut self) {
+        self.traversal = self.traversal.wrapping_add(1);
+        if self.traversal == 0 {
+            self.bin_epochs.fill(0);
+            self.traversal = 1;
+        }
+        self.complete = false;
+    }
+
+    fn clear_bin(&mut self, bin: usize) {
+        for values in [
+            &mut self.peaks,
+            &mut self.rms,
+            &mut self.left_peaks,
+            &mut self.right_peaks,
+            &mut self.left_rms,
+            &mut self.right_rms,
+        ] {
+            values[bin] = None;
+        }
+        for counts in [
+            &mut self.rms_counts,
+            &mut self.left_rms_counts,
+            &mut self.right_rms_counts,
+        ] {
+            counts[bin] = 0;
+        }
+        self.rms_spans[bin] = None;
+        self.rms_prefixes[bin] = None;
+    }
+
     pub fn matches(
         &self,
         path: &Path,
@@ -347,6 +395,8 @@ impl WaveformFrame {
             + bytes(&self.channel_weights)
             + bytes(&self.rms_spans)
             + bytes(&self.rms_prefixes)
+            + bytes(&self.bin_revisions)
+            + bytes(&self.bin_epochs)
     }
 
     /// Still Mode owns this guard so late manual scans cannot restore results.
@@ -404,6 +454,15 @@ impl WaveformFrame {
     fn compact_bin(&mut self, index: usize) {
         let left = index * 2;
         let right = left + 1;
+        let epoch = if self.peaks[left].is_none() {
+            self.bin_epochs.get(right).copied().unwrap_or(0)
+        } else if self.peaks.get(right).is_none_or(Option::is_none)
+            || self.bin_epochs.get(right) == Some(&self.bin_epochs[left])
+        {
+            self.bin_epochs[left]
+        } else {
+            0
+        };
         let intervals = [
             self.rms_prefixes[left].take(),
             self.bin_statistics(left),
@@ -435,6 +494,9 @@ impl WaveformFrame {
         }
         self.rms_spans[index] = primary.map(|primary| primary.span);
         self.rms_prefixes[index] = prefix;
+        self.bin_revisions[index] =
+            self.bin_revisions[left].max(self.bin_revisions.get(right).copied().unwrap_or(0));
+        self.bin_epochs[index] = epoch;
     }
 
     /// Only a decoder with the same opened content, backend and initial audio
@@ -450,6 +512,29 @@ impl WaveformFrame {
             .info()
             .duration
             .filter(|value| value.is_finite() && *value > 0.0);
+        self.select_identity(
+            path,
+            range,
+            decoder_hint,
+            duration,
+            WaveformIdentity::Progressive {
+                content: source.identity(),
+                ffmpeg: source.uses_ffmpeg(),
+                duration,
+                sample_rate: source.info().sample_rate,
+                channels: source.info().channels,
+            },
+        );
+    }
+    pub(super) fn select_audition_source(
+        &mut self,
+        path: &Path,
+        range: Option<PlaybackRange>,
+        decoder_hint: DecoderHint,
+        source: &Source,
+        display_duration: Option<f64>,
+    ) {
+        let duration = display_duration.filter(|value| value.is_finite() && *value > 0.0);
         self.select_identity(
             path,
             range,
@@ -496,6 +581,9 @@ impl WaveformFrame {
         self.right_rms_counts.clear();
         self.rms_spans.clear();
         self.rms_prefixes.clear();
+        self.bin_revisions.clear();
+        self.bin_epochs.clear();
+        self.traversal = 1;
         self.channel_weights.clear();
         self.max_peak = 1.0;
         self.revision = self.revision.wrapping_add(1);
@@ -545,6 +633,8 @@ impl WaveformFrame {
         self.right_rms_counts.resize(bins, 0);
         self.rms_spans.resize(bins, None);
         self.rms_prefixes.resize(bins, None);
+        self.bin_revisions.resize(bins, 0);
+        self.bin_epochs.resize(bins, 0);
     }
 
     pub(super) fn finish_scan(&mut self, end_seconds: f64) {
@@ -574,6 +664,8 @@ impl WaveformFrame {
             self.right_rms_counts.truncate(bins);
             self.rms_spans.truncate(bins);
             self.rms_prefixes.truncate(bins);
+            self.bin_revisions.truncate(bins);
+            self.bin_epochs.truncate(bins);
         }
         self.complete = complete;
         self.revision = self.revision.wrapping_add(1);
@@ -599,7 +691,7 @@ impl WaveformFrame {
         channels: usize,
         dirty: &mut Option<std::ops::Range<usize>>,
     ) {
-        if self.complete
+        if self.suspended
             || !start_seconds.is_finite()
             || sample_rate == 0
             || channels == 0
@@ -617,6 +709,7 @@ impl WaveformFrame {
             return;
         }
         let mut changed = false;
+        let mut rescale = false;
         // Metadata duration may be an estimate. Grow the bounded timeline for
         // actual decoded PCM, retaining pairwise peak and RMS statistics.
         if end_seconds > self.span_seconds + 0.5 / rate {
@@ -637,6 +730,8 @@ impl WaveformFrame {
                 self.right_rms_counts[retained..].fill(0);
                 self.rms_spans[retained..].fill(None);
                 self.rms_prefixes[retained..].fill(None);
+                self.bin_revisions[retained..].fill(0);
+                self.bin_epochs[retained..].fill(0);
                 self.span_seconds *= 2.0;
                 self.bin_frames = self.bin_frames.saturating_mul(2);
                 changed = true;
@@ -667,6 +762,16 @@ impl WaveformFrame {
                 .div_ceil(bins)
                 .min(u128::from(u64::MAX)) as u64;
             let mut take = (boundary - frame).min((count - offset) as u64) as usize;
+            if self.bin_epochs[bin] != self.traversal {
+                rescale |= self.max_peak > 1.0
+                    && [&self.peaks, &self.left_peaks, &self.right_peaks]
+                        .iter()
+                        .any(|peaks| peaks[bin].is_some_and(|peak| peak >= self.max_peak));
+                self.clear_bin(bin);
+                self.bin_epochs[bin] = self.traversal;
+                self.complete = false;
+                changed = true;
+            }
             let primary = self.rms_spans[bin].as_ref();
             let prefix = self.rms_prefixes[bin].as_ref();
             let mut represented = false;
@@ -695,6 +800,7 @@ impl WaveformFrame {
             let dirty = dirty.get_or_insert(bin..bin + 1);
             dirty.start = dirty.start.min(bin);
             dirty.end = dirty.end.max(bin + 1);
+            self.bin_revisions[bin] = self.revision.wrapping_add(1);
             let mut combined_peak = 0.0_f32;
             let mut combined_energy = 0.0_f64;
             let combined_count = (take * channels) as u64;
@@ -840,6 +946,16 @@ impl WaveformFrame {
         }
         if changed {
             self.revision = self.revision.wrapping_add(1);
+            if rescale {
+                self.max_peak = self
+                    .peaks
+                    .iter()
+                    .chain(&self.left_peaks)
+                    .chain(&self.right_peaks)
+                    .flatten()
+                    .copied()
+                    .fold(1.0, f32::max);
+            }
         }
     }
 }
@@ -923,7 +1039,7 @@ mod tests {
     }
 
     #[test]
-    fn cached_seek_reopens_preserve_unique_counts_and_accept_new_pcm() {
+    fn cached_seek_reopens_replace_statistics_without_reweighting() {
         let rate = (MAX_BINS * 2) as u32;
         let mut shared = frame(Some(1.0), rate);
         let mut accumulator = WaveformAccumulator::new(shared.clone());
@@ -947,7 +1063,7 @@ mod tests {
             let revision = shared.revision;
             reopened.push(0.0, &[1.0, 1.0], rate, 1);
             reopened.publish(&mut shared);
-            assert_eq!(shared.revision, revision);
+            assert!(shared.revision > revision);
             assert_eq!(shared.rms_counts[0], 2);
         }
         let mut reopened = WaveformAccumulator::new(shared.clone());
@@ -1080,45 +1196,39 @@ mod tests {
     }
 
     #[test]
-    fn middle_bin_cache_recovers_from_small_packets_across_reopens() {
+    fn reopened_traversals_replace_visited_bins_and_replay_after_completion() {
         let rate = (MAX_BINS * 8) as u32;
-        let samples: Vec<f32> = (0..rate).map(|index| (index % 8) as f32 / 8.0).collect();
         let mut shared = frame(Some(1.0), rate);
-        let mut accumulator = WaveformAccumulator::new(shared.clone());
-        accumulator.push(6.0 / f64::from(rate), &samples[6..7], rate, 1);
-        accumulator.push(4.0 / f64::from(rate), &samples[4..5], rate, 1);
-        accumulator.publish(&mut shared);
-        assert_eq!(shared.rms_counts[0], 1);
+        let mut initial = WaveformAccumulator::new(shared.clone());
+        initial.push(0.0, &vec![2.0; rate as usize * 2], rate, 2);
         let mut coverage = WaveformCoverage::new(0.0, 0.0);
-        for start in (0..16).step_by(2) {
-            // Reopening retains both displayed RMS and the earlier candidate;
-            // no PCM is needed to recover candidate energy after publication.
-            shared.select(
-                Path::new("track.wav"),
-                None,
-                DecoderHint::Auto,
-                Some(1.0),
-                rate,
-            );
-            let mut reopened = WaveformAccumulator::new(shared.clone());
-            let timestamp = start as f64 / f64::from(rate);
-            reopened.push(timestamp, &samples[start..start + 2], rate, 1);
-            reopened.publish(&mut shared);
-            coverage.record(timestamp, 2, rate);
-            if start < 4 {
-                assert_eq!(shared.rms_counts[0], 1);
-            }
-        }
-        let mut reopened = WaveformAccumulator::new(shared.clone());
-        reopened.push(16.0 / f64::from(rate), &samples[16..], rate, 1);
-        coverage.record(16.0 / f64::from(rate), samples.len() - 16, rate);
-        reopened.finish(&coverage);
-        reopened.publish(&mut shared);
-        let mut expected = frame(Some(1.0), rate);
-        expected.push(0.0, &samples, rate, 1);
+        coverage.record(0.0, rate as usize, rate);
+        initial.finish(&coverage);
+        initial.publish(&mut shared);
         assert!(shared.complete);
-        assert_statistics(&shared, &expected);
-        assert!(shared.rms_counts.iter().all(|count| *count == 8));
+        assert_eq!(shared.max_peak, 2.0);
+        let old_tail = shared.peaks[1];
+        let mut replay = WaveformAccumulator::new(shared.clone());
+        replay.push(0.0, &[0.25, 0.125, 0.25, 0.125], rate, 2);
+        replay.publish(&mut shared);
+        assert!(!shared.complete);
+        assert_eq!(shared.peaks[0], Some(0.25));
+        assert_eq!(shared.left_peaks[0], Some(0.25));
+        assert_eq!(shared.right_peaks[0], Some(0.125));
+        assert_eq!(shared.left_rms[0], Some(0.25));
+        assert_eq!(shared.right_rms[0], Some(0.125));
+        assert_eq!(shared.rms_counts[0], 4);
+        assert_eq!(shared.left_rms_counts[0], 2);
+        assert_eq!(shared.peaks[1], old_tail);
+        replay.begin_traversal();
+        replay.push(0.0, &[0.0625, 0.03125], rate, 2);
+        replay.publish(&mut shared);
+        assert_eq!(shared.peaks[0], Some(0.0625));
+        assert_eq!(shared.left_rms[0], Some(0.0625));
+        assert_eq!(shared.right_rms[0], Some(0.03125));
+        assert_eq!(shared.rms_counts[0], 2);
+        assert_eq!(shared.left_rms_counts[0], 1);
+        assert_eq!(shared.peaks[1], old_tail);
     }
 
     #[test]

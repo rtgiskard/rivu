@@ -82,6 +82,15 @@ impl Core {
             {
                 self.state.system.last_error = Some(message);
             }
+            AudioEvent::EqualizerSettingsFailed {
+                generation,
+                config,
+                message,
+            } if generation.is_none_or(|value| value == self.generation)
+                && *config == self.state.system.config.equalizer =>
+            {
+                self.state.system.last_error = Some(message);
+            }
             AudioEvent::DecoderStopped { generation } if generation == self.generation => {
                 // The worker has already stopped and may still be sending
                 // events while handling Configure; do not wait on a command.
@@ -182,7 +191,7 @@ impl Core {
     pub(in crate::core) fn start(&mut self, queue_id: u64, record_history: bool) -> Result<()> {
         self.start_with_status(queue_id, record_history, PlaybackStatus::Playing)
     }
-    fn start_with_status(
+    pub(in crate::core) fn start_with_status(
         &mut self,
         queue_id: u64,
         record_history: bool,
@@ -348,7 +357,11 @@ impl Core {
         }
         Ok(())
     }
-    fn retiring_audio_event(&mut self, generation: u64, event: AudioEvent) -> Result<()> {
+    pub(in crate::core) fn retiring_audio_event(
+        &mut self,
+        generation: u64,
+        event: AudioEvent,
+    ) -> Result<()> {
         match event {
             AudioEvent::Started {
                 generation: event_generation,
@@ -379,7 +392,7 @@ impl Core {
     }
     pub(in crate::core) fn finish_playback(
         &mut self,
-        snapshot: Result<Option<(u64, f64)>>,
+        snapshot: Result<Option<audio::AudioSnapshot>>,
         natural: bool,
         bookkeeping: Result<()>,
     ) -> Result<()> {
@@ -394,6 +407,8 @@ impl Core {
         };
         // Fence queued events even when stopping or saving the count fails.
         self.generation = self.generation.wrapping_add(1);
+        self.processing.audition = None;
+        self.processing.audition_generation = None;
         self.state.playback.status = PlaybackStatus::Stopped;
         self.state.playback.position = 0.0;
         self.state.playback.seek_revision = self.state.playback.seek_revision.wrapping_add(1);
@@ -406,16 +421,16 @@ impl Core {
         };
         let mut final_activity = None;
         if let Some(playback) = &mut self.playback {
-            if let Some((snapshot_generation, heard)) = snapshot
-                && snapshot_generation == generation
-                && heard.is_finite()
+            if let Some(snapshot) = snapshot
+                && snapshot.generation == generation
+                && snapshot.listened_seconds.is_finite()
             {
                 // Late paused confirmations still count as heard audio, but
                 // their activity timestamp cannot cross the pause boundary.
                 let heard_at = playback
                     .paused_at
                     .map_or_else(now, |paused_at| now().min(paused_at));
-                if playback.record_heard(heard, heard_at) {
+                if playback.record_heard(snapshot.listened_seconds, heard_at) {
                     self.state.playback.last_heard_at = playback.last_heard_at;
                 }
             }

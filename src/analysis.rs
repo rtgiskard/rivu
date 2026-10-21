@@ -1,8 +1,8 @@
-use crate::config::{AnalysisWindow, Config};
+use crate::config::{AnalysisWindow, Config, VisualizationSignal};
 use parking_lot::RwLock;
 use ringbuf::{
     HeapCons, HeapProd, HeapRb,
-    traits::{Consumer, Observer},
+    traits::{Consumer, Observer, Producer},
 };
 use rustfft::{Fft, FftPlanner, num_complex::Complex32};
 use std::{
@@ -215,6 +215,7 @@ pub struct AnalysisSettings {
     pub fps: u32,
     pub fft_size: u32,
     pub window: AnalysisWindow,
+    pub signal: VisualizationSignal,
 }
 
 impl From<&Config> for AnalysisSettings {
@@ -223,6 +224,7 @@ impl From<&Config> for AnalysisSettings {
             fps: config.analysis_fps,
             fft_size: config.analysis_fft_size,
             window: config.analysis_window,
+            signal: config.visualization_signal,
         }
     }
 }
@@ -241,7 +243,7 @@ impl AnalysisSettings {
 pub(crate) struct TapFrame {
     pub samples: [f32; 2],
     pub epoch: u64,
-    /// Complete display transition identity captured by the audio callback.
+    /// Complete display transition identity captured by the audio worker.
     pub demand_token: u64,
     /// The preceding tap frame was dropped; never bridge this gap in an FFT.
     pub gap: bool,
@@ -320,6 +322,73 @@ impl AnalysisControl {
     }
 }
 
+/// The audio worker is the sole producer; device callbacks never inspect analysis.
+pub(crate) struct AnalysisProducer {
+    ring: HeapProd<TapFrame>,
+    control: Arc<AnalysisControl>,
+    gap: bool,
+}
+
+impl AnalysisProducer {
+    pub(crate) fn discontinuity(&mut self) {
+        self.gap = true;
+    }
+
+    pub(crate) fn push(&mut self, pcm: &[f32], weights: &[[f32; 2]]) {
+        let token = self.control.display_token();
+        let epoch = self.control.epoch.load(Ordering::Acquire);
+        if weights.is_empty() || !epoch.is_multiple_of(2) || !self.control.accepts_audio_for(token)
+        {
+            self.gap = true;
+            return;
+        }
+        let gap = self.gap;
+        let frames = pcm.len() / weights.len();
+        let accepted = self
+            .ring
+            .push_iter(
+                pcm.chunks_exact(weights.len())
+                    .enumerate()
+                    .map(|(index, frame)| {
+                        let mut samples = [0.0; 2];
+                        for (sample, weight) in frame.iter().zip(weights) {
+                            samples[0] += sample * weight[0];
+                            samples[1] += sample * weight[1];
+                        }
+                        TapFrame {
+                            samples,
+                            epoch,
+                            demand_token: token,
+                            gap: gap && index == 0,
+                        }
+                    }),
+            );
+        self.gap = accepted < frames;
+        if self.gap {
+            self.control.tap_overflow.store(true, Ordering::Release);
+        }
+    }
+}
+
+#[cfg(test)]
+impl AnalysisProducer {
+    pub(crate) fn capture_for_test(
+        worker: &AnalysisWorker,
+        capacity: usize,
+    ) -> (Self, HeapCons<TapFrame>) {
+        use ringbuf::traits::Split;
+        let (ring, consumer) = HeapRb::new(capacity).split();
+        (
+            Self {
+                ring,
+                control: Arc::clone(&worker.control),
+                gap: false,
+            },
+            consumer,
+        )
+    }
+}
+
 pub(crate) struct AnalysisWorker {
     pub control: Arc<AnalysisControl>,
     pub ring: Arc<HeapRb<TapFrame>>,
@@ -360,6 +429,17 @@ impl AnalysisWorker {
     pub fn producer(&self) -> HeapProd<TapFrame> {
         HeapProd::new(self.ring.clone())
     }
+    pub(crate) fn audio_producer(&self) -> AnalysisProducer {
+        AnalysisProducer {
+            ring: self.producer(),
+            control: Arc::clone(&self.control),
+            gap: false,
+        }
+    }
+
+    pub(crate) fn settings(&self) -> AnalysisSettings {
+        *self.control.settings.read()
+    }
     pub fn set_playback_active(&self, enabled: bool) {
         if self.control.playback_active.swap(enabled, Ordering::AcqRel) != enabled {
             self.control.frame_requested.store(false, Ordering::Release);
@@ -376,8 +456,8 @@ impl AnalysisWorker {
         if (current & 1 != 0) == enabled {
             return;
         }
-        // Use the same reset barrier as sample-rate changes. The callback sees
-        // only atomics; the analysis thread owns every allocation and drop.
+        // Use the same reset barrier as sample-rate changes. The analysis
+        // thread owns every FFT allocation and drop.
         self.control.epoch.fetch_add(1, Ordering::AcqRel);
         self.control.frame_requested.store(false, Ordering::Release);
         self.control.still_mode.store(
@@ -917,6 +997,36 @@ fn analyze(
 mod tests {
     use super::*;
 
+    #[test]
+    fn worker_producer_marks_overflow_and_suspended_gaps_with_native_downmix() {
+        let worker = AnalysisWorker::new(Arc::default()).unwrap();
+        worker.set_playback_active(true);
+        worker.control.set_display_enabled(true);
+        let (mut producer, mut captured) = AnalysisProducer::capture_for_test(&worker, 2);
+        let weights = [[1.0, 0.0], [0.0, 1.0], [0.5, 0.5]];
+        producer.push(&[1.0, 2.0, 4.0, 2.0, 4.0, 8.0, 3.0, 6.0, 12.0], &weights);
+        assert_eq!(captured.try_pop().unwrap().samples, [3.0, 4.0]);
+        assert_eq!(captured.try_pop().unwrap().samples, [6.0, 8.0]);
+        assert!(captured.try_pop().is_none());
+        assert!(worker.control.tap_overflow.load(Ordering::Acquire));
+        producer.push(&[0.5, 1.0, 2.0], &weights);
+        let recovered = captured.try_pop().unwrap();
+        assert_eq!(recovered.samples, [1.5, 2.0]);
+        assert!(recovered.gap);
+        worker.set_still_mode(true);
+        producer.push(&[99.0; 3], &weights);
+        assert!(captured.try_pop().is_none());
+        worker.set_still_mode(false);
+        producer.push(&[0.5, 1.0, 2.0], &weights);
+        assert!(captured.try_pop().unwrap().gap);
+        worker.control.set_display_enabled(false);
+        producer.push(&[99.0; 3], &weights);
+        assert!(captured.try_pop().is_none());
+        worker.control.set_display_enabled(true);
+        producer.push(&[0.5, 1.0, 2.0], &weights);
+        assert!(captured.try_pop().unwrap().gap);
+    }
+
     const DENSITY_DEMAND: VisualizerDemand = VisualizerDemand {
         stereo_density: true,
         spatial_spectrum: false,
@@ -944,6 +1054,7 @@ mod tests {
                 fps: 20,
                 fft_size: 512,
                 window: AnalysisWindow::None,
+                signal: VisualizationSignal::After,
             },
             5120,
         );
@@ -982,6 +1093,7 @@ mod tests {
             fps: 20,
             fft_size: 4096,
             window: AnalysisWindow::None,
+            signal: VisualizationSignal::After,
         };
         let mut combined = SpectrumAnalyzer::new(settings, 32768);
         combined.set_visualizer_demand(ALL_DEMAND);
@@ -1209,6 +1321,7 @@ mod tests {
                         fps: 20,
                         fft_size: 4096,
                         window,
+                        signal: VisualizationSignal::After,
                     },
                     32768,
                 );
@@ -1238,6 +1351,7 @@ mod tests {
                 fps: 20,
                 fft_size: 512,
                 window: AnalysisWindow::None,
+                signal: VisualizationSignal::After,
             },
             8000,
         );
@@ -1458,6 +1572,7 @@ mod tests {
             fps: 60,
             fft_size: 512,
             window: AnalysisWindow::None,
+            signal: VisualizationSignal::After,
         });
         worker.control.set_display_demand(DisplayDemand {
             enabled: true,
@@ -1535,6 +1650,7 @@ mod tests {
             fps: 60,
             fft_size: 512,
             window: AnalysisWindow::None,
+            signal: VisualizationSignal::After,
         });
         worker.control.set_display_demand(DisplayDemand {
             enabled: true,
@@ -1627,6 +1743,7 @@ mod tests {
             fps: 60,
             fft_size: 512,
             window: AnalysisWindow::None,
+            signal: VisualizationSignal::After,
         });
         worker.control.set_display_demand(DisplayDemand {
             enabled: true,
@@ -1761,6 +1878,7 @@ mod tests {
             fps: 5,
             fft_size: 8192,
             window: AnalysisWindow::None,
+            signal: VisualizationSignal::After,
         });
         worker.reset(192_000);
         set_test_playback(&worker, true);
@@ -1815,6 +1933,7 @@ mod tests {
             fps: 5,
             fft_size: 512,
             window: AnalysisWindow::None,
+            signal: VisualizationSignal::After,
         });
         set_test_playback(&worker, true);
         let mut producer = worker.producer();
@@ -1866,6 +1985,7 @@ mod tests {
             fps: 60,
             fft_size: 1024,
             window: AnalysisWindow::None,
+            signal: VisualizationSignal::After,
         });
         worker.control.set_display_demand(DisplayDemand {
             enabled: true,
@@ -1912,6 +2032,7 @@ mod tests {
             fps: 60,
             fft_size: 512,
             window: AnalysisWindow::None,
+            signal: VisualizationSignal::After,
         });
         worker.control.set_display_demand(DisplayDemand {
             enabled: true,
@@ -1953,6 +2074,7 @@ mod tests {
             fps: 60,
             fft_size: 512,
             window: AnalysisWindow::None,
+            signal: VisualizationSignal::After,
         });
         worker.control.set_display_demand(DisplayDemand {
             enabled: true,
@@ -2029,6 +2151,7 @@ mod tests {
             fps: 60,
             fft_size: 512,
             window: AnalysisWindow::None,
+            signal: VisualizationSignal::After,
         });
         set_test_playback(&worker, true);
         let mut producer = worker.producer();
@@ -2086,6 +2209,7 @@ mod tests {
                 fps: 5,
                 fft_size: 512,
                 window: AnalysisWindow::None,
+                signal: VisualizationSignal::After,
             });
             set_test_playback(&worker, true);
             let mut producer = worker.producer();
@@ -2120,6 +2244,7 @@ mod tests {
             fps: 60,
             fft_size: 512,
             window: AnalysisWindow::None,
+            signal: VisualizationSignal::After,
         };
         worker.configure(settings);
         worker.control.set_display_demand(DisplayDemand {
@@ -2225,6 +2350,7 @@ mod tests {
             fps: 60,
             fft_size: 512,
             window: AnalysisWindow::None,
+            signal: VisualizationSignal::After,
         };
         worker.configure(settings);
         set_test_playback(&worker, true);
@@ -2329,6 +2455,7 @@ mod tests {
                     fps: 20,
                     fft_size,
                     window,
+                    signal: VisualizationSignal::After,
                 };
                 // A1760 is both a musical center and FFT-bin aligned at every size.
                 let rate = 56_320;
@@ -2370,6 +2497,7 @@ mod tests {
                 fps: 20,
                 fft_size,
                 window: AnalysisWindow::None,
+                signal: VisualizationSignal::After,
             };
             for amplitude in [0.5_f32, 1e-6] {
                 let mut analyzer = SpectrumAnalyzer::new(settings, 48_000);
@@ -2420,6 +2548,7 @@ mod tests {
             fps: 5,
             fft_size: 32768,
             window: AnalysisWindow::None,
+            signal: VisualizationSignal::After,
         };
         worker.configure(settings);
         worker.reset(192_000);

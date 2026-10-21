@@ -184,6 +184,7 @@ pub enum ViewResponse {
     DuplicateMembers(Page<crate::model::DuplicateMember>),
     RelocationTask(crate::model::RelocationTaskStatus),
     PlaylistEntryLocations(Vec<PlaylistEntryLocation>),
+    ProcessingTask(Option<Box<crate::model::ProcessingTaskStatus>>),
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum QueryError {
@@ -285,6 +286,7 @@ pub struct Ack {
     pub scan_id: Option<u64>,
     /// Present only when this command accepted a manual relocation task.
     pub relocation_id: Option<u64>,
+    pub processing_id: Option<u64>,
 }
 
 impl Ack {
@@ -302,6 +304,7 @@ impl Ack {
             revision,
             scan_id: None,
             relocation_id: None,
+            processing_id: None,
         }
     }
 

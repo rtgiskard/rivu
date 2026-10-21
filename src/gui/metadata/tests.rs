@@ -125,6 +125,7 @@ fn ack(ok: bool) -> Ack {
         revision: 0,
         scan_id: None,
         relocation_id: None,
+        processing_id: None,
     }
 }
 
