@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:rivu:audio-processing:request:1",
+  "title": "Rivu local offline neural inference request v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "task_id", "operation", "input_path", "output_dir", "model_manifest"],
+  "properties": {
+    "version": {"const": 1},
+    "task_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "operation": {"enum": ["speech", "separate"]},
+    "input_path": {"type": "string", "pattern": "^/", "description": "Existing local IEEE float32 WAV/WAVEX/RF64; 8000..192000Hz; nonempty <=4h. Speech mono/stereo; separation stereo only."},
+    "output_dir": {"type": "string", "pattern": "^/", "description": "Must not exist; existing parent. Worker owns only this newly created directory. Source is never modified. Results are published by complete event only. Caller terminates/reaps on cancellation and removes its task scratch."},
+    "model_manifest": {"type": "string", "pattern": "^/", "description": "Explicit node-local prepare.py manifest. Speech IDs: MossFormer2_SE_48K, nsnet2, DeepFilterNet3. Separation IDs: melband_roformer_kim, htdemucs. Exact dependency versions, SHA256 of every local artifact and factual weight-license/provenance records required; no license grant inferred. No global registry, implicit download, alternate model or device fallback."},
+    "device": {"enum": ["cpu", "cuda"], "default": "cpu"},
+    "threads": {"type": "integer", "minimum": 1, "maximum": 8, "default": 4},
+    "parameters": {"type": "object"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"operation": {"const": "speech"}}},
+      "then": {"properties": {"parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "wet_mix": {"type": "number", "minimum": 0, "maximum": 1, "default": 1, "description": "Source-rate linear dry/wet blend. Zero preserves original samples bit-exactly."},
+          "attenuation_limit_db": {"type": "number", "minimum": 0, "maximum": 100, "default": 80, "description": "Minimum spectral mask gain, not waveform clipping or level normalization."},
+          "post_filter": {"type": "boolean", "default": false, "description": "Only DeepFilterNet3 supports this parameter. Presence is rejected for MossFormer2 or NSNet2, including false."}
+        }
+      }}}
+    },
+    {
+      "if": {"properties": {"operation": {"const": "separate"}}},
+      "then": {"properties": {"parameters": {
+        "additionalProperties": false,
+        "properties": {"overlap": {"type": "number", "minimum": 0, "maximum": 0.875, "default": 0.75}}
+      }}}
+    }
+  ]
+}

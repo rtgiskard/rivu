@@ -1,0 +1,359 @@
+//! Linear-phase equalization with a bounded, uniformly partitioned FIR.
+//!
+//! The desired magnitude is the selected parametric EQ's settled response. A
+//! frequency-sampled, Blackman-windowed symmetric impulse approximates that
+//! magnitude; it deliberately does not preserve the IIR's nonlinear phase.
+//! Preparation owns FFT planning and allocation. Processing uses fixed 256-frame
+//! partitions, no allocation, no file access, and no output limiting. The causal
+//! delay includes both the symmetric kernel's group delay and one partition of
+//! buffering. Offline callers flush zeros, discard `latency_frames()`, and keep
+//! their original frame count to obtain source-aligned, zero-extended audio.
+
+use std::{f64::consts::PI, sync::Arc};
+
+use anyhow::{Result, ensure};
+use rustfft::{Fft, FftPlanner, num_complex::Complex};
+use serde::{Deserialize, Serialize};
+
+use crate::equalizer::{EqualizerConfig, MAX_CHANNELS};
+
+pub const MIN_TAPS: usize = 3;
+pub const MAX_TAPS: usize = 16_385;
+const PARTITION: usize = 256;
+const FFT_SIZE: usize = PARTITION * 2;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EqImplementation {
+    #[default]
+    Iir,
+    LinearPhase {
+        taps: usize,
+    },
+}
+
+impl EqImplementation {
+    pub fn validate(&self) -> Result<()> {
+        if let Self::LinearPhase { taps } = self {
+            validate_taps(*taps)?;
+        }
+        Ok(())
+    }
+}
+
+fn validate_taps(taps: usize) -> Result<()> {
+    ensure!(
+        (MIN_TAPS..=MAX_TAPS).contains(&taps) && taps % 2 == 1,
+        "linear-phase FIR requires an odd tap count in {MIN_TAPS}..={MAX_TAPS}"
+    );
+    Ok(())
+}
+
+pub struct FirEqualizer {
+    channels: usize,
+    taps: usize,
+    bypass: bool,
+    partitions: usize,
+    position: usize,
+    history_position: usize,
+    kernels: Vec<Complex<f32>>,
+    histories: Vec<Complex<f32>>,
+    input: Vec<f32>,
+    output: Vec<f32>,
+    overlap: Vec<f32>,
+    work: Vec<Complex<f32>>,
+    sum: Vec<Complex<f32>>,
+    scratch: Vec<Complex<f32>>,
+    forward: Arc<dyn Fft<f32>>,
+    inverse: Arc<dyn Fft<f32>>,
+}
+
+impl FirEqualizer {
+    pub fn new(
+        config: &EqualizerConfig,
+        sample_rate: u32,
+        channels: usize,
+        taps: usize,
+    ) -> Result<Self> {
+        validate_taps(taps)?;
+        config.validate_for_stream(sample_rate, channels)?;
+        ensure!(
+            channels <= MAX_CHANNELS,
+            "FIR supports at most {MAX_CHANNELS} channels"
+        );
+        let mut planner = FftPlanner::new();
+        let forward = planner.plan_fft_forward(FFT_SIZE);
+        let inverse = planner.plan_fft_inverse(FFT_SIZE);
+        let scratch_len = forward
+            .get_inplace_scratch_len()
+            .max(inverse.get_inplace_scratch_len());
+        let bypass = !config.enabled;
+        let partitions = if bypass { 0 } else { taps.div_ceil(PARTITION) };
+        let spectra_len = channels * partitions * FFT_SIZE;
+        let mut equalizer = Self {
+            channels,
+            taps,
+            bypass,
+            partitions,
+            position: 0,
+            history_position: 0,
+            kernels: vec![Complex::default(); spectra_len],
+            histories: vec![Complex::default(); spectra_len],
+            input: vec![0.0; if bypass { 0 } else { channels * PARTITION }],
+            output: vec![0.0; if bypass { 0 } else { channels * PARTITION }],
+            overlap: vec![0.0; if bypass { 0 } else { channels * PARTITION }],
+            work: vec![Complex::default(); FFT_SIZE],
+            sum: vec![Complex::default(); FFT_SIZE],
+            scratch: vec![Complex::default(); scratch_len],
+            forward,
+            inverse,
+        };
+        if !bypass {
+            for channel in 0..channels {
+                let impulse = design_kernel(config, sample_rate, channels, channel, taps)?;
+                for partition in 0..partitions {
+                    equalizer.work.fill(Complex::default());
+                    for (bin, &value) in equalizer
+                        .work
+                        .iter_mut()
+                        .zip(impulse[partition * PARTITION..].iter().take(PARTITION))
+                    {
+                        bin.re = value;
+                    }
+                    equalizer
+                        .forward
+                        .process_with_scratch(&mut equalizer.work, &mut equalizer.scratch);
+                    let start = (channel * partitions + partition) * FFT_SIZE;
+                    equalizer.kernels[start..start + FFT_SIZE].copy_from_slice(&equalizer.work);
+                }
+            }
+        }
+        Ok(equalizer)
+    }
+
+    pub fn latency_frames(&self) -> usize {
+        if self.bypass {
+            0
+        } else {
+            (self.taps - 1) / 2 + PARTITION
+        }
+    }
+
+    /// Zeros required after the final input to exhaust the complete causal tail.
+    pub fn tail_frames(&self) -> usize {
+        if self.bypass {
+            0
+        } else {
+            self.taps - 1 + PARTITION
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.position = 0;
+        self.history_position = 0;
+        self.histories.fill(Complex::default());
+        self.input.fill(0.0);
+        self.output.fill(0.0);
+        self.overlap.fill(0.0);
+    }
+
+    /// Whole frames only. Invalid active input is rejected before mutation.
+    /// Disabled EQ preserves every input bit, including non-finite payloads.
+    pub fn process_interleaved(&mut self, samples: &mut [f32]) -> Result<()> {
+        ensure!(
+            samples.len().is_multiple_of(self.channels),
+            "incomplete FIR frame"
+        );
+        if self.bypass {
+            return Ok(());
+        }
+        ensure!(
+            samples.iter().all(|value| value.is_finite()),
+            "FIR input is not finite"
+        );
+        for frame in samples.chunks_exact_mut(self.channels) {
+            for (channel, value) in frame.iter_mut().enumerate() {
+                let index = channel * PARTITION + self.position;
+                self.input[index] = *value;
+                *value = self.output[index];
+            }
+            self.position += 1;
+            if self.position == PARTITION {
+                self.convolve_partition();
+                self.position = 0;
+            }
+        }
+        Ok(())
+    }
+
+    fn convolve_partition(&mut self) {
+        for channel in 0..self.channels {
+            self.work.fill(Complex::default());
+            for (bin, &sample) in self
+                .work
+                .iter_mut()
+                .zip(&self.input[channel * PARTITION..(channel + 1) * PARTITION])
+            {
+                bin.re = sample;
+            }
+            self.forward
+                .process_with_scratch(&mut self.work, &mut self.scratch);
+            let start = (channel * self.partitions + self.history_position) * FFT_SIZE;
+            self.histories[start..start + FFT_SIZE].copy_from_slice(&self.work);
+            self.sum.fill(Complex::default());
+            for partition in 0..self.partitions {
+                let history =
+                    (self.history_position + self.partitions - partition) % self.partitions;
+                let input = (channel * self.partitions + history) * FFT_SIZE;
+                let kernel = (channel * self.partitions + partition) * FFT_SIZE;
+                for ((sum, signal), filter) in self
+                    .sum
+                    .iter_mut()
+                    .zip(&self.histories[input..input + FFT_SIZE])
+                    .zip(&self.kernels[kernel..kernel + FFT_SIZE])
+                {
+                    *sum += *signal * *filter;
+                }
+            }
+            self.inverse
+                .process_with_scratch(&mut self.sum, &mut self.scratch);
+            for index in 0..PARTITION {
+                let output = channel * PARTITION + index;
+                self.output[output] = self.sum[index].re / FFT_SIZE as f32 + self.overlap[output];
+                self.overlap[output] = self.sum[index + PARTITION].re / FFT_SIZE as f32;
+            }
+        }
+        self.history_position = (self.history_position + 1) % self.partitions;
+    }
+}
+
+fn design_kernel(
+    config: &EqualizerConfig,
+    sample_rate: u32,
+    channels: usize,
+    channel: usize,
+    taps: usize,
+) -> Result<Vec<f32>> {
+    let size = (taps * 8).next_power_of_two();
+    let frequencies: Vec<_> = (0..=size / 2)
+        .map(|bin| bin as f64 * f64::from(sample_rate) / size as f64)
+        .collect();
+    let mut decibels = vec![0.0; frequencies.len()];
+    config.sample_response_db(sample_rate, channels, channel, &frequencies, &mut decibels)?;
+    let mut spectrum = vec![Complex::<f64>::default(); size];
+    for (bin, db) in decibels.into_iter().enumerate() {
+        let magnitude = 10.0_f64.powf(db / 20.0);
+        ensure!(magnitude.is_finite(), "FIR target response is not finite");
+        spectrum[bin].re = magnitude;
+        if bin != 0 && bin != size / 2 {
+            spectrum[size - bin].re = magnitude;
+        }
+    }
+    FftPlanner::new()
+        .plan_fft_inverse(size)
+        .process(&mut spectrum);
+    let center = (taps - 1) / 2;
+    let mut impulse = vec![0.0; taps];
+    for index in 0..=center {
+        let phase = 2.0 * PI * index as f64 / (taps - 1) as f64;
+        let window = 0.42 - 0.5 * phase.cos() + 0.08 * (2.0 * phase).cos();
+        let lag = (index + size - center) % size;
+        let value = (spectrum[lag].re * window / size as f64) as f32;
+        ensure!(value.is_finite(), "FIR impulse is not finite");
+        impulse[index] = value;
+        impulse[taps - 1 - index] = value;
+    }
+    Ok(impulse)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::equalizer::{ChannelTarget, EqBand};
+
+    #[test]
+    fn unity_has_exact_declared_delay_and_reset_discards_history() {
+        let config = EqualizerConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        let mut fir = FirEqualizer::new(&config, 48_000, 2, 513).unwrap();
+        let delay = fir.latency_frames();
+        let mut input = vec![0.0; (fir.tail_frames() + 4) * 2];
+        input[0] = 0.75;
+        input[1] = -0.5;
+        fir.process_interleaved(&mut input).unwrap();
+        for (frame, pair) in input.as_chunks::<2>().0.iter().enumerate() {
+            let expected = if frame == delay {
+                [0.75, -0.5]
+            } else {
+                [0.0, 0.0]
+            };
+            assert!((pair[0] - expected[0]).abs() < 2e-6);
+            assert!((pair[1] - expected[1]).abs() < 2e-6);
+        }
+        fir.reset();
+        input.fill(0.0);
+        fir.process_interleaved(&mut input).unwrap();
+        assert!(input.iter().all(|sample| sample.abs() < 1e-7));
+    }
+
+    #[test]
+    fn actual_impulse_is_symmetric_and_channel_targeted() {
+        let config = EqualizerConfig {
+            enabled: true,
+            bands: vec![EqBand {
+                gain_db: 12.0,
+                frequency_hz: 2_000.0,
+                channels: ChannelTarget::Selected(vec![0]),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut fir = FirEqualizer::new(&config, 48_000, 2, 2049).unwrap();
+        let mut signal = vec![0.0; (fir.tail_frames() + 2) * 2];
+        signal[0] = 1.0;
+        signal[1] = 1.0;
+        fir.process_interleaved(&mut signal).unwrap();
+        for index in 0..2049 {
+            assert!(
+                (signal[(PARTITION + index) * 2] - signal[(PARTITION + 2048 - index) * 2]).abs()
+                    < 2e-6
+            );
+        }
+        let frequency = 2_000.0 / 48_000.0;
+        let response: Complex<f64> = signal
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .enumerate()
+            .map(|(index, frame)| {
+                Complex::from_polar(f64::from(frame[0]), -2.0 * PI * frequency * index as f64)
+            })
+            .sum();
+        assert!((20.0 * response.norm().log10() - 12.0).abs() < 0.1);
+        assert!((signal[fir.latency_frames() * 2 + 1] - 1.0).abs() < 2e-6);
+    }
+
+    #[test]
+    fn chunk_boundaries_do_not_change_audio_and_errors_are_atomic() {
+        let config = EqualizerConfig {
+            enabled: true,
+            preamp_db: 3.0,
+            ..Default::default()
+        };
+        let mut one = FirEqualizer::new(&config, 48_000, 1, 1025).unwrap();
+        let mut many = FirEqualizer::new(&config, 48_000, 1, 1025).unwrap();
+        let mut input: Vec<_> = (0..4000).map(|i| (i as f32 * 0.071).sin()).collect();
+        let mut split = input.clone();
+        one.process_interleaved(&mut input).unwrap();
+        for chunk in split.chunks_mut(37) {
+            many.process_interleaved(chunk).unwrap();
+        }
+        assert_eq!(input, split);
+        let mut invalid = [1.0, f32::NAN];
+        assert!(many.process_interleaved(&mut invalid).is_err());
+        assert_eq!(invalid[0], 1.0);
+        assert!(FirEqualizer::new(&config, 48_000, 1, 1024).is_err());
+    }
+}

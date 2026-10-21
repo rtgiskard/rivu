@@ -1,4 +1,5 @@
 /target/
 .cache/
+__pycache__/
 /vendor/gpui/Cargo.lock
 /vendor/gpui_wgpu/Cargo.lock

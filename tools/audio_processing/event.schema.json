@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:rivu:audio-processing:event:1",
+  "title": "One UTF-8 JSON object per stdout line; stderr is diagnostic only",
+  "type": "object",
+  "required": ["version", "task_id", "type"],
+  "properties": {
+    "version": {"const": 1},
+    "task_id": {"type": "string", "maxLength": 128},
+    "type": {"enum": ["progress", "complete", "error"]}
+  },
+  "oneOf": [
+    {
+      "required": ["stage", "completed", "total"],
+      "properties": {
+        "type": {"const": "progress"},
+        "stage": {"enum": ["inspect", "load", "inference"]},
+        "completed": {"type": "integer", "minimum": 0},
+        "total": {"type": "integer", "minimum": 1}
+      }
+    },
+    {
+      "required": ["outputs", "sample_rate", "channels", "frames", "model", "source_sha256", "request_sha256", "processing", "metrics"],
+      "properties": {
+        "type": {"const": "complete"},
+        "outputs": {
+          "type": "object",
+          "description": "Absolute task-owned float32 WAV paths, visible only after successful complete. Source frame count, channel count and sample rate exactly preserved. Samples may exceed full scale; no hidden clipping or normalization.",
+          "additionalProperties": false,
+          "properties": {
+            "speech": {"type": "string", "pattern": "^/"},
+            "vocals": {"type": "string", "pattern": "^/"},
+            "accompaniment": {"type": "string", "pattern": "^/"}
+          },
+          "oneOf": [{"required": ["speech"], "maxProperties": 1}, {"required": ["vocals", "accompaniment"], "maxProperties": 2}]
+        },
+        "sample_rate": {"type": "integer", "minimum": 8000, "maximum": 192000},
+        "channels": {"enum": [1, 2]},
+        "frames": {"type": "integer", "minimum": 1},
+        "model": {
+          "type": "object", "required": ["id", "sha256", "files"],
+          "properties": {
+            "id": {"type": "string"},
+            "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$", "description": "SHA256 of canonical manifest JSON, including model/dependency/license identities. Individual artifact hashes are in files."},
+            "files": {"type": "object", "additionalProperties": {"type": "string", "pattern": "^[a-f0-9]{64}$"}},
+            "provenance": {"type": "object", "description": "Factual model/engine revision, source, known license or unresolved status; never an inferred permission grant."}
+          }
+        },
+        "source_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "request_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "processing": {"type": "object"},
+        "metrics": {"type": "object"}
+      }
+    },
+    {
+      "required": ["code", "message"],
+      "properties": {
+        "type": {"const": "error"},
+        "code": {"type": "string"},
+        "message": {"type": "string"}
+      },
+      "description": "Process exits nonzero. No result is committed. Cancellation is terminating/reaping the subprocess, not a stdin protocol; caller owns scratch cleanup. A partial directory after signal termination is not a successful output."
+    }
+  ]
+}
