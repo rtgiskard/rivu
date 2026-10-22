@@ -269,9 +269,13 @@ def process(request, emit):
                     writers[stem].write(chunk)
                     sample_io_seconds += time.perf_counter()-io_start
                     peaks[stem] = max(peaks[stem], float(np.max(np.abs(chunk))))
-                input_energy += float(np.square(original.astype("float64")).sum())
-                output_energy += float(np.square(result.astype("float64")).sum())
+                # Accumulate in float64 without two full-size float64 temporaries.
+                input_energy += float(np.einsum("ij,ij->", original, original, dtype=np.float64, optimize=False))
+                output_energy += float(np.einsum("ij,ij->", result, result, dtype=np.float64, optimize=False))
                 block_times.append(time.perf_counter()-block_start)
+                # Views in result/original/chunks otherwise retain the previous
+                # context buffers while the next inference allocates its output.
+                del audio, converted, inferred, restored, result, original, chunks, chunk
                 emit("progress", stage="inference", completed=end, total=info.frames)
         require(digest(source) == source_hash, "source_changed", "source changed during processing")
         for path in outputs.values():

@@ -224,6 +224,7 @@ struct ImpulseRepair {
     config: ImpulseConfig,
     channels: usize,
     radius: usize,
+    floor: f32,
     data: Vec<f32>,
     filled: usize,
     processed: u64,
@@ -233,10 +234,12 @@ struct ImpulseRepair {
 impl ImpulseRepair {
     fn new(config: ImpulseConfig, channels: usize) -> Self {
         let radius = config.max_width + 2;
+        let floor = 10.0_f32.powf(config.floor_dbfs / 20.0);
         Self {
             config,
             channels,
             radius,
+            floor,
             data: vec![0.0; (2 * radius + 1) * channels],
             filled: radius,
             processed: 0,
@@ -267,7 +270,7 @@ impl ImpulseRepair {
     fn repair(&mut self) {
         let r = self.radius;
         let c = self.channels;
-        let floor = 10.0_f32.powf(self.config.floor_dbfs / 20.0);
+        let floor = self.floor;
         for ch in 0..c {
             let left = self.data[(r - 1) * c + ch];
             let center = self.data[r * c + ch];
@@ -361,6 +364,9 @@ pub struct Denoiser {
     minimum_period: usize,
     attack: f32,
     release: f32,
+    floor: f32,
+    adaptive_smoothing: f32,
+    adaptive_base: f32,
 }
 
 impl Denoiser {
@@ -419,6 +425,15 @@ impl Denoiser {
         };
         let attack = coefficient(config.attack_ms);
         let release = coefficient(config.release_ms);
+        let floor = 10.0_f32.powf(config.noise_floor_db / 20.0);
+        let adaptive_smoothing = (-(hop as f32) / (0.08 * sample_rate as f32)).exp();
+        let adaptive_base = (-(hop as f32) / (0.25 * sample_rate as f32)).exp();
+        // Only a partial wet blend needs an aligned copy of the original.
+        let dry_capacity = if !bypass && config.wet < 1.0 {
+            (size + 32) * channels
+        } else {
+            0
+        };
         Ok(Self {
             config,
             sample_rate,
@@ -430,7 +445,7 @@ impl Denoiser {
             emitted: 0,
             finished: false,
             poisoned: false,
-            dry: VecDeque::with_capacity((size + 32) * channels),
+            dry: VecDeque::with_capacity(dry_capacity),
             hum,
             impulse,
             frame: vec![0.0; channels],
@@ -460,6 +475,9 @@ impl Denoiser {
             minimum_period: ((sample_rate as usize) / hop).max(1),
             attack,
             release,
+            floor,
+            adaptive_smoothing,
+            adaptive_base,
         })
     }
 
@@ -525,7 +543,9 @@ impl Denoiser {
             if index % self.hop == 0 {
                 self.check_cancel(cancel)?;
             }
-            self.dry.extend(frame.iter().copied());
+            if self.config.wet < 1.0 {
+                self.dry.extend(frame.iter().copied());
+            }
             self.received += 1;
             if let Some(repair) = &mut self.impulse {
                 if !repair.push(frame, None) {
@@ -543,10 +563,6 @@ impl Denoiser {
     fn emit(&mut self, wet_frame: usize, output: &mut Vec<f32>) {
         let wet = self.config.wet;
         for ch in 0..self.channels {
-            let dry = self
-                .dry
-                .pop_front()
-                .expect("source frame precedes aligned output");
             let processed = if self.config.mode == DenoiseMode::Off {
                 self.frame[ch]
             } else {
@@ -555,6 +571,10 @@ impl Denoiser {
             output.push(if wet == 1.0 {
                 processed
             } else {
+                let dry = self
+                    .dry
+                    .pop_front()
+                    .expect("source frame precedes aligned output");
                 dry + wet * (processed - dry)
             });
         }
@@ -642,8 +662,8 @@ impl Denoiser {
         }
         let first = self.analyzed == 0;
         if self.config.mode == DenoiseMode::Adaptive {
-            let smoothing = (-(self.hop as f32) / (0.08 * self.sample_rate as f32)).exp();
-            let base = (-(self.hop as f32) / (0.25 * self.sample_rate as f32)).exp();
+            let smoothing = self.adaptive_smoothing;
+            let base = self.adaptive_base;
             let rotate_minimum = self.analyzed.is_multiple_of(self.minimum_period);
             for k in 0..bins {
                 let p = self.smoothed_power[k].max(MIN_POWER);
@@ -700,7 +720,7 @@ impl Denoiser {
                 }
             }
         }
-        let floor = 10.0_f32.powf(self.config.noise_floor_db / 20.0);
+        let floor = self.floor;
         for k in 0..bins {
             let power = self.power[k].max(MIN_POWER);
             let noise = (self.noise[k] * self.config.strength).max(MIN_POWER);
@@ -1156,6 +1176,60 @@ mod tests {
             .unwrap();
         processor.finish(&mut second, &mut || false).unwrap();
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn partial_wet_blends_remain_aligned_through_short_multichannel_tails() {
+        let channels = 6;
+        for mode in [
+            DenoiseMode::Off,
+            DenoiseMode::Stationary,
+            DenoiseMode::Profile,
+            DenoiseMode::Adaptive,
+        ] {
+            for frames in [1, 5, 9, 63, 127, 128, 255, 257, 713] {
+                let input = noise(frames * channels, 261, 0.1);
+                let config = DenoiseConfig {
+                    mode,
+                    fft_size: 256,
+                    hum: HumConfig {
+                        enabled: true,
+                        ..Default::default()
+                    },
+                    impulse: ImpulseConfig {
+                        enabled: true,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                };
+                let captured = (mode == DenoiseMode::Profile)
+                    .then(|| profile(&vec![0.0; 64 * channels], 48_000, channels, 256));
+                let full = run(
+                    config.clone(),
+                    48_000,
+                    channels,
+                    &input,
+                    captured.clone(),
+                    17,
+                );
+                for wet in [0.25, 0.75] {
+                    let blended = run(
+                        DenoiseConfig {
+                            wet,
+                            ..config.clone()
+                        },
+                        48_000,
+                        channels,
+                        &input,
+                        captured.clone(),
+                        113,
+                    );
+                    for ((dry, processed), mixed) in input.iter().zip(&full).zip(&blended) {
+                        assert_eq!(*mixed, *dry + wet * (*processed - *dry));
+                    }
+                }
+            }
+        }
     }
 
     #[test]

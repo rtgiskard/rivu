@@ -42,9 +42,11 @@
 //!
 //! Preparation and processing belong on a scheduling/file-job thread, never a
 //! device callback. Internal storage is bounded by FFT size, channels and repair
-//! width, independent of source duration. The caller owns output capacity and
-//! must drain it between calls. Cancellation invalidates a partial job until `reset`; the
-//! caller must discard its partial result. No source file is opened or modified.
+//! width, independent of source duration. Full-wet processing retains no dry copy;
+//! partial-wet processing retains only the aligned lookahead. The caller owns
+//! output capacity and must drain it between calls. Cancellation invalidates a
+//! partial job until `reset`; the caller must discard its partial result. No
+//! source file is opened or modified.
 
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};

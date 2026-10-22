@@ -669,3 +669,93 @@ fullband music evaluation, and device-specific underrun/deadline evidence remain
 explicit gaps. Neither reference parity, scalar improvement nor reconstruction
 closes them. Additional evidence must identify its corpus, settings and limits;
 it must not be described as listening that did not occur.
+
+=== Implementation cost audit
+
+The denoiser prepares fixed impulse thresholds and spectral gain coefficients
+once. Full-wet processing no longer retains or copies a dry lookahead queue;
+partial-wet processing still retains the source-aligned original. Algorithms,
+quality controls, stream geometry and reset/cancellation contracts are unchanged.
+In the paired 48 kHz stereo consumer, all ten baseline/candidate output hashes
+matched. At FFT size 2048, full-wet preparation requested one fewer allocation
+and 16,640 fewer bytes; FFT size 8192 saved 65,792 requested bytes. Partial-wet
+capacity was unchanged, and both versions had zero allocations inside the
+preallocated processing/finish measurement. These are allocation counts and
+cumulative requested bytes, not application RSS or callback-deadline claims.
+Seven timing repetitions did not show a uniform speedup: some spectral modes
+were slightly slower. Raw observations and workload/source identities are in
+`.cache/classical-audit/results.json`.
+
+The first NSNet2 cost pass reused spectral-feature and overlap-add temporaries
+without changing its window, hop, masks or gain floor. Comparisons covered 13 lengths and
+mono/stereo under both NumPy 1.26.4 (the pinned runtime) and NumPy 2.5.4;
+features and synthesized output matched each environment's baseline exactly.
+The pinned runtime also explicitly verified in-place mask multiplication against
+the previous expression. For a 12-second stereo synthetic workload, nine
+alternating-order repetitions under 1.26.4 measured feature temporary peaks of
+18,567,672 versus 13,875,816 bytes;
+synthesis peaks were essentially unchanged (55,394,728 versus 55,394,788 bytes).
+Under 2.5.4, synthesis temporary peaks were 36,919,120 versus 27,710,208 bytes,
+and feature peaks were 9,251,860 versus 4,626,684 bytes. Timing distributions
+overlapped; neither environment establishes an end-to-end model speedup.
+Evidence is in `.cache/speech-optimize-20261023/`; `nsnet-numeric.json` identifies
+the pinned runtime, and `nsnet-numeric-numpy-2.5.4.json` identifies the other run.
+
+A subsequent pass bounds the synthesis inverse FFT to 64 frames at a time,
+releasing each batch's frame views before allocating the next. Frame accumulation
+order and transform dtype remain unchanged; output/weight arrays still scale
+with the block duration. Against the previous all-frame synthesis, 44 length and
+mono/stereo cases in each of NumPy 1.26.4 and 2.5.4 matched their respective
+baseline exactly and left the input spectrum unchanged. These include partial
+batches, hop boundaries and long nonuniform frequency masks.
+
+At 48 kHz stereo, 576,037 samples (12 seconds plus 37 frames), traced synthesis
+peaks fell from 55,394,788 to 18,485,420 bytes in the pinned NumPy 1.26.4 runtime,
+and from 27,710,088 to 18,477,416 bytes under 2.5.4. Nine alternating-order timing
+repetitions under 1.26.4 had medians 25.899/23.107 ms and ranges
+25.125--31.046/22.243--24.647 ms (baseline/batched). The 2.5.4 distributions and
+short-input distributions overlap; no universal or end-to-end speedup is claimed.
+The real FFT/synthesis consumer and raw measurements with source identities are
+retained under `.cache/audio-review-next/`. This does not measure model execution
+or whole-process RSS.
+
+The shared neural worker accumulates RMS energy in float64 without full-block
+float64 conversion/square arrays and releases block views before the next
+inference. On 24 seconds of 192 kHz stereo data, seven energy-reduction repetitions
+measured temporary peaks of 147,456,192 versus 132,544 bytes; relative energy
+difference was about 2.05e-15 due to reduction order, not a change to audio.
+The ownership experiment demonstrates removal of previous-block references,
+not immediate OS memory reclamation or a measured Torch/ORT peak-RSS reduction.
+Kim/HTDemucs inference, overlap, context, resampling and source-minus-vocals
+semantics remain unchanged, as does DF3 inference.
+
+MossFormer2 now scales an owned padded waveform, clamps its private CPU mask,
+multiplies the spectrum and rescales synthesized samples in place. Kaldi/delta
+scratch ends before model inference; features end before synthesis and waveform
+and mask views end before the next channel. Padding still reaches the same full
+frame, with the same per-channel dither seed. The initially unexecuted candidate
+was adopted only after offline restoration of pinned Torch/torchaudio 2.11.0 CPU
+and NumPy 2.2.6 enabled real numerical execution. Across 99 length/layout/floor
+combinations, features and synthesis matched the previous expressions exactly
+and read-only caller input was preserved. The real final-ReLU/two-speaker mask
+view was checked; the source and other speaker remained unchanged.
+
+For a 12-second 48 kHz stereo DSP workload, profiler operation counts confirmed
+four fewer out-of-place multiplies and two fewer out-of-place floor operations.
+Their output buffers plus NumPy output rescaling account for 43,719,744 bytes of
+eliminated allocation per block, not a peak-memory reduction: on CPU the in-place
+mask keeps both speakers' ReLU storage alive until synthesis ends. Integrated
+seven-repetition alternating timings had medians 113.221/112.601 ms and ranges
+109.746--117.522/111.389--114.702 ms; an earlier run's candidate median was slower.
+No stable speedup is claimed. Integrated consumer evidence is
+`.cache/audio-review-next/moss-numeric-integrated.json`; preparation and adoption
+evidence is `.cache/speech-optimize-20261023/moss-adoption-evidence.json`.
+These checks execute real Torch/Kaldi/DSP, not a model or its weights. CUDA
+ownership was reviewed but not exercised.
+
+This audit's neural numerical checks do not establish real-model equivalence,
+listening quality or fixed-environment throughput. Real-weight regression tests
+require explicitly prepared manifests and their matching interpreters; skipped
+tests are not passes. Model-environment installation/download failures must be
+reported separately from the numerical and classical-render checks above.
+Worker evidence is under `.cache/audio-implementation-audit/`.

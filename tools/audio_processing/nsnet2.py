@@ -40,6 +40,44 @@ def prepare(args, target, download):
                           "weight_license":"CC-BY-4.0","code_license":"MIT",
                           "license_source":BASE+"README.md","reference":BASE+"NSNet2-baseline/enhance_onnx.py"}}
 
+def _log_power(spectrum):
+    import numpy as np
+    power = np.abs(spectrum)
+    np.square(power, out=power)
+    np.maximum(power, 1e-12, out=power)
+    np.log10(power, out=power)
+    return power.astype("float32", copy=False)
+
+
+def _synthesize(spectrum, window, window_power, hop, count):
+    """Overlap-add masked frames with bounded inverse-transform scratch storage."""
+    import numpy as np
+    from worker import require
+    window_size = len(window)
+    fft_size = (spectrum.shape[-1] - 1) * 2
+    padded_length = count + 2 * hop + (-count) % hop
+    output = np.zeros((padded_length, spectrum.shape[0]), dtype="float64")
+    weight = np.zeros(padded_length, dtype="float64")
+    windowed = None
+    # Transform bounded batches; preserve frame order and NumPy's transform dtype.
+    for first in range(0, spectrum.shape[1], 64):
+        reconstructed = np.fft.irfft(spectrum[:, first:first+64], n=fft_size, axis=-1)[..., :window_size].transpose(1, 0, 2)
+        if windowed is None:
+            windowed = np.empty((window_size, spectrum.shape[0]), dtype=reconstructed.dtype)
+        for index, frame in enumerate(reconstructed):
+            begin = (first + index) * hop
+            np.multiply(frame.T, window[:, None], out=windowed)
+            output[begin:begin+window_size] += windowed
+            weight[begin:begin+window_size] += window_power
+        # The last frame is a view; release it before allocating the next batch.
+        del frame, reconstructed
+    output = output[hop:hop+count]
+    weight = weight[hop:hop+count]
+    require(np.all(weight > 0), "alignment", "zero overlap-add weight")
+    output /= weight[:, None]
+    return output.astype("float32")
+
+
 def load_engine(manifest, base, device, controls):
     import os
     import numpy as np
@@ -53,6 +91,8 @@ def load_engine(manifest, base, device, controls):
     name = session.get_inputs()[0].name
     window_size, hop, fft_size = 960, 512, 1024
     window = np.sqrt(0.5 - 0.5*np.cos(2*np.pi*np.arange(window_size)/window_size)).astype("float32")
+    window_power = window**2
+    gain_floor = 10**(-controls.get("attenuation_limit_db",80)/20)
     def run(audio):
         count, channels = audio.shape
         # One leading hop and enough trailing zeros restore both signal edges without latency.
@@ -60,21 +100,12 @@ def load_engine(manifest, base, device, controls):
         frames = np.lib.stride_tricks.sliding_window_view(padded, window_size, axis=0)[::hop]
         # [time, channels, window] -> [channels, time, frequency]
         spectrum = np.fft.rfft(frames*window, n=fft_size, axis=-1).transpose(1, 0, 2)
-        features = np.log10(np.maximum(np.abs(spectrum)**2, 1e-12)).astype("float32")
+        features = _log_power(spectrum)
         # The graph initializes recurrent states per batch member: no cross-channel mixing.
         mask = session.run(None, {name:features})[0]
         require(mask.shape == features.shape and np.isfinite(mask).all(), "inference_output", "invalid NSNet2 spectral mask")
         # A gain floor limits suppression in dB; this is not waveform clipping/rescaling.
-        mask = np.maximum(mask, 10**(-controls.get("attenuation_limit_db",80)/20))
-        reconstructed = np.fft.irfft(spectrum*mask, n=fft_size, axis=-1)[..., :window_size].transpose(1, 0, 2)
-        output = np.zeros(padded.shape, dtype="float64")
-        weight = np.zeros(len(padded), dtype="float64")
-        for index, frame in enumerate(reconstructed):
-            begin = index*hop
-            output[begin:begin+window_size] += frame.T*window[:, None]
-            weight[begin:begin+window_size] += window**2
-        output = output[hop:hop+count]
-        weight = weight[hop:hop+count]
-        require(np.all(weight > 0), "alignment", "zero overlap-add weight")
-        return (output/weight[:,None]).astype("float32")
+        np.maximum(mask, gain_floor, out=mask)
+        spectrum *= mask
+        return _synthesize(spectrum, window, window_power, hop, count)
     return 48000, run

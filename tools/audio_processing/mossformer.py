@@ -4,7 +4,6 @@ Only explicit prepare downloads. Inference uses strict state loading, upstream
 Kaldi features/deltas and unnormalized spectral-mask synthesis (no peak rescale).
 """
 import importlib.util
-import math
 from pathlib import Path
 import shutil
 import sys
@@ -61,36 +60,57 @@ def load_model(base, device):
     model.load_state_dict(state, strict=True)
     return model.to(device).eval()
 
-def load_engine(manifest, base, device, controls):
+def _features(audio, padded_length, device):
+    """Build Kaldi features while keeping only waveform/features alive for inference."""
     import numpy as np
     import torch
     import torchaudio
+    # np.pad owns a copy even when no padding is needed; never scale caller storage.
+    padded = np.pad(audio, (0, padded_length-len(audio)))
+    waveform = torch.from_numpy(padded).mul_(32768.0)
+    fbank = torchaudio.compliance.kaldi.fbank(waveform.unsqueeze(0), dither=1.0,
+        frame_length=40.0, frame_shift=8.0, num_mel_bins=60, sample_frequency=48000, window_type="hamming")
+    first = torchaudio.functional.compute_deltas(fbank.T)
+    second = torchaudio.functional.compute_deltas(first)
+    features = torch.cat((fbank, first.T, second.T), dim=1).unsqueeze(0).to(device)
+    return waveform, features
+
+
+def _synthesize(waveform, mask, window, count, gain_floor):
+    """Consume a private CPU mask and synthesize without a second spectral buffer."""
+    import torch
+    # Pinned MaskNet's final non-inplace ReLU owns the output, not model state.
+    mask.clamp_min_(gain_floor)
+    spectrum = torch.stft(waveform, n_fft=1920, hop_length=384, win_length=1920,
+                          window=window, center=False, return_complex=True)
+    spectrum.mul_(mask)
+    enhanced = torch.istft(spectrum, n_fft=1920, hop_length=384, win_length=1920,
+                           window=window, center=False, length=len(waveform))
+    enhanced[:count].div_(32768.0)
+    return enhanced[:count].numpy()
+
+
+def load_engine(manifest, base, device, controls):
+    import numpy as np
+    import torch
     model = load_model(base,device)
     window_size, hop = 1920, 384
     window = torch.hamming_window(window_size,periodic=False)
+    gain_floor = 10**(-controls.get("attenuation_limit_db",80)/20)
     def run(audio):
         count, channels = audio.shape
         # The reference uses center=False. Pad the end to a complete frame so source tails
         # are inferred instead of silently zero-filled by istft(length=original_length).
-        padded_length = max(window_size, math.ceil(max(0,count-window_size)/hop)*hop+window_size)
+        padded_length = max(window_size, ((max(0,count-window_size)+hop-1)//hop)*hop+window_size)
         result = np.empty_like(audio)
         for channel in range(channels):
             # Equal-channel inputs get equal dither; there is still no stereo-linked mask.
             torch.manual_seed(0)
-            padded = np.pad(audio[:,channel],(0,padded_length-count))
-            waveform = torch.from_numpy(padded)*32768.0  # model's documented training units
-            fbank = torchaudio.compliance.kaldi.fbank(waveform.unsqueeze(0),dither=1.0,
-                frame_length=40.0,frame_shift=8.0,num_mel_bins=60,sample_frequency=48000,window_type="hamming")
-            first = torchaudio.functional.compute_deltas(fbank.T)
-            second = torchaudio.functional.compute_deltas(first)
-            features = torch.cat((fbank,first.T,second.T),dim=1).unsqueeze(0).to(device)
+            waveform, features = _features(audio[:,channel], padded_length, device)
             with torch.inference_mode():
                 mask = model(features)[-1].squeeze(0).T.detach().cpu()
-                mask = mask.clamp_min(10**(-controls.get("attenuation_limit_db",80)/20))
-                spectrum = torch.stft(waveform,n_fft=window_size,hop_length=hop,win_length=window_size,
-                                      window=window,center=False,return_complex=True)
-                enhanced = torch.istft(spectrum*mask,n_fft=window_size,hop_length=hop,win_length=window_size,
-                                       window=window,center=False,length=padded_length)
-            result[:,channel] = enhanced[:count].numpy()/32768.0
+                del features
+                result[:,channel] = _synthesize(waveform, mask, window, count, gain_floor)
+            del waveform, mask
         return result
     return 48000, run

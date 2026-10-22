@@ -1,6 +1,7 @@
-"""Behavioral checks; optional real-model tests require RIVU_SPEECH_MANIFEST.
+"""Behavioral checks; optional real-model tests use explicitly prepared manifests.
 
-Run with the prepared speech interpreter: python -m unittest discover -s tools/audio_processing -p 'test_*.py'
+Set RIVU_SPEECH_MANIFEST, RIVU_KIM_MANIFEST and/or RIVU_HTDEMUCS_MANIFEST.
+Run with the corresponding prepared interpreter: python -m unittest discover -s tools/audio_processing -p 'test_*.py'
 """
 import json
 import os
@@ -169,6 +170,63 @@ class RealSpeechTests(unittest.TestCase):
             self.assertEqual(rate,44100)
             np.testing.assert_array_equal(output,audio)
             self.assertEqual(digest(source),original_hash)
+
+class RealSeparationTests(unittest.TestCase):
+    def check_model(self, variable, model_id):
+        import subprocess
+        import sys
+        import numpy as np
+        import soundfile as sf
+        manifest = os.environ.get(variable)
+        if not manifest:
+            self.skipTest("explicit prepared real separation model required: " + variable)
+        scratch = ROOT / ".cache/neural/tests"
+        scratch.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=scratch) as directory:
+            base = Path(directory)
+            rate = 48000
+            # Distinct stereo signals, a partial final block, and impulses on
+            # both sides of the outer core boundary exercise source-rate trim.
+            time = np.arange(24*rate+37, dtype="float64") / rate
+            audio = np.column_stack((0.1*np.sin(2*np.pi*233*time),
+                                     0.07*np.sin(2*np.pi*617*time))).astype("float32")
+            audio[24*rate-1, 0] = 1.5
+            audio[24*rate+1, 1] = -1.25
+            source = base / "input.wav"
+            sf.write(source, audio, rate, subtype="FLOAT")
+            source_hash = digest(source)
+            request = {"version":1, "task_id":"real-separation", "operation":"separate",
+                       "input_path":str(source), "output_dir":str(base/"result"),
+                       "model_manifest":manifest, "threads":1, "parameters":{"overlap":0.75}}
+            request_path = base / "request.json"
+            request_path.write_text(json.dumps(request))
+            completed = subprocess.run([sys.executable, str(Path(__file__).with_name("worker.py")),
+                                        "--request", str(request_path)],
+                                       capture_output=True, text=True, check=True)
+            event = json.loads(completed.stdout.splitlines()[-1])
+            self.assertEqual(event["type"], "complete")
+            self.assertEqual(event["model"]["id"], model_id)
+            self.assertEqual((event["sample_rate"], event["channels"], event["frames"]),
+                             (rate, 2, len(audio)))
+            stems = {}
+            for name in ("vocals", "accompaniment"):
+                stems[name], output_rate = sf.read(event["outputs"][name], dtype="float32", always_2d=True)
+                self.assertEqual(output_rate, rate)
+                self.assertEqual(stems[name].shape, audio.shape)
+                self.assertTrue(np.isfinite(stems[name]).all())
+            np.testing.assert_array_equal(stems["accompaniment"].view("uint32"),
+                                          (audio-stems["vocals"]).view("uint32"))
+            self.assertEqual(digest(source), source_hash)
+            self.assertEqual(len(event["metrics"]["block_seconds"]), 2)
+            for metric, samples in (("input_rms", audio), ("target_rms", stems["vocals"])):
+                expected_rms = float(np.sqrt(np.mean(np.square(samples.astype("float64")))))
+                self.assertAlmostEqual(event["metrics"][metric], expected_rms, places=12)
+
+    def test_kim_source_rate_stereo_boundary_and_exact_complement(self):
+        self.check_model("RIVU_KIM_MANIFEST", "melband_roformer_kim")
+
+    def test_htdemucs_source_rate_stereo_boundary_and_exact_complement(self):
+        self.check_model("RIVU_HTDEMUCS_MANIFEST", "htdemucs")
 
 if __name__ == "__main__":
     unittest.main()
