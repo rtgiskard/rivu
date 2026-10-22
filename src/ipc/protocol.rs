@@ -1412,11 +1412,11 @@ pub(super) struct WireConfig {
     media_read_buffer_mb: u32,
     ffmpeg_enabled: bool,
     pipewire_auto_mix: bool,
-    equalizer: rivu_dsp::equalizer::EqualizerConfig,
+    equalizer: rivu_dsp::equalizer::config::EqualizerConfig,
     denoise: rivu_dsp::denoise::DenoiseConfig,
     neural: rivu_format::config::NeuralConfig,
     equalizer_presets: Vec<rivu_format::config::EqualizerPreset>,
-    equalizer_ab: Option<rivu_dsp::equalizer::EqualizerConfig>,
+    equalizer_ab: Option<rivu_dsp::equalizer::config::EqualizerConfig>,
     processing_graph: crate::model::ProcessingGraph,
 }
 

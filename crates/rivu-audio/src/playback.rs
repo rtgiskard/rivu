@@ -12,7 +12,7 @@ use crate::analysis::{AnalysisProducer, AnalysisWorker};
 use anyhow::{Result, bail};
 use crossbeam_channel::Receiver;
 use parking_lot::RwLock;
-use rivu_dsp::equalizer::{Equalizer, EqualizerConfig};
+use rivu_dsp::equalizer::{config::EqualizerConfig, iir::Equalizer};
 use rivu_format::config::VisualizationSignal;
 use std::{path::PathBuf, sync::Arc};
 
@@ -1321,7 +1321,7 @@ mod tests {
         let file = pcm_samples(320);
         let config = EqualizerConfig {
             enabled: true,
-            bands: vec![rivu_dsp::equalizer::EqBand {
+            bands: vec![rivu_dsp::equalizer::config::EqBand {
                 gain_db: 12.0,
                 ..Default::default()
             }],
@@ -1504,7 +1504,7 @@ mod tests {
         let (mut playback, _) = test_playback_with_waveform(file.path(), None, Arc::default());
         let config = EqualizerConfig {
             enabled: true,
-            bands: vec![rivu_dsp::equalizer::EqBand {
+            bands: vec![rivu_dsp::equalizer::config::EqBand {
                 gain_db: 12.0,
                 ..Default::default()
             }],

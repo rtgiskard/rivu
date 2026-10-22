@@ -2617,7 +2617,7 @@ fn processing_commands_and_configuration_use_current_positional_contract() {
     config
         .equalizer
         .bands
-        .push(rivu_dsp::equalizer::EqBand::default());
+        .push(rivu_dsp::equalizer::config::EqBand::default());
     config.neural.speech_manifest = Some("/models/speech.json".into());
     config.neural.separation_overlap = 0.5;
     let wire = WireConfig::from(&config);

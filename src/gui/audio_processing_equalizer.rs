@@ -2,7 +2,7 @@
 //! these entities own only drafts, response samples and cancellable pointer intent.
 use super::*;
 use crate::model::EqBandEdit;
-use rivu_dsp::equalizer::{ChannelTarget, EqBand, EqualizerConfig, FilterKind, MAX_BANDS};
+use rivu_dsp::equalizer::config::{ChannelTarget, EqBand, EqualizerConfig, FilterKind, MAX_BANDS};
 use rivu_format::config::processing_graph::{GraphEdit, GraphNodeKind};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -1122,7 +1122,8 @@ impl EqualizerEditor {
                             self.tr("processing-flat"),
                             cx,
                             |this, _, cx| {
-                                let mut config = rivu_dsp::equalizer::EqualizerConfig::default();
+                                let mut config =
+                                    rivu_dsp::equalizer::config::EqualizerConfig::default();
                                 config.enabled = this.config.enabled;
                                 this.eq(EqualizerEdit::Replace { config }, cx);
                             },

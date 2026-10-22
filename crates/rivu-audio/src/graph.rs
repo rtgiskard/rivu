@@ -10,8 +10,8 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use anyhow::{Context, Result, bail, ensure};
 use rivu_dsp::{
     denoise::{DenoiseMode, Denoiser},
-    equalizer::Equalizer,
-    fir_eq::FirEqualizer,
+    equalizer::fir::FirEqualizer,
+    equalizer::iir::Equalizer,
 };
 use rivu_format::config::processing_graph::{
     EqImplementation, GraphNodeKind, GraphPort, ProcessingGraph,
@@ -672,7 +672,7 @@ fn estimate(kind: &GraphNodeKind, channels: usize) -> (usize, u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rivu_dsp::{denoise::DenoiseConfig, equalizer::EqualizerConfig};
+    use rivu_dsp::{denoise::DenoiseConfig, equalizer::config::EqualizerConfig};
     use rivu_format::config::processing_graph::{GraphEdge, GraphNode};
 
     fn port(node: u64, port: u16) -> GraphPort {

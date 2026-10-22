@@ -1,6 +1,9 @@
 //! Reproducible CPU/heap microbenchmark; run with --release, never as a quality score.
-use rivu_dsp::equalizer::{EqBand, Equalizer, EqualizerConfig, FilterKind};
-use rivu_dsp::fir_eq::FirEqualizer;
+use rivu_dsp::equalizer::fir::FirEqualizer;
+use rivu_dsp::equalizer::{
+    config::{EqBand, EqualizerConfig, FilterKind},
+    iir::Equalizer,
+};
 use serde_json::json;
 use std::{
     alloc::{GlobalAlloc, Layout, System},

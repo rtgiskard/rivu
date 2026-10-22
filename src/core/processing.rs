@@ -343,7 +343,7 @@ impl Core {
                 ImportPreset { path, name } => {
                     let metadata = std::fs::metadata(&path)?;
                     ensure!(metadata.len() <= 65536, "Preset exceeds 64 KiB");
-                    let value: rivu_dsp::equalizer::EqualizerConfig =
+                    let value: rivu_dsp::equalizer::config::EqualizerConfig =
                         serde_json::from_slice(&std::fs::read(path)?)?;
                     value.validate()?;
                     if let Some(preset) =

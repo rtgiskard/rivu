@@ -147,7 +147,7 @@ pub struct WaveformScanSnapshot {
     pub decoder_hint: DecoderHint,
     pub expected_identity: Option<SourceIdentity>,
     pub signal: rivu_format::config::VisualizationSignal,
-    pub equalizer: Arc<rivu_dsp::equalizer::EqualizerConfig>,
+    pub equalizer: Arc<rivu_dsp::equalizer::config::EqualizerConfig>,
     pub(crate) graph: Option<graph::GraphSnapshot>,
 }
 
@@ -157,7 +157,7 @@ impl WaveformScanSnapshot {
         range: Option<PlaybackRange>,
         decoder_hint: DecoderHint,
         signal: rivu_format::config::VisualizationSignal,
-        equalizer: Arc<rivu_dsp::equalizer::EqualizerConfig>,
+        equalizer: Arc<rivu_dsp::equalizer::config::EqualizerConfig>,
     ) -> Self {
         Self {
             path,
@@ -269,7 +269,7 @@ pub enum AudioCommand {
     Seek(f64),
     Volume(f32),
     /// Prepared and applied on the audio worker, never in the device callback.
-    Equalizer(Arc<rivu_dsp::equalizer::EqualizerConfig>),
+    Equalizer(Arc<rivu_dsp::equalizer::config::EqualizerConfig>),
     OutputSettings {
         request: u64,
         device: Option<String>,
@@ -317,7 +317,7 @@ pub enum AudioEvent {
     },
     EqualizerSettingsFailed {
         generation: Option<u64>,
-        config: Arc<rivu_dsp::equalizer::EqualizerConfig>,
+        config: Arc<rivu_dsp::equalizer::config::EqualizerConfig>,
         message: String,
     },
 }

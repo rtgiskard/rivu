@@ -19,7 +19,7 @@ pub mod processing_graph;
 mod tests;
 
 pub use processing_graph::ProcessingGraph;
-pub use rivu_dsp::{denoise::DenoiseConfig, equalizer::EqualizerConfig};
+pub use rivu_dsp::{denoise::DenoiseConfig, equalizer::config::EqualizerConfig};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

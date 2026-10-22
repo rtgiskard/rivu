@@ -114,7 +114,7 @@ fn processing_tables_roundtrip_and_reject_invalid_controls() {
     config
         .equalizer
         .bands
-        .push(rivu_dsp::equalizer::EqBand::default());
+        .push(rivu_dsp::equalizer::config::EqBand::default());
     config.equalizer.bands[0].gain_db = 6.0;
     config.denoise.mode = rivu_dsp::denoise::DenoiseMode::Adaptive;
     config.neural.speech_interpreter = "/models/df-env/bin/python".into();

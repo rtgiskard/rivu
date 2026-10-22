@@ -7,7 +7,7 @@ description = "Current Rivu configuration and database format contracts"
 [dependencies]
 anyhow = "1"
 libc = "0.2"
-rivu-dsp = { path = "../rivu-dsp" }
+rivu-dsp = { path = "../rivu-dsp", default-features = false }
 rusqlite = { version = "0.40.2", features = ["bundled", "functions"] }
 serde = { version = "1", features = ["derive"] }
 toml = "1.1.8"

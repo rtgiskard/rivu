@@ -12,7 +12,7 @@ use crate::analysis::AnalysisWorker;
 use anyhow::anyhow;
 use crossbeam_channel::{Receiver, Sender, TryRecvError, select};
 use parking_lot::RwLock;
-use rivu_dsp::equalizer::EqualizerConfig;
+use rivu_dsp::equalizer::config::EqualizerConfig;
 use std::{
     path::PathBuf,
     sync::Arc,

@@ -11,7 +11,7 @@ ffmpeg = ["dep:bindgen", "dep:libloading"]
 test-support = []
 
 [dependencies]
-rivu-dsp = { path = "../rivu-dsp" }
+rivu-dsp = { path = "../rivu-dsp", default-features = false, features = ["execution"] }
 rivu-format = { path = "../rivu-format" }
 anyhow = "1"
 crossbeam-channel = "0.5"

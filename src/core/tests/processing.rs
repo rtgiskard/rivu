@@ -144,7 +144,7 @@ fn equalizer_and_denoise_edits_merge_on_the_core_owner() {
     let (_directory, mut core) = fixture();
     let _commands = recording_audio(&mut core);
     core.equalizer_edit(EqualizerEdit::AddBand {
-        band: rivu_dsp::equalizer::EqBand::default(),
+        band: rivu_dsp::equalizer::config::EqBand::default(),
     })
     .unwrap();
     core.equalizer_edit(EqualizerEdit::BandField {
@@ -173,7 +173,7 @@ fn equalizer_and_denoise_edits_merge_on_the_core_owner() {
 }
 #[test]
 fn empty_equalizer_batches_use_log_uniform_neutral_cell_centers() {
-    use rivu_dsp::equalizer::{EqBand, MAX_BANDS};
+    use rivu_dsp::equalizer::config::{EqBand, MAX_BANDS};
     for count in [1, 6, MAX_BANDS] {
         let (_directory, mut core) = fixture();
         let (commands, receive) = bounded(64);
@@ -211,7 +211,7 @@ fn empty_equalizer_batches_use_log_uniform_neutral_cell_centers() {
 
 #[test]
 fn equalizer_batches_fill_largest_log_gaps_without_rewriting_edited_bands() {
-    use rivu_dsp::equalizer::{ChannelTarget, EqBand, EqualizerConfig, FilterKind};
+    use rivu_dsp::equalizer::config::{ChannelTarget, EqBand, EqualizerConfig, FilterKind};
     let (_directory, mut core) = fixture();
     let _commands = recording_audio(&mut core);
     let original = EqualizerConfig {
@@ -269,12 +269,12 @@ fn equalizer_batches_fill_largest_log_gaps_without_rewriting_edited_bands() {
 
 #[test]
 fn invalid_equalizer_batch_counts_preserve_memory_disk_and_audio_atomically() {
-    use rivu_dsp::equalizer::MAX_BANDS;
+    use rivu_dsp::equalizer::config::MAX_BANDS;
     let (_directory, mut core) = fixture();
     let (commands, receive) = bounded(64);
     let _idle_commands = core.engine.replace_commands(commands);
     core.equalizer_edit(EqualizerEdit::AddBand {
-        band: rivu_dsp::equalizer::EqBand::default(),
+        band: rivu_dsp::equalizer::config::EqBand::default(),
     })
     .unwrap();
     assert!(matches!(
@@ -320,7 +320,7 @@ fn invalid_equalizer_batch_counts_preserve_memory_disk_and_audio_atomically() {
 
 #[test]
 fn equalizer_batch_generation_uses_current_track_rate_or_unknown_rate_fallback() {
-    use rivu_dsp::equalizer::{MAX_BANDS, MAX_FREQUENCY_RATE_RATIO};
+    use rivu_dsp::equalizer::config::{MAX_BANDS, MAX_FREQUENCY_RATE_RATIO};
     for sample_rate in [0, 8000, 22050, 48000, 192000] {
         let (_directory, mut core) = fixture();
         let _commands = recording_audio(&mut core);
@@ -345,7 +345,7 @@ fn equalizer_batch_generation_uses_current_track_rate_or_unknown_rate_fallback()
 
 #[test]
 fn rate_bounded_gap_filling_preserves_existing_out_of_range_bands() {
-    use rivu_dsp::equalizer::{EqBand, MAX_FREQUENCY_RATE_RATIO};
+    use rivu_dsp::equalizer::config::{EqBand, MAX_FREQUENCY_RATE_RATIO};
     let (_directory, mut core) = fixture();
     let _commands = recording_audio(&mut core);
     let mut track = core.track(1).unwrap();
@@ -757,7 +757,7 @@ fn relative_band_edits_merge_repeated_steps_without_restoring_the_other_axis() {
     let (_directory, mut core) = fixture();
     let _commands = recording_audio(&mut core);
     core.equalizer_edit(EqualizerEdit::AddBand {
-        band: rivu_dsp::equalizer::EqBand::default(),
+        band: rivu_dsp::equalizer::config::EqBand::default(),
     })
     .unwrap();
     for _ in 0..2 {
@@ -821,8 +821,8 @@ fn finished_graph_pcm(
 
 #[test]
 fn graph_cascaded_nonflat_fir_preserves_source_edge_context() {
-    use rivu_dsp::equalizer::{EqBand, EqualizerConfig, FilterKind};
-    use rivu_dsp::fir_eq::FirEqualizer;
+    use rivu_dsp::equalizer::config::{EqBand, EqualizerConfig, FilterKind};
+    use rivu_dsp::equalizer::fir::FirEqualizer;
     for intermediate_iir in [false, true] {
         let (directory, mut core) = fixture();
         let mut pcm = vec![0.0_f32; 513 * 2];
@@ -958,10 +958,10 @@ fn graph_cached_fir_boundary_matches_uncut_causal_graph() {
             id,
             position: [0.0; 2],
             kind: GraphNodeKind::Equalizer {
-                config: rivu_dsp::equalizer::EqualizerConfig {
+                config: rivu_dsp::equalizer::config::EqualizerConfig {
                     enabled: true,
-                    bands: vec![rivu_dsp::equalizer::EqBand {
-                        kind: rivu_dsp::equalizer::FilterKind::LowPass,
+                    bands: vec![rivu_dsp::equalizer::config::EqBand {
+                        kind: rivu_dsp::equalizer::config::FilterKind::LowPass,
                         frequency_hz: 5000.0,
                         ..Default::default()
                     }],
@@ -1045,10 +1045,10 @@ fn graph_hybrid_profile_boundary_preserves_fir_guards_and_source_identity() {
             id,
             position: [0.0; 2],
             kind: GraphNodeKind::Equalizer {
-                config: rivu_dsp::equalizer::EqualizerConfig {
+                config: rivu_dsp::equalizer::config::EqualizerConfig {
                     enabled: true,
-                    bands: vec![rivu_dsp::equalizer::EqBand {
-                        kind: rivu_dsp::equalizer::FilterKind::LowPass,
+                    bands: vec![rivu_dsp::equalizer::config::EqBand {
+                        kind: rivu_dsp::equalizer::config::FilterKind::LowPass,
                         frequency_hz: 5000.0,
                         ..Default::default()
                     }],
@@ -1163,7 +1163,7 @@ fn graph_executes_shuffled_ancestors_once_with_independent_eq_and_unclipped_mix(
     let (directory, mut core) = fixture();
     let expected = source(directory.path());
     let eq = |preamp_db| GraphNodeKind::Equalizer {
-        config: rivu_dsp::equalizer::EqualizerConfig {
+        config: rivu_dsp::equalizer::config::EqualizerConfig {
             enabled: true,
             preamp_db,
             ..Default::default()

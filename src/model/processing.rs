@@ -1,4 +1,4 @@
-use rivu_dsp::equalizer::{ChannelTarget, EqBand, EqualizerConfig, FilterKind};
+use rivu_dsp::equalizer::config::{ChannelTarget, EqBand, EqualizerConfig, FilterKind};
 pub use rivu_format::config::processing_graph::{
     EqImplementation, GraphEdge, GraphEdit, GraphExecutionMode, GraphNode, GraphNodeKind,
     GraphPort, NoiseSelection, ProcessingGraph,
@@ -98,7 +98,7 @@ impl EqualizerEdit {
                                 .map_or(maximum_hz, |rate| {
                                     maximum_hz.min(
                                         f64::from(rate)
-                                            * rivu_dsp::equalizer::MAX_FREQUENCY_RATE_RATIO,
+                                            * rivu_dsp::equalizer::config::MAX_FREQUENCY_RATE_RATIO,
                                     )
                                 });
                         ensure!(
@@ -116,7 +116,7 @@ impl EqualizerEdit {
             }
             AddBand { band } => config.bands.push(band),
             AddBands { count } => {
-                use rivu_dsp::equalizer::{EqBand, MAX_BANDS, MAX_FREQUENCY_RATE_RATIO};
+                use rivu_dsp::equalizer::config::{EqBand, MAX_BANDS, MAX_FREQUENCY_RATE_RATIO};
                 let bands = &mut config.bands;
                 ensure!(count > 0, "Equalizer band count must be positive");
                 ensure!(

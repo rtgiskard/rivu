@@ -292,7 +292,7 @@ impl AudioProcessing {
             (
                 "eq",
                 GraphNodeKind::Equalizer {
-                    config: rivu_dsp::equalizer::EqualizerConfig {
+                    config: rivu_dsp::equalizer::config::EqualizerConfig {
                         enabled: true,
                         ..Default::default()
                     },

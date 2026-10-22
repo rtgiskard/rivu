@@ -461,11 +461,11 @@ pub(super) fn plan_info(runner: &audio::GraphRunner) -> GraphPlanInfo {
 fn equalize(
     input: &Path,
     output: &Path,
-    config: &rivu_dsp::equalizer::EqualizerConfig,
+    config: &rivu_dsp::equalizer::config::EqualizerConfig,
     implementation: EqImplementation,
     cancel: &AtomicBool,
 ) -> Result<(u64, u64)> {
-    use rivu_dsp::{equalizer::Equalizer, fir_eq::FirEqualizer};
+    use rivu_dsp::{equalizer::fir::FirEqualizer, equalizer::iir::Equalizer};
     let mut reader = hound::WavReader::open(input)?;
     let spec = reader.spec();
     let channels = usize::from(spec.channels);
@@ -813,7 +813,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let input = dir.path().join("input.wav");
         source(&input, &[0.1; 513]);
-        let config = rivu_dsp::equalizer::EqualizerConfig {
+        let config = rivu_dsp::equalizer::config::EqualizerConfig {
             enabled: true,
             preamp_db: 6.020599913,
             ..Default::default()
@@ -858,7 +858,7 @@ mod tests {
         expected[512] = -0.5;
         source(&input, &expected);
         let output = dir.path().join("aligned.wav");
-        let config = rivu_dsp::equalizer::EqualizerConfig {
+        let config = rivu_dsp::equalizer::config::EqualizerConfig {
             enabled: true,
             ..Default::default()
         };

@@ -30,6 +30,25 @@ No model download occurs implicitly during playback or a build.
 * Allocation, channel count, block work, retained results and scratch storage have
   explicit finite bounds. Long processing stays outside the device callback.
 
+`rivu-dsp::equalizer` groups shared parameters and implementation selection in
+`config`, the recursive processor in `iir::Equalizer`, and the linear-phase
+processor in `fir::FirEqualizer`. Both implementations consume the same
+`config::EqualizerConfig`; `config::EqImplementation` selects between them.
+There is no separate top-level `fir_eq` module or legacy path alias.
+
+Configuration and validation remain available without execution support. The
+default feature set is empty; the optional `execution` feature enables `iir`,
+`fir`, response sampling, denoising implementations and the `rustfft` dependency.
+Execution APIs are absent when disabled, not replaced by no-ops. Serialization,
+defaults and validation semantics remain unchanged.
+
+The desktop application and `rivu-audio` explicitly enable `execution` with
+default features disabled. `rivu-format` uses only the resident contracts with
+default features disabled and does not request execution. Cargo feature
+unification can still enable execution when these crates share a dependency
+graph with an execution consumer. The `equalizer_benchmark` and `denoise_render`
+examples require `--features execution`.
+
 == Practical workflow
 
 Add the Audio processing panel from the layout panel catalog. Processing graph,

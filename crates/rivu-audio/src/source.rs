@@ -1033,7 +1033,7 @@ impl Source {
             range,
             decoder_hint,
             rivu_format::config::VisualizationSignal::Before,
-            std::sync::Arc::new(rivu_dsp::equalizer::EqualizerConfig::default()),
+            std::sync::Arc::new(rivu_dsp::equalizer::config::EqualizerConfig::default()),
         );
         self.scan_waveform_processed(&snapshot, cancelled, None, None)
     }
@@ -1061,7 +1061,7 @@ impl Source {
         let processed = snapshot.signal == rivu_format::config::VisualizationSignal::After;
         let mut equalizer = processed
             .then(|| {
-                rivu_dsp::equalizer::Equalizer::new(&snapshot.equalizer, sample_rate, channels)
+                rivu_dsp::equalizer::iir::Equalizer::new(&snapshot.equalizer, sample_rate, channels)
             })
             .transpose()?;
         let mut skip = graph.as_ref().map_or_else(
@@ -1095,7 +1095,7 @@ impl Source {
                 if graph.is_none()
                     && equalizer
                         .as_ref()
-                        .is_none_or(rivu_dsp::equalizer::Equalizer::is_bypassed)
+                        .is_none_or(rivu_dsp::equalizer::iir::Equalizer::is_bypassed)
                 {
                     let discard = skip.min(block.len() / channels);
                     skip -= discard;
@@ -2275,22 +2275,21 @@ mod tests {
                             .err()
                             .expect("A FIFO is not an audio source");
                         assert!(format!("{error:#}").contains("not an ordinary file"));
-                        let error =
-                            Source::waveform(
-                                &crate::WaveformScanSnapshot::original(
-                                    (path).to_owned(),
-                                    None,
-                                    hint,
-                                    rivu_format::config::VisualizationSignal::Before,
-                                    std::sync::Arc::new(
-                                        rivu_dsp::equalizer::EqualizerConfig::default(),
-                                    ),
+                        let error = Source::waveform(
+                            &crate::WaveformScanSnapshot::original(
+                                (path).to_owned(),
+                                None,
+                                hint,
+                                rivu_format::config::VisualizationSignal::Before,
+                                std::sync::Arc::new(
+                                    rivu_dsp::equalizer::config::EqualizerConfig::default(),
                                 ),
-                                2,
-                                enabled,
-                                &cancelled,
-                            )
-                            .unwrap_err();
+                            ),
+                            2,
+                            enabled,
+                            &cancelled,
+                        )
+                        .unwrap_err();
                         assert!(format!("{error:#}").contains("not an ordinary file"));
                     }
                     let error = probe(path, enabled).err().unwrap();
@@ -2332,19 +2331,22 @@ mod tests {
                 let mut source = Source::open(&alias, PROBE_BUFFER_LEN, hint, enabled).unwrap();
                 assert_eq!(source.identity(), identity);
                 assert_eq!(decode_remaining(&mut source), expected);
-                let frame = Source::waveform(
-                    &crate::WaveformScanSnapshot::original(
-                        alias.to_owned(),
-                        None,
-                        hint,
-                        rivu_format::config::VisualizationSignal::Before,
-                        std::sync::Arc::new(rivu_dsp::equalizer::EqualizerConfig::default()),
-                    ),
-                    2,
-                    enabled,
-                    &cancelled,
-                )
-                .unwrap();
+                let frame =
+                    Source::waveform(
+                        &crate::WaveformScanSnapshot::original(
+                            alias.to_owned(),
+                            None,
+                            hint,
+                            rivu_format::config::VisualizationSignal::Before,
+                            std::sync::Arc::new(
+                                rivu_dsp::equalizer::config::EqualizerConfig::default(),
+                            ),
+                        ),
+                        2,
+                        enabled,
+                        &cancelled,
+                    )
+                    .unwrap();
                 assert!(frame.complete);
                 assert_eq!(frame.duration, Some(2.0));
             }
@@ -2450,7 +2452,7 @@ mod tests {
                 None,
                 DecoderHint::Native,
                 rivu_format::config::VisualizationSignal::Before,
-                std::sync::Arc::new(rivu_dsp::equalizer::EqualizerConfig::default()),
+                std::sync::Arc::new(rivu_dsp::equalizer::config::EqualizerConfig::default()),
             ),
             2,
             false,
@@ -2600,7 +2602,7 @@ mod tests {
                     None,
                     DecoderHint::Ffmpeg,
                     rivu_format::config::VisualizationSignal::Before,
-                    std::sync::Arc::new(rivu_dsp::equalizer::EqualizerConfig::default()),
+                    std::sync::Arc::new(rivu_dsp::equalizer::config::EqualizerConfig::default()),
                 ),
                 2,
                 false,
@@ -2627,7 +2629,7 @@ mod tests {
                 None,
                 DecoderHint::Native,
                 rivu_format::config::VisualizationSignal::Before,
-                std::sync::Arc::new(rivu_dsp::equalizer::EqualizerConfig::default()),
+                std::sync::Arc::new(rivu_dsp::equalizer::config::EqualizerConfig::default()),
             ),
             2,
             true,
@@ -2669,7 +2671,7 @@ mod tests {
                 None,
                 DecoderHint::Ffmpeg,
                 rivu_format::config::VisualizationSignal::Before,
-                std::sync::Arc::new(rivu_dsp::equalizer::EqualizerConfig::default()),
+                std::sync::Arc::new(rivu_dsp::equalizer::config::EqualizerConfig::default()),
             ),
             2,
             true,
@@ -2768,7 +2770,7 @@ mod tests {
                     range,
                     DecoderHint::Native,
                     rivu_format::config::VisualizationSignal::Before,
-                    std::sync::Arc::new(rivu_dsp::equalizer::EqualizerConfig::default()),
+                    std::sync::Arc::new(rivu_dsp::equalizer::config::EqualizerConfig::default()),
                 ),
                 2,
                 true,
@@ -2781,7 +2783,7 @@ mod tests {
                     range,
                     DecoderHint::Ffmpeg,
                     rivu_format::config::VisualizationSignal::Before,
-                    std::sync::Arc::new(rivu_dsp::equalizer::EqualizerConfig::default()),
+                    std::sync::Arc::new(rivu_dsp::equalizer::config::EqualizerConfig::default()),
                 ),
                 2,
                 true,
@@ -2865,7 +2867,7 @@ mod tests {
                 None,
                 DecoderHint::Auto,
                 rivu_format::config::VisualizationSignal::Before,
-                std::sync::Arc::new(rivu_dsp::equalizer::EqualizerConfig::default()),
+                std::sync::Arc::new(rivu_dsp::equalizer::config::EqualizerConfig::default()),
             ),
             2,
             false,
@@ -2907,7 +2909,7 @@ mod tests {
                     range,
                     DecoderHint::Auto,
                     rivu_format::config::VisualizationSignal::Before,
-                    std::sync::Arc::new(rivu_dsp::equalizer::EqualizerConfig::default()),
+                    std::sync::Arc::new(rivu_dsp::equalizer::config::EqualizerConfig::default()),
                 ),
                 2,
                 false,
@@ -2957,7 +2959,7 @@ mod tests {
                 None,
                 DecoderHint::Auto,
                 rivu_format::config::VisualizationSignal::Before,
-                std::sync::Arc::new(rivu_dsp::equalizer::EqualizerConfig::default()),
+                std::sync::Arc::new(rivu_dsp::equalizer::config::EqualizerConfig::default()),
             ),
             2,
             false,
@@ -3047,7 +3049,7 @@ mod tests {
                 None,
                 DecoderHint::Auto,
                 rivu_format::config::VisualizationSignal::Before,
-                std::sync::Arc::new(rivu_dsp::equalizer::EqualizerConfig::default()),
+                std::sync::Arc::new(rivu_dsp::equalizer::config::EqualizerConfig::default()),
             ),
             2,
             false,
@@ -3077,7 +3079,7 @@ mod tests {
                 None,
                 DecoderHint::Auto,
                 rivu_format::config::VisualizationSignal::Before,
-                std::sync::Arc::new(rivu_dsp::equalizer::EqualizerConfig::default()),
+                std::sync::Arc::new(rivu_dsp::equalizer::config::EqualizerConfig::default()),
             ),
             2,
             false,

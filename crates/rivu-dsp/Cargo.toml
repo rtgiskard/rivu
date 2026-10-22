@@ -5,11 +5,23 @@ edition = "2024"
 license = "GPL-3.0-or-later"
 description = "Bounded audio processing and numerical response analysis for Rivu"
 
+[features]
+default = []
+execution = ["dep:rustfft"]
+
 [dependencies]
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
-rustfft = "6"
+rustfft = { version = "6", optional = true }
 
 [dev-dependencies]
 serde_json = "1"
 hound = "3.5"
+
+[[example]]
+name = "equalizer_benchmark"
+required-features = ["execution"]
+
+[[example]]
+name = "denoise_render"
+required-features = ["execution"]

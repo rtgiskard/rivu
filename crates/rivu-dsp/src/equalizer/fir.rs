@@ -8,46 +8,15 @@
 //! delay includes both the symmetric kernel's group delay and one partition of
 //! buffering. Offline callers flush zeros, discard `latency_frames()`, and keep
 //! their original frame count to obtain source-aligned, zero-extended audio.
-
 use std::{f64::consts::PI, sync::Arc};
 
-use anyhow::{Result, ensure};
 use rustfft::{Fft, FftPlanner, num_complex::Complex};
-use serde::{Deserialize, Serialize};
 
-use crate::equalizer::{EqualizerConfig, MAX_CHANNELS};
+use super::config::{EqualizerConfig, MAX_CHANNELS, validate_taps};
+use anyhow::{Result, ensure};
 
-pub const MIN_TAPS: usize = 3;
-pub const MAX_TAPS: usize = 16_385;
 const PARTITION: usize = 256;
 const FFT_SIZE: usize = PARTITION * 2;
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum EqImplementation {
-    #[default]
-    Iir,
-    LinearPhase {
-        taps: usize,
-    },
-}
-
-impl EqImplementation {
-    pub fn validate(&self) -> Result<()> {
-        if let Self::LinearPhase { taps } = self {
-            validate_taps(*taps)?;
-        }
-        Ok(())
-    }
-}
-
-fn validate_taps(taps: usize) -> Result<()> {
-    ensure!(
-        (MIN_TAPS..=MAX_TAPS).contains(&taps) && taps % 2 == 1,
-        "linear-phase FIR requires an odd tap count in {MIN_TAPS}..={MAX_TAPS}"
-    );
-    Ok(())
-}
 
 pub struct FirEqualizer {
     channels: usize,
@@ -268,8 +237,8 @@ fn design_kernel(
 
 #[cfg(test)]
 mod tests {
+    use super::super::config::{ChannelTarget, EqBand};
     use super::*;
-    use crate::equalizer::{ChannelTarget, EqBand};
 
     #[test]
     fn unity_has_exact_declared_delay_and_reset_discards_history() {

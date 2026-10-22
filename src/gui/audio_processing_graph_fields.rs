@@ -116,7 +116,7 @@ fn node_replacement(
     graph: &ProcessingGraph,
     id: u64,
     patches: &[(String, String)],
-    equalizer: Option<rivu_dsp::equalizer::EqualizerConfig>,
+    equalizer: Option<rivu_dsp::equalizer::config::EqualizerConfig>,
 ) -> Result<GraphEdit, (Option<String>, String)> {
     let node = graph
         .nodes
@@ -1071,11 +1071,11 @@ mod tests {
     fn equalizer_and_implementation_drafts_share_one_validated_edit() {
         let mut graph = speech_graph();
         graph.nodes.last_mut().unwrap().kind = GraphNodeKind::Equalizer {
-            config: rivu_dsp::equalizer::EqualizerConfig::default(),
+            config: rivu_dsp::equalizer::config::EqualizerConfig::default(),
             implementation: EqImplementation::Iir,
         };
         let original = graph.clone();
-        let draft = rivu_dsp::equalizer::EqualizerConfig {
+        let draft = rivu_dsp::equalizer::config::EqualizerConfig {
             preamp_db: -3.1234567890123,
             ..Default::default()
         };

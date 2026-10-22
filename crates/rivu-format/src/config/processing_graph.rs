@@ -25,7 +25,7 @@ impl NoiseSelection {
         Ok(())
     }
 }
-pub use rivu_dsp::fir_eq::EqImplementation;
+pub use rivu_dsp::equalizer::config::EqImplementation;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GraphExecutionMode {

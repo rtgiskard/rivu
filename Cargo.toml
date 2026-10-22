@@ -20,7 +20,7 @@ embed-nerd-font = []
 rivu-format = { path = "crates/rivu-format" }
 rivu-audio = { path = "crates/rivu-audio", default-features = false }
 rivu-ui = { path = "crates/rivu-ui" }
-rivu-dsp = { path = "crates/rivu-dsp" }
+rivu-dsp = { path = "crates/rivu-dsp", default-features = false, features = ["execution"] }
 hound = "3.5"
 anyhow = "1"
 blake3 = "1"
