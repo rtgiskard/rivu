@@ -4,12 +4,13 @@ use super::{
     BYTES_PER_MEBIBYTE, Channel, MediaInfo,
     bitrate::{self, PacketStats},
 };
+use crate::file_input::open_regular_file;
 use crate::model::DecoderHint;
 use anyhow::{Context, Result, anyhow, bail};
 use std::{
-    fs::{File, OpenOptions},
+    fs::File,
     io::Seek,
-    os::unix::fs::{MetadataExt, OpenOptionsExt},
+    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     sync::atomic::{AtomicBool, Ordering},
 };
@@ -49,20 +50,6 @@ pub(crate) fn metadata_budget(visuals: bool) -> symphonia_metadata::budget::Meta
             0
         }),
     ))
-}
-
-/// Open before inspecting metadata so a replaced path cannot block on a FIFO.
-/// Normal symlinks are followed; only the actual opened object must be regular.
-pub(crate) fn open_regular_file(path: &Path) -> Result<File> {
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NONBLOCK)
-        .open(path)
-        .with_context(|| format!("Opening {}", path.display()))?;
-    if !file.metadata()?.is_file() {
-        bail!("Audio source {} is not an ordinary file", path.display());
-    }
-    Ok(file)
 }
 
 /// Content version captured from the same file descriptor used by the decoder.

@@ -6,7 +6,7 @@ use crate::model::Track;
 use parking_lot::{Mutex, RwLock};
 use std::{
     collections::{HashMap, VecDeque},
-    fs::{self, OpenOptions},
+    fs,
     io::{self, Write},
     path::{Path, PathBuf},
     sync::{Arc, OnceLock},
@@ -392,20 +392,7 @@ impl ArtworkManager {
     }
 
     fn embedded_uri(&self, path: &Path) -> Result<Option<Arc<ArtworkFile>>, ()> {
-        let mut options = OpenOptions::new();
-        options.read(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            // A stale or replaced media path may be a FIFO with no writer.
-            options.custom_flags(libc::O_NONBLOCK);
-        }
-        let file = options.open(path).map_err(|_| ())?;
-        // Check the opened object, not the path, so replacement cannot turn a
-        // metadata-approved regular file into a blocking stream before probing.
-        if !file.metadata().map_err(|_| ())?.is_file() {
-            return Err(());
-        }
+        let file = crate::file_input::open_regular_file(path).map_err(|_| ())?;
         let mut hint = Hint::new();
         if let Some(extension) = path.extension().and_then(|value| value.to_str()) {
             hint.with_extension(extension);
