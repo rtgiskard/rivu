@@ -1,5 +1,5 @@
 use super::super::*;
-use rivu_ui::{column, icon_button, row};
+use rivu_ui::{column, row};
 
 impl GuiApp {
     pub(in crate::gui) fn measurement(&self, key: Measured) -> AnyElement {
@@ -311,7 +311,7 @@ impl GuiApp {
                     );
                     let tab_bar_visible = panel.show_tab_bar;
                     let drag = PanelDrag {
-                        panel_id,
+                        source: DockSource::Existing(panel_id),
                         title: title.clone(),
                     };
                     tabs = tabs.child(
@@ -324,7 +324,7 @@ impl GuiApp {
                             .flex_shrink(1.)
                             .flex()
                             .items_center()
-                            .gap_2()
+                            .gap_1()
                             .px_1()
                             .py_0p5()
                             .rounded_sm()
@@ -389,7 +389,7 @@ impl GuiApp {
                                 let entity = cx.entity().downgrade();
                                 view.on_drag(drag, move |drag, _, window, cx| {
                                     let _ = entity.update(cx, |this, cx| {
-                                        this.start_panel_docking(drag.panel_id, window, cx);
+                                        this.start_panel_docking(drag.source, window, cx);
                                         if !this.panel_docking_blocked() {
                                             this.update_panel_docking(
                                                 window.mouse_position(),
@@ -405,20 +405,40 @@ impl GuiApp {
                             .child(div().min_w_0().truncate().child(title))
                             .child(self.measurement(Measured::Tab(panel_id)))
                             .when(!self.workspace.layouts.current().locked, |view| {
-                                view.child(rivu_ui::quiet_icon_button(
-                                    theme,
-                                    icon_button(
-                                        ("close", panel_id),
-                                        "",
-                                        self.tr("shell-remove-panel"),
-                                        cx,
-                                        move |this, _, cx| {
-                                            if this.workspace.layouts.current().locked {
-                                                return;
-                                            }
+                                view.child(rivu_ui::activate_control(
+                                    div()
+                                        .id(("close", panel_id))
+                                        .role(Role::Button)
+                                        .aria_label(self.tr("shell-remove-panel"))
+                                        .tab_index(0)
+                                        .flex_shrink_0()
+                                        .size(rems(1.))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .rounded_sm()
+                                        .cursor_pointer()
+                                        .hover(|style| style.bg(rgb(theme.highlight)))
+                                        .focus(|style| style.bg(rgb(theme.highlight)))
+                                        .tooltip(rivu_ui::text_tooltip(
+                                            self.tr("shell-remove-panel"),
+                                        ))
+                                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                            cx.stop_propagation()
+                                        })
+                                        .child(
+                                            div()
+                                                .font_family(rivu_ui::theme::icon_family(cx))
+                                                .font_size_scale(1.)
+                                                .line_height(relative(1.))
+                                                .child(""),
+                                        ),
+                                    cx,
+                                    move |this, _, cx| {
+                                        if !this.workspace.layouts.current().locked {
                                             this.remove_layout_panel(panel_id, cx);
-                                        },
-                                    ),
+                                        }
+                                    },
                                 ))
                             }),
                     );

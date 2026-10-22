@@ -590,7 +590,11 @@ including after renaming the current layout.
 
 While unlocked, panels can be added, removed, moved, resized, and reordered.
 Right-click a panel to toggle its tab bar, even while locked. Right-click the
-bottom-right layout button to toggle the lock, or left-click it to add a panel.
+bottom-right layout button to toggle the lock, or left-click it to open the panel
+catalog. Drag a catalog item into the workspace to add a new instance; single-click
+and double-click do not add panels, and there is no keyboard insertion action.
+An empty workspace accepts a drop to create its first tab group. Cancelling or
+releasing outside a valid target creates nothing.
 Playback, tab selection, and layout management remain available while locked.
 Locked separators have no resize cursor or hover highlight.
 
@@ -607,7 +611,8 @@ During a panel drag, only the panel under the pointer is a destination. Drop at
 its left, right, top, or bottom edge to split that panel region, or at its center
 to merge tabs. Enclosing rows, columns, and the entire layout are not separate
 targets. The label and outline identify the destination panel, and the shaded
-region previews the moved panel's final position, including source removal.
+region previews the panel's final position, including source removal when moving
+an existing panel. Catalog drags use the same targets and preview as panel moves.
 Release to apply that target. Corners and separator gutters do not select an
 ambiguous edge.
 

@@ -2,7 +2,7 @@
 
 use super::super::*;
 use rivu_ui::{
-    Popover, button, caption, checked_menu_item, column, menu_item, row, surface::MenuIndicator,
+    Popover, caption, checked_menu_item, column, menu_item, row, surface::MenuIndicator,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -58,24 +58,47 @@ impl GuiApp {
         for spec in PANELS {
             let kind = spec.kind;
             let title = self.tr(spec.title_id);
-            let choice = button(kind, title.clone(), cx, move |this, _, cx| {
-                if this.workspace.layouts.current().locked {
-                    return;
-                }
-                let cancellation = this.workspace.interaction.cancel();
-                this.apply_interaction_cancellation(cancellation, cx);
-                this.workspace
-                    .layouts
-                    .current_mut()
-                    .add(kind, this.workspace.interaction.target_group());
-                this.layout_changed(cx);
-                this.shell.dismiss(shell::Surface::PanelCatalog);
-                this.persist_layout(cx);
-            })
-            .flex_shrink_0()
-            .max_w_full()
-            .truncate()
-            .tooltip(rivu_ui::text_tooltip(title));
+            let drag = PanelDrag {
+                source: DockSource::Catalog(kind),
+                title: title.clone(),
+            };
+            let choice = div()
+                .id(kind)
+                .role(Role::Group)
+                .aria_label(title.clone())
+                .flex()
+                .items_center()
+                .gap_1()
+                .min_w_0()
+                .flex_shrink_0()
+                .max_w_full()
+                .px_2()
+                .py_1()
+                .min_h_8()
+                .rounded_sm()
+                .text_sm()
+                .hover(|style| style.bg(rgb(theme.highlight)))
+                .child(div().text_color(rgb(theme.muted)).child("⠿"))
+                .child(div().min_w_0().truncate().child(title.clone()))
+                .when(!self.workspace.layouts.current().locked, |view| {
+                    let entity = cx.entity().downgrade();
+                    view.cursor_move()
+                        .on_drag(drag, move |drag, _, window, cx| {
+                            let _ = entity.update(cx, |this, cx| {
+                                if this.workspace.layouts.current().locked {
+                                    return;
+                                }
+                                this.shell.dismiss(shell::Surface::PanelCatalog);
+                                this.start_panel_docking(drag.source, window, cx);
+                                if !this.panel_docking_blocked() {
+                                    this.update_panel_docking(window.mouse_position(), window, cx);
+                                }
+                                cx.notify();
+                            });
+                            cx.new(|_| drag.clone())
+                        })
+                })
+                .tooltip(rivu_ui::text_tooltip(title));
             if matches!(
                 kind,
                 "spectrum" | "waveform" | "spectrogram" | "audio_visualizer" | "album_artwork"

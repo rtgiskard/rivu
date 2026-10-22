@@ -1,9 +1,9 @@
-shell-empty-layout = Add a panel to build your layout
+shell-empty-layout = Drag a panel here to build your layout
 shell-dismiss-message = Dismiss message
 shell-copy-message = Copy message
 shell-layout-locked-hint = Layout locked
     Right-click to unlock
-shell-layout-unlocked-hint = Left-click: add panel
+shell-layout-unlocked-hint = Left-click: open panel catalog
     Right-click: lock layout
 shell-menu = Menu
 shell-about = About
@@ -17,7 +17,7 @@ shell-keyboard-help-navigation = These keys scroll or close help without acting 
 shell-visualizations = Visualizations
 shell-close-window = Close window
 shell-quit = Quit application
-shell-add-panel = Add panel
+shell-add-panel = Drag a panel into the layout
 shell-track-information-menu = Track information  ›
 shell-load-waveform = Load full waveform now
 shell-waveform-seek-on = Click and drag to seek ✓
@@ -109,6 +109,7 @@ shell-dock-right = Panel · right
 shell-dock-above = Panel · above
 shell-dock-below = Panel · below
 shell-dock-tab = Panel · tab
+shell-dock-place = Place panel
 shell-style-menu = Style: { $style }  ›
 shell-back = Back
 shell-clear-queue-confirm = Clear all { $count } queued entries?

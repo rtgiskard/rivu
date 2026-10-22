@@ -43,6 +43,19 @@ apply only at collection creation or explicit template creation. Initial tab
 selection and template controls are documented in
 link:01_config.adoc#_layout[Configuration and layout].
 
+Panel catalog insertion is drag-only, without click, double-click, or keyboard
+insertion actions. Catalog items and existing tabs share the window's docking
+session, target resolution, geometry epochs, preview, and drop path. A catalog
+preview owns a candidate layout containing the new instance; the live layout and
+ID allocator change only on a valid drop. Cancellation discards that candidate.
+The model constructs new-panel candidates and returns the allocated panel ID;
+preview geometry and commit use that identity and its actual destination group,
+without predicting allocator offsets in the UI. Catalog entries use grip-marked
+drag items rather than action buttons. Empty-workspace feedback says `Place panel`
+instead of suggesting an existing tab group.
+The measured workspace, excluding the footer, is the initial target for an empty
+layout. Resizing invalidates that measurement just like ordinary panel geometry.
+
 Visualization sizing uses the actual content canvas, after any visible
 tab row, panel borders, and 0.5rem content insets. Spectrum and Spectrogram show an
 `Enlarge panel` hint when that canvas is at most 64px wide or 40px high; the hint
@@ -81,8 +94,10 @@ and docking overlays keep their window coordinates.
 The tab strip uses 0.5rem horizontal and 0.125rem vertical padding. Its labels
 use 0.25rem horizontal and 0.125rem vertical padding. These follow interface
 scale. Neither the strip nor its labels impose a fixed or minimum height;
-text, close controls and padding
-determine their height. The footer has no separate outer padding and keeps at
+text and padding determine their height. Unlocking adds a centered Nerd Font close
+icon in a 1rem square, with a one-em icon line height, no button padding, and a
+0.25rem gap from the label;
+tab height and presentation remain unchanged. The footer has no separate outer padding and keeps at
 least 4rem between messages and the right-aligned button group. Messages can
 shrink and truncate; the button group does not shrink. Its content determines its height, without
 a fixed or minimum height. Its menu and panel catalog anchor above the actual

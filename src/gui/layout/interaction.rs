@@ -26,11 +26,16 @@ pub(in crate::gui) struct DockRequest {
     pub(in crate::gui) index: Option<usize>,
 }
 
+pub(in crate::gui) struct PreparedDock {
+    pub(in crate::gui) layout: Layout,
+    pub(in crate::gui) panel: u64,
+}
+
 pub(in crate::gui) struct DockHover {
     pub(in crate::gui) request: DockRequest,
     pub(in crate::gui) owner: Bounds<Pixels>,
     pub(in crate::gui) preview: Option<Bounds<Pixels>>,
-    pub(in crate::gui) prepared: Option<Layout>,
+    pub(in crate::gui) prepared: Option<PreparedDock>,
     pub(in crate::gui) unchanged: bool,
 }
 
@@ -51,14 +56,21 @@ impl DockGeometry {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(in crate::gui) enum DockSource {
+    Existing(u64),
+    Catalog(&'static str),
+}
+
 pub(in crate::gui) struct PanelDocking {
-    pub(in crate::gui) source: u64,
+    pub(in crate::gui) source: DockSource,
     pub(in crate::gui) hover: Option<DockHover>,
     pub(in crate::gui) geometry: DockGeometry,
 }
 
 #[derive(Clone, Copy, Hash, PartialEq, Eq)]
 pub(in crate::gui) enum Measured {
+    Workspace,
     Node(u64),
     Tab(u64),
     Seek(u64),
@@ -146,7 +158,10 @@ impl MeasurementHandle {
         {
             return;
         }
-        if matches!(self.key, Measured::Node(_) | Measured::Tab(_)) {
+        if matches!(
+            self.key,
+            Measured::Workspace | Measured::Node(_) | Measured::Tab(_)
+        ) {
             measurements.tree_measured = true;
         }
         measurements.bounds.insert(self.key, bounds);
@@ -205,7 +220,7 @@ impl LayoutInteraction {
 
     pub(in crate::gui) fn start_docking(
         &mut self,
-        source: u64,
+        source: DockSource,
         geometry: DockGeometry,
     ) -> Cancellation {
         let cancellation = self.cancel();
@@ -299,6 +314,7 @@ impl LayoutInteraction {
         // Invalidate outstanding callbacks even if an ID is reused by a new tree.
         measurements.epoch = measurements.epoch.wrapping_add(1);
         measurements.allowed.clear();
+        measurements.allowed.insert(Measured::Workspace);
         if let Some(root) = root {
             collect(root, &mut measurements.allowed);
         }
@@ -691,9 +707,9 @@ mod tests {
         owner.update_slider_seek(0.5);
         assert!(owner.synchronize_geometry(geometry(900., 1., 1.)).is_some());
         assert_eq!(owner.finish_drag(), DragCommit::None);
-        owner.start_docking(3, geometry(900., 1., 1.));
+        owner.start_docking(DockSource::Existing(3), geometry(900., 1., 1.));
         owner.synchronize_geometry(geometry(900., 1.5, 1.));
-        assert_eq!(owner.docking().unwrap().source, 3);
+        assert!(owner.docking().unwrap().source == DockSource::Existing(3));
         assert!(owner.docking().unwrap().hover.is_none());
         assert!(owner.measured_geometry().is_none());
     }
@@ -798,7 +814,7 @@ mod tests {
     #[test]
     fn lock_and_window_invalidation_discard_docking_and_stale_target_identity() {
         let mut owner = LayoutInteraction::default();
-        owner.start_docking(3, geometry(800., 1., 1.));
+        owner.start_docking(DockSource::Existing(3), geometry(800., 1., 1.));
         assert!(owner.lock_layout().docking);
         assert!(owner.docking().is_none());
         owner.set_target_group(Some(1));
@@ -806,5 +822,35 @@ mod tests {
         owner.invalidate_window();
         assert_eq!(owner.target_group(), None);
         assert_eq!(owner.finish_waveform(20., 7), None);
+    }
+
+    #[test]
+    fn empty_workspace_measurements_enable_docking_without_accepting_stale_callbacks() {
+        let mut owner = LayoutInteraction::default();
+        let initial = geometry(800., 1., 1.);
+        let bounds = Bounds::new(point(px(0.), px(40.)), size(px(800.), px(360.)));
+        owner.layout_changed(None);
+        owner.synchronize_geometry(initial);
+        let stale = owner.measurement_handle(Measured::Workspace);
+        stale.record(bounds, initial);
+        assert!(owner.measured_geometry() == Some(initial));
+        assert_eq!(
+            owner.measurements().get(&Measured::Workspace),
+            Some(&bounds)
+        );
+        owner.start_docking(DockSource::Catalog("transport"), initial);
+        let resized = geometry(900., 1., 1.);
+        owner.synchronize_geometry(resized);
+        stale.record(bounds, resized);
+        assert!(owner.measured_geometry().is_none());
+        assert!(owner.measurements().is_empty());
+        assert!(owner.docking().unwrap().source == DockSource::Catalog("transport"));
+        let fresh = owner.measurement_handle(Measured::Workspace);
+        fresh.record(bounds, resized);
+        assert!(owner.measured_geometry() == Some(resized));
+        owner.layout_changed(Some(&tree(1, 2)));
+        fresh.record(bounds, resized);
+        assert!(owner.measurements().is_empty());
+        assert!(owner.measured_geometry().is_none());
     }
 }

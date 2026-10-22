@@ -1,9 +1,9 @@
-shell-empty-layout = 添加面板，开始布局
+shell-empty-layout = 拖入面板，开始布局
 shell-dismiss-message = 关闭消息
 shell-copy-message = 复制消息
 shell-layout-locked-hint = 布局已锁定
     右键解锁
-shell-layout-unlocked-hint = 左键添加面板
+shell-layout-unlocked-hint = 左键打开面板目录
     右键锁定布局
 shell-menu = 菜单
 shell-about = 关于
@@ -17,7 +17,7 @@ shell-keyboard-help-navigation = 以下按键仅滚动或关闭帮助，不操�
 shell-visualizations = 可视化
 shell-close-window = 关闭窗口
 shell-quit = 退出应用
-shell-add-panel = 添加面板
+shell-add-panel = 将面板拖入布局
 shell-track-information-menu = 曲目信息  ›
 shell-load-waveform = 加载完整波形
 shell-waveform-seek-on = 点击拖动定位 ✓
@@ -109,6 +109,7 @@ shell-dock-right = 面板 · 右侧
 shell-dock-above = 面板 · 上方
 shell-dock-below = 面板 · 下方
 shell-dock-tab = 面板 · 标签页
+shell-dock-place = 放置面板
 shell-style-menu = 样式：{ $style }  ›
 shell-back = 返回
 shell-clear-queue-confirm = 清空队列中的全部 { $count } 项？

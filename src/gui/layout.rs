@@ -1016,6 +1016,43 @@ impl Layout {
         id
     }
 
+    /// Build a new-panel docking candidate without changing this layout.
+    /// Unlike add, an explicit destination must exist; None is only for an empty layout.
+    pub fn with_docked_panel(
+        &self,
+        kind: &str,
+        target: Option<u64>,
+        edge: Edge,
+        index: Option<usize>,
+    ) -> Option<(Self, u64)> {
+        match (&self.root, target) {
+            (Some(root), Some(target)) => {
+                let node = root.find(target)?;
+                if edge == Edge::Center && !matches!(node, Node::Tabs { .. }) {
+                    return None;
+                }
+            }
+            (None, None) if edge == Edge::Center => {}
+            _ => return None,
+        }
+        let count = if self.root.is_none() {
+            2
+        } else if edge == Edge::Center {
+            1
+        } else {
+            3
+        };
+        self.next_id.checked_add(count)?;
+        let mut candidate = self.clone();
+        let panel = candidate.add(kind, target);
+        if let Some(target) = target
+            && !candidate.move_panel(panel, target, edge, index)
+        {
+            return None;
+        }
+        Some((candidate, panel))
+    }
+
     fn take_panel(&mut self, group: u64, panel_id: u64) -> (Panel, usize, u64) {
         let Some(Node::Tabs { panels, active, .. }) =
             self.root.as_mut().and_then(|root| root.find_mut(group))

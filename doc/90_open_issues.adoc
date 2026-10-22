@@ -76,3 +76,19 @@ wrapper adds no shared hint.
 Extend the same 64px-width/40px-height rule to the remaining consumers, including
 tooltip and scrolling access. Verify small saved layouts, separator resizing and
 interface scale 2 without changing saved proportions.
+
+== Drag-only panel catalog insertion
+
+Status: resolved in implementation, 2026-10-21.
+
+The right-side Panel catalog now adds components only through drag-and-drop.
+Single-click, double-click, and keyboard activation do not add components. The
+drop location chooses a tab position or edge split; empty workspaces accept their
+first component. Cancelling or dropping outside a valid target creates nothing.
+
+Catalog insertion shares the existing panel-docking preview and commit path;
+preview candidates never allocate IDs in the live layout. Verified with layout
+behavior tests and an isolated nested Wayland GUI, including inert clicks,
+center and edge insertion, empty layouts, invalid drops, Escape cancellation,
+and existing tab transfers. User operations are documented in
+link:01_config.adoc#_layout[Configuration and layout].

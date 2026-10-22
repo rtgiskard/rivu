@@ -35,7 +35,8 @@ use ashpd::desktop::file_chooser::SelectedFiles;
 use futures::{StreamExt, channel::mpsc};
 use gpui::{prelude::*, *};
 use layout::interaction::{
-    Cancellation, DockGeometry, DockHover, DockRequest, DragCommit, Dragging, Measured,
+    Cancellation, DockGeometry, DockHover, DockRequest, DockSource, DragCommit, Dragging, Measured,
+    PreparedDock,
 };
 use layout::panel_menu::{PanelMenu, PanelMenuPage};
 use layout::save_owner::LayoutSaveHandle;
@@ -151,7 +152,7 @@ fn format_time(seconds: f64) -> String {
 
 #[derive(Clone)]
 struct PanelDrag {
-    panel_id: u64,
+    source: DockSource,
     title: SharedString,
 }
 impl Render for PanelDrag {

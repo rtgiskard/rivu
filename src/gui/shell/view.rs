@@ -105,7 +105,7 @@ impl Render for GuiApp {
             }))
             .on_drag_move::<PanelDrag>(cx.listener(
                 |this, event: &DragMoveEvent<PanelDrag>, window, cx| {
-                    let source = event.drag(cx).panel_id;
+                    let source = event.drag(cx).source;
                     if this
                         .workspace
                         .interaction
@@ -138,7 +138,7 @@ impl Render for GuiApp {
                 }
             }))
             .on_drop(cx.listener(|this, drag: &PanelDrag, window, cx| {
-                this.drop_panel_docking(drag.panel_id, window, cx);
+                this.drop_panel_docking(drag.source, window, cx);
                 cx.stop_propagation();
             }))
             .on_modifiers_changed(
@@ -407,7 +407,15 @@ impl Render for GuiApp {
                 .w_full()
                 .p_1()
                 .gap_1()
-                .child(div().flex_1().min_h_0().min_w_0().child(layout_view))
+                .child(
+                    div()
+                        .relative()
+                        .flex_1()
+                        .min_h_0()
+                        .min_w_0()
+                        .child(layout_view)
+                        .child(self.measurement(Measured::Workspace)),
+                )
                 .child(footer),
         );
         if self.workspace.interaction.docking().is_some() {
