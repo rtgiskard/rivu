@@ -177,7 +177,7 @@ impl Playback {
         panel_id: u64,
         seek_measurement: AnyElement,
         volume_measurement: AnyElement,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = rivu_ui::theme::palette(cx);
@@ -220,16 +220,37 @@ impl Playback {
             cx.emit(Self::slider_event(Dragging::Seek(panel_id), input));
         })
         .child(seek_measurement);
+        let volume_focus = window
+            .use_keyed_state(("volume-focus", panel_id), cx, |_, cx| cx.focus_handle())
+            .read(cx)
+            .clone();
+        let volume_dragging = matches!(self.dragging, Some(Dragging::Volume(id)) if id == panel_id);
+        let show_volume_value = volume_dragging
+            || (volume_focus.is_focused(window) && window.last_input_was_keyboard());
         let volume = Slider::new(
             ("volume", panel_id),
             self.state.playback.volume,
             self.context.tr("gl-volume-level"),
         )
-        .dragging(matches!(self.dragging, Some(Dragging::Volume(id)) if id == panel_id))
+        .dragging(volume_dragging)
         .render(cx, move |_, input, _, cx| {
             cx.emit(Self::slider_event(Dragging::Volume(panel_id), input));
         })
-        .child(volume_measurement);
+        .track_focus(&volume_focus)
+        .child(volume_measurement)
+        .when(show_volume_value, |view| {
+            view.child(gpui::deferred(
+                gpui::anchored()
+                    .anchor(gpui::Anchor::BottomLeft)
+                    .offset(gpui::point(gpui::px(0.), gpui::px(-4.)))
+                    .snap_to_window_with_margin(gpui::px(4.))
+                    .child(
+                        rivu_ui::tooltip_surface(window, cx, 8.)
+                            .whitespace_nowrap()
+                            .child(format!("{:.0}%", self.state.playback.volume * 100.)),
+                    ),
+            ))
+        });
         let controls = row().gap_1().flex_shrink_0().justify_center().child(
             IconButtonGroup::new(IconButtonStyle::Quiet, IconButtonDensity::Regular)
                 .button_with(
@@ -322,12 +343,6 @@ impl Playback {
             .w(gpui::rems(9.))
             .max_w(gpui::relative(1.))
             .flex_shrink_0()
-            .child(
-                caption(theme, format!("{:.0}%", self.state.playback.volume * 100.))
-                    .font_features(tabular_numbers())
-                    .whitespace_nowrap()
-                    .flex_shrink_0(),
-            )
             .child(
                 div()
                     .id(("volume-label", panel_id))

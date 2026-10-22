@@ -444,6 +444,12 @@ sessions, while the playback owner retains seek target identity, preview and
 commit/cancellation semantics. Keyboard takeover cancels an existing pointer
 session before dispatch, so a later pointer release cannot overwrite it.
 
+Playback shows only the volume icon and slider at rest. During a volume drag or
+keyboard focus, a tooltip-styled value appears above the slider without taking
+layout space. It follows the current Core volume; pointer release/cancellation
+or leaving keyboard focus removes it. The panel-keyed focus handle lives only
+while that control is rendered; no timeout or separate volume state is needed.
+
 The package uses this workspace's pinned GPUI revision and local patches. It is
 not a renderer-independent API or a promise of compatibility with arbitrary GPUI
 versions. `make lint` and `make build` include the component package;
