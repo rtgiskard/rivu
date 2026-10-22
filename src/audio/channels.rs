@@ -1,4 +1,4 @@
-//! Speaker positions in decoded/interleaved order. No implicit downmix is performed.
+//! Speaker positions, lossless device mapping, and logical analysis downmix.
 
 use anyhow::{Result, bail};
 
@@ -84,10 +84,51 @@ pub(super) fn mapping(source: &[Channel], device: &[Channel]) -> Result<Vec<Opti
         .collect())
 }
 
+// Visualization paths fold decoded channels into two logical sides. Real
+// output still uses the original permutation with independent speakers.
+pub(super) fn analysis_weights(layout: &[Channel]) -> Vec<[f32; 2]> {
+    use Channel::*;
+    let mut weights: Vec<_> = layout
+        .iter()
+        .map(|channel| match channel {
+            FrontLeft | RearLeft | SideLeft | FrontLeftCenter | TopFrontLeft | TopRearLeft => {
+                [1.0, 0.0]
+            }
+            FrontRight | RearRight | SideRight | FrontRightCenter | TopFrontRight
+            | TopRearRight => [0.0, 1.0],
+            _ => [1.0, 1.0],
+        })
+        .collect();
+    let total = weights.iter().fold([0.0_f32; 2], |sum, weight| {
+        [sum[0] + weight[0], sum[1] + weight[1]]
+    });
+    for weight in &mut weights {
+        weight[0] /= total[0].max(1.0);
+        weight[1] /= total[1].max(1.0);
+    }
+    weights
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use Channel::*;
+
+    #[test]
+    fn analysis_downmix_is_normalized_and_independent_of_speaker_mapping() {
+        let layout = [FrontLeft, FrontRight, FrontCenter, Lfe, SideLeft, SideRight];
+        let weights = analysis_weights(&layout);
+        assert_eq!(weights[0], [0.25, 0.0]);
+        assert_eq!(weights[1], [0.0, 0.25]);
+        assert_eq!(weights[2], [0.25, 0.25]);
+        assert_eq!(weights[3], [0.25, 0.25]);
+        assert_eq!(weights[4], [0.25, 0.0]);
+        assert_eq!(weights[5], [0.0, 0.25]);
+        assert!(mapping(&layout, &[FrontLeft, FrontRight]).is_err());
+        assert_eq!(analysis_weights(&[FrontCenter]), [[1.0, 1.0]]);
+        assert_eq!(analysis_weights(&[FrontLeft]), [[1.0, 0.0]]);
+        assert!(analysis_weights(&[]).is_empty());
+    }
 
     #[test]
     fn mapping_preserves_every_speaker_and_never_guesses_from_count() {

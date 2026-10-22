@@ -85,7 +85,7 @@ impl Playback {
             },
             analyzer,
         )?;
-        let waveform_weights = super::output::analysis_weights(source.layout());
+        let waveform_weights = super::channels::analysis_weights(source.layout());
         {
             let mut waveform = waveform.write();
             waveform.set_still_mode(still_mode);
@@ -386,7 +386,7 @@ mod tests {
             .write()
             .select_source(path, range, DecoderHint::Auto, &source);
         let (output, render) = super::super::output::test_backend(8_000, false, source.layout());
-        let waveform_weights = super::super::output::analysis_weights(source.layout());
+        let waveform_weights = super::super::channels::analysis_weights(source.layout());
         let waveform_coverage = WaveformCoverage::new(0.0, source.waveform_timestamp_tolerance());
         let playback = Playback {
             source,

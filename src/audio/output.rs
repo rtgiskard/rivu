@@ -273,7 +273,7 @@ impl Output {
             channels: source_channels,
             scratch,
             mapping: Vec::new(),
-            analysis_weights: analysis_weights(source_layout),
+            analysis_weights: channels::analysis_weights(source_layout),
             rate,
             clock: PlaybackClock::new(),
         };
@@ -391,31 +391,6 @@ impl Output {
         self.stream.take();
         self.heard()
     }
-}
-
-// Visualization paths fold decoded channels into two logical sides. Real
-// output still uses the original permutation with independent speakers.
-pub(super) fn analysis_weights(layout: &[Channel]) -> Vec<[f32; 2]> {
-    use Channel::*;
-    let mut weights: Vec<_> = layout
-        .iter()
-        .map(|channel| match channel {
-            FrontLeft | RearLeft | SideLeft | FrontLeftCenter | TopFrontLeft | TopRearLeft => {
-                [1.0, 0.0]
-            }
-            FrontRight | RearRight | SideRight | FrontRightCenter | TopFrontRight
-            | TopRearRight => [0.0, 1.0],
-            _ => [1.0, 1.0],
-        })
-        .collect();
-    let total = weights.iter().fold([0.0_f32; 2], |sum, weight| {
-        [sum[0] + weight[0], sum[1] + weight[1]]
-    });
-    for weight in &mut weights {
-        weight[0] /= total[0].max(1.0);
-        weight[1] /= total[1].max(1.0);
-    }
-    weights
 }
 
 struct OutputCallback {
@@ -1720,7 +1695,7 @@ mod pcm_tests {
             channels: device.len(),
             scratch: vec![0.0; source.len() * OutputCallback::BLOCK_FRAMES],
             mapping: crate::audio::channels::mapping(source, device).unwrap(),
-            analysis_weights: analysis_weights(source),
+            analysis_weights: channels::analysis_weights(source),
             rate,
             clock: PlaybackClock::new(),
         };
