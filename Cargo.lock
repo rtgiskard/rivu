@@ -5042,7 +5042,6 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "ashpd",
- "bindgen",
  "blake3",
  "bytes",
  "chrono",
@@ -5058,20 +5057,16 @@ dependencies = [
  "hound",
  "image",
  "libc",
- "libloading 0.9.0",
- "opus",
  "parking_lot",
- "pipewire",
- "pkg-config",
  "postcard",
  "rand 0.10.3",
  "ratatui",
  "ringbuf",
+ "rivu-audio",
  "rivu-dsp",
  "rivu-format",
  "rivu-ui",
  "rusqlite",
- "rustfft",
  "serde",
  "serde_json",
  "signal-hook",
@@ -5091,6 +5086,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "rivu-audio"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "bindgen",
+ "crossbeam-channel",
+ "hound",
+ "libc",
+ "libloading 0.9.0",
+ "opus",
+ "parking_lot",
+ "pipewire",
+ "pkg-config",
+ "ringbuf",
+ "rivu-dsp",
+ "rivu-format",
+ "rustfft",
+ "serde",
+ "serde_json",
+ "symphonia",
+ "symphonia-metadata",
+ "tempfile",
+]
+
+[[package]]
 name = "rivu-dsp"
 version = "0.1.0"
 dependencies = [
@@ -5106,6 +5126,7 @@ name = "rivu-format"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "libc",
  "rivu-dsp",
  "rusqlite",
  "serde",

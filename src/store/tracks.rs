@@ -4,8 +4,9 @@ use super::rows::{
     library_row_from_row, track_from_row,
 };
 use super::{Store, batch_limit};
-use crate::model::{Batch, DecoderHint, HistoryEntry, Page, Track};
+use crate::model::{Batch, HistoryEntry, Page, Track};
 use anyhow::{Context, Result, bail};
+use rivu_audio::DecoderHint;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

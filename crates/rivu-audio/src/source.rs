@@ -4,9 +4,9 @@ use super::{
     BYTES_PER_MEBIBYTE, Channel, MediaInfo,
     bitrate::{self, PacketStats},
 };
-use crate::file_input::open_regular_file;
-use crate::model::DecoderHint;
+use crate::DecoderHint;
 use anyhow::{Context, Result, anyhow, bail};
+use rivu_format::input::open_regular_file;
 use std::{
     fs::File,
     io::Seek,
@@ -41,7 +41,7 @@ pub(super) const DECODE_WORK_BUDGET: usize = 64;
 
 /// Share one admission budget across probing and all later metadata revisions.
 /// Playback/probe retain tags only; artwork explicitly opts into visual bytes.
-pub(crate) fn metadata_budget(visuals: bool) -> symphonia_metadata::budget::MetadataBudget {
+pub fn metadata_budget(visuals: bool) -> symphonia_metadata::budget::MetadataBudget {
     use symphonia::core::common::Limit;
     symphonia_metadata::budget::MetadataBudget::new(MetadataOptions::default().limit_visual_bytes(
         Limit::Maximum(if visuals {
@@ -71,7 +71,7 @@ impl SourceIdentity {
         Ok(Self::from_metadata(&metadata))
     }
 
-    pub(crate) fn from_metadata(metadata: &std::fs::Metadata) -> Self {
+    pub fn from_metadata(metadata: &std::fs::Metadata) -> Self {
         Self {
             device: metadata.dev(),
             inode: metadata.ino(),
@@ -130,7 +130,7 @@ pub fn probe(path: &Path, ffmpeg_enabled: bool) -> Result<MediaInfo> {
 }
 
 /// Probe the already opened object without looking up its original path again.
-pub(crate) fn probe_file(path: &Path, mut file: File, ffmpeg_enabled: bool) -> Result<MediaInfo> {
+pub fn probe_file(path: &Path, mut file: File, ffmpeg_enabled: bool) -> Result<MediaInfo> {
     SourceIdentity::from_file(&file)?;
     file.rewind()
         .context("Rewinding audio source for probing")?;
@@ -1008,7 +1008,7 @@ impl Source {
             .graph
             .as_ref()
             .map(super::graph::GraphSnapshot::source_context);
-        let graph = if snapshot.signal == crate::config::VisualizationSignal::After {
+        let graph = if snapshot.signal == rivu_format::config::VisualizationSignal::After {
             snapshot
                 .graph
                 .as_ref()
@@ -1032,7 +1032,7 @@ impl Source {
             path.to_owned(),
             range,
             decoder_hint,
-            crate::config::VisualizationSignal::Before,
+            rivu_format::config::VisualizationSignal::Before,
             std::sync::Arc::new(rivu_dsp::equalizer::EqualizerConfig::default()),
         );
         self.scan_waveform_processed(&snapshot, cancelled, None, None)
@@ -1058,7 +1058,7 @@ impl Source {
         frame.scan_source_identity = Some(self.identity());
         let weights = super::channels::analysis_weights(&self.layout);
         frame.set_channel_weights(&weights);
-        let processed = snapshot.signal == crate::config::VisualizationSignal::After;
+        let processed = snapshot.signal == rivu_format::config::VisualizationSignal::After;
         let mut equalizer = processed
             .then(|| {
                 rivu_dsp::equalizer::Equalizer::new(&snapshot.equalizer, sample_rate, channels)
@@ -1588,21 +1588,6 @@ mod tests {
         assert_eq!(decode_remaining(&mut source), [0.5, -0.5]);
     }
 
-    #[test]
-    fn native_metadata_budget_preserves_unsynchronised_audio() {
-        let directory = tempfile::tempdir().unwrap();
-        for (version, tag_wide) in [(2, true), (3, true), (4, false), (4, true)] {
-            let path = directory
-                .path()
-                .join(format!("unsync-{version}-{tag_wide}.wav"));
-            crate::artwork::tests::budget_unsynchronised_wav(&path, version, tag_wide);
-            assert_eq!(probe(&path, false).unwrap().sample_rate, 8_000);
-            let mut source =
-                Source::open(&path, PROBE_BUFFER_LEN, DecoderHint::Native, false).unwrap();
-            assert_eq!(decode_remaining(&mut source), [0.5]);
-        }
-    }
-
     fn id3_frame_file(frame_id: &[u8; 4], payload: &[u8]) -> tempfile::NamedTempFile {
         let mut file = tempfile::Builder::new().suffix(".wav").tempfile().unwrap();
         file.write_all(b"ID3\x03\0\0").unwrap();
@@ -1644,52 +1629,6 @@ mod tests {
         assert_eq!(probe(file.path(), false).unwrap().sample_rate, 8_000);
         let mut source =
             Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Native, false).unwrap();
-        assert_eq!(decode_remaining(&mut source), [0.5]);
-    }
-
-    #[test]
-    fn native_metadata_budget_skips_large_pictures_without_losing_tags_or_audio() {
-        let directory = tempfile::tempdir().unwrap();
-        for version in [2, 3, 4] {
-            let path = directory.path().join(format!("budget-{version}.wav"));
-            let size = if version == 2 { 9 } else { 27 } * BYTES_PER_MEBIBYTE;
-            crate::artwork::tests::budget_tagged_wav(
-                &path,
-                version,
-                &[
-                    (crate::artwork::DEFAULT_IMAGE, size, 3),
-                    (
-                        crate::artwork::DEFAULT_IMAGE,
-                        crate::artwork::DEFAULT_IMAGE.len(),
-                        3,
-                    ),
-                ],
-            );
-            let info = probe(&path, false).unwrap();
-            assert_eq!(info.title, "Budget title");
-            assert_eq!(info.sample_rate, 8_000);
-            let mut source =
-                Source::open(&path, PROBE_BUFFER_LEN, DecoderHint::Native, false).unwrap();
-            assert!(!source.uses_ffmpeg());
-            assert_eq!(decode_remaining(&mut source), [0.5]);
-        }
-    }
-
-    #[test]
-    fn native_metadata_budget_keeps_audio_after_many_picture_frames() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("many-pictures.wav");
-        let pictures = vec![
-            (
-                crate::artwork::DEFAULT_IMAGE,
-                crate::artwork::DEFAULT_IMAGE.len(),
-                3
-            );
-            64
-        ];
-        crate::artwork::tests::budget_tagged_wav(&path, 4, &pictures);
-        let mut source = Source::open(&path, PROBE_BUFFER_LEN, DecoderHint::Native, false).unwrap();
-        assert_eq!(source.info.title, "Budget title");
         assert_eq!(decode_remaining(&mut source), [0.5]);
     }
 
@@ -1964,7 +1903,7 @@ mod tests {
             let mut source =
                 Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Native, false).unwrap();
             source
-                .restrict(super::super::PlaybackRange {
+                .restrict(crate::PlaybackRange {
                     start_seconds: 0.0,
                     end_seconds: end,
                 })
@@ -2077,7 +2016,7 @@ mod tests {
         let mut source =
             Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Auto, false).unwrap();
         source
-            .restrict(super::super::PlaybackRange {
+            .restrict(crate::PlaybackRange {
                 start_seconds: 0.0,
                 end_seconds: source.info().duration,
             })
@@ -2161,7 +2100,7 @@ mod tests {
             let mut source =
                 Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Native, false).unwrap();
             source
-                .restrict(super::super::PlaybackRange {
+                .restrict(crate::PlaybackRange {
                     start_seconds: 9.0,
                     end_seconds,
                 })
@@ -2238,7 +2177,7 @@ mod tests {
             Source::begin_open(file.path(), PROBE_BUFFER_LEN, hint, ffmpeg_enabled).unwrap();
         while !source.poll_open().unwrap() {}
         source
-            .restrict(super::super::PlaybackRange {
+            .restrict(crate::PlaybackRange {
                 start_seconds: 0.4,
                 end_seconds: Some(1.6),
             })
@@ -2290,7 +2229,7 @@ mod tests {
             for (start, end) in [(257, 6_147), (4_095, 4_096)] {
                 let mut source = Source::open(file.path(), PROBE_BUFFER_LEN, hint, true).unwrap();
                 source
-                    .restrict(super::super::PlaybackRange {
+                    .restrict(crate::PlaybackRange {
                         start_seconds: start as f64 / f64::from(rate),
                         end_seconds: Some(end as f64 / f64::from(rate)),
                     })
@@ -2338,11 +2277,11 @@ mod tests {
                         assert!(format!("{error:#}").contains("not an ordinary file"));
                         let error =
                             Source::waveform(
-                                &super::super::WaveformScanSnapshot::original(
+                                &crate::WaveformScanSnapshot::original(
                                     (path).to_owned(),
                                     None,
                                     hint,
-                                    crate::config::VisualizationSignal::Before,
+                                    rivu_format::config::VisualizationSignal::Before,
                                     std::sync::Arc::new(
                                         rivu_dsp::equalizer::EqualizerConfig::default(),
                                     ),
@@ -2394,11 +2333,11 @@ mod tests {
                 assert_eq!(source.identity(), identity);
                 assert_eq!(decode_remaining(&mut source), expected);
                 let frame = Source::waveform(
-                    &super::super::WaveformScanSnapshot::original(
+                    &crate::WaveformScanSnapshot::original(
                         alias.to_owned(),
                         None,
                         hint,
-                        crate::config::VisualizationSignal::Before,
+                        rivu_format::config::VisualizationSignal::Before,
                         std::sync::Arc::new(rivu_dsp::equalizer::EqualizerConfig::default()),
                     ),
                     2,
@@ -2433,7 +2372,7 @@ mod tests {
             assert!(frame.span_seconds >= 2.0);
             source.info.duration = Some(0.25);
             source
-                .restrict(super::super::PlaybackRange {
+                .restrict(crate::PlaybackRange {
                     start_seconds: 0.5,
                     end_seconds: Some(1.5),
                 })
@@ -2506,11 +2445,11 @@ mod tests {
         assert_eq!(decode_remaining(&mut source).len(), actual_frames);
         let cancelled = AtomicBool::new(false);
         let waveform = Source::waveform(
-            &super::super::WaveformScanSnapshot::original(
+            &crate::WaveformScanSnapshot::original(
                 (file.path()).to_owned(),
                 None,
                 DecoderHint::Native,
-                crate::config::VisualizationSignal::Before,
+                rivu_format::config::VisualizationSignal::Before,
                 std::sync::Arc::new(rivu_dsp::equalizer::EqualizerConfig::default()),
             ),
             2,
@@ -2523,7 +2462,7 @@ mod tests {
         assert!(waveform.span_seconds >= actual_duration);
         assert!(waveform.peaks.len() <= 1024);
         source
-            .restrict(super::super::PlaybackRange {
+            .restrict(crate::PlaybackRange {
                 start_seconds: 3.0,
                 end_seconds: Some(4.0),
             })
@@ -2640,7 +2579,7 @@ mod tests {
             let status = std::process::Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
-                    "audio::source::tests::decoder_hints_respect_global_disable_and_keep_native_runtime_cold",
+                    "source::tests::decoder_hints_respect_global_disable_and_keep_native_runtime_cold",
                     "--nocapture",
                 ])
                 .env(CHILD, "1")
@@ -2652,15 +2591,15 @@ mod tests {
 
         let file = pcm_file();
         let cancelled = AtomicBool::new(false);
-        assert!(!super::super::ffmpeg::load_attempted());
+        assert!(!crate::ffmpeg::load_attempted());
         assert!(Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Ffmpeg, false).is_err());
         assert!(
             Source::waveform(
-                &super::super::WaveformScanSnapshot::original(
+                &crate::WaveformScanSnapshot::original(
                     file.path().to_owned(),
                     None,
                     DecoderHint::Ffmpeg,
-                    crate::config::VisualizationSignal::Before,
+                    rivu_format::config::VisualizationSignal::Before,
                     std::sync::Arc::new(rivu_dsp::equalizer::EqualizerConfig::default()),
                 ),
                 2,
@@ -2669,7 +2608,7 @@ mod tests {
             )
             .is_err()
         );
-        assert!(!super::super::ffmpeg::load_attempted());
+        assert!(!crate::ffmpeg::load_attempted());
 
         let mut reference =
             Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Native, false).unwrap();
@@ -2683,11 +2622,11 @@ mod tests {
         assert!(!native.uses_ffmpeg());
         assert_eq!(decode_remaining(&mut native), expected);
         let envelope = Source::waveform(
-            &super::super::WaveformScanSnapshot::original(
+            &crate::WaveformScanSnapshot::original(
                 (file.path()).to_owned(),
                 None,
                 DecoderHint::Native,
-                crate::config::VisualizationSignal::Before,
+                rivu_format::config::VisualizationSignal::Before,
                 std::sync::Arc::new(rivu_dsp::equalizer::EqualizerConfig::default()),
             ),
             2,
@@ -2708,7 +2647,7 @@ mod tests {
         .err()
         .expect("Native must reject an unsupported container without falling back");
         assert!(error.downcast_ref::<UnsupportedNative>().is_some());
-        assert!(!super::super::ffmpeg::load_attempted());
+        assert!(!crate::ffmpeg::load_attempted());
     }
 
     #[cfg(not(feature = "ffmpeg"))]
@@ -2725,11 +2664,11 @@ mod tests {
         );
         let cancelled = AtomicBool::new(false);
         let error = Source::waveform(
-            &super::super::WaveformScanSnapshot::original(
+            &crate::WaveformScanSnapshot::original(
                 (file.path()).to_owned(),
                 None,
                 DecoderHint::Ffmpeg,
-                crate::config::VisualizationSignal::Before,
+                rivu_format::config::VisualizationSignal::Before,
                 std::sync::Arc::new(rivu_dsp::equalizer::EqualizerConfig::default()),
             ),
             2,
@@ -2754,7 +2693,7 @@ mod tests {
             let status = std::process::Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
-                    "audio::source::tests::lazy_wave_probe_preserves_native_pcm",
+                    "source::tests::lazy_wave_probe_preserves_native_pcm",
                     "--nocapture",
                 ])
                 .env(CHILD, "1")
@@ -2765,17 +2704,17 @@ mod tests {
         }
 
         let file = pcm_file();
-        assert!(!super::super::ffmpeg::load_attempted());
+        assert!(!crate::ffmpeg::load_attempted());
         let cold = probe_details(file.path(), true, false).unwrap();
         assert!(matches!(cold.probe_backend, ProbeBackend::Native));
         assert!(matches!(cold.decoder_backend, ProbeBackend::Native));
-        assert!(!super::super::ffmpeg::load_attempted());
+        assert!(!crate::ffmpeg::load_attempted());
 
         let mut reference =
             Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Auto, false).unwrap();
         let expected = decode_remaining(&mut reference);
         let enhanced = probe_details(file.path(), true, true).unwrap();
-        assert!(super::super::ffmpeg::load_attempted());
+        assert!(crate::ffmpeg::load_attempted());
         assert!(matches!(enhanced.probe_backend, ProbeBackend::Ffmpeg));
         assert!(matches!(enhanced.decoder_backend, ProbeBackend::Native));
 
@@ -2818,17 +2757,17 @@ mod tests {
         let cancelled = AtomicBool::new(false);
         for range in [
             None,
-            Some(super::super::PlaybackRange {
+            Some(crate::PlaybackRange {
                 start_seconds: 30.0 / 75.0,
                 end_seconds: Some(80.0 / 75.0),
             }),
         ] {
             let native = Source::waveform(
-                &super::super::WaveformScanSnapshot::original(
+                &crate::WaveformScanSnapshot::original(
                     (file.path()).to_owned(),
                     range,
                     DecoderHint::Native,
-                    crate::config::VisualizationSignal::Before,
+                    rivu_format::config::VisualizationSignal::Before,
                     std::sync::Arc::new(rivu_dsp::equalizer::EqualizerConfig::default()),
                 ),
                 2,
@@ -2837,11 +2776,11 @@ mod tests {
             )
             .unwrap();
             let forced = Source::waveform(
-                &super::super::WaveformScanSnapshot::original(
+                &crate::WaveformScanSnapshot::original(
                     (file.path()).to_owned(),
                     range,
                     DecoderHint::Ffmpeg,
-                    crate::config::VisualizationSignal::Before,
+                    rivu_format::config::VisualizationSignal::Before,
                     std::sync::Arc::new(rivu_dsp::equalizer::EqualizerConfig::default()),
                 ),
                 2,
@@ -2849,7 +2788,7 @@ mod tests {
                 &cancelled,
             )
             .unwrap();
-            assert!(super::super::ffmpeg::load_attempted());
+            assert!(crate::ffmpeg::load_attempted());
             assert!(forced.complete);
             assert!(forced.matches(file.path(), range, DecoderHint::Ffmpeg));
             assert!(native.matches(file.path(), range, DecoderHint::Native));
@@ -2868,7 +2807,7 @@ mod tests {
             Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Ffmpeg, true).unwrap();
         assert!(source.uses_ffmpeg());
         assert!(matches!(source.probe_backend, ProbeBackend::Ffmpeg));
-        assert!(super::super::ffmpeg::load_attempted());
+        assert!(crate::ffmpeg::load_attempted());
         assert_ffmpeg_pcm(&mut source, &reference, 0.0);
         source.seek(0.2).unwrap();
         assert!(source.uses_ffmpeg());
@@ -2893,7 +2832,7 @@ mod tests {
                 Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Ffmpeg, true).unwrap();
             assert!(source.uses_ffmpeg());
             source
-                .restrict(super::super::PlaybackRange {
+                .restrict(crate::PlaybackRange {
                     start_seconds: start_frame as f64 / 75.0,
                     end_seconds: end_frame.map(|frame| frame as f64 / 75.0),
                 })
@@ -2921,11 +2860,11 @@ mod tests {
         assert_eq!(decode_remaining(&mut source).len(), 88_200);
         let cancelled = std::sync::atomic::AtomicBool::new(false);
         let waveform = Source::waveform(
-            &super::super::WaveformScanSnapshot::original(
+            &crate::WaveformScanSnapshot::original(
                 alias.to_owned(),
                 None,
                 DecoderHint::Auto,
-                crate::config::VisualizationSignal::Before,
+                rivu_format::config::VisualizationSignal::Before,
                 std::sync::Arc::new(rivu_dsp::equalizer::EqualizerConfig::default()),
             ),
             2,
@@ -2951,7 +2890,7 @@ mod tests {
             (80, None),
             (30, Some(31)),
         ] {
-            let range = (start != 0 || end.is_some()).then_some(super::super::PlaybackRange {
+            let range = (start != 0 || end.is_some()).then_some(crate::PlaybackRange {
                 start_seconds: start as f64 / 75.0,
                 end_seconds: end.map(|end| end as f64 / 75.0),
             });
@@ -2963,11 +2902,11 @@ mod tests {
                 expected[bin] = expected[bin].max(sample.abs());
             }
             let actual = Source::waveform(
-                &super::super::WaveformScanSnapshot::original(
+                &crate::WaveformScanSnapshot::original(
                     (file.path()).to_owned(),
                     range,
                     DecoderHint::Auto,
-                    crate::config::VisualizationSignal::Before,
+                    rivu_format::config::VisualizationSignal::Before,
                     std::sync::Arc::new(rivu_dsp::equalizer::EqualizerConfig::default()),
                 ),
                 2,
@@ -3013,11 +2952,11 @@ mod tests {
         }
         let cancelled = std::sync::atomic::AtomicBool::new(false);
         let envelope = Source::waveform(
-            &super::super::WaveformScanSnapshot::original(
+            &crate::WaveformScanSnapshot::original(
                 (file.path()).to_owned(),
                 None,
                 DecoderHint::Auto,
-                crate::config::VisualizationSignal::Before,
+                rivu_format::config::VisualizationSignal::Before,
                 std::sync::Arc::new(rivu_dsp::equalizer::EqualizerConfig::default()),
             ),
             2,
@@ -3103,11 +3042,11 @@ mod tests {
         }
         let cancelled = std::sync::atomic::AtomicBool::new(false);
         let envelope = Source::waveform(
-            &super::super::WaveformScanSnapshot::original(
+            &crate::WaveformScanSnapshot::original(
                 (file.path()).to_owned(),
                 None,
                 DecoderHint::Auto,
-                crate::config::VisualizationSignal::Before,
+                rivu_format::config::VisualizationSignal::Before,
                 std::sync::Arc::new(rivu_dsp::equalizer::EqualizerConfig::default()),
             ),
             2,
@@ -3133,11 +3072,11 @@ mod tests {
     fn waveform_cancellation_precedes_opening_the_file() {
         let cancelled = std::sync::atomic::AtomicBool::new(true);
         let error = Source::waveform(
-            &super::super::WaveformScanSnapshot::original(
+            &crate::WaveformScanSnapshot::original(
                 (Path::new("")).to_owned(),
                 None,
                 DecoderHint::Auto,
-                crate::config::VisualizationSignal::Before,
+                rivu_format::config::VisualizationSignal::Before,
                 std::sync::Arc::new(rivu_dsp::equalizer::EqualizerConfig::default()),
             ),
             2,
@@ -3196,14 +3135,14 @@ mod tests {
         let file = pcm_file();
         let mut source =
             Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Auto, false).unwrap();
-        let range = super::super::PlaybackRange {
+        let range = crate::PlaybackRange {
             start_seconds: 30.0 / 75.0,
             end_seconds: Some(80.0 / 75.0),
         };
         source.restrict(range).unwrap();
         let rate = source.info.sample_rate;
         let channels = source.layout.len();
-        let mut frame = super::super::WaveformFrame::default();
+        let mut frame = crate::WaveformFrame::default();
         frame.select(
             file.path(),
             Some(range),
@@ -3250,7 +3189,7 @@ mod tests {
     #[test]
     fn continuous_playback_finalizes_known_and_unknown_cue_previews_at_eof() {
         let file = pcm_file();
-        let cue = super::super::PlaybackRange {
+        let cue = crate::PlaybackRange {
             start_seconds: 30.0 / 75.0,
             end_seconds: Some(80.0 / 75.0),
         };
@@ -3267,7 +3206,7 @@ mod tests {
                 }
                 let rate = source.info.sample_rate;
                 let channels = source.layout.len();
-                let mut frame = super::super::WaveformFrame::default();
+                let mut frame = crate::WaveformFrame::default();
                 frame.select(
                     file.path(),
                     range,
@@ -3275,7 +3214,7 @@ mod tests {
                     source.info.duration,
                     rate,
                 );
-                let mut coverage = super::super::waveform::WaveformCoverage::new(
+                let mut coverage = crate::waveform::WaveformCoverage::new(
                     0.0,
                     source.waveform_timestamp_tolerance(),
                 );
@@ -3304,19 +3243,17 @@ mod tests {
     #[test]
     fn ffmpeg_quantized_timestamps_complete_without_hiding_missing_pcm() {
         let mut file = tempfile::NamedTempFile::new().unwrap();
-        file.write_all(include_bytes!(
-            "../../tests/fixtures/audio/quantized-aac.mka"
-        ))
-        .unwrap();
+        file.write_all(include_bytes!("../tests/fixtures/quantized-aac.mka"))
+            .unwrap();
         let mut source =
             Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Ffmpeg, true).unwrap();
         let rate = source.info.sample_rate;
         let channels = source.layout.len();
-        let mut frame = super::super::WaveformFrame::default();
+        let mut frame = crate::WaveformFrame::default();
         frame.select(file.path(), None, DecoderHint::Ffmpeg, None, rate);
         let tolerance = source.waveform_timestamp_tolerance();
-        let mut coverage = super::super::waveform::WaveformCoverage::new(0.0, tolerance);
-        let mut missing_pcm = super::super::waveform::WaveformCoverage::new(0.0, tolerance);
+        let mut coverage = crate::waveform::WaveformCoverage::new(0.0, tolerance);
+        let mut missing_pcm = crate::waveform::WaveformCoverage::new(0.0, tolerance);
         let mut packet = 0;
         while let Some((samples, timestamp)) = source.next_frames().unwrap() {
             coverage.record(timestamp, samples.len() / channels, rate);
@@ -3342,7 +3279,7 @@ mod tests {
         source.info.duration = None;
         let rate = source.info.sample_rate;
         let channels = source.layout.len();
-        let mut frame = super::super::WaveformFrame::default();
+        let mut frame = crate::WaveformFrame::default();
         frame.select(file.path(), None, DecoderHint::Auto, None, rate);
         let (samples, timestamp) = source.next_frames().unwrap().unwrap();
         let first_count = samples.len().min(441 * channels);
@@ -3350,10 +3287,8 @@ mod tests {
         let first_peak = frame.peaks[0];
         assert!(first_peak.is_some());
         source.seek(1.0).unwrap();
-        let mut coverage = super::super::waveform::WaveformCoverage::new(
-            1.0,
-            source.waveform_timestamp_tolerance(),
-        );
+        let mut coverage =
+            crate::waveform::WaveformCoverage::new(1.0, source.waveform_timestamp_tolerance());
         while let Some((samples, timestamp)) = source.next_frames().unwrap() {
             coverage.record(timestamp, samples.len() / channels, rate);
             frame.push(timestamp, samples, rate, channels);
@@ -3383,7 +3318,7 @@ mod tests {
             let mut source =
                 Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Auto, false).unwrap();
             source
-                .restrict(super::super::PlaybackRange {
+                .restrict(crate::PlaybackRange {
                     start_seconds: start_frame as f64 / 75.0,
                     end_seconds: end_frame.map(|frame| frame as f64 / 75.0),
                 })
@@ -3407,7 +3342,7 @@ mod tests {
         let mut source =
             Source::open(file.path(), PROBE_BUFFER_LEN, DecoderHint::Auto, false).unwrap();
         source
-            .restrict(super::super::PlaybackRange {
+            .restrict(crate::PlaybackRange {
                 start_seconds: 1.0,
                 end_seconds: Some(1.5),
             })

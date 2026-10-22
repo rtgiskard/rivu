@@ -17,13 +17,14 @@ use clap::{CommandFactory, FromArgMatches};
 use rivu::config::ConfigPersistence;
 use rivu::{
     app::App,
-    audio, config,
+    config,
     i18n::Localizer,
     ipc,
     model::{Command, Query, RepeatMode},
     response::{StateSections, ViewResponse},
     terminal,
 };
+use rivu_audio as audio;
 use std::{path::PathBuf, thread, time::Duration};
 
 pub(super) fn print_error(error: &anyhow::Error) {

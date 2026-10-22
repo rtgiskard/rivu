@@ -1,10 +1,7 @@
-pub(crate) mod analysis;
 pub mod app;
 pub(crate) mod artwork;
-pub mod audio;
 pub mod config;
 pub(crate) mod core;
-mod file_input;
 pub(crate) mod gui;
 pub mod i18n;
 pub mod ipc;
@@ -20,4 +17,3 @@ pub(crate) mod store;
 pub mod terminal;
 pub(crate) mod theme;
 pub(crate) mod tray;
-mod volume;

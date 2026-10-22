@@ -40,8 +40,8 @@ fn display_wait(ready: impl Fn() -> bool) {
 }
 
 fn display_samples(
-    producer: &mut ringbuf::HeapProd<crate::analysis::TapFrame>,
-    worker: &crate::analysis::AnalysisWorker,
+    producer: &mut ringbuf::HeapProd<rivu_audio::analysis::TapFrame>,
+    worker: &rivu_audio::analysis::AnalysisWorker,
     demand_token: u64,
     count: usize,
     samples: [f32; 2],
@@ -50,9 +50,9 @@ fn display_samples(
     for _ in 0..count {
         assert!(
             producer
-                .try_push(crate::analysis::TapFrame {
+                .try_push(rivu_audio::analysis::TapFrame {
                     samples,
-                    epoch: worker.control.epoch.load(Ordering::Acquire),
+                    epoch: worker.control.epoch(),
                     demand_token,
                     gap: false,
                 })
@@ -66,7 +66,7 @@ fn display_off_clears_results_with_a_saturated_business_queue_and_reopens() {
     let (handle, worker, _receiver) = display_fixture();
     let demand = DisplayDemand {
         enabled: true,
-        visualizer: crate::analysis::VisualizerDemand {
+        visualizer: rivu_audio::analysis::VisualizerDemand {
             stereo_density: true,
             ..Default::default()
         },

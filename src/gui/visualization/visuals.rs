@@ -26,10 +26,10 @@ use std::{
     time::Duration,
 };
 
-use crate::{
-    analysis::AnalysisFrame,
-    config::{AnalysisWindow, Config, SpectrumStyle, VisualizationPalette, VisualizationSignal},
+use crate::config::{
+    AnalysisWindow, Config, SpectrumStyle, VisualizationPalette, VisualizationSignal,
 };
+use rivu_audio::analysis::AnalysisFrame;
 
 const HISTORY_GAP_RESET: Duration = Duration::from_secs(1);
 const MAX_SPECTRUM_BARS: usize = 2000;
@@ -2683,7 +2683,9 @@ mod tests {
             sample_time: Duration::from_secs_f64(time),
             frequencies_hz: vec![20.0, 200.0, 2000.0, 20_000.0],
             spectrum_db: vec![level; 4],
-            settings: Some(crate::analysis::AnalysisSettings::from(&Config::default())),
+            settings: Some(rivu_audio::analysis::AnalysisSettings::from(
+                &Config::default(),
+            )),
             generation: 1,
             ..AnalysisFrame::default()
         }
@@ -2725,7 +2727,7 @@ mod tests {
             assert!(visuals.data.borrow().latest_levels.is_empty());
             assert_eq!(visuals.data.borrow().len, 0);
             let mut fresh = frame(2.1, -60.0);
-            fresh.settings = Some(crate::analysis::AnalysisSettings::from(&config));
+            fresh.settings = Some(rivu_audio::analysis::AnalysisSettings::from(&config));
             fresh.generation = 2;
             visuals.update(&fresh);
             assert_eq!(visuals.data.borrow().peaks, vec![-60.0; 4]);
@@ -2763,7 +2765,7 @@ mod tests {
 
         // Reusing a sequence is valid after switching the selected signal.
         let mut before = frame(1.1, -40.0);
-        before.settings = Some(crate::analysis::AnalysisSettings::from(&config));
+        before.settings = Some(rivu_audio::analysis::AnalysisSettings::from(&config));
         visuals.update(&before);
         assert_eq!(visuals.data.borrow().len, 1);
         assert_eq!(visuals.data.borrow().latest_levels, vec![-40.0; 4]);

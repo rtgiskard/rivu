@@ -1211,9 +1211,9 @@ mod tests {
     fn tree_range_search_favorites_and_missing_share_query_batches() {
         use crate::{
             library::{ScanRecord, ScanResult},
-            model::MediaInfo,
             store::Store,
         };
+        use rivu_audio::MediaInfo;
         use std::path::Path;
 
         let store = Store::open(Path::new(":memory:")).unwrap();

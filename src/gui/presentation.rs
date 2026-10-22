@@ -6,7 +6,6 @@ use super::{layout, visualization};
 #[cfg(test)]
 use crate::config::ConfigPersistence;
 use crate::{
-    analysis::{AnalysisFrame, DisplayDemand, VisualizerDemand},
     config::{AudioVisualizerOptions, AudioVisualizerStyle, Config},
     core::CoreHandle,
     i18n::Localizer,
@@ -16,6 +15,7 @@ use gpui::{
     AnyElement, Context, Entity, Render, Subscription, Task, WeakEntity, Window, div, prelude::*,
     rgb,
 };
+use rivu_audio::analysis::{AnalysisFrame, DisplayDemand, VisualizerDemand};
 use std::{
     collections::HashMap,
     sync::Arc,
@@ -443,7 +443,7 @@ pub(super) fn retain_analysis_staging(frame: &mut AnalysisFrame, demand: Display
     let visualizer = &mut frame.visualizer;
     if !demand.visualizer.stereo_density {
         visualizer.demand.stereo_density = false;
-        visualizer.density = crate::analysis::DensitySnapshot::default();
+        visualizer.density = rivu_audio::analysis::DensitySnapshot::default();
         visualizer.correlation = None;
         visualizer.balance = None;
         visualizer.side_ratio = None;

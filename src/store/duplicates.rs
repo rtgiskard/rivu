@@ -291,7 +291,7 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::DecoderHint;
+    use rivu_audio::DecoderHint;
     use std::path::Path;
 
     fn fixture() -> Result<Store> {

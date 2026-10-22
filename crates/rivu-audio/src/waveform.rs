@@ -4,7 +4,7 @@ use super::{
     PlaybackRange,
     source::{Source, SourceIdentity},
 };
-use crate::model::DecoderHint;
+use crate::DecoderHint;
 use std::{
     path::{Path, PathBuf},
     sync::{
@@ -69,7 +69,7 @@ pub(crate) struct RmsPrefix {
 /// Captured when a decoder is loaded, never refreshed from a path or library
 /// snapshot. Keep the initial duration separate from the EOF-corrected timeline.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) enum WaveformIdentity {
+pub enum WaveformIdentity {
     Progressive {
         content: SourceIdentity,
         ffmpeg: bool,
@@ -94,32 +94,32 @@ pub struct WaveformFrame {
     pub span_seconds: f64,
     // Sample width is bin_frames / bin_count, independent of EOF array truncation.
     // Widen the numerator so coarsening cannot overflow the u64 sample domain.
-    pub(crate) bin_frames: u128,
-    pub(crate) bin_count: u64,
+    pub bin_frames: u128,
+    pub bin_count: u64,
     pub max_peak: f32,
     /// `None` is not yet decoded; `Some(0.0)` is decoded silence.
     pub peaks: Vec<Option<f32>>,
     /// RMS of the current contiguous decoded interval in each rolling bin.
-    pub(crate) rms: Vec<Option<f32>>,
-    pub(crate) rms_counts: Vec<u64>,
-    pub(crate) left_peaks: Vec<Option<f32>>,
-    pub(crate) right_peaks: Vec<Option<f32>>,
-    pub(crate) left_rms: Vec<Option<f32>>,
-    pub(crate) right_rms: Vec<Option<f32>>,
-    pub(crate) left_rms_counts: Vec<u64>,
-    pub(crate) right_rms_counts: Vec<u64>,
+    pub rms: Vec<Option<f32>>,
+    pub rms_counts: Vec<u64>,
+    pub left_peaks: Vec<Option<f32>>,
+    pub right_peaks: Vec<Option<f32>>,
+    pub left_rms: Vec<Option<f32>>,
+    pub right_rms: Vec<Option<f32>>,
+    pub left_rms_counts: Vec<u64>,
+    pub right_rms_counts: Vec<u64>,
     pub(crate) channel_weights: Vec<[f32; 2]>,
-    pub(crate) rms_spans: Vec<Option<std::ops::Range<u64>>>,
+    pub rms_spans: Vec<Option<std::ops::Range<u64>>>,
     pub(crate) rms_prefixes: Vec<Option<RmsPrefix>>,
     /// Last PCM revision per bin, used to fence asynchronous full scans.
-    pub(crate) bin_revisions: Vec<u64>,
-    pub(crate) bin_epochs: Vec<u64>,
+    pub bin_revisions: Vec<u64>,
+    pub bin_epochs: Vec<u64>,
     pub(crate) traversal: u64,
     pub(crate) suspended: bool,
     pub(crate) suspension_generation: u64,
     pub(crate) full_scan_cancelled: Weak<AtomicBool>,
-    pub(crate) identity: Option<WaveformIdentity>,
-    pub(crate) scan_source_identity: Option<SourceIdentity>,
+    pub identity: Option<WaveformIdentity>,
+    pub scan_source_identity: Option<SourceIdentity>,
 }
 
 impl Default for WaveformFrame {
@@ -367,11 +367,11 @@ impl WaveformFrame {
             && self.decoder_hint == decoder_hint
     }
 
-    pub(crate) fn suspension_generation(&self) -> u64 {
+    pub fn suspension_generation(&self) -> u64 {
         self.suspension_generation
     }
 
-    pub(crate) fn cancel_scan_on_suspend(&mut self, cancelled: &Arc<AtomicBool>) {
+    pub fn cancel_scan_on_suspend(&mut self, cancelled: &Arc<AtomicBool>) {
         if self.suspended {
             cancelled.store(true, Ordering::Relaxed);
         } else {
@@ -400,7 +400,7 @@ impl WaveformFrame {
     }
 
     /// Still Mode owns this guard so late manual scans cannot restore results.
-    pub(crate) fn set_still_mode(&mut self, suspended: bool) {
+    pub fn set_still_mode(&mut self, suspended: bool) {
         if self.suspended == suspended {
             return;
         }

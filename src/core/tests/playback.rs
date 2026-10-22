@@ -550,7 +550,7 @@ fn paused_confirmations_do_not_advance_activity_at_stop() {
     assert_eq!(play_count(&core, 1), 1);
     let generation = core.generation;
     core.finish_playback(
-        Ok(Some(crate::audio::AudioSnapshot {
+        Ok(Some(rivu_audio::AudioSnapshot {
             generation,
             position_seconds: 20.0,
             listened_seconds: 20.0,
@@ -688,7 +688,7 @@ fn stop_ack_records_queued_start_and_snapshot_without_terminal_navigation() {
             .send(AudioEvent::DecoderStopped { generation })
             .unwrap();
         core.finish_playback(
-            Ok(Some(crate::audio::AudioSnapshot {
+            Ok(Some(rivu_audio::AudioSnapshot {
                 generation,
                 position_seconds: heard,
                 listened_seconds: heard,
@@ -733,7 +733,7 @@ fn queued_start_rejection_fences_once_without_recursive_stop_or_count() {
     core.store.remove_tracks(&[1]).unwrap();
     assert!(
         core.finish_playback(
-            Ok(Some(crate::audio::AudioSnapshot {
+            Ok(Some(rivu_audio::AudioSnapshot {
                 generation,
                 position_seconds: 10.0,
                 listened_seconds: 10.0

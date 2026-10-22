@@ -1,9 +1,9 @@
-use crate::config::{AnalysisWindow, Config, VisualizationSignal};
 use parking_lot::RwLock;
 use ringbuf::{
     HeapCons, HeapProd, HeapRb,
     traits::{Consumer, Observer, Producer},
 };
+use rivu_format::config::{AnalysisWindow, Config, VisualizationSignal};
 use rustfft::{Fft, FftPlanner, num_complex::Complex32};
 use std::{
     sync::{
@@ -77,7 +77,7 @@ impl std::ops::Deref for DensitySnapshot {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl From<Vec<f32>> for DensitySnapshot {
     fn from(cells: Vec<f32>) -> Self {
         Self(Some(Arc::new(cells)))
@@ -195,7 +195,7 @@ impl DensityField {
 #[derive(Clone, Debug, Default)]
 pub struct AnalysisFrame {
     pub sequence: u64,
-    pub(crate) display_token: u64,
+    pub display_token: u64,
     /// Changes whenever a window cannot continue the preceding signal.
     pub generation: u64,
     /// Absent until the first publication; identifies the FFT producing this frame.
@@ -240,7 +240,7 @@ impl AnalysisSettings {
 }
 
 #[derive(Clone, Copy, Default)]
-pub(crate) struct TapFrame {
+pub struct TapFrame {
     pub samples: [f32; 2],
     pub epoch: u64,
     /// Complete display transition identity captured by the audio worker.
@@ -249,27 +249,32 @@ pub(crate) struct TapFrame {
     pub gap: bool,
 }
 
-pub(crate) struct AnalysisControl {
-    pub playback_active: AtomicBool,
+pub struct AnalysisControl {
+    pub(crate) playback_active: AtomicBool,
     settings: RwLock<AnalysisSettings>,
     /// Playback/output sample rate used to map FFT bins to frequencies.
-    pub sample_rate: AtomicU32,
+    pub(crate) sample_rate: AtomicU32,
     /// Even epochs are stable; odd epochs mark sample-rate reset in progress.
-    pub epoch: AtomicU64,
+    pub(crate) epoch: AtomicU64,
     shutdown: AtomicBool,
     // Complete display demand and its transition identity are one snapshot.
     display_demand: AtomicU64,
     // One consumer permit, never an accumulating queue of analysis jobs.
     frame_requested: AtomicBool,
     // Overflow invalidates the queued prefix before a later gap-marked tap arrives.
-    pub tap_overflow: AtomicBool,
+    pub(crate) tap_overflow: AtomicBool,
     worker_thread: OnceLock<thread::Thread>,
     // Low bit is Still Mode; upper bits preserve quick destructive transitions.
     still_mode: AtomicU64,
 }
 
 impl AnalysisControl {
-    pub(crate) fn request_frame(&self) {
+    #[cfg(feature = "test-support")]
+    pub fn epoch(&self) -> u64 {
+        self.epoch.load(Ordering::Acquire)
+    }
+
+    pub fn request_frame(&self) {
         if self.accepts_audio()
             && !self.frame_requested.swap(true, Ordering::AcqRel)
             && let Some(worker) = self.worker_thread.get()
@@ -278,7 +283,7 @@ impl AnalysisControl {
         }
     }
 
-    pub(crate) fn display_token(&self) -> u64 {
+    pub fn display_token(&self) -> u64 {
         self.display_demand.load(Ordering::Acquire)
     }
 
@@ -292,12 +297,12 @@ impl AnalysisControl {
             && self.still_mode.load(Ordering::Acquire) & 1 == 0
     }
 
-    pub(crate) fn set_display_demand(&self, demand: DisplayDemand) {
+    pub fn set_display_demand(&self, demand: DisplayDemand) {
         self.update_display_demand(|_| demand);
     }
 
     // The public Analysis command changes only enablement, not plot selection.
-    pub(crate) fn set_display_enabled(&self, enabled: bool) {
+    pub fn set_display_enabled(&self, enabled: bool) {
         self.update_display_demand(|demand| DisplayDemand { enabled, ..demand });
     }
 
@@ -389,7 +394,7 @@ impl AnalysisProducer {
     }
 }
 
-pub(crate) struct AnalysisWorker {
+pub struct AnalysisWorker {
     pub control: Arc<AnalysisControl>,
     pub ring: Arc<HeapRb<TapFrame>>,
     worker: Option<JoinHandle<()>>,

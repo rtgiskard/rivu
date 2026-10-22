@@ -1575,7 +1575,7 @@ mod pcm_tests {
             shared,
             channels: device.len(),
             scratch: vec![0.0; source.len() * OutputCallback::BLOCK_FRAMES],
-            mapping: crate::audio::channels::mapping(source, device).unwrap(),
+            mapping: crate::channels::mapping(source, device).unwrap(),
             source_channels: source.len(),
             rate,
             clock: PlaybackClock::new(),

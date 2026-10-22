@@ -25,7 +25,7 @@ use super::{
 };
 use crate::{
     artwork::ArtworkManager,
-    model::{Command, DecoderHint, PlaybackStatus, Query, Track},
+    model::{Command, PlaybackStatus, Query, Track},
     projection::GuiSnapshot,
 };
 use chrono::{DateTime, Local};
@@ -34,6 +34,7 @@ use gpui::{
     div, prelude::*, px, rgb,
 };
 use read::{MetadataReadCoordinator, MetadataReadTask, ReadCompletion, ReadEnvironment};
+use rivu_audio::DecoderHint;
 use rivu_ui::{
     active_control, button, caption, column, disabled_control, form_field, icon_button,
     input::{Input, InputEvent},

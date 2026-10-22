@@ -7,8 +7,8 @@ use super::{
     playback::{Playback, PlaybackOptions},
     source::Source,
 };
+use crate::DecoderHint;
 use crate::analysis::AnalysisWorker;
-use crate::model::DecoderHint;
 use anyhow::anyhow;
 use crossbeam_channel::{Receiver, Sender, TryRecvError, select};
 use parking_lot::RwLock;
@@ -724,10 +724,9 @@ mod tests {
     fn graph_audition_rejects_same_format_source_replacement_before_open() {
         use rivu_format::config::processing_graph::{GraphPort, ProcessingGraph};
         for hint in opening_hints() {
-            let original = super::super::source::opening_prefix_file(0, true);
-            let replacement = super::super::source::opening_prefix_file(0, true);
-            let expected_identity =
-                super::super::SourceIdentity::from_file(original.as_file()).unwrap();
+            let original = crate::source::opening_prefix_file(0, true);
+            let replacement = crate::source::opening_prefix_file(0, true);
+            let expected_identity = crate::SourceIdentity::from_file(original.as_file()).unwrap();
             let runner = GraphRunner::compile(
                 &ProcessingGraph::default(),
                 GraphPort { node: 2, port: 0 },
@@ -786,7 +785,7 @@ mod tests {
 
     #[test]
     fn paused_opening_retains_metadata_and_rejects_retired_generation_updates() {
-        let file = super::super::source::opening_prefix_file(1024, true);
+        let file = crate::source::opening_prefix_file(1024, true);
         let (mut worker, commands, events, _shutdown) = opening_worker();
         load_prefix(&mut worker, file.path(), DecoderHint::Native, 41);
         worker.poll_opening();
@@ -867,7 +866,7 @@ mod tests {
 
     #[test]
     fn stop_and_snapshot_cancel_real_first_frame_prefix_without_lifecycle_events() {
-        let file = super::super::source::opening_prefix_file(1024, true);
+        let file = crate::source::opening_prefix_file(1024, true);
         for hint in opening_hints() {
             let (mut worker, commands, events, _shutdown) = opening_worker();
             load_prefix(&mut worker, file.path(), hint, 41);
@@ -895,8 +894,8 @@ mod tests {
 
     #[test]
     fn replacing_a_real_first_frame_prefix_reports_only_the_new_generation() {
-        let old = super::super::source::opening_prefix_file(1024, true);
-        let empty = super::super::source::opening_prefix_file(0, false);
+        let old = crate::source::opening_prefix_file(1024, true);
+        let empty = crate::source::opening_prefix_file(0, false);
         for hint in opening_hints() {
             let (mut worker, commands, events, _shutdown) = opening_worker();
             load_prefix(&mut worker, old.path(), hint, 41);
@@ -927,7 +926,7 @@ mod tests {
 
     #[test]
     fn shutdown_cancels_real_first_frame_prefix_at_the_next_control_round() {
-        let file = super::super::source::opening_prefix_file(1024, true);
+        let file = crate::source::opening_prefix_file(1024, true);
         for hint in opening_hints() {
             for disconnect in [false, true] {
                 let (mut worker, commands, events, shutdown) = opening_worker();
@@ -949,7 +948,7 @@ mod tests {
 
     #[test]
     fn rejected_output_settings_cancel_the_opening_generation() {
-        let file = super::super::source::opening_prefix_file(1024, true);
+        let file = crate::source::opening_prefix_file(1024, true);
         let (mut worker, commands, events, _shutdown) = opening_worker();
         load_prefix(&mut worker, file.path(), DecoderHint::Native, 41);
         worker.poll_opening();
@@ -998,7 +997,7 @@ mod tests {
     #[cfg(feature = "ffmpeg")]
     #[test]
     fn disabling_ffmpeg_cancels_its_real_opening_without_started_or_failed() {
-        let file = super::super::source::opening_prefix_file(1024, true);
+        let file = crate::source::opening_prefix_file(1024, true);
         let (mut worker, commands, events, _shutdown) = opening_worker();
         load_prefix(&mut worker, file.path(), DecoderHint::Ffmpeg, 41);
         worker.poll_opening();
@@ -1094,7 +1093,7 @@ mod tests {
             worker.run();
         });
         let mut retired = Vec::new();
-        let snapshot = crate::audio::stop_and_snapshot(&commands, &event_receive, |event| {
+        let snapshot = crate::stop_and_snapshot(&commands, &event_receive, |event| {
             if let AudioEvent::Ended { generation, .. } = event {
                 retired.push(generation);
             }
@@ -1144,7 +1143,7 @@ mod tests {
             AudioCommand::Seek(0.5),
             AudioCommand::Pause(true),
             AudioCommand::AnalysisSettings(crate::analysis::AnalysisSettings::from(
-                &crate::config::Config::default(),
+                &rivu_format::config::Config::default(),
             )),
         ] {
             worker.command(command);
@@ -1190,7 +1189,7 @@ mod tests {
             AudioCommand::MediaReadBuffer(2),
             AudioCommand::FfmpegEnabled(false),
             AudioCommand::AnalysisSettings(crate::analysis::AnalysisSettings::from(
-                &crate::config::Config::default(),
+                &rivu_format::config::Config::default(),
             )),
             AudioCommand::StopAndSnapshot(reply),
             AudioCommand::Shutdown,
@@ -1347,8 +1346,8 @@ mod tests {
 
     #[test]
     fn engine_shutdown_and_drop_cancel_full_command_and_event_queues() {
+        use crate::AudioEngine;
         use crate::analysis::AnalysisFrame;
-        use crate::audio::AudioEngine;
         use parking_lot::Mutex;
 
         for explicit in [false, true] {
@@ -1491,7 +1490,7 @@ mod tests {
             }
             _ => panic!("expected explicit idle equalizer settings failure"),
         }
-        let file = super::super::source::opening_prefix_file(1024, true);
+        let file = crate::source::opening_prefix_file(1024, true);
         load_prefix(&mut worker, file.path(), DecoderHint::Native, 77);
         worker.command(AudioCommand::Equalizer(invalid.clone()));
         assert!(
@@ -1504,7 +1503,7 @@ mod tests {
 
     #[test]
     fn cancelling_an_audition_opening_keeps_cumulative_heard_and_metadata() {
-        let file = super::super::source::opening_prefix_file(1024, true);
+        let file = crate::source::opening_prefix_file(1024, true);
         let info = Source::open(file.path(), 65_536, DecoderHint::Native, false)
             .unwrap()
             .info()

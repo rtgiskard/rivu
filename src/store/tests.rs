@@ -1,7 +1,6 @@
 use super::Store;
-use crate::model::{
-    AlbumSort, CueSegment, DecoderHint, MediaInfo, PlaylistEntryRow, QueryStamp, Track,
-};
+use crate::model::{AlbumSort, CueSegment, PlaylistEntryRow, QueryStamp, Track};
+use rivu_audio::{DecoderHint, MediaInfo};
 use rusqlite::{Connection, params};
 use std::collections::HashSet;
 use std::fs;

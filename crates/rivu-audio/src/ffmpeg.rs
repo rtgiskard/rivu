@@ -517,7 +517,7 @@ pub(super) fn inspect_wave(path: &Path, file: &File) -> Result<Option<Input>> {
         Some(Ok(rt)) => rt,
         _ => return Ok(None),
     };
-    let path = crate::library::logical_path(path)?;
+    let path = rivu_format::config::logical_path(path)?;
     let mut magic = [0; 12];
     // Positional reading leaves native decoding at byte zero without a seek.
     match file.read_exact_at(&mut magic, 0) {
@@ -558,7 +558,7 @@ impl Decoder {
         cancelled: Option<&AtomicBool>,
     ) -> Result<Self> {
         check_cancelled(cancelled)?;
-        let path = crate::library::logical_path(path)?;
+        let path = rivu_format::config::logical_path(path)?;
         let input = Input::from_file(path, file, runtime()?)?;
         Self::from_input(input, cancelled)
     }
@@ -1056,7 +1056,7 @@ unsafe fn copy_samples<T: Copy>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::file_input::open_regular_file;
+    use rivu_format::input::open_regular_file;
 
     #[test]
     fn encoded_duration_restores_skip_discard_and_rejects_manual_or_malformed_trim() {

@@ -1,9 +1,10 @@
 use crate::{
     app::AppCommand,
-    model::{Command, DatabaseOptimization, DecoderHint, Query, ScanProgress, SystemState},
+    model::{Command, DatabaseOptimization, Query, ScanProgress, SystemState},
     response::{Ack, QueryResponse, StateResponse, StateRevisions, StateSections},
 };
 use anyhow::{Context, Result, bail};
+use rivu_audio::DecoderHint;
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 

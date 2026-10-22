@@ -156,6 +156,9 @@ during startup or status queries. Native decoding works without them.
 The compiled extension is disabled at runtime until
 `playback.ffmpeg_enabled = true`; see link:doc/04_playback.adoc#_optional_ffmpeg_decoder[Playback]
 for decoder behavior and runtime dependencies.
+The application feature forwards to `rivu-audio/ffmpeg`; the
+link:doc/04_playback.adoc#_audio_runtime_crate[audio runtime crate] owns binding
+generation and native audio dependencies.
 
 To build without FFmpeg support, omit the FFmpeg package and disable default features:
 

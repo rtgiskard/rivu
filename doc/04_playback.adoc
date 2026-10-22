@@ -500,3 +500,19 @@ navigation selects the occurrence without opening its decoder; paused navigation
 loads it paused. CLI, TUI, and GUI Next/Previous retain their normal play-starting
 behavior when navigating to another occurrence.
 `SetPosition` for an occurrence other than the current one is ignored.
+
+== Audio runtime crate
+
+`crates/rivu-audio` owns decoding and probing, PipeWire output, playback workers,
+processed graph rendering, waveform capture and audio analysis. It also owns
+`DecoderHint` and `MediaInfo`; consumers use `rivu_audio` directly. Queue and
+library identity, configuration persistence and processing-job orchestration stay
+in the application. The audio crate has no dependency on application, GUI or
+database code.
+
+Shared regular-file admission lives in `rivu_format::input`, preserving opened
+descriptor checks and nonblocking FIFO rejection for audio and metadata readers.
+FFmpeg bindings and PipeWire prerequisites are built by `rivu-audio`; the
+application's `ffmpeg` feature forwards to that crate. Native-only builds continue
+to use `--no-default-features`.
+

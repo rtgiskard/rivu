@@ -383,9 +383,9 @@ fn draw_details(
             ));
             lines.push(Line::default());
             let decoder = match track.decoder_hint {
-                crate::model::DecoderHint::Auto => i18n.text("gl-auto"),
-                crate::model::DecoderHint::Native => i18n.text("gl-native"),
-                crate::model::DecoderHint::Ffmpeg => "FFmpeg",
+                rivu_audio::DecoderHint::Auto => i18n.text("gl-auto"),
+                rivu_audio::DecoderHint::Native => i18n.text("gl-native"),
+                rivu_audio::DecoderHint::Ffmpeg => "FFmpeg",
             };
             lines.extend(detail_field(
                 i18n.text("gl-decoder-hint"),

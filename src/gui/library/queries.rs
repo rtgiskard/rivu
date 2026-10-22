@@ -362,9 +362,10 @@ mod tests {
             core::Runtime,
             gui::library::model::LibraryBrowser,
             library::{ScanRecord, ScanResult},
-            model::{MediaInfo, Query},
+            model::Query,
             store::Store,
         };
+        use rivu_audio::MediaInfo;
 
         let directory = tempfile::tempdir().unwrap();
         let parent = directory.path().join("music");

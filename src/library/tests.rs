@@ -625,7 +625,7 @@ fn opened_scan_source_keeps_metadata_and_hash_when_its_symlink_is_retargeted() -
             #[cfg(feature = "ffmpeg")]
             if enabled {
                 // Exercise loaded-runtime WAVE inspection as well as native-only opens.
-                crate::audio::probe_details(&first, true, true)?;
+                rivu_audio::probe_details(&first, true, true)?;
             }
             let requested = if cue { sheet } else { audio.clone() };
             let mut lookups = 0;

@@ -32,11 +32,8 @@ use gpui::{
 };
 use parking_lot::RwLock;
 
-use crate::{
-    audio::{PlaybackRange, WaveformFrame},
-    config::Config,
-    model::{DecoderHint, Track},
-};
+use crate::{config::Config, model::Track};
+use rivu_audio::{DecoderHint, PlaybackRange, WaveformFrame};
 
 #[derive(Clone, PartialEq)]
 struct Source {
@@ -77,7 +74,7 @@ struct ManualRequest {
     suspension_generation: u64,
     cancelled: Arc<AtomicBool>,
     progressive_revision: u64,
-    identity: Option<crate::audio::WaveformIdentity>,
+    identity: Option<rivu_audio::WaveformIdentity>,
 }
 
 #[derive(Clone)]
@@ -87,7 +84,7 @@ struct FullPreview {
     frame: WaveformFrame,
     progressive_revision: u64,
     baseline_revision: u64,
-    identity: Option<crate::audio::WaveformIdentity>,
+    identity: Option<rivu_audio::WaveformIdentity>,
 }
 
 impl FullPreview {
@@ -102,7 +99,7 @@ impl FullPreview {
 
 fn scan_matches_progressive(scan: &WaveformFrame, progressive: &WaveformFrame) -> bool {
     match (scan.scan_source_identity, progressive.identity) {
-        (Some(scanned), Some(crate::audio::WaveformIdentity::Progressive { content, .. })) => {
+        (Some(scanned), Some(rivu_audio::WaveformIdentity::Progressive { content, .. })) => {
             scanned == content
         }
         _ => true,
@@ -110,12 +107,12 @@ fn scan_matches_progressive(scan: &WaveformFrame, progressive: &WaveformFrame) -
 }
 
 type SnapshotReply =
-    crossbeam_channel::Receiver<Result<Option<crate::audio::WaveformScanSnapshot>, String>>;
+    crossbeam_channel::Receiver<Result<Option<rivu_audio::WaveformScanSnapshot>, String>>;
 
 struct PreparedScan {
     generation: u64,
     snapshot: Option<anyhow::Result<SnapshotReply>>,
-    fallback: crate::audio::WaveformScanSnapshot,
+    fallback: rivu_audio::WaveformScanSnapshot,
     buffer_mb: u32,
     ffmpeg_enabled: bool,
 }
@@ -137,8 +134,8 @@ fn waveform_gcd(mut left: u128, mut right: u128) -> u128 {
 impl WaveformBinGeometry {
     fn from_frame(frame: &WaveformFrame) -> Option<Self> {
         let sample_rate = match frame.identity {
-            Some(crate::audio::WaveformIdentity::Progressive { sample_rate, .. })
-            | Some(crate::audio::WaveformIdentity::FullScan { sample_rate, .. }) => sample_rate,
+            Some(rivu_audio::WaveformIdentity::Progressive { sample_rate, .. })
+            | Some(rivu_audio::WaveformIdentity::FullScan { sample_rate, .. }) => sample_rate,
             None => 0,
         };
         if frame.bin_frames == 0 || frame.bin_count == 0 || sample_rate == 0 {
@@ -984,7 +981,7 @@ impl Waveform {
         self.prepared_scan = Some(PreparedScan {
             generation,
             snapshot,
-            fallback: crate::audio::WaveformScanSnapshot::original(
+            fallback: rivu_audio::WaveformScanSnapshot::original(
                 track.path.clone(),
                 track_range(track),
                 track.decoder_hint,
@@ -1040,7 +1037,7 @@ impl Waveform {
                     {
                         snapshot.decoder_hint = display_source.decoder_hint;
                     }
-                    let mut frame = crate::audio::waveform(
+                    let mut frame = rivu_audio::waveform(
                         &snapshot,
                         setup.buffer_mb,
                         setup.ffmpeg_enabled,
@@ -1805,46 +1802,33 @@ mod tests {
     }
 
     fn frame(peaks: Vec<Option<f32>>) -> WaveformFrame {
-        let max_peak = peaks.iter().flatten().copied().fold(1.0, f32::max);
-        WaveformFrame {
-            revision: 1,
-            path: Some(PathBuf::from("track.flac")),
-            range: None,
+        let counts: Vec<_> = peaks
+            .iter()
+            .map(|value| u64::from(value.is_some()))
+            .collect();
+        let mut frame = WaveformFrame::default();
+        frame.revision = 1;
+        frame.path = Some(PathBuf::from("track.flac"));
+        frame.duration = Some(10.0);
+        frame.span_seconds = 10.0;
+        frame.bin_frames = 80_000;
+        frame.bin_count = peaks.len() as u64;
+        frame.identity = Some(rivu_audio::WaveformIdentity::FullScan {
             duration: Some(10.0),
-            span_seconds: 10.0,
-            bin_frames: 80_000,
-            bin_count: peaks.len() as u64,
-            identity: Some(crate::audio::WaveformIdentity::FullScan {
-                duration: Some(10.0),
-                sample_rate: 8_000,
-            }),
-            max_peak,
-            bin_revisions: peaks
-                .iter()
-                .map(|value| u64::from(value.is_some()))
-                .collect(),
-            peaks: peaks.clone(),
-            rms: peaks.clone(),
-            rms_counts: peaks
-                .iter()
-                .map(|value| u64::from(value.is_some()))
-                .collect(),
-            left_peaks: peaks.clone(),
-            right_peaks: peaks.clone(),
-            left_rms: peaks.clone(),
-            right_rms: peaks.clone(),
-            left_rms_counts: peaks
-                .iter()
-                .map(|value| u64::from(value.is_some()))
-                .collect(),
-            right_rms_counts: peaks
-                .iter()
-                .map(|value| u64::from(value.is_some()))
-                .collect(),
-            channel_weights: Vec::new(),
-            complete: false,
-            ..WaveformFrame::default()
-        }
+            sample_rate: 8_000,
+        });
+        frame.max_peak = peaks.iter().flatten().copied().fold(1.0, f32::max);
+        frame.bin_revisions = counts.clone();
+        frame.rms_counts = counts.clone();
+        frame.left_rms_counts = counts.clone();
+        frame.right_rms_counts = counts;
+        frame.rms = peaks.clone();
+        frame.left_peaks = peaks.clone();
+        frame.right_peaks = peaks.clone();
+        frame.left_rms = peaks.clone();
+        frame.right_rms = peaks.clone();
+        frame.peaks = peaks;
+        frame
     }
 
     fn geometry_frame(
@@ -1860,7 +1844,7 @@ mod tests {
             / bin_count as f64
             / f64::from(sample_rate);
         result.duration = Some(result.span_seconds);
-        result.identity = Some(crate::audio::WaveformIdentity::FullScan {
+        result.identity = Some(rivu_audio::WaveformIdentity::FullScan {
             duration: result.duration,
             sample_rate,
         });
@@ -2635,8 +2619,8 @@ mod tests {
     fn scan_provenance_retires_a_preplay_baseline_when_actual_source_changes() {
         let original = tempfile::tempfile().unwrap();
         let replacement = tempfile::tempfile().unwrap();
-        let original = crate::audio::SourceIdentity::from_file(&original).unwrap();
-        let replacement = crate::audio::SourceIdentity::from_file(&replacement).unwrap();
+        let original = rivu_audio::SourceIdentity::from_file(&original).unwrap();
+        let replacement = rivu_audio::SourceIdentity::from_file(&replacement).unwrap();
         let mut waveform = preview(frame(vec![None; 2]));
         let (request, _) = waveform.start_full(DecoderHint::Auto);
         let mut baseline = frame(vec![Some(0.75); 2]);
@@ -2644,7 +2628,7 @@ mod tests {
         assert!(waveform.finish_full(request, Ok(baseline)));
         {
             let mut shared = waveform.shared.write();
-            shared.identity = Some(crate::audio::WaveformIdentity::Progressive {
+            shared.identity = Some(rivu_audio::WaveformIdentity::Progressive {
                 content: replacement,
                 ffmpeg: false,
                 duration: Some(10.0),

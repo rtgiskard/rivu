@@ -1,14 +1,12 @@
 //! Shared, accepted-audio-clocked generative light views. No simulation in paint.
 use super::{fractal_beams, fractal_flow};
+use crate::config::{AudioVisualizerOptions, AudioVisualizerStyle, Config};
 use crate::i18n::Localizer;
-use crate::{
-    analysis::{AnalysisFrame, AnalysisSettings},
-    config::{AudioVisualizerOptions, AudioVisualizerStyle, Config},
-};
 use gpui::{
     AnyElement, App, Bounds, GpuFrame, GpuLimits, GpuPalette, GpuSegment, GpuSource,
     GpuStrokeLayer, Pixels, TextAlign, Window, canvas, div, fill, point, prelude::*, px, rgb, size,
 };
+use rivu_audio::analysis::{AnalysisFrame, AnalysisSettings};
 use std::{cell::RefCell, rc::Rc, sync::Arc, time::Duration};
 
 #[derive(Clone, Copy, Default)]
@@ -568,7 +566,7 @@ fn blend(from: u32, to: u32, t: f32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::analysis::{VisualizerDemand, VisualizerFrame};
+    use rivu_audio::analysis::{VisualizerDemand, VisualizerFrame};
 
     fn plot(style: AudioVisualizerStyle) -> FractalVisualizer {
         let plot = FractalVisualizer::new(style);

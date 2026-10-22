@@ -2,10 +2,11 @@
 
 use super::{
     PlaybackRange, SourceIdentity,
-    source::{DECODE_WORK_BUDGET, DecodeStep, Source, check_cancelled, open_regular_file},
+    source::{DECODE_WORK_BUDGET, DecodeStep, Source, check_cancelled},
 };
-use crate::model::DecoderHint;
+use crate::DecoderHint;
 use anyhow::{Context, Result, bail};
+use rivu_format::input::open_regular_file;
 use std::{fs::OpenOptions, io::BufWriter, path::Path, sync::atomic::AtomicBool};
 
 // RIFF uses 32-bit lengths. Leave room for all WAV headers; reject rather than
@@ -14,11 +15,11 @@ const MAX_RENDER_BYTES: u64 = u32::MAX as u64 - 1024;
 const WRITE_FRAMES: usize = 4096;
 
 #[derive(Clone, Debug)]
-pub(crate) struct RenderInfo {
-    pub(crate) source_identity: SourceIdentity,
-    pub(crate) sample_rate: u32,
-    pub(crate) channels: u16,
-    pub(crate) frames: u64,
+pub struct RenderInfo {
+    pub source_identity: SourceIdentity,
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub frames: u64,
 }
 
 /// Render the selected source range as native-rate, unclipped float32 WAV.
@@ -26,7 +27,7 @@ pub(crate) struct RenderInfo {
 /// result. Existing destinations are never overwritten; errors remove only the
 /// new, partial file. PCM and buffered writes remain bounded independently of
 /// track duration, and cancellation reaches decoder packet loops as well.
-pub(crate) fn render_source(
+pub fn render_source(
     path: &Path,
     range: Option<PlaybackRange>,
     decoder_hint: DecoderHint,

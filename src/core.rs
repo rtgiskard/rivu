@@ -1,6 +1,4 @@
 use crate::{
-    analysis::{AnalysisControl, AnalysisFrame, DisplayDemand},
-    audio::{self, AudioCommand, AudioEngine, AudioEvent},
     config::{Config, ConfigPatch, ConfigPersistence, LibraryColumn},
     library::{self, M3uItem, ScanResult},
     logging,
@@ -16,6 +14,8 @@ use anyhow::{Context, Result};
 use crossbeam_channel::{Receiver, Sender, bounded};
 use parking_lot::{Condvar, Mutex, RwLock};
 use rand::seq::SliceRandom;
+use rivu_audio::analysis::{AnalysisControl, AnalysisFrame, DisplayDemand};
+use rivu_audio::{self as audio, AudioCommand, AudioEngine, AudioEvent, DecoderHint, MediaInfo};
 use std::{
     collections::{HashSet, VecDeque},
     path::{Path, PathBuf},

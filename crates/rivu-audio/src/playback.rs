@@ -7,13 +7,13 @@ use super::{
     source::{DECODE_WORK_BUDGET, DecodeStep, Source},
     waveform::{WaveformAccumulator, WaveformCoverage},
 };
+use crate::DecoderHint;
 use crate::analysis::{AnalysisProducer, AnalysisWorker};
-use crate::config::VisualizationSignal;
-use crate::model::DecoderHint;
 use anyhow::{Result, bail};
 use crossbeam_channel::Receiver;
 use parking_lot::RwLock;
 use rivu_dsp::equalizer::{Equalizer, EqualizerConfig};
+use rivu_format::config::VisualizationSignal;
 use std::{path::PathBuf, sync::Arc};
 
 const PENDING_BUFFER_CAPACITY: usize = 16_384;
@@ -695,8 +695,8 @@ mod tests {
         waveform
             .write()
             .select_source(path, range, DecoderHint::Auto, &source);
-        let (output, render) = super::super::output::test_backend(8_000, false, source.layout());
-        let waveform_weights = super::super::channels::analysis_weights(source.layout());
+        let (output, render) = crate::output::test_backend(8_000, false, source.layout());
+        let waveform_weights = crate::channels::analysis_weights(source.layout());
         let timestamp_tolerance = source.waveform_timestamp_tolerance();
         let waveform_coverage = WaveformCoverage::new(0.0, timestamp_tolerance);
         let equalizer =
@@ -734,7 +734,7 @@ mod tests {
                 last_end: None,
                 timestamp_tolerance,
             },
-            scan_source: super::super::WaveformScanSnapshot::original(
+            scan_source: crate::WaveformScanSnapshot::original(
                 path.to_owned(),
                 range,
                 DecoderHint::Auto,
@@ -779,7 +779,7 @@ mod tests {
         assert!(waveform.read().revision > completed.revision);
         assert_eq!(waveform.read().peaks, completed.peaks);
         let (output, mut render) =
-            super::super::output::test_backend(8_000, false, reopened.source.layout());
+            crate::output::test_backend(8_000, false, reopened.source.layout());
         reopened
             .restart_output_with(Some(0.0), |_, _| Ok(output))
             .unwrap();
@@ -829,7 +829,7 @@ mod tests {
         let replacement = pcm_level(16_000, 26214);
         std::fs::rename(replacement.path(), file.path()).unwrap();
         let (output, mut render) =
-            super::super::output::test_backend(8_000, false, playback.source.layout());
+            crate::output::test_backend(8_000, false, playback.source.layout());
         playback
             .restart_output_with(Some(1.0), |_, _| Ok(output))
             .unwrap();
@@ -1014,7 +1014,7 @@ mod tests {
         for target in [None, Some(0.0), Some(0.5)] {
             let initial_revision = playback.visualization.waveform.read().revision;
             let (output, mut render) =
-                super::super::output::test_backend(8_000, false, playback.source.layout());
+                crate::output::test_backend(8_000, false, playback.source.layout());
             playback
                 .restart_output_with(target, |_, _| Ok(output))
                 .unwrap();
@@ -1048,7 +1048,7 @@ mod tests {
         }
         playback.set_still_mode(false);
         let (output, mut render) =
-            super::super::output::test_backend(8_000, false, playback.source.layout());
+            crate::output::test_backend(8_000, false, playback.source.layout());
         playback
             .restart_output_with(Some(0.0), |_, _| Ok(output))
             .unwrap();
@@ -1144,7 +1144,7 @@ mod tests {
                 end_seconds: Some(12.0),
             },
         );
-        let (output, mut render) = super::super::output::test_backend_with_capacity(
+        let (output, mut render) = crate::output::test_backend_with_capacity(
             8_000,
             false,
             playback.source.layout(),
@@ -1271,7 +1271,7 @@ mod tests {
         for target in [0.75, 0.125, 1.0, 0.0] {
             let prior_revision = playback.visualization.waveform.read().revision;
             let (output, mut render) =
-                super::super::output::test_backend(8_000, true, playback.source.layout());
+                crate::output::test_backend(8_000, true, playback.source.layout());
             playback
                 .restart_output_with(Some(target), |_, paused| {
                     assert!(paused);
@@ -1356,7 +1356,7 @@ mod tests {
                 } else {
                     &processed
                 };
-                let weights = super::super::output::analysis_weights(playback.source.layout());
+                let weights = crate::channels::analysis_weights(playback.source.layout());
                 for sample in expected {
                     assert_eq!(
                         captured.try_pop().unwrap().samples,
@@ -1394,7 +1394,7 @@ mod tests {
             preamp_db: 6.0,
             ..Default::default()
         });
-        let mut snapshot = super::super::WaveformScanSnapshot::original(
+        let mut snapshot = crate::WaveformScanSnapshot::original(
             file.path().to_owned(),
             None,
             DecoderHint::Native,
@@ -1404,7 +1404,7 @@ mod tests {
         snapshot.expected_identity = Some(source.identity());
         snapshot.graph = Some(graph.snapshot());
         let cancelled = std::sync::atomic::AtomicBool::new(false);
-        let before = super::super::waveform(&snapshot, 2, false, &cancelled).unwrap();
+        let before = crate::waveform(&snapshot, 2, false, &cancelled).unwrap();
         assert_eq!(before.duration, Some(117.0 / 8_000.0));
         assert_eq!(before.rms_counts.iter().sum::<u64>(), 117);
         assert!(
@@ -1422,7 +1422,7 @@ mod tests {
                 .all(|rms| (*rms - 0.25).abs() < 1e-6)
         );
         snapshot.signal = VisualizationSignal::After;
-        let after = super::super::waveform(&snapshot, 2, false, &cancelled).unwrap();
+        let after = crate::waveform(&snapshot, 2, false, &cancelled).unwrap();
         assert_eq!(after.duration, before.duration);
         assert_eq!(after.rms_counts.iter().sum::<u64>(), 117);
         let expected = 0.25 * 10.0_f32.powf(6.0 / 20.0);
@@ -1442,7 +1442,7 @@ mod tests {
         );
         let replacement = pcm_level(149, 16384);
         snapshot.path = replacement.path().to_owned();
-        assert!(super::super::waveform(&snapshot, 2, false, &cancelled).is_err());
+        assert!(crate::waveform(&snapshot, 2, false, &cancelled).is_err());
     }
 
     #[test]
@@ -1455,12 +1455,8 @@ mod tests {
             ..EqualizerConfig::default()
         };
         playback.equalizer = Equalizer::new(&config, 8_000, 1).unwrap();
-        let (output, mut render) = super::super::output::test_backend_with_capacity(
-            8_000,
-            false,
-            playback.source.layout(),
-            17,
-        );
+        let (output, mut render) =
+            crate::output::test_backend_with_capacity(8_000, false, playback.source.layout(), 17);
         playback.output = output;
         playback.fill().unwrap();
         assert!(playback.pending.len() > 17);
@@ -1519,7 +1515,7 @@ mod tests {
         for target in [Some(0.25), None] {
             let position = target.unwrap_or_else(|| playback.position());
             let (output, mut render) =
-                super::super::output::test_backend(8_000, false, playback.source.layout());
+                crate::output::test_backend(8_000, false, playback.source.layout());
             playback
                 .restart_output_with(target, |_, _| Ok(output))
                 .unwrap();
@@ -1696,7 +1692,7 @@ mod tests {
         playback.graph = Some(runner);
         playback.fill().unwrap();
         let (output, mut render) =
-            super::super::output::test_backend(8_000, false, playback.source.layout());
+            crate::output::test_backend(8_000, false, playback.source.layout());
         playback
             .restart_output_with(Some(0.25), |_, _| Ok(output))
             .unwrap();
@@ -1784,7 +1780,7 @@ mod tests {
                 },
             );
             let (output, mut render) =
-                super::super::output::test_backend(8_000, false, playback.source.layout());
+                crate::output::test_backend(8_000, false, playback.source.layout());
             playback
                 .restart_output_with(Some(0.25), |_, _| Ok(output))
                 .unwrap();
@@ -1800,7 +1796,7 @@ mod tests {
             let snapshot = playback.close();
             assert_eq!(
                 snapshot,
-                super::super::AudioSnapshot {
+                crate::AudioSnapshot {
                     generation: 1,
                     position_seconds: 0.25 + 32.0 / 8_000.0,
                     listened_seconds: 12.0 + 32.0 / 8_000.0,

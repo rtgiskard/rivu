@@ -7,14 +7,12 @@ use crate::i18n::Localizer;
 
 use super::super::layout;
 use super::{analysis_visualizer::AnalysisVisualizer, fractal_visualizer::FractalVisualizer};
-use crate::{
-    analysis::{AnalysisFrame, AnalysisSettings},
-    config::{AudioVisualizerOptions, AudioVisualizerStyle, Config},
-};
+use crate::config::{AudioVisualizerOptions, AudioVisualizerStyle, Config};
 use gpui::{
     AnyElement, App, Bounds, PathBuilder, Rgba, TextAlign, Window, canvas, div, point, prelude::*,
     px, rgb,
 };
+use rivu_audio::analysis::{AnalysisFrame, AnalysisSettings};
 use std::{
     cell::RefCell,
     f32::consts::PI,

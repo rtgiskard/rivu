@@ -106,6 +106,11 @@ mod ffmpeg {
         }
     }
 }
+pub mod analysis;
+mod media;
+pub use media::{DecoderHint, MediaInfo};
+mod volume;
+
 mod bitrate;
 mod channels;
 mod graph;
@@ -117,13 +122,13 @@ mod waveform;
 mod worker;
 
 use channels::Channel;
-pub(crate) use graph::GraphRunner;
+pub use graph::GraphRunner;
 pub use output::devices;
-pub(crate) use render::render_source;
-pub use source::{SourceIdentity, probe, probe_details};
-pub(crate) use source::{metadata_budget, probe_file};
-pub use waveform::WaveformFrame;
-pub(crate) use waveform::WaveformIdentity;
+pub use render::{RenderInfo, render_source};
+pub use source::{
+    ProbeBackend, ProbeResult, SourceIdentity, metadata_budget, probe, probe_details, probe_file,
+};
+pub use waveform::{WaveformFrame, WaveformIdentity};
 
 pub fn ffmpeg_status() -> anyhow::Result<String> {
     ffmpeg::availability()
@@ -141,7 +146,7 @@ pub struct WaveformScanSnapshot {
     pub range: Option<PlaybackRange>,
     pub decoder_hint: DecoderHint,
     pub expected_identity: Option<SourceIdentity>,
-    pub signal: crate::config::VisualizationSignal,
+    pub signal: rivu_format::config::VisualizationSignal,
     pub equalizer: Arc<rivu_dsp::equalizer::EqualizerConfig>,
     pub(crate) graph: Option<graph::GraphSnapshot>,
 }
@@ -151,7 +156,7 @@ impl WaveformScanSnapshot {
         path: PathBuf,
         range: Option<PlaybackRange>,
         decoder_hint: DecoderHint,
-        signal: crate::config::VisualizationSignal,
+        signal: rivu_format::config::VisualizationSignal,
         equalizer: Arc<rivu_dsp::equalizer::EqualizerConfig>,
     ) -> Self {
         Self {
@@ -177,7 +182,6 @@ pub fn waveform(
 }
 
 use crate::analysis::{AnalysisControl, AnalysisFrame, AnalysisSettings, AnalysisWorker};
-use crate::model::{DecoderHint, MediaInfo};
 use anyhow::{Context, Result};
 use crossbeam_channel::{Receiver, Sender, TrySendError, after, bounded, select};
 use parking_lot::{Mutex, RwLock};
@@ -322,7 +326,7 @@ pub struct AudioEngine {
     commands: Sender<AudioCommand>,
     pub events: Receiver<AudioEvent>,
     pub analysis: Arc<RwLock<AnalysisFrame>>,
-    pub(crate) analysis_control: Arc<AnalysisControl>,
+    pub analysis_control: Arc<AnalysisControl>,
     pub waveform: Arc<RwLock<WaveformFrame>>,
     worker: Option<JoinHandle<()>>,
     shutdown: Mutex<Option<Sender<()>>>,
@@ -382,7 +386,7 @@ impl AudioEngine {
 
     /// Core is the sole ordinary producer. Until its next send, the worker can
     /// only free slots, so a complete batch can be admitted after persistence.
-    pub(crate) fn ensure_command_capacity(&self, count: usize) -> Result<()> {
+    pub fn ensure_command_capacity(&self, count: usize) -> Result<()> {
         let capacity = self
             .commands
             .capacity()
@@ -394,30 +398,27 @@ impl AudioEngine {
         Ok(())
     }
 
-    pub(crate) fn stop_request(&self) -> AudioStop {
+    pub fn stop_request(&self) -> AudioStop {
         AudioStop {
             commands: self.commands.clone(),
             events: self.events.clone(),
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn replace_commands(
-        &mut self,
-        commands: Sender<AudioCommand>,
-    ) -> Sender<AudioCommand> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn replace_commands(&mut self, commands: Sender<AudioCommand>) -> Sender<AudioCommand> {
         std::mem::replace(&mut self.commands, commands)
     }
 }
 
 /// A stop-only handle cannot submit ordinary commands behind Core's preflight.
-pub(crate) struct AudioStop {
+pub struct AudioStop {
     commands: Sender<AudioCommand>,
     events: Receiver<AudioEvent>,
 }
 
 impl AudioStop {
-    pub(crate) fn wait(self, observe: impl FnMut(AudioEvent)) -> Result<AudioSnapshot> {
+    pub fn wait(self, observe: impl FnMut(AudioEvent)) -> Result<AudioSnapshot> {
         stop_and_snapshot(&self.commands, &self.events, observe)
     }
 }

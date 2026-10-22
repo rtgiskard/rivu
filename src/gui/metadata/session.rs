@@ -5,7 +5,8 @@
 //! erase unavailability or cancel a newer read. Identity epochs invalidate callbacks
 //! after leaving and reopening the same track or discarding it.
 
-use crate::model::{Command, DecoderHint, Track};
+use crate::model::{Command, Track};
+use rivu_audio::DecoderHint;
 use std::sync::Arc;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

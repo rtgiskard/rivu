@@ -218,12 +218,12 @@ fn run_until_disconnected(core: &mut Core, requests: Receiver<Request>) {
 
 fn display_fixture() -> (
     CoreHandle,
-    crate::analysis::AnalysisWorker,
+    rivu_audio::analysis::AnalysisWorker,
     Receiver<Request>,
 ) {
     let analysis = Arc::new(RwLock::new(AnalysisFrame::default()));
-    let worker = crate::analysis::AnalysisWorker::new(analysis.clone()).unwrap();
-    worker.configure(crate::analysis::AnalysisSettings {
+    let worker = rivu_audio::analysis::AnalysisWorker::new(analysis.clone()).unwrap();
+    worker.configure(rivu_audio::analysis::AnalysisSettings {
         fps: 60,
         fft_size: 512,
         window: crate::config::AnalysisWindow::None,

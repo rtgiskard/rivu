@@ -1522,13 +1522,13 @@ impl GuiApp {
 mod state_tests {
     use super::presentation::{retain_analysis_staging, stage_analysis_frame};
     use super::{BrowserFocus, ListFocus, panel_list_focus};
-    use crate::analysis::{
-        AnalysisFrame, AnalysisSettings, AnalysisWorker, DisplayDemand, TapFrame, VisualizerDemand,
-    };
     use parking_lot::RwLock;
     use ringbuf::traits::Producer;
+    use rivu_audio::analysis::{
+        AnalysisFrame, AnalysisSettings, AnalysisWorker, DisplayDemand, TapFrame, VisualizerDemand,
+    };
     use std::{
-        sync::{Arc, atomic::Ordering},
+        sync::Arc,
         thread,
         time::{Duration, Instant},
     };
@@ -1563,7 +1563,7 @@ mod state_tests {
                     producer
                         .try_push(TapFrame {
                             samples: [sample, -sample * 0.5],
-                            epoch: worker.control.epoch.load(Ordering::Acquire),
+                            epoch: worker.control.epoch(),
                             demand_token: token,
                             gap: false,
                         })

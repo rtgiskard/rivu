@@ -9,7 +9,7 @@ use std::{
 
 /// Follow ordinary symlinks, but reject non-regular opened objects. Nonblocking
 /// open ensures a FIFO substituted at the path cannot wait for a writer.
-pub(crate) fn open_regular_file(path: &Path) -> io::Result<File> {
+pub fn open_regular_file(path: &Path) -> io::Result<File> {
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NONBLOCK)

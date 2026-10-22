@@ -1,4 +1,5 @@
-use crate::model::{CueSegment, DecoderHint, Track};
+use crate::model::{CueSegment, Track};
+use rivu_audio::DecoderHint;
 use std::path::PathBuf;
 
 pub(super) fn fingerprint_from_row(

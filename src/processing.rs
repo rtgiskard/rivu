@@ -1,7 +1,8 @@
 //! Offline processing runs outside Core and never publishes directly into player state.
-use crate::{audio, config::Config, model::*};
+use crate::{config::Config, model::*};
 use anyhow::{Context, Result, bail, ensure};
 use crossbeam_channel::{Receiver, Sender, bounded};
+use rivu_audio as audio;
 use std::{
     fs,
     io::{Read, Write},

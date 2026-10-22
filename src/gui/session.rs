@@ -130,7 +130,7 @@ impl UiSession {
     fn clear_window_state(&self) {
         self.handle.clear_wakeup();
         self.handle
-            .set_display_demand(crate::analysis::DisplayDemand::default());
+            .set_display_demand(rivu_audio::analysis::DisplayDemand::default());
     }
 
     pub(crate) fn release_window(&mut self) {

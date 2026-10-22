@@ -392,12 +392,12 @@ impl ArtworkManager {
     }
 
     fn embedded_uri(&self, path: &Path) -> Result<Option<Arc<ArtworkFile>>, ()> {
-        let file = crate::file_input::open_regular_file(path).map_err(|_| ())?;
+        let file = rivu_format::input::open_regular_file(path).map_err(|_| ())?;
         let mut hint = Hint::new();
         if let Some(extension) = path.extension().and_then(|value| value.to_str()) {
             hint.with_extension(extension);
         }
-        let mut budget = crate::audio::metadata_budget(true);
+        let mut budget = rivu_audio::metadata_budget(true);
         let mut format = budget
             .with(|| {
                 get_probe().probe(
@@ -523,6 +523,81 @@ fn write_image(path: &Path, data: &[u8]) -> io::Result<String> {
 pub(crate) mod tests {
     use super::*;
     use std::fs::File;
+
+    fn assert_budget_audio(path: &Path) {
+        use rivu_audio::{DecoderHint, ProbeBackend, render_source};
+        use std::sync::atomic::AtomicBool;
+
+        let details = rivu_audio::probe_details(path, false, false).unwrap();
+        assert!(matches!(details.decoder_backend, ProbeBackend::Native));
+        assert_eq!(details.info.sample_rate, 8_000);
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("decoded.wav");
+        let rendered = render_source(
+            path,
+            None,
+            DecoderHint::Native,
+            2,
+            false,
+            &output,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(rendered.frames, 1);
+        let samples = hound::WavReader::open(output)
+            .unwrap()
+            .into_samples::<f32>()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(samples, [0.5]);
+    }
+
+    #[test]
+    fn native_metadata_budget_preserves_unsynchronised_audio() {
+        let directory = tempfile::tempdir().unwrap();
+        for (version, tag_wide) in [(2, true), (3, true), (4, false), (4, true)] {
+            let path = directory
+                .path()
+                .join(format!("unsync-{version}-{tag_wide}.wav"));
+            budget_unsynchronised_wav(&path, version, tag_wide);
+            assert_budget_audio(&path);
+        }
+    }
+
+    #[test]
+    fn native_metadata_budget_skips_large_pictures_without_losing_tags_or_audio() {
+        let directory = tempfile::tempdir().unwrap();
+        for version in [2, 3, 4] {
+            let path = directory.path().join(format!("budget-{version}.wav"));
+            let size = if version == 2 { 9 } else { 27 } * 1024 * 1024;
+            budget_tagged_wav(
+                &path,
+                version,
+                &[
+                    (DEFAULT_IMAGE, size, 3),
+                    (DEFAULT_IMAGE, DEFAULT_IMAGE.len(), 3),
+                ],
+            );
+            assert_eq!(
+                rivu_audio::probe(&path, false).unwrap().title,
+                "Budget title"
+            );
+            assert_budget_audio(&path);
+        }
+    }
+
+    #[test]
+    fn native_metadata_budget_keeps_audio_after_many_picture_frames() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("many-pictures.wav");
+        let pictures = vec![(DEFAULT_IMAGE, DEFAULT_IMAGE.len(), 3); 64];
+        budget_tagged_wav(&path, 4, &pictures);
+        assert_eq!(
+            rivu_audio::probe(&path, false).unwrap().title,
+            "Budget title"
+        );
+        assert_budget_audio(&path);
+    }
 
     pub(crate) fn track(path: PathBuf) -> Track {
         Track {

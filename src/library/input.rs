@@ -10,7 +10,7 @@ pub(super) fn read_input(
     cancellation: &ScanCancellation,
 ) -> Result<Vec<u8>> {
     cancellation.check()?;
-    let mut file = crate::file_input::open_regular_file(path)?;
+    let mut file = rivu_format::input::open_regular_file(path)?;
     let metadata = file.metadata()?;
     ensure!(
         metadata.len() <= limit as u64,

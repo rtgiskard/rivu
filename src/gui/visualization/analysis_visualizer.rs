@@ -1,6 +1,5 @@
 //! Fixed-scale, analysis-backed stereo plots. GPU field storage is independent of panel size.
 use crate::{
-    analysis::{AnalysisFrame, AnalysisSettings, DENSITY_SIDE, DensitySnapshot, SpatialBin},
     config::{AudioVisualizerOptions, AudioVisualizerStyle, Config},
     i18n::Localizer,
 };
@@ -8,6 +7,9 @@ use gpui::{
     AnyElement, App, Bounds, GpuFieldParams, GpuFrame, GpuLimits, GpuPalette, GpuSource, GpuState,
     GpuValueMapping, Hsla, Pixels, Point, SharedString, TextAlign, Window, canvas, div, fill,
     point, prelude::*, px, rgb, size,
+};
+use rivu_audio::analysis::{
+    AnalysisFrame, AnalysisSettings, DENSITY_SIDE, DensitySnapshot, SpatialBin,
 };
 use std::{cell::RefCell, rc::Rc, sync::Arc, time::Duration};
 
@@ -856,7 +858,7 @@ fn label(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::analysis::{SpatialBin, VisualizerDemand, VisualizerFrame};
+    use rivu_audio::analysis::{SpatialBin, VisualizerDemand, VisualizerFrame};
 
     fn frame(style: AudioVisualizerStyle) -> AnalysisFrame {
         AnalysisFrame {
