@@ -14,7 +14,8 @@ use crate::{
     tray::TrayController,
 };
 use anyhow::{Context, Result, anyhow, bail};
-use crossbeam_channel::{bounded, select_biased};
+#[cfg(test)]
+use crossbeam_channel::bounded;
 use futures::{StreamExt, channel::mpsc};
 use gpui::{App as GpuiApp, GraphicalEnvironment, QuitMode, Subscription, Task, WindowingRequest};
 use signal_hook::{
@@ -212,7 +213,7 @@ pub struct App {
     handle: AppHandle,
     runtime: Runtime,
     signals: Option<ShutdownSignals>,
-    media: Option<MediaWorker>,
+    media: Option<mpris::MediaWorker>,
     artwork: Arc<ArtworkManager>,
     tray: Option<TrayController>,
     gui: Option<GuiState>,
@@ -299,7 +300,7 @@ impl App {
             session: Some(session),
             _socket_owner: socket_owner,
         };
-        app.media = Some(MediaWorker::start(
+        app.media = Some(mpris::MediaWorker::start(
             app.runtime.handle.clone(),
             app.handle.clone(),
             Arc::clone(&app.artwork),
@@ -652,111 +653,6 @@ impl ShutdownSignals {
 impl Drop for ShutdownSignals {
     fn drop(&mut self) {
         self.handle.close();
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
-        }
-    }
-}
-
-struct MediaWorker {
-    stop: crossbeam_channel::Sender<()>,
-    worker: Option<thread::JoinHandle<()>>,
-}
-
-impl MediaWorker {
-    fn start(handle: CoreHandle, app: AppHandle, artwork: Arc<ArtworkManager>) -> Result<Self> {
-        let changes = handle.subscribe();
-        let (stop, stop_receiver) = bounded(1);
-        let worker = thread::Builder::new()
-            .name("rivu-mpris-manager".into())
-            .spawn(move || {
-                let mut service = None;
-                let mut registration = None;
-                let not_registering = crossbeam_channel::never();
-                let mut enabled = false;
-                loop {
-                    let state = handle.mpris_service_state();
-                    if state.shutting_down {
-                        break;
-                    }
-                    if state.enabled != enabled {
-                        enabled = state.enabled;
-                        registration = None;
-                        service = None;
-                        if enabled {
-                            match mpris::Registration::start(
-                                handle.clone(),
-                                app.clone(),
-                                Arc::clone(&artwork),
-                            ) {
-                                Ok(pending) => registration = Some(pending),
-                                Err(error) => {
-                                    let _ = handle.send(Command::MprisStatus {
-                                        status: format!("MPRIS unavailable: {error:#}"),
-                                    });
-                                }
-                            }
-                        } else {
-                            let _ = handle.send(Command::MprisStatus {
-                                status: "Desktop media controls disabled".to_owned(),
-                            });
-                        }
-                    }
-                    let registered = registration
-                        .as_ref()
-                        .map_or(&not_registering, mpris::Registration::result);
-                    select_biased! {
-                        recv(stop_receiver) -> _ => break,
-                        recv(changes) -> changed => {
-                            if changed.is_err() {
-                                break;
-                            }
-                        }
-                        recv(registered) -> connection => {
-                            registration = None;
-                            // Never start a publisher for a cancelled enable request.
-                            let state = handle.mpris_service_state();
-                            if state.shutting_down {
-                                break;
-                            }
-                            if !state.enabled {
-                                continue;
-                            }
-                            let status = match connection
-                                .context("MPRIS registration worker stopped")
-                                .and_then(|result| result)
-                                .and_then(|connection| {
-                                    mpris::Mpris::start(
-                                        connection,
-                                        handle.clone(),
-                                        app.clone(),
-                                        Arc::clone(&artwork),
-                                    )
-                                })
-                            {
-                                Ok(started) => {
-                                    service = Some(started);
-                                    "Connected to desktop media controls".to_owned()
-                                }
-                                Err(error) => format!("MPRIS unavailable: {error:#}"),
-                            };
-                            let _ = handle.send(Command::MprisStatus { status });
-                        }
-                    }
-                }
-                drop(registration);
-                drop(service);
-            })?;
-        Ok(Self {
-            stop,
-            worker: Some(worker),
-        })
-    }
-}
-
-impl Drop for MediaWorker {
-    fn drop(&mut self) {
-        let _ = self.stop.try_send(());
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }

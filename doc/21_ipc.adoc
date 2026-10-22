@@ -256,9 +256,10 @@ epochs discard results belonging to closed or superseded reviews.
 The graphical host has three lifetime boundaries within one process:
 
 * `App` in `app.rs` owns the core runtime, IPC server and socket acquisition,
-  shutdown signals, MPRIS, shared artwork, logging session, optional tray, and
-  open/focus/quit coordination. Its GPUI event loop remains available when no
-  window exists.
+  shutdown signals, shared artwork, logging session, optional tray, and
+  open/focus/quit coordination. It holds the MPRIS manager; the MPRIS module owns
+  enable transitions, registration cancellation, publisher startup, and service
+  teardown. Its GPUI event loop remains available when no window exists.
 * The core owns accepted business operations and authoritative state. Closing a
   window does not cancel playback, scans, saves, or other accepted commands.
   Explicit relocation review is an exception: dismissing its dialog requests
@@ -285,13 +286,23 @@ Disabling FFmpeg or publishing its success/failure result drops the timer;
 configuration changes re-evaluate demand before Core waits again. Disabled,
 resolved, and native-only builds retain no FFmpeg status polling wakeups.
 
-App's media manager owns MPRIS registration and the resulting publisher. Each
-enable attempt uses one temporary registration worker; the manager remains
-responsive to core changes and shutdown. Disabling or stopping cancels the
-asynchronous bus build and joins that worker before retiring the attempt. A
-completed connection starts publishing only if MPRIS is still enabled and the
-core is not shutting down. Failed attempts wait for a later off/on transition,
-not a retry timer; registration never blocks the first window.
+The MPRIS module's media manager owns registration and the resulting publisher;
+App retains and joins the manager. Each enable attempt uses one temporary
+registration worker; the manager remains responsive to core changes and shutdown.
+Disabling or stopping cancels the asynchronous bus build and joins that worker
+before retiring the attempt. A completed connection starts publishing only if
+MPRIS is still enabled and the core is not shutting down. Failed attempts wait
+for a later off/on transition, not a retry timer; registration never blocks the
+first window. Initially disabled controls publish the disabled status too.
+
+Publisher status is ordered by the publisher itself, so an immediate failure
+cannot be overwritten by the manager's startup success. Retirement cancels
+pending signal writes and joins the publisher. It removes the Root and Player
+interfaces to stop new MPRIS calls, waits up to one second for their active reply
+guards (including an accepted Quit acknowledgement), then explicitly closes the
+connection with a separate one-second deadline. A peer cannot retain the manager
+indefinitely by keeping a method call or connection reference alive. Cold artwork
+loads remain synchronous on the publisher and must finish before that join.
 
 MPRIS metadata follows the selected track's immutable snapshot as well as its
 queue occurrence, selection validity and playback duration. A scan that changes

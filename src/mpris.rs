@@ -1,7 +1,8 @@
-//! Session-bus MPRIS2 adapter. Registration is cancellable before the publisher
-//! starts. Keep one `Mpris` alive per application runtime; dropping it wakes the
-//! publisher and finishes outstanding replies before closing. Playback changes
-//! come from the core subscription, never a library polling loop.
+//! Session-bus MPRIS2 adapter. The application owns one media manager; this
+//! module owns enable transitions, cancellable registration and publication.
+//! Retiring a service cancels sends, joins the publisher, drains accepted
+//! replies with a deadline, then closes the connection. Playback changes come
+//! from the core subscription, never a library polling loop.
 
 use crate::{
     app::{AppCommand, AppHandle},
@@ -20,7 +21,7 @@ use std::{
     time::Duration,
 };
 use zbus::{
-    blocking::Connection,
+    Connection,
     connection::Builder,
     fdo,
     object_server::SignalEmitter,
@@ -34,19 +35,130 @@ const NO_TRACK: &str = "/org/mpris/MediaPlayer2/TrackList/NoTrack";
 const MICROS_PER_SECOND: f64 = 1_000_000.0;
 type Metadata = HashMap<String, OwnedValue>;
 
+pub(crate) struct MediaWorker {
+    stop: crossbeam_channel::Sender<()>,
+    worker: Option<thread::JoinHandle<()>>,
+}
+
+impl MediaWorker {
+    pub(crate) fn start(
+        handle: CoreHandle,
+        app: AppHandle,
+        artwork: Arc<ArtworkManager>,
+    ) -> Result<Self> {
+        let changes = handle.subscribe();
+        let (stop, stop_receiver) = bounded(1);
+        let worker = thread::Builder::new()
+            .name("rivu-mpris-manager".into())
+            .spawn(move || {
+                let mut service = None;
+                let mut registration = None;
+                let not_registering = crossbeam_channel::never();
+                let mut enabled = None;
+                loop {
+                    let state = handle.mpris_service_state();
+                    if state.shutting_down {
+                        break;
+                    }
+                    if enabled != Some(state.enabled) {
+                        enabled = Some(state.enabled);
+                        registration = None;
+                        service = None;
+                        if state.enabled {
+                            match Registration::start(
+                                handle.clone(),
+                                app.clone(),
+                                Arc::clone(&artwork),
+                            ) {
+                                Ok(pending) => registration = Some(pending),
+                                Err(error) => {
+                                    let _ = handle.send(Command::MprisStatus {
+                                        status: format!("MPRIS unavailable: {error:#}"),
+                                    });
+                                }
+                            }
+                        } else {
+                            let _ = handle.send(Command::MprisStatus {
+                                status: "Desktop media controls disabled".to_owned(),
+                            });
+                        }
+                    }
+                    let registered = registration
+                        .as_ref()
+                        .map_or(&not_registering, Registration::result);
+                    select_biased! {
+                        recv(stop_receiver) -> _ => break,
+                        recv(changes) -> changed => {
+                            if changed.is_err() {
+                                break;
+                            }
+                        }
+                        recv(registered) -> connection => {
+                            registration = None;
+                            // Never start a publisher for a cancelled enable request.
+                            let state = handle.mpris_service_state();
+                            if state.shutting_down {
+                                break;
+                            }
+                            if !state.enabled {
+                                continue;
+                            }
+                            match connection
+                                .context("MPRIS registration worker stopped")
+                                .and_then(|result| result)
+                                .and_then(|connection| {
+                                    Mpris::start(
+                                        connection,
+                                        handle.clone(),
+                                        app.clone(),
+                                        Arc::clone(&artwork),
+                                    )
+                                })
+                            {
+                                Ok(started) => {
+                                    service = Some(started);
+                                }
+                                Err(error) => {
+                                    let _ = handle.send(Command::MprisStatus {
+                                        status: format!("MPRIS unavailable: {error:#}"),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+                drop(registration);
+                drop(service);
+            })?;
+        Ok(Self {
+            stop,
+            worker: Some(worker),
+        })
+    }
+}
+
+impl Drop for MediaWorker {
+    fn drop(&mut self) {
+        let _ = self.stop.try_send(());
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
 /// The media manager owns and joins each attempt, including cancelled builds.
-pub(crate) struct Registration {
+struct Registration {
     result: Receiver<Result<Connection>>,
     stop: Option<oneshot::Sender<()>>,
     worker: Option<JoinHandle<()>>,
 }
 
 impl Registration {
-    pub(crate) fn start(
-        handle: CoreHandle,
-        app: AppHandle,
-        artwork: Arc<ArtworkManager>,
-    ) -> Result<Self> {
+    fn start(handle: CoreHandle, app: AppHandle, artwork: Arc<ArtworkManager>) -> Result<Self> {
+        Self::spawn(register(handle, app, artwork))
+    }
+
+    fn spawn(attempt: impl Future<Output = Result<Connection>> + Send + 'static) -> Result<Self> {
         let (registered, result) = bounded(1);
         let (stop, stopped) = oneshot::channel();
         let worker = thread::Builder::new()
@@ -56,7 +168,7 @@ impl Registration {
                     // Cancellation covers connect, authentication, and name acquisition.
                     futures::select_biased! {
                         _ = stopped.fuse() => {},
-                        result = register(handle, app, artwork).fuse() => {
+                        result = attempt.fuse() => {
                             let _ = registered.try_send(result);
                         },
                     }
@@ -70,7 +182,7 @@ impl Registration {
         })
     }
 
-    pub(crate) fn result(&self) -> &Receiver<Result<Connection>> {
+    fn result(&self) -> &Receiver<Result<Connection>> {
         &self.result
     }
 }
@@ -110,18 +222,18 @@ async fn register(
         )?
         .build()
         .await
-        .map(Connection::from)
         .context("Registering org.mpris.MediaPlayer2.rivu")
 }
 
-pub struct Mpris {
+struct Mpris {
     connection: Option<Connection>,
     stop: Sender<()>,
+    cancel: Option<oneshot::Sender<()>>,
     publisher: Option<JoinHandle<()>>,
 }
 
 impl Mpris {
-    pub(crate) fn start(
+    fn start(
         connection: Connection,
         handle: CoreHandle,
         app: AppHandle,
@@ -131,19 +243,25 @@ impl Mpris {
         let initial = handle.mpris_snapshot();
         let initial_can_raise = app.can_raise();
         let (stop, stopped) = bounded(1);
+        let (cancel, mut cancelled) = oneshot::channel();
         let bus = connection.clone();
         let publisher = thread::Builder::new()
             .name("rivu-mpris".into())
             .spawn(move || {
+                // This worker is the sole writer of publisher success/failure status.
+                // A fast initial failure must not be overwritten by the manager.
+                let _ = handle.send(Command::MprisStatus {
+                    status: "Connected to desktop media controls".to_owned(),
+                });
                 let mut previous = initial;
                 let mut previous_can_raise = initial_can_raise;
                 let mut metadata = TrackMetadata::from_snapshot(&previous, &artwork);
                 let mut loaded_artwork = None;
-                if let Err(error) = publish_artwork(&bus, &handle, &previous, &mut metadata, &artwork, &mut loaded_artwork) {
-                    let _ = handle.send(Command::MprisStatus {
-                        status: format!("publisher stopped: {error}"),
-                    });
-                    tracing::warn!(error = %error, "mpris_publisher_stopped");
+                if !publish_until_cancelled(
+                    &mut cancelled,
+                    &handle,
+                    publish_artwork(&bus, &handle, &previous, &mut metadata, &artwork, &mut loaded_artwork),
+                ) {
                     return;
                 }
                 loop {
@@ -153,21 +271,20 @@ impl Mpris {
                             if update.is_err() { break; }
                             let current = handle.mpris_snapshot();
                             let current_can_raise = app.can_raise();
-                            if let Err(error) = publish_changes(
-                                &bus,
-                                &previous,
-                                &current,
-                                &mut metadata,
-                                &artwork,
-                                previous_can_raise,
-                                current_can_raise,
-                            ).and_then(|()| publish_artwork(
-                                &bus, &handle, &current, &mut metadata, &artwork, &mut loaded_artwork,
-                            )) {
-                                let _ = handle.send(Command::MprisStatus {
-                                    status: format!("publisher stopped: {error}"),
-                                });
-                                tracing::warn!(error = %error, "mpris_publisher_stopped");
+                            if !publish_until_cancelled(&mut cancelled, &handle, async {
+                                publish_changes(
+                                    &bus,
+                                    &previous,
+                                    &current,
+                                    &mut metadata,
+                                    &artwork,
+                                    previous_can_raise,
+                                    current_can_raise,
+                                ).await?;
+                                publish_artwork(
+                                    &bus, &handle, &current, &mut metadata, &artwork, &mut loaded_artwork,
+                                ).await
+                            }) {
                                 break;
                             }
                             if current.shutting_down { break; }
@@ -181,6 +298,7 @@ impl Mpris {
         Ok(Self {
             connection: Some(connection),
             stop,
+            cancel: Some(cancel),
             publisher: Some(publisher),
         })
     }
@@ -188,13 +306,88 @@ impl Mpris {
 
 impl Drop for Mpris {
     fn drop(&mut self) {
+        if let Some(cancel) = self.cancel.take() {
+            let _ = cancel.send(());
+        }
         let _ = self.stop.try_send(());
         if let Some(publisher) = self.publisher.take() {
             let _ = publisher.join();
         }
         if let Some(connection) = self.connection.take() {
-            connection.graceful_shutdown();
+            retire_connection(connection);
         }
+    }
+}
+
+/// Bus writes are asynchronous so cancellation can release a backpressured
+/// publisher before the manager joins it. Cold artwork loads stay on this worker.
+fn publish_until_cancelled(
+    cancelled: &mut oneshot::Receiver<()>,
+    handle: &CoreHandle,
+    publication: impl Future<Output = zbus::Result<()>>,
+) -> bool {
+    match futures::executor::block_on(async {
+        futures::select_biased! {
+            _ = cancelled.fuse() => None,
+            result = publication.fuse() => Some(result),
+        }
+    }) {
+        Some(Ok(())) => true,
+        Some(Err(error)) => {
+            let _ = handle.send(Command::MprisStatus {
+                status: format!("publisher stopped: {error}"),
+            });
+            tracing::warn!(error = %error, "mpris_publisher_stopped");
+            false
+        }
+        None => false,
+    }
+}
+
+fn retire_connection(connection: Connection) {
+    // zbus uses its independent async-io executor. Only the shutdown deadline
+    // needs this runtime; do not move connection setup onto it.
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            tracing::warn!(error = %error, "mpris_connection_drain_failed");
+            return;
+        }
+    };
+    runtime.block_on(async {
+        // Remove public entry points before waiting for active calls. zbus holds
+        // each interface's read guard through sending its method reply, so the
+        // exclusive guards below also drain an accepted Quit's acknowledgement.
+        if tokio::time::timeout(Duration::from_secs(1), drain_interfaces(&connection))
+            .await
+            .is_err()
+        {
+            tracing::warn!("mpris_connection_drain_timed_out");
+        }
+        // Closing, rather than only dropping a graceful-shutdown future, retires
+        // the bus name even if a peer still holds an outstanding call/reference.
+        match tokio::time::timeout(Duration::from_secs(1), connection.close()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::warn!(error = %error, "mpris_connection_close_failed"),
+            Err(_) => tracing::warn!("mpris_connection_close_timed_out"),
+        }
+    });
+}
+
+async fn drain_interfaces(connection: &Connection) {
+    let server = connection.object_server();
+    let root = server.interface::<_, Root>(OBJECT_PATH).await.ok();
+    let player = server.interface::<_, Player>(OBJECT_PATH).await.ok();
+    let _ = server.remove::<Root, _>(OBJECT_PATH).await;
+    let _ = server.remove::<Player, _>(OBJECT_PATH).await;
+    if let Some(root) = root {
+        let _guard = root.get_mut().await;
+    }
+    if let Some(player) = player {
+        let _guard = player.get_mut().await;
     }
 }
 
@@ -679,7 +872,7 @@ fn refresh_metadata(
 
 /// Cold probes run only on the existing publisher. Re-read playback after the
 /// blocking load: a completion may warm the cache but never publish stale art.
-fn publish_artwork(
+async fn publish_artwork(
     connection: &Connection,
     handle: &CoreHandle,
     requested: &MprisSnapshot,
@@ -718,19 +911,21 @@ fn publish_artwork(
     if *metadata != next {
         let mut changed: HashMap<&str, Value<'_>> = HashMap::new();
         changed.insert("Metadata", Value::from(metadata_map(next.as_ref())));
-        connection.emit_signal(
-            None::<&str>,
-            OBJECT_PATH,
-            "org.freedesktop.DBus.Properties",
-            "PropertiesChanged",
-            &(PLAYER_INTERFACE, changed, Vec::<&str>::new()),
-        )?;
+        connection
+            .emit_signal(
+                None::<&str>,
+                OBJECT_PATH,
+                "org.freedesktop.DBus.Properties",
+                "PropertiesChanged",
+                &(PLAYER_INTERFACE, changed, Vec::<&str>::new()),
+            )
+            .await?;
         *metadata = next;
     }
     Ok(())
 }
 
-fn publish_changes(
+async fn publish_changes(
     connection: &Connection,
     previous: &MprisSnapshot,
     current: &MprisSnapshot,
@@ -798,36 +993,42 @@ fn publish_changes(
         }
     }
     if !changed.is_empty() {
-        connection.emit_signal(
-            None::<&str>,
-            OBJECT_PATH,
-            "org.freedesktop.DBus.Properties",
-            "PropertiesChanged",
-            &(PLAYER_INTERFACE, changed, Vec::<&str>::new()),
-        )?;
+        connection
+            .emit_signal(
+                None::<&str>,
+                OBJECT_PATH,
+                "org.freedesktop.DBus.Properties",
+                "PropertiesChanged",
+                &(PLAYER_INTERFACE, changed, Vec::<&str>::new()),
+            )
+            .await?;
     }
     if previous_can_raise != current_can_raise {
         let mut changed: HashMap<&str, Value<'_>> = HashMap::new();
         changed.insert("CanRaise", current_can_raise.into());
-        connection.emit_signal(
-            None::<&str>,
-            OBJECT_PATH,
-            "org.freedesktop.DBus.Properties",
-            "PropertiesChanged",
-            &("org.mpris.MediaPlayer2", changed, Vec::<&str>::new()),
-        )?;
+        connection
+            .emit_signal(
+                None::<&str>,
+                OBJECT_PATH,
+                "org.freedesktop.DBus.Properties",
+                "PropertiesChanged",
+                &("org.mpris.MediaPlayer2", changed, Vec::<&str>::new()),
+            )
+            .await?;
     }
     // Position itself never sends PropertiesChanged. Core explicitly marks
     // discontinuities, including seeks from non-D-Bus clients, so small seeks
     // are not lost to a clock-drift threshold and regular progress stays quiet.
     if previous.playback.seek_revision != current.playback.seek_revision {
-        connection.emit_signal(
-            None::<&str>,
-            OBJECT_PATH,
-            PLAYER_INTERFACE,
-            "Seeked",
-            &(microseconds(current.playback.position),),
-        )?;
+        connection
+            .emit_signal(
+                None::<&str>,
+                OBJECT_PATH,
+                PLAYER_INTERFACE,
+                "Seeked",
+                &(microseconds(current.playback.position),),
+            )
+            .await?;
     }
     Ok(())
 }
@@ -835,8 +1036,235 @@ fn publish_changes(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{PlaybackState, QueueState, Track};
-    use std::path::PathBuf;
+    use crate::{
+        config::ConfigPersistence,
+        model::{PlaybackState, QueueState, Track},
+    };
+    use std::{
+        io::{BufRead, BufReader},
+        path::PathBuf,
+        process::{Child, Stdio},
+        sync::atomic::{AtomicBool, Ordering},
+    };
+
+    fn runtime_fixture() -> (tempfile::TempDir, crate::core::Runtime) {
+        let directory = tempfile::tempdir().unwrap();
+        let config = directory.path().join("config.toml");
+        crate::config::Config {
+            media_read_buffer_mb: 1,
+            ffmpeg_enabled: false,
+            mpris_enabled: false,
+            ..Default::default()
+        }
+        .save(&config)
+        .unwrap();
+        let runtime = crate::core::Runtime::start(directory.path(), &config).unwrap();
+        (directory, runtime)
+    }
+
+    fn wait_status(handle: &CoreHandle, expected: &str) {
+        let changes = handle.subscribe();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while handle.gui_snapshot().system.mpris_status != expected {
+            changes.recv_deadline(deadline).unwrap();
+        }
+    }
+
+    struct Dropped(Arc<AtomicBool>);
+
+    impl Drop for Dropped {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn initially_disabled_manager_reports_status_without_bus_registration() {
+        let (directory, mut runtime) = runtime_fixture();
+        let manager = MediaWorker::start(
+            runtime.handle.clone(),
+            AppHandle::new(&runtime, false),
+            Arc::new(ArtworkManager::new(directory.path())),
+        )
+        .unwrap();
+        wait_status(&runtime.handle, "Desktop media controls disabled");
+        drop(manager);
+        runtime.control.request_shutdown().unwrap();
+        runtime.join().unwrap();
+    }
+
+    #[test]
+    fn registration_cancellation_drops_pending_build_before_join_returns() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let guard = Dropped(Arc::clone(&dropped));
+        let (polled, entered) = bounded(1);
+        let attempt = Registration::spawn(async move {
+            let _guard = guard;
+            polled.send(()).unwrap();
+            futures::future::pending::<Result<Connection>>().await
+        })
+        .unwrap();
+        entered.recv_timeout(Duration::from_secs(5)).unwrap();
+        drop(attempt);
+        assert!(dropped.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn publisher_cancellation_drops_pending_send_before_join_returns() {
+        let (_directory, mut runtime) = runtime_fixture();
+        let handle = runtime.handle.clone();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let guard = Dropped(Arc::clone(&dropped));
+        let (cancel, mut cancelled) = oneshot::channel();
+        let (polled, entered) = bounded(1);
+        let publisher = thread::spawn(move || {
+            publish_until_cancelled(&mut cancelled, &handle, async move {
+                let _guard = guard;
+                polled.send(()).unwrap();
+                futures::future::pending::<zbus::Result<()>>().await
+            })
+        });
+        entered.recv_timeout(Duration::from_secs(5)).unwrap();
+        cancel.send(()).unwrap();
+        assert!(!publisher.join().unwrap());
+        assert!(dropped.load(Ordering::SeqCst));
+        assert!(runtime.handle.gui_snapshot().system.mpris_status.is_empty());
+        runtime.control.request_shutdown().unwrap();
+        runtime.join().unwrap();
+    }
+
+    #[test]
+    fn publisher_failure_follows_connected_status_and_cancellation_wins_ready_error() {
+        let (_directory, mut runtime) = runtime_fixture();
+        let handle = &runtime.handle;
+        handle
+            .send(Command::MprisStatus {
+                status: "Connected to desktop media controls".to_owned(),
+            })
+            .unwrap();
+        let (_cancel, mut cancelled) = oneshot::channel();
+        assert!(!publish_until_cancelled(&mut cancelled, handle, async {
+            Err(zbus::Error::Failure("test send failure".to_owned()))
+        }));
+        let failure = "publisher stopped: test send failure";
+        wait_status(handle, failure);
+        let (cancel, mut cancelled) = oneshot::channel();
+        cancel.send(()).unwrap();
+        assert!(!publish_until_cancelled(&mut cancelled, handle, async {
+            panic!("cancelled publication must not be polled");
+        }));
+        assert_eq!(handle.gui_snapshot().system.mpris_status, failure);
+        runtime.control.request_shutdown().unwrap();
+        runtime.join().unwrap();
+    }
+
+    // These tests use an isolated session bus, never the user's desktop bus.
+    struct TestBus {
+        child: Child,
+        address: String,
+    }
+
+    impl TestBus {
+        fn start() -> Self {
+            let mut child = std::process::Command::new("dbus-daemon")
+                .args(["--session", "--nofork", "--print-address=1"])
+                .stdout(Stdio::piped())
+                .spawn()
+                .expect("MPRIS lifecycle tests require dbus-daemon");
+            let mut address = String::new();
+            BufReader::new(child.stdout.take().unwrap())
+                .read_line(&mut address)
+                .unwrap();
+            Self {
+                child,
+                address: address.trim().to_owned(),
+            }
+        }
+
+        fn connect(&self) -> Connection {
+            futures::executor::block_on(Builder::address(self.address.as_str()).unwrap().build())
+                .unwrap()
+        }
+
+        fn serve_root(&self, app: AppHandle) -> Connection {
+            futures::executor::block_on(
+                Builder::address(self.address.as_str())
+                    .unwrap()
+                    .name(BUS_NAME)
+                    .unwrap()
+                    .serve_at(OBJECT_PATH, Root { app })
+                    .unwrap()
+                    .build(),
+            )
+            .unwrap()
+        }
+    }
+
+    impl Drop for TestBus {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
+    #[test]
+    fn retirement_deadline_closes_connection_even_with_live_interface_guard() {
+        let bus = TestBus::start();
+        let (_directory, mut runtime) = runtime_fixture();
+        let connection = bus.serve_root(AppHandle::new(&runtime, false));
+        let retained = connection.clone();
+        let root = futures::executor::block_on(
+            connection.object_server().interface::<_, Root>(OBJECT_PATH),
+        )
+        .unwrap();
+        // Model a peer whose reply has not finished: the exclusive drain cannot
+        // complete, but the deadline must still close all connection clones.
+        let active_reply = futures::executor::block_on(root.get());
+        let retire = thread::spawn(move || retire_connection(connection));
+        retire.join().unwrap();
+        assert!(retained.is_closed());
+        assert!(futures::executor::block_on(
+            retained.object_server().interface::<_, Root>(OBJECT_PATH),
+        ).is_err());
+        drop(active_reply);
+        // A retained closed connection cannot prevent reacquiring the name.
+        let replacement = futures::executor::block_on(
+            Builder::address(bus.address.as_str())
+                .unwrap()
+                .name(BUS_NAME)
+                .unwrap()
+                .build(),
+        )
+        .unwrap();
+        futures::executor::block_on(replacement.close()).unwrap();
+        runtime.control.request_shutdown().unwrap();
+        runtime.join().unwrap();
+    }
+
+    #[test]
+    fn accepted_quit_reply_survives_service_retirement() {
+        let bus = TestBus::start();
+        let (_directory, mut runtime) = runtime_fixture();
+        let connection = bus.serve_root(AppHandle::new(&runtime, false));
+        let changes = runtime.handle.subscribe();
+        let client = bus.connect();
+        let quit = thread::spawn(move || {
+            futures::executor::block_on(client.call_method(
+                Some(BUS_NAME),
+                OBJECT_PATH,
+                Some("org.mpris.MediaPlayer2"),
+                "Quit",
+                &(),
+            ))
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !runtime.handle.is_shutting_down() {
+            changes.recv_deadline(deadline).unwrap();
+        }
+        retire_connection(connection);
+        quit.join().unwrap().unwrap();
+        runtime.join().unwrap();
+    }
 
     fn track(id: i64) -> Track {
         Track {
