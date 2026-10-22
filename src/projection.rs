@@ -243,14 +243,14 @@ impl GuiLibrarySnapshot {
         &self,
         playlist_id: Option<i64>,
     ) -> crate::response::QueryRevisions {
-        crate::response::QueryRevisions {
-            library: self.revision,
-            structure: self.structure_revision,
-            playlist: self.playlist_revision,
-            duplicate_groups: self.duplicate_groups_revision,
-            duplicate_members: self.duplicate_members_revision,
-            ..Default::default()
-        }
+        crate::response::QueryRevisions::from_library(
+            self.revision,
+            self.structure_revision,
+            self.playlist_revision,
+            0,
+            self.duplicate_groups_revision,
+            self.duplicate_members_revision,
+        )
         .with_playlist_scope(
             playlist_id,
             &self.playlist_entry_revisions,
@@ -286,15 +286,14 @@ impl TuiSnapshot {
         &self,
         playlist_id: Option<i64>,
     ) -> crate::response::QueryRevisions {
-        crate::response::QueryRevisions {
-            library: self.library.revision,
-            structure: self.library.structure_revision,
-            playlist: self.library.playlist_revision,
-            queue: self.queue.revision,
-            duplicate_groups: self.library.duplicate_groups_revision,
-            duplicate_members: self.library.duplicate_members_revision,
-            ..Default::default()
-        }
+        crate::response::QueryRevisions::from_library(
+            self.library.revision,
+            self.library.structure_revision,
+            self.library.playlist_revision,
+            self.queue.revision,
+            self.library.duplicate_groups_revision,
+            self.library.duplicate_members_revision,
+        )
         .with_playlist_scope(
             playlist_id,
             &self.library.playlist_entry_revisions,

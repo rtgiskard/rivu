@@ -241,12 +241,6 @@ pub use rivu_format::config::MAX_QUERY_ROWS;
 pub(crate) const SEARCH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(150);
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct QueueEntry {
-    pub id: u64,
-    pub track_id: i64,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct QueueRow {
     pub id: u64,
     pub track_id: i64,
@@ -563,20 +557,19 @@ pub enum LibraryLocateResult {
 }
 
 impl LibrarySnapshot {
-    pub fn query_revisions(
+    pub(crate) fn query_revisions(
         &self,
         queue_revision: u64,
         playlist_id: Option<i64>,
     ) -> crate::response::QueryRevisions {
-        crate::response::QueryRevisions {
-            library: self.revision,
-            structure: self.structure_revision,
-            playlist: self.playlist_revision,
-            queue: queue_revision,
-            duplicate_groups: self.duplicate_groups_revision,
-            duplicate_members: self.duplicate_members_revision,
-            ..Default::default()
-        }
+        crate::response::QueryRevisions::from_library(
+            self.revision,
+            self.structure_revision,
+            self.playlist_revision,
+            queue_revision,
+            self.duplicate_groups_revision,
+            self.duplicate_members_revision,
+        )
         .with_playlist_scope(
             playlist_id,
             &self.playlist_entry_revisions,

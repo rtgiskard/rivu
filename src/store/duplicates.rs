@@ -1,5 +1,5 @@
 use super::Store;
-use super::rows::{TRACK_COLUMNS, fingerprint_from_row, track_from_row};
+use super::rows::{TRACK_COLUMN_COUNT, TRACK_COLUMNS, fingerprint_from_row, track_from_row};
 use crate::model::{DuplicateGroup, DuplicateMember, Page};
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -15,17 +15,17 @@ const DUPLICATE_MEMBER_COLUMNS: &str = "file_size,modified_ns,
 fn duplicate_member_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DuplicateMember> {
     Ok(DuplicateMember {
         track: track_from_row(row)?,
-        file_size: row.get::<_, i64>(25)? as u64,
-        modified_ns: row.get(26)?,
-        has_overrides: row.get(27)?,
-        playlist_references: row.get::<_, i64>(28)? as usize,
-        queue_references: row.get::<_, i64>(29)? as usize,
-        independent: row.get(30)?,
+        file_size: row.get::<_, i64>(TRACK_COLUMN_COUNT)? as u64,
+        modified_ns: row.get(TRACK_COLUMN_COUNT + 1)?,
+        has_overrides: row.get(TRACK_COLUMN_COUNT + 2)?,
+        playlist_references: row.get::<_, i64>(TRACK_COLUMN_COUNT + 3)? as usize,
+        queue_references: row.get::<_, i64>(TRACK_COLUMN_COUNT + 4)? as usize,
+        independent: row.get(TRACK_COLUMN_COUNT + 5)?,
     })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RelocationIdentity {
+pub(crate) struct RelocationIdentity {
     pub id: i64,
     pub path: PathBuf,
     pub fingerprint: String,
@@ -36,7 +36,7 @@ pub struct RelocationIdentity {
 /// The Core must freshly hash the target and check stable file identity, source
 /// absence and active playback before calling the database-only commit.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PreparedRelocation {
+pub(crate) struct PreparedRelocation {
     pub source: RelocationIdentity,
     pub target: RelocationIdentity,
 }
@@ -232,7 +232,11 @@ impl Store {
         Ok(updated != 0)
     }
 
-    pub fn prepare_relocation(&self, source_id: i64, target_id: i64) -> Result<PreparedRelocation> {
+    pub(crate) fn prepare_relocation(
+        &self,
+        source_id: i64,
+        target_id: i64,
+    ) -> Result<PreparedRelocation> {
         let tx = self.conn.unchecked_transaction()?;
         let source = relocation_row(&tx, source_id)?;
         let target = relocation_row(&tx, target_id)?;
@@ -244,7 +248,7 @@ impl Store {
         })
     }
 
-    pub fn commit_relocation(&self, prepared: &PreparedRelocation) -> Result<()> {
+    pub(crate) fn commit_relocation(&self, prepared: &PreparedRelocation) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         let source = relocation_row(&tx, prepared.source.id)?;
         let target = relocation_row(&tx, prepared.target.id)?;

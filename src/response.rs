@@ -90,6 +90,26 @@ pub struct QueryRevisions {
 }
 
 impl QueryRevisions {
+    /// Assemble the common library domains for model and consumer projections.
+    pub(crate) fn from_library(
+        library: u64,
+        structure: u64,
+        playlist: u64,
+        queue: u64,
+        duplicate_groups: u64,
+        duplicate_members: u64,
+    ) -> Self {
+        Self {
+            library,
+            structure,
+            playlist,
+            queue,
+            duplicate_groups,
+            duplicate_members,
+            ..Self::default()
+        }
+    }
+
     /// Playlist presence is authoritative in the content/lifetime map; metadata
     /// alone must never revive a deleted playlist's scope.
     pub(crate) fn with_playlist_scope(

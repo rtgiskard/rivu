@@ -52,6 +52,8 @@ pub(super) fn cue_from_row(
 }
 
 pub(super) const TRACK_COLUMNS: &str = "id,path,COALESCE(title_override,raw_title),COALESCE(artist_override,raw_artist),COALESCE(album_override,raw_album),duration,codec,channels,sample_rate,missing,play_count,last_played,cue_sheet,cue_number,cue_start_frame,cue_end_frame,bitrate_bps,track_number,disc_number,bits_per_sample,release_date,favorite,fingerprint,decoder_hint,bitrate_exact";
+/// Number of columns decoded by `track_from_row`; appended row payloads start here.
+pub(super) const TRACK_COLUMN_COUNT: usize = 25;
 
 pub(super) fn track_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Track> {
     Ok(Track {
@@ -123,4 +125,19 @@ pub(super) fn library_row_from_row(
     row: &rusqlite::Row<'_>,
 ) -> rusqlite::Result<crate::model::LibraryRow> {
     library_row_at(row, 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn track_projection_column_count_matches_appended_payload_offset() {
+        let store = super::super::Store::open(std::path::Path::new(":memory:")).unwrap();
+        let statement = store
+            .conn
+            .prepare(&format!("SELECT {TRACK_COLUMNS} FROM tracks"))
+            .unwrap();
+        assert_eq!(statement.column_count(), TRACK_COLUMN_COUNT);
+    }
 }
