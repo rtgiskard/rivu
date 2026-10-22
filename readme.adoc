@@ -198,6 +198,12 @@ Source archives can set that variable explicitly when Git metadata is absent.
 Set `SOURCE_DATE_EPOCH` to nonnegative Unix seconds for a reproducible build
 timestamp. Invalid values fail the build; About displays the timestamp locally.
 
+== Acknowledgements
+
+Special thanks to https://deadbeef.sourceforge.io/[DeaDBeeF] and its contributors.
+DeaDBeeF has been the author's music player for years and is an important
+reference for Rivu's direction.
+
 == License
 
 GPL-3.0-or-later.
