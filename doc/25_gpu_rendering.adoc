@@ -530,8 +530,9 @@ link:22_cache.adoc#_waveform[Waveform caching].
 
 Segments use butt caps and ordinary source-over blending in the shared MSAA
 intermediate. Each immutable frame's endpoint array is uploaded once and reused
-across that frame's ordered layers, with logical-pixel widths and palette-index offsets; no union, grouping
-compositor or feedback buffer is introduced. Zero-length segments draw nothing.
+across that frame's ordered layers, with logical-pixel widths and palette-index
+offsets. Layers retain their individual source-over order; shared scratch grouping
+does not union overlapping geometry or introduce feedback. Zero-length segments draw nothing.
 Fractal simulation and accepted audio time remain application-owned. Publications
 change only with accepted geometry or display parameters, not repaint or resize;
 hiding releases application display storage. The application retains the original
@@ -608,15 +609,85 @@ by device-aligned dynamic offsets. Alignment padding and initialization copies
 remain charged until completion; this is not a retained high-water pool. A new
 field publication still copies/uploads the complete numeric payload. There are
 no reusable upload pages or partial-field updates.
-For N admitted draws, placement capacity is `(N - 1) * aligned_stride + 112` bytes;
-the stride rounds 112 bytes up to the device's uniform-offset alignment. Admission
-reserves the complete slab together with any new immutable data and palette.
+Placement capacity for N admitted draws is
+`(N - 1) * aligned_stride + 128` bytes; the stride rounds 128 bytes up to
+the device's uniform-offset alignment. The final 16 bytes hold the raster
+target's window-physical origin and eight bytes of zeroed alignment padding,
+not a relocated mask or a second viewport scale.
+Admission reserves the complete slab together with any new immutable data and palette.
 
-Rectangle edges and procedural segments use per-sample coverage in the existing
-Path intermediate. Adjacent zero-gap instances therefore do not blend two alpha
-edge ramps into a dark seam. This retains compact instance data but adds the
-intermediate rasterization and resolve cost; the renderer owns the shared MSAA
-storage and its existing lifetime, rather than allocating a surface per panel.
+=== Shared local multisample scratch
+
+Waveform, rectangles, procedural segments, palette Paths and ordinary GPUI Paths
+share one renderer-owned offscreen attachment/resolve pair. The existing adapter
+sample count remains unchanged (4x when supported, single-sample fallback);
+Field remains directly single-sampled. Adjacent rectangle instances retain
+per-sample coverage rather than overlapping alpha ramps. There is no per-panel
+texture cache, atlas, tiling or adaptive quality mode.
+
+Within a scene GPU batch, only consecutive integer-aligned, disjoint multisampled
+draws may share a resolve. Their union must occupy no more than twice the sum of
+their visible areas: this explicit heuristic trades a bounded amount of empty
+raster area for fewer passes, rather than merging distant small panels across
+the window. It is not a universal performance optimum. Fractional edges,
+overlap, single-sampled materials and intervening primitives terminate a group;
+no primitive is reordered and overlapping draws resolve separately.
+
+Native GPUI Path batches have different semantics: all batch vertices already
+form a packed intermediate. Same-order batches composite each original path
+bounds; mixed-order batches composite the original union once. Localization
+preserves that whole batch and sprite multiplicity, even when its required union
+is sparse. Splitting or treating these as independent material draws would change
+alpha and ordering. Native batches and material groups reuse the same pair in
+command order, never a separate fullscreen Path allocation.
+
+Each raster footprint is clipped to the physical viewport and rounded outwards
+only for attachment storage. Geometry retains its original window-to-clip
+arithmetic, fractional window origin and DPI mapping. The raster pass keeps the
+window-sized viewport and translates its origin by the negative integer
+attachment origin; renormalizing vertices to the smaller texture could change
+edge coverage. Scissors are attachment-local. Fragment masks, rectangle LED
+periods and Path gradients use translated window-physical coordinates. Native
+Path gradient evaluation receives that same translation; interpolated clip
+distances are unchanged. Composition preserves original fractional bounds and
+blend state and loads the corresponding resolved physical pixel, without
+reapplying opacity or clipping. Both native instance transports use this ABI.
+
+Planning includes only admitted material demand and native batches containing
+actual vertices. Before allocating attachments, the renderer preflights every
+native vertex upload and native/material composite record in scene order, starting
+at the actual existing instance offset. Admission and the writer share transport
+alignment, WebGL texel rounding, capacity growth and rollover arithmetic; the
+original maximum upload budget remains authoritative. Rejected recordings release
+scratch ownership and frame-plan storage without destroying in-flight resources.
+The pair extent is the componentwise maximum of current clipped raster extents,
+never larger than the viewport. Stable demand reuses it; changed
+demand replaces it instead of retaining a high-water mark or an unbounded pool.
+Orthogonal wide/short and narrow/tall footprints can still require a large shared
+pair; this is a bounded one-pair ownership tradeoff, not a claim of optimal packing.
+No demand, renderer destruction, surface invalidation or device replacement
+releases renderer ownership. Resize recomputes all footprints and viewport data;
+an unchanged required extent may reuse the pair. Submitted commands retain
+replaced textures until completion: explicit early `destroy()` is forbidden.
+Surface alpha pipeline rebuilds do not invalidate same-size scratch attachments
+or require a lazily restored special compositor.
+Reusable material-range and native-raster plan vectors follow the same 120-frame
+sustained-low-demand reclamation policy as Path expansion scratch. Native plans
+are consumed in sorted scene order with linear cursors rather than a retained
+hash map. Surface unconfiguration releases both plan vectors immediately.
+
+Attachment bytes are separate from the material buffer budget. Four-byte targets
+with 4x sampling retain `width * height * (4 + 1) * 4` nominal bytes; single-sample
+fallback retains only the resolved texture. Backend allocation overhead and
+retired queue-owned attachments are not included. Test/bench-support headless
+hooks report current extent, cumulative pair allocations, nominal retained bytes
+and offscreen raster pass count, plus the actual adapter sample count. They also
+support no-readback submission and explicit completion waits. Baseline image and
+mixed-scene performance comparisons use separate binaries built from the fixed
+baseline and new source; there is no shipping environment switch or legacy route.
+Image comparisons must cover clipping, translucent overlap, fractional coverage,
+native packed batches, nonzero raster origins, resize and resource recovery.
+
 
 GPU buffers are initialized through WGPU's write-only mapped view, never by
 reinterpreting the Rust model or overwriting an older revision. Completion
@@ -658,6 +729,89 @@ introduced. Completed storage omitted from a later scene is reclaimed on draw,
 including an empty scene; window/device destruction drops the renderer's ownership.
 Ordinary scenes with no extension resources do not perform extension-specific
 device polling. Native Metal remains explicitly unsupported.
+
+==== Shared local MSAA comparison (2026-10-23)
+
+Compared separate release binaries against commit `9b49886b60ce8955c243440b5ca0992118556605`
+on Radeon 780M / RADV, Mesa 26.2.5. The baseline already has local Waveform
+attachments; this comparison measures unifying the other multisampled materials
+and ordinary GPUI Paths, not the earlier full-window-to-local Waveform change.
+The `shared_local_msaa_20261023` record in
+link:25_gpu_rendering_benchmark.json[the benchmark data] retains source and binary
+hashes, raw timing samples, native process samples and interpretation limits.
+
+Successful 192x128, 4x-MSAA synthetic frames retain the following nominal
+attachment bytes. These are current renderer-owned texture dimensions, not
+physical VRAM or in-flight retired allocations.
+
+[cols="2,1,1,1,1",options="header"]
+|===
+|Scene |Baseline bytes |Unified bytes |Baseline raster passes |Unified raster passes
+|Mixed native/material |675600 |184080 |22 |22
+|Distant small regions |931820 |431880 |9 |17
+|Fullscreen |983040 |491520 |5 |5
+|Native Path only |491520 |208280 |1 |1
+|One Waveform |259260 |259260 |1 |1
+|Four Waveforms |403200 |403200 |2 |2
+|===
+
+The area-sensitive split has a real cost: distant regions use more passes.
+Three independent runs, each with twelve 64-frame samples, measured CPU
+encode/submit wall time below. Values are the median of run medians, with the
+range of run medians in brackets, in microseconds per frame.
+
+[cols="2,1,1",options="header"]
+|===
+|Scene |Baseline |Unified
+|Mixed native/material |492.869 [477.382–529.284] |489.815 [449.018–539.791]
+|Distant small regions |220.946 [220.397–243.319] |340.676 [326.195–353.866]
+|Fullscreen |145.985 [142.147–149.053] |144.342 [143.614–147.226]
+|Native Path only |78.420 [75.887–78.900] |79.083 [76.015–79.481]
+|Solid only |79.873 [74.948–83.041] |76.564 [72.503–82.366]
+|Segments only |84.612 [80.850–86.655] |76.624 [75.480–77.440]
+|Rectangles only |77.045 [76.726–79.632] |84.606 [80.891–85.417]
+|===
+
+Each warm/reference/measured submission completes before the next submission;
+all 64512 measured frames match nonzero completed-reference attachment/pass
+counters for their viewport. Completion waits are accumulated separately and
+are not GPU execution timestamps. Earlier queued-submission profile results
+were invalid because admission pressure omitted drawings; they are excluded.
+Resize samples alternate viewport multipliers 1, 1.5, 0.625 and 1 and use the
+same per-frame admission checks. No universal CPU speedup is claimed.
+
+Real Rivu measurements used a 1280x800 nested niri window on Weston headless GL,
+one minute of stereo 48kHz PCM16 media, muted output, and alternating baseline
+and candidate order. Each version has three six-second samples per layout.
+The table reports process-scoped DRM GFX engine busy percentage: median and
+range across the three runs, not per-widget duration or GPU timestamps.
+
+[cols="2,1,1",options="header"]
+|===
+|Layout |Baseline GFX % |Unified GFX %
+|Waveform + Solid + Fractal Beams + Spectrogram/text |3.655 [3.499–3.670] |3.090 [3.085–3.104]
+|Waveform + Bars + Rings + Spectrogram/text |5.007 [4.981–5.059] |4.234 [4.187–4.356]
+|Waveform + Outline + Rings + Spectrogram/text |5.069 [4.974–5.084] |4.213 [4.184–4.277]
+|Four Waveforms |2.164 [2.164–2.193] |2.219 [2.193–2.252]
+|One Waveform |2.103 [1.993–2.144] |2.135 [2.070–2.162]
+|===
+
+Mixed-layout engine occupancy improves in these workloads; Waveform-only
+controls do not show a stable gain. CPU usage remains broadly similar and
+process PSS does not show a consistent reduction. Paused samples record zero
+process CPU and GFX counter deltas. The first run of each version/layout also
+exercises compositor resize, surface close and CLI reopen; actual captures
+were inspected. These checks do not cover host tray/IME integration or establish
+cross-version pixel parity for unsynchronized live scenes.
+
+The deterministic cross-binary capture matrix compares 3960 images across
+Unorm/sRGB, integer/fractional origins, scales 1/1.5/2, opaque/transparent
+surfaces, mixed/interleaved/overlapping content, replay, resize, hide/show,
+in-flight use and alpha-pipeline rebuild. Every pixel passes the unchanged
+per-channel tolerance of three. Exact native packed-alpha baseline probes
+also establish the expected sprite multiplicity; named `green()` has half the
+green intensity of the explicit full-green fixture and is not its oracle.
+The renderer behavior suite passes 139 tests and `make lint` passes.
 
 ==== Initial comparative measurements
 

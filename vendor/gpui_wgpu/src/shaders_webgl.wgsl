@@ -207,18 +207,19 @@ fn load_shadow(instance_id: u32) -> Shadow {
 }
 
 fn load_path_vertex(vertex_id: u32) -> PathRasterizationVertex {
-    var cursor = instance_cursor(vertex_id * 26u);
+    var cursor = instance_cursor(vertex_id * 28u);
     return PathRasterizationVertex(
         read_vec2_f32(&cursor),
         read_vec2_f32(&cursor),
         read_background(&cursor),
         read_bounds(&cursor),
+        read_vec2_f32(&cursor),
     );
 }
 
 fn load_path_sprite(instance_id: u32) -> PathSprite {
-    var cursor = instance_cursor(instance_id * 4u);
-    return PathSprite(read_bounds(&cursor));
+    var cursor = instance_cursor(instance_id * 8u);
+    return PathSprite(read_bounds(&cursor), read_vec2_f32(&cursor), read_vec2_f32(&cursor));
 }
 
 fn load_underline(instance_id: u32) -> Underline {

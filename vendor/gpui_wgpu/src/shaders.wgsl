@@ -1052,6 +1052,7 @@ struct PathRasterizationVertex {
     st_position: vec2<f32>,
     color: Background,
     bounds: Bounds,
+    raster_origin: vec2<f32>,
 }
 
 
@@ -1096,7 +1097,7 @@ fn fs_path_rasterization(input: PathRasterizationVarying) -> @location(0) vec4<f
         background.solid,
         background.colors,
     );
-    let color = gradient_color(background, input.position.xy, bounds,
+    let color = gradient_color(background, input.position.xy + v.raster_origin, bounds,
         prepared_gradient.solid, prepared_gradient.color0, prepared_gradient.color1);
     return vec4<f32>(color.rgb * color.a * alpha, color.a * alpha);
 }
@@ -1105,12 +1106,14 @@ fn fs_path_rasterization(input: PathRasterizationVarying) -> @location(0) vec4<f
 
 struct PathSprite {
     bounds: Bounds,
+    raster_origin: vec2<f32>,
+    pad: vec2<f32>,
 }
 
 
 struct PathVarying {
     @builtin(position) position: vec4<f32>,
-    @location(0) texture_coords: vec2<f32>,
+    @location(0) @interpolate(flat) raster_origin: vec2<f32>,
 }
 
 @vertex
@@ -1119,21 +1122,17 @@ fn vs_path(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) insta
     let sprite = load_path_sprite(instance_id);
     // Don't apply content mask because it was already accounted for when rasterizing the path.
     let device_position = to_device_position(unit_vertex, sprite.bounds);
-    // For screen-space intermediate texture, convert screen position to texture coordinates
-    let screen_position = sprite.bounds.origin + unit_vertex * sprite.bounds.size;
-    let texture_coords = screen_position / globals.viewport_size;
 
     var out = PathVarying();
     out.position = device_position;
-    out.texture_coords = texture_coords;
+    out.raster_origin = sprite.raster_origin;
 
     return out;
 }
 
 @fragment
 fn fs_path(input: PathVarying) -> @location(0) vec4<f32> {
-    let sample = textureSample(t_sprite, s_sprite, input.texture_coords);
-    return sample;
+    return textureLoad(t_sprite, vec2<i32>(floor(input.position.xy - input.raster_origin)), 0);
 }
 
 // --- underlines --- //

@@ -19,7 +19,7 @@ const RECTANGLE_STRIDE: u64 = 32;
 const WAVEFORM_STRIDE: u64 = 16;
 const PATH_STRIDE: u64 = 16;
 const PALETTE_STRIDE: u64 = 16;
-const PLACEMENT_SIZE: u64 = 112;
+const PLACEMENT_SIZE: u64 = 128;
 // Charge an initialization staging copy even after upload completion.
 const INITIALIZATION_COPIES: u64 = 2;
 const MAX_BYTES: u64 = 64 * 1024 * 1024;
@@ -118,6 +118,7 @@ pub(crate) struct PreparedDraw {
     instances: u32,
     vertices: u32,
     kind: MaterialKind,
+    raster_bounds: Option<gpui::Bounds<gpui::ScaledPixels>>,
     pub(crate) visible_bounds: gpui::Bounds<gpui::ScaledPixels>,
 }
 impl PreparedDraw {
@@ -125,10 +126,120 @@ impl PreparedDraw {
         self.kind.multisampled()
     }
 }
+pub(crate) struct MsaaGroup {
+    pub(crate) range: std::ops::Range<usize>,
+    pub(crate) bounds: gpui::Bounds<gpui::ScaledPixels>,
+    pub(crate) raster_bounds: gpui::Bounds<gpui::ScaledPixels>,
+}
 #[derive(Default)]
 pub(crate) struct PreparedMaterials {
     pub(crate) draws: FxHashMap<usize, PreparedDraw>,
     placement: Option<wgpu::BindGroup>,
+    pub(crate) msaa_groups: FxHashMap<usize, MsaaGroup>,
+    pub(crate) msaa_extent: (u32, u32),
+}
+
+/// Round storage only, never the composite geometry or the fragment mask.
+pub(crate) fn raster_bounds(
+    bounds: gpui::Bounds<gpui::ScaledPixels>,
+    size: Size<DevicePixels>,
+) -> Option<gpui::Bounds<gpui::ScaledPixels>> {
+    use gpui::{Bounds, Point, ScaledPixels};
+    let clipped = bounds.intersect(&Bounds {
+        origin: Point::default(),
+        size: size.map(ScaledPixels::from),
+    });
+    if clipped.is_empty() {
+        return None;
+    }
+    let origin = Point {
+        x: ScaledPixels(clipped.origin.x.0.floor()),
+        y: ScaledPixels(clipped.origin.y.0.floor()),
+    };
+    let end = clipped.bottom_right();
+    Some(Bounds {
+        origin,
+        size: gpui::Size {
+            width: ScaledPixels(end.x.0.ceil() - origin.x.0),
+            height: ScaledPixels(end.y.0.ceil() - origin.y.0),
+        },
+    })
+}
+
+impl PreparedMaterials {
+    fn plan_msaa(&mut self, ranges: &[std::ops::Range<usize>], size: Size<DevicePixels>) {
+        use gpui::{Bounds, ScaledPixels};
+        let viewport = Bounds {
+            origin: gpui::Point::default(),
+            size: size.map(ScaledPixels::from),
+        };
+        let integer = |bounds: Bounds<ScaledPixels>| {
+            let end = bounds.bottom_right();
+            bounds.origin.x.0.fract() == 0.0
+                && bounds.origin.y.0.fract() == 0.0
+                && end.x.0.fract() == 0.0
+                && end.y.0.fract() == 0.0
+        };
+        let area = |bounds: Bounds<ScaledPixels>| {
+            let clipped = bounds.intersect(&viewport);
+            if clipped.is_empty() {
+                return 0.0;
+            }
+            f64::from(clipped.size.width.0) * f64::from(clipped.size.height.0)
+        };
+        for range in ranges {
+            let mut indices = range.clone().peekable();
+            while let Some(index) = indices.next() {
+                let Some(draw) = self.draws.get(&index).filter(|draw| draw.multisampled()) else {
+                    continue;
+                };
+                let mut bounds = draw.visible_bounds;
+                let mut covered_area = area(bounds);
+                let mut group_range = index..index + 1;
+                if integer(bounds) {
+                    while let Some(&next_index) = indices.peek() {
+                        let Some(next) = self
+                            .draws
+                            .get(&next_index)
+                            .filter(|draw| draw.multisampled())
+                        else {
+                            break;
+                        };
+                        let next_bounds = next.visible_bounds;
+                        let union = bounds.union(&next_bounds);
+                        // Disjoint integer composites can share a resolve. Do not
+                        // turn distant small draws into a mostly empty attachment.
+                        if !integer(next_bounds)
+                            || bounds.intersects(&next_bounds)
+                            || area(union) > 2.0 * (covered_area + area(next_bounds))
+                        {
+                            break;
+                        }
+                        covered_area += area(next_bounds);
+                        bounds = union;
+                        group_range.end = next_index + 1;
+                        indices.next();
+                    }
+                }
+                let Some(raster_bounds) = raster_bounds(bounds, size) else {
+                    continue;
+                };
+                self.msaa_extent.0 = self.msaa_extent.0.max(raster_bounds.size.width.0 as u32);
+                self.msaa_extent.1 = self.msaa_extent.1.max(raster_bounds.size.height.0 as u32);
+                for draw_index in group_range.clone() {
+                    self.draws.get_mut(&draw_index).unwrap().raster_bounds = Some(raster_bounds);
+                }
+                self.msaa_groups.insert(
+                    index,
+                    MsaaGroup {
+                        range: group_range,
+                        bounds,
+                        raster_bounds,
+                    },
+                );
+            }
+        }
+    }
 }
 pub(crate) struct MaterialRenderer {
     downlevel_flags: wgpu::DownlevelFlags,
@@ -392,6 +503,7 @@ impl MaterialRenderer {
         device: &wgpu::Device,
         batches: &[GpuDraw],
         size: Size<DevicePixels>,
+        msaa_ranges: Option<&[std::ops::Range<usize>]>,
     ) -> PreparedMaterials {
         debug_assert!(!self.preparing);
         if batches.is_empty()
@@ -537,9 +649,13 @@ impl MaterialRenderer {
                     instances,
                     vertices,
                     kind,
+                    raster_bounds: None,
                     visible_bounds,
                 },
             );
+        }
+        if let Some(ranges) = msaa_ranges {
+            prepared.plan_msaa(ranges, size);
         }
         if !prepared.draws.is_empty() {
             let bytes = (prepared.draws.len() as u64 - 1) * placement_stride + PLACEMENT_SIZE;
@@ -561,6 +677,13 @@ impl MaterialRenderer {
                             self.premultiplied,
                             self.srgb_target,
                         );
+                        if let Some(raster) = draw.raster_bounds {
+                            put_floats(
+                                &mut mapped.slice(offset..offset + PLACEMENT_SIZE as usize),
+                                112,
+                                &[raster.origin.x.0, raster.origin.y.0],
+                            );
+                        }
                     }
                 },
             );
@@ -875,6 +998,7 @@ fn encode_placement(
 ) {
     let bounds = batch.bounds;
     let mask = batch.content_mask.bounds;
+    put_floats(bytes, 112, &[0.0, 0.0]);
     put_floats(
         bytes,
         0,

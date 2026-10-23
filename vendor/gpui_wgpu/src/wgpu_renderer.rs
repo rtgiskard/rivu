@@ -107,6 +107,19 @@ struct GammaParams {
 #[repr(C)]
 struct PathSprite {
     bounds: Bounds<ScaledPixels>,
+    raster_origin: [f32; 2],
+    pad: [f32; 2],
+}
+
+/// One shared scratch pair per resource generation, reused in command order.
+/// Dropping handles never invalidates attachments retained by in-flight work.
+struct MsaaScratch {
+    _resolved: wgpu::Texture,
+    resolved: wgpu::TextureView,
+    _msaa: Option<wgpu::Texture>,
+    msaa: Option<wgpu::TextureView>,
+    texture: wgpu::BindGroup,
+    extent: (u32, u32),
 }
 
 #[derive(Clone, Debug)]
@@ -116,6 +129,15 @@ struct PathRasterizationVertex {
     st_position: Point<f32>,
     color: Background,
     bounds: Bounds<ScaledPixels>,
+    raster_origin: [f32; 2],
+}
+
+#[derive(Clone, Copy)]
+struct NativeRasterBatch {
+    start: usize,
+    raster_bounds: Bounds<ScaledPixels>,
+    vertices: usize,
+    sprites: usize,
 }
 
 pub struct WgpuSurfaceConfig {
@@ -198,10 +220,7 @@ struct WgpuResources {
     globals_bind_group: wgpu::BindGroup,
     path_globals_bind_group: wgpu::BindGroup,
     instance_data: InstanceData,
-    path_intermediate_texture: Option<wgpu::Texture>,
-    path_intermediate_view: Option<wgpu::TextureView>,
-    path_msaa_texture: Option<wgpu::Texture>,
-    path_msaa_view: Option<wgpu::TextureView>,
+    msaa_scratch: Option<MsaaScratch>,
 }
 
 struct CachedTextureBindGroup {
@@ -211,10 +230,7 @@ struct CachedTextureBindGroup {
 
 impl WgpuResources {
     fn invalidate_intermediate_textures(&mut self) {
-        self.path_intermediate_texture = None;
-        self.path_intermediate_view = None;
-        self.path_msaa_texture = None;
-        self.path_msaa_view = None;
+        self.msaa_scratch = None;
     }
 }
 
@@ -237,6 +253,12 @@ struct WgpuRendererCore {
     path_sprite_peak: usize,
     low_path_sprite_frames: u16,
     low_path_sprite_peak: usize,
+    material_ranges: Vec<Range<usize>>,
+    low_material_range_frames: u16,
+    low_material_range_peak: usize,
+    native_rasters: Vec<NativeRasterBatch>,
+    low_native_raster_frames: u16,
+    low_native_raster_peak: usize,
     max_instance_data_size: u64,
     instance_data_alignment: u64,
     uses_webgl_instance_data: bool,
@@ -246,6 +268,10 @@ struct WgpuRendererCore {
     adapter_info: wgpu::AdapterInfo,
     target_format: wgpu::TextureFormat,
     max_texture_size: u32,
+    #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
+    msaa_allocations: u64,
+    #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
+    msaa_raster_passes: u64,
 }
 
 /// GPU resources of a windowed renderer. A surface is only ever configured against the
@@ -1053,17 +1079,8 @@ impl WgpuRenderer {
             warn!("Failed to poll device during resize: {e:?}");
         }
 
-        // Destroy old textures before allocating new ones to avoid GPU memory spikes
-        if let Some(ref texture) = resources.path_intermediate_texture {
-            texture.destroy();
-        }
-        if let Some(ref texture) = resources.path_msaa_texture {
-            texture.destroy();
-        }
-
-        // Invalidate intermediate textures - they will be lazily recreated
-        // in draw() after we confirm the surface is healthy. This avoids
-        // panics when the device/surface is in an invalid state during resize.
+        // Release ownership, never explicitly destroy a submitted attachment.
+        // The next frame plans current demand after the surface is healthy.
         resources.invalidate_intermediate_textures();
 
         if let RendererState::Ready { surface, core } = &self.state {
@@ -1377,10 +1394,7 @@ impl WgpuRendererCore {
                 globals_bind_group,
                 path_globals_bind_group,
                 instance_data,
-                path_intermediate_texture: None,
-                path_intermediate_view: None,
-                path_msaa_texture: None,
-                path_msaa_view: None,
+                msaa_scratch: None,
             },
             atlas,
             path_globals_offset,
@@ -1397,9 +1411,19 @@ impl WgpuRendererCore {
             path_sprite_peak: 0,
             low_path_sprite_frames: 0,
             low_path_sprite_peak: 0,
+            material_ranges: Vec::new(),
+            low_material_range_frames: 0,
+            low_material_range_peak: 0,
+            native_rasters: Vec::new(),
+            low_native_raster_frames: 0,
+            low_native_raster_peak: 0,
             max_instance_data_size,
             instance_data_alignment,
             uses_webgl_instance_data,
+            #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
+            msaa_allocations: 0,
+            #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
+            msaa_raster_passes: 0,
             rendering_params,
             is_bgr: false,
             dual_source_blending,
@@ -1417,40 +1441,125 @@ impl WgpuRendererCore {
         &mut self.resources
     }
 
-    /// Path rendering goes through an intermediate texture that must match the frame
-    /// target's dimensions, so the textures are keyed by size and rebuilt on mismatch.
-    fn ensure_intermediate_textures(&mut self, size: Size<DevicePixels>) {
-        let width = size.width.0 as u32;
-        let height = size.height.0 as u32;
+    fn ensure_msaa_scratch(&mut self, extent: (u32, u32)) {
+        if extent.0 == 0 || extent.1 == 0 {
+            self.resources.invalidate_intermediate_textures();
+            return;
+        }
         if self
             .resources
-            .path_intermediate_texture
+            .msaa_scratch
             .as_ref()
-            .is_some_and(|texture| texture.width() == width && texture.height() == height)
+            .is_some_and(|pair| pair.extent == extent)
         {
             return;
         }
-
-        let format = self.target_format;
-        let path_sample_count = self.rendering_params.path_sample_count;
-        let resources = &mut self.resources;
-
-        let (texture, view) =
-            Self::create_path_intermediate(&resources.device, format, width, height);
-        resources.path_intermediate_texture = Some(texture);
-        resources.path_intermediate_view = Some(view);
-
-        let (path_msaa_texture, path_msaa_view) = Self::create_msaa_if_needed(
-            &resources.device,
-            format,
-            width,
-            height,
-            path_sample_count,
+        // One pair sized to current frame demand, not a high-water pool.
+        // Submitted command buffers retain replaced handles until completion.
+        self.resources.msaa_scratch = None;
+        let device = &self.resources.device;
+        let (resolved_texture, resolved) =
+            Self::create_path_intermediate(device, self.target_format, extent.0, extent.1);
+        let (msaa_texture, msaa) = Self::create_msaa_if_needed(
+            device,
+            self.target_format,
+            extent.0,
+            extent.1,
+            self.rendering_params.path_sample_count,
         )
         .map(|(texture, view)| (Some(texture), Some(view)))
         .unwrap_or((None, None));
-        resources.path_msaa_texture = path_msaa_texture;
-        resources.path_msaa_view = path_msaa_view;
+        let texture = self.create_texture_bind_group("MSAA scratch resolve", &resolved);
+        self.resources.msaa_scratch = Some(MsaaScratch {
+            _resolved: resolved_texture,
+            resolved,
+            _msaa: msaa_texture,
+            msaa,
+            texture,
+            extent,
+        });
+        #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
+        {
+            self.msaa_allocations += 1;
+        }
+    }
+
+    fn set_raster_viewport(
+        pass: &mut wgpu::RenderPass<'_>,
+        raster: Bounds<ScaledPixels>,
+        size: Size<DevicePixels>,
+    ) {
+        // Original window-to-clip arithmetic and viewport scale preserve the
+        // sample phase; only an integer translation changes attachment origin.
+        pass.set_viewport(
+            -raster.origin.x.0,
+            -raster.origin.y.0,
+            size.width.0 as f32,
+            size.height.0 as f32,
+            0.0,
+            1.0,
+        );
+        pass.set_scissor_rect(
+            0,
+            0,
+            raster.size.width.0 as u32,
+            raster.size.height.0 as u32,
+        );
+    }
+
+    fn draw_material_group(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        materials: &PreparedMaterials,
+        group: &crate::gpu_material::MsaaGroup,
+        size: Size<DevicePixels>,
+    ) {
+        #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
+        {
+            self.msaa_raster_passes += 1;
+        }
+        let pair = self.resources.msaa_scratch.as_ref().unwrap();
+        let (target, resolve) = pair
+            .msaa
+            .as_ref()
+            .map_or((&pair.resolved, None), |msaa| (msaa, Some(&pair.resolved)));
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("material MSAA scratch rasterization"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                resolve_target: resolve,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: if pair.msaa.is_some() {
+                        wgpu::StoreOp::Discard
+                    } else {
+                        wgpu::StoreOp::Store
+                    },
+                },
+                depth_slice: None,
+            })],
+            depth_stencil_attachment: None,
+            ..Default::default()
+        });
+        let raster = group.raster_bounds;
+        Self::set_raster_viewport(&mut pass, raster, size);
+        for index in group.range.clone() {
+            if group.range.len() > 1 {
+                let bounds = materials.draws[&index].visible_bounds.intersect(&raster);
+                if bounds.is_empty() {
+                    continue;
+                }
+                pass.set_scissor_rect(
+                    (bounds.origin.x.0 - raster.origin.x.0) as u32,
+                    (bounds.origin.y.0 - raster.origin.y.0) as u32,
+                    bounds.size.width.0 as u32,
+                    bounds.size.height.0 as u32,
+                );
+            }
+            self.resources
+                .materials
+                .draw(materials, &materials.draws[&index], &mut pass);
+        }
     }
 
     fn render_frame(
@@ -1525,6 +1634,8 @@ impl WgpuRendererCore {
                 self.low_path_vertex_peak = 0;
                 self.low_path_sprite_frames = 0;
                 self.low_path_sprite_peak = 0;
+                self.resources.invalidate_intermediate_textures();
+                self.release_frame_plan();
                 self.resources.queue.submit(std::iter::empty());
                 self.resources.materials.submitted(&self.resources.queue);
             })
@@ -1541,8 +1652,13 @@ impl WgpuRendererCore {
         let frame_start_path_capacity = self.path_vertices.capacity();
         self.path_vertex_peak = 0;
         let frame_start_sprite_capacity = self.path_sprites.capacity();
+        let frame_start_material_range_capacity = self.material_ranges.capacity();
+        let frame_start_native_raster_capacity = self.native_rasters.capacity();
         self.path_sprite_peak = 0;
-        let mut paths_rasterized = false;
+        #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
+        {
+            self.msaa_raster_passes = 0;
+        }
         let mut instance_offset = 0;
         let instance_bindings = self
             .write_instances(scene, &mut instance_offset)
@@ -1562,10 +1678,59 @@ impl WgpuRendererCore {
         self.resources
             .materials
             .configure_budget(scene.gpu_material_budget);
-        let materials =
-            self.resources
-                .materials
-                .prepare(&self.resources.device, &scene.gpu_draws, size);
+        self.material_ranges.clear();
+        self.native_rasters.clear();
+        let mut extent = (0u32, 0u32);
+        for batch in scene.batches() {
+            match batch {
+                #[cfg(not(target_os = "macos"))]
+                PrimitiveBatch::Gpu(range) => self.material_ranges.push(range),
+                PrimitiveBatch::Paths(range) => {
+                    // Native vertices form one packed intermediate; preserve
+                    // the complete batch and its original composite sprites.
+                    let bounds = scene.paths[range.clone()]
+                        .iter()
+                        .filter(|path| !path.vertices.is_empty())
+                        .map(|path| path.clipped_bounds())
+                        .reduce(|bounds, next| bounds.union(&next));
+                    if let Some(raster) =
+                        bounds.and_then(|bounds| crate::gpu_material::raster_bounds(bounds, size))
+                    {
+                        extent.0 = extent.0.max(raster.size.width.0 as u32);
+                        extent.1 = extent.1.max(raster.size.height.0 as u32);
+                        let paths = &scene.paths[range.clone()];
+                        let vertices = paths.iter().try_fold(0usize, |count, path| {
+                            count
+                                .checked_add(path.vertices.len())
+                                .context("native path vertex count overflow")
+                        })?;
+                        let sprites = if paths.last().map(|path| path.order) == Some(paths[0].order)
+                        {
+                            paths.len()
+                        } else {
+                            1
+                        };
+                        self.native_rasters.push(NativeRasterBatch {
+                            start: range.start,
+                            raster_bounds: raster,
+                            vertices,
+                            sprites,
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+        let materials = self.resources.materials.prepare(
+            &self.resources.device,
+            &scene.gpu_draws,
+            size,
+            Some(&self.material_ranges),
+        );
+        extent.0 = extent.0.max(materials.msaa_extent.0);
+        extent.1 = extent.1.max(materials.msaa_extent.1);
+        self.preflight_msaa_instance_data(scene, &materials, instance_offset)?;
+        self.ensure_msaa_scratch(extent);
 
         let mut encoder =
             self.resources()
@@ -1590,6 +1755,7 @@ impl WgpuRendererCore {
                 ..Default::default()
             });
 
+            let mut native_raster_index = 0;
             for batch in scene.batches() {
                 match batch {
                     #[cfg(not(target_os = "macos"))]
@@ -1599,42 +1765,14 @@ impl WgpuRendererCore {
                             let Some(draw) = materials.draws.get(&index) else {
                                 continue;
                             };
-                            if draw.multisampled() {
-                                let mut bounds = draw.visible_bounds;
-                                let mut paths = index..index + 1;
-                                // The scene batch already excludes intervening primitives.
-                                // Overlapping paths must resolve separately: blending MSAA
-                                // samples together is not blending individually resolved paths.
-                                // One conservative clipped union keeps this scan linear, and
-                                // integer bounds let each draw retain its exact composite area.
-                                if Self::gpu_path_bounds_are_integer(bounds) {
-                                    while let Some(&next_index) = indices.peek() {
-                                        let Some(next) = materials.draws.get(&next_index) else {
-                                            break;
-                                        };
-                                        if !next.multisampled() {
-                                            break;
-                                        }
-                                        let next_bounds = next.visible_bounds;
-                                        if !Self::gpu_path_bounds_are_integer(next_bounds)
-                                            || bounds.intersects(&next_bounds)
-                                        {
-                                            break;
-                                        }
-                                        bounds = bounds.union(&next_bounds);
-                                        paths.end = next_index + 1;
-                                        indices.next();
-                                    }
+                            if let Some(group) = materials.msaa_groups.get(&index) {
+                                while indices.peek().is_some_and(|next| *next < group.range.end) {
+                                    indices.next();
                                 }
                                 drop(pass);
-                                self.draw_gpu_paths_to_intermediate(
-                                    &mut encoder,
-                                    &materials,
-                                    paths,
-                                    size,
-                                );
+                                self.draw_material_group(&mut encoder, &materials, group, size);
                                 pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                                    label: Some("main_pass_after_gpu_path"),
+                                    label: Some("main_pass_after_msaa"),
                                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                                         view: frame_view,
                                         resolve_target: None,
@@ -1647,13 +1785,14 @@ impl WgpuRendererCore {
                                     depth_stencil_attachment: None,
                                     ..Default::default()
                                 });
-                                paths_rasterized = true;
-                                self.draw_gpu_paths_from_intermediate(
-                                    bounds,
+                                self.draw_material_from_intermediate(
+                                    group,
                                     &mut instance_offset,
                                     &mut pass,
                                 )?;
-                            } else {
+                                continue;
+                            }
+                            if !draw.multisampled() {
                                 self.resources.materials.draw(&materials, draw, &mut pass);
                             }
                         }
@@ -1671,16 +1810,24 @@ impl WgpuRendererCore {
                         &mut pass,
                     ),
                     PrimitiveBatch::Paths(range) => {
-                        let paths = &scene.paths[range];
-                        if paths.is_empty() {
+                        let Some(plan) = self
+                            .native_rasters
+                            .get(native_raster_index)
+                            .filter(|plan| plan.start == range.start)
+                            .copied()
+                        else {
                             continue;
-                        }
+                        };
+                        native_raster_index += 1;
+                        let raster = plan.raster_bounds;
+                        let paths = &scene.paths[range];
 
                         drop(pass);
                         let rasterized = self.draw_paths_to_intermediate(
                             &mut encoder,
                             paths,
                             size,
+                            raster,
                             &mut instance_offset,
                         )?;
 
@@ -1700,9 +1847,9 @@ impl WgpuRendererCore {
                         });
 
                         if rasterized {
-                            paths_rasterized = true;
                             self.draw_paths_from_intermediate(
                                 paths,
+                                raster,
                                 &mut instance_offset,
                                 &mut pass,
                             )?;
@@ -1753,12 +1900,6 @@ impl WgpuRendererCore {
             }
         }
 
-        if !paths_rasterized {
-            // Drop our references, as when unconfiguring the surface. Previously
-            // submitted work keeps its textures alive; destroy() would invalidate it.
-            self.resources.invalidate_intermediate_textures();
-        }
-
         let submission = self
             .resources()
             .queue
@@ -1778,6 +1919,22 @@ impl WgpuRendererCore {
             frame_start_sprite_capacity,
             &mut self.low_path_sprite_frames,
             &mut self.low_path_sprite_peak,
+        );
+        let material_ranges = self.material_ranges.len();
+        Self::maintain_path_scratch_capacity(
+            &mut self.material_ranges,
+            material_ranges,
+            frame_start_material_range_capacity,
+            &mut self.low_material_range_frames,
+            &mut self.low_material_range_peak,
+        );
+        let native_rasters = self.native_rasters.len();
+        Self::maintain_path_scratch_capacity(
+            &mut self.native_rasters,
+            native_rasters,
+            frame_start_native_raster_capacity,
+            &mut self.low_native_raster_frames,
+            &mut self.low_native_raster_peak,
         );
         Ok(submission)
     }
@@ -1948,85 +2105,28 @@ impl WgpuRendererCore {
         }
     }
 
-    // Fractional composite edges depend on the backend's subpixel rasterization.
-    // Leave them as individual passes instead of approximating their pixel area.
-    fn gpu_path_bounds_are_integer(bounds: Bounds<ScaledPixels>) -> bool {
-        let end = bounds.bottom_right();
-        bounds.origin.x.0.fract() == 0.0
-            && bounds.origin.y.0.fract() == 0.0
-            && end.x.0.fract() == 0.0
-            && end.y.0.fract() == 0.0
-    }
-
-    fn draw_gpu_paths_to_intermediate(
+    fn draw_material_from_intermediate(
         &mut self,
-        encoder: &mut wgpu::CommandEncoder,
-        materials: &PreparedMaterials,
-        range: Range<usize>,
-        size: Size<DevicePixels>,
-    ) {
-        self.ensure_intermediate_textures(size);
-        let resources = self.resources();
-        let Some(view) = resources.path_intermediate_view.as_ref() else {
-            return;
-        };
-        let (target, resolve) = resources
-            .path_msaa_view
-            .as_ref()
-            .map_or((view, None), |msaa| (msaa, Some(view)));
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("GPU palette path rasterization"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: target,
-                resolve_target: resolve,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                    store: wgpu::StoreOp::Store,
-                },
-                depth_slice: None,
-            })],
-            depth_stencil_attachment: None,
-            ..Default::default()
-        });
-        let grouped = range.len() > 1;
-        let viewport = Bounds {
-            origin: Point::default(),
-            size: size.map(ScaledPixels::from),
-        };
-        for index in range {
-            if grouped {
-                // Use the coherent captured footprint, not coordinate mapping.
-                let bounds = materials.draws[&index].visible_bounds.intersect(&viewport);
-                if bounds.is_empty() {
-                    continue;
-                }
-                pass.set_scissor_rect(
-                    bounds.origin.x.0 as u32,
-                    bounds.origin.y.0 as u32,
-                    bounds.size.width.0 as u32,
-                    bounds.size.height.0 as u32,
-                );
-            }
-            resources
-                .materials
-                .draw(materials, &materials.draws[&index], &mut pass);
-        }
-    }
-
-    fn draw_gpu_paths_from_intermediate(
-        &mut self,
-        bounds: Bounds<ScaledPixels>,
+        group: &crate::gpu_material::MsaaGroup,
         instance_offset: &mut u64,
         pass: &mut wgpu::RenderPass<'_>,
     ) -> Result<()> {
         self.path_sprites.clear();
-        self.path_sprites.push(PathSprite { bounds });
+        self.path_sprites.push(PathSprite {
+            bounds: group.bounds,
+            raster_origin: [
+                group.raster_bounds.origin.x.0,
+                group.raster_bounds.origin.y.0,
+            ],
+            pad: [0.0; 2],
+        });
         self.composite_path_sprites(instance_offset, pass)
     }
 
     fn draw_paths_from_intermediate(
         &mut self,
         paths: &[Path<ScaledPixels>],
+        raster: Bounds<ScaledPixels>,
         instance_offset: &mut u64,
         pass: &mut wgpu::RenderPass<'_>,
     ) -> Result<()> {
@@ -2035,13 +2135,19 @@ impl WgpuRendererCore {
         if paths.last().map(|p| &p.order) == Some(&first_path.order) {
             self.path_sprites.extend(paths.iter().map(|p| PathSprite {
                 bounds: p.clipped_bounds(),
+                raster_origin: [raster.origin.x.0, raster.origin.y.0],
+                pad: [0.0; 2],
             }));
         } else {
             let mut bounds = first_path.clipped_bounds();
             for path in paths.iter().skip(1) {
                 bounds = bounds.union(&path.clipped_bounds());
             }
-            self.path_sprites.push(PathSprite { bounds });
+            self.path_sprites.push(PathSprite {
+                bounds,
+                raster_origin: [raster.origin.x.0, raster.origin.y.0],
+                pad: [0.0; 2],
+            });
         }
         self.composite_path_sprites(instance_offset, pass)
     }
@@ -2051,9 +2157,6 @@ impl WgpuRendererCore {
         instance_offset: &mut u64,
         pass: &mut wgpu::RenderPass<'_>,
     ) -> Result<()> {
-        let Some(path_intermediate_view) = self.resources().path_intermediate_view.clone() else {
-            return Ok(());
-        };
         let sprite_count = self.path_sprites.len() as u32;
         self.path_sprite_peak = self.path_sprite_peak.max(self.path_sprites.len());
         let mut sprites = std::mem::take(&mut self.path_sprites);
@@ -2062,15 +2165,11 @@ impl WgpuRendererCore {
         sprites.clear();
         self.path_sprites = sprites;
         let instances = instances?;
-        let texture = self.create_texture_bind_group(
-            "path_intermediate_texture_bind_group",
-            &path_intermediate_view,
-        );
         let resources = self.resources();
         pass.set_pipeline(&resources.pipelines.paths);
         pass.set_bind_group(0, &resources.globals_bind_group, &[]);
         pass.set_bind_group(1, &instances.bind_group, &[]);
-        pass.set_bind_group(2, &texture, &[]);
+        pass.set_bind_group(2, &resources.msaa_scratch.as_ref().unwrap().texture, &[]);
         pass.draw(
             0..4,
             instances.first_instance..instances.first_instance + sprite_count,
@@ -2083,6 +2182,7 @@ impl WgpuRendererCore {
         encoder: &mut wgpu::CommandEncoder,
         paths: &[Path<ScaledPixels>],
         size: Size<DevicePixels>,
+        raster: Bounds<ScaledPixels>,
         instance_offset: &mut u64,
     ) -> Result<bool> {
         self.path_vertices.clear();
@@ -2094,6 +2194,7 @@ impl WgpuRendererCore {
                     st_position: v.st_position,
                     color: path.color,
                     bounds,
+                    raster_origin: [raster.origin.x.0, raster.origin.y.0],
                 }));
         }
 
@@ -2116,20 +2217,16 @@ impl WgpuRendererCore {
         self.path_vertices = vertices;
         let vertex_binding = vertex_binding?;
 
-        // The existing vertex preparation determines demand without another scan
-        // of scene.paths, which may contain only paths with empty vertex arrays.
-        self.ensure_intermediate_textures(size);
-
+        #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
+        {
+            self.msaa_raster_passes += 1;
+        }
         let resources = self.resources();
-        let Some(path_intermediate_view) = resources.path_intermediate_view.as_ref() else {
-            return Ok(false);
-        };
-
-        let (target_view, resolve_target) = if let Some(ref msaa_view) = resources.path_msaa_view {
-            (msaa_view, Some(path_intermediate_view))
-        } else {
-            (path_intermediate_view, None)
-        };
+        let pair = resources.msaa_scratch.as_ref().unwrap();
+        let (target_view, resolve_target) = pair
+            .msaa
+            .as_ref()
+            .map_or((&pair.resolved, None), |msaa| (msaa, Some(&pair.resolved)));
 
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -2139,13 +2236,18 @@ impl WgpuRendererCore {
                     resolve_target,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
+                        store: if pair.msaa.is_some() {
+                            wgpu::StoreOp::Discard
+                        } else {
+                            wgpu::StoreOp::Store
+                        },
                     },
                     depth_slice: None,
                 })],
                 depth_stencil_attachment: None,
                 ..Default::default()
             });
+            Self::set_raster_viewport(&mut pass, raster, size);
 
             pass.set_bind_group(0, &resources.path_globals_bind_group, &[]);
             pass.set_bind_group(1, &vertex_binding.bind_group, &[]);
@@ -2159,6 +2261,124 @@ impl WgpuRendererCore {
         Ok(true)
     }
 
+    fn release_frame_plan(&mut self) {
+        self.material_ranges = Vec::new();
+        self.low_material_range_frames = 0;
+        self.low_material_range_peak = 0;
+        self.native_rasters = Vec::new();
+        self.low_native_raster_frames = 0;
+        self.low_native_raster_peak = 0;
+    }
+
+    fn preflight_msaa_instance_data(
+        &self,
+        scene: &Scene,
+        materials: &PreparedMaterials,
+        mut offset: u64,
+    ) -> Result<()> {
+        let mut capacity = self.instance_data_capacity;
+        let mut native_raster_index = 0;
+        // Initial ordinary instance uploads already advanced offset. Replay the
+        // remaining allocations in exact scene order, including composite data
+        // and rollover/growth, before any attachment is allocated.
+        for batch in scene.batches() {
+            match batch {
+                #[cfg(not(target_os = "macos"))]
+                PrimitiveBatch::Gpu(range) => {
+                    for index in range {
+                        if materials.msaa_groups.contains_key(&index) {
+                            self.instance_binding_allocation::<PathSprite>(
+                                1,
+                                &mut offset,
+                                &mut capacity,
+                            )?;
+                        }
+                    }
+                }
+                PrimitiveBatch::Paths(range) => {
+                    if let Some(plan) = self
+                        .native_rasters
+                        .get(native_raster_index)
+                        .filter(|plan| plan.start == range.start)
+                    {
+                        self.instance_binding_allocation::<PathRasterizationVertex>(
+                            plan.vertices,
+                            &mut offset,
+                            &mut capacity,
+                        )?;
+                        self.instance_binding_allocation::<PathSprite>(
+                            plan.sprites,
+                            &mut offset,
+                            &mut capacity,
+                        )?;
+                        native_raster_index += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Pure allocation cursor shared by admission and the actual writer. This
+    /// preserves transport limits, alignment, and maximum-capacity rollover.
+    fn instance_binding_allocation<T>(
+        &self,
+        count: usize,
+        cursor: &mut u64,
+        capacity: &mut u64,
+    ) -> Result<(u64, u64)> {
+        let stride = std::mem::size_of::<T>() as u64;
+        let size = u64::try_from(count)?
+            .checked_mul(stride)
+            .context("instance data byte count overflow")?
+            .max(16);
+        let (alignment, allocation_size) = if self.uses_webgl_instance_data {
+            // Texture records start on both an instance and a texel boundary;
+            // the final texel's padding may not overlap the next allocation.
+            (
+                least_common_multiple(self.instance_data_alignment, stride.max(1)),
+                size.checked_next_multiple_of(INSTANCE_TEXTURE_TEXEL_SIZE)
+                    .context("instance texture allocation overflow")?,
+            )
+        } else {
+            (self.instance_data_alignment.max(1), size)
+        };
+        let mut offset = cursor
+            .checked_next_multiple_of(alignment)
+            .context("instance data offset overflow")?;
+        let end = offset
+            .checked_add(allocation_size)
+            .context("instance data range overflow")?;
+        if end > *capacity {
+            let grown = capacity
+                .saturating_mul(2)
+                .max(
+                    allocation_size
+                        .checked_next_power_of_two()
+                        .context("instance data capacity overflow")?,
+                )
+                .min(self.max_instance_data_size);
+            anyhow::ensure!(
+                grown >= allocation_size,
+                "instance data needs {allocation_size} bytes, above the maximum of {}",
+                self.max_instance_data_size
+            );
+            anyhow::ensure!(
+                grown > *capacity,
+                "frame instance data exceeds the {}-byte maximum",
+                self.max_instance_data_size
+            );
+            *capacity = grown;
+            offset = 0;
+        }
+        if self.uses_webgl_instance_data {
+            u32::try_from(offset / stride.max(1)).context("instance index exceeds u32 range")?;
+        }
+        *cursor = offset + allocation_size;
+        Ok((offset, size))
+    }
+
     fn write_instance_binding<T>(
         &mut self,
         label: &str,
@@ -2166,29 +2386,17 @@ impl WgpuRendererCore {
         instances: &[T],
     ) -> Result<InstanceBinding> {
         let data = unsafe { Self::instance_bytes(instances) };
-        // wgpu rejects zero-sized bindings, so empty primitive arrays still
-        // reserve the 16-byte minimum.
-        let size = (data.len() as u64).max(16);
-        let stride = (std::mem::size_of::<T>() as u64).max(1);
-        let (alignment, allocation_size) = if self.uses_webgl_instance_data {
-            // The texture transport has no binding offset: the shader indexes
-            // the instance texture absolutely, so each allocation must start on
-            // a whole instance (a stride multiple) and a whole texel, and must
-            // end on a texel boundary so the zero padding of its final partial
-            // texel cannot overlap the next allocation.
-            (
-                least_common_multiple(self.instance_data_alignment, stride),
-                size.next_multiple_of(INSTANCE_TEXTURE_TEXEL_SIZE),
-            )
-        } else {
-            (self.instance_data_alignment.max(1), size)
-        };
-        let mut offset = (*instance_offset).next_multiple_of(alignment);
-        if offset + allocation_size > self.instance_data_capacity {
-            self.grow_instance_data(allocation_size)?;
-            offset = 0;
+        let mut capacity = self.instance_data_capacity;
+        let (offset, size) =
+            self.instance_binding_allocation::<T>(instances.len(), instance_offset, &mut capacity)?;
+        if capacity != self.instance_data_capacity {
+            log::debug!(
+                "instance data grown from {} to {capacity}",
+                self.instance_data_capacity
+            );
+            self.replace_instance_data(capacity);
         }
-        *instance_offset = offset + allocation_size;
+        let stride = (std::mem::size_of::<T>() as u64).max(1);
 
         let first_instance = if self.uses_webgl_instance_data {
             u32::try_from(offset / stride).context("instance index exceeds u32 range")?
@@ -2366,28 +2574,6 @@ impl WgpuRendererCore {
         self.low_instance_data_peak = 0;
     }
 
-    fn grow_instance_data(&mut self, required: u64) -> Result<()> {
-        let capacity = (self.instance_data_capacity * 2)
-            .max(required.next_power_of_two())
-            .min(self.max_instance_data_size);
-        anyhow::ensure!(
-            capacity >= required,
-            "instance data needs {required} bytes, above the maximum of {}",
-            self.max_instance_data_size
-        );
-        anyhow::ensure!(
-            capacity > self.instance_data_capacity,
-            "frame instance data exceeds the {}-byte maximum",
-            self.max_instance_data_size
-        );
-        log::debug!(
-            "instance data grown from {} to {capacity}",
-            self.instance_data_capacity
-        );
-        self.replace_instance_data(capacity);
-        Ok(())
-    }
-
     fn replace_instance_data(&mut self, capacity: u64) {
         // Earlier bind groups and submitted commands retain the old allocation.
         // Only subsequent writes use the replacement; never destroy or wait here.
@@ -2439,6 +2625,7 @@ impl WgpuRenderer {
             core.path_sprite_peak = 0;
             core.low_path_sprite_frames = 0;
             core.low_path_sprite_peak = 0;
+            core.release_frame_plan();
         }
     }
 
@@ -2627,6 +2814,7 @@ pub struct WgpuHeadlessRenderer {
     core: WgpuRendererCore,
     render_target: Option<HeadlessRenderTarget>,
     observed_error_generation: u64,
+    transparent: bool,
 }
 
 #[cfg(all(
@@ -2635,7 +2823,71 @@ pub struct WgpuHeadlessRenderer {
 ))]
 impl WgpuHeadlessRenderer {
     pub fn new() -> anyhow::Result<Self> {
+        Self::new_comparison(false, false)
+    }
+
+    /// Headless output configuration for cross-binary baseline comparisons.
+    pub fn new_for_msaa_comparison(transparent: bool) -> anyhow::Result<Self> {
+        Self::new_comparison(transparent, false)
+    }
+
+    pub fn new_for_msaa_comparison_srgb(transparent: bool) -> anyhow::Result<Self> {
+        Self::new_comparison(transparent, true)
+    }
+
+    pub fn path_sample_count(&self) -> u32 {
+        self.core.rendering_params.path_sample_count
+    }
+
+    /// Current renderer-owned pair extent and cumulative pair allocations.
+    pub fn msaa_attachment_stats(&self) -> (Option<(u32, u32)>, u64) {
+        (
+            self.core
+                .resources
+                .msaa_scratch
+                .as_ref()
+                .map(|pair| pair.extent),
+            self.core.msaa_allocations,
+        )
+    }
+
+    /// Renderer-retained attachment bytes and last frame's offscreen passes.
+    /// Excludes the output target and retired handles retained by the GPU queue.
+    pub fn msaa_frame_stats(&self) -> (u64, u64) {
+        let bytes = self.core.resources.msaa_scratch.as_ref().map_or(0, |pair| {
+            let samples = self.core.rendering_params.path_sample_count;
+            let copies = if samples > 1 { 1 + samples } else { 1 };
+            u64::from(pair.extent.0)
+                * u64::from(pair.extent.1)
+                * u64::from(copies)
+                * u64::from(self.core.target_format.block_copy_size(None).unwrap())
+        });
+        (bytes, self.core.msaa_raster_passes)
+    }
+
+    pub fn render_scene_no_readback(
+        &mut self,
+        scene: &Scene,
+        size: Size<DevicePixels>,
+    ) -> anyhow::Result<()> {
+        self.render(scene, size)
+    }
+
+    pub fn wait_for_gpu(&mut self) -> anyhow::Result<()> {
+        self.core.resources.device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        })?;
+        self.check_gpu_errors()
+    }
+
+    fn new_comparison(transparent: bool, srgb: bool) -> anyhow::Result<Self> {
         let (context, target_format) = WgpuContext::new_headless()?;
+        let target_format = if srgb {
+            target_format.add_srgb_suffix()
+        } else {
+            target_format
+        };
         // The device may be shared with earlier renderers; observe only errors raised from
         // here on, including any while this renderer builds its pipelines.
         let observed_error_generation = context.errors().current_generation();
@@ -2644,7 +2896,11 @@ impl WgpuHeadlessRenderer {
             &context,
             atlas,
             target_format,
-            wgpu::CompositeAlphaMode::Opaque,
+            if transparent {
+                wgpu::CompositeAlphaMode::PreMultiplied
+            } else {
+                wgpu::CompositeAlphaMode::Opaque
+            },
         );
 
         Ok(Self {
@@ -2652,6 +2908,7 @@ impl WgpuHeadlessRenderer {
             core,
             render_target: None,
             observed_error_generation,
+            transparent,
         })
     }
 
@@ -2721,8 +2978,17 @@ impl WgpuHeadlessRenderer {
             .ok_or_else(|| anyhow::anyhow!("Headless render target was not created"))?
             .view
             .clone();
-        self.core
-            .render_frame(scene, &view, size, false, wgpu::Color::BLACK)?;
+        self.core.render_frame(
+            scene,
+            &view,
+            size,
+            self.transparent,
+            if self.transparent {
+                wgpu::Color::TRANSPARENT
+            } else {
+                wgpu::Color::BLACK
+            },
+        )?;
         Ok(())
     }
 
@@ -2827,7 +3093,10 @@ impl WgpuHeadlessRenderer {
         drop(mapped_data);
         readback_buffer.unmap();
 
-        if self.core.target_format == wgpu::TextureFormat::Bgra8Unorm {
+        if matches!(
+            self.core.target_format,
+            wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+        ) {
             for pixel in pixels.chunks_exact_mut(4) {
                 pixel.swap(0, 2);
             }
@@ -2936,6 +3205,63 @@ mod tests {
     };
     #[cfg(target_os = "linux")]
     use gpui::{DevicePixels, PlatformHeadlessRenderer, Scene};
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn msaa_scratch_survives_alpha_pipeline_rebuild() -> anyhow::Result<()> {
+        let mut renderer = WgpuHeadlessRenderer::new_for_msaa_comparison(false)?;
+        anyhow::ensure!(
+            renderer.path_sample_count() == 4,
+            "this regression requires a GPU adapter supporting 4x MSAA"
+        );
+        let frame = gpui::GpuFrame::waveform(
+            vec![gpui::GpuWaveformColumn { levels: [0.5; 4] }],
+            gpui::GpuPalette::new(&[[1.0, 0.0, 0.0, 1.0]; 2], 2)?,
+            gpui::GpuWaveformParams { palette_start: 0.0 },
+            gpui::GpuLimits {
+                max_waveform_columns: 1,
+                max_palette_colors: 2,
+                ..Default::default()
+            },
+        )
+        .map_err(anyhow::Error::msg)?;
+        let bounds = solid_quad(4.0, 4.0, 24.0, 16.0, gpui::red()).bounds;
+        let mut scene = Scene::default();
+        scene.insert_primitive(gpui::GpuDraw {
+            order: 0,
+            bounds,
+            content_mask: ContentMask { bounds },
+            scale_factor: 1.0,
+            opacity: 1.0,
+            source: gpui::GpuSource::Fixed(frame),
+        });
+        scene.finish();
+        let size = gpui::size(DevicePixels(32), DevicePixels(24));
+        let before = renderer.render_scene_to_image(&scene, size)?;
+        let attachments = renderer.msaa_attachment_stats();
+        assert!(attachments.0.is_some(), "MSAA scratch must be allocated");
+        assert_eq!(before.get_pixel(8, 10).0, [255, 0, 0, 255]);
+        for alpha in [
+            wgpu::CompositeAlphaMode::PostMultiplied,
+            wgpu::CompositeAlphaMode::Opaque,
+        ] {
+            // The real transparency transition rebuilds pipelines but keeps attachments.
+            let core = &mut renderer.core;
+            core.resources.pipelines = WgpuRendererCore::create_pipelines(
+                &core.resources.device,
+                &core.resources.bind_group_layouts,
+                core.target_format,
+                alpha,
+                core.rendering_params.path_sample_count,
+                core.dual_source_blending,
+                core.uses_webgl_instance_data,
+            );
+            let after = renderer.render_scene_to_image(&scene, size)?;
+            assert_eq!(before, after);
+            assert_eq!(renderer.msaa_attachment_stats(), attachments);
+        }
+        Ok(())
+    }
 
     #[test]
     fn path_staging_reclaims_only_after_sustained_low_demand() {
@@ -3260,11 +3586,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     fn assert_no_path_intermediates(renderer: &WgpuHeadlessRenderer) {
-        let resources = &renderer.core.resources;
-        assert!(resources.path_intermediate_texture.is_none());
-        assert!(resources.path_intermediate_view.is_none());
-        assert!(resources.path_msaa_texture.is_none());
-        assert!(resources.path_msaa_view.is_none());
+        assert!(renderer.core.resources.msaa_scratch.is_none());
     }
 
     #[cfg(target_os = "linux")]
@@ -3332,11 +3654,12 @@ mod tests {
 
         renderer.render_scene(&path_scene, size)?;
         let resources = &renderer.core.resources;
-        let first_texture = resources.path_intermediate_texture.clone().unwrap();
-        let first_msaa = resources.path_msaa_texture.clone();
+        let pair = resources.msaa_scratch.as_ref().unwrap();
+        let first_texture = pair._resolved.clone();
+        let first_msaa = pair._msaa.clone();
         assert_eq!(first_texture.sample_count(), 1);
         assert_eq!(first_msaa.is_some(), multisampled);
-        assert_eq!(resources.path_msaa_view.is_some(), multisampled);
+        assert_eq!(pair.msaa.is_some(), multisampled);
         if let Some(texture) = &first_msaa {
             assert_eq!(
                 texture.sample_count(),
@@ -3349,8 +3672,8 @@ mod tests {
         // this later submission invalid, including for the MSAA attachment.
         let mut deferred = resources.device.create_command_encoder(&Default::default());
         {
-            let resolved = resources.path_intermediate_view.as_ref().unwrap();
-            let msaa = resources.path_msaa_view.as_ref();
+            let resolved = &pair.resolved;
+            let msaa = pair.msaa.as_ref();
             let _pass = deferred.begin_render_pass(&wgpu::RenderPassDescriptor {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: msaa.unwrap_or(resolved),
@@ -3367,11 +3690,9 @@ mod tests {
         let deferred = deferred.finish();
 
         renderer.render_scene(&path_scene, size)?;
-        assert_eq!(
-            renderer.core.resources.path_intermediate_texture.as_ref(),
-            Some(&first_texture)
-        );
-        assert_eq!(renderer.core.resources.path_msaa_texture, first_msaa);
+        let pair = renderer.core.resources.msaa_scratch.as_ref().unwrap();
+        assert_eq!(&pair._resolved, &first_texture);
+        assert_eq!(pair._msaa, first_msaa);
         renderer.render_scene(&empty_path_scene, size)?;
         assert_no_path_intermediates(&renderer);
         renderer.core.resources.queue.submit([deferred]);
@@ -3383,13 +3704,14 @@ mod tests {
         assert_no_path_intermediates(&renderer);
         let image = renderer.render_scene_to_image(&path_scene, resized)?;
         let resources = &renderer.core.resources;
-        let restored = resources.path_intermediate_texture.as_ref().unwrap();
+        let pair = resources.msaa_scratch.as_ref().unwrap();
+        let restored = &pair._resolved;
         assert_ne!(restored, &first_texture);
-        assert_eq!((restored.width(), restored.height()), (40, 24));
-        assert_eq!(resources.path_msaa_texture.is_some(), multisampled);
-        if let Some(texture) = &resources.path_msaa_texture {
+        assert_eq!((restored.width(), restored.height()), (16, 16));
+        assert_eq!(pair._msaa.is_some(), multisampled);
+        if let Some(texture) = &pair._msaa {
             assert_ne!(Some(texture), first_msaa.as_ref());
-            assert_eq!((texture.width(), texture.height()), (40, 24));
+            assert_eq!((texture.width(), texture.height()), (16, 16));
         }
         assert_pixel(&image, 4, 8, RED);
         assert_pixel(&image, 10, 8, BLUE);
@@ -3715,8 +4037,8 @@ mod tests {
     fn webgl_record_sizes_match_shader_word_strides() {
         assert_eq!(std::mem::size_of::<Quad>(), 40 * 4);
         assert_eq!(std::mem::size_of::<Shadow>(), 28 * 4);
-        assert_eq!(std::mem::size_of::<PathRasterizationVertex>(), 26 * 4);
-        assert_eq!(std::mem::size_of::<PathSprite>(), 4 * 4);
+        assert_eq!(std::mem::size_of::<PathRasterizationVertex>(), 28 * 4);
+        assert_eq!(std::mem::size_of::<PathSprite>(), 8 * 4);
         assert_eq!(std::mem::size_of::<Underline>(), 16 * 4);
         assert_eq!(std::mem::size_of::<MonochromeSprite>(), 28 * 4);
         assert_eq!(std::mem::size_of::<SubpixelSprite>(), 28 * 4);
@@ -3839,6 +4161,184 @@ mod tests {
                 33.0_f32.to_bits(),
             ]
         );
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn rejected_native_path_transport_does_not_allocate_msaa_scratch() -> anyhow::Result<()> {
+        let mut renderer = WgpuHeadlessRenderer::new()?;
+        renderer.core.material_ranges.reserve(8192);
+        renderer.core.native_rasters.reserve(8192);
+        // Keep the real transport limit, but make the fixture exceed it without
+        // allocating a large attachment or relying on a driver-specific limit.
+        renderer.core.max_instance_data_size = renderer.core.instance_data_capacity;
+        let mut path = rectangle_path(0.0, 0.0, 128.0, 96.0);
+        let count = (renderer.core.max_instance_data_size
+            / std::mem::size_of::<PathRasterizationVertex>() as u64
+            + 3)
+        .next_multiple_of(3) as usize;
+        let vertex = path.vertices[0].clone();
+        Arc::make_mut(&mut path.vertices).resize(count, vertex);
+        let mut rejected = Scene::default();
+        rejected.insert_primitive(path);
+        rejected.finish();
+        assert!(
+            renderer
+                .render_scene_no_readback(&rejected, device_size(128, 96))
+                .is_err()
+        );
+        assert_eq!(
+            renderer.msaa_attachment_stats(),
+            (None, 0),
+            "a rejected native upload must not allocate or retain an attachment"
+        );
+        assert_eq!(renderer.core.material_ranges.capacity(), 0);
+        assert_eq!(renderer.core.native_rasters.capacity(), 0);
+        let mut recovered = Scene::default();
+        let mut path = rectangle_path(4.0, 4.0, 8.0, 8.0);
+        path.color = gpui::red().into();
+        recovered.insert_primitive(path);
+        recovered.finish();
+        let image = renderer.render_scene_to_image(&recovered, device_size(128, 96))?;
+        assert_pixel(&image, 8, 8, RED);
+        assert_eq!(renderer.msaa_attachment_stats(), (Some((8, 8)), 1));
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn rejected_material_composite_rollover_does_not_allocate_msaa_scratch() -> anyhow::Result<()> {
+        let mut renderer = WgpuHeadlessRenderer::new()?;
+        let capacity = renderer.core.instance_data_alignment.max(32) * 8;
+        renderer.core.replace_instance_data(capacity);
+        renderer.core.max_instance_data_size = capacity;
+        let frame = gpui::GpuFrame::rectangles(
+            &[gpui::GpuRectangle {
+                bounds: [0.0, 0.0, 1.0, 1.0],
+                palette_range: [0.0, 0.0],
+            }],
+            gpui::GpuPalette::new(&[[1.0, 0.0, 0.0, 0.5]], 1)?,
+            gpui::GpuRectangleParams::default(),
+            gpui::GpuLimits {
+                max_rectangles: 1,
+                max_palette_colors: 1,
+                ..Default::default()
+            },
+        )?;
+        let bounds = solid_quad(4.0, 4.0, 16.0, 16.0, gpui::red()).bounds;
+        let mut scene = Scene::default();
+        for _ in 0..8 {
+            scene.insert_primitive(gpui::GpuDraw {
+                order: 0,
+                bounds,
+                content_mask: ContentMask { bounds },
+                scale_factor: 1.0,
+                opacity: 1.0,
+                source: gpui::GpuSource::Fixed(frame.clone()),
+            });
+        }
+        scene.finish();
+        // Every composite fits individually. Existing ordinary instance data
+        // plus all eight ordered composites together exhaust the capped slab.
+        assert!(
+            renderer
+                .render_scene_no_readback(&scene, device_size(32, 32))
+                .is_err()
+        );
+        assert_eq!(renderer.msaa_attachment_stats(), (None, 0));
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn frame_planning_storage_reclaims_sustained_low_demand() -> anyhow::Result<()> {
+        let mut renderer = WgpuHeadlessRenderer::new()?;
+        renderer.core.material_ranges.reserve(8192);
+        renderer.core.native_rasters.reserve(8192);
+        let mut scene = Scene::default();
+        let mut path = rectangle_path(4.0, 4.0, 8.0, 8.0);
+        path.color = gpui::red().into();
+        scene.insert_primitive(path);
+        scene.finish();
+        for _ in 0..INSTANCE_DATA_SHRINK_DELAY_FRAMES {
+            renderer.render_scene_no_readback(&scene, device_size(16, 16))?;
+        }
+        assert!(renderer.core.material_ranges.capacity() <= 1024);
+        assert!(renderer.core.native_rasters.capacity() <= 1024);
+        let image = renderer.render_scene_to_image(&scene, device_size(16, 16))?;
+        assert_pixel(&image, 8, 8, RED);
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn local_native_paths_preserve_packed_batch_sprite_multiplicity() -> anyhow::Result<()> {
+        let mut renderer = WgpuHeadlessRenderer::new()?;
+        for same_order in [false, true] {
+            let mut scene = Scene::default();
+            if same_order {
+                scene.push_layer(solid_quad(0.0, 0.0, 96.0, 80.0, gpui::black()).bounds);
+            }
+            // Explicit full-intensity primaries, not named green's .25 lightness.
+            let colors: [Hsla; 2] = [gpui::rgb(0xff0000).into(), gpui::rgb(0x00ff00).into()];
+            for color in colors {
+                let mut path = rectangle_path(24.25, 32.5, 16.0, 16.0);
+                path.color = Hsla { a: 0.5, ..color }.into();
+                scene.insert_primitive(path);
+            }
+            if same_order {
+                scene.pop_layer();
+            }
+            scene.finish();
+            assert_eq!(scene.paths[0].order == scene.paths[1].order, same_order);
+            let image = renderer.render_scene_to_image(&scene, device_size(96, 80))?;
+            // Packed samples contain red(.5) then green(.5). A same-order batch
+            // composites that result twice, while mixed orders use one union.
+            assert_pixel(
+                &image,
+                30,
+                40,
+                if same_order {
+                    [80, 160, 0, 255]
+                } else {
+                    [64, 128, 0, 255]
+                },
+            );
+            assert_pixel(&image, 22, 40, BLACK);
+            assert_pixel(&image, 42, 40, BLACK);
+            assert_eq!(renderer.msaa_attachment_stats().0, Some((17, 17)));
+            assert_eq!(renderer.msaa_frame_stats().1, 1);
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn local_native_path_gradients_keep_window_fragment_coordinates() -> anyhow::Result<()> {
+        let mut renderer = WgpuHeadlessRenderer::new()?;
+        let background = linear_gradient(
+            0.0,
+            linear_color_stop(gpui::red(), 0.0),
+            linear_color_stop(gpui::blue(), 1.0),
+        );
+        let mut path = rectangle_path(24.25, 32.5, 20.0, 24.0);
+        path.color = background;
+        let mut paths = Scene::default();
+        paths.insert_primitive(path.clone());
+        paths.finish();
+        let actual = renderer.render_scene_to_image(&paths, device_size(96, 80))?;
+        let mut quad = solid_quad(24.25, 32.5, 20.0, 24.0, gpui::red());
+        quad.background = background;
+        let mut quads = Scene::default();
+        quads.insert_primitive(quad);
+        quads.finish();
+        let expected = renderer.render_scene_to_image(&quads, device_size(96, 80))?;
+        for y in 34..55 {
+            for x in 26..43 {
+                assert_pixel(&actual, x, y, expected.get_pixel(x, y).0);
+            }
+        }
+        assert_pixel(&actual, 23, 44, BLACK);
+        Ok(())
     }
 }
 

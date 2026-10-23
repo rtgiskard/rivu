@@ -9,6 +9,7 @@ struct Placement {
     config: vec4<u32>, // schema, palette count, premultiplied target, sRGB target
     field: vec4<u32>, // width, height, logarithmic mapping, reserved zero
     source_bounds: vec4<f32>,
+    raster_origin: vec2<f32>, // raster target origin in window physical pixels
 }
 @group(0) @binding(0) var<uniform> placement: Placement;
 @group(1) @binding(0) var<storage, read> data: array<u32>;
@@ -247,7 +248,8 @@ fn path_vertex(@builtin(vertex_index) vertex: u32) -> VertexOutput {
     output.instance = 0u;
     return output;
 }
-fn clipped(pixel: vec2<f32>) -> bool {
+fn clipped(target_pixel: vec2<f32>) -> bool {
+    let pixel = target_pixel + placement.raster_origin;
     return any(pixel < placement.mask.xy) || any(pixel >= placement.mask.xy + placement.mask.zw);
 }
 fn finish_color(sample: vec4<f32>, coverage: f32, premultiplied: bool) -> vec4<f32> {
@@ -315,7 +317,7 @@ fn rectangle_fragment(input: RectangleVertexOutput) -> @location(0) vec4<f32> {
     if clipped(input.position.xy) { discard; }
     let offset = input.instance * 8u;
     let bottom = placement.bounds.y + (data_float(offset + 1u) + data_float(offset + 3u)) * placement.bounds.w;
-    let bottom_distance = bottom - input.position.y;
+    let bottom_distance = bottom - (input.position.y + placement.raster_origin.y);
     let height = placement.params.x * placement.scale;
     let gap = placement.params.y * placement.scale;
     if height > 0.0 && gap > 0.0 {
@@ -333,7 +335,7 @@ fn rectangle_fragment(input: RectangleVertexOutput) -> @location(0) vec4<f32> {
 fn path_fragment(input: VertexOutput) -> @location(0) vec4<f32> {
     let coverage = path_coverage(input.local, dpdx(input.local), dpdy(input.local));
     if clipped(input.position.xy) { discard; }
-    let y = (input.position.y - placement.bounds.y) / placement.bounds.w;
+    let y = (input.position.y + placement.raster_origin.y - placement.bounds.y) / placement.bounds.w;
     let coordinate = mix(placement.params.x, placement.params.y, 1.0 - y);
     // The shared path intermediate is always premultiplied, regardless of the
     // window surface alpha mode; its existing compositor owns the final blend.

@@ -1,4 +1,3959 @@
 {
+  "shared_local_msaa_20261023": {
+    "date": "2026-10-23",
+    "scope": "Shared current-demand local MSAA for native GPUI Paths and all multisampled material schemas; no signal/palette/multiplicity changes",
+    "baseline_commit": "9b49886b60ce8955c243440b5ca0992118556605",
+    "environment": {
+      "adapter": "AMD Radeon 780M Graphics (RADV PHOENIX)",
+      "driver": "Mesa 26.2.5-arch1.1",
+      "backend": "Vulkan",
+      "native_compositors": "nested niri on Weston headless GL",
+      "native_output": [
+        1280,
+        800
+      ],
+      "profile": "release",
+      "msaa_samples": 4
+    },
+    "correctness": {
+      "captures": 3960,
+      "failed_captures": 0,
+      "channel_tolerance": 3,
+      "baseline_binary_sha256": "12f957df4c0845d12c62a960acd7840b7ffeda89ab35862b967614eab6987700",
+      "unified_binary_sha256": "7caf994da595e7d38e169c5c50b4d1b042c7b2cf42d47a2ead979b2fe00adaa7"
+    },
+    "capture_identities": {
+      "baseline": {
+        "fixture_sha256": {
+          "main.rs": "0a7e8c75394a337c12a47d3d3442fcf53bf5778404e4345963f644649680d844",
+          "scenes.rs": "097417d96fa835b590968144eb00558145665ee744c85453047e5de70893da9f"
+        },
+        "binary": "/home/giskard/dev/gskd/rivu/.cache/target/release/msaa-baseline-evidence",
+        "binary_sha256": "12f957df4c0845d12c62a960acd7840b7ffeda89ab35862b967614eab6987700",
+        "renderer": {
+          "source": "/home/giskard/dev/gskd/rivu/.cache/msaa-baseline-9b49886",
+          "head": "9b49886b60ce8955c243440b5ca0992118556605",
+          "renderer_sha256": {
+            "vendor/gpui_wgpu/src/cosmic_text_system.rs": "83edad9a8375150cfc2210e5cf569776fae7ce7381481d1fe71656a6ade0d82e",
+            "vendor/gpui_wgpu/src/fontconfig.rs": "78926476b5fbb4191462e81a086e819b9fae71cbbbed0ff69ce06b193bfaf4a4",
+            "vendor/gpui_wgpu/src/gpu_material.rs": "4c45b66e1b1b67668490791e400289d54b888b8dec78433aa4dd8d7fded6d672",
+            "vendor/gpui_wgpu/src/gpu_material.wgsl": "44b68548ff9d708eeafc41524a658c27c4ef2ddca00cdb3779f015eca34d5c19",
+            "vendor/gpui_wgpu/src/gpu_material_abi_tests.rs": "c20f40a9ef5bb07669a56c2df54b24f105d0494afbd371796a94abadc4efb85b",
+            "vendor/gpui_wgpu/src/gpu_material_tests.rs": "56ed43aabccd7f0ac09d20330d8953ac5d78812250ecfeda7f4cf5ee7b6ff203",
+            "vendor/gpui_wgpu/src/gpui_wgpu.rs": "6526d3fd4500ae8115797fe1dbd26c8e9457c001d8ed499a7e2a75787388be93",
+            "vendor/gpui_wgpu/src/path_coverage.wgsl": "b2c7333c7b9f98d4a9adbf8d61311381cfb493345736bb59b6e8c3a63b106bf6",
+            "vendor/gpui_wgpu/src/shaders.wgsl": "cf063e7414f751846d637cfdecddec81356fc975235a15a7f3880605f4a95e1a",
+            "vendor/gpui_wgpu/src/shaders_storage.wgsl": "5e7935445569ec610b2f7ab520c6d2b3ad8613248fc4465072e8dfae941017ca",
+            "vendor/gpui_wgpu/src/shaders_subpixel.wgsl": "0530095284595ac2338dd471317fd936f4f1bbe8cc9a9dcfe2b3abb39dc2f62d",
+            "vendor/gpui_wgpu/src/shaders_webgl.wgsl": "6e178090823983e9ed0600154010de754f7b737f1cb38899bae9ca189fa06e2c",
+            "vendor/gpui_wgpu/src/waveform_local.wgsl": "b2d14ece65a352ab7c70e8722a7f1e7f39cbba5d988ed4c9f3b78cdc55fc37f6",
+            "vendor/gpui_wgpu/src/wgpu_atlas.rs": "5ffe8691f9f2958e2f3ef4c2fcae50fb6948ca9874c993675966b2b60487bb1c",
+            "vendor/gpui_wgpu/src/wgpu_context.rs": "9bffda417f4c9f515809d57b56f71906f68185437b533e2a62b5873c516c1f2d",
+            "vendor/gpui_wgpu/src/wgpu_renderer.rs": "e50d67b77507d2468f7fcd6f486b1f232f8cd7c9b325f9e2d3bc53e256465d05"
+          }
+        }
+      },
+      "unified": {
+        "fixture_sha256": {
+          "main.rs": "0a7e8c75394a337c12a47d3d3442fcf53bf5778404e4345963f644649680d844",
+          "scenes.rs": "097417d96fa835b590968144eb00558145665ee744c85453047e5de70893da9f"
+        },
+        "binary": "/home/giskard/dev/gskd/rivu/.cache/target/release/waveform-local-msaa-behavior",
+        "binary_sha256": "7caf994da595e7d38e169c5c50b4d1b042c7b2cf42d47a2ead979b2fe00adaa7",
+        "renderer": {
+          "source": "/home/giskard/dev/gskd/rivu/.cache/waveform-local-msaa",
+          "head": "9b49886b60ce8955c243440b5ca0992118556605",
+          "renderer_sha256": {
+            "vendor/gpui_wgpu/src/cosmic_text_system.rs": "83edad9a8375150cfc2210e5cf569776fae7ce7381481d1fe71656a6ade0d82e",
+            "vendor/gpui_wgpu/src/fontconfig.rs": "78926476b5fbb4191462e81a086e819b9fae71cbbbed0ff69ce06b193bfaf4a4",
+            "vendor/gpui_wgpu/src/gpu_material.rs": "87d4f6adb3fd287b342b813b998051b6662406fc67160fe97727a02775cd0a8b",
+            "vendor/gpui_wgpu/src/gpu_material.wgsl": "bcc618f419a54d3184eb658069132782e5cee1845a58728b5d84c1730456d9ec",
+            "vendor/gpui_wgpu/src/gpu_material_abi_tests.rs": "c20f40a9ef5bb07669a56c2df54b24f105d0494afbd371796a94abadc4efb85b",
+            "vendor/gpui_wgpu/src/gpu_material_tests.rs": "677e20009a75bd7dc4060d5453c09276293a83ff89050043cb681a702c44e417",
+            "vendor/gpui_wgpu/src/gpui_wgpu.rs": "6526d3fd4500ae8115797fe1dbd26c8e9457c001d8ed499a7e2a75787388be93",
+            "vendor/gpui_wgpu/src/path_coverage.wgsl": "b2c7333c7b9f98d4a9adbf8d61311381cfb493345736bb59b6e8c3a63b106bf6",
+            "vendor/gpui_wgpu/src/shaders.wgsl": "77ca2a2aa4bd52279a0d8370caeae88aefa265ea53a3cd4cedcaab7836d45bc0",
+            "vendor/gpui_wgpu/src/shaders_storage.wgsl": "5e7935445569ec610b2f7ab520c6d2b3ad8613248fc4465072e8dfae941017ca",
+            "vendor/gpui_wgpu/src/shaders_subpixel.wgsl": "0530095284595ac2338dd471317fd936f4f1bbe8cc9a9dcfe2b3abb39dc2f62d",
+            "vendor/gpui_wgpu/src/shaders_webgl.wgsl": "6c8a95125c858cdca5b03fa2a68e34f519c7a0aa6010925de9a890f91f962e1a",
+            "vendor/gpui_wgpu/src/wgpu_atlas.rs": "5ffe8691f9f2958e2f3ef4c2fcae50fb6948ca9874c993675966b2b60487bb1c",
+            "vendor/gpui_wgpu/src/wgpu_context.rs": "9bffda417f4c9f515809d57b56f71906f68185437b533e2a62b5873c516c1f2d",
+            "vendor/gpui_wgpu/src/wgpu_renderer.rs": "9831014d96a0290b431c0f73302f70c411255573ddd21720b15c33281b175c9c"
+          }
+        }
+      }
+    },
+    "profile": {
+      "protocol": "Each warm/reference/measured submission completes before next; encode+submit excludes separately accumulated drain; all measured frames asserted against nonzero completed warm bytes/passes reference.",
+      "runs": 42,
+      "measured_frames": 64512,
+      "sample_rows": 1008,
+      "groups": [
+        {
+          "case": "mixed",
+          "version": "baseline",
+          "mode": "stable",
+          "samples": 36,
+          "frames": 2304,
+          "cpu_encode_submit_us_per_frame_median": 504.75,
+          "gpu_completion_wait_us_per_frame_median": 1132.519,
+          "bytes_passes_by_viewport_multiplier": {
+            "1": [
+              675600,
+              22
+            ]
+          }
+        },
+        {
+          "case": "mixed",
+          "version": "baseline",
+          "mode": "resize",
+          "samples": 36,
+          "frames": 2304,
+          "cpu_encode_submit_us_per_frame_median": 519.429,
+          "gpu_completion_wait_us_per_frame_median": 1132.007,
+          "bytes_passes_by_viewport_multiplier": {
+            "1": [
+              675600,
+              22
+            ],
+            "1.5": [
+              1290000,
+              22
+            ],
+            "0.625": [
+              361500,
+              22
+            ]
+          }
+        },
+        {
+          "case": "mixed",
+          "version": "unified",
+          "mode": "stable",
+          "samples": 36,
+          "frames": 2304,
+          "cpu_encode_submit_us_per_frame_median": 480.969,
+          "gpu_completion_wait_us_per_frame_median": 1093.009,
+          "bytes_passes_by_viewport_multiplier": {
+            "1": [
+              184080,
+              22
+            ]
+          }
+        },
+        {
+          "case": "mixed",
+          "version": "unified",
+          "mode": "resize",
+          "samples": 36,
+          "frames": 2304,
+          "cpu_encode_submit_us_per_frame_median": 491.47,
+          "gpu_completion_wait_us_per_frame_median": 1088.315,
+          "bytes_passes_by_viewport_multiplier": {
+            "1": [
+              184080,
+              22
+            ],
+            "1.5": [
+              184080,
+              22
+            ],
+            "0.625": [
+              169500,
+              22
+            ]
+          }
+        },
+        {
+          "case": "distant",
+          "version": "baseline",
+          "mode": "stable",
+          "samples": 36,
+          "frames": 2304,
+          "cpu_encode_submit_us_per_frame_median": 222.454,
+          "gpu_completion_wait_us_per_frame_median": 472.578,
+          "bytes_passes_by_viewport_multiplier": {
+            "1": [
+              931820,
+              9
+            ]
+          }
+        },
+        {
+          "case": "distant",
+          "version": "baseline",
+          "mode": "resize",
+          "samples": 36,
+          "frames": 2304,
+          "cpu_encode_submit_us_per_frame_median": 237.067,
+          "gpu_completion_wait_us_per_frame_median": 513.524,
+          "bytes_passes_by_viewport_multiplier": {
+            "1": [
+              931820,
+              9
+            ],
+            "1.5": [
+              1546220,
+              9
+            ],
+            "0.625": [
+              372180,
+              9
+            ]
+          }
+        },
+        {
+          "case": "distant",
+          "version": "unified",
+          "mode": "stable",
+          "samples": 36,
+          "frames": 2304,
+          "cpu_encode_submit_us_per_frame_median": 338.959,
+          "gpu_completion_wait_us_per_frame_median": 836.747,
+          "bytes_passes_by_viewport_multiplier": {
+            "1": [
+              431880,
+              17
+            ]
+          }
+        },
+        {
+          "case": "distant",
+          "version": "unified",
+          "mode": "resize",
+          "samples": 36,
+          "frames": 2304,
+          "cpu_encode_submit_us_per_frame_median": 304.475,
+          "gpu_completion_wait_us_per_frame_median": 705.745,
+          "bytes_passes_by_viewport_multiplier": {
+            "1": [
+              431880,
+              17
+            ],
+            "1.5": [
+              431880,
+              17
+            ],
+            "0.625": [
+              177840,
+              5
+            ]
+          }
+        },
+        {
+          "case": "fullscreen",
+          "version": "baseline",
+          "mode": "stable",
+          "samples": 36,
+          "frames": 2304,
+          "cpu_encode_submit_us_per_frame_median": 144.47,
+          "gpu_completion_wait_us_per_frame_median": 326.584,
+          "bytes_passes_by_viewport_multiplier": {
+            "1": [
+              983040,
+              5
+            ]
+          }
+        },
+        {
+          "case": "fullscreen",
+          "version": "baseline",
+          "mode": "resize",
+          "samples": 36,
+          "frames": 2304,
+          "cpu_encode_submit_us_per_frame_median": 167.208,
+          "gpu_completion_wait_us_per_frame_median": 346.337,
+          "bytes_passes_by_viewport_multiplier": {
+            "1": [
+              983040,
+              5
+            ],
+            "1.5": [
+              1597440,
+              5
+            ],
+            "0.625": [
+              384000,
+              5
+            ]
+          }
+        },
+        {
+          "case": "fullscreen",
+          "version": "unified",
+          "mode": "stable",
+          "samples": 36,
+          "frames": 2304,
+          "cpu_encode_submit_us_per_frame_median": 143.781,
+          "gpu_completion_wait_us_per_frame_median": 327.563,
+          "bytes_passes_by_viewport_multiplier": {
+            "1": [
+              491520,
+              5
+            ]
+          }
+        },
+        {
+          "case": "fullscreen",
+          "version": "unified",
+          "mode": "resize",
+          "samples": 36,
+          "frames": 2304,
+          "cpu_encode_submit_us_per_frame_median": 154.733,
+          "gpu_completion_wait_us_per_frame_median": 324.375,
+          "bytes_passes_by_viewport_multiplier": {
+            "1": [
+              491520,
+              5
+            ],
+            "1.5": [
+              491520,
+              5
+            ],
+            "0.625": [
+              192000,
+              5
+            ]
+          }
+        },
+        {
+          "case": "pathonly",
+          "version": "baseline",
+          "mode": "stable",
+          "samples": 36,
+          "frames": 2304,
+          "cpu_encode_submit_us_per_frame_median": 77.982,
+          "gpu_completion_wait_us_per_frame_median": 143.921,
+          "bytes_passes_by_viewport_multiplier": {
+            "1": [
+              491520,
+              1
+            ]
+          }
+        },
+        {
+          "case": "pathonly",
+          "version": "baseline",
+          "mode": "resize",
+          "samples": 36,
+          "frames": 2304,
+          "cpu_encode_submit_us_per_frame_median": 93.833,
+          "gpu_completion_wait_us_per_frame_median": 150.604,
+          "bytes_passes_by_viewport_multiplier": {
+            "1": [
+              491520,
+              1
+            ],
+            "1.5": [
+              1105920,
+              1
+            ],
+            "0.625": [
+              192000,
+              1
+            ]
+          }
+        },
+        {
+          "case": "pathonly",
+          "version": "unified",
+          "mode": "stable",
+          "samples": 36,
+          "frames": 2304,
+          "cpu_encode_submit_us_per_frame_median": 77.554,
+          "gpu_completion_wait_us_per_frame_median": 141.252,
+          "bytes_passes_by_viewport_multiplier": {
+            "1": [
+              208280,
+              1
+            ]
+          }
+        },
+        {
+          "case": "pathonly",
+          "version": "unified",
+          "mode": "resize",
+          "samples": 36,
+          "frames": 2304,
+          "cpu_encode_submit_us_per_frame_median": 90.807,
+          "gpu_completion_wait_us_per_frame_median": 146.262,
+          "bytes_passes_by_viewport_multiplier": {
+            "1": [
+              208280,
+              1
+            ],
+            "1.5": [
+              208280,
+              1
+            ],
+            "0.625": [
+              143880,
+              1
+            ]
+          }
+        },
+        {
+          "case": "solidonly",
+          "version": "baseline",
+          "mode": "stable",
+          "samples": 36,
+          "frames": 2304,
+          "cpu_encode_submit_us_per_frame_median": 78.663,
+          "gpu_completion_wait_us_per_frame_median": 139.546,
+          "bytes_passes_by_viewport_multiplier": {
+            "1": [
+              491520,
+              1
+            ]
+          }
+        },
+        {
+          "case": "solidonly",
+          "version": "baseline",
+          "mode": "resize",
+          "samples": 36,
+          "frames": 2304,
+          "cpu_encode_submit_us_per_frame_median": 93.313,
+          "gpu_completion_wait_us_per_frame_median": 143.468,
+          "bytes_passes_by_viewport_multiplier": {
+            "1": [
+              491520,
+              1
+            ],
+            "1.5": [
+              1105920,
+              1
+            ],
+            "0.625": [
+              192000,
+              1
+            ]
+          }
+        },
+        {
+          "case": "solidonly",
+          "version": "unified",
+          "mode": "stable",
+          "samples": 36,
+          "frames": 2304,
+          "cpu_encode_submit_us_per_frame_median": 76.697,
+          "gpu_completion_wait_us_per_frame_median": 137.335,
+          "bytes_passes_by_viewport_multiplier": {
+            "1": [
+              259260,
+              1
+            ]
+          }
+        },
+        {
+          "case": "solidonly",
+          "version": "unified",
+          "mode": "resize",
+          "samples": 36,
+          "frames": 2304,
+          "cpu_encode_submit_us_per_frame_median": 90.871,
+          "gpu_completion_wait_us_per_frame_median": 139.926,
+          "bytes_passes_by_viewport_multiplier": {
+            "1": [
+              259260,
+              1
+            ],
+            "1.5": [
+              259260,
+              1
+            ],
+            "0.625": [
+              146060,
+              1
+            ]
+          }
+        },
+        {
+          "case": "segmentsonly",
+          "version": "baseline",
+          "mode": "stable",
+          "samples": 36,
+          "frames": 2304,
+          "cpu_encode_submit_us_per_frame_median": 83.376,
+          "gpu_completion_wait_us_per_frame_median": 139.508,
+          "bytes_passes_by_viewport_multiplier": {
+            "1": [
+              491520,
+              1
+            ]
+          }
+        },
+        {
+          "case": "segmentsonly",
+          "version": "baseline",
+          "mode": "resize",
+          "samples": 36,
+          "frames": 2304,
+          "cpu_encode_submit_us_per_frame_median": 95.743,
+          "gpu_completion_wait_us_per_frame_median": 143.622,
+          "bytes_passes_by_viewport_multiplier": {
+            "1": [
+              491520,
+              1
+            ],
+            "1.5": [
+              1105920,
+              1
+            ],
+            "0.625": [
+              192000,
+              1
+            ]
+          }
+        },
+        {
+          "case": "segmentsonly",
+          "version": "unified",
+          "mode": "stable",
+          "samples": 36,
+          "frames": 2304,
+          "cpu_encode_submit_us_per_frame_median": 75.954,
+          "gpu_completion_wait_us_per_frame_median": 136.344,
+          "bytes_passes_by_viewport_multiplier": {
+            "1": [
+              223500,
+              1
+            ]
+          }
+        },
+        {
+          "case": "segmentsonly",
+          "version": "unified",
+          "mode": "resize",
+          "samples": 36,
+          "frames": 2304,
+          "cpu_encode_submit_us_per_frame_median": 98.937,
+          "gpu_completion_wait_us_per_frame_median": 142.256,
+          "bytes_passes_by_viewport_multiplier": {
+            "1": [
+              223500,
+              1
+            ],
+            "1.5": [
+              223500,
+              1
+            ],
+            "0.625": [
+              132980,
+              1
+            ]
+          }
+        },
+        {
+          "case": "rectanglesonly",
+          "version": "baseline",
+          "mode": "stable",
+          "samples": 36,
+          "frames": 2304,
+          "cpu_encode_submit_us_per_frame_median": 77.772,
+          "gpu_completion_wait_us_per_frame_median": 147.143,
+          "bytes_passes_by_viewport_multiplier": {
+            "1": [
+              491520,
+              1
+            ]
+          }
+        },
+        {
+          "case": "rectanglesonly",
+          "version": "baseline",
+          "mode": "resize",
+          "samples": 36,
+          "frames": 2304,
+          "cpu_encode_submit_us_per_frame_median": 95.567,
+          "gpu_completion_wait_us_per_frame_median": 153.081,
+          "bytes_passes_by_viewport_multiplier": {
+            "1": [
+              491520,
+              1
+            ],
+            "1.5": [
+              1105920,
+              1
+            ],
+            "0.625": [
+              192000,
+              1
+            ]
+          }
+        },
+        {
+          "case": "rectanglesonly",
+          "version": "unified",
+          "mode": "stable",
+          "samples": 36,
+          "frames": 2304,
+          "cpu_encode_submit_us_per_frame_median": 83.395,
+          "gpu_completion_wait_us_per_frame_median": 146.652,
+          "bytes_passes_by_viewport_multiplier": {
+            "1": [
+              259260,
+              1
+            ]
+          }
+        },
+        {
+          "case": "rectanglesonly",
+          "version": "unified",
+          "mode": "resize",
+          "samples": 36,
+          "frames": 2304,
+          "cpu_encode_submit_us_per_frame_median": 99.99,
+          "gpu_completion_wait_us_per_frame_median": 150.228,
+          "bytes_passes_by_viewport_multiplier": {
+            "1": [
+              259260,
+              1
+            ],
+            "1.5": [
+              259260,
+              1
+            ],
+            "0.625": [
+              146060,
+              1
+            ]
+          }
+        }
+      ],
+      "fixture_sha256": {
+        "main.rs": "304ef30b5e82f72828f79ac8b5486ce9cdf05b0b9a87b015e34e8a7f5eef3583",
+        "scenes.rs": "097417d96fa835b590968144eb00558145665ee744c85453047e5de70893da9f"
+      },
+      "binary_sha256": {
+        "baseline": "6098d49145db8f99b2f256bd7a009358a3e547a5f1b823e3058af9fe542b0187",
+        "unified": "5f5e8fde5beaf28b968521d9e1bece1f4df22c18926710ade93fb330e5c817c7"
+      }
+    },
+    "profile_raw_run_samples": [
+      {
+        "case": "distant",
+        "version": "baseline",
+        "mode": "stable",
+        "run": 0,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          222.621625,
+          208.070921875,
+          224.855515625,
+          207.728734375,
+          238.86878124999998,
+          207.31857812500002,
+          227.705296875,
+          205.044375,
+          205.11585937499999,
+          218.507609375,
+          239.88804687500001,
+          222.287015625
+        ],
+        "completion_wait_us_per_frame": [
+          467.504828125,
+          451.821015625,
+          488.76351562499997,
+          471.428421875,
+          489.330296875,
+          453.213609375,
+          477.057140625,
+          454.564125,
+          454.390296875,
+          485.82475000000005,
+          496.419671875,
+          477.28528125
+        ]
+      },
+      {
+        "case": "distant",
+        "version": "baseline",
+        "mode": "resize",
+        "run": 0,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          230.63429687500002,
+          229.27859375,
+          223.95707812499998,
+          240.30645312500002,
+          229.2304375,
+          237.90621875000002,
+          227.067828125,
+          242.315703125,
+          223.33825,
+          219.930625,
+          227.877953125,
+          223.345421875
+        ],
+        "completion_wait_us_per_frame": [
+          498.8324375,
+          518.762328125,
+          492.955875,
+          508.348984375,
+          509.01718750000003,
+          483.747375,
+          497.424328125,
+          501.51428124999995,
+          493.15048437499996,
+          510.49620312499997,
+          490.5735625,
+          491.574265625
+        ]
+      },
+      {
+        "case": "distant",
+        "version": "unified",
+        "mode": "stable",
+        "run": 0,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          351.993328125,
+          338.231484375,
+          324.42923437499996,
+          325.52993749999996,
+          319.372234375,
+          313.20862500000004,
+          313.436984375,
+          314.940578125,
+          326.8608125,
+          358.417640625,
+          339.10246875,
+          336.35140624999997
+        ],
+        "completion_wait_us_per_frame": [
+          835.6080625,
+          838.003328125,
+          837.04684375,
+          837.267828125,
+          849.235765625,
+          843.9393281250001,
+          838.30528125,
+          836.852921875,
+          836.641359375,
+          837.658734375,
+          836.631484375,
+          845.29003125
+        ]
+      },
+      {
+        "case": "distant",
+        "version": "unified",
+        "mode": "resize",
+        "run": 0,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          284.57965624999997,
+          297.280578125,
+          302.2308125,
+          310.58559375,
+          310.89796874999996,
+          314.629703125,
+          308.7773125,
+          287.863828125,
+          300.007,
+          285.14271875000003,
+          301.94384375,
+          313.11956250000003
+        ],
+        "completion_wait_us_per_frame": [
+          702.4635625,
+          712.728171875,
+          706.139234375,
+          705.4753906249999,
+          701.3984062500001,
+          706.231953125,
+          716.15784375,
+          715.958234375,
+          705.258109375,
+          701.8447343749999,
+          705.444609375,
+          727.54421875
+        ]
+      },
+      {
+        "case": "distant",
+        "version": "baseline",
+        "mode": "stable",
+        "run": 1,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          214.241625,
+          230.458828125,
+          217.224015625,
+          217.46509375,
+          261.35315625,
+          220.22576562499998,
+          221.77815625,
+          242.37856250000002,
+          221.665890625,
+          213.000265625,
+          208.15587499999998,
+          224.178859375
+        ],
+        "completion_wait_us_per_frame": [
+          455.396765625,
+          454.106609375,
+          460.9421875,
+          463.923515625,
+          473.72728125000003,
+          454.51503125,
+          465.197234375,
+          476.391828125,
+          452.74690625000005,
+          467.77573437499996,
+          448.0643125,
+          491.946640625
+        ]
+      },
+      {
+        "case": "distant",
+        "version": "baseline",
+        "mode": "resize",
+        "run": 1,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          241.01334375,
+          222.177109375,
+          284.50825000000003,
+          239.68895312499998,
+          279.735765625,
+          232.737328125,
+          243.5154375,
+          242.73165625000001,
+          271.61453125,
+          248.383359375,
+          227.98959374999998,
+          249.9203125
+        ],
+        "completion_wait_us_per_frame": [
+          518.326625,
+          510.76796874999997,
+          534.4511875,
+          531.04878125,
+          538.109140625,
+          510.33967187499996,
+          509.5288125,
+          518.209625,
+          534.6535781250001,
+          521.808953125,
+          546.6795156249999,
+          533.248390625
+        ]
+      },
+      {
+        "case": "distant",
+        "version": "unified",
+        "mode": "stable",
+        "run": 1,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          333.802578125,
+          345.96475,
+          346.66004687500003,
+          338.37412500000005,
+          317.37112499999995,
+          322.35015625,
+          363.998828125,
+          343.29749999999996,
+          317.595703125,
+          342.977078125,
+          349.365828125,
+          320.406796875
+        ],
+        "completion_wait_us_per_frame": [
+          832.78609375,
+          835.9482968750001,
+          846.6667343749999,
+          830.6646406250001,
+          833.10328125,
+          834.9128906249999,
+          836.2758125,
+          839.568734375,
+          839.74496875,
+          841.7678906250001,
+          836.9114374999999,
+          833.7463750000001
+        ]
+      },
+      {
+        "case": "distant",
+        "version": "unified",
+        "mode": "resize",
+        "run": 1,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          315.2280625,
+          298.9398125,
+          315.2485625,
+          305.543859375,
+          330.71009375,
+          323.536,
+          303.5234375,
+          326.413640625,
+          310.62834375,
+          302.89959374999995,
+          304.53139062500003,
+          323.63821874999996
+        ],
+        "completion_wait_us_per_frame": [
+          715.0354062499999,
+          714.017484375,
+          713.0292499999999,
+          702.830375,
+          710.740546875,
+          722.557171875,
+          709.461390625,
+          712.23146875,
+          705.501734375,
+          701.304359375,
+          707.4160625,
+          705.988421875
+        ]
+      },
+      {
+        "case": "distant",
+        "version": "baseline",
+        "mode": "stable",
+        "run": 2,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          218.1745625,
+          244.812921875,
+          218.397609375,
+          243.937359375,
+          248.07609375,
+          251.093828125,
+          242.92509374999997,
+          228.02615625,
+          247.63875,
+          225.968359375,
+          205.71006250000002,
+          243.71224999999998
+        ],
+        "completion_wait_us_per_frame": [
+          485.319171875,
+          473.794609375,
+          453.82425,
+          498.90915624999997,
+          493.722703125,
+          514.5640625,
+          496.862453125,
+          492.199765625,
+          510.346734375,
+          466.64396875,
+          447.033953125,
+          506.550578125
+        ]
+      },
+      {
+        "case": "distant",
+        "version": "baseline",
+        "mode": "resize",
+        "run": 2,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          271.912859375,
+          221.05012499999998,
+          243.5269375,
+          235.01903125,
+          227.0900625,
+          237.875234375,
+          236.2594375,
+          227.222,
+          254.553890625,
+          248.839859375,
+          272.33179687499995,
+          233.837640625
+        ],
+        "completion_wait_us_per_frame": [
+          525.157375,
+          512.103125,
+          527.488921875,
+          517.588140625,
+          522.1026093749999,
+          518.9098125,
+          497.56034375,
+          528.224484375,
+          522.6889687500001,
+          514.9453125,
+          503.7575625,
+          507.966671875
+        ]
+      },
+      {
+        "case": "distant",
+        "version": "unified",
+        "mode": "stable",
+        "run": 2,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          356.864671875,
+          376.6088125,
+          353.196484375,
+          390.19084375,
+          366.486,
+          338.815234375,
+          336.748453125,
+          316.499453125,
+          354.534921875,
+          350.709421875,
+          346.492265625,
+          362.96650000000005
+        ],
+        "completion_wait_us_per_frame": [
+          831.7017500000001,
+          836.8525312500001,
+          855.957984375,
+          834.00340625,
+          828.549984375,
+          829.0614843750001,
+          834.144125,
+          838.7537187500001,
+          835.92875,
+          843.277578125,
+          835.109328125,
+          834.0419218750001
+        ]
+      },
+      {
+        "case": "distant",
+        "version": "unified",
+        "mode": "resize",
+        "run": 2,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          296.083390625,
+          303.18564062499996,
+          299.302625,
+          304.418890625,
+          305.19356250000004,
+          339.884359375,
+          284.58704687500006,
+          301.280765625,
+          317.173015625,
+          308.78153125,
+          295.892390625,
+          301.0515625
+        ],
+        "completion_wait_us_per_frame": [
+          704.033828125,
+          706.2368749999999,
+          704.3399218750001,
+          697.4185625,
+          705.22146875,
+          721.28465625,
+          702.935015625,
+          703.274828125,
+          703.452421875,
+          701.0117968750001,
+          700.048578125,
+          707.97896875
+        ]
+      },
+      {
+        "case": "fullscreen",
+        "version": "baseline",
+        "mode": "stable",
+        "run": 0,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          153.33060937500002,
+          143.92350000000002,
+          145.982890625,
+          136.275390625,
+          136.57139062500002,
+          164.56353125,
+          146.94468750000001,
+          137.078546875,
+          152.17284375,
+          141.61393750000002,
+          158.401953125,
+          145.98746874999998
+        ],
+        "completion_wait_us_per_frame": [
+          339.589859375,
+          342.546609375,
+          332.506953125,
+          316.50084375,
+          317.621953125,
+          339.42484375,
+          323.34246875,
+          316.8486875,
+          334.214578125,
+          329.45632812499997,
+          331.50456249999996,
+          316.00045312500004
+        ]
+      },
+      {
+        "case": "fullscreen",
+        "version": "baseline",
+        "mode": "resize",
+        "run": 0,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          169.90225,
+          162.4355625,
+          185.040078125,
+          247.556296875,
+          209.155140625,
+          176.317671875,
+          160.807453125,
+          181.77046875,
+          154.41393749999997,
+          173.17557812500002,
+          173.329265625,
+          182.262046875
+        ],
+        "completion_wait_us_per_frame": [
+          352.755484375,
+          340.241578125,
+          380.41628125,
+          439.926046875,
+          388.6158125,
+          367.600578125,
+          340.500078125,
+          360.110296875,
+          341.994546875,
+          350.04228125,
+          354.26735937499996,
+          343.23589062499997
+        ]
+      },
+      {
+        "case": "fullscreen",
+        "version": "unified",
+        "mode": "stable",
+        "run": 0,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          141.400375,
+          152.99034375,
+          143.4885625,
+          150.962484375,
+          136.46721875,
+          158.27878125,
+          136.004703125,
+          154.44564062499998,
+          151.046375,
+          140.6204375,
+          132.307515625,
+          154.45940624999997
+        ],
+        "completion_wait_us_per_frame": [
+          319.17676562500003,
+          329.0008125,
+          321.966484375,
+          333.98267187500005,
+          320.060453125,
+          335.83465624999997,
+          313.4229375,
+          336.19520312500003,
+          346.6425625,
+          324.221171875,
+          317.066921875,
+          334.914609375
+        ]
+      },
+      {
+        "case": "fullscreen",
+        "version": "unified",
+        "mode": "resize",
+        "run": 0,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          159.802359375,
+          176.61840625,
+          162.214953125,
+          148.98896875,
+          161.6495,
+          165.450671875,
+          150.98428124999998,
+          143.9705625,
+          153.96118750000002,
+          167.275796875,
+          151.804546875,
+          151.04753125
+        ],
+        "completion_wait_us_per_frame": [
+          336.52020312499997,
+          342.685375,
+          327.407,
+          315.29701562500003,
+          323.47926562500004,
+          327.92817187500003,
+          319.83675,
+          312.45154687499996,
+          326.739234375,
+          335.507078125,
+          321.494640625,
+          318.672546875
+        ]
+      },
+      {
+        "case": "fullscreen",
+        "version": "baseline",
+        "mode": "stable",
+        "run": 1,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          142.168359375,
+          145.01714062500002,
+          157.2748125,
+          133.429171875,
+          143.844421875,
+          176.36940625,
+          170.299296875,
+          141.06257812500002,
+          137.15640625,
+          142.12515625,
+          141.76,
+          136.38796875
+        ],
+        "completion_wait_us_per_frame": [
+          321.673984375,
+          328.24375,
+          334.86673437499996,
+          314.978546875,
+          326.442859375,
+          344.9886875,
+          373.76171875,
+          325.24284375,
+          320.892625,
+          322.98875,
+          324.3398125,
+          316.77240625
+        ]
+      },
+      {
+        "case": "fullscreen",
+        "version": "baseline",
+        "mode": "resize",
+        "run": 1,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          154.41134375000001,
+          165.080171875,
+          162.45932812499998,
+          161.543234375,
+          192.044328125,
+          182.147671875,
+          170.10792187500002,
+          167.241734375,
+          179.32524999999998,
+          176.70271874999997,
+          177.240421875,
+          163.787125
+        ],
+        "completion_wait_us_per_frame": [
+          331.43828125000005,
+          347.65603125,
+          346.97440624999996,
+          340.5750625,
+          355.462625,
+          358.74585937499995,
+          351.326859375,
+          344.11171875,
+          342.587625,
+          344.553,
+          351.52478125,
+          360.67067187500004
+        ]
+      },
+      {
+        "case": "fullscreen",
+        "version": "unified",
+        "mode": "stable",
+        "run": 1,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          136.978734375,
+          142.67815625,
+          158.90603124999998,
+          143.4201875,
+          154.58825000000002,
+          166.97021875000002,
+          148.96837499999998,
+          143.926359375,
+          136.92223437500002,
+          144.7578125,
+          142.941046875,
+          148.99090625
+        ],
+        "completion_wait_us_per_frame": [
+          320.1061875,
+          327.516484375,
+          335.7516875,
+          325.42853125,
+          331.143515625,
+          345.033515625,
+          327.609125,
+          327.786296875,
+          321.188140625,
+          320.789203125,
+          323.162140625,
+          328.894296875
+        ]
+      },
+      {
+        "case": "fullscreen",
+        "version": "unified",
+        "mode": "resize",
+        "run": 1,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          161.14471875,
+          175.508578125,
+          153.267765625,
+          151.931015625,
+          177.20543750000002,
+          146.859890625,
+          168.40853124999998,
+          168.53993749999998,
+          157.28390625,
+          185.990546875,
+          172.21559375,
+          174.20903125
+        ],
+        "completion_wait_us_per_frame": [
+          328.18503125,
+          339.58893750000004,
+          313.6671875,
+          315.38421875,
+          360.64909374999996,
+          316.676296875,
+          327.786171875,
+          330.70809375,
+          331.035265625,
+          340.24490625,
+          335.197453125,
+          342.36620312499997
+        ]
+      },
+      {
+        "case": "fullscreen",
+        "version": "baseline",
+        "mode": "stable",
+        "run": 2,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          147.300921875,
+          162.100546875,
+          139.542421875,
+          140.49935937499998,
+          150.96353125000002,
+          136.850359375,
+          156.50607812500002,
+          138.146859375,
+          137.564734375,
+          151.61268750000002,
+          154.354296875,
+          150.80603125
+        ],
+        "completion_wait_us_per_frame": [
+          325.06921875,
+          348.4199375,
+          318.33475,
+          319.529484375,
+          330.926203125,
+          328.863375,
+          326.724640625,
+          317.654484375,
+          321.6776875,
+          329.6018125,
+          332.219390625,
+          330.59665625
+        ]
+      },
+      {
+        "case": "fullscreen",
+        "version": "baseline",
+        "mode": "resize",
+        "run": 2,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          164.604234375,
+          163.282046875,
+          159.338421875,
+          161.04475,
+          158.190140625,
+          168.45737499999998,
+          153.170640625,
+          166.706515625,
+          156.23206249999998,
+          165.30603125000002,
+          192.4319375,
+          167.174515625
+        ],
+        "completion_wait_us_per_frame": [
+          339.02178125,
+          353.60871875,
+          344.1219375,
+          344.88717187500004,
+          345.698765625,
+          345.548171875,
+          334.934953125,
+          350.235359375,
+          337.39642187500004,
+          344.560046875,
+          357.19153125,
+          335.609921875
+        ]
+      },
+      {
+        "case": "fullscreen",
+        "version": "unified",
+        "mode": "stable",
+        "run": 2,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          176.351609375,
+          173.12240625,
+          141.2180625,
+          151.87071874999998,
+          146.599328125,
+          143.592390625,
+          158.02053125,
+          135.790859375,
+          131.043984375,
+          129.084265625,
+          143.63534375,
+          134.598796875
+        ],
+        "completion_wait_us_per_frame": [
+          352.569984375,
+          339.561609375,
+          329.52879687499995,
+          328.62535937499996,
+          343.89903125,
+          324.192875,
+          338.17173437499997,
+          318.321375,
+          316.854375,
+          312.28526562499997,
+          327.188484375,
+          317.21525
+        ]
+      },
+      {
+        "case": "fullscreen",
+        "version": "unified",
+        "mode": "resize",
+        "run": 2,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          163.61996875,
+          147.80907812499998,
+          155.50440625000002,
+          149.171484375,
+          148.933171875,
+          151.44496875,
+          152.3250625,
+          148.498546875,
+          149.55425,
+          159.56378125,
+          148.388796875,
+          149.7443125
+        ],
+        "completion_wait_us_per_frame": [
+          330.49990625,
+          320.315515625,
+          321.11817187500003,
+          313.950875,
+          320.15165625000003,
+          325.271046875,
+          321.639140625,
+          316.70754687500005,
+          317.363046875,
+          345.345703125,
+          309.345640625,
+          321.2489375
+        ]
+      },
+      {
+        "case": "mixed",
+        "version": "baseline",
+        "mode": "stable",
+        "run": 0,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          526.6094375,
+          633.6786718750001,
+          539.5785,
+          531.9582656250001,
+          473.65995312499996,
+          488.96973437500003,
+          500.455390625,
+          453.510140625,
+          526.080203125,
+          1079.2649375,
+          778.35984375,
+          561.051140625
+        ],
+        "completion_wait_us_per_frame": [
+          1112.0147656249999,
+          1127.06178125,
+          1140.4934531249999,
+          1132.3001875,
+          1127.58421875,
+          1125.6307656249999,
+          1131.6006562500002,
+          1138.565453125,
+          1132.7385625,
+          1309.9980625,
+          1209.224515625,
+          1145.361671875
+        ]
+      },
+      {
+        "case": "mixed",
+        "version": "baseline",
+        "mode": "resize",
+        "run": 0,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          488.82159375000003,
+          501.17673437499997,
+          594.464609375,
+          546.61146875,
+          525.0956562499999,
+          651.18725,
+          643.931671875,
+          653.51753125,
+          630.537609375,
+          640.270453125,
+          475.118171875,
+          513.763125
+        ],
+        "completion_wait_us_per_frame": [
+          1117.8926250000002,
+          1145.2520937499999,
+          1143.96384375,
+          1141.1672187499998,
+          1141.97825,
+          1125.035359375,
+          1151.4441875,
+          1127.200765625,
+          1130.9500625,
+          1143.4762812499998,
+          1113.765140625,
+          1134.19596875
+        ]
+      },
+      {
+        "case": "mixed",
+        "version": "unified",
+        "mode": "stable",
+        "run": 0,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          536.20834375,
+          450.51124999999996,
+          437.85567187500004,
+          438.246078125,
+          448.77054687500004,
+          435.307484375,
+          435.38149999999996,
+          453.1116875,
+          449.26445312500005,
+          434.2518125,
+          461.36421875,
+          471.397625
+        ],
+        "completion_wait_us_per_frame": [
+          1087.77115625,
+          1081.677984375,
+          1093.7617343749998,
+          1094.035078125,
+          1082.37775,
+          1078.82815625,
+          1073.3056875,
+          1087.6297656250001,
+          1082.8121718749999,
+          1082.991265625,
+          1084.253734375,
+          1080.8519218749998
+        ]
+      },
+      {
+        "case": "mixed",
+        "version": "unified",
+        "mode": "resize",
+        "run": 0,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          503.359390625,
+          566.740484375,
+          562.211703125,
+          493.644125,
+          498.124,
+          502.56540625,
+          470.416609375,
+          519.737390625,
+          1060.515640625,
+          813.5209062499999,
+          554.40075,
+          525.71625
+        ],
+        "completion_wait_us_per_frame": [
+          1082.9249062499998,
+          1116.920859375,
+          1114.289109375,
+          1088.7536406250001,
+          1090.482359375,
+          1084.88346875,
+          1072.663546875,
+          1092.666359375,
+          1252.6924531250002,
+          1177.608015625,
+          1114.143875,
+          1091.5247031249999
+        ]
+      },
+      {
+        "case": "mixed",
+        "version": "baseline",
+        "mode": "stable",
+        "run": 1,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          475.623078125,
+          464.40306250000003,
+          502.302109375,
+          528.18265625,
+          525.9294531249999,
+          483.43623437499997,
+          471.981078125,
+          458.5025625,
+          467.65882812499996,
+          987.1172499999999,
+          852.9359374999999,
+          558.29209375
+        ],
+        "completion_wait_us_per_frame": [
+          1108.40096875,
+          1110.275984375,
+          1136.050078125,
+          1141.855703125,
+          1131.976984375,
+          1136.0465625,
+          1135.601859375,
+          1122.3470468750002,
+          1128.276875,
+          1274.437765625,
+          1228.10015625,
+          1157.11425
+        ]
+      },
+      {
+        "case": "mixed",
+        "version": "baseline",
+        "mode": "resize",
+        "run": 1,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          527.13965625,
+          489.61171874999997,
+          570.545828125,
+          657.986328125,
+          496.193015625,
+          487.99285937499997,
+          480.91790625000004,
+          481.906546875,
+          508.175546875,
+          451.317890625,
+          472.257296875,
+          461.37651562499997
+        ],
+        "completion_wait_us_per_frame": [
+          1140.205765625,
+          1142.270140625,
+          1151.825703125,
+          1169.922296875,
+          1109.6887499999998,
+          1125.371890625,
+          1125.28715625,
+          1119.3266875000002,
+          1129.685796875,
+          1119.341203125,
+          1115.120734375,
+          1121.740234375
+        ]
+      },
+      {
+        "case": "mixed",
+        "version": "unified",
+        "mode": "stable",
+        "run": 1,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          497.806453125,
+          481.76162500000004,
+          574.7280312500001,
+          1062.19590625,
+          904.188296875,
+          601.8091875,
+          504.904265625,
+          509.49115624999996,
+          521.7961250000001,
+          557.7857031249999,
+          622.33584375,
+          430.046265625
+        ],
+        "completion_wait_us_per_frame": [
+          1104.8859218750001,
+          1083.86503125,
+          1127.55109375,
+          1272.908859375,
+          1217.15365625,
+          1129.40953125,
+          1088.0761875,
+          1092.2563125,
+          1106.283609375,
+          1118.8651875,
+          1128.132484375,
+          1072.70425
+        ]
+      },
+      {
+        "case": "mixed",
+        "version": "unified",
+        "mode": "resize",
+        "run": 1,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          453.25407812500004,
+          452.980875,
+          459.025625,
+          453.184015625,
+          462.28065625,
+          461.352390625,
+          483.07271875000004,
+          489.2965625,
+          535.5514218750001,
+          450.61284374999997,
+          439.65101562499996,
+          502.44275000000005
+        ],
+        "completion_wait_us_per_frame": [
+          1068.5016406250002,
+          1090.9143125,
+          1074.747078125,
+          1085.806828125,
+          1094.927890625,
+          1080.85796875,
+          1106.88534375,
+          1083.1440937500001,
+          1083.897171875,
+          1080.0814375,
+          1094.458328125,
+          1077.24065625
+        ]
+      },
+      {
+        "case": "mixed",
+        "version": "baseline",
+        "mode": "stable",
+        "run": 2,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          467.11529687499996,
+          441.330703125,
+          423.29368750000003,
+          436.74015625,
+          446.0133125,
+          540.689078125,
+          519.9474375000001,
+          486.334859375,
+          512.34703125,
+          507.19725000000005,
+          468.429375,
+          523.8739375
+        ],
+        "completion_wait_us_per_frame": [
+          1120.86221875,
+          1102.089828125,
+          1102.20278125,
+          1108.325375,
+          1124.01375,
+          1139.3539374999998,
+          1145.879921875,
+          1130.734125,
+          1138.478078125,
+          1147.7620625,
+          1116.4288437500002,
+          1137.41425
+        ]
+      },
+      {
+        "case": "mixed",
+        "version": "baseline",
+        "mode": "resize",
+        "run": 2,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          946.08690625,
+          947.2385625000001,
+          600.415953125,
+          540.5328125,
+          525.228171875,
+          544.797515625,
+          583.5019062499999,
+          501.90756250000004,
+          489.88890625,
+          484.10625,
+          466.05825,
+          502.10889062499996
+        ],
+        "completion_wait_us_per_frame": [
+          1254.903296875,
+          1257.488390625,
+          1158.07703125,
+          1128.5434062499999,
+          1133.064734375,
+          1152.819015625,
+          1143.741765625,
+          1135.298,
+          1113.172015625,
+          1125.350375,
+          1121.3584375,
+          1124.075109375
+        ]
+      },
+      {
+        "case": "mixed",
+        "version": "unified",
+        "mode": "stable",
+        "run": 2,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          443.047171875,
+          446.47109374999997,
+          515.070328125,
+          499.453046875,
+          528.397984375,
+          464.778421875,
+          477.78440625,
+          510.674609375,
+          439.566125,
+          480.1760625,
+          882.676171875,
+          909.195765625
+        ],
+        "completion_wait_us_per_frame": [
+          1087.104625,
+          1081.5936718750002,
+          1087.75853125,
+          1114.35340625,
+          1111.25871875,
+          1094.77053125,
+          1100.976671875,
+          1103.192140625,
+          1091.730015625,
+          1099.85553125,
+          1206.91565625,
+          1207.3782500000002
+        ]
+      },
+      {
+        "case": "mixed",
+        "version": "unified",
+        "mode": "resize",
+        "run": 2,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          523.867015625,
+          534.0613125,
+          508.20134375000004,
+          555.1233125,
+          648.1286562500001,
+          467.113078125,
+          449.19371875,
+          458.1444375,
+          441.804109375,
+          456.79839062499997,
+          474.44159375,
+          467.23159375
+        ],
+        "completion_wait_us_per_frame": [
+          1103.699734375,
+          1108.82034375,
+          1092.930015625,
+          1109.1645,
+          1136.9649375,
+          1075.799484375,
+          1087.876296875,
+          1086.335125,
+          1083.1221875,
+          1070.123796875,
+          1079.678578125,
+          1072.9593125000001
+        ]
+      },
+      {
+        "case": "pathonly",
+        "version": "baseline",
+        "mode": "stable",
+        "run": 0,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          83.0366875,
+          79.30624999999999,
+          84.888390625,
+          99.18357812500001,
+          79.42346875,
+          71.58639062499999,
+          72.124703125,
+          74.921609375,
+          73.71085937500001,
+          74.687828125,
+          77.53351562499999,
+          81.67120312499999
+        ],
+        "completion_wait_us_per_frame": [
+          146.189453125,
+          145.67612499999998,
+          144.7456875,
+          150.97401562500002,
+          142.27075,
+          141.67509375,
+          141.658890625,
+          144.81390625,
+          144.48825000000002,
+          140.94671875,
+          140.262171875,
+          145.211203125
+        ]
+      },
+      {
+        "case": "pathonly",
+        "version": "baseline",
+        "mode": "resize",
+        "run": 0,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          91.074109375,
+          83.567640625,
+          99.644390625,
+          99.50121874999999,
+          102.059859375,
+          103.893296875,
+          94.18493749999999,
+          106.30290624999999,
+          85.73165625,
+          82.568109375,
+          93.97171875000001,
+          89.48578124999999
+        ],
+        "completion_wait_us_per_frame": [
+          150.98990625,
+          145.7235,
+          155.592765625,
+          150.138796875,
+          151.101390625,
+          156.856265625,
+          145.7635,
+          155.8086875,
+          151.281984375,
+          145.814796875,
+          149.49984375,
+          143.55559374999999
+        ]
+      },
+      {
+        "case": "pathonly",
+        "version": "unified",
+        "mode": "stable",
+        "run": 0,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          74.835328125,
+          75.512234375,
+          87.87265625,
+          71.287171875,
+          77.300640625,
+          80.5035625,
+          76.51742187500001,
+          78.912828125,
+          70.506421875,
+          69.967546875,
+          77.5556875,
+          68.339671875
+        ],
+        "completion_wait_us_per_frame": [
+          138.47534375,
+          139.35737500000002,
+          147.1575625,
+          140.423078125,
+          141.893515625,
+          139.041515625,
+          138.9711875,
+          140.752828125,
+          140.89207812499998,
+          140.143203125,
+          140.3964375,
+          140.57206250000002
+        ]
+      },
+      {
+        "case": "pathonly",
+        "version": "unified",
+        "mode": "resize",
+        "run": 0,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          84.345515625,
+          80.94623437499999,
+          96.25965625,
+          87.09209375,
+          94.95049999999999,
+          97.57418750000001,
+          89.6005625,
+          80.992359375,
+          81.79684375,
+          97.255046875,
+          87.73549999999999,
+          86.78084375
+        ],
+        "completion_wait_us_per_frame": [
+          144.700578125,
+          142.0890625,
+          149.8054375,
+          146.40484375000003,
+          147.313046875,
+          146.75442187500002,
+          146.23271875,
+          142.152625,
+          142.23271874999998,
+          147.926984375,
+          142.031671875,
+          141.921046875
+        ]
+      },
+      {
+        "case": "pathonly",
+        "version": "baseline",
+        "mode": "stable",
+        "run": 1,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          69.40599999999999,
+          69.91907812500001,
+          89.23859374999999,
+          100.53140625,
+          72.08378125,
+          75.707796875,
+          76.06603125,
+          91.1279375,
+          98.18893750000001,
+          79.79953125,
+          74.910859375,
+          68.87120312500001
+        ],
+        "completion_wait_us_per_frame": [
+          142.352265625,
+          141.803046875,
+          146.32503125,
+          152.68670312499998,
+          146.77528125,
+          143.43200000000002,
+          144.066125,
+          143.68001562499998,
+          145.97434375,
+          143.217765625,
+          142.3750625,
+          141.263640625
+        ]
+      },
+      {
+        "case": "pathonly",
+        "version": "baseline",
+        "mode": "resize",
+        "run": 1,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          92.217015625,
+          93.68715625,
+          91.3581875,
+          87.38,
+          87.97421875,
+          87.347015625,
+          103.6478125,
+          104.360859375,
+          92.97939062500001,
+          83.37831249999999,
+          85.148109375,
+          97.93578125
+        ],
+        "completion_wait_us_per_frame": [
+          151.212359375,
+          173.197125,
+          149.4213125,
+          144.010828125,
+          144.52915625,
+          143.98234374999998,
+          154.314703125,
+          156.75135937500002,
+          146.502109375,
+          146.58534375000002,
+          144.10228125,
+          152.76328125
+        ]
+      },
+      {
+        "case": "pathonly",
+        "version": "unified",
+        "mode": "stable",
+        "run": 1,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          79.7420625,
+          79.2204375,
+          82.1083125,
+          85.10340625,
+          74.8318125,
+          77.553234375,
+          80.83203125,
+          74.96853125,
+          75.035625,
+          85.469609375,
+          81.1070625,
+          76.31976562499999
+        ],
+        "completion_wait_us_per_frame": [
+          142.093,
+          140.66748437500002,
+          141.86014062499999,
+          143.399578125,
+          138.84859375,
+          160.650984375,
+          140.83678125,
+          141.421140625,
+          140.110265625,
+          141.581140625,
+          143.08637499999998,
+          141.08225
+        ]
+      },
+      {
+        "case": "pathonly",
+        "version": "unified",
+        "mode": "resize",
+        "run": 1,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          81.04043750000001,
+          100.16809375000001,
+          83.42621875,
+          94.2745625,
+          83.83839062499999,
+          82.577515625,
+          84.786234375,
+          96.96753125000001,
+          92.66325,
+          95.9069375,
+          85.012,
+          97.46734375
+        ],
+        "completion_wait_us_per_frame": [
+          141.407625,
+          147.456640625,
+          141.265984375,
+          141.6475,
+          142.244234375,
+          142.68396875,
+          140.25853125,
+          147.24604687500002,
+          147.065984375,
+          148.338,
+          142.16475,
+          148.28943750000002
+        ]
+      },
+      {
+        "case": "pathonly",
+        "version": "baseline",
+        "mode": "stable",
+        "run": 2,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          97.075828125,
+          76.1025625,
+          82.083796875,
+          73.701890625,
+          79.66190625,
+          95.670515625,
+          97.491203125,
+          77.826015625,
+          78.1379375,
+          73.95865625,
+          75.391515625,
+          80.376171875
+        ],
+        "completion_wait_us_per_frame": [
+          155.67465625,
+          143.547125,
+          146.52393750000002,
+          141.919921875,
+          143.775453125,
+          154.39014062500002,
+          149.541484375,
+          147.35171875,
+          142.82625,
+          144.48406250000002,
+          143.2121875,
+          143.326453125
+        ]
+      },
+      {
+        "case": "pathonly",
+        "version": "baseline",
+        "mode": "resize",
+        "run": 2,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          102.961125,
+          82.347984375,
+          88.78328125,
+          86.780796875,
+          115.04570312499999,
+          96.21421875,
+          101.409046875,
+          93.917046875,
+          98.028390625,
+          112.766953125,
+          107.012046875,
+          93.748578125
+        ],
+        "completion_wait_us_per_frame": [
+          152.34834375,
+          146.99075,
+          149.354203125,
+          144.6219375,
+          157.78470312500002,
+          148.177625,
+          152.9390625,
+          167.84275000000002,
+          152.485015625,
+          162.554671875,
+          158.48585937500002,
+          150.2181875
+        ]
+      },
+      {
+        "case": "pathonly",
+        "version": "unified",
+        "mode": "stable",
+        "run": 2,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          77.21746875000001,
+          76.89520312500001,
+          70.7681875,
+          86.569734375,
+          78.0761875,
+          80.09018750000001,
+          84.41121875,
+          129.17554687499998,
+          84.71048437500001,
+          76.157546875,
+          76.691953125,
+          89.876171875
+        ],
+        "completion_wait_us_per_frame": [
+          143.456296875,
+          142.77373437499998,
+          141.688078125,
+          148.166171875,
+          142.34340625,
+          140.993578125,
+          150.08190625,
+          152.621515625,
+          145.261359375,
+          140.611703125,
+          139.68873437500002,
+          151.92334375
+        ]
+      },
+      {
+        "case": "pathonly",
+        "version": "unified",
+        "mode": "resize",
+        "run": 2,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          98.169671875,
+          102.074640625,
+          90.953890625,
+          91.11815625,
+          90.6600625,
+          100.42165625,
+          89.54676562499999,
+          90.217640625,
+          95.95845312499999,
+          92.19540625,
+          92.091453125,
+          87.987328125
+        ],
+        "completion_wait_us_per_frame": [
+          154.826328125,
+          151.563421875,
+          146.80085937500002,
+          144.1271875,
+          144.08890625,
+          146.958671875,
+          146.2905625,
+          144.87349999999998,
+          150.281875,
+          148.411921875,
+          145.958421875,
+          146.876265625
+        ]
+      },
+      {
+        "case": "rectanglesonly",
+        "version": "baseline",
+        "mode": "stable",
+        "run": 0,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          73.25859375,
+          74.490734375,
+          88.979671875,
+          71.330078125,
+          78.582390625,
+          75.508375,
+          79.27275,
+          70.16378125,
+          98.4829375,
+          70.627671875,
+          83.155328125,
+          91.108234375
+        ],
+        "completion_wait_us_per_frame": [
+          144.8666875,
+          144.822984375,
+          149.36693749999998,
+          146.071453125,
+          151.77325,
+          147.556453125,
+          147.368,
+          144.382640625,
+          168.2460625,
+          145.452171875,
+          147.011671875,
+          151.13674999999998
+        ]
+      },
+      {
+        "case": "rectanglesonly",
+        "version": "baseline",
+        "mode": "resize",
+        "run": 0,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          84.35215625000001,
+          127.08749999999999,
+          126.04399999999998,
+          129.61862499999998,
+          93.1350625,
+          91.346265625,
+          82.37865625,
+          103.703171875,
+          110.829609375,
+          90.701859375,
+          109.320625,
+          84.476921875
+        ],
+        "completion_wait_us_per_frame": [
+          148.0829375,
+          182.645359375,
+          153.6735625,
+          162.97321875,
+          157.7289375,
+          154.86093749999998,
+          149.6589375,
+          151.47253124999997,
+          156.01418750000002,
+          152.871,
+          155.65584375,
+          147.280171875
+        ]
+      },
+      {
+        "case": "rectanglesonly",
+        "version": "unified",
+        "mode": "stable",
+        "run": 0,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          93.5978125,
+          90.854015625,
+          70.604296875,
+          69.963921875,
+          77.869359375,
+          97.488421875,
+          108.38928125,
+          104.337046875,
+          87.2241875,
+          73.625640625,
+          79.68775000000001,
+          81.987953125
+        ],
+        "completion_wait_us_per_frame": [
+          146.80278124999998,
+          147.53175,
+          144.898546875,
+          145.150234375,
+          146.39846875,
+          150.4075625,
+          150.50817187500002,
+          150.32931250000001,
+          145.169546875,
+          144.055421875,
+          154.89575,
+          144.36642187500001
+        ]
+      },
+      {
+        "case": "rectanglesonly",
+        "version": "unified",
+        "mode": "resize",
+        "run": 0,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          93.709953125,
+          109.79562499999999,
+          80.902625,
+          100.24996875000001,
+          99.695171875,
+          92.86156249999999,
+          98.3769375,
+          95.19375,
+          105.2400625,
+          109.34487499999999,
+          94.87098437499999,
+          100.04668749999999
+        ],
+        "completion_wait_us_per_frame": [
+          148.495796875,
+          156.06854687499998,
+          147.531484375,
+          146.4389375,
+          163.22845312500002,
+          153.819234375,
+          164.54346875000002,
+          154.27184375,
+          147.90465625,
+          147.98815625,
+          146.672953125,
+          149.842234375
+        ]
+      },
+      {
+        "case": "rectanglesonly",
+        "version": "baseline",
+        "mode": "stable",
+        "run": 1,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          68.8003125,
+          71.13,
+          77.28998437499999,
+          76.162875,
+          74.88062500000001,
+          78.968546875,
+          81.462265625,
+          79.245140625,
+          74.532796875,
+          78.253328125,
+          72.75051562499999,
+          92.350515625
+        ],
+        "completion_wait_us_per_frame": [
+          146.14353125000002,
+          149.090890625,
+          145.385171875,
+          146.697828125,
+          148.59721875,
+          150.78343750000002,
+          147.15653125,
+          147.00574999999998,
+          144.6904375,
+          145.724046875,
+          145.948921875,
+          146.480953125
+        ]
+      },
+      {
+        "case": "rectanglesonly",
+        "version": "baseline",
+        "mode": "resize",
+        "run": 1,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          97.793203125,
+          120.35203125000001,
+          110.97053125000001,
+          84.79664062500001,
+          97.445671875,
+          117.17148437499999,
+          96.34762500000001,
+          90.341234375,
+          94.188265625,
+          81.32896874999999,
+          120.25771875000001,
+          94.70215625
+        ],
+        "completion_wait_us_per_frame": [
+          152.786828125,
+          160.644640625,
+          163.51567187499998,
+          150.208328125,
+          153.004046875,
+          156.93043749999998,
+          154.25004687499998,
+          149.059671875,
+          152.674671875,
+          148.552171875,
+          164.187359375,
+          155.636
+        ]
+      },
+      {
+        "case": "rectanglesonly",
+        "version": "unified",
+        "mode": "stable",
+        "run": 1,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          88.205453125,
+          75.43154687500001,
+          72.36029687499999,
+          69.95021875,
+          84.70021875,
+          100.739328125,
+          86.134078125,
+          73.201296875,
+          110.070359375,
+          103.56382812499999,
+          93.432953125,
+          81.260375
+        ],
+        "completion_wait_us_per_frame": [
+          147.239203125,
+          144.898109375,
+          144.82662499999998,
+          143.99209374999998,
+          152.034703125,
+          146.501484375,
+          149.237578125,
+          145.0505,
+          150.54853125,
+          151.095015625,
+          147.865390625,
+          145.11396875
+        ]
+      },
+      {
+        "case": "rectanglesonly",
+        "version": "unified",
+        "mode": "resize",
+        "run": 1,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          90.00359375,
+          82.54942187500001,
+          102.21882812499999,
+          134.63909375,
+          104.862125,
+          81.103140625,
+          117.04003125,
+          82.15253125,
+          99.933859375,
+          86.8089375,
+          106.646984375,
+          91.07715625
+        ],
+        "completion_wait_us_per_frame": [
+          146.62003125,
+          145.162203125,
+          151.80925000000002,
+          161.0413125,
+          153.38609375000001,
+          145.868328125,
+          156.948203125,
+          144.998296875,
+          150.18470312500003,
+          145.01984374999998,
+          157.486171875,
+          148.89860937499998
+        ]
+      },
+      {
+        "case": "rectanglesonly",
+        "version": "baseline",
+        "mode": "stable",
+        "run": 2,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          78.79884375,
+          88.0623125,
+          76.36265625,
+          72.951640625,
+          69.21625,
+          69.564078125,
+          80.46439062500001,
+          88.1780625,
+          89.58140625,
+          77.07978125000001,
+          90.26596875,
+          90.813578125
+        ],
+        "completion_wait_us_per_frame": [
+          153.534109375,
+          153.669046875,
+          168.082609375,
+          146.06531249999998,
+          144.977140625,
+          147.128765625,
+          151.46326562500002,
+          149.680953125,
+          147.628609375,
+          145.46275,
+          155.37,
+          152.66607812499998
+        ]
+      },
+      {
+        "case": "rectanglesonly",
+        "version": "baseline",
+        "mode": "resize",
+        "run": 2,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          94.787375,
+          105.924609375,
+          123.42629687499999,
+          90.678,
+          89.500921875,
+          91.39193750000001,
+          91.778140625,
+          119.92834375,
+          126.8485,
+          92.629640625,
+          91.61846875,
+          106.73334375
+        ],
+        "completion_wait_us_per_frame": [
+          153.028265625,
+          150.68124999999998,
+          154.674703125,
+          148.53287500000002,
+          152.735046875,
+          152.4990625,
+          155.50692187500002,
+          158.38598437500002,
+          155.562890625,
+          151.873421875,
+          153.13401562500002,
+          151.877125
+        ]
+      },
+      {
+        "case": "rectanglesonly",
+        "version": "unified",
+        "mode": "stable",
+        "run": 2,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          73.73475,
+          91.5161875,
+          73.4165625,
+          83.083015625,
+          73.20628125,
+          78.69971874999999,
+          71.07165625,
+          83.70675,
+          91.908359375,
+          89.22095312500001,
+          73.859375,
+          88.52725
+        ],
+        "completion_wait_us_per_frame": [
+          143.34074999999999,
+          154.997171875,
+          146.36365625,
+          148.329265625,
+          144.45259375,
+          143.934484375,
+          145.30054687499998,
+          147.32873437499998,
+          151.01304687500001,
+          170.27728125,
+          144.64934374999999,
+          148.948234375
+        ]
+      },
+      {
+        "case": "rectanglesonly",
+        "version": "unified",
+        "mode": "resize",
+        "run": 2,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          131.472265625,
+          104.277,
+          91.366875,
+          89.15042187499999,
+          107.1085625,
+          94.820984375,
+          133.24532812500001,
+          104.280625,
+          85.13378125,
+          124.73765625,
+          124.959609375,
+          116.354578125
+        ],
+        "completion_wait_us_per_frame": [
+          161.06471875,
+          150.786734375,
+          148.44615625,
+          150.272015625,
+          154.135203125,
+          149.341609375,
+          157.02782812499998,
+          157.02798437500002,
+          145.96349999999998,
+          156.44178125,
+          153.33834375,
+          149.4956875
+        ]
+      },
+      {
+        "case": "segmentsonly",
+        "version": "baseline",
+        "mode": "stable",
+        "run": 0,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          80.98546875,
+          83.10025,
+          90.96321875000001,
+          80.04971875,
+          84.199203125,
+          75.773703125,
+          90.19921875,
+          78.67440624999999,
+          74.821359375,
+          80.714140625,
+          74.59628124999999,
+          85.65634375
+        ],
+        "completion_wait_us_per_frame": [
+          139.767625,
+          138.37267187499998,
+          139.17103125,
+          139.33839062500002,
+          148.81832812500002,
+          136.498546875,
+          165.008546875,
+          136.96821875,
+          138.40571874999998,
+          138.57915625,
+          136.60934375,
+          142.8025
+        ]
+      },
+      {
+        "case": "segmentsonly",
+        "version": "baseline",
+        "mode": "resize",
+        "run": 0,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          84.18974999999999,
+          84.1833125,
+          95.80265625000001,
+          95.683609375,
+          89.25848437500001,
+          94.429875,
+          88.759015625,
+          82.36979687499999,
+          122.1075625,
+          82.12684374999999,
+          95.570140625,
+          90.897953125
+        ],
+        "completion_wait_us_per_frame": [
+          141.03359375,
+          142.59615625,
+          141.84201562500002,
+          147.31460937499997,
+          143.699953125,
+          144.935796875,
+          143.544828125,
+          139.741,
+          163.05545312499999,
+          140.05953125000002,
+          145.97579687500001,
+          142.46065625
+        ]
+      },
+      {
+        "case": "segmentsonly",
+        "version": "unified",
+        "mode": "stable",
+        "run": 0,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          86.24931249999999,
+          75.61065625,
+          84.2199375,
+          86.295359375,
+          85.986765625,
+          74.031171875,
+          77.638125,
+          73.42712499999999,
+          92.0198125,
+          73.930796875,
+          75.379109375,
+          68.67426562499999
+        ],
+        "completion_wait_us_per_frame": [
+          143.372421875,
+          135.301015625,
+          136.024140625,
+          137.07023437499998,
+          140.48184375,
+          135.429421875,
+          135.743921875,
+          134.339359375,
+          142.48765625000001,
+          135.42009375,
+          137.254578125,
+          133.599625
+        ]
+      },
+      {
+        "case": "segmentsonly",
+        "version": "unified",
+        "mode": "resize",
+        "run": 0,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          83.448,
+          112.969578125,
+          97.460640625,
+          92.930734375,
+          94.15235937499999,
+          119.28171875,
+          111.98748437500001,
+          95.52117187500001,
+          81.882328125,
+          104.45470312500001,
+          98.2834375,
+          112.845109375
+        ],
+        "completion_wait_us_per_frame": [
+          138.7441875,
+          162.268203125,
+          146.55771875000002,
+          144.85662499999998,
+          147.298234375,
+          147.43657812499998,
+          143.06020312500002,
+          144.7001875,
+          135.897765625,
+          143.85332812500002,
+          139.429734375,
+          142.066390625
+        ]
+      },
+      {
+        "case": "segmentsonly",
+        "version": "baseline",
+        "mode": "stable",
+        "run": 1,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          82.381828125,
+          85.42778125,
+          87.882984375,
+          69.852515625,
+          71.904046875,
+          90.82015625000001,
+          83.059828125,
+          82.466765625,
+          92.522390625,
+          95.30796875,
+          119.04529687499999,
+          102.657609375
+        ],
+        "completion_wait_us_per_frame": [
+          138.41059375,
+          143.96740625,
+          143.790171875,
+          136.47187499999998,
+          136.861203125,
+          141.299296875,
+          139.67690625,
+          138.76653124999999,
+          148.7508125,
+          141.212296875,
+          151.42026562499998,
+          146.374046875
+        ]
+      },
+      {
+        "case": "segmentsonly",
+        "version": "baseline",
+        "mode": "resize",
+        "run": 1,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          89.9228125,
+          110.114921875,
+          117.283,
+          88.31240625000001,
+          107.51603125000001,
+          87.235578125,
+          97.597171875,
+          118.22075,
+          98.813359375,
+          92.72190625,
+          86.55300000000001,
+          111.167578125
+        ],
+        "completion_wait_us_per_frame": [
+          142.49584374999998,
+          142.830640625,
+          153.40637500000003,
+          142.36014062499999,
+          149.40001562499998,
+          144.0264375,
+          150.221828125,
+          146.02959375,
+          141.100046875,
+          144.55229687500002,
+          139.4085625,
+          143.047484375
+        ]
+      },
+      {
+        "case": "segmentsonly",
+        "version": "unified",
+        "mode": "stable",
+        "run": 1,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          82.12301562500001,
+          71.82921875000001,
+          80.35209375000001,
+          67.97717187500001,
+          74.44496875,
+          86.087125,
+          79.38687499999999,
+          82.624640625,
+          70.606671875,
+          72.15923437500001,
+          80.694125,
+          75.49265625
+        ],
+        "completion_wait_us_per_frame": [
+          135.95840625,
+          135.44746874999998,
+          135.874203125,
+          136.55959375,
+          136.47593750000001,
+          144.1905625,
+          136.352546875,
+          137.35459375,
+          135.431359375,
+          134.11792187499998,
+          142.68824999999998,
+          136.0274375
+        ]
+      },
+      {
+        "case": "segmentsonly",
+        "version": "unified",
+        "mode": "resize",
+        "run": 1,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          78.90121875,
+          89.56828125000001,
+          82.86770312499999,
+          103.880484375,
+          107.738140625,
+          109.035234375,
+          101.27828125,
+          79.56371874999999,
+          105.59309375000001,
+          107.62812500000001,
+          81.593609375,
+          99.59026562499999
+        ],
+        "completion_wait_us_per_frame": [
+          136.422515625,
+          141.66103125,
+          137.35971874999998,
+          142.84460937499998,
+          144.5785,
+          139.577453125,
+          147.381921875,
+          137.106,
+          142.053125,
+          163.165828125,
+          137.82434375,
+          144.97496875
+        ]
+      },
+      {
+        "case": "segmentsonly",
+        "version": "baseline",
+        "mode": "stable",
+        "run": 2,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          79.98724999999999,
+          88.617484375,
+          86.22834375000001,
+          74.37753125,
+          81.9156875,
+          71.57284375,
+          112.96685937500001,
+          87.057796875,
+          85.573734375,
+          77.359515625,
+          83.65103124999999,
+          88.76990625
+        ],
+        "completion_wait_us_per_frame": [
+          138.61514062499998,
+          144.461984375,
+          138.72914062499999,
+          138.15170312499998,
+          143.32093749999999,
+          137.348078125,
+          151.868265625,
+          140.54759375,
+          138.46390624999998,
+          137.304984375,
+          140.162703125,
+          144.32187499999998
+        ]
+      },
+      {
+        "case": "segmentsonly",
+        "version": "baseline",
+        "mode": "resize",
+        "run": 2,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          104.054890625,
+          127.58551562500001,
+          90.07740625000001,
+          100.25853125,
+          110.902296875,
+          99.287875,
+          94.63028125000001,
+          101.541171875,
+          89.023390625,
+          99.984984375,
+          99.310609375,
+          116.06696875
+        ],
+        "completion_wait_us_per_frame": [
+          143.27534375000002,
+          152.56390625,
+          142.371546875,
+          146.91028125,
+          156.05525,
+          141.973765625,
+          143.23803125,
+          155.309484375,
+          142.45723437499998,
+          145.148265625,
+          144.66009375,
+          145.98120312499998
+        ]
+      },
+      {
+        "case": "segmentsonly",
+        "version": "unified",
+        "mode": "stable",
+        "run": 2,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          74.66123437499999,
+          73.941046875,
+          91.59278125,
+          73.7609375,
+          76.298328125,
+          70.38185937499999,
+          87.19639062499999,
+          81.97821875,
+          80.49490625,
+          77.762515625,
+          72.8606875,
+          70.355484375
+        ],
+        "completion_wait_us_per_frame": [
+          136.28103124999998,
+          136.450078125,
+          143.863125,
+          137.114984375,
+          136.3363125,
+          135.0001875,
+          158.147890625,
+          139.506109375,
+          135.13475,
+          136.510390625,
+          134.84240624999998,
+          139.122859375
+        ]
+      },
+      {
+        "case": "segmentsonly",
+        "version": "unified",
+        "mode": "resize",
+        "run": 2,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          102.642703125,
+          96.747578125,
+          89.73692187500001,
+          103.87784375000001,
+          119.348421875,
+          88.47331249999999,
+          83.14825,
+          82.72509375,
+          126.65940624999999,
+          106.77282812499999,
+          106.65684375,
+          92.93365625
+        ],
+        "completion_wait_us_per_frame": [
+          140.722953125,
+          145.612734375,
+          140.598734375,
+          141.24746875,
+          150.943921875,
+          137.0346875,
+          139.888375,
+          137.777625,
+          157.23465625,
+          142.44484375,
+          139.2984375,
+          145.18584374999998
+        ]
+      },
+      {
+        "case": "solidonly",
+        "version": "baseline",
+        "mode": "stable",
+        "run": 0,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          73.98940625,
+          72.509578125,
+          77.730109375,
+          81.54528125,
+          80.123296875,
+          79.62175,
+          81.02259375,
+          88.174171875,
+          76.076171875,
+          73.28,
+          91.64610937500001,
+          106.506640625
+        ],
+        "completion_wait_us_per_frame": [
+          138.641953125,
+          137.57203125,
+          137.2664375,
+          141.04471875,
+          140.87004687499999,
+          143.395453125,
+          143.75539062500002,
+          143.169828125,
+          137.98904687499999,
+          136.997984375,
+          138.389703125,
+          146.559296875
+        ]
+      },
+      {
+        "case": "solidonly",
+        "version": "baseline",
+        "mode": "resize",
+        "run": 0,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          120.04425,
+          81.546375,
+          95.1318125,
+          111.77225,
+          113.54234375,
+          87.61075,
+          86.6018125,
+          100.55340625000001,
+          93.73096875,
+          91.274609375,
+          90.015,
+          89.338796875
+        ],
+        "completion_wait_us_per_frame": [
+          149.51040625000002,
+          140.4618125,
+          143.776734375,
+          150.69778125,
+          146.69612500000002,
+          140.508515625,
+          141.161953125,
+          148.767171875,
+          139.51690624999998,
+          138.71184375,
+          138.25721875,
+          139.457734375
+        ]
+      },
+      {
+        "case": "solidonly",
+        "version": "unified",
+        "mode": "stable",
+        "run": 0,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          68.21737499999999,
+          80.687296875,
+          83.86996875,
+          68.32476562500001,
+          80.8619375,
+          110.56934374999999,
+          76.51634374999999,
+          79.73512500000001,
+          105.84648437499999,
+          109.8100625,
+          95.83929687499999,
+          90.290453125
+        ],
+        "completion_wait_us_per_frame": [
+          136.01703125,
+          141.868015625,
+          137.82376562500002,
+          134.631125,
+          135.209734375,
+          160.278671875,
+          136.514109375,
+          141.26584375000002,
+          144.68665625,
+          154.457171875,
+          143.603859375,
+          141.889203125
+        ]
+      },
+      {
+        "case": "solidonly",
+        "version": "unified",
+        "mode": "resize",
+        "run": 0,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          103.996875,
+          113.424578125,
+          114.4810625,
+          104.75134375,
+          84.08717187500001,
+          81.06071874999999,
+          91.399859375,
+          81.49360937499999,
+          89.178765625,
+          101.492140625,
+          81.3544375,
+          86.7774375
+        ],
+        "completion_wait_us_per_frame": [
+          146.132984375,
+          150.92992187500002,
+          142.034921875,
+          140.19359375000002,
+          137.445484375,
+          136.573609375,
+          137.30159375,
+          138.151890625,
+          143.00037500000002,
+          141.7739375,
+          137.79415625,
+          139.08209374999998
+        ]
+      },
+      {
+        "case": "solidonly",
+        "version": "baseline",
+        "mode": "stable",
+        "run": 1,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          69.168796875,
+          77.70576562500001,
+          74.73170312500001,
+          75.707296875,
+          76.9824375,
+          68.48928125,
+          69.9770625,
+          75.163578125,
+          90.000640625,
+          70.81809375,
+          72.34707812500001,
+          131.102296875
+        ],
+        "completion_wait_us_per_frame": [
+          136.8704375,
+          145.273140625,
+          137.19984374999999,
+          139.82796875,
+          140.2373125,
+          138.24967187500002,
+          136.289296875,
+          139.264859375,
+          139.94409375,
+          135.949875,
+          137.12787500000002,
+          162.783984375
+        ]
+      },
+      {
+        "case": "solidonly",
+        "version": "baseline",
+        "mode": "resize",
+        "run": 1,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          120.01140625,
+          90.0230625,
+          87.79596875,
+          95.417609375,
+          88.97309374999999,
+          85.643640625,
+          85.89075,
+          87.18934374999999,
+          94.51514062499999,
+          99.534265625,
+          122.784203125,
+          102.260546875
+        ],
+        "completion_wait_us_per_frame": [
+          149.438734375,
+          144.88495312499998,
+          141.42775,
+          143.15884375,
+          138.753828125,
+          138.66359375000002,
+          138.993421875,
+          162.87650000000002,
+          147.32582812500002,
+          147.91653125000002,
+          146.016484375,
+          145.049109375
+        ]
+      },
+      {
+        "case": "solidonly",
+        "version": "unified",
+        "mode": "stable",
+        "run": 1,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          75.607640625,
+          68.253765625,
+          77.68304687499999,
+          74.656828125,
+          71.03009374999999,
+          67.656828125,
+          79.569953125,
+          70.6514375,
+          67.4176875,
+          73.975859375,
+          69.033984375,
+          83.3725
+        ],
+        "completion_wait_us_per_frame": [
+          137.79290625000002,
+          137.786875,
+          143.595984375,
+          139.53590625,
+          137.31337499999998,
+          133.641578125,
+          137.517375,
+          136.75278125,
+          135.94109375,
+          136.553421875,
+          135.5741875,
+          143.6904375
+        ]
+      },
+      {
+        "case": "solidonly",
+        "version": "unified",
+        "mode": "resize",
+        "run": 1,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          95.9056875,
+          123.49396875000001,
+          117.367,
+          81.36809375,
+          88.18437499999999,
+          89.619296875,
+          104.662578125,
+          114.3579375,
+          88.94840625,
+          87.478109375,
+          101.625984375,
+          114.568359375
+        ],
+        "completion_wait_us_per_frame": [
+          163.167234375,
+          148.56921875,
+          144.953859375,
+          137.2985,
+          141.95371875,
+          140.798125,
+          139.42709375,
+          145.225609375,
+          138.5146875,
+          139.28029687499998,
+          142.119734375,
+          152.71721875
+        ]
+      },
+      {
+        "case": "solidonly",
+        "version": "baseline",
+        "mode": "stable",
+        "run": 2,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          79.03803125,
+          84.785390625,
+          90.40828125,
+          95.42576562500001,
+          82.81790625000001,
+          83.264078125,
+          80.04765625,
+          85.42746875,
+          72.31434374999999,
+          78.28740625,
+          73.615796875,
+          116.47828125
+        ],
+        "completion_wait_us_per_frame": [
+          144.25160937500002,
+          140.239859375,
+          144.692640625,
+          147.67015625,
+          148.931390625,
+          138.776609375,
+          137.66009375,
+          138.30139062499998,
+          137.40553125,
+          142.138640625,
+          136.6361875,
+          160.00621875000002
+        ]
+      },
+      {
+        "case": "solidonly",
+        "version": "baseline",
+        "mode": "resize",
+        "run": 2,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          99.404046875,
+          89.48735937500001,
+          92.89584375,
+          83.42373437500001,
+          114.43184375,
+          92.55484375,
+          89.2615,
+          95.23003125,
+          107.06046875,
+          111.314625,
+          102.078765625,
+          86.14525
+        ],
+        "completion_wait_us_per_frame": [
+          147.15253125,
+          142.554359375,
+          142.532125,
+          140.8840625,
+          149.36846875,
+          144.128609375,
+          142.14328125,
+          144.62625,
+          147.18346875,
+          142.52946875,
+          144.611921875,
+          138.66020312499998
+        ]
+      },
+      {
+        "case": "solidonly",
+        "version": "unified",
+        "mode": "stable",
+        "run": 2,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          71.021671875,
+          77.2846875,
+          80.030859375,
+          76.24853125,
+          74.331046875,
+          78.642609375,
+          68.48234375,
+          68.6275,
+          76.878484375,
+          78.27378125,
+          71.005421875,
+          81.401359375
+        ],
+        "completion_wait_us_per_frame": [
+          138.44284374999998,
+          137.0070625,
+          139.296125,
+          136.55540625,
+          135.89640624999998,
+          137.35635937499998,
+          134.80128125,
+          133.78509375,
+          141.11853125000002,
+          136.79306250000002,
+          135.59785937499998,
+          136.9978125
+        ]
+      },
+      {
+        "case": "solidonly",
+        "version": "unified",
+        "mode": "resize",
+        "run": 2,
+        "frames_per_sample": 64,
+        "encode_submit_us_per_frame": [
+          80.54167187499999,
+          112.997953125,
+          103.64334375,
+          97.2439375,
+          89.29203125,
+          83.15739062499999,
+          83.874421875,
+          83.96476562500001,
+          103.89989062500001,
+          90.34154687499999,
+          92.790015625,
+          82.8471875
+        ],
+        "completion_wait_us_per_frame": [
+          137.276171875,
+          147.50378125,
+          144.48121875,
+          141.196734375,
+          138.80084375,
+          135.99840625000002,
+          136.433625,
+          136.83778125,
+          147.33209375,
+          139.65915625,
+          138.65357812500002,
+          137.826984375
+        ]
+      }
+    ],
+    "native": {
+      "runs_per_version_per_case": 3,
+      "live_sample_seconds": 6,
+      "media": "steady.wav stereo PCM16 48000Hz 60s; muted output",
+      "binary_sha256": {
+        "unified-before": "7c3235e0132cfccb24ad4573851ab450865c05e8eec95d1d15baeb908d284492",
+        "unified-after": "1c2baca9077cee2119f97184107cc4a170ff66e1829781582e2ed4cf07f99943"
+      },
+      "raw_samples": [
+        {
+          "case": "small_mixed_solid_fractal_waveform_full",
+          "version": "unified-before",
+          "run": 0,
+          "duration_s": 6.000357532000635,
+          "cpu_percent": 5.499672281861037,
+          "gfx_engine_percent": 3.498660519484154,
+          "pss_kib": 83795,
+          "paused_cpu_percent": 0.0,
+          "paused_gfx_engine_percent": 0.0,
+          "resize_close_reopen_checked": true
+        },
+        {
+          "case": "small_mixed_solid_fractal_waveform_full",
+          "version": "unified-after",
+          "run": 0,
+          "duration_s": 6.000388649001252,
+          "cpu_percent": 5.166332018370155,
+          "gfx_engine_percent": 3.085035150694976,
+          "pss_kib": 83421,
+          "paused_cpu_percent": 0.0,
+          "paused_gfx_engine_percent": 0.0,
+          "resize_close_reopen_checked": true
+        },
+        {
+          "case": "small_mixed_solid_fractal_waveform_full",
+          "version": "unified-after",
+          "run": 1,
+          "duration_s": 6.000260261003859,
+          "cpu_percent": 5.499761437761204,
+          "gfx_engine_percent": 3.103852248049682,
+          "pss_kib": 83644,
+          "paused_cpu_percent": 0.0,
+          "paused_gfx_engine_percent": 0.0,
+          "resize_close_reopen_checked": false
+        },
+        {
+          "case": "small_mixed_solid_fractal_waveform_full",
+          "version": "unified-before",
+          "run": 1,
+          "duration_s": 6.000371307018213,
+          "cpu_percent": 5.499659656295307,
+          "gfx_engine_percent": 3.670172173219006,
+          "pss_kib": 83562,
+          "paused_cpu_percent": 0.0,
+          "paused_gfx_engine_percent": 0.0,
+          "resize_close_reopen_checked": false
+        },
+        {
+          "case": "small_mixed_solid_fractal_waveform_full",
+          "version": "unified-before",
+          "run": 2,
+          "duration_s": 6.000334508978995,
+          "cpu_percent": 5.666350759132157,
+          "gfx_engine_percent": 3.654676146335622,
+          "pss_kib": 83140,
+          "paused_cpu_percent": 0.0,
+          "paused_gfx_engine_percent": 0.0,
+          "resize_close_reopen_checked": false
+        },
+        {
+          "case": "small_mixed_solid_fractal_waveform_full",
+          "version": "unified-after",
+          "run": 2,
+          "duration_s": 6.000343476014677,
+          "cpu_percent": 5.49968516500959,
+          "gfx_engine_percent": 3.0895311866901287,
+          "pss_kib": 83976,
+          "paused_cpu_percent": 0.0,
+          "paused_gfx_engine_percent": 0.0,
+          "resize_close_reopen_checked": false
+        },
+        {
+          "case": "small_mixed_bars_waveform_full",
+          "version": "unified-before",
+          "run": 0,
+          "duration_s": 6.000288683979306,
+          "cpu_percent": 6.333028626015864,
+          "gfx_engine_percent": 4.9812026677653565,
+          "pss_kib": 84887,
+          "paused_cpu_percent": 0.0,
+          "paused_gfx_engine_percent": 0.0,
+          "resize_close_reopen_checked": true
+        },
+        {
+          "case": "small_mixed_bars_waveform_full",
+          "version": "unified-after",
+          "run": 0,
+          "duration_s": 6.000352912989911,
+          "cpu_percent": 6.332960835976064,
+          "gfx_engine_percent": 4.186540169265247,
+          "pss_kib": 85045,
+          "paused_cpu_percent": 0.0,
+          "paused_gfx_engine_percent": 0.0,
+          "resize_close_reopen_checked": true
+        },
+        {
+          "case": "small_mixed_bars_waveform_full",
+          "version": "unified-after",
+          "run": 1,
+          "duration_s": 6.000365637009963,
+          "cpu_percent": 6.166290895972372,
+          "gfx_engine_percent": 4.356399306530559,
+          "pss_kib": 85290,
+          "paused_cpu_percent": 0.0,
+          "paused_gfx_engine_percent": 0.0,
+          "resize_close_reopen_checked": false
+        },
+        {
+          "case": "small_mixed_bars_waveform_full",
+          "version": "unified-before",
+          "run": 1,
+          "duration_s": 6.000345789012499,
+          "cpu_percent": 6.499625416824251,
+          "gfx_engine_percent": 5.0592009639824385,
+          "pss_kib": 84648,
+          "paused_cpu_percent": 0.0,
+          "paused_gfx_engine_percent": 0.0,
+          "resize_close_reopen_checked": false
+        },
+        {
+          "case": "small_mixed_bars_waveform_full",
+          "version": "unified-before",
+          "run": 2,
+          "duration_s": 6.000377018004656,
+          "cpu_percent": 6.499591589491309,
+          "gfx_engine_percent": 5.007393987051746,
+          "pss_kib": 84667,
+          "paused_cpu_percent": 0.0,
+          "paused_gfx_engine_percent": 0.0,
+          "resize_close_reopen_checked": false
+        },
+        {
+          "case": "small_mixed_bars_waveform_full",
+          "version": "unified-after",
+          "run": 2,
+          "duration_s": 6.000236035004491,
+          "cpu_percent": 6.166424084677247,
+          "gfx_engine_percent": 4.234273410542754,
+          "pss_kib": 85080,
+          "paused_cpu_percent": 0.0,
+          "paused_gfx_engine_percent": 0.0,
+          "resize_close_reopen_checked": false
+        },
+        {
+          "case": "small_mixed_outline_waveform_full",
+          "version": "unified-before",
+          "run": 0,
+          "duration_s": 6.000249189994065,
+          "cpu_percent": 6.333070310374491,
+          "gfx_engine_percent": 4.974215879195764,
+          "pss_kib": 84844,
+          "paused_cpu_percent": 0.0,
+          "paused_gfx_engine_percent": 0.0,
+          "resize_close_reopen_checked": true
+        },
+        {
+          "case": "small_mixed_outline_waveform_full",
+          "version": "unified-after",
+          "run": 0,
+          "duration_s": 6.000243610003963,
+          "cpu_percent": 6.333076199880308,
+          "gfx_engine_percent": 4.183619654733222,
+          "pss_kib": 85526,
+          "paused_cpu_percent": 0.0,
+          "paused_gfx_engine_percent": 0.0,
+          "resize_close_reopen_checked": true
+        },
+        {
+          "case": "small_mixed_outline_waveform_full",
+          "version": "unified-after",
+          "run": 1,
+          "duration_s": 6.000238030013861,
+          "cpu_percent": 6.166422034412946,
+          "gfx_engine_percent": 4.2127775554166815,
+          "pss_kib": 85099,
+          "paused_cpu_percent": 0.0,
+          "paused_gfx_engine_percent": 0.0,
+          "resize_close_reopen_checked": false
+        },
+        {
+          "case": "small_mixed_outline_waveform_full",
+          "version": "unified-before",
+          "run": 1,
+          "duration_s": 6.000424016005127,
+          "cpu_percent": 6.332885792510889,
+          "gfx_engine_percent": 5.084055079879198,
+          "pss_kib": 85012,
+          "paused_cpu_percent": 0.0,
+          "paused_gfx_engine_percent": 0.0,
+          "resize_close_reopen_checked": false
+        },
+        {
+          "case": "small_mixed_outline_waveform_full",
+          "version": "unified-before",
+          "run": 2,
+          "duration_s": 6.000212932995055,
+          "cpu_percent": 6.499769330774872,
+          "gfx_engine_percent": 5.068778748293309,
+          "pss_kib": 85650,
+          "paused_cpu_percent": 0.0,
+          "paused_gfx_engine_percent": 0.0,
+          "resize_close_reopen_checked": false
+        },
+        {
+          "case": "small_mixed_outline_waveform_full",
+          "version": "unified-after",
+          "run": 2,
+          "duration_s": 6.000757485016948,
+          "cpu_percent": 6.165888238673839,
+          "gfx_engine_percent": 4.276908650963007,
+          "pss_kib": 85098,
+          "paused_cpu_percent": 0.0,
+          "paused_gfx_engine_percent": 0.0,
+          "resize_close_reopen_checked": false
+        },
+        {
+          "case": "multi4_waveform_full",
+          "version": "unified-before",
+          "run": 0,
+          "duration_s": 6.0003418030100875,
+          "cpu_percent": 1.999886072153451,
+          "gfx_engine_percent": 2.1644570636767386,
+          "pss_kib": 82122,
+          "paused_cpu_percent": 0.0,
+          "paused_gfx_engine_percent": 0.0,
+          "resize_close_reopen_checked": true
+        },
+        {
+          "case": "multi4_waveform_full",
+          "version": "unified-after",
+          "run": 0,
+          "duration_s": 6.000238610984525,
+          "cpu_percent": 2.166580505015441,
+          "gfx_engine_percent": 2.2188654423887106,
+          "pss_kib": 82714,
+          "paused_cpu_percent": 0.0,
+          "paused_gfx_engine_percent": 0.0,
+          "resize_close_reopen_checked": true
+        },
+        {
+          "case": "multi4_waveform_full",
+          "version": "unified-after",
+          "run": 1,
+          "duration_s": 6.000361238984624,
+          "cpu_percent": 1.9998795942543335,
+          "gfx_engine_percent": 2.192843176592908,
+          "pss_kib": 82616,
+          "paused_cpu_percent": 0.0,
+          "paused_gfx_engine_percent": 0.0,
+          "resize_close_reopen_checked": false
+        },
+        {
+          "case": "multi4_waveform_full",
+          "version": "unified-before",
+          "run": 1,
+          "duration_s": 6.000327256013406,
+          "cpu_percent": 1.9998909206116788,
+          "gfx_engine_percent": 2.1639493390943456,
+          "pss_kib": 81717,
+          "paused_cpu_percent": 0.0,
+          "paused_gfx_engine_percent": 0.0,
+          "resize_close_reopen_checked": false
+        },
+        {
+          "case": "multi4_waveform_full",
+          "version": "unified-before",
+          "run": 2,
+          "duration_s": 6.000343395018717,
+          "cpu_percent": 1.999885541544505,
+          "gfx_engine_percent": 2.1930430866547015,
+          "pss_kib": 82514,
+          "paused_cpu_percent": 0.0,
+          "paused_gfx_engine_percent": 0.0,
+          "resize_close_reopen_checked": false
+        },
+        {
+          "case": "multi4_waveform_full",
+          "version": "unified-after",
+          "run": 2,
+          "duration_s": 6.000345217995346,
+          "cpu_percent": 1.999884933955363,
+          "gfx_engine_percent": 2.2522092328072585,
+          "pss_kib": 82465,
+          "paused_cpu_percent": 0.0,
+          "paused_gfx_engine_percent": 0.0,
+          "resize_close_reopen_checked": false
+        },
+        {
+          "case": "waveform_full",
+          "version": "unified-before",
+          "run": 0,
+          "duration_s": 6.0002362439990975,
+          "cpu_percent": 1.9999212551008025,
+          "gfx_engine_percent": 1.9928487502402745,
+          "pss_kib": 81315,
+          "paused_cpu_percent": 0.0,
+          "paused_gfx_engine_percent": 0.0,
+          "resize_close_reopen_checked": true
+        },
+        {
+          "case": "waveform_full",
+          "version": "unified-after",
+          "run": 0,
+          "duration_s": 6.000254337996012,
+          "cpu_percent": 1.9999152242616114,
+          "gfx_engine_percent": 2.162347972125015,
+          "pss_kib": 82188,
+          "paused_cpu_percent": 0.0,
+          "paused_gfx_engine_percent": 0.0,
+          "resize_close_reopen_checked": true
+        },
+        {
+          "case": "waveform_full",
+          "version": "unified-after",
+          "run": 1,
+          "duration_s": 6.000344877014868,
+          "cpu_percent": 1.833227960302246,
+          "gfx_engine_percent": 2.135046061947925,
+          "pss_kib": 81412,
+          "paused_cpu_percent": 0.0,
+          "paused_gfx_engine_percent": 0.0,
+          "resize_close_reopen_checked": false
+        },
+        {
+          "case": "waveform_full",
+          "version": "unified-before",
+          "run": 1,
+          "duration_s": 6.000398036005208,
+          "cpu_percent": 1.666556108444023,
+          "gfx_engine_percent": 2.143573863403757,
+          "pss_kib": 82044,
+          "paused_cpu_percent": 0.0,
+          "paused_gfx_engine_percent": 0.0,
+          "resize_close_reopen_checked": false
+        },
+        {
+          "case": "waveform_full",
+          "version": "unified-before",
+          "run": 2,
+          "duration_s": 6.000329789007083,
+          "cpu_percent": 1.6665750636440884,
+          "gfx_engine_percent": 2.1032684275322757,
+          "pss_kib": 81891,
+          "paused_cpu_percent": 0.0,
+          "paused_gfx_engine_percent": 0.0,
+          "resize_close_reopen_checked": false
+        },
+        {
+          "case": "waveform_full",
+          "version": "unified-after",
+          "run": 2,
+          "duration_s": 6.000324329012074,
+          "cpu_percent": 1.8332342381584394,
+          "gfx_engine_percent": 2.07045523188335,
+          "pss_kib": 81756,
+          "paused_cpu_percent": 0.0,
+          "paused_gfx_engine_percent": 0.0,
+          "resize_close_reopen_checked": false
+        }
+      ]
+    },
+    "limits": [
+      "Attachment bytes are width*height*(4+1)*4 nominal logical ownership, not physical VRAM or queue-retired texture storage",
+      "Native DRM GFX percent is process-engine busy counter / wall time, not per-widget GPU duration",
+      "Profile encode-submit wall excludes separately accumulated completion wait; neither value is a GPU timestamp",
+      "Profile waits every frame and verifies nonzero warm-reference counters for all64512 measured frames; queued perf-final results are invalid and excluded",
+      "Native dynamic images are smoke only, not synchronized cross-version parity",
+      "Sparse distant workload trades more passes and slower encoding for lower owned attachment bytes; no universal speedup",
+      "Process PSS shows no consistent memory improvement; no GUI cadence trace or host integration claim"
+    ]
+  },
   "date": "2026-10-18",
   "scope": "Vendor fixed-schema LED drawing kernel, not end-to-end Rivu performance or a completed consumer migration",
   "baseline": "Current SpectrumStyle::Led append_rect -> NonZero PathBuilder tessellation -> textured Path -> WGPU intermediate rasterization; unchanged old rendering path used in the same executable",

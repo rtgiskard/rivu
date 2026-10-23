@@ -1307,8 +1307,9 @@ fn palette_paths_preserve_existing_curve_coverage_and_msaa() -> anyhow::Result<(
         renderer
             .core
             .resources
-            .path_msaa_texture
+            .msaa_scratch
             .as_ref()
+            .and_then(|pair| pair._msaa.as_ref())
             .map(|texture| texture.sample_count())
             .unwrap_or(1),
         renderer.core.rendering_params.path_sample_count
@@ -1371,7 +1372,7 @@ fn palette_paths_keep_full_mapping_clip_order_opacity_and_shared_palette() -> an
     pixel(&image, 20, 8, [120, 0, 135, 255]);
     assert_eq!(renderer.core.resources.materials.palette_stats(), (1, 1));
     renderer.render_scene_to_image(&Scene::default(), size(24, 16))?;
-    assert!(renderer.core.resources.path_intermediate_texture.is_none());
+    assert!(renderer.core.resources.msaa_scratch.is_none());
     assert_eq!(renderer.core.resources.materials.stats().2, 0);
     Ok(())
 }
@@ -1629,14 +1630,17 @@ fn palette_path_batches_keep_fractional_bounds_on_individual_passes() -> anyhow:
             } else {
                 record.content_mask.bounds = bounds(x + fraction, y + 3.0 + fraction, 16.0, 20.0);
             }
-            assert!(!WgpuRendererCore::gpu_path_bounds_are_integer(
-                record.bounds.intersect(&record.content_mask.bounds)
-            ));
             scene.insert_primitive(record);
         }
     }
     scene.pop_layer();
     scene.finish();
+    renderer.render_scene_no_readback(&scene, size(104, 52))?;
+    assert_eq!(
+        renderer.msaa_frame_stats().1,
+        scene.gpu_draws.len() as u64,
+        "fractional geometry and mask edges must retain individual resolves"
+    );
     let actual = compare_individual_material_draws(&mut renderer, &scene, size(104, 52))?;
     assert!(
         actual
@@ -2185,5 +2189,131 @@ fn waveform_cached_scene_resolves_latest_snapshot_and_clear_without_repaint() ->
     state.clear();
     let cleared = renderer.render_scene_to_image(&cached, size(8, 8))?;
     pixel(&cleared, 3, 3, BLACK);
+    Ok(())
+}
+
+#[test]
+fn msaa_groups_trade_sparse_area_for_passes_without_changing_pixels() -> anyhow::Result<()> {
+    let mut renderer = WgpuHeadlessRenderer::new()?;
+    for (second_x, expected_extent, expected_passes) in [(24.0, (32, 16), 1), (216.0, (16, 16), 2)]
+    {
+        let viewport = bounds(0.0, 0.0, 256.0, 128.0);
+        let mut scene = Scene::default();
+        scene.push_layer(viewport);
+        scene.insert_primitive(draw(
+            GpuSource::Fixed(frame([1.0, 0.0, 0.0, 0.5])),
+            bounds(8.0, 48.0, 16.0, 16.0),
+        ));
+        scene.insert_primitive(draw(
+            GpuSource::Fixed(frame([0.0, 1.0, 0.0, 0.5])),
+            bounds(second_x, 48.0, 16.0, 16.0),
+        ));
+        scene.pop_layer();
+        scene.finish();
+        let image = renderer.render_scene_to_image(&scene, size(256, 128))?;
+        assert_eq!(renderer.msaa_attachment_stats().0, Some(expected_extent));
+        assert_eq!(renderer.msaa_frame_stats().1, expected_passes);
+        pixel(&image, 12, 52, [128, 0, 0, 255]);
+        pixel(&image, second_x as u32 + 4, 52, [0, 128, 0, 255]);
+        pixel(&image, 128, 52, BLACK);
+        compare_individual_material_draws(&mut renderer, &scene, size(256, 128))?;
+    }
+    Ok(())
+}
+
+#[test]
+fn local_msaa_material_masks_led_periods_and_gradients_keep_window_coordinates()
+-> anyhow::Result<()> {
+    let mut renderer = WgpuHeadlessRenderer::new()?;
+    let materials = [
+        rectangle_frame(
+            &[rectangle()],
+            &[[1.0, 0.0, 0.0, 0.8], [0.0, 1.0, 0.0, 0.6]],
+            GpuRectangleParams {
+                cell_height: 3.0,
+                cell_gap: 2.0,
+            },
+            limits(),
+        )?,
+        palette_curve(&[[1.0, 0.0, 0.0, 0.8], [0.0, 1.0, 0.0, 0.6]])?,
+        segment_frame([-0.5, 0.25, 1.5, 0.75], 5.0, [1.0, 0.0, 0.0, 0.6])?,
+        GpuFrame::waveform(
+            vec![
+                gpui::GpuWaveformColumn {
+                    levels: [0.2, 0.8, 0.4, 1.0]
+                };
+                4
+            ],
+            GpuPalette::new(&[[1.0, 0.0, 0.0, 0.8], [0.0, 1.0, 0.0, 0.6]], 2)?,
+            gpui::GpuWaveformParams::default(),
+            limits(),
+        )?,
+    ];
+    for material in materials {
+        let mut images = Vec::new();
+        for (dx, dy) in [(0.0, 0.0), (32.0, 48.0)] {
+            let mut scene = Scene::default();
+            let mut record = draw(
+                GpuSource::Fixed(material.clone()),
+                bounds(3.25 + dx, 2.5 + dy, 24.0, 24.0),
+            );
+            record.content_mask.bounds = bounds(5.5 + dx, 4.25 + dy, 20.0, 20.0);
+            record.scale_factor = 1.25;
+            record.opacity = 0.65;
+            scene.insert_primitive(record);
+            scene.finish();
+            images.push(renderer.render_scene_to_image(&scene, size(96, 96))?);
+        }
+        let mut colored = false;
+        for y in 0..32 {
+            for x in 0..32 {
+                let actual = images[1].get_pixel(x + 32, y + 48).0;
+                let expected = images[0].get_pixel(x, y).0;
+                assert!(
+                    actual.iter().zip(expected).all(|(a, e)| a.abs_diff(e) <= 3),
+                    "translated material pixel ({x},{y}) changed: {actual:?} != {expected:?}"
+                );
+                colored |= actual[0] > 3 || actual[1] > 3;
+            }
+        }
+        assert!(colored, "translation must exercise visible geometry");
+        pixel(&images[1], 36, 60, BLACK);
+    }
+    Ok(())
+}
+
+#[test]
+fn msaa_material_kinds_share_dense_groups_but_keep_overlap_resolves() -> anyhow::Result<()> {
+    let mut renderer = WgpuHeadlessRenderer::new()?;
+    let mut scene = Scene::default();
+    let viewport = bounds(0.0, 0.0, 96.0, 48.0);
+    scene.push_layer(viewport);
+    for (index, material) in [
+        frame([1.0, 0.0, 0.0, 0.5]),
+        segment_frame([0.0, 0.5, 1.0, 0.5], 4.0, [0.0, 1.0, 0.0, 0.5])?,
+        palette_curve(&[[0.0, 0.0, 1.0, 0.5]])?,
+        GpuFrame::waveform(
+            vec![gpui::GpuWaveformColumn { levels: [0.5; 4] }; 4],
+            GpuPalette::new(&[[1.0, 1.0, 0.0, 0.5]; 2], 2)?,
+            gpui::GpuWaveformParams::default(),
+            limits(),
+        )?,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut record = draw(
+            GpuSource::Fixed(material),
+            bounds(8.0 + index as f32 * 20.0, 12.0, 16.0, 24.0),
+        );
+        // Footprints, rather than just placement boxes, determine compatibility.
+        record.content_mask.bounds = record.bounds;
+        scene.insert_primitive(record);
+    }
+    scene.pop_layer();
+    scene.finish();
+    renderer.render_scene_to_image(&scene, size(96, 48))?;
+    assert_eq!(renderer.msaa_frame_stats().1, 1);
+    compare_individual_material_draws(&mut renderer, &scene, size(96, 48))?;
     Ok(())
 }

@@ -79,6 +79,7 @@ fn material_shader_and_byte_abi_match_structurally() {
             (64, ScalarKind::Uint, Some(VectorSize::Quad)),
             (80, ScalarKind::Uint, Some(VectorSize::Quad)),
             (96, ScalarKind::Float, Some(VectorSize::Quad)),
+            (112, ScalarKind::Float, Some(VectorSize::Bi)),
         ],
     );
     let globals: Vec<_> = module
@@ -266,7 +267,7 @@ fn rectangle_retirement_charges_unsubmitted_and_inflight_allocations() -> anyhow
     renderer.allocation_limit = 3 * INITIALIZATION_COPIES as usize;
     renderer.byte_limit =
         (RECTANGLE_STRIDE + PALETTE_STRIDE + PLACEMENT_SIZE) * INITIALIZATION_COPIES;
-    let prepared = renderer.prepare(&context.device, &[batch.clone(), batch.clone()], size);
+    let prepared = renderer.prepare(&context.device, &[batch.clone(), batch.clone()], size, None);
     assert_eq!(prepared.draws.len(), 1);
     assert_eq!(renderer.pipeline_counts, [1, 0, 0, 0, 0]);
     assert_eq!(
@@ -295,7 +296,7 @@ fn rectangle_retirement_charges_unsubmitted_and_inflight_allocations() -> anyhow
     renderer.byte_limit = MAX_BYTES;
     assert!(
         renderer
-            .prepare(&context.device, &[batch], size)
+            .prepare(&context.device, &[batch], size, None)
             .draws
             .is_empty()
     );
@@ -327,7 +328,7 @@ fn rectangle_retirement_charges_unsubmitted_and_inflight_allocations() -> anyhow
     renderer
         .completed
         .store(MAX_PENDING_SUBMISSIONS, Ordering::Release);
-    renderer.prepare(&context.device, &[], size);
+    renderer.prepare(&context.device, &[], size, None);
     assert_eq!(renderer.bytes, 0);
     assert!(renderer.uploads.is_empty());
     assert!(renderer.placements.is_empty());
@@ -405,7 +406,7 @@ fn pipelines_follow_admitted_variants_and_reuse_on_replay() -> anyhow::Result<()
         width: DevicePixels(8),
         height: DevicePixels(8),
     };
-    assert!(renderer.prepare(device, &[], size).draws.is_empty());
+    assert!(renderer.prepare(device, &[], size, None).draws.is_empty());
     let cleared = GpuDraw {
         source: GpuSource::Dynamic(state),
         ..field_batch.clone()
@@ -416,7 +417,7 @@ fn pipelines_follow_admitted_variants_and_reuse_on_replay() -> anyhow::Result<()
     };
     assert!(
         renderer
-            .prepare(device, &[cleared, empty], size)
+            .prepare(device, &[cleared, empty], size, None)
             .draws
             .is_empty()
     );
@@ -425,11 +426,21 @@ fn pipelines_follow_admitted_variants_and_reuse_on_replay() -> anyhow::Result<()
         scale_factor: f32::NAN,
         ..field_batch.clone()
     };
-    assert!(renderer.prepare(device, &[invalid], size).draws.is_empty());
+    assert!(
+        renderer
+            .prepare(device, &[invalid], size, None)
+            .draws
+            .is_empty()
+    );
     renderer.byte_limit = 0;
     assert!(
         renderer
-            .prepare(device, &[field_batch.clone(), path_batch.clone()], size)
+            .prepare(
+                device,
+                &[field_batch.clone(), path_batch.clone()],
+                size,
+                None
+            )
             .draws
             .is_empty()
     );
@@ -438,7 +449,7 @@ fn pipelines_follow_admitted_variants_and_reuse_on_replay() -> anyhow::Result<()
     renderer.byte_limit = MAX_BYTES;
     assert_eq!(
         renderer
-            .prepare(device, &[path_batch.clone()], size)
+            .prepare(device, &[path_batch.clone()], size, None)
             .draws
             .len(),
         1
@@ -454,18 +465,18 @@ fn pipelines_follow_admitted_variants_and_reuse_on_replay() -> anyhow::Result<()
     renderer.byte_limit = 0;
     assert!(
         renderer
-            .prepare(device, &[field_batch.clone()], size)
+            .prepare(device, &[field_batch.clone()], size, None)
             .draws
             .is_empty()
     );
     assert_eq!(renderer.pipeline_counts, [0, 0, 1, 0, 0]);
     renderer.byte_limit = MAX_BYTES;
     let both = [path_batch, field_batch];
-    assert_eq!(renderer.prepare(device, &both, size).draws.len(), 2);
+    assert_eq!(renderer.prepare(device, &both, size, None).draws.len(), 2);
     assert_eq!(renderer.pipeline_counts, [0, 1, 1, 0, 0]);
     context.queue.submit(std::iter::empty());
     renderer.submitted(&context.queue);
-    assert_eq!(renderer.prepare(device, &both, size).draws.len(), 2);
+    assert_eq!(renderer.prepare(device, &both, size, None).draws.len(), 2);
     assert_eq!(
         renderer.pipeline_counts,
         [0, 1, 1, 0, 0],
@@ -474,7 +485,7 @@ fn pipelines_follow_admitted_variants_and_reuse_on_replay() -> anyhow::Result<()
     context.queue.submit(std::iter::empty());
     renderer.submitted(&context.queue);
     renderer.set_downlevel_flags(wgpu::DownlevelFlags::empty());
-    assert!(renderer.prepare(device, &both, size).draws.is_empty());
+    assert!(renderer.prepare(device, &both, size, None).draws.is_empty());
     assert_eq!(
         renderer.pipeline_counts,
         [0, 1, 1, 0, 0],
@@ -705,14 +716,14 @@ fn waveform_uploads_are_lazy_budgeted_weak_and_completion_retired() -> anyhow::R
     renderer.byte_limit = charge - 1;
     assert!(
         renderer
-            .prepare(&context.device, &[batch.clone()], size)
+            .prepare(&context.device, &[batch.clone()], size, None)
             .draws
             .is_empty()
     );
     assert_eq!(renderer.pipeline_counts, [0; 5]);
     assert_eq!(renderer.bytes, 0);
     renderer.byte_limit = charge;
-    let prepared = renderer.prepare(&context.device, &[batch.clone()], size);
+    let prepared = renderer.prepare(&context.device, &[batch.clone()], size, None);
     assert_eq!(prepared.draws.len(), 1);
     assert_eq!(renderer.pipeline_counts, [0, 0, 0, 0, 1]);
     assert_eq!(renderer.bytes, charge);
@@ -736,7 +747,7 @@ fn waveform_uploads_are_lazy_budgeted_weak_and_completion_retired() -> anyhow::R
         submission_index: Some(submission),
         timeout: Some(std::time::Duration::from_secs(30)),
     })?;
-    renderer.prepare(&context.device, &[], size);
+    renderer.prepare(&context.device, &[], size, None);
     assert_eq!(renderer.bytes, 0);
     assert!(renderer.uploads.is_empty());
     assert!(renderer.palettes.is_empty());
