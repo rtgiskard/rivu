@@ -385,7 +385,13 @@ impl Core {
     }
 
     pub(in crate::core) fn drain_playback_events(&mut self, generation: u64) -> Result<()> {
-        while let Ok(event) = self.engine.events.try_recv() {
+        while let Ok(event) = self
+            .engine
+            .events
+            .as_mut()
+            .expect("Core owns audio events")
+            .try_recv()
+        {
             self.retiring_audio_event(generation, event)?;
         }
         Ok(())
@@ -475,16 +481,23 @@ impl Core {
         result
     }
     pub(in crate::core) fn stop_playback(&mut self, natural: bool) -> Result<()> {
-        let stop = self.engine.stop_request();
+        let mut stop = self.engine.stop_request();
+        let executor = self.executor.clone();
         let generation = self.generation;
         let mut bookkeeping = Ok(());
-        let snapshot = stop
-            .wait(|event| {
+        // Only the persistent synchronous business owner enters this wait.
+        // Tokio's driver remains free, and the stop handle is the sole audio
+        // event consumer until it returns the receiver (also on timeout).
+        let snapshot = wait_on(
+            &executor,
+            stop.wait(|event| {
                 if bookkeeping.is_ok() {
                     bookkeeping = self.retiring_audio_event(generation, event);
                 }
-            })
-            .map(Some);
+            }),
+        )
+        .map(Some);
+        self.engine.restore_events(stop.into_events());
         self.finish_playback(snapshot, natural, bookkeeping)
     }
 

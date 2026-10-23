@@ -17,14 +17,13 @@ use rand::RngExt;
 use std::{
     fs,
     path::{Path, PathBuf},
-    thread::{self, JoinHandle},
     time::Duration,
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
     net::{UnixListener, UnixStream},
-    runtime::Builder,
     sync::watch,
+    task::JoinSet,
     time::{Instant, timeout, timeout_at},
 };
 /// Holds the abstract listener before any database or audio startup side effects.
@@ -48,89 +47,31 @@ impl SocketOwner {
     }
 }
 
-/// Transport worker using a cloned listener.
-/// The application must retain SocketOwner through core and server teardown.
+/// Async transport owned by App; Core's runtime stays alive until this service
+/// and every connection have retired, before SocketOwner releases authority.
 pub struct Server {
     data_dir: PathBuf,
     shutdown: watch::Sender<bool>,
-    bridge_stop: crossbeam_channel::Sender<()>,
-    worker: Option<JoinHandle<()>>,
+    worker: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Server {
     pub(crate) fn start(owner: &SocketOwner, handle: CoreHandle, app: AppHandle) -> Result<Self> {
         let data_dir = owner.data_dir.clone();
-        let worker_listener = owner.listener.try_clone()?;
+        let listener = {
+            let _guard = handle.executor().enter();
+            UnixListener::from_std(owner.listener.try_clone()?)?
+        };
         let (shutdown, shutdown_rx) = watch::channel(false);
-        let (bridge_stop, bridge_stop_rx) = crossbeam_channel::bounded(1);
-        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
-        let worker_data_dir = data_dir.clone();
-        let worker = thread::Builder::new().name("rivu-ipc".into()).spawn(move || {
-            let runtime = match Builder::new_current_thread().enable_io().enable_time().build() {
-                Ok(runtime) => runtime,
-                Err(error) => {
-                    tracing::error!(error = %error, "ipc_runtime_start_failed");
-                    let _ = ready_tx.send(Err(anyhow::Error::from(error)));
-                    return;
-                }
-            };
-            // App retains a listening descriptor through runtime shutdown;
-            // stopping this worker must not release directory ownership.
-            let listener = {
-                let _guard = runtime.enter();
-                UnixListener::from_std(worker_listener)
-            };
-            let listener = match listener {
-                Ok(listener) => listener,
-                Err(error) => {
-                    let _ = ready_tx.send(Err(anyhow::Error::from(error)));
-                    return;
-                }
-            };
-            let (revision_tx, revision_rx) = watch::channel(handle.state_revisions());
-            let updates = handle.subscribe();
-            let bridge_handle = handle.clone();
-            let bridge = thread::Builder::new().name("rivu-ipc-revisions".into()).spawn(move || {
-                loop {
-                    crossbeam_channel::select! {
-                        recv(updates) -> message => {
-                            if message.is_ok() { let _ = revision_tx.send(bridge_handle.state_revisions()); } else { break; }
-                        }
-                        recv(bridge_stop_rx) -> _ => break,
-                    }
-                }
-            });
-            let bridge = match bridge {
-                Ok(bridge) => bridge,
-                Err(error) => {
-                    tracing::error!(path = %worker_data_dir.display(), error = %error, "ipc_revision_bridge_start_failed");
-                    let _ = ready_tx.send(Err(anyhow::anyhow!("starting IPC revision bridge: {error}")));
-                    return;
-                }
-            };
-            tracing::info!(path = %worker_data_dir.display(), "ipc_server_started");
-            let _ = ready_tx.send(Ok(()));
-            runtime.block_on(run_server(listener, handle, app, revision_rx, shutdown_rx));
-            let _ = bridge.join();
-        })?;
-        match ready_rx.recv() {
-            Ok(Ok(())) => Ok(Self {
-                data_dir,
-                shutdown,
-                bridge_stop,
-                worker: Some(worker),
-            }),
-            Ok(Err(error)) => {
-                tracing::error!(path = %data_dir.display(), error = %error, "ipc_server_start_failed");
-                let _ = worker.join();
-                Err(error)
-            }
-            Err(error) => {
-                tracing::error!(path = %data_dir.display(), error = %error, "ipc_server_start_failed");
-                let _ = worker.join();
-                Err(anyhow::Error::from(error))
-            }
-        }
+        let revision_rx = handle.subscribe_revisions();
+        let executor = handle.executor().clone();
+        let worker = executor.spawn(run_server(listener, handle, app, revision_rx, shutdown_rx));
+        tracing::info!(path = %data_dir.display(), "ipc_server_started");
+        Ok(Self {
+            data_dir,
+            shutdown,
+            worker: Some(worker),
+        })
     }
 }
 
@@ -138,37 +79,25 @@ impl Drop for Server {
     fn drop(&mut self) {
         tracing::info!(path = %self.data_dir.display(), "ipc_server_stopping");
         let _ = self.shutdown.send(true);
-        let _ = self.bridge_stop.send(());
         if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
+            let _ = futures::executor::block_on(worker);
         }
     }
 }
 async fn run_command(app: &AppHandle, command: AppCommand) -> Result<Ack> {
     let duration = bridge_timeout(command.wait_timeout());
-    timeout(
-        duration,
-        tokio::task::spawn_blocking({
-            let app = app.clone();
-            move || app.request_ack(command)
-        }),
-    )
-    .await
-    .context("Reading IPC acknowledgement timed out")?
-    .map_err(|error| anyhow::anyhow!("Core command task failed: {error}"))
+    timeout(duration, app.request_ack_async(command))
+        .await
+        .context("Reading IPC acknowledgement timed out")
 }
 
 async fn run_query(handle: &CoreHandle, query: Query) -> Result<QueryResponse> {
     timeout(
         bridge_timeout(CoreHandle::query_wait_timeout()),
-        tokio::task::spawn_blocking({
-            let handle = handle.clone();
-            move || handle.query(query)
-        }),
+        handle.query_async(query),
     )
     .await
-    .context("Reading IPC query timed out")?
-    .map_err(|error| anyhow::anyhow!("Core query task failed: {error}"))
+    .context("Reading IPC query timed out")
 }
 
 const FRAME_TIMEOUT: Duration = Duration::from_secs(5);
@@ -409,12 +338,16 @@ async fn run_server(
     updates: watch::Receiver<StateRevisions>,
     mut shutdown: watch::Receiver<bool>,
 ) {
-    let mut rng = rand::rng();
-    let mut instance_id = UNKNOWN_INSTANCE;
-    while instance_id == UNKNOWN_INSTANCE {
-        instance_id = rng.random();
-    }
-    let mut clients = Vec::new();
+    let instance_id = {
+        let mut rng = rand::rng();
+        loop {
+            let id = rng.random();
+            if id != UNKNOWN_INSTANCE {
+                break id;
+            }
+        }
+    };
+    let mut clients = JoinSet::new();
     let revisions = updates;
     loop {
         tokio::select! {
@@ -430,16 +363,22 @@ async fn run_server(
                     tracing::warn!(error = %error, "ipc_peer_rejected");
                     continue;
                 }
-                clients.retain(|task: &tokio::task::JoinHandle<Result<()>>| !task.is_finished());
+                // len includes completed tasks; reclaim at most MAX_CLIENTS
+                // before deciding admission, without polling active sessions.
+                for _ in 0..MAX_CLIENTS {
+                    if clients.try_join_next().is_none() {
+                        break;
+                    }
+                }
                 if clients.len() < MAX_CLIENTS {
-                    clients.push(tokio::spawn(serve_connection(
+                    clients.spawn(serve_connection(
                         stream,
                         handle.clone(),
                         app.clone(),
                         instance_id,
                         revisions.clone(),
                         shutdown.clone(),
-                    )));
+                    ));
                 } else {
                     tracing::warn!(clients = clients.len(), max_clients = MAX_CLIENTS, "ipc_client_limit_reached");
                     let mut buffer = Vec::new();
@@ -449,19 +388,21 @@ async fn run_server(
                 }
             }
             changed = shutdown.changed() => { if changed.is_err() || *shutdown.borrow() { break; } }
+            result = clients.join_next(), if !clients.is_empty() => {
+                if let Some(Err(error)) = result {
+                    tracing::warn!(error = %error, "ipc_connection_task_failed");
+                }
+            }
         }
     }
     // Idle sessions observe shutdown; accepted operations finish their reply
     // before App retires the socket and releases instance authority.
     let _ = timeout(Duration::from_secs(120), async {
-        for task in &mut clients {
-            let _ = task.await;
-        }
+        while clients.join_next().await.is_some() {}
     })
     .await;
-    for task in clients {
-        task.abort();
-    }
+    clients.abort_all();
+    while clients.join_next().await.is_some() {}
 }
 
 pub fn is_no_instance(error: &Error) -> bool {

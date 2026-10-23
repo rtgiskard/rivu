@@ -789,7 +789,7 @@ fn save_prepared_scan(core: &mut Core, scan: ScanFinished) -> ScanTaskStatus {
             error: None,
         },
         cancellation: library::ScanCancellation::default(),
-        worker: thread::spawn(|| {}),
+        worker: core.executor.spawn_blocking(|| {}),
         pending_save: None,
     });
     core.scan_event(ScanEvent::Finished(scan));
@@ -976,10 +976,10 @@ fn scan_start_ack_binds_the_accepted_task() {
     let (directory, mut core) = fixture();
     let path = directory.path().join("1.wav");
     write_pcm(&path);
-    let (requests, receiver) = bounded(3);
-    let (reply, ack) = bounded(1);
+    let (requests, receiver) = mpsc::channel(3);
+    let (reply, ack) = oneshot::channel();
     requests
-        .send(Request {
+        .blocking_send(Request {
             operation: Operation::Command(Command::Scan {
                 paths: vec![path],
                 force: false,
@@ -988,8 +988,8 @@ fn scan_start_ack_binds_the_accepted_task() {
         })
         .unwrap();
     drop(requests);
-    run_until_disconnected(&mut core, receiver);
-    let CoreResponse::Ack(ack) = ack.recv().unwrap() else {
+    core = run_until_disconnected(core, receiver);
+    let CoreResponse::Ack(ack) = ack.blocking_recv().unwrap() else {
         panic!("Expected ack");
     };
     assert!(ack.is_success());
@@ -1125,7 +1125,7 @@ fn scan_lookup_wait_observes_cancel_and_shutdown_without_committing() {
         let id = core.active_scan.as_ref().unwrap().status.id;
         let lookup = loop {
             let event = core.scan_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-            if matches!(event, ScanEvent::KnownSource { .. }) {
+            if matches!(event, ScanEvent::KnownSources { .. }) {
                 break event;
             }
             core.scan_event(event);
@@ -1159,7 +1159,7 @@ fn cancelling_finished_but_uncommitted_scan_discards_its_result() {
     let finished = loop {
         match core.scan_rx.recv_timeout(Duration::from_secs(5)).unwrap() {
             ScanEvent::Progress { .. } => {}
-            event @ ScanEvent::KnownSource { .. } => core.scan_event(event),
+            event @ ScanEvent::KnownSources { .. } => core.scan_event(event),
             ScanEvent::Finished(scan) => break scan,
             ScanEvent::Saved(_) => panic!("Scan cannot save before Core authorizes it"),
         }
@@ -1186,7 +1186,7 @@ fn saving_scan_rejects_cancellation_and_invalidates_the_owner_cache() {
     let finished = loop {
         match core.scan_rx.recv_timeout(Duration::from_secs(5)).unwrap() {
             ScanEvent::Progress { .. } => {}
-            event @ ScanEvent::KnownSource { .. } => core.scan_event(event),
+            event @ ScanEvent::KnownSources { .. } => core.scan_event(event),
             ScanEvent::Finished(scan) => break scan,
             ScanEvent::Saved(_) => panic!("Saving requires Core authorization"),
         }
@@ -1252,13 +1252,13 @@ fn stale_scan_events_cannot_replace_the_active_task() {
         import: None,
         progress,
     }));
-    let (reply, receive) = bounded(1);
-    core.scan_event(ScanEvent::KnownSource {
+    let (reply, receive) = oneshot::channel();
+    core.scan_event(ScanEvent::KnownSources {
         id: 0,
-        path: directory.path().join("1.wav"),
+        paths: vec![directory.path().join("1.wav")],
         reply,
     });
-    assert!(receive.recv().unwrap().is_err());
+    assert!(futures::executor::block_on(receive).unwrap().is_err());
     assert_eq!(core.active_scan.as_ref().unwrap().status, before);
     assert!(core.scan_results.is_empty());
     assert!(settle_scan(&mut core));
@@ -1767,7 +1767,7 @@ fn forced_scan_reprobes_unchanged_files_instead_of_reusing_cached_metadata() {
     write_pcm(&path);
     let mut scanned = library::scan_paths(
         std::slice::from_ref(&path),
-        |_| Ok(None),
+        |paths| Ok(vec![None; paths.len()]),
         false,
         &[_directory.path().to_path_buf()],
         core.state.system.config.scan_max_depth,
@@ -1982,7 +1982,7 @@ fn accepted_import_allows_dispatch_and_cancellation_before_commit() {
     // Hold the worker at its existing owner lookup, without timing assumptions.
     let lookup = loop {
         let event = core.scan_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        if matches!(&event, ScanEvent::KnownSource { .. }) {
+        if matches!(&event, ScanEvent::KnownSources { .. }) {
             break event;
         }
         core.scan_event(event);
@@ -2007,13 +2007,14 @@ fn accepted_import_allows_dispatch_and_cancellation_before_commit() {
 }
 
 fn settle_optimization(core: &mut Core) -> Result<()> {
-    let result = core
-        .active_optimization
-        .as_ref()
-        .unwrap()
-        .finished
-        .recv_timeout(Duration::from_secs(15))
-        .unwrap();
+    let executor = core.executor.clone();
+    let finished = &mut core.active_optimization.as_mut().unwrap().finished;
+    let result = wait_on(&executor, async {
+        tokio::time::timeout(Duration::from_secs(15), finished)
+            .await
+            .unwrap()
+            .unwrap()
+    });
     let (reply, result) = core.finish_optimization(result);
     assert!(reply.is_none());
     assert!(core.active_optimization.is_none());
@@ -2024,18 +2025,19 @@ fn settle_optimization(core: &mut Core) -> Result<()> {
 fn database_optimization_remains_single_flight_after_requester_disconnects() {
     let (_directory, mut core) = fixture_with_database(Some(10.0), true);
     core.command(Command::OptimizeDatabase).unwrap();
-    let (reply, requester) = bounded(1);
+    let (reply, requester) = oneshot::channel();
     core.active_optimization.as_mut().unwrap().reply = Some(reply);
     drop(requester);
     assert!(core.command(Command::OptimizeDatabase).is_err());
     assert!(core.active_optimization.is_some());
-    let result = core
-        .active_optimization
-        .as_ref()
-        .unwrap()
-        .finished
-        .recv_timeout(Duration::from_secs(15))
-        .unwrap();
+    let executor = core.executor.clone();
+    let finished = &mut core.active_optimization.as_mut().unwrap().finished;
+    let result = wait_on(&executor, async {
+        tokio::time::timeout(Duration::from_secs(15), finished)
+            .await
+            .unwrap()
+            .unwrap()
+    });
     // Even an available result does not retire the operation or replay it.
     assert!(core.command(Command::OptimizeDatabase).is_err());
     let (reply, result) = core.finish_optimization(result);

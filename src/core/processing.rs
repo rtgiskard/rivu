@@ -887,11 +887,17 @@ impl Core {
         self.engine.ensure_command_capacity(2)?;
         let generation = self.generation;
         let mut bookkeeping = Ok(());
-        let snapshot = self.engine.stop_request().wait(|event| {
-            if bookkeeping.is_ok() {
-                bookkeeping = self.retiring_audio_event(generation, event);
-            }
-        });
+        let executor = self.executor.clone();
+        let mut stop = self.engine.stop_request();
+        let snapshot = wait_on(
+            &executor,
+            stop.wait(|event| {
+                if bookkeeping.is_ok() {
+                    bookkeeping = self.retiring_audio_event(generation, event);
+                }
+            }),
+        );
+        self.engine.restore_events(stop.into_events());
         let snapshot = match snapshot {
             Ok(snapshot) if bookkeeping.is_ok() => snapshot,
             other => return self.finish_playback(other.map(Some), false, bookkeeping),

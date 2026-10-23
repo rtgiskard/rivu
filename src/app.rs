@@ -192,15 +192,19 @@ impl AppHandle {
     }
 
     pub(crate) fn request_ack(&self, command: AppCommand) -> Ack {
+        let _guard = self.core.executor().enter();
+        futures::executor::block_on(self.request_ack_async(command))
+    }
+
+    pub(crate) async fn request_ack_async(&self, command: AppCommand) -> Ack {
         match command {
-            AppCommand::Core(command) => self.core.request_ack(command),
-            AppCommand::ShowWindow => {
-                let result = self.raise();
-                Ack::from_result(result, self.core.revision())
-            }
+            AppCommand::Core(command) => self.core.request_ack_async(command).await,
+            AppCommand::ShowWindow => Ack::from_result(self.raise(), self.core.revision()),
             AppCommand::Shutdown => {
                 let _ = self.request_shutdown();
-                self.runtime.shutdown_ack(|| self.core.revision())
+                self.runtime
+                    .shutdown_ack_async(|| self.core.revision())
+                    .await
             }
         }
     }
@@ -605,7 +609,7 @@ impl App {
     /// Drain producers before flushing, only after core join and outside GPUI.
     fn stop_services(&mut self) {
         drop(self.media.take());
-        // Server::drop stops acceptance and drains accepted operations before joining.
+        // Server::drop drains its JoinSet while Core still owns the Tokio driver.
         drop(self.server.take());
         drop(self.signals.take());
         if let Some(mut session) = self.session.take() {
@@ -887,5 +891,65 @@ mod tests {
         std::fs::write(&config, b"invalid config intentionally").unwrap();
         assert!(App::start(directory.path().to_owned(), config, Vec::new(), false).is_err());
         assert!(ipc::SocketOwner::acquire(directory.path()).is_ok());
+    }
+
+    #[test]
+    fn ipc_commands_and_sql_queries_finish_with_the_entire_blocking_pool_occupied() {
+        let (directory, mut runtime) = runtime_fixture();
+        let owner = ipc::SocketOwner::acquire(directory.path()).unwrap();
+        let app = AppHandle::new(&runtime, false);
+        let server = ipc::Server::start(&owner, runtime.handle.clone(), app.clone()).unwrap();
+        let (started, running) = bounded(4);
+        let (release, released) = bounded::<()>(0);
+        let workers: Vec<_> = (0..4)
+            .map(|_| {
+                let started = started.clone();
+                let released = released.clone();
+                runtime.handle.executor().spawn_blocking(move || {
+                    started.send(()).unwrap();
+                    let _ = released.recv();
+                })
+            })
+            .collect();
+        for _ in 0..4 {
+            running.recv_timeout(Duration::from_secs(5)).unwrap();
+        }
+        assert!(
+            ipc::request_ack(directory.path(), &Command::Volume { value: 0.4 })
+                .unwrap()
+                .is_success()
+        );
+        assert_eq!(
+            ipc::get_state(directory.path(), crate::response::StateSections::ALL)
+                .unwrap()
+                .playback
+                .unwrap()
+                .playback
+                .volume,
+            0.4
+        );
+        assert!(matches!(
+            ipc::query(
+                directory.path(),
+                &crate::model::Query::Track { track_id: 1 }
+            )
+            .unwrap()
+            .result,
+            Ok(crate::response::ViewResponse::Track(None))
+        ));
+        // No waiter borrowed a blocking slot; producers can run as soon as
+        // capacity is released, without restarting or replaying any request.
+        drop(release);
+        for worker in workers {
+            futures::executor::block_on(worker).unwrap();
+        }
+        assert!(
+            ipc::request_ack(directory.path(), &Command::OptimizeDatabase)
+                .unwrap()
+                .is_success()
+        );
+        app.request_shutdown().unwrap();
+        runtime.join().unwrap();
+        drop(server);
     }
 }

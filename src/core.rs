@@ -1,3 +1,8 @@
+//! Core waits for events and applies state transitions on one dedicated owner.
+//! Tokio drives bounded admission, async replies, IPC and independent long jobs.
+//! Caller timeout never cancels admitted work or authorizes replay. Real-time
+//! audio stays independent; shutdown completion includes physical retirement.
+
 use crate::{
     config::{Config, ConfigPatch, ConfigPersistence, LibraryColumn},
     library::{self, M3uItem, ScanResult},
@@ -12,7 +17,8 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use crossbeam_channel::{Receiver, Sender, bounded};
-use parking_lot::{Condvar, Mutex, RwLock};
+use futures::FutureExt;
+use parking_lot::{Mutex, RwLock};
 use rand::seq::SliceRandom;
 use rivu_audio::analysis::{AnalysisControl, AnalysisFrame, DisplayDemand};
 use rivu_audio::{self as audio, AudioCommand, AudioEngine, AudioEvent, DecoderHint, MediaInfo};
@@ -23,6 +29,10 @@ use std::{
     thread::{self, JoinHandle},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+use tokio::sync::{Notify, mpsc, oneshot, watch};
+
+mod tasks;
+use tasks::{TaskRuntime, wait_on};
 
 mod query_epoch;
 pub(crate) use query_epoch::{QueryEpoch, QueryTicket};
@@ -37,6 +47,7 @@ type QueryTimeout = Arc<dyn Fn(QueryResponse) + Send + Sync>;
     clippy::large_enum_variant,
     reason = "Keep one-shot query replies inline instead of allocating a response box"
 )]
+#[derive(Debug)]
 enum CoreResponse {
     Query(QueryResponse),
     Ack(Ack),
@@ -69,7 +80,7 @@ pub(crate) enum GuiConfigChange {
 }
 struct Request {
     operation: Operation,
-    reply: Option<Sender<CoreResponse>>,
+    reply: Option<oneshot::Sender<CoreResponse>>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -155,11 +166,15 @@ pub struct CoreHandle {
     pub(crate) analysis: Arc<RwLock<AnalysisFrame>>,
     analysis_control: Arc<AnalysisControl>,
     pub(crate) waveform: Arc<RwLock<audio::WaveformFrame>>,
-    sender: Sender<Request>,
+    sender: mpsc::Sender<Request>,
+    executor: tokio::runtime::Handle,
+    revision_updates: watch::Receiver<StateRevisions>,
     wakeup: Arc<RwLock<Option<Wakeup>>>,
     subscribers: Arc<RwLock<Vec<Sender<()>>>>,
     // Window-scoped: cloning a GUI handle must not change IPC/CLI query policy.
     query_timeout: Option<QueryTimeout>,
+    #[cfg(test)]
+    _test_tasks: Option<Arc<TaskRuntime>>,
 }
 
 pub(crate) struct MprisServiceState {
@@ -289,6 +304,20 @@ impl CoreHandle {
         self.subscribers.write().push(sender);
         receiver
     }
+
+    pub(crate) fn subscribe_revisions(&self) -> watch::Receiver<StateRevisions> {
+        self.revision_updates.clone()
+    }
+
+    pub(crate) fn executor(&self) -> &tokio::runtime::Handle {
+        &self.executor
+    }
+
+    pub(crate) async fn query_async(&self, query: Query) -> QueryResponse {
+        self.query_with_ticket_async(query, None, false, REPLY_TIMEOUT)
+            .await
+    }
+    #[cfg(test)]
     /// Query metadata and rows are produced in the same Core dispatch.
     pub fn query(&self, query: Query) -> QueryResponse {
         self.query_with_ticket(query, None, false, REPLY_TIMEOUT)
@@ -321,13 +350,26 @@ impl CoreHandle {
         physical_retirement: bool,
         timeout: Duration,
     ) -> QueryResponse {
+        wait_on(
+            &self.executor,
+            self.query_with_ticket_async(query, ticket, physical_retirement, timeout),
+        )
+    }
+
+    async fn query_with_ticket_async(
+        &self,
+        query: Query,
+        ticket: Option<QueryTicket>,
+        physical_retirement: bool,
+        duration: Duration,
+    ) -> QueryResponse {
         if ticket.as_ref().is_some_and(|ticket| !ticket.is_current()) {
             return QueryResponse {
                 revisions: self.state.read().query_revisions_for(&query),
                 result: Err(QueryError::Cancelled),
             };
         }
-        let (tx, rx) = bounded(1);
+        let (tx, mut rx) = oneshot::channel();
         let request = Request {
             operation: Operation::Query {
                 query,
@@ -335,11 +377,29 @@ impl CoreHandle {
             },
             reply: Some(tx),
         };
-        let response = self
-            .sender
-            .send_timeout(request, ADMISSION_TIMEOUT)
-            .map_err(|error| format!("Core unavailable: {error}"))
-            .and_then(|()| self.receive_query(&rx, ticket.as_ref(), physical_retirement, timeout));
+        let response = match self.admit(request).await {
+            Err(error) => Err(format!("Core unavailable: {error}")),
+            Ok(()) => match tokio::time::timeout(duration, &mut rx).await {
+                Ok(result) => result.map_err(|error| format!("Core response unavailable: {error}")),
+                Err(error) => {
+                    let message = format!("Core response unavailable: {error}");
+                    if physical_retirement {
+                        if ticket.as_ref().is_none_or(QueryTicket::is_current)
+                            && let Some(notify) = &self.query_timeout
+                        {
+                            notify(QueryResponse {
+                                revisions: self.state.read().query_revisions(),
+                                result: Err(QueryError::Message(message.clone())),
+                            });
+                        }
+                        // Timeout ends logical waiting, never physical ownership.
+                        // GUI slots remain occupied until Core sends or disconnects.
+                        let _ = rx.await;
+                    }
+                    Err(message)
+                }
+            },
+        };
         match response {
             Ok(CoreResponse::Query(response)) => response,
             Ok(CoreResponse::Ack(_)) => unreachable!("query request returned Ack"),
@@ -350,33 +410,11 @@ impl CoreHandle {
         }
     }
 
-    fn receive_query(
-        &self,
-        receiver: &Receiver<CoreResponse>,
-        ticket: Option<&QueryTicket>,
-        physical_retirement: bool,
-        timeout: Duration,
-    ) -> std::result::Result<CoreResponse, String> {
-        match receiver.recv_timeout(timeout) {
-            Ok(response) => Ok(response),
-            Err(error) => {
-                let message = format!("Core response unavailable: {error}");
-                if physical_retirement && error == crossbeam_channel::RecvTimeoutError::Timeout {
-                    if ticket.is_none_or(QueryTicket::is_current)
-                        && let Some(notify) = &self.query_timeout
-                    {
-                        notify(QueryResponse {
-                            revisions: self.state.read().query_revisions(),
-                            result: Err(QueryError::Message(message.clone())),
-                        });
-                    }
-                    // The request still owns its Core queue/execution slot. Neither
-                    // timeout nor cancellation can retire it; never return late data.
-                    let _ = receiver.recv();
-                }
-                Err(message)
-            }
-        }
+    async fn admit(&self, request: Request) -> Result<()> {
+        tokio::time::timeout(ADMISSION_TIMEOUT, self.sender.send(request))
+            .await
+            .context("Core queue admission timed out")?
+            .context("Rivu is stopped")
     }
 
     /// Read only requested state sections under one short shared-state lock.
@@ -409,25 +447,43 @@ impl CoreHandle {
     }
 
     fn operation_ack(&self, operation: Operation, duration: Duration) -> Ack {
-        let (tx, rx) = bounded(1);
+        wait_on(
+            &self.executor,
+            self.operation_ack_async(operation, duration),
+        )
+    }
+
+    pub(crate) async fn request_ack_async(&self, command: Command) -> Ack {
+        let duration = Self::command_reply_timeout(&command);
+        self.operation_ack_async(Operation::Command(command), duration)
+            .await
+    }
+
+    async fn operation_ack_async(&self, operation: Operation, duration: Duration) -> Ack {
+        let (tx, rx) = oneshot::channel();
         let request = Request {
             operation,
             reply: Some(tx),
         };
-        if let Err(error) = self.sender.send_timeout(request, ADMISSION_TIMEOUT) {
+        if let Err(error) = self.admit(request).await {
             return Ack::new(
                 AckStatus::NotAdmitted,
                 Some(format!("Core command not admitted: {error}")),
                 self.revision(),
             );
         }
-        match rx.recv_timeout(duration) {
-            Ok(CoreResponse::Ack(ack)) => ack,
-            Ok(CoreResponse::Query(_)) => unreachable!("command request returned query"),
-            Err(error) => Ack::new(
+        match tokio::time::timeout(duration, rx).await {
+            Ok(Ok(CoreResponse::Ack(ack))) => ack,
+            Ok(Ok(CoreResponse::Query(_))) => unreachable!("command request returned query"),
+            result => Ack::new(
                 AckStatus::Unknown,
                 Some(format!(
-                    "Core command outcome unknown: {error}; do not automatically retry"
+                    "Core command outcome unknown: {}; do not automatically retry",
+                    match result {
+                        Ok(Err(error)) => error.to_string(),
+                        Err(error) => error.to_string(),
+                        Ok(Ok(_)) => unreachable!("successful responses matched above"),
+                    }
                 )),
                 self.revision(),
             ),
@@ -438,14 +494,14 @@ impl CoreHandle {
 /// Runtime lifecycle control, separate from business requests and view wakeups.
 #[derive(Clone)]
 pub(crate) struct RuntimeControl {
-    shutdown: Sender<()>,
+    shutdown: mpsc::Sender<()>,
     completion: Arc<Completion>,
 }
 
 #[derive(Default)]
 struct Completion {
     state: Mutex<CompletionState>,
-    acknowledged: Condvar,
+    acknowledged: Notify,
 }
 
 #[derive(Default)]
@@ -456,8 +512,8 @@ struct CompletionState {
 }
 
 impl RuntimeControl {
-    fn new() -> (Self, Receiver<()>) {
-        let (shutdown, receiver) = bounded(1);
+    fn new() -> (Self, mpsc::Receiver<()>) {
+        let (shutdown, receiver) = mpsc::channel(1);
         (
             Self {
                 shutdown,
@@ -469,26 +525,32 @@ impl RuntimeControl {
 
     pub(crate) fn request_shutdown(&self) -> Result<()> {
         match self.shutdown.try_send(()) {
-            Ok(()) | Err(crossbeam_channel::TrySendError::Full(())) => Ok(()),
-            Err(crossbeam_channel::TrySendError::Disconnected(())) => {
+            Ok(()) | Err(mpsc::error::TrySendError::Full(())) => Ok(()),
+            Err(mpsc::error::TrySendError::Closed(())) => {
                 anyhow::bail!("Rivu is stopped")
             }
         }
     }
 
     /// Acknowledges the shutdown request, not completion of runtime teardown.
-    pub(crate) fn shutdown_ack(&self, revision: impl Fn() -> u64) -> Ack {
+    pub(crate) async fn shutdown_ack_async(&self, revision: impl Fn() -> u64) -> Ack {
         let requested = self.request_shutdown();
-        let mut state = self.completion.state.lock();
-        let deadline = Instant::now() + REPLY_TIMEOUT;
-        while requested.is_ok() && state.ack.is_none() && !state.finished {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                break;
+        let waiting = async {
+            loop {
+                let notified = self.completion.acknowledged.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                {
+                    let state = self.completion.state.lock();
+                    if state.ack.is_some() || state.finished || requested.is_err() {
+                        return;
+                    }
+                }
+                notified.await;
             }
-            self.completion.acknowledged.wait_for(&mut state, remaining);
-        }
-        state.ack.clone().unwrap_or_else(|| {
+        };
+        let _ = tokio::time::timeout(REPLY_TIMEOUT, waiting).await;
+        self.completion.state.lock().ack.clone().unwrap_or_else(|| {
             let status = if requested.is_err() {
                 AckStatus::NotAdmitted
             } else {
@@ -508,7 +570,7 @@ impl RuntimeControl {
 
     fn acknowledge(&self, ack: Ack) {
         self.completion.state.lock().ack = Some(ack);
-        self.completion.acknowledged.notify_all();
+        self.completion.acknowledged.notify_waiters();
     }
 
     pub(crate) fn set_completion_callback(&self, callback: impl Fn() + Send + Sync + 'static) {
@@ -527,7 +589,7 @@ impl RuntimeControl {
         state.finished = true;
         let callback = state.callback.clone();
         drop(state);
-        self.completion.acknowledged.notify_all();
+        self.completion.acknowledged.notify_waiters();
         if let Some(callback) = callback {
             callback();
         }
@@ -546,6 +608,9 @@ pub struct Runtime {
     pub handle: CoreHandle,
     pub(crate) control: RuntimeControl,
     worker: Option<JoinHandle<()>>,
+    // Last field: Drop joins Core before the Tokio driver/pool can stop. App
+    // separately retires IPC before releasing this lifecycle owner.
+    _tasks: TaskRuntime,
 }
 impl Runtime {
     /// Load host configuration only when its path can be published over IPC.
@@ -602,7 +667,9 @@ impl Runtime {
         tracing::debug!("store_ready");
         let engine = AudioEngine::new(config.media_read_buffer_mb)?;
         tracing::info!("audio_engine_ready");
-        let (sender, receiver) = bounded(64);
+        let tasks = TaskRuntime::start()?;
+        let executor = tasks.handle.clone();
+        let (sender, receiver) = mpsc::channel(64);
         let (control, shutdown_receiver) = RuntimeControl::new();
         let shared = Arc::new(RwLock::new(CoreState::default()));
         let wakeup = Arc::new(RwLock::new(None));
@@ -618,94 +685,78 @@ impl Runtime {
             state
         };
         *shared.write() = initial.clone();
+        let (revision_updates, revision_rx) = watch::channel(initial.revisions);
         let handle = CoreHandle {
             state: shared.clone(),
             analysis: engine.analysis.clone(),
             analysis_control: Arc::clone(&engine.analysis_control),
             waveform: Arc::clone(&engine.waveform),
             sender,
+            executor: executor.clone(),
+            revision_updates: revision_rx,
             wakeup: wakeup.clone(),
             subscribers: subscribers.clone(),
             query_timeout: None,
+            #[cfg(test)]
+            _test_tasks: None,
+        };
+        let (scan_tx, scan_rx) = mpsc::channel(3);
+        let (relocation_tx, relocation_rx) = mpsc::channel(1);
+        let core = Core {
+            store,
+            engine,
+            logging,
+            executor: executor.clone(),
+            revision_updates,
+            state: initial,
+            shared,
+            wakeup,
+            subscribers,
+            generation: 0,
+            output_settings_request: 0,
+            queue_ids: Vec::new(),
+            playback: None,
+            retired_playback: None,
+            playback_write_deferred: false,
+            pending_bitrate: None,
+            pending_navigation: None,
+            active_export: None,
+            active_optimization: None,
+            processing: crate::processing::Service::new(data_dir.to_path_buf()),
+            processing_results: VecDeque::new(),
+            scan_tx,
+            scan_rx,
+            active_scan: None,
+            scan_results: VecDeque::new(),
+            next_scan_id: 1,
+            relocation_tx,
+            relocation_rx,
+            active_relocation: None,
+            relocation_results: VecDeque::new(),
+            next_relocation_id: 1,
+            played: Vec::new(),
+            played_cursor: 0,
+            saved_config,
+            config_save_error: None,
+            #[cfg(test)]
+            _test_tasks: None,
         };
         let worker_control = control.clone();
-        let processing_data_dir = data_dir.to_path_buf();
         let worker = thread::Builder::new()
             .name("rivu-core".into())
             .spawn(move || {
                 let _completion = CompletionGuard(worker_control.clone());
-                let (scan_tx, scan_rx) = bounded(1);
-                let (relocation_tx, relocation_rx) = bounded(1);
-                let mut core = Core {
-                    store,
-                    engine,
-                    logging,
-                    state: initial,
-                    shared,
-                    wakeup,
-                    subscribers,
-                    generation: 0,
-                    output_settings_request: 0,
-                    queue_ids: Vec::new(),
-                    playback: None,
-                    retired_playback: None,
-                    playback_write_deferred: false,
-                    pending_bitrate: None,
-                    pending_navigation: None,
-                    active_export: None,
-                    active_optimization: None,
-                    processing: crate::processing::Service::new(processing_data_dir),
-                    processing_results: VecDeque::new(),
-                    scan_tx,
-                    scan_rx,
-                    active_scan: None,
-                    scan_results: VecDeque::new(),
-                    next_scan_id: 1,
-                    relocation_tx,
-                    relocation_rx,
-                    active_relocation: None,
-                    relocation_results: VecDeque::new(),
-                    next_relocation_id: 1,
-                    played: Vec::new(),
-                    played_cursor: 0,
-                    saved_config,
-                    config_save_error: None,
-                };
-                tracing::debug!("core_worker_started");
-                let initial_load_started = Instant::now();
-                tracing::debug!("initial_load_started");
-                if let Err(error) = core.load_initial_state() {
-                    tracing::error!(error = %error, "initial_load_failed");
-                    core.state.system.last_error = Some(format!("Loading library: {error:#}"));
-                    core.publish();
-                } else {
-                    tracing::info!(
-                        elapsed_ms = initial_load_started.elapsed().as_millis(),
-                        "initial_load_completed"
-                    );
-                }
-                let _ = core.audio(AudioCommand::StillMode(core.state.system.config.still_mode));
-                let _ = core.audio(AudioCommand::Volume(core.state.playback.volume));
-                let _ = core.audio(AudioCommand::FfmpegEnabled(
-                    core.state.system.config.ffmpeg_enabled,
-                ));
-                let _ = core.audio(AudioCommand::OutputSettings {
-                    request: core.output_settings_request,
-                    device: core.state.system.selected_device.clone(),
-                    auto_mix: core.state.system.config.pipewire_auto_mix,
-                });
-                let _ = core.audio(AudioCommand::AnalysisSettings(
-                    core.state.system.config.as_ref().into(),
-                ));
-                let _ = core.audio(AudioCommand::Equalizer(Arc::new(
-                    core.state.system.config.equalizer.clone(),
-                )));
+                // Local ownership ensures unwind drops Core before publishing
+                // completion, on this thread rather than the shared reactor.
+                let mut core = core;
+                core.initialize();
                 core.run(receiver, shutdown_receiver, &worker_control);
             })?;
         Ok(Self {
             handle,
             control,
             worker: Some(worker),
+            _tasks: tasks,
         })
     }
     pub fn is_finished(&self) -> bool {
@@ -714,11 +765,7 @@ impl Runtime {
             .is_none_or(|worker| worker.is_finished())
     }
     pub fn join(&mut self) -> thread::Result<()> {
-        if let Some(worker) = self.worker.take() {
-            worker.join()
-        } else {
-            Ok(())
-        }
+        self.worker.take().map_or(Ok(()), JoinHandle::join)
     }
 }
 impl Drop for Runtime {
@@ -775,10 +822,10 @@ enum ScanEvent {
         id: u64,
         progress: ScanProgress,
     },
-    KnownSource {
+    KnownSources {
         id: u64,
-        path: PathBuf,
-        reply: Sender<Result<Option<library::KnownFile>>>,
+        paths: Vec<PathBuf>,
+        reply: tokio::sync::oneshot::Sender<Result<Vec<Option<library::KnownFile>>>>,
     },
     Finished(ScanFinished),
     Saved(catalog::ScanSaved),
@@ -787,20 +834,20 @@ const MAX_RETAINED_SCAN_RESULTS: usize = 32;
 struct ScanTask {
     status: ScanTaskStatus,
     cancellation: library::ScanCancellation,
-    worker: JoinHandle<()>,
+    worker: tokio::task::JoinHandle<()>,
     pending_save: Option<ScanFinished>,
 }
 struct RelocationTask {
     status: RelocationTaskStatus,
     prepared: crate::store::PreparedRelocation,
     cancellation: library::ScanCancellation,
-    worker: Option<JoinHandle<()>>,
+    worker: Option<tokio::task::JoinHandle<()>>,
 }
 impl Drop for RelocationTask {
     fn drop(&mut self) {
         self.cancellation.cancel();
         if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
+            let _ = futures::executor::block_on(worker);
         }
     }
 }
@@ -812,6 +859,8 @@ struct Core {
     store: Store,
     engine: AudioEngine,
     logging: Option<logging::Control>,
+    executor: tokio::runtime::Handle,
+    revision_updates: watch::Sender<StateRevisions>,
     state: CoreState,
     shared: Arc<RwLock<CoreState>>,
     wakeup: Arc<RwLock<Option<Wakeup>>>,
@@ -830,13 +879,13 @@ struct Core {
     active_optimization: Option<maintenance::OptimizationTask>,
     processing: crate::processing::Service,
     processing_results: VecDeque<ProcessingTaskStatus>,
-    scan_tx: Sender<ScanEvent>,
-    scan_rx: Receiver<ScanEvent>,
+    scan_tx: mpsc::Sender<ScanEvent>,
+    scan_rx: mpsc::Receiver<ScanEvent>,
     active_scan: Option<ScanTask>,
     scan_results: VecDeque<ScanTaskStatus>,
     next_scan_id: u64,
-    relocation_tx: Sender<RelocationFinished>,
-    relocation_rx: Receiver<RelocationFinished>,
+    relocation_tx: mpsc::Sender<RelocationFinished>,
+    relocation_rx: mpsc::Receiver<RelocationFinished>,
     active_relocation: Option<RelocationTask>,
     relocation_results: VecDeque<RelocationTaskStatus>,
     next_relocation_id: u64,
@@ -845,6 +894,31 @@ struct Core {
     played_cursor: usize,
     saved_config: Option<Config>,
     config_save_error: Option<String>,
+    #[cfg(test)]
+    _test_tasks: Option<TaskRuntime>,
+}
+
+impl Drop for Core {
+    fn drop(&mut self) {
+        // Runs on the dedicated Core owner (or a synchronous test owner),
+        // including unwind. Cancellation is intent, never retirement.
+        drop(self.active_export.take());
+        if let Some(task) = self.active_scan.take() {
+            if task.status.progress.phase != ScanPhase::Saving {
+                task.cancellation.cancel();
+            }
+            self.scan_rx.close();
+            while self.scan_rx.try_recv().is_ok() {}
+            let _ = futures::executor::block_on(task.worker);
+            while self.scan_rx.try_recv().is_ok() {}
+        }
+        self.relocation_rx.close();
+        while self.relocation_rx.try_recv().is_ok() {}
+        drop(self.active_relocation.take());
+        while self.relocation_rx.try_recv().is_ok() {}
+        drop(self.active_optimization.take());
+        // AudioEngine::drop sends shutdown and physically joins its worker.
+    }
 }
 impl Core {
     fn load_initial_state(&mut self) -> Result<()> {

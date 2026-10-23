@@ -6,19 +6,24 @@ use super::*;
 use crate::model::{CueSegment, PlaylistExportTrack, ScanPhase, Track};
 use anyhow::{Context, Result};
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
 
 fn known_source(
     known: &[(PathBuf, KnownFile)],
-) -> impl FnMut(&Path) -> Result<Option<KnownFile>> + '_ {
-    move |path| {
-        Ok(known
+) -> impl FnMut(&[PathBuf]) -> Result<Vec<Option<KnownFile>>> + '_ {
+    move |paths| {
+        Ok(paths
             .iter()
-            .filter(|(key, _)| key == path)
-            .min_by_key(|(_, file)| file.cue.is_some())
-            .map(|(_, file)| file.clone()))
+            .map(|path| {
+                known
+                    .iter()
+                    .filter(|(key, _)| key == path)
+                    .min_by_key(|(_, file)| file.cue.is_some())
+                    .map(|(_, file)| file.clone())
+            })
+            .collect())
     }
 }
 
@@ -51,6 +56,95 @@ fn scan_paths(
         &ScanCancellation::default(),
         |_, _, _, _, _| {},
     )
+}
+
+#[test]
+fn source_lookup_batches_are_bounded_and_cover_only_encountered_sources() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let root = directory.path().to_path_buf();
+    let count = 2 * super::scan::SOURCE_BATCH_SIZE + 1;
+    for index in 0..count {
+        wav(&root.join(format!("{index:03}.wav")), 75)?;
+    }
+    let mut batches = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let result = super::scan_paths(
+        std::slice::from_ref(&root),
+        |paths| {
+            assert!(paths.len() <= super::scan::SOURCE_BATCH_SIZE);
+            batches.push(paths.len());
+            for path in paths {
+                assert!(path.starts_with(&root));
+                assert!(
+                    seen.insert(path.clone()),
+                    "source must be admitted only once"
+                );
+            }
+            Ok(vec![None; paths.len()])
+        },
+        false,
+        std::slice::from_ref(&root),
+        1,
+        &ScanCancellation::default(),
+        |_, _, _, _, _| {},
+    )?;
+    assert!(result.errors.is_empty(), "{:?}", result.errors);
+    assert_eq!(result.records.len(), count);
+    assert_eq!(seen.len(), count);
+    assert_eq!(
+        batches,
+        [
+            super::scan::SOURCE_BATCH_SIZE,
+            super::scan::SOURCE_BATCH_SIZE,
+            1
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn cue_lookup_batches_share_sources_across_sheet_batches() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let root = directory.path().to_path_buf();
+    let count = super::scan::SOURCE_BATCH_SIZE + 1;
+    for index in 0..count {
+        wav(&root.join(format!("{index:03}.wav")), 75)?;
+        fs::write(
+            root.join(format!("{index:03}.cue")),
+            format!("FILE \"{index:03}.wav\" WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\n"),
+        )?;
+    }
+    fs::write(
+        root.join("shared.cue"),
+        "FILE \"000.wav\" WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\n",
+    )?;
+    let mut batches = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let result = super::scan_paths(
+        std::slice::from_ref(&root),
+        |paths| {
+            batches.push(paths.len());
+            for path in paths {
+                assert!(
+                    seen.insert(path.clone()),
+                    "shared CUE sources must not be reprobed"
+                );
+            }
+            Ok(vec![None; paths.len()])
+        },
+        false,
+        std::slice::from_ref(&root),
+        1,
+        &ScanCancellation::default(),
+        |_, _, _, _, _| {},
+    )?;
+    assert!(result.errors.is_empty(), "{:?}", result.errors);
+    assert_eq!(batches, [super::scan::SOURCE_BATCH_SIZE, 1]);
+    assert_eq!(seen.len(), count);
+    assert_eq!(result.records.len(), count + 1);
+    assert!(result.records.iter().all(|record| record.cue.is_some()));
+    assert_eq!(result.suppressed_sources.len(), count);
+    Ok(())
 }
 
 #[test]
@@ -162,7 +256,7 @@ fn new_and_retargeted_cue_sheets_reuse_known_sources_outside_request_scope() -> 
         };
         let scan = super::scan_paths(
             &[requested],
-            |path| store.known_source(path),
+            |paths| paths.iter().map(|path| store.known_source(path)).collect(),
             false,
             &[directory.path().to_path_buf()],
             crate::config::Config::default().scan_max_depth,
@@ -259,7 +353,7 @@ fn cancellation_is_shared_and_discards_discovery_or_accumulated_records() -> Res
         assert!(owner.check().is_ok());
         let outcome = super::scan_paths(
             std::slice::from_ref(&root),
-            |_| Ok(None),
+            |paths| Ok(vec![None; paths.len()]),
             false,
             std::slice::from_ref(&root),
             1,
@@ -283,7 +377,7 @@ fn cancellation_is_shared_and_discards_discovery_or_accumulated_records() -> Res
     assert!(
         super::scan_paths(
             std::slice::from_ref(&root),
-            |_| Ok(None),
+            |paths| Ok(vec![None; paths.len()]),
             false,
             std::slice::from_ref(&root),
             1,
@@ -297,19 +391,97 @@ fn cancellation_is_shared_and_discards_discovery_or_accumulated_records() -> Res
 }
 
 #[test]
+fn async_source_lookup_releases_the_only_blocking_slot() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let root = directory.path().to_path_buf();
+    let audio = root.join("audio.wav");
+    wav(&audio, 150)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()?;
+    runtime.block_on(async {
+        let cancellation = ScanCancellation::default();
+        let (lookup, requested) = tokio::sync::oneshot::channel();
+        let (reply, response) = tokio::sync::oneshot::channel::<Result<Vec<Option<KnownFile>>>>();
+        let mut lookup = Some(lookup);
+        let mut response = Some(response);
+        let paths = [root.clone()];
+        let scan = super::scan_paths_with_cues(
+            &paths,
+            |paths| {
+                assert_eq!(paths.as_slice(), std::slice::from_ref(&audio));
+                lookup.take().unwrap().send(()).unwrap();
+                let response = response.take().unwrap();
+                async move { response.await.context("lookup owner disconnected")? }
+            },
+            false,
+            &paths,
+            1,
+            (&cancellation, None),
+            |_, _, _, _, _| {},
+        );
+        let owner = async {
+            requested.await?;
+            // This cannot run if an entire scan closure occupies the sole slot
+            // while synchronously waiting for its source lookup reply.
+            tokio::time::timeout(Duration::from_secs(5), tokio::task::spawn_blocking(|| ()))
+                .await??;
+            reply.send(Ok(vec![None])).unwrap();
+            anyhow::Ok(())
+        };
+        let (result, owner) = tokio::join!(scan, owner);
+        owner?;
+        let result = result?;
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.records.len(), 1);
+        assert_eq!(result.records[0].path, audio);
+        anyhow::Ok(())
+    })
+}
+
+#[tokio::test]
+async fn cancellation_wakes_every_async_waiter_and_remains_observable() {
+    let cancellation = ScanCancellation::default();
+    let first = cancellation.clone();
+    let second = cancellation.clone();
+    let (first, second, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(
+            async move {
+                first.cancelled().await;
+                first.check()
+            },
+            async move {
+                second.cancelled().await;
+                second.check()
+            },
+            async {
+                tokio::task::yield_now().await;
+                cancellation.cancel();
+            },
+        )
+    })
+    .await
+    .unwrap();
+    assert!(first.is_err());
+    assert!(second.is_err());
+    tokio::time::timeout(Duration::from_secs(5), cancellation.cancelled())
+        .await
+        .unwrap();
+    assert!(cancellation.is_cancelled());
+}
+
+#[test]
 fn cancellation_during_a_hash_read_stops_at_the_chunk_boundary() {
     struct CancellingReader {
         cancellation: ScanCancellation,
         reads: usize,
     }
-    impl Read for CancellingReader {
+    impl std::io::Read for CancellingReader {
         fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
             self.reads += 1;
             if self.reads == 2 {
                 self.cancellation.cancel();
-            }
-            if self.reads > 2 {
-                return Ok(0);
             }
             buffer.fill(1);
             Ok(buffer.len())
@@ -320,58 +492,92 @@ fn cancellation_during_a_hash_read_stops_at_the_chunk_boundary() {
         cancellation: cancellation.clone(),
         reads: 0,
     };
-    assert!(super::scan::hash_reader(&mut reader, &cancellation).is_err());
+    let mut scratch = [0; 128 * 1024];
+    let mut hasher = blake3::Hasher::new();
+    let first = super::scan::hash_chunk(&mut reader, &mut scratch, &mut hasher, &cancellation);
+    assert_eq!(first.unwrap(), Some(scratch.len()));
+    let first_hash = hasher.finalize();
+    assert!(
+        super::scan::hash_chunk(&mut reader, &mut scratch, &mut hasher, &cancellation).is_err()
+    );
+    assert_eq!(
+        hasher.finalize(),
+        first_hash,
+        "cancelled read must not enter the fingerprint"
+    );
     assert_eq!(reader.reads, 2);
 }
 
-#[test]
-fn bounded_playlist_reads_enforce_capacity_and_cancellation_boundaries() -> Result<()> {
-    use super::input::{MAX_CUE_BYTES, read_chunks, read_input};
+#[tokio::test]
+async fn bounded_playlist_reads_enforce_capacity_and_cancellation_boundaries() -> Result<()> {
+    use super::input::{MAX_CUE_BYTES, read_chunks_async, read_input_async};
 
     let directory = tempfile::tempdir()?;
     let sheet = directory.path().join("album.cue");
     let cancellation = ScanCancellation::default();
     let bytes = vec![b' '; MAX_CUE_BYTES];
     fs::write(&sheet, &bytes)?;
-    assert_eq!(read_input(&sheet, MAX_CUE_BYTES, &cancellation)?, bytes);
+    assert_eq!(
+        read_input_async(&sheet, MAX_CUE_BYTES, &cancellation).await?,
+        bytes
+    );
     File::options()
         .write(true)
         .open(&sheet)?
         .set_len(MAX_CUE_BYTES as u64 + 1)?;
-    assert!(read_input(&sheet, MAX_CUE_BYTES, &cancellation).is_err());
+    assert!(
+        read_input_async(&sheet, MAX_CUE_BYTES, &cancellation)
+            .await
+            .is_err()
+    );
     // A source that grows after metadata was checked is still bounded per chunk.
-    let mut grown = std::io::Cursor::new(vec![b' '; MAX_CUE_BYTES + 1]);
-    assert!(read_chunks(&mut grown, MAX_CUE_BYTES, &cancellation).is_err());
+    let grown = std::io::Cursor::new(vec![b' '; MAX_CUE_BYTES + 1]);
+    assert!(
+        read_chunks_async(grown, Vec::new(), MAX_CUE_BYTES, &cancellation)
+            .await
+            .is_err()
+    );
 
     struct CancellingReader {
         cancellation: ScanCancellation,
-        reads: usize,
+        reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
         at_eof: bool,
     }
-    impl Read for CancellingReader {
+    impl std::io::Read for CancellingReader {
         fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
-            self.reads += 1;
+            self.reads
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             self.cancellation.cancel();
-            buffer.fill(b' ');
-            Ok(if self.at_eof { 0 } else { buffer.len() })
+            if self.at_eof {
+                Ok(0)
+            } else {
+                buffer.fill(b' ');
+                Ok(buffer.len())
+            }
         }
     }
     for at_eof in [false, true] {
         let cancellation = ScanCancellation::default();
-        let mut reader = CancellingReader {
+        let reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let reader = CancellingReader {
             cancellation: cancellation.clone(),
-            reads: 0,
+            reads: reads.clone(),
             at_eof,
         };
-        assert!(read_chunks(&mut reader, MAX_CUE_BYTES, &cancellation).is_err());
-        assert_eq!(reader.reads, 1);
+        assert!(
+            read_chunks_async(reader, Vec::new(), MAX_CUE_BYTES, &cancellation)
+                .await
+                .is_err()
+        );
+        assert_eq!(reads.load(std::sync::atomic::Ordering::Relaxed), 1);
         // Cancellation wins before metadata lookup or decoding malformed input.
         assert!(
-            read_input(
+            read_input_async(
                 &directory.path().join("absent.cue"),
                 MAX_CUE_BYTES,
                 &cancellation
             )
+            .await
             .unwrap_err()
             .to_string()
             .contains("cancelled")
@@ -631,13 +837,13 @@ fn opened_scan_source_keeps_metadata_and_hash_when_its_symlink_is_retargeted() -
             let mut lookups = 0;
             let result = super::scan_paths(
                 &[requested],
-                |path| {
-                    assert_eq!(path, audio.as_path());
+                |paths| {
+                    assert_eq!(paths, std::slice::from_ref(&audio));
                     lookups += 1;
                     // The scanner has opened the original target before this lookup.
                     fs::remove_file(&audio)?;
                     std::os::unix::fs::symlink(&second, &audio)?;
-                    Ok(None)
+                    Ok(vec![None])
                 },
                 enabled,
                 &[root],
@@ -679,12 +885,12 @@ fn in_place_source_changes_fail_scans_instead_of_mixing_versions() -> Result<()>
             let mut changed = false;
             let result = super::scan_paths(
                 std::slice::from_ref(&audio),
-                |path| {
-                    assert_eq!(path, audio.as_path());
+                |paths| {
+                    assert_eq!(paths, std::slice::from_ref(&audio));
                     // Rewrite the already opened inode, not a replacement pathname.
                     wav(&audio, frames)?;
                     changed = true;
-                    Ok(cached.then(|| known.clone()))
+                    Ok(vec![cached.then(|| known.clone())])
                 },
                 enabled,
                 &[root],
@@ -871,13 +1077,18 @@ fn explicit_non_utf8_scopes_do_not_abort_valid_scan_reconciliation() -> Result<(
             let mut events = Vec::new();
             let result = super::scan_paths(
                 &requested,
-                |path| {
-                    assert!(path.starts_with(&good_root));
-                    if force {
-                        Ok(None)
-                    } else {
-                        store.known_source(path)
-                    }
+                |paths| {
+                    paths
+                        .iter()
+                        .map(|path| {
+                            assert!(path.starts_with(&good_root));
+                            if force {
+                                Ok(None)
+                            } else {
+                                store.known_source(path)
+                            }
+                        })
+                        .collect()
                 },
                 false,
                 std::slice::from_ref(&root),
@@ -1294,7 +1505,7 @@ fn missing_requests_keep_normalized_logical_roots_and_progress_paths() -> Result
     let mut progress_paths = Vec::new();
     let result = super::scan_paths(
         &[requested],
-        |_| Ok(None),
+        |paths| Ok(vec![None; paths.len()]),
         false,
         &[directory.path().to_path_buf()],
         crate::config::Config::default().scan_max_depth,
@@ -1322,7 +1533,7 @@ fn linked_root_keeps_alias_in_records_roots_and_progress() -> Result<()> {
     let mut progress_paths = Vec::new();
     let result = super::scan_paths(
         &[alias.join("unused/../.")],
-        |_| Ok(None),
+        |paths| Ok(vec![None; paths.len()]),
         false,
         std::slice::from_ref(&alias),
         crate::config::Config::default().scan_max_depth,
@@ -1437,7 +1648,7 @@ fn cue_in_linked_tree_keeps_sheet_and_source_aliases_across_roots() -> Result<()
     )?;
     let result = super::scan_paths(
         std::slice::from_ref(&root),
-        |_| Ok(None),
+        |paths| Ok(vec![None; paths.len()]),
         false,
         &[root.clone(), other_root],
         crate::config::Config::default().scan_max_depth,
@@ -1477,7 +1688,7 @@ fn scan_progress_reports_deduplicated_candidates_and_suppressed_tasks() -> Resul
     let mut events = Vec::new();
     let result = super::scan_paths(
         &paths,
-        |_| Ok(None),
+        |paths| Ok(vec![None; paths.len()]),
         false,
         &library_roots,
         crate::config::Config::default().scan_max_depth,
@@ -1629,7 +1840,7 @@ fn scan_depth_zero_is_rejected_by_library_api() -> Result<()> {
     let root = logical_path(directory.path())?;
     let error = super::scan_paths(
         std::slice::from_ref(&root),
-        |_| Ok(None),
+        |paths| Ok(vec![None; paths.len()]),
         false,
         std::slice::from_ref(&root),
         0,
@@ -1734,7 +1945,7 @@ fn cue_sources_require_logical_membership_in_any_configured_root() -> Result<()>
     let library_roots = vec![logical_path(inside.path())?];
     let control = super::scan_paths(
         std::slice::from_ref(&sheet),
-        |_| Ok(None),
+        |paths| Ok(vec![None; paths.len()]),
         false,
         &[logical_path(inside.path())?, logical_path(outside.path())?],
         crate::config::Config::default().scan_max_depth,
@@ -1747,7 +1958,7 @@ fn cue_sources_require_logical_membership_in_any_configured_root() -> Result<()>
     let mut events = Vec::new();
     let result = super::scan_paths(
         std::slice::from_ref(&sheet),
-        |_| Ok(None),
+        |paths| Ok(vec![None; paths.len()]),
         false,
         &library_roots,
         crate::config::Config::default().scan_max_depth,
@@ -2242,6 +2453,22 @@ fn playlist_tracks<'a>(
             .map(export_track)
             .context("Missing fixture track")
     })
+}
+
+// Scan/import fixtures stay synchronous; the actual writer is driven by Tokio,
+// including its awaited filesystem operations and streaming input boundary.
+fn export_m3u<I>(path: &Path, tracks: I, cancellation: &ScanCancellation) -> Result<()>
+where
+    I: IntoIterator<Item = Result<PlaylistExportTrack>>,
+{
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(super::export_m3u(
+            path,
+            futures::stream::iter(tracks),
+            cancellation,
+        ))
 }
 
 #[test]

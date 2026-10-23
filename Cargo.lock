@@ -5074,6 +5074,7 @@ dependencies = [
  "symphonia-metadata",
  "tempfile",
  "tokio",
+ "tokio-util",
  "toml 1.1.8+spec-1.1.0",
  "tracing",
  "tracing-appender",
@@ -5081,7 +5082,6 @@ dependencies = [
  "unic-langid",
  "unicode-segmentation",
  "url",
- "walkdir",
  "zbus",
 ]
 
@@ -5092,6 +5092,7 @@ dependencies = [
  "anyhow",
  "bindgen",
  "crossbeam-channel",
+ "futures",
  "hound",
  "libc",
  "libloading 0.9.0",
@@ -5108,6 +5109,8 @@ dependencies = [
  "symphonia",
  "symphonia-metadata",
  "tempfile",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -6307,6 +6310,20 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.9",
+]
+
+[[package]]
+name = "tokio-util"
+version = "0.7.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e464cf451ba96ebfc6f9b6542f17ee8b8956e33f1e40d9690624e59d7a7f8a4b"
+dependencies = [
+ "bytes",
+ "futures-core",
+ "futures-sink",
+ "futures-util",
+ "pin-project-lite",
+ "tokio",
 ]
 
 [[package]]

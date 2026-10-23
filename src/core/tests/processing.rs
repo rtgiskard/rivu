@@ -23,13 +23,18 @@ fn source(directory: &Path) -> Vec<f32> {
     writer.finalize().unwrap();
     samples
 }
-fn completion(core: &Core) -> crate::processing::Event {
+fn next_processing_event(core: &mut Core, timeout: Duration) -> Result<crate::processing::Event> {
+    wait_on(&core.executor, async {
+        tokio::time::timeout(timeout, core.processing.receiver.recv())
+            .await
+            .context("Timed out waiting for processing event")?
+            .context("Processing event channel disconnected")
+    })
+}
+
+fn completion(core: &mut Core) -> crate::processing::Event {
     loop {
-        let event = core
-            .processing
-            .receiver
-            .recv_timeout(Duration::from_secs(10))
-            .unwrap();
+        let event = next_processing_event(core, Duration::from_secs(10)).unwrap();
         if matches!(event, crate::processing::Event::Finished { .. }) {
             return event;
         }
@@ -44,19 +49,21 @@ fn recording_final_snapshot(
     core: &mut Core,
     snapshot: audio::AudioSnapshot,
 ) -> Receiver<AudioCommand> {
-    let (commands, receive) = bounded(64);
+    let (commands, mut receive) = mpsc::channel(64);
     let previous = core.engine.replace_commands(commands);
     let (record, recorded) = crossbeam_channel::unbounded();
     thread::spawn(move || {
         let _previous = previous;
-        while let Ok(command) = receive.recv() {
-            let reply = match &command {
-                AudioCommand::StopAndSnapshot(reply) => Some(reply.clone()),
-                _ => None,
-            };
-            let _ = record.send(command);
-            if let Some(reply) = reply {
-                let _ = reply.send(snapshot);
+        while let Some(command) = receive.blocking_recv() {
+            match command {
+                AudioCommand::StopAndSnapshot(reply) => {
+                    let (recorded_reply, _) = oneshot::channel();
+                    let _ = record.send(AudioCommand::StopAndSnapshot(recorded_reply));
+                    let _ = reply.send(snapshot);
+                }
+                command => {
+                    let _ = record.send(command);
+                }
             }
         }
     });
@@ -97,7 +104,7 @@ fn cancellation_after_physical_completion_still_prevents_publication() {
     source(directory.path());
     core.start_processing(1, ProcessingOperation::Denoise, None)
         .unwrap();
-    let event = completion(&core);
+    let event = completion(&mut core);
     core.processing.cancel(1).unwrap();
     core.processing_event(event);
     assert_eq!(
@@ -112,7 +119,7 @@ fn changed_source_between_completion_and_commit_is_rejected() {
     source(directory.path());
     core.start_processing(1, ProcessingOperation::Denoise, None)
         .unwrap();
-    let event = completion(&core);
+    let event = completion(&mut core);
     std::fs::write(directory.path().join("1.wav"), b"replacement").unwrap();
     core.processing_event(event);
     assert_eq!(
@@ -176,7 +183,7 @@ fn empty_equalizer_batches_use_log_uniform_neutral_cell_centers() {
     use rivu_dsp::equalizer::config::{EqBand, MAX_BANDS};
     for count in [1, 6, MAX_BANDS] {
         let (_directory, mut core) = fixture();
-        let (commands, receive) = bounded(64);
+        let (commands, mut receive) = mpsc::channel(64);
         let _idle_commands = core.engine.replace_commands(commands);
         assert!(core.state.current_track.is_none());
         core.equalizer_edit(EqualizerEdit::AddBands { count })
@@ -271,7 +278,7 @@ fn equalizer_batches_fill_largest_log_gaps_without_rewriting_edited_bands() {
 fn invalid_equalizer_batch_counts_preserve_memory_disk_and_audio_atomically() {
     use rivu_dsp::equalizer::config::MAX_BANDS;
     let (_directory, mut core) = fixture();
-    let (commands, receive) = bounded(64);
+    let (commands, mut receive) = mpsc::channel(64);
     let _idle_commands = core.engine.replace_commands(commands);
     core.equalizer_edit(EqualizerEdit::AddBand {
         band: rivu_dsp::equalizer::config::EqBand::default(),
@@ -376,7 +383,7 @@ fn rate_bounded_gap_filling_preserves_existing_out_of_range_bands() {
 #[test]
 fn unusable_equalizer_batch_frequency_range_is_rejected_atomically() {
     let (_directory, mut core) = fixture();
-    let (commands, receive) = bounded(64);
+    let (commands, mut receive) = mpsc::channel(64);
     let _idle_commands = core.engine.replace_commands(commands);
     let mut track = core.track(1).unwrap();
     track.sample_rate = 40;
@@ -509,11 +516,7 @@ fn background_mix_applies_actual_gains_without_clipping_or_new_track_identity() 
     let _commands = recording_audio(&mut core);
     core.audition_processing(1, AuditionMode::Mix, -6.0, 0.0)
         .unwrap();
-    let event = core
-        .processing
-        .receiver
-        .recv_timeout(Duration::from_secs(10))
-        .unwrap();
+    let event = next_processing_event(&mut core, Duration::from_secs(10)).unwrap();
     assert!(matches!(
         event,
         crate::processing::Event::MixFinished { .. }
@@ -1292,7 +1295,7 @@ fn graph_export_uses_frozen_graph_and_publishes_only_after_acceptance() {
     let destination = directory.path().join("frozen graph export.wav");
     core.processing_graph_export(1, graph_port(2, 0), destination.clone())
         .unwrap();
-    let event = completion(&core);
+    let event = completion(&mut core);
     assert!(!destination.exists());
     core.processing_event(event);
     let task = core.processing_status(2).unwrap();
@@ -1324,7 +1327,7 @@ fn graph_export_cancel_after_physical_completion_never_publishes_a_file() {
     let destination = directory.path().join("cancelled export.wav");
     core.processing_graph_export(1, graph_port(2, 0), destination.clone())
         .unwrap();
-    let event = completion(&core);
+    let event = completion(&mut core);
     core.cancel_processing(2).unwrap();
     core.processing_event(event);
     assert_eq!(
@@ -1377,7 +1380,7 @@ fn graph_export_source_change_at_publication_discards_staged_file() {
     let destination = directory.path().join("changed source export.wav");
     core.processing_graph_export(1, graph_port(2, 0), destination.clone())
         .unwrap();
-    let event = completion(&core);
+    let event = completion(&mut core);
     std::fs::write(directory.path().join("1.wav"), b"changed source").unwrap();
     core.processing_event(event);
     assert_eq!(
@@ -1506,7 +1509,7 @@ fn newer_playback_generation_does_not_get_replaced_by_late_graph_preparation() {
     let commands = recording_audio(&mut core);
     core.processing_graph_run(1, graph_port(2, 0), GraphExecutionMode::Auto)
         .unwrap();
-    let event = completion(&core);
+    let event = completion(&mut core);
     core.generation = core.generation.wrapping_add(1);
     core.processing_event(event);
     assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
@@ -1572,4 +1575,87 @@ fn selected_cache_budget_rejects_new_result_without_publishing_dangling_paths() 
     assert!(rejected.graph_outputs.is_empty());
     assert_eq!(core.processing.results.len(), 1);
     assert!(retained.exists());
+}
+
+#[test]
+fn shutdown_closes_processing_delivery_and_retires_unpublished_outputs() {
+    let (directory, mut core) = fixture();
+    source(directory.path());
+    for _ in 0..3 {
+        core.start_processing(1, ProcessingOperation::Denoise, None)
+            .unwrap();
+        complete(&mut core);
+    }
+    let buffered = core.processing.results.pop_front().unwrap();
+    let blocked = core.processing.results.pop_front().unwrap();
+    let buffered_path = buffered.directory.path().to_path_buf();
+    let blocked_path = blocked.directory.path().to_path_buf();
+    let retained_path = core.processing.results[0].directory.path().to_path_buf();
+    core.processing
+        .sender
+        .try_send(crate::processing::Event::Finished {
+            id: buffered.status.id,
+            result: Ok(Box::new(buffered)),
+        })
+        .ok()
+        .unwrap();
+    while core.processing.sender.capacity() != 0 {
+        core.processing
+            .sender
+            .try_send(crate::processing::Event::Progress {
+                id: 4,
+                completed: 0,
+                total: None,
+                phase: ProcessingPhase::Processing,
+            })
+            .ok()
+            .unwrap();
+    }
+    let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let observed = cancelled.clone();
+    let sender = core.processing.sender.clone();
+    let (sent, delivery) = bounded(1);
+    let (release, released) = bounded(1);
+    let worker = thread::spawn(move || {
+        let rejected = sender
+            .blocking_send(crate::processing::Event::Finished {
+                id: blocked.status.id,
+                result: Ok(Box::new(blocked)),
+            })
+            .is_err();
+        sent.send(rejected).unwrap();
+        released.recv().unwrap();
+    });
+    core.processing.active = Some(crate::processing::Active {
+        id: 4,
+        cancelled,
+        worker,
+    });
+    let (finished, completion) = bounded(1);
+    let shutdown = thread::spawn(move || {
+        core.processing.shutdown();
+        assert!(core.processing.sender.is_closed());
+        assert!(core.processing.receiver.try_recv().is_err());
+        assert!(
+            retained_path.exists(),
+            "retained audition output retired too early"
+        );
+        finished.send(()).unwrap();
+        core
+    });
+    let rejected = delivery.recv_timeout(Duration::from_secs(5)).unwrap();
+    let waiting_for_retirement = completion.try_recv().is_err();
+    let cancelled = observed.load(Ordering::Acquire);
+    release.send(()).unwrap();
+    let core = shutdown.join().unwrap();
+    completion.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(rejected, "shutdown accepted a new terminal delivery");
+    assert!(cancelled);
+    assert!(
+        waiting_for_retirement,
+        "shutdown returned before worker retirement"
+    );
+    assert!(!buffered_path.exists());
+    assert!(!blocked_path.exists());
+    assert!(core.processing.active.is_none());
 }

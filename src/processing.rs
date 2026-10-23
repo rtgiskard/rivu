@@ -1,7 +1,6 @@
 //! Offline processing runs outside Core and never publishes directly into player state.
 use crate::{config::Config, model::*};
 use anyhow::{Context, Result, bail, ensure};
-use crossbeam_channel::{Receiver, Sender, bounded};
 use rivu_audio as audio;
 use std::{
     fs,
@@ -15,6 +14,7 @@ use std::{
     thread::{self, JoinHandle},
     time::Duration,
 };
+use tokio::sync::mpsc::{Receiver, Sender, channel};
 
 pub(crate) mod graph;
 
@@ -108,7 +108,7 @@ pub(crate) struct Service {
 }
 impl Service {
     pub fn new(data_dir: PathBuf) -> Self {
-        let (sender, receiver) = bounded(8);
+        let (sender, receiver) = channel(8);
         Self {
             sender,
             receiver,
@@ -281,7 +281,7 @@ impl Service {
                 } else {
                     run(track, stamp, config, directory, initial, &flag, &tx)
                 };
-                let _ = tx.send(Event::Finished {
+                let _ = tx.blocking_send(Event::Finished {
                     id,
                     result: result.map(Box::new),
                 });
@@ -303,15 +303,18 @@ impl Service {
         Ok(())
     }
     pub fn shutdown(&mut self) {
-        if let Some(task) = self.active.take() {
+        let task = self.active.take();
+        if let Some(task) = &task {
             task.cancelled.store(true, Ordering::Release);
-            // Drain bounded event admission so a terminal send cannot block joining.
-            while !task.worker.is_finished() {
-                while self.receiver.try_recv().is_ok() {}
-                thread::sleep(Duration::from_millis(10));
-            }
+        }
+        // Closing admission wakes every reliable sender, including a worker
+        // blocked behind buffered progress. Joining establishes retirement;
+        // draining afterward drops unpublished outputs, not retained auditions.
+        self.receiver.close();
+        if let Some(task) = task {
             let _ = task.worker.join();
         }
+        while self.receiver.try_recv().is_ok() {}
     }
 }
 impl Drop for Service {
@@ -1091,7 +1094,7 @@ pub(crate) fn mix(
             if outcome.is_err() {
                 let _ = fs::remove_file(&path);
             }
-            let _ = tx.send(Event::MixFinished {
+            let _ = tx.blocking_send(Event::MixFinished {
                 id,
                 generation,
                 result: outcome,

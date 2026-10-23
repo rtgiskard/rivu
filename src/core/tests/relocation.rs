@@ -68,11 +68,18 @@ fn relocation_fixture() -> (tempfile::TempDir, Core, i64, i64) {
     (directory, core, source, target)
 }
 
+fn receive_relocation(core: &mut Core) -> RelocationFinished {
+    let executor = core.executor.clone();
+    wait_on(&executor, async {
+        tokio::time::timeout(Duration::from_secs(5), core.relocation_rx.recv())
+            .await
+            .unwrap()
+            .unwrap()
+    })
+}
+
 fn settle_relocation(core: &mut Core) -> RelocationTaskStatus {
-    let event = core
-        .relocation_rx
-        .recv_timeout(Duration::from_secs(5))
-        .unwrap();
+    let event = receive_relocation(core);
     core.relocation_event(event);
     assert!(core.active_relocation.is_none());
     core.state.system.relocation_task.clone().unwrap()
@@ -164,10 +171,7 @@ fn relocation_rechecks_target_conflicts_and_source_presence_at_commit() {
         let (_directory, mut core, source, target) = relocation_fixture();
         core.relocate_track(source, target).unwrap();
         // Fence hashing completion without allowing Core's commit dispatch.
-        let event = core
-            .relocation_rx
-            .recv_timeout(Duration::from_secs(5))
-            .unwrap();
+        let event = receive_relocation(&mut core);
         if source_returns {
             std::fs::write(core.track(source).unwrap().path, b"returned").unwrap();
         } else {
@@ -190,10 +194,7 @@ fn relocation_rechecks_target_conflicts_and_source_presence_at_commit() {
 fn relocation_rejects_target_file_drift_after_background_hash() {
     let (_directory, mut core, source, target) = relocation_fixture();
     core.relocate_track(source, target).unwrap();
-    let event = core
-        .relocation_rx
-        .recv_timeout(Duration::from_secs(5))
-        .unwrap();
+    let event = receive_relocation(&mut core);
     std::fs::write(core.track(target).unwrap().path, b"new bytes").unwrap();
     core.relocation_event(event);
     assert_eq!(
@@ -231,10 +232,7 @@ fn relocation_rejects_active_affected_rows_at_start_and_during_hash() {
 fn relocation_rejects_source_marked_independent_during_hash() {
     let (_directory, mut core, source, target) = relocation_fixture();
     core.relocate_track(source, target).unwrap();
-    let event = core
-        .relocation_rx
-        .recv_timeout(Duration::from_secs(5))
-        .unwrap();
+    let event = receive_relocation(&mut core);
     core.command(Command::KeepTrackIndependent { track_id: source })
         .unwrap();
     core.relocation_event(event);
@@ -251,10 +249,7 @@ fn relocation_rejects_database_identity_drift_after_fresh_verification() {
     for change_source in [false, true] {
         let (directory, mut core, source, target) = relocation_fixture();
         core.relocate_track(source, target).unwrap();
-        let event = core
-            .relocation_rx
-            .recv_timeout(Duration::from_secs(5))
-            .unwrap();
+        let event = receive_relocation(&mut core);
         let changed_id = if change_source { source } else { target };
         let known = core
             .store
@@ -301,4 +296,79 @@ fn relocation_rejects_database_identity_drift_after_fresh_verification() {
         assert!(core.track(source).unwrap().missing);
         assert!(core.store.track(target).unwrap().is_some());
     }
+}
+
+#[test]
+fn verification_panic_retires_the_task_without_committing_and_allows_retry() {
+    let (_directory, mut core, source, target) = relocation_fixture();
+    let id = core.next_relocation_id;
+    core.next_relocation_id += 1;
+    let prepared = core.store.prepare_relocation(source, target).unwrap();
+    let status = RelocationTaskStatus {
+        id,
+        source_id: source,
+        target_id: target,
+        phase: RelocationPhase::Verifying,
+        error: None,
+    };
+    let worker =
+        core.spawn_relocation_verification(id, async { panic!("injected verification panic") });
+    core.active_relocation = Some(RelocationTask {
+        status,
+        prepared,
+        cancellation: library::ScanCancellation::default(),
+        worker: Some(worker),
+    });
+    let result = settle_relocation(&mut core);
+    assert_eq!(result.phase, RelocationPhase::Failed);
+    assert!(result.error.as_deref().unwrap().contains("panicked"));
+    assert!(core.track(source).unwrap().missing);
+    core.relocate_track(source, target).unwrap();
+    assert_eq!(
+        settle_relocation(&mut core).phase,
+        RelocationPhase::Completed
+    );
+}
+
+#[test]
+fn cancellation_keeps_relocation_admission_until_the_async_worker_retires() {
+    let (_directory, mut core, source, target) = relocation_fixture();
+    let id = core.next_relocation_id;
+    core.next_relocation_id += 1;
+    let prepared = core.store.prepare_relocation(source, target).unwrap();
+    let (started, observe_started) = oneshot::channel();
+    let (release, released) = oneshot::channel();
+    let worker = core.spawn_relocation_verification(id, async move {
+        let _ = started.send(());
+        let _ = released.await;
+        Err(anyhow::anyhow!("released verification"))
+    });
+    core.active_relocation = Some(RelocationTask {
+        status: RelocationTaskStatus {
+            id,
+            source_id: source,
+            target_id: target,
+            phase: RelocationPhase::Verifying,
+            error: None,
+        },
+        prepared,
+        cancellation: library::ScanCancellation::default(),
+        worker: Some(worker),
+    });
+    wait_on(&core.executor, observe_started).unwrap();
+    core.cancel_relocation(id).unwrap();
+    assert!(core.active_relocation.is_some());
+    assert!(core.relocation_rx.try_recv().is_err());
+    assert!(core.relocate_track(source, target).is_err());
+    release.send(()).unwrap();
+    assert_eq!(
+        settle_relocation(&mut core).phase,
+        RelocationPhase::Cancelled
+    );
+    assert!(core.track(source).unwrap().missing);
+    core.relocate_track(source, target).unwrap();
+    assert_eq!(
+        settle_relocation(&mut core).phase,
+        RelocationPhase::Completed
+    );
 }

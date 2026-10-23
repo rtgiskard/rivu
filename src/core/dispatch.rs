@@ -1,164 +1,300 @@
 use super::*;
-use crossbeam_channel::select;
+
+pub(super) enum BusinessEvent {
+    Request(Request),
+    Audio(AudioEvent),
+    AudioStopped,
+    Scan(ScanEvent),
+    Relocation(RelocationFinished),
+    Processing(crate::processing::Event),
+    Export(Result<()>),
+    Optimization(Result<DatabaseOptimization>),
+    FfmpegStatus,
+    Shutdown(RuntimeControl),
+}
 
 impl Core {
-    pub(in crate::core) fn run(
+    /// Event waiting and state transitions stay on the same dedicated owner.
+    /// The shared runtime only drives I/O, timers and independent long jobs.
+    pub(super) fn run(
         &mut self,
-        requests: Receiver<Request>,
-        shutdown: Receiver<()>,
+        mut requests: mpsc::Receiver<Request>,
+        mut shutdown: mpsc::Receiver<()>,
         control: &RuntimeControl,
     ) {
-        let not_polling = crossbeam_channel::never();
-        let no_export = crossbeam_channel::never();
-        let no_optimization = crossbeam_channel::never();
+        let executor = self.executor.clone();
         let mut ffmpeg_status_ticks = None;
-        loop {
-            // Only an unresolved one-time load needs polling, including loads
-            // initiated by GUI waveform work outside the audio engine. Preserve
-            // the timer across unrelated requests, and drop it once resolved.
-            if self.state.system.ffmpeg_status == "not loaded" {
-                ffmpeg_status_ticks
-                    .get_or_insert_with(|| crossbeam_channel::tick(Duration::from_millis(100)));
-            } else {
-                ffmpeg_status_ticks = None;
+        while let Some(event) = wait_on(
+            &executor,
+            self.next_event(
+                &mut requests,
+                &mut shutdown,
+                &mut ffmpeg_status_ticks,
+                control,
+            ),
+        ) {
+            if !self.business_event(event) {
+                break;
             }
-            let ffmpeg_status_tick = ffmpeg_status_ticks.as_ref().unwrap_or(&not_polling);
-            let export_finished = self
-                .active_export
-                .as_ref()
-                .map(|task| &task.finished)
-                .unwrap_or(&no_export);
-            let optimization_finished = self
-                .active_optimization
-                .as_ref()
-                .map(|task| &task.finished)
-                .unwrap_or(&no_optimization);
-            select! {
-                recv(shutdown) -> _ => {
-                    self.state.system.shutting_down = true;
-                    self.publish();
-                    control.acknowledge(Ack::from_result(Ok(()), self.state.system.revision));
-                    let result = self.stop();
-                    if let Err(error) = &result {
-                        self.state.system.last_error = Some(format!("{error:#}"));
-                        tracing::error!(error = %error, "shutdown_playback_stop_failed");
-                    }
-                    self.publish();
-                    break;
-                }
-                recv(requests) -> request => {
-                    let Ok(request) = request else { break; };
-                    match request.operation {
-                        Operation::Query { query, ticket } => {
-                            let response = self.query_response_if_current(&query, ticket.as_ref());
-                            if let Some(reply) = request.reply {
-                                let _ = reply.send(CoreResponse::Query(response));
-                            }
-                        }
-                        Operation::WaveformSnapshot(reply) => {
-                            if let Err(error) = self.audio(AudioCommand::WaveformSnapshot(reply.clone())) {
-                                let _ = reply.try_send(Err(format!("{error:#}")));
-                            }
-                        }
-                        Operation::Command(command) => {
-                            let starts_scan = matches!(&command, Command::Scan { .. } | Command::ImportPlaylist { .. });
-                            let starts_relocation = matches!(&command, Command::RelocateTrack { .. });
-                            let starts_export = matches!(&command, Command::ExportPlaylist { .. });
-                            let starts_optimization = matches!(&command, Command::OptimizeDatabase);
-                            let starts_processing = matches!(&command, Command::StartProcessing { .. } | Command::ProcessingGraphRun { .. } | Command::ProcessingGraphExport { .. } | Command::ProcessingGraphAudition { .. });
-                            let result = self.command(command);
-                            if let Err(error) = &result {
-                                self.state.system.last_error = Some(format!("{error:#}"));
-                            }
-                            self.publish();
-                            let scan_id = if result.is_ok() && starts_scan { self.active_scan.as_ref().map(|task| task.status.id) } else { None };
-                            let relocation_id = if result.is_ok() && starts_relocation { self.active_relocation.as_ref().map(|task| task.status.id) } else { None };
-                            let processing_id = if result.is_ok() && starts_processing { self.processing.active.as_ref().map(|task| task.id) } else { None };
-                            if result.is_ok() && starts_export {
-                                self.active_export.as_mut().expect("export was accepted").reply = request.reply;
-                                continue;
-                            }
-                            if result.is_ok() && starts_optimization {
-                                self.active_optimization.as_mut().expect("optimization was accepted").reply = request.reply;
-                                continue;
-                            }
-                            if let Some(reply) = request.reply {
-                                let _ = reply.send(CoreResponse::Ack(Ack {
-                                    scan_id,
-                                    relocation_id,
-                                    processing_id,
-                                    ..Ack::from_result(result, self.state.system.revision)
-                                }));
-                            }
-                        }
-                        operation @ (Operation::GuiConfig(_) | Operation::Navigate(_)) => {
-                            let result = if self.database_maintenance_active() {
-                                Err(anyhow::anyhow!("Database maintenance is in progress; this operation was not executed"))
-                            } else {
-                                match operation {
-                                    Operation::GuiConfig(change) => self.update_gui_config(change),
-                                    Operation::Navigate(direction) => self.navigate(direction),
-                                    _ => unreachable!("operation matched above"),
-                                }
-                            };
-                            if let Err(error) = &result {
-                                self.state.system.last_error = Some(format!("{error:#}"));
-                            }
-                            self.publish();
-                            if let Some(reply) = request.reply {
-                                let _ = reply.send(CoreResponse::Ack(Ack::from_result(result, self.state.system.revision)));
-                            }
-                        }
-                    }
-                }
-                recv(self.engine.events) -> event => {
-                    let Ok(event) = event else { self.state.system.last_error = Some("Audio worker stopped unexpectedly".into()); self.publish(); break; };
-                    if let Err(error) = self.audio_event(event) { self.state.system.last_error = Some(format!("{error:#}")); }
-                    self.publish();
-                }
-                recv(self.scan_rx) -> scan => {
-                    if let Ok(scan) = scan {
-                        self.scan_event(scan);
-                    }
-                }
-                recv(self.relocation_rx) -> event => {
-                    if let Ok(event) = event {
-                        self.relocation_event(event);
-                        self.resume_pending_scan();
-                    }
-                }
-                recv(self.processing.receiver) -> event => {
-                    if let Ok(event) = event { self.processing_event(event); }
-                }
-                recv(export_finished) -> result => {
-                    let result = result.unwrap_or_else(|_| Err(anyhow::anyhow!("Playlist export ended without a result; inspect the destination before retrying")));
-                    let (reply, result) = self.finish_export(result);
-                    self.complete_background(reply, result);
-                }
-                recv(optimization_finished) -> result => {
-                    let result = result.unwrap_or_else(|_| Err(anyhow::anyhow!("Database optimization ended without a result; the database may already have changed")));
-                    let (reply, result) = self.finish_optimization(result);
-                    self.complete_background(reply, result);
-                }
-                recv(ffmpeg_status_tick) -> _ => {
-                    if audio::ffmpeg_load_attempted() {
-                        self.state.system.ffmpeg_status = audio::ffmpeg_status()
-                            .unwrap_or_else(|error| format!("unavailable: {error:#}"));
-                        self.publish();
-                    }
-                }
+        }
+        self.finalize();
+    }
+
+    async fn next_event(
+        &mut self,
+        requests: &mut mpsc::Receiver<Request>,
+        shutdown: &mut mpsc::Receiver<()>,
+        ffmpeg_status_ticks: &mut Option<tokio::time::Interval>,
+        control: &RuntimeControl,
+    ) -> Option<BusinessEvent> {
+        if self.state.system.ffmpeg_status == "not loaded" {
+            ffmpeg_status_ticks.get_or_insert_with(|| {
+                let period = Duration::from_millis(100);
+                let mut ticks =
+                    tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+                ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                ticks
+            });
+        } else {
+            *ffmpeg_status_ticks = None;
+        }
+        let Core {
+            engine,
+            scan_rx,
+            relocation_rx,
+            active_export,
+            active_optimization,
+            processing,
+            ..
+        } = self;
+        // Consume one event per iteration, with randomized selection to avoid
+        // permanent priority for a hot input.
+        Some(tokio::select! {
+            _ = shutdown.recv() => BusinessEvent::Shutdown(control.clone()),
+            request = requests.recv() => BusinessEvent::Request(request?),
+            event = engine.events.as_mut().expect("Core owns audio events").recv() => {
+                event.map_or(BusinessEvent::AudioStopped, BusinessEvent::Audio)
             }
-            if !self.database_maintenance_active()
-                && (self.playback_write_deferred || self.pending_navigation.is_some())
-            {
-                if let Err(error) = self.flush_deferred_playback() {
-                    self.state.system.last_error =
-                        Some(format!("Saving deferred playback statistics: {error:#}"));
+            scan = scan_rx.recv() => BusinessEvent::Scan(scan?),
+            relocation = relocation_rx.recv() => BusinessEvent::Relocation(relocation?),
+            event = processing.receiver.recv() => BusinessEvent::Processing(event?),
+            result = async {
+                match active_export.as_mut() {
+                    Some(task) => (&mut task.finished).await,
+                    None => std::future::pending().await,
+                }
+            } => BusinessEvent::Export(result.unwrap_or_else(|_| Err(anyhow::anyhow!(
+                "Playlist export ended without a result; inspect the destination before retrying"
+            )))),
+            result = async {
+                match active_optimization.as_mut() {
+                    Some(task) => (&mut task.finished).await,
+                    None => std::future::pending().await,
+                }
+            } => BusinessEvent::Optimization(result.unwrap_or_else(|_| Err(anyhow::anyhow!(
+                "Database optimization ended without a result; the database may already have changed"
+            )))),
+            _ = async {
+                match ffmpeg_status_ticks.as_mut() {
+                    Some(ticks) => { ticks.tick().await; }
+                    None => std::future::pending().await,
+                }
+            } => BusinessEvent::FfmpegStatus,
+        })
+    }
+}
+
+impl Core {
+    /// Synchronous SQLite work and its state transition share one owner.
+    /// Traversal/export/hash/probe/scan-save/VACUUM remain independent jobs.
+    fn business_event(&mut self, event: BusinessEvent) -> bool {
+        match event {
+            BusinessEvent::Request(request) => self.dispatch_request(request),
+            BusinessEvent::Audio(event) => {
+                if let Err(error) = self.audio_event(event) {
+                    self.state.system.last_error = Some(format!("{error:#}"));
                 }
                 self.publish();
             }
+            BusinessEvent::AudioStopped => {
+                self.state.system.last_error = Some("Audio worker stopped unexpectedly".into());
+                self.publish();
+                return false;
+            }
+            BusinessEvent::Scan(scan) => self.scan_event(scan),
+            BusinessEvent::Relocation(event) => {
+                self.relocation_event(event);
+                self.resume_pending_scan();
+            }
+            BusinessEvent::Processing(event) => self.processing_event(event),
+            BusinessEvent::Export(result) => {
+                let (reply, result) = self.finish_export(result);
+                self.complete_background(reply, result);
+            }
+            BusinessEvent::Optimization(result) => {
+                let (reply, result) = self.finish_optimization(result);
+                self.complete_background(reply, result);
+            }
+            BusinessEvent::FfmpegStatus => {
+                if audio::ffmpeg_load_attempted() {
+                    self.state.system.ffmpeg_status = audio::ffmpeg_status()
+                        .unwrap_or_else(|error| format!("unavailable: {error:#}"));
+                    self.publish();
+                }
+            }
+            BusinessEvent::Shutdown(control) => {
+                self.state.system.shutting_down = true;
+                self.publish();
+                control.acknowledge(Ack::from_result(Ok(()), self.state.system.revision));
+                if let Err(error) = self.stop() {
+                    self.state.system.last_error = Some(format!("{error:#}"));
+                    tracing::error!(error = %error, "shutdown_playback_stop_failed");
+                }
+                self.publish();
+                return false;
+            }
         }
+        if !self.database_maintenance_active()
+            && (self.playback_write_deferred || self.pending_navigation.is_some())
+        {
+            if let Err(error) = self.flush_deferred_playback() {
+                self.state.system.last_error =
+                    Some(format!("Saving deferred playback statistics: {error:#}"));
+            }
+            self.publish();
+        }
+        true
+    }
 
+    pub(super) fn initialize(&mut self) {
+        let started = Instant::now();
+        tracing::debug!("initial_load_started");
+        if let Err(error) = self.load_initial_state() {
+            tracing::error!(error = %error, "initial_load_failed");
+            self.state.system.last_error = Some(format!("Loading library: {error:#}"));
+            self.publish();
+        } else {
+            tracing::info!(
+                elapsed_ms = started.elapsed().as_millis(),
+                "initial_load_completed"
+            );
+        }
+        let _ = self.audio(AudioCommand::StillMode(self.state.system.config.still_mode));
+        let _ = self.audio(AudioCommand::Volume(self.state.playback.volume));
+        let _ = self.audio(AudioCommand::FfmpegEnabled(
+            self.state.system.config.ffmpeg_enabled,
+        ));
+        let _ = self.audio(AudioCommand::OutputSettings {
+            request: self.output_settings_request,
+            device: self.state.system.selected_device.clone(),
+            auto_mix: self.state.system.config.pipewire_auto_mix,
+        });
+        let _ = self.audio(AudioCommand::Equalizer(Arc::new(
+            self.state.system.config.equalizer.clone(),
+        )));
+        let _ = self.audio(AudioCommand::AnalysisSettings(
+            self.state.system.config.as_ref().into(),
+        ));
+    }
+
+    fn dispatch_request(&mut self, request: Request) {
+        match request.operation {
+            Operation::Query { query, ticket } => {
+                let response = self.query_response_if_current(&query, ticket.as_ref());
+                if let Some(reply) = request.reply {
+                    let _ = reply.send(CoreResponse::Query(response));
+                }
+            }
+            Operation::WaveformSnapshot(reply) => {
+                if let Err(error) = self.audio(AudioCommand::WaveformSnapshot(reply.clone())) {
+                    let _ = reply.try_send(Err(format!("{error:#}")));
+                }
+            }
+            Operation::Command(command) => {
+                let starts_scan = matches!(
+                    &command,
+                    Command::Scan { .. } | Command::ImportPlaylist { .. }
+                );
+                let starts_relocation = matches!(&command, Command::RelocateTrack { .. });
+                let starts_export = matches!(&command, Command::ExportPlaylist { .. });
+                let starts_optimization = matches!(&command, Command::OptimizeDatabase);
+                let starts_processing = matches!(
+                    &command,
+                    Command::StartProcessing { .. }
+                        | Command::ProcessingGraphRun { .. }
+                        | Command::ProcessingGraphExport { .. }
+                        | Command::ProcessingGraphAudition { .. }
+                );
+                let result = self.command(command);
+                if let Err(error) = &result {
+                    self.state.system.last_error = Some(format!("{error:#}"));
+                }
+                self.publish();
+                let scan_id = if result.is_ok() && starts_scan {
+                    self.active_scan.as_ref().map(|task| task.status.id)
+                } else {
+                    None
+                };
+                let relocation_id = if result.is_ok() && starts_relocation {
+                    self.active_relocation.as_ref().map(|task| task.status.id)
+                } else {
+                    None
+                };
+                let processing_id = if result.is_ok() && starts_processing {
+                    self.processing.active.as_ref().map(|task| task.id)
+                } else {
+                    None
+                };
+                if result.is_ok() && starts_export {
+                    self.active_export
+                        .as_mut()
+                        .expect("export was accepted")
+                        .reply = request.reply;
+                    return;
+                }
+                if result.is_ok() && starts_optimization {
+                    self.active_optimization
+                        .as_mut()
+                        .expect("optimization was accepted")
+                        .reply = request.reply;
+                    return;
+                }
+                if let Some(reply) = request.reply {
+                    let _ = reply.send(CoreResponse::Ack(Ack {
+                        scan_id,
+                        relocation_id,
+                        processing_id,
+                        ..Ack::from_result(result, self.state.system.revision)
+                    }));
+                }
+            }
+            operation @ (Operation::GuiConfig(_) | Operation::Navigate(_)) => {
+                let result = if self.database_maintenance_active() {
+                    Err(anyhow::anyhow!(
+                        "Database maintenance is in progress; this operation was not executed"
+                    ))
+                } else {
+                    match operation {
+                        Operation::GuiConfig(change) => self.update_gui_config(change),
+                        Operation::Navigate(direction) => self.navigate(direction),
+                        _ => unreachable!("operation matched above"),
+                    }
+                };
+                if let Err(error) = &result {
+                    self.state.system.last_error = Some(format!("{error:#}"));
+                }
+                self.publish();
+                if let Some(reply) = request.reply {
+                    let _ = reply.send(CoreResponse::Ack(Ack::from_result(
+                        result,
+                        self.state.system.revision,
+                    )));
+                }
+            }
+        }
+    }
+
+    fn finalize(&mut self) {
         self.state.system.shutting_down = true;
         // Retire background database users before final writes on Core's connection.
         if let Some((reply, result)) = self.shutdown_export() {
@@ -190,7 +326,11 @@ impl Core {
         self.publish();
     }
 
-    fn complete_background(&mut self, reply: Option<Sender<CoreResponse>>, result: Result<()>) {
+    fn complete_background(
+        &mut self,
+        reply: Option<oneshot::Sender<CoreResponse>>,
+        result: Result<()>,
+    ) {
         if let Err(error) = &result {
             self.state.system.last_error = Some(format!("{error:#}"));
         }
@@ -240,6 +380,14 @@ impl Core {
             }
             shared.revisions = *revisions;
         }
+        self.revision_updates.send_if_modified(|revisions| {
+            if *revisions == self.state.revisions {
+                false
+            } else {
+                *revisions = self.state.revisions;
+                true
+            }
+        });
         self.subscribers.write().retain(|sender| {
             !matches!(
                 sender.try_send(()),

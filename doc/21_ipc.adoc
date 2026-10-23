@@ -91,18 +91,24 @@ schema and IPC protocol. A mismatch requires a fresh probe during scanning but
 does not invalidate the cached file fingerprint.
 
 Scanning requests cached raw source metadata on demand through task-ID-tagged
-core events; it no longer copies a whole-library known-file snapshot at startup.
-An indexed exact-path query decodes at most one matching identity, preferring an
-ordinary file over CUE segments. Only unchanged ordinary identities authorize
-full-source probe reuse; unchanged CUE identities may still supply fingerprints.
-New or retargeted CUE sheets can request sources outside the scanned subtree,
-within configured roots. Shared sources reuse one result or error per scan.
-Force scans bypass these lookups. The cost is one owner round trip and one
-short-lived reply channel per distinct encountered source, not per unrelated
-library row; this favors scoped scans without promising higher whole-library
-throughput. Cancellation disconnects a notification channel to wake blocked
-lookup submission and reply waits without polling. Stale task IDs cannot obtain
-metadata or commit results for a replacement scan.
+Core events carrying at most 32 admitted source paths; it does not copy a
+whole-library known-file snapshot at startup. Each indexed exact-path query decodes
+at most one matching identity, preferring an ordinary file over CUE segments.
+Core checks task identity and cancellation before servicing the bounded batch.
+Only unchanged ordinary identities authorize full-source probe reuse; unchanged
+CUE identities may still supply fingerprints. New or retargeted CUE sheets can
+request sources outside the scanned subtree, within configured roots. Up to 32
+sheets are prepared together, and shared sources reuse one result or error per scan.
+Force scans bypass these lookups. The owner round trip and short-lived reply
+channel are per batch, while indexed database reads remain per distinct encountered
+source, never per unrelated library row. For an audio-only request with 64 admitted
+sources, this is two owner round trips/reply channels instead of 64; partially
+filled batches and CUE groups retain their own bounded requests. No blocking-pool
+slot waits for Core, and at most 32 source descriptors are retained across a lookup.
+This trades bounded descriptor/batch storage for fewer owner transfers, not a
+second database owner or a stale state snapshot. Cancellation wakes async lookup
+submission and reply waits without polling. Stale task IDs cannot obtain metadata
+or commit results for a replacement scan.
 
 Scan merging checks each eligible old CUE sheet's absence once per merge and
 indexes relocation candidates by fingerprint, segment number and frame bounds.
@@ -277,6 +283,41 @@ completion before GUI registration and core panic; it does not reuse a window
 opener callback. Shutdown uses a bounded lifecycle signal independent of the
 business queue. IPC shutdown acknowledgements are drained before transport and
 socket retirement, and service joins occur outside GPUI quit callbacks.
+
+Core waits for events and applies state transitions on one persistent dedicated
+thread. Bounded Tokio channels carry requests, audio facts, processing, scan and
+relocation events; one-shot channels carry export and optimization completion.
+The owner polls one `select!` event per turn with randomized selection, using the
+shared Tokio reactor for I/O and timers. IPC directly awaits Core's bounded
+request/reply path; revision watching observes authoritative publication.
+
+Synchronous SQLite access and its corresponding business-state transition stay
+atomic on that owner. This keeps database work off the shared I/O driver and out
+of the file/probe blocking pool; it does not make SQLite natively asynchronous.
+Independent async tasks coordinate bounded synchronous file stages, probes and
+database transactions on a shared four-thread blocking pool. Waiting for Core
+does not retain a file-work pool slot. App retains the shared runtime until Core
+and IPC connections have retired; shutdown joins run outside GUI callbacks.
+Core unwinds and retires its resources on its dedicated thread before publishing
+lifecycle completion. Started background work is joined before resource
+retirement; cancelling a waiter is not completion or rollback.
+
+Processing shutdown signals cancellation and closes bounded event admission before
+joining its worker. Closing admission wakes blocked progress/result senders; after
+the join, draining buffered events destroys unpublished outputs. Retained audition
+results remain owned by the processing service until its own final retirement.
+
+Manual relocation verification admits its regular-file descriptor and metadata
+together, then hashes in at most 4 MiB blocking stages using one reusable
+128 KiB buffer. Cancellation is checked between reads; every started stage is
+awaited before releasing admission. The descriptor and path are revalidated
+before accepting the hash and again at the existing commit boundary.
+
+Audio's real-time callback and dedicated decoding/output worker remain
+synchronous. Their non-real-time event boundary uses a bounded Tokio channel.
+Stop/snapshot temporarily owns that channel's sole receiver, drains facts while
+awaiting command capacity and the one-shot reply, and retains one absolute
+deadline. No second receiver or automatic stop replay is introduced.
 
 Core owns a 100 ms FFmpeg status poll only while the enabled decoder status is
 `not loaded`. It observes the nonblocking one-time load result, including loads

@@ -10,10 +10,11 @@
 //! device buffers on stop are not counted as heard. Accuracy at the physical
 //! output remains bounded by PipeWire's playback timestamps.
 //!
-//! Lifecycle events use bounded worker-thread backpressure; progress is best
-//! effort. Ordinary command admission never waits for capacity, allowing the
-//! consumer to return to draining events after an explicit queue-full error.
-//! Stop/snapshot drains events while waiting; shutdown cancels blocked delivery.
+//! Lifecycle events use Tokio's bounded async queue with worker-thread
+//! backpressure; progress is best effort. Core owns its only receiver. Ordinary
+//! command admission never waits for capacity. Stop/snapshot temporarily owns
+//! that same receiver and drains it while awaiting capacity and acknowledgement.
+//! Shutdown cancels blocked delivery before joining the synchronous worker.
 //!
 //! Scheduling rounds admit at most 64 commands, including coalesced seeks and
 //! read-ahead barriers. Opening retains decoder progress and yields after at
@@ -130,10 +131,12 @@ pub use source::{
 };
 pub use waveform::{WaveformFrame, WaveformIdentity};
 
+/// Read the published runtime status without starting or waiting for a load.
 pub fn ffmpeg_status() -> anyhow::Result<String> {
     ffmpeg::availability()
 }
 
+/// Whether an explicit load has published either a runtime or its failure.
 pub fn ffmpeg_load_attempted() -> bool {
     ffmpeg::load_attempted()
 }
@@ -183,7 +186,7 @@ pub fn waveform(
 
 use crate::analysis::{AnalysisControl, AnalysisFrame, AnalysisSettings, AnalysisWorker};
 use anyhow::{Context, Result};
-use crossbeam_channel::{Receiver, Sender, TrySendError, after, bounded, select};
+use crossbeam_channel::{Receiver, Sender, bounded};
 use parking_lot::{Mutex, RwLock};
 use std::{
     path::PathBuf,
@@ -191,6 +194,8 @@ use std::{
     thread::{self, JoinHandle},
     time::Duration,
 };
+use tokio::sync::{mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
 use worker::Worker;
 
 const BYTES_PER_MEBIBYTE: usize = 1024 * 1024;
@@ -283,7 +288,7 @@ pub enum AudioCommand {
     AnalysisSettings(AnalysisSettings),
     /// Capture the actual active source/graph without blocking device callbacks.
     WaveformSnapshot(Sender<std::result::Result<Option<WaveformScanSnapshot>, String>>),
-    StopAndSnapshot(Sender<AudioSnapshot>),
+    StopAndSnapshot(oneshot::Sender<AudioSnapshot>),
     Shutdown,
 }
 #[derive(Clone, Debug)]
@@ -323,19 +328,21 @@ pub enum AudioEvent {
 }
 
 pub struct AudioEngine {
-    commands: Sender<AudioCommand>,
-    pub events: Receiver<AudioEvent>,
+    commands: mpsc::Sender<AudioCommand>,
+    command_wake: Sender<()>,
+    pub events: Option<mpsc::Receiver<AudioEvent>>,
     pub analysis: Arc<RwLock<AnalysisFrame>>,
     pub analysis_control: Arc<AnalysisControl>,
     pub waveform: Arc<RwLock<WaveformFrame>>,
     worker: Option<JoinHandle<()>>,
-    shutdown: Mutex<Option<Sender<()>>>,
+    shutdown: Mutex<Option<AudioShutdown>>,
 }
 impl AudioEngine {
     pub fn new(media_read_buffer_mb: u32) -> Result<Self> {
-        let (commands, receive) = bounded(64);
-        let (send_events, events) = bounded(128);
-        let (shutdown, cancelled) = bounded(0);
+        let (commands, receive) = mpsc::channel(64);
+        let (command_wake, commands_ready) = bounded(1);
+        let (send_events, events) = mpsc::channel(128);
+        let (shutdown, cancelled) = shutdown_channel();
         let analysis = Arc::new(RwLock::new(AnalysisFrame::default()));
         let waveform = Arc::new(RwLock::new(WaveformFrame::default()));
         let worker_waveform = waveform.clone();
@@ -349,6 +356,7 @@ impl AudioEngine {
             .spawn(move || {
                 Worker::new(
                     receive,
+                    commands_ready,
                     send_events,
                     cancelled,
                     analyzer,
@@ -359,7 +367,8 @@ impl AudioEngine {
             })?;
         Ok(Self {
             commands,
-            events,
+            command_wake,
+            events: Some(events),
             analysis,
             analysis_control,
             waveform,
@@ -377,81 +386,166 @@ impl AudioEngine {
         self.commands
             .try_send(command)
             .map_err(|error| match error {
-                TrySendError::Full(_) => {
+                mpsc::error::TrySendError::Full(_) => {
                     anyhow::anyhow!("Audio command queue is full; command not queued")
                 }
-                TrySendError::Disconnected(_) => anyhow::anyhow!("Audio worker stopped"),
-            })
+                mpsc::error::TrySendError::Closed(_) => anyhow::anyhow!("Audio worker stopped"),
+            })?;
+        // This is only a coalesced queue-ready notification. The bounded Tokio
+        // queue owns every command and wakes async capacity waiters itself.
+        let _ = self.command_wake.try_send(());
+        Ok(())
     }
 
     /// Core is the sole ordinary producer. Until its next send, the worker can
     /// only free slots, so a complete batch can be admitted after persistence.
     pub fn ensure_command_capacity(&self, count: usize) -> Result<()> {
-        let capacity = self
-            .commands
-            .capacity()
-            .expect("audio commands are bounded");
         anyhow::ensure!(
-            count <= capacity.saturating_sub(self.commands.len()),
+            count <= self.commands.capacity(),
             "Audio command queue has insufficient capacity; commands not queued"
         );
         Ok(())
     }
 
-    pub fn stop_request(&self) -> AudioStop {
-        AudioStop {
-            commands: self.commands.clone(),
-            events: self.events.clone(),
-        }
+    /// Temporarily transfer the sole event receiver to a cancellation-safe stop.
+    /// Return it through `restore_events` after the request has settled.
+    pub fn stop_request(&mut self) -> AudioStop {
+        AudioStop::new(
+            self.commands.clone(),
+            self.command_wake.clone(),
+            self.events.take().expect("audio events already borrowed"),
+        )
+    }
+
+    /// Restore the event receiver previously transferred to a stop request.
+    pub fn restore_events(&mut self, events: mpsc::Receiver<AudioEvent>) {
+        assert!(
+            self.events.is_none(),
+            "audio event receiver already restored"
+        );
+        self.events = Some(events);
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub fn replace_commands(&mut self, commands: Sender<AudioCommand>) -> Sender<AudioCommand> {
-        std::mem::replace(&mut self.commands, commands)
+    pub fn replace_commands(
+        &mut self,
+        commands: mpsc::Sender<AudioCommand>,
+    ) -> mpsc::Sender<AudioCommand> {
+        let previous = std::mem::replace(&mut self.commands, commands);
+        let _ = self.command_wake.try_send(());
+        previous
     }
 }
 
 /// A stop-only handle cannot submit ordinary commands behind Core's preflight.
 pub struct AudioStop {
-    commands: Sender<AudioCommand>,
-    events: Receiver<AudioEvent>,
+    commands: mpsc::Sender<AudioCommand>,
+    command_wake: Sender<()>,
+    events: mpsc::Receiver<AudioEvent>,
+    reply: Option<oneshot::Sender<AudioSnapshot>>,
+    stopped: oneshot::Receiver<AudioSnapshot>,
+    deadline: tokio::time::Instant,
 }
 
 impl AudioStop {
-    pub fn wait(self, observe: impl FnMut(AudioEvent)) -> Result<AudioSnapshot> {
-        stop_and_snapshot(&self.commands, &self.events, observe)
+    fn new(
+        commands: mpsc::Sender<AudioCommand>,
+        command_wake: Sender<()>,
+        events: mpsc::Receiver<AudioEvent>,
+    ) -> Self {
+        let (reply, stopped) = oneshot::channel();
+        Self {
+            commands,
+            command_wake,
+            events,
+            reply: Some(reply),
+            stopped,
+            deadline: tokio::time::Instant::now() + Duration::from_secs(5),
+        }
+    }
+
+    /// Cancellation retains both the sole event receiver and request state.
+    /// Resuming this handle never replays an already admitted stop command.
+    /// Acknowledgement includes the final position and listened-time counters,
+    /// sampled only after the synchronous worker closes the physical output.
+    pub async fn wait(&mut self, mut observe: impl FnMut(AudioEvent)) -> Result<AudioSnapshot> {
+        let deadline = tokio::time::sleep_until(self.deadline);
+        tokio::pin!(deadline);
+        if self.reply.is_some() {
+            let capacity = self.commands.reserve();
+            tokio::pin!(capacity);
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = &mut deadline => anyhow::bail!("Audio output did not stop before the deadline"),
+                    event = self.events.recv() => {
+                        observe(event.context("Audio worker stopped before stop was submitted")?);
+                    }
+                    permit = &mut capacity => {
+                        let permit = permit.context("Audio worker stopped")?;
+                        let reply = self.reply.take().expect("stop request was not admitted");
+                        permit.send(AudioCommand::StopAndSnapshot(reply));
+                        let _ = self.command_wake.try_send(());
+                        break;
+                    }
+                }
+            }
+        }
+        let mut events_open = true;
+        loop {
+            tokio::select! {
+                biased;
+                _ = &mut deadline => anyhow::bail!("Audio output did not stop before the deadline"),
+                // The worker emits these FIFO events before physically closing
+                // playback. Drain them before accepting its acknowledgement.
+                event = self.events.recv(), if events_open => {
+                    match event {
+                        Some(event) => observe(event),
+                        None => events_open = false,
+                    }
+                }
+                snapshot = &mut self.stopped => return snapshot.context("Audio worker stopped before acknowledging stop"),
+            }
+        }
+    }
+
+    /// Return ownership of the sole event receiver to the engine.
+    pub fn into_events(self) -> mpsc::Receiver<AudioEvent> {
+        self.events
     }
 }
 
-/// Preserve command order while freeing reverse-channel capacity until stop is acknowledged.
-fn stop_and_snapshot(
-    commands: &Sender<AudioCommand>,
-    events: &Receiver<AudioEvent>,
-    mut observe: impl FnMut(AudioEvent),
-) -> Result<AudioSnapshot> {
-    let (reply, stopped) = bounded(1);
-    let deadline = after(Duration::from_secs(5));
-    loop {
-        select! {
-            send(commands, AudioCommand::StopAndSnapshot(reply)) -> sent => {
-                sent.context("Audio worker stopped")?;
-                break;
-            }
-            recv(events) -> event => {
-                observe(event.context("Audio worker stopped before stop was submitted")?);
-            }
-            recv(deadline) -> _ => anyhow::bail!("Audio output did not stop before the deadline"),
-        }
+// Cancelling the async send and waking synchronous selects are one lifetime.
+// Drop runs before the wake sender disconnects, including AudioEngine::drop.
+struct AudioShutdown {
+    _wake: Sender<()>,
+    events: CancellationToken,
+}
+
+struct AudioShutdownReceiver {
+    signal: Receiver<()>,
+    events: CancellationToken,
+}
+
+impl Drop for AudioShutdown {
+    fn drop(&mut self) {
+        self.events.cancel();
     }
-    loop {
-        select! {
-            recv(stopped) -> snapshot => return snapshot.context("Audio worker stopped before acknowledging stop"),
-            recv(events) -> event => {
-                observe(event.context("Audio worker stopped before acknowledging stop")?);
-            }
-            recv(deadline) -> _ => anyhow::bail!("Audio output did not stop before the deadline"),
-        }
-    }
+}
+
+fn shutdown_channel() -> (AudioShutdown, AudioShutdownReceiver) {
+    let (wake, receiver) = bounded(0);
+    let events = CancellationToken::new();
+    (
+        AudioShutdown {
+            _wake: wake,
+            events: events.clone(),
+        },
+        AudioShutdownReceiver {
+            signal: receiver,
+            events,
+        },
+    )
 }
 impl Drop for AudioEngine {
     fn drop(&mut self) {

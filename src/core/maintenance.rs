@@ -3,15 +3,15 @@ use anyhow::ensure;
 
 /// The owner outlives request timeouts and retires only after its connection closes.
 pub(in crate::core) struct OptimizationTask {
-    pub(in crate::core) finished: Receiver<Result<DatabaseOptimization>>,
-    pub(in crate::core) reply: Option<Sender<CoreResponse>>,
-    worker: Option<JoinHandle<()>>,
+    pub(in crate::core) finished: oneshot::Receiver<Result<DatabaseOptimization>>,
+    pub(in crate::core) reply: Option<oneshot::Sender<CoreResponse>>,
+    worker: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl OptimizationTask {
     fn join(&mut self) -> Result<()> {
         if let Some(worker) = self.worker.take() {
-            worker.join().map_err(|_| {
+            futures::executor::block_on(worker).map_err(|_| {
                 anyhow::anyhow!(
                     "Database optimization worker panicked; the database may already have changed"
                 )
@@ -50,20 +50,29 @@ impl Core {
         );
         let current_id = self.state.queue.current_id;
         let path = self.store.database_path()?;
-        let (finished_tx, finished) = bounded(1);
-        let worker = thread::Builder::new()
-            .name("rivu-database-optimization".into())
-            .spawn(move || {
-                let result = Store::open(&path).and_then(|store| {
+        let (finished_tx, finished) = oneshot::channel();
+        let worker = self.executor.spawn(async move {
+            // SQLite VACUUM/ANALYZE/checkpoint are synchronous and may commit.
+            // Await their real completion even during shutdown; cancellation of
+            // an async waiter cannot retire the connection or undo those facts.
+            let result = tokio::task::spawn_blocking(move || {
+                Store::open(&path).and_then(|store| {
                     store.set_queue_current(current_id)?;
-                    store.optimize().context(
-                        "Database optimization failed; the database may already have changed",
-                    )
-                });
-                // Single-flight has exactly one completion slot. Delivery cannot
-                // block shutdown, including after the requester has timed out.
-                let _ = finished_tx.try_send(result);
-            })?;
+                    store
+                        .optimize()
+                        .context("Database optimization failed; the database may already have changed")
+                })
+            })
+            .await
+            .unwrap_or_else(|error| {
+                Err(anyhow::anyhow!(
+                    "Database optimization worker failed: {error}; the database may already have changed"
+                ))
+            });
+            // Single-flight has exactly one completion slot. Delivery cannot
+            // block shutdown, including after the requester has timed out.
+            let _ = finished_tx.send(result);
+        });
         self.active_optimization = Some(OptimizationTask {
             finished,
             reply: None,
@@ -76,7 +85,7 @@ impl Core {
     pub(in crate::core) fn finish_optimization(
         &mut self,
         result: Result<DatabaseOptimization>,
-    ) -> (Option<Sender<CoreResponse>>, Result<()>) {
+    ) -> (Option<oneshot::Sender<CoreResponse>>, Result<()>) {
         let Some(mut task) = self.active_optimization.take() else {
             return (
                 None,
@@ -96,12 +105,12 @@ impl Core {
 
     pub(in crate::core) fn shutdown_optimization(
         &mut self,
-    ) -> Option<(Option<Sender<CoreResponse>>, Result<()>)> {
+    ) -> Option<(Option<oneshot::Sender<CoreResponse>>, Result<()>)> {
         let task = self.active_optimization.as_mut()?;
         // VACUUM is not cancellable here. Shutdown waits for physical completion,
         // with no hard duration bound and no replay after an unknown outcome.
         let result = task.join().and_then(|()| {
-            task.finished.recv().unwrap_or_else(|_| {
+            task.finished.try_recv().unwrap_or_else(|_| {
                 Err(anyhow::anyhow!(
                     "Database optimization worker ended without a result; the database may already have changed"
                 ))

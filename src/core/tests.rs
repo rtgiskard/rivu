@@ -15,6 +15,28 @@ mod relocation;
 mod settings;
 mod tracks;
 
+pub(super) fn executor() -> tokio::runtime::Handle {
+    static TASKS: std::sync::LazyLock<TaskRuntime> =
+        std::sync::LazyLock::new(|| TaskRuntime::start().unwrap());
+    TASKS.handle.clone()
+}
+
+// Bound synchronous test waits while exercising the production Tokio ports.
+trait TokioReceiverExt<T> {
+    fn recv_timeout(&mut self, timeout: Duration) -> Result<T>;
+}
+
+impl<T> TokioReceiverExt<T> for tokio::sync::mpsc::Receiver<T> {
+    fn recv_timeout(&mut self, timeout: Duration) -> Result<T> {
+        wait_on(&executor(), async {
+            tokio::time::timeout(timeout, self.recv())
+                .await
+                .context("Timed out waiting for task event")?
+                .context("Task event channel disconnected")
+        })
+    }
+}
+
 // An idle real audio worker handles stop/snapshot, but these tests never load
 // audio. Missing-file errors expose the selected entry without opening output.
 fn fixture() -> (tempfile::TempDir, Core) {
@@ -75,12 +97,15 @@ fn fixture_with_database(duration: Option<f64>, persistent: bool) -> (tempfile::
     Arc::make_mut(&mut state.system.config)
         .library_roots
         .push(directory.path().to_path_buf());
-    let (scan_tx, scan_rx) = bounded(1);
-    let (relocation_tx, relocation_rx) = bounded(1);
+    let (scan_tx, scan_rx) = mpsc::channel(3);
+    let (relocation_tx, relocation_rx) = mpsc::channel(1);
+    let tasks = TaskRuntime::start().unwrap();
     let mut core = Core {
         store,
         engine: AudioEngine::new(1).unwrap(),
         logging: None,
+        executor: tasks.handle.clone(),
+        revision_updates: watch::channel(state.revisions).0,
         shared: Arc::new(RwLock::new(state.clone())),
         state,
         wakeup: Arc::new(RwLock::new(None)),
@@ -111,6 +136,7 @@ fn fixture_with_database(duration: Option<f64>, persistent: bool) -> (tempfile::
         played_cursor: 0,
         saved_config: None,
         config_save_error: None,
+        _test_tasks: Some(tasks),
     };
     core.enqueue(&[1, 2, 2, 3, 4]).unwrap();
     (directory, core)
@@ -119,14 +145,12 @@ fn fixture_with_database(duration: Option<f64>, persistent: bool) -> (tempfile::
 // Capture the commands Core really sends without opening a platform device.
 // The existing idle worker remains alive for its event/analysis ownership.
 fn recording_audio(core: &mut Core) -> Receiver<AudioCommand> {
-    let (commands, receive) = bounded(64);
+    let (commands, mut receive) = mpsc::channel(64);
     let (record, recorded) = crossbeam_channel::unbounded();
     let idle_commands = core.engine.replace_commands(commands);
     thread::spawn(move || {
         let mut final_snapshot = audio::AudioSnapshot::default();
-        while let Ok(command) = receive.recv() {
-            // No callback runs in this recorder. Reflect only admitted source
-            // changes and seeks; tests needing audible progress supply a clock.
+        while let Some(command) = receive.blocking_recv() {
             match &command {
                 AudioCommand::Load {
                     generation,
@@ -160,13 +184,15 @@ fn recording_audio(core: &mut Core) -> Receiver<AudioCommand> {
                 AudioCommand::Seek(position) => final_snapshot.position_seconds = *position,
                 _ => {}
             }
-            let snapshot = match &command {
-                AudioCommand::StopAndSnapshot(reply) => Some(reply.clone()),
-                _ => None,
-            };
-            let _ = record.send(command);
-            if let Some(reply) = snapshot {
-                let _ = reply.send(final_snapshot);
+            match command {
+                AudioCommand::StopAndSnapshot(reply) => {
+                    let (recorded_reply, _) = oneshot::channel();
+                    let _ = record.send(AudioCommand::StopAndSnapshot(recorded_reply));
+                    let _ = reply.send(final_snapshot);
+                }
+                command => {
+                    let _ = record.send(command);
+                }
             }
         }
         drop(idle_commands);
@@ -183,16 +209,19 @@ fn navigation_runtime(
     Arc<Mutex<Vec<MprisSnapshot>>>,
 ) {
     core.publish();
-    let (sender, requests) = bounded(64);
+    let (sender, requests) = mpsc::channel(64);
     let handle = CoreHandle {
         state: core.shared.clone(),
         analysis: core.engine.analysis.clone(),
         analysis_control: core.engine.analysis_control.clone(),
         waveform: core.engine.waveform.clone(),
         sender,
+        executor: core.executor.clone(),
+        revision_updates: core.revision_updates.subscribe(),
         wakeup: core.wakeup.clone(),
         subscribers: core.subscribers.clone(),
         query_timeout: None,
+        _test_tasks: None,
     };
     let publications = Arc::new(Mutex::new(Vec::new()));
     let observed = publications.clone();
@@ -204,22 +233,29 @@ fn navigation_runtime(
     });
     let (control, shutdown) = RuntimeControl::new();
     let worker_control = control.clone();
-    let worker = thread::spawn(move || {
-        core.run(requests, shutdown, &worker_control);
-        core
-    });
+    let worker = thread::spawn(move || run_test_driver(core, requests, shutdown, &worker_control));
     (handle, control, worker, publications)
 }
 
-fn run_until_disconnected(core: &mut Core, requests: Receiver<Request>) {
+fn run_test_driver(
+    mut core: Core,
+    requests: mpsc::Receiver<Request>,
+    shutdown: mpsc::Receiver<()>,
+    control: &RuntimeControl,
+) -> Core {
+    core.run(requests, shutdown, control);
+    core
+}
+
+fn run_until_disconnected(core: Core, requests: mpsc::Receiver<Request>) -> Core {
     let (control, shutdown) = RuntimeControl::new();
-    core.run(requests, shutdown, &control);
+    run_test_driver(core, requests, shutdown, &control)
 }
 
 fn display_fixture() -> (
     CoreHandle,
     rivu_audio::analysis::AnalysisWorker,
-    Receiver<Request>,
+    mpsc::Receiver<Request>,
 ) {
     let analysis = Arc::new(RwLock::new(AnalysisFrame::default()));
     let worker = rivu_audio::analysis::AnalysisWorker::new(analysis.clone()).unwrap();
@@ -230,16 +266,20 @@ fn display_fixture() -> (
         signal: crate::config::VisualizationSignal::After,
     });
     worker.set_playback_active(true);
-    let (sender, receiver) = bounded(1);
+    let (sender, receiver) = mpsc::channel(1);
+    let tasks = Arc::new(TaskRuntime::start().unwrap());
     let handle = CoreHandle {
         state: Arc::new(RwLock::new(CoreState::default())),
         analysis,
         analysis_control: worker.control.clone(),
         waveform: Arc::new(RwLock::new(audio::WaveformFrame::default())),
         sender,
+        executor: tasks.handle.clone(),
+        revision_updates: watch::channel(StateRevisions::default()).1,
         wakeup: Arc::new(RwLock::new(None)),
         subscribers: Arc::new(RwLock::new(Vec::new())),
         query_timeout: None,
+        _test_tasks: Some(tasks),
     };
     (handle, worker, receiver)
 }

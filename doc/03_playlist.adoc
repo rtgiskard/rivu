@@ -195,8 +195,10 @@ imports, not playlist sizes for other operations. Input errors identify
 preparation/read/decode/parse stages and occur before any scan or playlist commit.
 Parsed import CUE sheets are reused by metadata scanning, preserving the sheet
 version and track order read during preparation. Ordinary library scans and CUE
-exports share the ordinary-file-only, nonblocking, 1 MiB CUE reader; scans also
-check cancellation between read chunks and while parsing lines and segments.
+exports share the ordinary-file-only, nonblocking, 1 MiB CUE reader. Input reads
+move the admitted descriptor and retained byte buffer through blocking stages of
+at most 256 KiB; cancellation is checked before and after each read, including
+EOF, and during CUE parsing. Reading does not reopen an admitted path.
 
 Scan saving, playlist creation, and playlist refresh are separate stages. A
 failure to save the scan does not create a playlist. Once the scan has been
@@ -212,6 +214,15 @@ Export runs in the background and permits only one active export. Its command
 reply reports final output, not startup. Concurrent edits do not alter its snapshot.
 Failure or shutdown cancellation before replacement preserves the old target;
 a response timeout does not cancel the worker or prove that replacement failed.
+
+Export formats at most 256 rows before a cooperative yield, counting CUE
+continuations even when they produce no output. File writes reuse one 256 KiB
+buffer and submit at most that many bytes per blocking stage; database pages
+remain bounded and retain the same read snapshot. Neither stage occupies a
+blocking worker while waiting for the other. Errors, panics, and cancellation
+await submitted file work and retire the temporary file and database snapshot
+before admitting another export. The final same-directory replacement is one
+joined atomic stage; cancellation after its last check cannot undo replacement.
 
 [source,sh]
 ----

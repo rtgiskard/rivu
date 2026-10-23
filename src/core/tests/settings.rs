@@ -101,9 +101,9 @@ fn missing_config_is_created_only_at_apply_or_orderly_exit() {
             ))))
             .unwrap();
         } else {
-            let (sender, receiver) = bounded(1);
+            let (sender, receiver) = mpsc::channel(1);
             drop(sender);
-            run_until_disconnected(&mut core, receiver);
+            core = run_until_disconnected(core, receiver);
         }
         let saved = Config::load(&path).unwrap();
         assert_eq!(saved.volume, 0.25);
@@ -177,9 +177,9 @@ fn no_op_apply_and_change_back_exit_do_not_replace_saved_config() {
     .unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), original);
     assert_eq!(std::fs::metadata(&path).unwrap().ino(), inode);
-    let (sender, receiver) = bounded(1);
+    let (sender, receiver) = mpsc::channel(1);
     drop(sender);
-    run_until_disconnected(&mut core, receiver);
+    drop(run_until_disconnected(core, receiver));
     assert_eq!(std::fs::read(&path).unwrap(), original);
     assert_eq!(std::fs::metadata(&path).unwrap().ino(), inode);
 }
@@ -199,9 +199,9 @@ fn queue_save_failure_does_not_prevent_final_config_save() {
          BEGIN SELECT RAISE(FAIL, 'queue save blocked'); END;",
         )
         .unwrap();
-    let (sender, receiver) = bounded(1);
+    let (sender, receiver) = mpsc::channel(1);
     drop(sender);
-    run_until_disconnected(&mut core, receiver);
+    core = run_until_disconnected(core, receiver);
     assert!(
         core.shared
             .read()
@@ -230,9 +230,11 @@ fn busy_audio_configuration_rejects_the_whole_batch_before_persistence() {
             .unwrap();
         let baseline = core.state.clone();
         let saved = std::fs::read(&core.state.system.config_path).unwrap();
-        let (commands, receive) = bounded(64);
+        let (commands, mut receive) = mpsc::channel(64);
         for index in 0..64 - available {
-            commands.send(AudioCommand::Volume(index as f32)).unwrap();
+            commands
+                .try_send(AudioCommand::Volume(index as f32))
+                .unwrap();
         }
         core.engine.replace_commands(commands);
         let mut config = core.state.system.config.as_ref().clone();
@@ -378,9 +380,9 @@ fn shutdown_flush_reports_failure_and_retains_live_settings() {
         mode: RepeatMode::All,
     })
     .unwrap();
-    let (sender, receiver) = bounded(1);
+    let (sender, receiver) = mpsc::channel(1);
     drop(sender);
-    run_until_disconnected(&mut core, receiver);
+    core = run_until_disconnected(core, receiver);
     let state = core.shared.read();
     assert!(state.system.shutting_down);
     assert!(state.system.last_error.is_some());
@@ -739,7 +741,7 @@ fn settings_failed_save_retry_merges_against_latest_runtime() {
 #[test]
 fn settings_saved_audio_failure_keeps_committed_desired_configuration() {
     let (_directory, mut core) = fixture();
-    let (commands, receiver) = bounded(64);
+    let (commands, receiver) = mpsc::channel(64);
     drop(receiver);
     core.engine.replace_commands(commands);
     let baseline = core.state.system.config.clone();
@@ -944,7 +946,7 @@ fn unavailable_output_targets_remain_desired_and_persist_across_entry_points() {
 #[test]
 fn configure_saved_but_disconnected_audio_retains_desired_settings() {
     let (_directory, mut core) = fixture();
-    let (commands, receiver) = bounded(64);
+    let (commands, receiver) = mpsc::channel(64);
     drop(receiver);
     core.engine.replace_commands(commands);
     let mut config = core.state.system.config.as_ref().clone();
@@ -997,7 +999,7 @@ fn still_mode_toggle_commits_without_accessing_unwritable_config_path() {
 #[test]
 fn still_mode_applied_but_disconnected_audio_retains_unsaved_settings() {
     let (_directory, mut core) = fixture();
-    let (commands, receiver) = bounded(1);
+    let (commands, receiver) = mpsc::channel(1);
     drop(receiver);
     core.engine.replace_commands(commands);
     // Pending playback settings must be incorporated in the same memory snapshot.

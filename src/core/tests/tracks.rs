@@ -860,8 +860,8 @@ fn metadata_edit_refreshes_published_history_without_rewriting_old_snapshots() {
 fn current_metadata_edit_preflights_capacity_without_blocking_unrelated_facts() {
     let (_directory, mut core) = fixture();
     pending(&mut core, 1);
-    let (commands, receive) = bounded(1);
-    commands.send(AudioCommand::Volume(0.5)).unwrap();
+    let (commands, mut receive) = mpsc::channel(1);
+    commands.try_send(AudioCommand::Volume(0.5)).unwrap();
     let _idle_commands = core.engine.replace_commands(commands);
     let current = Arc::clone(core.state.current_track.as_ref().unwrap());
     let before = core.state.query_revisions();
@@ -921,8 +921,8 @@ fn current_metadata_edit_preflights_capacity_without_blocking_unrelated_facts() 
 fn committed_metadata_refresh_preserves_the_old_snapshot_until_audio_admission() {
     let (_directory, mut core) = fixture();
     pending(&mut core, 1);
-    let (commands, receive) = bounded(1);
-    commands.send(AudioCommand::Volume(0.5)).unwrap();
+    let (commands, mut receive) = mpsc::channel(1);
+    commands.try_send(AudioCommand::Volume(0.5)).unwrap();
     let _idle_commands = core.engine.replace_commands(commands);
     let current = Arc::clone(core.state.current_track.as_ref().unwrap());
     core.store

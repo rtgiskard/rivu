@@ -1,57 +1,32 @@
 use super::paths::{is_audio_path, is_cue_path, logical_path};
 use crate::model::{CueSegment, ScanPhase};
 use anyhow::{Context, Result, anyhow, bail};
-use rivu_audio::MediaInfo;
-use rivu_audio::{SourceIdentity, probe_file};
+use rivu_audio::{MediaInfo, SourceIdentity, probe_file};
 use rivu_format::input::open_regular_file;
 use std::collections::{HashMap, HashSet};
-use std::fs::{self, File};
+use std::fs;
 use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
-use walkdir::WalkDir;
+use tokio_util::sync::CancellationToken;
 
-/// Cooperative cancellation shared by the scan owner and its filesystem worker.
-#[derive(Clone, Debug)]
+/// Cooperative cancellation shared by the scan owner and its async preparation.
+#[derive(Clone, Debug, Default)]
 pub struct ScanCancellation {
-    state: Arc<CancellationState>,
-}
-
-#[derive(Debug)]
-struct CancellationState {
-    cancelled: AtomicBool,
-    sender: parking_lot::Mutex<Option<crossbeam_channel::Sender<()>>>,
-    receiver: crossbeam_channel::Receiver<()>,
-}
-
-impl Default for ScanCancellation {
-    fn default() -> Self {
-        let (sender, receiver) = crossbeam_channel::bounded(0);
-        Self {
-            state: Arc::new(CancellationState {
-                cancelled: AtomicBool::new(false),
-                sender: parking_lot::Mutex::new(Some(sender)),
-                receiver,
-            }),
-        }
-    }
+    token: CancellationToken,
 }
 
 impl ScanCancellation {
     pub fn cancel(&self) {
-        self.state.cancelled.store(true, Ordering::Relaxed);
-        // Disconnecting wakes every wait without consuming a one-shot signal.
-        self.state.sender.lock().take();
+        self.token.cancel();
     }
 
     pub fn is_cancelled(&self) -> bool {
-        self.state.cancelled.load(Ordering::Relaxed)
+        self.token.is_cancelled()
     }
 
-    pub(crate) fn cancelled(&self) -> &crossbeam_channel::Receiver<()> {
-        &self.state.receiver
+    pub(crate) async fn cancelled(&self) {
+        self.token.cancelled().await;
     }
 
     pub fn check(&self) -> Result<()> {
@@ -232,7 +207,7 @@ impl ScanResult {
 /// Scan directories, audio files and CUE sheets without touching audio output.
 /// CUE metadata is always reread; only unchanged full-source probe results may
 /// be reused. Failed sheets contribute no partial tracks or source suppression.
-/// `known_source` looks up only a source actually encountered by this scan.
+/// `known_sources` looks up only the admitted sources in a bounded batch.
 /// `library_roots` are normalized absolute logical paths, as published by the core.
 /// `max_depth` is relative to each requested directory, which is itself depth 0.
 /// Cancellation returns an error, never a partial result. Checks surround blocking
@@ -240,27 +215,30 @@ impl ScanResult {
 #[cfg(test)]
 pub fn scan_paths(
     paths: &[PathBuf],
-    known_source: impl FnMut(&Path) -> Result<Option<KnownFile>>,
+    mut known_sources: impl FnMut(&[PathBuf]) -> Result<Vec<Option<KnownFile>>>,
     ffmpeg_enabled: bool,
     library_roots: &[PathBuf],
     max_depth: u32,
     cancellation: &ScanCancellation,
     progress: impl FnMut(ScanPhase, usize, Option<usize>, usize, Option<&Path>),
 ) -> Result<ScanResult> {
-    scan_paths_with_cues(
-        paths,
-        known_source,
-        ffmpeg_enabled,
-        library_roots,
-        max_depth,
-        (cancellation, None),
-        progress,
-    )
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(scan_paths_with_cues(
+            paths,
+            |paths| std::future::ready(known_sources(&paths)),
+            ffmpeg_enabled,
+            library_roots,
+            max_depth,
+            (cancellation, None),
+            progress,
+        ))
 }
 
-pub(crate) fn scan_paths_with_cues(
+pub(crate) async fn scan_paths_with_cues<Fut>(
     paths: &[PathBuf],
-    mut known_source: impl FnMut(&Path) -> Result<Option<KnownFile>>,
+    mut known_sources: impl FnMut(Vec<PathBuf>) -> Fut,
     ffmpeg_enabled: bool,
     library_roots: &[PathBuf],
     max_depth: u32,
@@ -269,7 +247,10 @@ pub(crate) fn scan_paths_with_cues(
         Option<HashMap<PathBuf, super::cue::CueSheet>>,
     ),
     mut progress: impl FnMut(ScanPhase, usize, Option<usize>, usize, Option<&Path>),
-) -> Result<ScanResult> {
+) -> Result<ScanResult>
+where
+    Fut: Future<Output = Result<Vec<Option<KnownFile>>>>,
+{
     cancellation.check()?;
     if max_depth == 0 {
         bail!("scan max depth must be at least 1");
@@ -315,7 +296,13 @@ pub(crate) fn scan_paths_with_cues(
         }
         result.roots.push(root.clone());
         let root_index = result.roots.len() - 1;
-        let metadata = match fs::metadata(&root) {
+        let metadata = match tokio::task::spawn_blocking({
+            let root = root.clone();
+            move || fs::metadata(root)
+        })
+        .await
+        .context("Scan root metadata worker failed")?
+        {
             Ok(metadata) => metadata,
             Err(error) => {
                 cancellation.check()?;
@@ -371,77 +358,16 @@ pub(crate) fn scan_paths_with_cues(
                     Some(root.as_path()),
                 );
             }
-        } else if metadata.is_dir() {
-            let max_walk_depth = (max_depth as usize).saturating_add(1);
-            let mut entries = WalkDir::new(&root)
-                .follow_links(true)
-                .max_depth(max_walk_depth)
-                .into_iter();
-            loop {
-                cancellation.check()?;
-                let Some(entry) = entries.next() else {
-                    break;
-                };
-                cancellation.check()?;
-                match entry {
-                    Ok(entry)
-                        if entry.depth() > max_depth as usize && entry.file_type().is_dir() =>
-                    {
-                        entries.skip_current_dir();
-                        let report = result.push_skipped_directory(root_index, entry.path());
-                        if report {
-                            tracing::warn!(
-                                path = %entry.path().display(),
-                                max_depth,
-                                "scan_depth_limit_reached"
-                            );
-                        }
-                        result.push_error(|| {
-                            format!(
-                                "{}: directory exceeds scan depth limit {max_depth}",
-                                entry.path().display()
-                            )
-                        });
-                        progress(
-                            ScanPhase::Discovering,
-                            files.len(),
-                            None,
-                            result.errors.len(),
-                            Some(entry.path()),
-                        );
-                    }
-                    // Admission checks the opened object, not a discovery-time type hint.
-                    Ok(entry)
-                        if !entry.file_type().is_dir()
-                            && (is_audio_path(entry.path()) || is_cue_path(entry.path())) =>
-                    {
-                        if files.insert(entry.path().to_path_buf()) {
-                            progress(
-                                ScanPhase::Discovering,
-                                files.len(),
-                                None,
-                                result.errors.len(),
-                                Some(entry.path()),
-                            );
-                        }
-                    }
-                    Ok(_) => {}
-                    Err(error) => {
-                        result.push_uncertainty(ScanUncertainty::Subtree {
-                            root_index,
-                            path: error.path().unwrap_or(&root).to_path_buf(),
-                        });
-                        result.push_error(|| format!("{}: {error}", root.display()));
-                        progress(
-                            ScanPhase::Discovering,
-                            files.len(),
-                            None,
-                            result.errors.len(),
-                            Some(root.as_path()),
-                        );
-                    }
-                }
-            }
+        } else {
+            discover_directory(
+                &root,
+                metadata,
+                (root_index, max_depth),
+                cancellation,
+                (&mut files, &mut result),
+                &mut progress,
+            )
+            .await?;
         }
     }
     cancellation.check()?;
@@ -452,8 +378,14 @@ pub(crate) fn scan_paths_with_cues(
         result.errors.len(),
         None,
     );
-    let mut files: Vec<_> = files.into_iter().collect();
-    files.sort();
+    let files = tokio::task::spawn_blocking(move || {
+        let mut files: Vec<_> = files.into_iter().collect();
+        files.sort();
+        files
+    })
+    .await
+    .context("Scan discovery ordering worker failed")?;
+    cancellation.check()?;
     let total = files.len();
     let mut processed = 0;
     progress(
@@ -465,44 +397,50 @@ pub(crate) fn scan_paths_with_cues(
     );
     let mut sources = HashMap::new();
     let mut suppressed = HashSet::new();
-    for sheet in files.iter().filter(|path| is_cue_path(path)) {
-        cancellation.check()?;
-        match scan_cue(
-            sheet,
-            &mut known_source,
+    let mut scratch = vec![0; HASH_CHUNK_BYTES];
+    let mut cue_paths = files.iter().filter(|path| is_cue_path(path));
+    loop {
+        let mut prepared = Vec::new();
+        let mut pending = HashSet::new();
+        for path in cue_paths.by_ref().take(SOURCE_BATCH_SIZE) {
+            cancellation.check()?;
+            let sheet = read_cue(path, library_roots, cancellation, sheets.as_mut()).await;
+            if let Ok(sheet) = &sheet {
+                for track in &sheet.tracks {
+                    if !sources.contains_key(&track.file) {
+                        pending.insert(track.file.clone());
+                    }
+                }
+            }
+            prepared.push((path, sheet));
+        }
+        if prepared.is_empty() {
+            break;
+        }
+        let mut pending: Vec<_> = pending.into_iter().collect();
+        pending.sort();
+        prepare_sources(
+            pending,
+            &mut known_sources,
             &mut sources,
             ffmpeg_enabled,
-            library_roots,
             cancellation,
-            sheets.as_mut(),
-        ) {
-            Ok(records) => {
-                suppressed.extend(records.iter().map(|record| record.path.clone()));
-                result.records.extend(records);
+            &mut scratch,
+        )
+        .await?;
+        for (path, sheet) in prepared {
+            cancellation.check()?;
+            match sheet.and_then(|sheet| cue_records(path, sheet, &sources, cancellation)) {
+                Ok(records) => {
+                    suppressed.extend(records.iter().map(|record| record.path.clone()));
+                    result.records.extend(records);
+                }
+                Err(error) => {
+                    cancellation.check()?;
+                    result.push_uncertainty(ScanUncertainty::CueSheet(path.clone()));
+                    result.push_error(|| format!("{}: {error:#}", path.display()));
+                }
             }
-            Err(error) => {
-                cancellation.check()?;
-                result.push_uncertainty(ScanUncertainty::CueSheet(sheet.clone()));
-                result.push_error(|| format!("{}: {error:#}", sheet.display()));
-            }
-        }
-        processed += 1;
-        progress(
-            ScanPhase::ReadingMetadata,
-            processed,
-            Some(total),
-            result.errors.len(),
-            Some(sheet.as_path()),
-        );
-    }
-    for (path, source) in &sources {
-        if source.is_err() {
-            result.push_uncertainty(ScanUncertainty::File(path.clone()));
-        }
-    }
-    for path in files.iter().filter(|path| is_audio_path(path)) {
-        cancellation.check()?;
-        if suppressed.contains(path) && !explicit_audio.contains(path) {
             processed += 1;
             progress(
                 ScanPhase::ReadingMetadata,
@@ -511,47 +449,79 @@ pub(crate) fn scan_paths_with_cues(
                 result.errors.len(),
                 Some(path.as_path()),
             );
-            continue;
         }
-        // CUE sheets are finished, so ordinary files can consume their source snapshot.
-        let record = match sources.remove(path) {
-            Some(record) => record.map_err(|error| anyhow!("{error}")),
-            None => lookup_and_scan_file(path, &mut known_source, ffmpeg_enabled, cancellation),
-        };
-        cancellation.check()?;
-        match record {
-            Ok(record) => result.records.push(record),
-            Err(error) => {
-                result.push_uncertainty(ScanUncertainty::File(path.clone()));
-                result.push_error(|| format!("{}: {error:#}", path.display()));
+    }
+    for (path, source) in &sources {
+        if source.is_err() {
+            result.push_uncertainty(ScanUncertainty::File(path.clone()));
+        }
+    }
+    for chunk in files.chunks(SOURCE_BATCH_SIZE) {
+        let pending = chunk
+            .iter()
+            .filter(|path| {
+                is_audio_path(path)
+                    && (!suppressed.contains(*path) || explicit_audio.contains(*path))
+                    && !sources.contains_key(*path)
+            })
+            .cloned()
+            .collect();
+        prepare_sources(
+            pending,
+            &mut known_sources,
+            &mut sources,
+            ffmpeg_enabled,
+            cancellation,
+            &mut scratch,
+        )
+        .await?;
+        for path in chunk.iter().filter(|path| is_audio_path(path)) {
+            cancellation.check()?;
+            if !suppressed.contains(path) || explicit_audio.contains(path) {
+                let record = sources
+                    .remove(path)
+                    .context("Audio source was not prepared")?;
+                match record {
+                    Ok(record) => result.records.push(record),
+                    Err(error) => {
+                        result.push_uncertainty(ScanUncertainty::File(path.clone()));
+                        result.push_error(|| format!("{}: {error}", path.display()));
+                    }
+                }
             }
+            processed += 1;
+            progress(
+                ScanPhase::ReadingMetadata,
+                processed,
+                Some(total),
+                result.errors.len(),
+                Some(path.as_path()),
+            );
         }
-        processed += 1;
-        progress(
-            ScanPhase::ReadingMetadata,
-            processed,
-            Some(total),
-            result.errors.len(),
-            Some(path.as_path()),
-        );
     }
     cancellation.check()?;
-    suppressed.retain(|path| !explicit_audio.contains(path));
-    result.suppressed_sources = suppressed.into_iter().collect();
-    result.suppressed_sources.sort();
-    result.skipped_directories.sort_unstable_by(|a, b| {
-        a.path
-            .cmp(&b.path)
-            .then_with(|| a.root_index.cmp(&b.root_index))
-    });
-    result.records.sort_by(|a, b| {
-        let identity = |record: &ScanRecord| record.cue.as_ref().map(|cue| cue.number).unwrap_or(0);
-        let a_path = a.cue.as_ref().map_or(&a.path, |cue| &cue.sheet);
-        let b_path = b.cue.as_ref().map_or(&b.path, |cue| &cue.sheet);
-        a_path
-            .cmp(b_path)
-            .then_with(|| identity(a).cmp(&identity(b)))
-    });
+    let result = tokio::task::spawn_blocking(move || {
+        suppressed.retain(|path| !explicit_audio.contains(path));
+        result.suppressed_sources = suppressed.into_iter().collect();
+        result.suppressed_sources.sort();
+        result.skipped_directories.sort_unstable_by(|a, b| {
+            a.path
+                .cmp(&b.path)
+                .then_with(|| a.root_index.cmp(&b.root_index))
+        });
+        result.records.sort_by(|a, b| {
+            let identity =
+                |record: &ScanRecord| record.cue.as_ref().map(|cue| cue.number).unwrap_or(0);
+            let a_path = a.cue.as_ref().map_or(&a.path, |cue| &cue.sheet);
+            let b_path = b.cue.as_ref().map_or(&b.path, |cue| &cue.sheet);
+            a_path
+                .cmp(b_path)
+                .then_with(|| identity(a).cmp(&identity(b)))
+        });
+        result
+    })
+    .await
+    .context("Scan result ordering worker failed")?;
     progress(
         ScanPhase::ReadingMetadata,
         processed,
@@ -563,33 +533,191 @@ pub(crate) fn scan_paths_with_cues(
     Ok(result)
 }
 
-fn source_record<'a>(
-    path: PathBuf,
-    known_source: &mut impl FnMut(&Path) -> Result<Option<KnownFile>>,
-    sources: &'a mut HashMap<PathBuf, std::result::Result<ScanRecord, String>>,
-    ffmpeg_enabled: bool,
+/// One sequential DFS: at most max_depth + 1 directory readers, no task per
+/// entry, and inode ancestry detects loops without erasing logical aliases.
+async fn discover_directory(
+    root: &Path,
+    metadata: fs::Metadata,
+    (root_index, max_depth): (usize, u32),
     cancellation: &ScanCancellation,
-) -> Result<&'a ScanRecord> {
-    cancellation.check()?;
-    sources
-        .entry(path)
-        .or_insert_with_key(|path| {
-            lookup_and_scan_file(path, known_source, ffmpeg_enabled, cancellation)
-                .map_err(|error| format!("{error:#}"))
+    (files, result): (&mut HashSet<PathBuf>, &mut ScanResult),
+    progress: &mut impl FnMut(ScanPhase, usize, Option<usize>, usize, Option<&Path>),
+) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    struct Directory {
+        path: PathBuf,
+        identity: (u64, u64),
+        entries: fs::ReadDir,
+    }
+    enum Discovery {
+        File(PathBuf),
+        Error(PathBuf, std::io::Error),
+        Depth(PathBuf),
+    }
+
+    let root_path = root.to_path_buf();
+    let entries = tokio::task::spawn_blocking(move || fs::read_dir(root_path))
+        .await
+        .context("Scan directory admission worker failed")?;
+    let entries = match entries {
+        Ok(entries) => entries,
+        Err(error) => {
+            traversal_error(root_index, root, error, files.len(), result, progress);
+            cancellation.check()?;
+            return Ok(());
+        }
+    };
+    let mut stack = vec![Directory {
+        path: root.to_path_buf(),
+        identity: (metadata.dev(), metadata.ino()),
+        entries,
+    }];
+    while !stack.is_empty() {
+        cancellation.check()?;
+        let token = cancellation.clone();
+        let (next_stack, discoveries) = tokio::task::spawn_blocking(move || {
+            let mut discoveries = Vec::new();
+            // Count reader exhaustion/errors too, so a deep unwind is bounded.
+            for _ in 0..DIRECTORY_BATCH_SIZE {
+                token.check()?;
+                let Some(directory) = stack.last_mut() else {
+                    break;
+                };
+                let entry = match directory.entries.next() {
+                    Some(Ok(entry)) => entry,
+                    None => {
+                        stack.pop();
+                        continue;
+                    }
+                    Some(Err(error)) => {
+                        let path = directory.path.clone();
+                        stack.pop();
+                        discoveries.push(Discovery::Error(path, error));
+                        continue;
+                    }
+                };
+                let path = entry.path();
+                let file_type = match entry.file_type() {
+                    Ok(file_type) => file_type,
+                    Err(error) => {
+                        discoveries.push(Discovery::Error(path, error));
+                        continue;
+                    }
+                };
+                let metadata = if file_type.is_dir() || file_type.is_symlink() {
+                    match fs::metadata(&path) {
+                        Ok(metadata) => Some(metadata),
+                        Err(error) => {
+                            discoveries.push(Discovery::Error(path, error));
+                            continue;
+                        }
+                    }
+                } else {
+                    None
+                };
+                token.check()?;
+                if let Some(metadata) = metadata.filter(fs::Metadata::is_dir) {
+                    if stack.len() > max_depth as usize {
+                        discoveries.push(Discovery::Depth(path));
+                        continue;
+                    }
+                    let identity = (metadata.dev(), metadata.ino());
+                    if stack.iter().any(|directory| directory.identity == identity) {
+                        discoveries.push(Discovery::Error(
+                            path,
+                            std::io::Error::other("filesystem loop detected"),
+                        ));
+                        continue;
+                    }
+                    match fs::read_dir(&path) {
+                        Ok(entries) => stack.push(Directory {
+                            path,
+                            identity,
+                            entries,
+                        }),
+                        Err(error) => discoveries.push(Discovery::Error(path, error)),
+                    }
+                } else if is_audio_path(&path) || is_cue_path(&path) {
+                    discoveries.push(Discovery::File(path));
+                }
+            }
+            token.check()?;
+            Ok::<_, anyhow::Error>((stack, discoveries))
         })
-        .as_ref()
-        .map_err(|error| anyhow!("{error}"))
+        .await
+        .context("Scan directory batch worker failed")??;
+        stack = next_stack;
+        cancellation.check()?;
+        for discovery in discoveries {
+            match discovery {
+                Discovery::Error(path, error) => {
+                    traversal_error(root_index, &path, error, files.len(), result, progress);
+                }
+                Discovery::Depth(path) => {
+                    if result.push_skipped_directory(root_index, &path) {
+                        tracing::warn!(path = %path.display(), max_depth, "scan_depth_limit_reached");
+                    }
+                    result.push_error(|| {
+                        format!(
+                            "{}: directory exceeds scan depth limit {max_depth}",
+                            path.display()
+                        )
+                    });
+                    progress(
+                        ScanPhase::Discovering,
+                        files.len(),
+                        None,
+                        result.errors.len(),
+                        Some(&path),
+                    );
+                }
+                Discovery::File(path) => {
+                    // This type hint never admits the actual object for reading.
+                    if files.insert(path.clone()) {
+                        progress(
+                            ScanPhase::Discovering,
+                            files.len(),
+                            None,
+                            result.errors.len(),
+                            Some(&path),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    cancellation.check()
 }
 
-fn scan_cue(
+fn traversal_error(
+    root_index: usize,
     path: &Path,
-    known_source: &mut impl FnMut(&Path) -> Result<Option<KnownFile>>,
-    sources: &mut HashMap<PathBuf, std::result::Result<ScanRecord, String>>,
-    ffmpeg_enabled: bool,
+    error: std::io::Error,
+    processed: usize,
+    result: &mut ScanResult,
+    progress: &mut impl FnMut(ScanPhase, usize, Option<usize>, usize, Option<&Path>),
+) {
+    result.push_uncertainty(ScanUncertainty::Subtree {
+        root_index,
+        path: path.to_path_buf(),
+    });
+    result.push_error(|| format!("{}: {error}", path.display()));
+    progress(
+        ScanPhase::Discovering,
+        processed,
+        None,
+        result.errors.len(),
+        Some(path),
+    );
+}
+
+async fn read_cue(
+    path: &Path,
     library_roots: &[PathBuf],
     cancellation: &ScanCancellation,
     sheets: Option<&mut HashMap<PathBuf, super::cue::CueSheet>>,
-) -> Result<Vec<ScanRecord>> {
+) -> Result<super::cue::CueSheet> {
     cancellation.check()?;
     path.to_str().context("CUE sheet path is not UTF-8")?;
     let sheet = match sheets {
@@ -597,25 +725,52 @@ fn scan_cue(
             .remove(path)
             .context("Import CUE sheet was not prepared"),
         None => {
-            let bytes = super::input::read_input(path, super::input::MAX_CUE_BYTES, cancellation)
-                .with_context(|| format!("Reading CUE {}", path.display()))?;
-            super::cue::parse_input(&bytes, path, cancellation)
+            let bytes =
+                super::input::read_input_async(path, super::input::MAX_CUE_BYTES, cancellation)
+                    .await
+                    .with_context(|| format!("Reading CUE {}", path.display()))?;
+            let path = path.to_path_buf();
+            let cancellation = cancellation.clone();
+            tokio::task::spawn_blocking(move || {
+                super::cue::parse_input(&bytes, &path, &cancellation)
+            })
+            .await
+            .context("CUE parser worker failed")?
         }
     };
     cancellation.check()?;
-    let sheet = sheet?;
+    let mut sheet = sheet?;
+    for track in &mut sheet.tracks {
+        cancellation.check()?;
+        track.file = logical_path(&track.file)
+            .with_context(|| format!("resolve CUE source {}", track.file.display()))?;
+        if !library_roots
+            .iter()
+            .any(|root| track.file.starts_with(root))
+        {
+            bail!(
+                "CUE source {} is outside the configured library roots",
+                track.file.display()
+            );
+        }
+    }
+    Ok(sheet)
+}
+
+fn cue_records(
+    path: &Path,
+    sheet: super::cue::CueSheet,
+    sources: &HashMap<PathBuf, std::result::Result<ScanRecord, String>>,
+    cancellation: &ScanCancellation,
+) -> Result<Vec<ScanRecord>> {
     let mut records = Vec::with_capacity(sheet.tracks.len());
     for track in sheet.tracks {
         cancellation.check()?;
-        let source = logical_path(&track.file)
-            .with_context(|| format!("resolve CUE source {}", track.file.display()))?;
-        if !library_roots.iter().any(|root| source.starts_with(root)) {
-            bail!(
-                "CUE source {} is outside the configured library roots",
-                source.display()
-            );
-        }
-        let source = source_record(source, known_source, sources, ffmpeg_enabled, cancellation)?;
+        let source = sources
+            .get(&track.file)
+            .context("CUE source was not prepared")?
+            .as_ref()
+            .map_err(|error| anyhow!("{error}"))?;
         let duration = source
             .media
             .duration
@@ -660,100 +815,248 @@ fn scan_cue(
     Ok(records)
 }
 
-fn lookup_and_scan_file(
-    path: &Path,
-    known_source: &mut impl FnMut(&Path) -> Result<Option<KnownFile>>,
-    ffmpeg_enabled: bool,
-    cancellation: &ScanCancellation,
-) -> Result<ScanRecord> {
-    cancellation.check()?;
-    path.to_str().context("Audio source path is not UTF-8")?;
-    let file = open_regular_file(path)?;
-    let metadata = file
-        .metadata()
-        .with_context(|| format!("read metadata for {}", path.display()))?;
-    cancellation.check()?;
-    let known = known_source(path);
-    cancellation.check()?;
-    scan_file(
-        path,
-        file,
-        metadata,
-        known?.as_ref(),
-        ffmpeg_enabled,
-        cancellation,
-    )
+pub(crate) const SOURCE_BATCH_SIZE: usize = 32;
+const DIRECTORY_BATCH_SIZE: usize = 64;
+const HASH_CHUNK_BYTES: usize = 128 * 1024;
+// One blocking turn performs at most 32 probes/read steps and hashes at most 4 MiB.
+const SOURCE_STEPS_PER_TURN: usize = 32;
+
+struct PendingSource {
+    path: PathBuf,
+    file: fs::File,
+    identity: SourceIdentity,
+    size: u64,
+    modified_ns: i64,
+    known: Option<KnownFile>,
+    initialized: bool,
+    media: Option<MediaInfo>,
+    fingerprint: Option<String>,
+    hasher: Option<blake3::Hasher>,
+    hashed: u64,
 }
 
-fn scan_file(
-    path: &Path,
-    mut file: File,
-    metadata: fs::Metadata,
-    known: Option<&KnownFile>,
-    ffmpeg_enabled: bool,
-    cancellation: &ScanCancellation,
-) -> Result<ScanRecord> {
-    cancellation.check()?;
-    let identity = SourceIdentity::from_metadata(&metadata);
-    let size = metadata.len();
-    let modified_ns = cache_modified_ns(metadata.modified().ok());
-    let unchanged = known.filter(|known| known.matches_metadata(size, modified_ns));
-    let media = match unchanged
-        .filter(|known| known.cue.is_none())
-        .and_then(|known| known.media.as_ref())
-        .filter(|media| !ffmpeg_enabled || (media.channels != 0 && media.sample_rate != 0))
-    {
-        Some(media) => media.clone(),
-        None => {
-            cancellation.check()?;
-            let media =
-                probe_file(path, file.try_clone()?, ffmpeg_enabled).with_context(|| "probe audio");
-            cancellation.check()?;
-            media?
+impl PendingSource {
+    fn step(
+        &mut self,
+        ffmpeg_enabled: bool,
+        cancellation: &ScanCancellation,
+        scratch: &mut [u8],
+    ) -> Result<Option<ScanRecord>> {
+        cancellation.check()?;
+        let size = self.size;
+        let modified_ns = self.modified_ns;
+        if !self.initialized {
+            let unchanged = self
+                .known
+                .take()
+                .filter(|known| known.matches_metadata(size, modified_ns));
+            if let Some(mut known) = unchanged {
+                self.fingerprint = known.fingerprint.take();
+                self.media = known.media.take().filter(|media| {
+                    known.cue.is_none()
+                        && (!ffmpeg_enabled || (media.channels != 0 && media.sample_rate != 0))
+                });
+            }
+            if self.media.is_none() {
+                let file = self.file.try_clone()?;
+                let media = probe_file(&self.path, file, ffmpeg_enabled).context("probe audio");
+                self.media = Some(media?);
+                cancellation.check()?;
+            }
+            if self.fingerprint.is_none() {
+                // A duplicated probe fd shares its seek offset: rewind the same object.
+                self.file
+                    .rewind()
+                    .with_context(|| format!("rewind {} for hashing", self.path.display()))?;
+                self.hasher = Some(blake3::Hasher::new());
+            }
+            self.initialized = true;
         }
-    };
-    let fingerprint = match unchanged.and_then(|known| known.fingerprint.as_ref()) {
-        Some(fingerprint) => fingerprint.clone(),
-        None => {
-            file.rewind()
-                .with_context(|| format!("rewind {} for hashing", path.display()))?;
-            // Growth cannot keep hashing alive; the version check below rejects it.
-            hash_reader((&mut file).take(size), cancellation)
-                .with_context(|| format!("hash {}", path.display()))?
+        if self.fingerprint.is_none() && self.hashed < size {
+            let length = (size - self.hashed).min(scratch.len() as u64) as usize;
+            let hasher = self
+                .hasher
+                .as_mut()
+                .context("Audio hash was not initialized")?;
+            let chunk = hash_chunk(&mut self.file, &mut scratch[..length], hasher, cancellation);
+            match chunk.with_context(|| format!("hash {}", self.path.display()))? {
+                None => return Ok(None),
+                Some(0) => self.hashed = size,
+                Some(count) => {
+                    self.hashed += count as u64;
+                    if self.hashed < size {
+                        return Ok(None);
+                    }
+                }
+            }
         }
-    };
-    cancellation.check()?;
-    if SourceIdentity::from_file(&file)? != identity {
-        bail!("Audio source {} changed while scanning", path.display());
+        cancellation.check()?;
+        if SourceIdentity::from_metadata(&self.file.metadata()?) != self.identity {
+            bail!(
+                "Audio source {} changed while scanning",
+                self.path.display()
+            );
+        }
+        cancellation.check()?;
+        let fingerprint = match self.fingerprint.take() {
+            Some(fingerprint) => fingerprint,
+            None => self
+                .hasher
+                .as_ref()
+                .context("Audio hash was not initialized")?
+                .finalize()
+                .to_hex()
+                .to_string(),
+        };
+        Ok(Some(ScanRecord {
+            path: std::mem::take(&mut self.path),
+            size,
+            modified_ns,
+            fingerprint: Some(fingerprint),
+            media: self.media.take().context("Audio probe returned no media")?,
+            cue: None,
+        }))
     }
-    Ok(ScanRecord {
-        path: path.to_path_buf(),
-        size,
-        modified_ns,
-        fingerprint: Some(fingerprint),
-        media,
-        cue: None,
-    })
 }
 
-pub(super) fn hash_reader(
-    mut reader: impl Read,
+async fn prepare_sources<Fut>(
+    paths: Vec<PathBuf>,
+    known_sources: &mut impl FnMut(Vec<PathBuf>) -> Fut,
+    sources: &mut HashMap<PathBuf, std::result::Result<ScanRecord, String>>,
+    ffmpeg_enabled: bool,
     cancellation: &ScanCancellation,
-) -> Result<String> {
-    let mut buffer = [0; 128 * 1024];
-    let mut hasher = blake3::Hasher::new();
+    scratch: &mut Vec<u8>,
+) -> Result<()>
+where
+    Fut: Future<Output = Result<Vec<Option<KnownFile>>>>,
+{
+    let mut paths = paths.into_iter();
     loop {
         cancellation.check()?;
-        let count = match reader.read(&mut buffer) {
-            Ok(count) => count,
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(error) => return Err(error.into()),
-        };
-        cancellation.check()?;
-        if count == 0 {
-            break;
+        let batch: Vec<_> = paths.by_ref().take(SOURCE_BATCH_SIZE).collect();
+        if batch.is_empty() {
+            return Ok(());
         }
-        hasher.update(&buffer[..count]);
+        let token = cancellation.clone();
+        let admitted = tokio::task::spawn_blocking(move || {
+            let mut admitted = Vec::with_capacity(batch.len());
+            for path in batch {
+                token.check()?;
+                let opened = (|| {
+                    path.to_str().context("Audio source path is not UTF-8")?;
+                    let file = open_regular_file(&path)?;
+                    let metadata = file.metadata()?;
+                    Ok::<_, anyhow::Error>((file, metadata))
+                })();
+                admitted.push((path, opened));
+            }
+            token.check()?;
+            Ok::<_, anyhow::Error>(admitted)
+        })
+        .await
+        .context("Scan source admission worker failed")??;
+        cancellation.check()?;
+        let mut opened = Vec::with_capacity(admitted.len());
+        let mut lookup_paths = Vec::with_capacity(admitted.len());
+        for (path, admission) in admitted {
+            match admission {
+                Ok((file, metadata)) => {
+                    lookup_paths.push(path.clone());
+                    opened.push((path, file, metadata));
+                }
+                Err(error) => {
+                    sources.insert(path, Err(format!("{error:#}")));
+                }
+            }
+        }
+        if opened.is_empty() {
+            continue;
+        }
+        // No blocking slot is held across this Core request. Keep the admitted fds.
+        let known = known_sources(lookup_paths).await;
+        cancellation.check()?;
+        let known = match known {
+            Ok(known) => known,
+            Err(error) => {
+                let error = format!("{error:#}");
+                for (path, _, _) in opened {
+                    sources.insert(path, Err(error.clone()));
+                }
+                continue;
+            }
+        };
+        anyhow::ensure!(
+            known.len() == opened.len(),
+            "Scan source lookup batch length mismatch"
+        );
+        let mut pending: std::collections::VecDeque<_> = opened
+            .into_iter()
+            .zip(known)
+            .map(|((path, file, metadata), known)| PendingSource {
+                path,
+                file,
+                identity: SourceIdentity::from_metadata(&metadata),
+                size: metadata.len(),
+                modified_ns: cache_modified_ns(metadata.modified().ok()),
+                known,
+                initialized: false,
+                media: None,
+                fingerprint: None,
+                hasher: None,
+                hashed: 0,
+            })
+            .collect();
+        while !pending.is_empty() {
+            cancellation.check()?;
+            let token = cancellation.clone();
+            let mut buffer = std::mem::take(scratch);
+            let (remaining, completed, buffer) = tokio::task::spawn_blocking(move || {
+                let mut completed = Vec::new();
+                for _ in 0..SOURCE_STEPS_PER_TURN {
+                    token.check()?;
+                    let Some(source) = pending.front_mut() else {
+                        break;
+                    };
+                    match source.step(ffmpeg_enabled, &token, &mut buffer) {
+                        Ok(Some(record)) => {
+                            pending.pop_front();
+                            completed.push((record.path.clone(), Ok(record)));
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            token.check()?;
+                            let source = pending.pop_front().expect("front source is present");
+                            completed.push((source.path, Err(format!("{error:#}"))));
+                        }
+                    }
+                }
+                token.check()?;
+                Ok::<_, anyhow::Error>((pending, completed, buffer))
+            })
+            .await
+            .context("Scan source batch worker failed")??;
+            *scratch = buffer;
+            pending = remaining;
+            cancellation.check()?;
+            sources.extend(completed);
+        }
     }
-    Ok(hasher.finalize().to_hex().to_string())
+}
+
+pub(super) fn hash_chunk(
+    reader: &mut impl Read,
+    scratch: &mut [u8],
+    hasher: &mut blake3::Hasher,
+    cancellation: &ScanCancellation,
+) -> Result<Option<usize>> {
+    cancellation.check()?;
+    let read = reader.read(scratch);
+    cancellation.check()?;
+    let count = match read {
+        Ok(count) => count,
+        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    hasher.update(&scratch[..count]);
+    Ok(Some(count))
 }

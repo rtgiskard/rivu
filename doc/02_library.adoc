@@ -140,10 +140,34 @@ out-of-range times always bypass cache reuse.
 An unchanged result still completes its scan status and reports errors, but does
 not invalidate library, structure, playlist, or queue-content views. Playlist
 imports still create the requested playlist when the scanned tracks are unchanged.
-Cached source metadata is looked up as each source is encountered, including
-sources used by new or retargeted CUE sheets within configured roots. See
+Cached source metadata is looked up in bounded batches as sources are encountered,
+including sources used by new or retargeted CUE sheets within configured roots. See
 link:21_ipc.adoc#_core_and_client_boundary[Scan lookup and merge design] for
 ownership, reuse rules, and costs.
+
+Scan filesystem work runs in joined, bounded synchronous stages on the shared
+four-thread Tokio blocking pool, not through a Tokio filesystem hop per metadata
+call or hash chunk. Directory discovery advances at most 64 entries or reader
+exhaustions per stage, with at most `scan_max_depth + 1` open directory readers;
+ancestry inode checks preserve cycle detection and logical aliases.
+Source admission opens and checks at most 32 ordinary files per batch, reusing
+that descriptor's metadata for cache validation. The async coordinator then awaits
+one Core lookup for the batch without retaining a blocking worker. Source stages
+perform at most 32 probe/read steps and hash at most 4 MiB before returning to the
+executor; cancellation is checked around each probe and each 128 KiB read.
+One 128 KiB hash scratch buffer is reused throughout the scan. The active source
+stays at the front of its work queue across incremental reads; its descriptor,
+metadata and hash state are borrowed in place rather than moved out and reinserted
+for every chunk. Completion or failure retires that source. Up to 32 CUE sheets
+are prepared together so their distinct sources can share lookup batches; shared
+source successes and failures remain cached for the scan. Each sheet retains the
+existing 1 MiB input limit, and failed sheets suppress no ordinary source.
+Progress is coalesced on a bounded event channel; lookup batches and completion
+facts are reliable. Probing and hashing use the same admitted source descriptor,
+rewound after probing, with a final descriptor-version check before recording.
+Every started blocking stage is joined before cancellation can retire preparation;
+CUE parsing and SQLite Saving remain separate bounded blocking work.
+
 Native probing skips oversized tags and embedded images before buffering their
 full payloads; otherwise decodable audio remains usable, but some metadata may
 be absent. See link:22_cache.adoc#_native_metadata_admission[Native metadata admission]
@@ -161,6 +185,9 @@ and optional playlist creation finish in the background. State/task status and
 existing-playback controls remain responsive; database reads and edits report
 maintenance in progress instead of waiting. Shutdown waits for the actual saving
 result. A failed result can still contain committed library or playlist changes.
+Admission remains occupied until preparation or Saving has released its file
+and database resources and its supervised task has joined; cancellation only
+stops preparation and never replays an uncertain commit.
 
 == Desktop list search
 

@@ -1,7 +1,8 @@
 //! Command handling, playback lifecycle, refill scheduling, and analyzer policy.
 
 use super::{
-    AudioCommand, AudioEvent, AudioSnapshot, PlaybackMetadata, WaveformFrame,
+    AudioCommand, AudioEvent, AudioShutdownReceiver, AudioSnapshot, PlaybackMetadata,
+    WaveformFrame,
     graph::GraphRunner,
     output::validate_device,
     playback::{Playback, PlaybackOptions},
@@ -10,7 +11,7 @@ use super::{
 use crate::DecoderHint;
 use crate::analysis::AnalysisWorker;
 use anyhow::anyhow;
-use crossbeam_channel::{Receiver, Sender, TryRecvError, select};
+use crossbeam_channel::{Receiver, select};
 use parking_lot::RwLock;
 use rivu_dsp::equalizer::config::EqualizerConfig;
 use std::{
@@ -18,12 +19,14 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
+use tokio::sync::{mpsc, mpsc::error::TryRecvError};
+use tokio_util::sync::CancellationToken;
 
 // Include coalesced seeks and read-ahead barriers in each scheduling round.
 const MAX_COMMANDS_PER_ROUND: usize = 64;
 
 struct CommandInbox {
-    receiver: Receiver<AudioCommand>,
+    receiver: mpsc::Receiver<AudioCommand>,
     // A non-seek read ahead is an ordering barrier, not a command to discard.
     pending: Option<AudioCommand>,
 }
@@ -109,8 +112,9 @@ impl Opening {
 
 pub(super) struct Worker {
     commands: CommandInbox,
-    events: Sender<AudioEvent>,
-    shutdown: Receiver<()>,
+    commands_ready: Receiver<()>,
+    events: mpsc::Sender<AudioEvent>,
+    shutdown: AudioShutdownReceiver,
     analyzer: AnalysisWorker,
     waveform: Arc<RwLock<WaveformFrame>>,
     playback: Option<Playback>,
@@ -128,9 +132,10 @@ pub(super) struct Worker {
 }
 impl Worker {
     pub(super) fn new(
-        commands: Receiver<AudioCommand>,
-        events: Sender<AudioEvent>,
-        shutdown: Receiver<()>,
+        commands: mpsc::Receiver<AudioCommand>,
+        commands_ready: Receiver<()>,
+        events: mpsc::Sender<AudioEvent>,
+        shutdown: AudioShutdownReceiver,
         analyzer: AnalysisWorker,
         waveform: Arc<RwLock<WaveformFrame>>,
         media_read_buffer_len: usize,
@@ -140,6 +145,7 @@ impl Worker {
                 receiver: commands,
                 pending: None,
             },
+            commands_ready,
             events,
             shutdown,
             analyzer,
@@ -159,7 +165,7 @@ impl Worker {
         }
     }
     fn event(&self, event: AudioEvent) {
-        send_event(&self.events, &self.shutdown, event);
+        send_event(&self.events, &self.shutdown.events, event);
     }
     fn stop(&mut self) -> AudioSnapshot {
         self.analyzer.set_playback_active(false);
@@ -474,7 +480,10 @@ impl Worker {
         let result = opening.poll(self.media_read_buffer_len, self.ffmpeg_enabled);
         // Shutdown may disconnect during a single, non-interruptible backend
         // call. Do not create output or publish completion after cancellation.
-        if matches!(self.shutdown.try_recv(), Err(TryRecvError::Disconnected)) {
+        if matches!(
+            self.shutdown.signal.try_recv(),
+            Err(crossbeam_channel::TryRecvError::Disconnected)
+        ) {
             self.stop();
             return;
         }
@@ -504,7 +513,10 @@ impl Worker {
                     &self.analyzer,
                     self.waveform.clone(),
                 );
-                if matches!(self.shutdown.try_recv(), Err(TryRecvError::Disconnected)) {
+                if matches!(
+                    self.shutdown.signal.try_recv(),
+                    Err(crossbeam_channel::TryRecvError::Disconnected)
+                ) {
                     if let Ok(mut playback) = result {
                         playback.close();
                     }
@@ -536,19 +548,29 @@ impl Worker {
     }
 
     fn control_round(&mut self) -> bool {
-        if matches!(self.shutdown.try_recv(), Err(TryRecvError::Disconnected)) {
+        if matches!(
+            self.shutdown.signal.try_recv(),
+            Err(crossbeam_channel::TryRecvError::Disconnected)
+        ) {
             self.stop();
             return false;
         }
         let mut remaining = MAX_COMMANDS_PER_ROUND;
         while let Ok(command) = self.commands.try_recv_round(&mut remaining) {
-            if matches!(self.shutdown.try_recv(), Err(TryRecvError::Disconnected)) {
+            if matches!(
+                self.shutdown.signal.try_recv(),
+                Err(crossbeam_channel::TryRecvError::Disconnected)
+            ) {
                 self.stop();
                 return false;
             }
             if !self.command(command) {
                 return false;
             }
+        }
+        if self.commands.receiver.is_closed() && !self.commands.has_ready() {
+            self.stop();
+            return false;
         }
         true
     }
@@ -566,14 +588,10 @@ impl Worker {
                 if self.commands.has_ready() {
                     continue;
                 }
-                let command = select! {
-                    recv(self.shutdown) -> _ => break,
-                    recv(self.commands.receiver) -> command => match command {
-                        Ok(command) => command,
-                        Err(_) => break,
-                    },
-                };
-                self.commands.pending = Some(command);
+                select! {
+                    recv(self.shutdown.signal) -> _ => break,
+                    recv(self.commands_ready) -> wake => if wake.is_err() { break; },
+                }
                 continue;
             }
             // Fatal backend errors must still be delivered while paused,
@@ -633,33 +651,25 @@ impl Worker {
             let deadline = playback
                 .refill_delay()
                 .min(Duration::from_millis(100).saturating_sub(self.progress.elapsed()));
-            let command = if playback.paused() {
+            if playback.paused() {
                 select! {
-                    recv(self.shutdown) -> _ => break,
-                    recv(self.commands.receiver) -> command => Some(command),
+                    recv(self.shutdown.signal) -> _ => break,
+                    recv(self.commands_ready) -> wake => if wake.is_err() { break; },
                     recv(errors) -> error => {
                         if let Ok(error) = error { self.fail(anyhow!(error)); }
-                        None
                     },
-                    recv(notifications) -> _ => None,
+                    recv(notifications) -> _ => {},
                 }
             } else {
                 select! {
-                    recv(self.shutdown) -> _ => break,
-                    recv(self.commands.receiver) -> command => Some(command),
+                    recv(self.shutdown.signal) -> _ => break,
+                    recv(self.commands_ready) -> wake => if wake.is_err() { break; },
                     recv(errors) -> error => {
                         if let Ok(error) = error { self.fail(anyhow!(error)); }
-                        None
                     },
-                    recv(notifications) -> _ => None,
-                    default(deadline) => None,
+                    recv(notifications) -> _ => {},
+                    default(deadline) => {},
                 }
-            };
-            if let Some(command) = command {
-                let Ok(command) = command else {
-                    break;
-                };
-                self.commands.pending = Some(command);
             }
         }
         self.stop();
@@ -669,37 +679,48 @@ impl Worker {
 // Backpressure stays on the scheduling thread, never the real-time callback.
 // The bounded channel cannot silently lose lifecycle events while a receiver
 // remains connected. Shutdown explicitly cancels a blocked send.
-fn send_event(events: &Sender<AudioEvent>, shutdown: &Receiver<()>, event: AudioEvent) {
+fn send_event(events: &mpsc::Sender<AudioEvent>, shutdown: &CancellationToken, event: AudioEvent) {
     if matches!(event, AudioEvent::Progress { .. }) {
         let _ = events.try_send(event);
     } else {
-        select! {
-            send(events, event) -> _ => {},
-            recv(shutdown) -> _ => {},
-        }
+        // This executor blocks only the dedicated non-RT audio worker. Tokio
+        // sync primitives need no runtime, and cancellation interrupts capacity
+        // backpressure even while Core retains the sole receiver during Drop.
+        futures::executor::block_on(async {
+            tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => {},
+                _ = events.send(event) => {},
+            }
+        });
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{AudioShutdown, AudioStop, shutdown_channel};
     use crossbeam_channel::bounded;
+    use futures::FutureExt;
+    use tokio::sync::oneshot;
 
     fn opening_worker() -> (
         Worker,
-        Sender<AudioCommand>,
-        Receiver<AudioEvent>,
-        Sender<()>,
+        mpsc::Sender<AudioCommand>,
+        mpsc::Receiver<AudioEvent>,
+        AudioShutdown,
     ) {
-        let (send, commands) = bounded(MAX_COMMANDS_PER_ROUND);
-        let (events, receive) = bounded(16);
-        let (stop, shutdown) = bounded(0);
+        let (send, commands) = mpsc::channel(MAX_COMMANDS_PER_ROUND);
+        let (_wake, commands_ready) = bounded(1);
+        let (events, receive) = mpsc::channel(16);
+        let (stop, shutdown) = shutdown_channel();
         let analyzer = AnalysisWorker::new(Arc::new(RwLock::new(
             crate::analysis::AnalysisFrame::default(),
         )))
         .unwrap();
         let worker = Worker::new(
             commands,
+            commands_ready,
             events,
             shutdown,
             analyzer,
@@ -734,7 +755,7 @@ mod tests {
                 1,
             )
             .unwrap();
-            let (mut worker, _commands, events, _shutdown) = opening_worker();
+            let (mut worker, _commands, mut events, _shutdown) = opening_worker();
             worker.ffmpeg_enabled = hint == DecoderHint::Ffmpeg;
             worker.command(AudioCommand::GraphAudition {
                 path: original.path().to_owned(),
@@ -808,7 +829,7 @@ mod tests {
                 metadata: Arc::default(),
             },
         ] {
-            commands.send(command).unwrap();
+            commands.try_send(command).unwrap();
         }
         assert!(worker.control_round());
         let opening = worker.opening.as_ref().unwrap();
@@ -828,7 +849,7 @@ mod tests {
             ..PlaybackMetadata::default()
         });
         commands
-            .send(AudioCommand::Load {
+            .try_send(AudioCommand::Load {
                 path: file.path().to_owned(),
                 range: None,
                 decoder_hint: DecoderHint::Native,
@@ -839,7 +860,7 @@ mod tests {
             })
             .unwrap();
         commands
-            .send(AudioCommand::Metadata {
+            .try_send(AudioCommand::Metadata {
                 generation: 41,
                 metadata: edited,
             })
@@ -876,8 +897,10 @@ mod tests {
                 assert!(worker.playback.is_none());
                 assert!(events.is_empty());
             }
-            let (reply, snapshot) = bounded(1);
-            commands.send(AudioCommand::StopAndSnapshot(reply)).unwrap();
+            let (reply, mut snapshot) = oneshot::channel();
+            commands
+                .try_send(AudioCommand::StopAndSnapshot(reply))
+                .unwrap();
             assert!(worker.control_round());
             assert_eq!(
                 snapshot.try_recv().unwrap(),
@@ -889,6 +912,26 @@ mod tests {
             assert!(worker.opening.is_none());
             worker.poll_opening();
             assert!(events.is_empty());
+
+            load_prefix(&mut worker, file.path(), hint, 42);
+            worker.poll_opening();
+            assert!(worker.opening.is_some());
+            let (reply, snapshot) = oneshot::channel();
+            drop(snapshot);
+            commands
+                .try_send(AudioCommand::StopAndSnapshot(reply))
+                .unwrap();
+            assert!(worker.control_round());
+            assert_eq!(
+                worker.last_snapshot,
+                AudioSnapshot {
+                    generation: 42,
+                    ..Default::default()
+                }
+            );
+            assert!(worker.opening.is_none());
+            assert!(worker.playback.is_none());
+            assert!(events.is_empty());
         }
     }
 
@@ -897,12 +940,12 @@ mod tests {
         let old = crate::source::opening_prefix_file(1024, true);
         let empty = crate::source::opening_prefix_file(0, false);
         for hint in opening_hints() {
-            let (mut worker, commands, events, _shutdown) = opening_worker();
+            let (mut worker, commands, mut events, _shutdown) = opening_worker();
             load_prefix(&mut worker, old.path(), hint, 41);
             worker.poll_opening();
             assert!(worker.opening.is_some());
             commands
-                .send(AudioCommand::Load {
+                .try_send(AudioCommand::Load {
                     path: empty.path().to_owned(),
                     range: None,
                     decoder_hint: DecoderHint::Native,
@@ -936,7 +979,7 @@ mod tests {
                 if disconnect {
                     drop(shutdown);
                 } else {
-                    commands.send(AudioCommand::Shutdown).unwrap();
+                    commands.try_send(AudioCommand::Shutdown).unwrap();
                 }
                 assert!(!worker.control_round());
                 assert!(worker.opening.is_none());
@@ -949,12 +992,12 @@ mod tests {
     #[test]
     fn rejected_output_settings_cancel_the_opening_generation() {
         let file = crate::source::opening_prefix_file(1024, true);
-        let (mut worker, commands, events, _shutdown) = opening_worker();
+        let (mut worker, commands, mut events, _shutdown) = opening_worker();
         load_prefix(&mut worker, file.path(), DecoderHint::Native, 41);
         worker.poll_opening();
         assert!(worker.opening.is_some());
         commands
-            .send(AudioCommand::OutputSettings {
+            .try_send(AudioCommand::OutputSettings {
                 request: 7,
                 device: Some("invalid-opening-target".into()),
                 auto_mix: false,
@@ -973,14 +1016,16 @@ mod tests {
 
     #[test]
     fn disabling_ffmpeg_before_the_first_open_round_cancels_its_generation() {
-        let (mut worker, commands, events, _shutdown) = opening_worker();
+        let (mut worker, commands, mut events, _shutdown) = opening_worker();
         load_prefix(
             &mut worker,
             std::path::Path::new("unopened.mka"),
             DecoderHint::Ffmpeg,
             41,
         );
-        commands.send(AudioCommand::FfmpegEnabled(false)).unwrap();
+        commands
+            .try_send(AudioCommand::FfmpegEnabled(false))
+            .unwrap();
         assert!(worker.control_round());
         assert!(worker.opening.is_none());
         assert!(matches!(
@@ -998,11 +1043,13 @@ mod tests {
     #[test]
     fn disabling_ffmpeg_cancels_its_real_opening_without_started_or_failed() {
         let file = crate::source::opening_prefix_file(1024, true);
-        let (mut worker, commands, events, _shutdown) = opening_worker();
+        let (mut worker, commands, mut events, _shutdown) = opening_worker();
         load_prefix(&mut worker, file.path(), DecoderHint::Ffmpeg, 41);
         worker.poll_opening();
         assert!(worker.opening.is_some());
-        commands.send(AudioCommand::FfmpegEnabled(false)).unwrap();
+        commands
+            .try_send(AudioCommand::FfmpegEnabled(false))
+            .unwrap();
         assert!(worker.control_round());
         assert!(worker.opening.is_none());
         assert!(matches!(
@@ -1022,15 +1069,17 @@ mod tests {
 
     #[test]
     fn rejected_output_change_keeps_new_target_instead_of_reusing_previous_device() {
-        let (_send, commands) = bounded(1);
-        let (events, receive) = bounded(2);
-        let (_stop, shutdown) = bounded(0);
+        let (_send, commands) = mpsc::channel(1);
+        let (_wake, commands_ready) = bounded(1);
+        let (events, mut receive) = mpsc::channel(2);
+        let (_stop, shutdown) = shutdown_channel();
         let analyzer = AnalysisWorker::new(Arc::new(RwLock::new(
             crate::analysis::AnalysisFrame::default(),
         )))
         .unwrap();
         let mut worker = Worker::new(
             commands,
+            commands_ready,
             events,
             shutdown,
             analyzer,
@@ -1061,24 +1110,26 @@ mod tests {
         }
     }
 
-    #[test]
-    fn stop_snapshot_drains_backpressured_lifecycle_events_before_acknowledging() {
-        let (commands, receive) = bounded(1);
-        commands.send(AudioCommand::Volume(0.4)).unwrap();
-        let (events, event_receive) = bounded(1);
+    #[tokio::test]
+    async fn stop_snapshot_drains_backpressured_lifecycle_events_before_acknowledging() {
+        let (commands, receive) = mpsc::channel(1);
+        let (command_wake, commands_ready) = bounded(1);
+        commands.try_send(AudioCommand::Volume(0.4)).unwrap();
+        let (events, event_receive) = mpsc::channel(1);
         events
-            .send(AudioEvent::Ended {
+            .try_send(AudioEvent::Ended {
                 generation: 1,
                 bitrate_bps: None,
             })
             .unwrap();
-        let (shutdown, cancelled) = bounded(0);
+        let (shutdown, cancelled) = shutdown_channel();
         let analyzer = AnalysisWorker::new(Arc::new(RwLock::new(
             crate::analysis::AnalysisFrame::default(),
         )))
         .unwrap();
         let worker = Worker::new(
             receive,
+            commands_ready,
             events,
             cancelled,
             analyzer,
@@ -1093,22 +1144,129 @@ mod tests {
             worker.run();
         });
         let mut retired = Vec::new();
-        let snapshot = crate::stop_and_snapshot(&commands, &event_receive, |event| {
-            if let AudioEvent::Ended { generation, .. } = event {
-                retired.push(generation);
-            }
-        });
+        let mut stop = AudioStop::new(commands, command_wake, event_receive);
+        let snapshot = stop
+            .wait(|event| {
+                if let AudioEvent::Ended { generation, .. } = event {
+                    retired.push(generation);
+                }
+            })
+            .await;
         drop(shutdown);
         worker.join().unwrap();
         assert_eq!(snapshot.unwrap(), AudioSnapshot::default());
         assert_eq!(retired, [1, 2]);
     }
 
+    #[tokio::test]
+    async fn cancelled_stop_wait_retains_its_receiver_and_never_replays_admission() {
+        let (commands, mut receive) = mpsc::channel(1);
+        let (command_wake, commands_ready) = bounded(1);
+        commands.try_send(AudioCommand::Volume(0.4)).unwrap();
+        let (events, event_receive) = mpsc::channel(1);
+        events
+            .try_send(AudioEvent::DecoderStopped { generation: 7 })
+            .unwrap();
+        let mut stop = AudioStop::new(commands, command_wake, event_receive);
+        let mut retired = Vec::new();
+        assert!(
+            stop.wait(|event| retired.push(event))
+                .now_or_never()
+                .is_none()
+        );
+        assert!(matches!(
+            retired.as_slice(),
+            [AudioEvent::DecoderStopped { generation: 7 }]
+        ));
+        assert!(matches!(
+            receive.try_recv().unwrap(),
+            AudioCommand::Volume(0.4)
+        ));
+
+        assert!(
+            stop.wait(|event| retired.push(event))
+                .now_or_never()
+                .is_none()
+        );
+        commands_ready.try_recv().unwrap();
+        let AudioCommand::StopAndSnapshot(reply) = receive.try_recv().unwrap() else {
+            panic!("stop was not admitted after capacity became available");
+        };
+        assert!(
+            stop.wait(|event| retired.push(event))
+                .now_or_never()
+                .is_none()
+        );
+        assert!(
+            receive.is_empty(),
+            "cancelled acknowledgement wait replayed stop"
+        );
+
+        events
+            .try_send(AudioEvent::DecoderStopped { generation: 8 })
+            .unwrap();
+        let snapshot = AudioSnapshot {
+            generation: 7,
+            position_seconds: 3.5,
+            listened_seconds: 2.5,
+        };
+        reply.send(snapshot).unwrap();
+        assert_eq!(
+            stop.wait(|event| retired.push(event)).await.unwrap(),
+            snapshot
+        );
+        assert!(matches!(
+            retired.as_slice(),
+            [
+                AudioEvent::DecoderStopped { generation: 7 },
+                AudioEvent::DecoderStopped { generation: 8 },
+            ]
+        ));
+        let mut event_receive = stop.into_events();
+        events
+            .try_send(AudioEvent::DecoderStopped { generation: 9 })
+            .unwrap();
+        assert!(matches!(
+            event_receive.try_recv(),
+            Ok(AudioEvent::DecoderStopped { generation: 9 })
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stop_deadline_covers_capacity_acknowledgement_and_closed_event_delivery() {
+        for queue_full in [false, true] {
+            let (commands, receive) = mpsc::channel(1);
+            let (command_wake, _commands_ready) = bounded(1);
+            if queue_full {
+                commands.try_send(AudioCommand::Volume(0.4)).unwrap();
+            }
+            let (events, event_receive) = mpsc::channel(1);
+            let mut stop = AudioStop::new(commands, command_wake, event_receive);
+            assert!(stop.wait(|_| {}).now_or_never().is_none());
+            assert_eq!(receive.len(), 1);
+            // After admission a closed event channel must not bypass the same
+            // deadline while the worker still owns the unacknowledged reply.
+            if !queue_full {
+                drop(events);
+            }
+            tokio::time::advance(Duration::from_secs(5)).await;
+            let error = stop.wait(|_| {}).await.unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("did not stop before the deadline")
+            );
+            assert_eq!(receive.len(), 1, "a timed-out stop was replayed");
+            let _events = stop.into_events();
+        }
+    }
+
     #[test]
     fn still_mode_discards_stopped_waveforms_without_changing_playback_policy() {
-        let (_send, commands) = bounded(1);
-        let (events, _receive) = bounded(1);
-        let (_stop, shutdown) = bounded(0);
+        let (_send, commands) = mpsc::channel(1);
+        let (_wake, commands_ready) = bounded(1);
+        let (events, _receive) = mpsc::channel(1);
+        let (_stop, shutdown) = shutdown_channel();
         let analyzer = AnalysisWorker::new(Arc::new(RwLock::new(
             crate::analysis::AnalysisFrame::default(),
         )))
@@ -1127,6 +1285,7 @@ mod tests {
         let waveform = Arc::new(RwLock::new(frame));
         let mut worker = Worker::new(
             commands,
+            commands_ready,
             events,
             shutdown,
             analyzer,
@@ -1161,7 +1320,7 @@ mod tests {
 
     #[test]
     fn consecutive_seeks_stop_at_every_non_seek_barrier() {
-        let (reply, _snapshot) = bounded(1);
+        let (reply, _snapshot) = oneshot::channel();
         let barriers = [
             AudioCommand::Load {
                 path: PathBuf::from("other.wav"),
@@ -1196,14 +1355,14 @@ mod tests {
         ];
         for barrier in barriers {
             let kind = std::mem::discriminant(&barrier);
-            let (send, receiver) = bounded(4);
+            let (send, receiver) = mpsc::channel(4);
             for command in [
                 AudioCommand::Seek(10.0),
                 AudioCommand::Seek(20.0),
                 barrier,
                 AudioCommand::Seek(30.0),
             ] {
-                send.send(command).unwrap();
+                send.try_send(command).unwrap();
             }
             let mut inbox = CommandInbox {
                 receiver,
@@ -1231,9 +1390,9 @@ mod tests {
 
     #[test]
     fn seek_batches_are_bounded_and_keep_the_remaining_targets() {
-        let (send, receiver) = bounded(MAX_COMMANDS_PER_ROUND + 2);
+        let (send, receiver) = mpsc::channel(MAX_COMMANDS_PER_ROUND + 2);
         for target in 1..=MAX_COMMANDS_PER_ROUND + 2 {
-            send.send(AudioCommand::Seek(target as f64)).unwrap();
+            send.try_send(AudioCommand::Seek(target as f64)).unwrap();
         }
         drop(send);
         let mut inbox = CommandInbox {
@@ -1264,8 +1423,8 @@ mod tests {
 
     #[test]
     fn replenished_commands_yield_each_round_without_reordering() {
-        let (send, receiver) = bounded(1);
-        send.send(AudioCommand::Volume(0.0)).unwrap();
+        let (send, receiver) = mpsc::channel(1);
+        send.try_send(AudioCommand::Volume(0.0)).unwrap();
         let mut inbox = CommandInbox {
             receiver,
             pending: None,
@@ -1278,7 +1437,7 @@ mod tests {
                 handled += 1;
                 // Model a producer replenishing every consumed slot, without
                 // thread timing or ever allowing the inbox to become empty.
-                send.send(AudioCommand::Volume(handled as f32)).unwrap();
+                send.try_send(AudioCommand::Volume(handled as f32)).unwrap();
             }
             assert_eq!(remaining, 0);
             assert!(
@@ -1291,12 +1450,12 @@ mod tests {
 
     #[test]
     fn round_boundary_keeps_a_seek_read_ahead_barrier_before_later_seeks() {
-        let (send, receiver) = bounded(MAX_COMMANDS_PER_ROUND + 1);
+        let (send, receiver) = mpsc::channel(MAX_COMMANDS_PER_ROUND + 1);
         for target in 1..MAX_COMMANDS_PER_ROUND {
-            send.send(AudioCommand::Seek(target as f64)).unwrap();
+            send.try_send(AudioCommand::Seek(target as f64)).unwrap();
         }
-        send.send(AudioCommand::Pause(true)).unwrap();
-        send.send(AudioCommand::Seek(100.0)).unwrap();
+        send.try_send(AudioCommand::Pause(true)).unwrap();
+        send.try_send(AudioCommand::Seek(100.0)).unwrap();
         let mut inbox = CommandInbox {
             receiver,
             pending: None,
@@ -1324,8 +1483,8 @@ mod tests {
 
     #[test]
     fn single_seek_does_not_wait_for_more_input() {
-        let (send, receiver) = bounded(1);
-        send.send(AudioCommand::Seek(7.0)).unwrap();
+        let (send, receiver) = mpsc::channel(1);
+        send.try_send(AudioCommand::Seek(7.0)).unwrap();
         let (done, completed) = bounded(1);
         let worker = std::thread::spawn(move || {
             let mut inbox = CommandInbox {
@@ -1351,61 +1510,75 @@ mod tests {
         use parking_lot::Mutex;
 
         for explicit in [false, true] {
-            let (commands, receive) = bounded(1);
-            commands.send(AudioCommand::Pause(true)).unwrap();
-            let (events, event_receive) = bounded(1);
-            events
-                .send(AudioEvent::Ended {
-                    generation: 1,
-                    bitrate_bps: None,
-                })
-                .unwrap();
-            let held_events = event_receive.clone();
-            let (shutdown, cancelled) = bounded(0);
-            let analysis = Arc::new(RwLock::new(AnalysisFrame::default()));
-            let waveform = Arc::new(RwLock::new(WaveformFrame::default()));
-            let analyzer = AnalysisWorker::new(analysis.clone()).unwrap();
-            let analysis_control = Arc::clone(&analyzer.control);
-            let worker = Worker::new(receive, events, cancelled, analyzer, waveform.clone(), 1024);
-            let worker = std::thread::spawn(move || {
-                worker.event(AudioEvent::Ended {
-                    generation: 2,
-                    bitrate_bps: None,
+            for borrowed in [false, true] {
+                let (commands, receive) = mpsc::channel(1);
+                let (command_wake, commands_ready) = bounded(1);
+                commands.try_send(AudioCommand::Pause(true)).unwrap();
+                let (events, event_receive) = mpsc::channel(1);
+                events
+                    .try_send(AudioEvent::Ended {
+                        generation: 1,
+                        bitrate_bps: None,
+                    })
+                    .unwrap();
+                let (shutdown, cancelled) = shutdown_channel();
+                let analysis = Arc::new(RwLock::new(AnalysisFrame::default()));
+                let waveform = Arc::new(RwLock::new(WaveformFrame::default()));
+                let analyzer = AnalysisWorker::new(analysis.clone()).unwrap();
+                let analysis_control = Arc::clone(&analyzer.control);
+                let worker = Worker::new(
+                    receive,
+                    commands_ready,
+                    events,
+                    cancelled,
+                    analyzer,
+                    waveform.clone(),
+                    1024,
+                );
+                let worker = std::thread::spawn(move || {
+                    worker.event(AudioEvent::Ended {
+                        generation: 2,
+                        bitrate_bps: None,
+                    });
+                    worker.run();
                 });
-                worker.run();
-            });
-            let engine = AudioEngine {
-                commands,
-                events: event_receive,
-                analysis,
-                analysis_control,
-                waveform,
-                worker: Some(worker),
-                shutdown: Mutex::new(Some(shutdown)),
-            };
-            let (done, completed) = bounded(1);
-            let closer = std::thread::spawn(move || {
-                if explicit {
-                    engine.send(AudioCommand::Shutdown).unwrap();
+                let mut engine = AudioEngine {
+                    commands,
+                    command_wake,
+                    events: Some(event_receive),
+                    analysis,
+                    analysis_control,
+                    waveform,
+                    worker: Some(worker),
+                    shutdown: Mutex::new(Some(shutdown)),
+                };
+                let held_events = if borrowed { engine.events.take() } else { None };
+                let (done, completed) = bounded(1);
+                let closer = std::thread::spawn(move || {
+                    if explicit {
+                        engine.send(AudioCommand::Shutdown).unwrap();
+                    }
+                    drop(engine);
+                    done.send(()).unwrap();
+                });
+                completed.recv_timeout(Duration::from_secs(2)).unwrap();
+                closer.join().unwrap();
+                if let Some(mut held_events) = held_events {
+                    assert!(matches!(
+                        held_events.try_recv(),
+                        Ok(AudioEvent::Ended { generation: 1, .. })
+                    ));
                 }
-                drop(engine);
-                done.send(()).unwrap();
-            });
-            completed.recv_timeout(Duration::from_secs(2)).unwrap();
-            closer.join().unwrap();
-            assert!(matches!(
-                held_events.try_recv(),
-                Ok(AudioEvent::Ended { generation: 1, .. })
-            ));
+            }
         }
     }
 
     #[test]
     fn full_event_queue_drops_progress_but_retains_lifecycle_events() {
-        let (events, receive) = bounded(1);
-        let (_stop, shutdown) = bounded(0);
+        let (events, mut receive) = mpsc::channel(1);
+        let shutdown = CancellationToken::new();
         events
-            .send(AudioEvent::Ended {
+            .try_send(AudioEvent::Ended {
                 generation: 1,
                 bitrate_bps: None,
             })
@@ -1435,15 +1608,15 @@ mod tests {
             );
         });
         assert!(matches!(
-            receive.recv().unwrap(),
+            receive.blocking_recv().unwrap(),
             AudioEvent::Ended { generation: 1, .. }
         ));
         assert!(matches!(
-            receive.recv().unwrap(),
+            receive.blocking_recv().unwrap(),
             AudioEvent::DecoderStopped { generation: 2 }
         ));
         assert!(matches!(
-            receive.recv().unwrap(),
+            receive.blocking_recv().unwrap(),
             AudioEvent::Failed { generation: 3, .. }
         ));
         sender.join().unwrap();
@@ -1451,10 +1624,10 @@ mod tests {
 
     #[test]
     fn shutdown_cancels_a_full_event_queue() {
-        let (events, _receive) = bounded(1);
-        let (stop, shutdown) = bounded::<()>(0);
+        let (events, _receive) = mpsc::channel(1);
+        let (stop, shutdown) = shutdown_channel();
         events
-            .send(AudioEvent::Ended {
+            .try_send(AudioEvent::Ended {
                 generation: 1,
                 bitrate_bps: None,
             })
@@ -1462,7 +1635,7 @@ mod tests {
         let sender = std::thread::spawn(move || {
             send_event(
                 &events,
-                &shutdown,
+                &shutdown.events,
                 AudioEvent::Ended {
                     generation: 2,
                     bitrate_bps: None,
@@ -1475,7 +1648,7 @@ mod tests {
 
     #[test]
     fn invalid_equalizer_settings_report_config_and_current_generation() {
-        let (mut worker, _commands, events, _shutdown) = opening_worker();
+        let (mut worker, _commands, mut events, _shutdown) = opening_worker();
         let invalid = Arc::new(EqualizerConfig {
             preamp_db: f64::NAN,
             ..Default::default()

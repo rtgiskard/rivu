@@ -107,11 +107,14 @@ fn pause_accepted_before_queued_eof_keeps_next_and_repeat_one_paused() {
         // Core sends Load synchronously, but the recorder forwards it on
         // another thread. Its snapshot reply follows recording every earlier
         // FIFO command, so draining cannot race the final paused Load.
-        let (snapshot, recorded_through_snapshot) = bounded(1);
+        let (snapshot, recorded_through_snapshot) = oneshot::channel();
         core.audio(AudioCommand::StopAndSnapshot(snapshot)).unwrap();
-        recorded_through_snapshot
-            .recv_timeout(Duration::from_secs(5))
-            .unwrap();
+        wait_on(&core.executor, async {
+            tokio::time::timeout(Duration::from_secs(5), recorded_through_snapshot)
+                .await
+                .unwrap()
+                .unwrap()
+        });
         let loads: Vec<_> = commands
             .try_iter()
             .filter_map(|command| match command {

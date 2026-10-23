@@ -56,7 +56,7 @@ fn committed_play_count_invalidates_and_is_not_replayed_after_projection_failure
 #[test]
 fn saturated_audio_admission_preserves_state_requests_events_and_command_order() {
     let (_directory, mut core) = fixture();
-    let (commands, receive) = bounded(64);
+    let (commands, mut receive) = mpsc::channel(64);
     core.engine.replace_commands(commands.clone());
     core.command(Command::Device {
         name: Some("accepted-output".into()),
@@ -64,12 +64,14 @@ fn saturated_audio_admission_preserves_state_requests_events_and_command_order()
     .unwrap();
     core.flush_config().unwrap();
     for index in 1..64 {
-        commands.send(AudioCommand::Volume(index as f32)).unwrap();
+        commands
+            .try_send(AudioCommand::Volume(index as f32))
+            .unwrap();
     }
-    let (events, event_receive) = bounded(128);
+    let (events, event_receive) = mpsc::channel(128);
     for index in 0..128 {
         events
-            .send(AudioEvent::OutputSettingsFailed {
+            .try_send(AudioEvent::OutputSettingsFailed {
                 request: core.output_settings_request,
                 device: core.state.system.selected_device.clone(),
                 auto_mix: core.state.system.config.pipewire_auto_mix,
@@ -77,7 +79,7 @@ fn saturated_audio_admission_preserves_state_requests_events_and_command_order()
             })
             .unwrap();
     }
-    core.engine.events = event_receive;
+    core.engine.events = Some(event_receive);
     let saved = std::fs::read(&core.state.system.config_path).unwrap();
     let generation = core.generation;
     let (finished, completion) = bounded(1);
@@ -134,7 +136,7 @@ fn saturated_audio_admission_preserves_state_requests_events_and_command_order()
         assert_eq!(core.state.playback.volume, volume);
     }
     assert_eq!(receive.len(), 64);
-    assert_eq!(core.engine.events.len(), 128);
+    assert_eq!(core.engine.events.as_ref().unwrap().len(), 128);
     assert!(matches!(
         receive.try_recv().unwrap(),
         AudioCommand::OutputSettings { request: 1, device: Some(device), .. }
@@ -148,7 +150,7 @@ fn saturated_audio_admission_preserves_state_requests_events_and_command_order()
     }
     assert!(receive.try_recv().is_err());
     for index in 0..128 {
-        let event = core.engine.events.try_recv().unwrap();
+        let event = core.engine.events.as_mut().unwrap().try_recv().unwrap();
         core.audio_event(event).unwrap();
         assert_eq!(
             core.state.system.last_error,
@@ -334,9 +336,9 @@ fn full_eof_upgrades_estimate_but_stale_and_stopped_events_do_not() {
         .unwrap();
         assert!(!core.store.track(1).unwrap().unwrap().bitrate_exact);
         if drain {
-            let (send, receive) = bounded(1);
-            core.engine.events = receive;
-            send.send(AudioEvent::Ended {
+            let (send, receive) = mpsc::channel(1);
+            core.engine.events = Some(receive);
+            send.try_send(AudioEvent::Ended {
                 generation,
                 bitrate_bps: Some(192_000),
             })
@@ -396,9 +398,9 @@ fn same_track_restart_retains_queued_started_and_eof_bitrate_upgrades() {
             event
         };
         let _commands = recording_audio(&mut core);
-        let (sender, events) = bounded(1);
-        core.engine.events = events;
-        sender.send(event).unwrap();
+        let (sender, events) = mpsc::channel(1);
+        core.engine.events = Some(events);
+        sender.try_send(event).unwrap();
 
         core.start(queue_id, false).unwrap();
         assert_eq!(core.generation, generation.wrapping_add(1));
@@ -654,38 +656,38 @@ fn stop_ack_records_queued_start_and_snapshot_without_terminal_navigation() {
         let (_directory, mut core) = fixture();
         pending(&mut core, 1);
         let generation = core.generation;
-        let (sender, events) = bounded(8);
-        core.engine.events = events;
-        sender.send(started_event(&core, Some(10.0))).unwrap();
-        sender.send(started_event(&core, Some(10.0))).unwrap();
+        let (sender, events) = mpsc::channel(8);
+        core.engine.events = Some(events);
+        sender.try_send(started_event(&core, Some(10.0))).unwrap();
+        sender.try_send(started_event(&core, Some(10.0))).unwrap();
         sender
-            .send(AudioEvent::Progress {
+            .try_send(AudioEvent::Progress {
                 generation,
                 position_seconds: 9.0,
                 listened_seconds: 2.0,
             })
             .unwrap();
         sender
-            .send(AudioEvent::Progress {
+            .try_send(AudioEvent::Progress {
                 generation: generation - 1,
                 position_seconds: 10.0,
                 listened_seconds: 10.0,
             })
             .unwrap();
         sender
-            .send(AudioEvent::Ended {
+            .try_send(AudioEvent::Ended {
                 generation,
                 bitrate_bps: None,
             })
             .unwrap();
         sender
-            .send(AudioEvent::Failed {
+            .try_send(AudioEvent::Failed {
                 generation,
                 message: "Retired failure".into(),
             })
             .unwrap();
         sender
-            .send(AudioEvent::DecoderStopped { generation })
+            .try_send(AudioEvent::DecoderStopped { generation })
             .unwrap();
         core.finish_playback(
             Ok(Some(rivu_audio::AudioSnapshot {
@@ -714,18 +716,18 @@ fn queued_start_rejection_fences_once_without_recursive_stop_or_count() {
     let (_directory, mut core) = fixture();
     pending(&mut core, 1);
     let generation = core.generation;
-    let (sender, events) = bounded(4);
-    core.engine.events = events;
-    sender.send(started_event(&core, Some(10.0))).unwrap();
+    let (sender, events) = mpsc::channel(4);
+    core.engine.events = Some(events);
+    sender.try_send(started_event(&core, Some(10.0))).unwrap();
     sender
-        .send(AudioEvent::Progress {
+        .try_send(AudioEvent::Progress {
             generation,
             position_seconds: 10.0,
             listened_seconds: 10.0,
         })
         .unwrap();
     sender
-        .send(AudioEvent::Ended {
+        .try_send(AudioEvent::Ended {
             generation,
             bitrate_bps: None,
         })
@@ -746,7 +748,7 @@ fn queued_start_rejection_fences_once_without_recursive_stop_or_count() {
     assert_eq!(core.generation, generation.wrapping_add(1));
     assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
     assert!(core.playback.is_none());
-    while let Ok(event) = core.engine.events.try_recv() {
+    while let Ok(event) = core.engine.events.as_mut().unwrap().try_recv() {
         core.audio_event(event).unwrap();
     }
     assert!(core.store.history(200).unwrap().is_empty());

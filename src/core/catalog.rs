@@ -1,5 +1,6 @@
 use super::*;
 use anyhow::{bail, ensure};
+use futures::FutureExt;
 use std::collections::BTreeMap;
 
 fn scan_message(progress: &ScanProgress) -> String {
@@ -20,26 +21,36 @@ fn scan_message(progress: &ScanProgress) -> String {
         |path| format!("{phase} ({unit}): {}", path.display()),
     )
 }
-fn lookup_scan_source(
-    sender: &Sender<ScanEvent>,
+// Capacity three covers coalesced progress, one outstanding lookup (possibly
+// abandoned by cancellation), and the reliable terminal event. Reliable sends
+// await capacity; progress is droppable and never consumes more than one slot.
+async fn deliver_scan_event(
+    sender: &tokio::sync::mpsc::Sender<ScanEvent>,
+    event: ScanEvent,
+) -> Result<()> {
+    sender
+        .send(event)
+        .await
+        .map_err(|_| anyhow::anyhow!("scan owner disconnected"))
+}
+
+async fn lookup_scan_sources(
+    sender: tokio::sync::mpsc::Sender<ScanEvent>,
     id: u64,
-    path: &Path,
-    cancellation: &library::ScanCancellation,
-) -> Result<Option<library::KnownFile>> {
+    paths: Vec<PathBuf>,
+    cancellation: library::ScanCancellation,
+) -> Result<Vec<Option<library::KnownFile>>> {
     cancellation.check()?;
-    let (reply, receive) = bounded(1);
-    let event = ScanEvent::KnownSource {
-        id,
-        path: path.to_path_buf(),
-        reply,
-    };
-    crossbeam_channel::select_biased! {
-        recv(cancellation.cancelled()) -> _ => bail!("scan cancelled"),
-        send(sender, event) -> sent => sent.context("scan owner disconnected")?,
+    let (reply, receive) = tokio::sync::oneshot::channel();
+    tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => bail!("scan cancelled"),
+        result = deliver_scan_event(&sender, ScanEvent::KnownSources { id, paths, reply }) => result?,
     }
-    let result = crossbeam_channel::select_biased! {
-        recv(cancellation.cancelled()) -> _ => bail!("scan cancelled"),
-        recv(receive) -> result => result.context("scan source lookup disconnected")?,
+    let result = tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => bail!("scan cancelled"),
+        result = receive => result.context("scan source lookup disconnected")?,
     };
     cancellation.check()?;
     result
@@ -74,7 +85,7 @@ pub(super) struct ScanSaved {
 }
 
 struct ScanSavingCompletion {
-    sender: Sender<ScanEvent>,
+    sender: Option<tokio::sync::oneshot::Sender<ScanSaved>>,
     saved: Option<ScanSaved>,
 }
 
@@ -87,8 +98,10 @@ impl Drop for ScanSavingCompletion {
                     "Scan saving worker panicked; database changes may already be committed and some projections may be stale; inspect the library before retrying"
                 ));
             }
-            // The owner drains this one completion before joining on shutdown.
-            let _ = self.sender.send(ScanEvent::Saved(saved));
+            // The async supervisor joins the transaction before forwarding facts.
+            if let Some(sender) = self.sender.take() {
+                let _ = sender.send(saved);
+            }
         }
     }
 }
@@ -98,10 +111,10 @@ fn save_scan(
     current_id: Option<u64>,
     scan: ScanFinished,
     import_revisions: Option<ImportPlaylistRevisions>,
-    sender: Sender<ScanEvent>,
+    sender: tokio::sync::oneshot::Sender<ScanSaved>,
 ) {
     let mut completion = ScanSavingCompletion {
-        sender,
+        sender: Some(sender),
         saved: Some(ScanSaved {
             id: scan.id,
             progress: scan.progress,
@@ -270,107 +283,112 @@ impl Core {
         let cancellation = library::ScanCancellation::default();
         let worker_cancellation = cancellation.clone();
         let sender = self.scan_tx.clone();
-        let worker = thread::Builder::new()
-            .name("rivu-scan".into())
-            .spawn(move || {
-                let mut latest = ScanProgress {
-                    phase: ScanPhase::Discovering,
-                    processed: 0,
-                    total: None,
-                    errors: 0,
-                    path: None,
-                };
-                let mut last_phase = None;
-                let mut last_emit = Instant::now() - Duration::from_millis(100);
-                let progress_sender = sender.clone();
-                let mut progress = |phase, processed, total, errors, path: Option<&Path>| {
-                    latest.phase = phase;
-                    latest.processed = processed;
-                    latest.total = total;
-                    latest.errors = errors;
-                    let transition = last_phase != Some(phase);
-                    if transition || last_emit.elapsed() >= Duration::from_millis(100) {
-                        last_phase = Some(phase);
-                        last_emit = Instant::now();
-                        if !progress_sender.is_full() {
-                            let event = ScanProgress {
-                                phase,
-                                processed,
-                                total,
-                                errors,
-                                path: path.map(Path::to_path_buf),
-                            };
-                            let _ = progress_sender.try_send(ScanEvent::Progress {
-                                id,
-                                progress: event,
-                            });
-                        }
+        let worker = self.spawn_scan_preparation(id, async move {
+            let mut latest = ScanProgress {
+                phase: ScanPhase::Discovering,
+                processed: 0,
+                total: None,
+                errors: 0,
+                path: None,
+            };
+            let mut last_phase = None;
+            let mut last_emit = Instant::now() - Duration::from_millis(100);
+            let progress_sender = sender.clone();
+            let mut progress = |phase, processed, total, errors, path: Option<&Path>| {
+                latest.phase = phase;
+                latest.processed = processed;
+                latest.total = total;
+                latest.errors = errors;
+                let transition = last_phase != Some(phase);
+                if transition || last_emit.elapsed() >= Duration::from_millis(100) {
+                    last_phase = Some(phase);
+                    last_emit = Instant::now();
+                    if progress_sender.capacity() == progress_sender.max_capacity() {
+                        let event = ScanProgress {
+                            phase,
+                            processed,
+                            total,
+                            errors,
+                            path: path.map(Path::to_path_buf),
+                        };
+                        let _ = progress_sender.try_send(ScanEvent::Progress {
+                            id,
+                            progress: event,
+                        });
                     }
-                };
-                let preparation_started = Instant::now();
-                let mut import = None;
-                let result = (|| {
-                    let (paths, sheets, force) = match input {
-                        ScanInput::Import { path, name } => {
-                            import = Some((name, Vec::new()));
-                            let prepared = library::prepare_playlist_import(
-                                &path,
-                                &worker_cancellation,
-                                Some(&config.library_roots),
-                            )
-                            .context(
-                                "Preparing playlist import; scan not saved, playlist not created",
-                            )?;
-                            let paths = prepared
-                                .items
-                                .iter()
-                                .map(|item| item.path.clone())
-                                .collect::<Vec<_>>();
-                            import.as_mut().unwrap().1 = prepared.items;
-                            (paths, Some(prepared.sheets), false)
-                        }
-                        ScanInput::Paths { paths, force } => (paths, None, force),
-                    };
-                    library::scan_paths_with_cues(
-                        &paths,
-                        |path| {
-                            if force {
-                                Ok(None)
-                            } else {
-                                lookup_scan_source(&sender, id, path, &worker_cancellation)
-                            }
-                        },
-                        ffmpeg_enabled,
-                        &config.library_roots,
-                        config.scan_max_depth,
-                        (&worker_cancellation, sheets),
-                        &mut progress,
-                    )
-                    .map(|mut result| {
-                        result.min_duration_secs = config.scan_min_duration_secs;
-                        result
-                    })
-                })();
-                tracing::info!(
-                    id,
-                    elapsed_ms = preparation_started.elapsed().as_millis(),
-                    "library_scan_prepared"
-                );
-                match &result {
-                    Ok(result) => tracing::info!(
-                        records = result.records.len(),
-                        errors = result.errors.len(),
-                        "library_scan_finished"
-                    ),
-                    Err(error) => tracing::info!(error = %error, "library_scan_finished"),
                 }
-                let _ = sender.send(ScanEvent::Finished(ScanFinished {
-                    id,
-                    result,
-                    import,
-                    progress: latest,
-                }));
-            })?;
+            };
+            let preparation_started = Instant::now();
+            let mut import = None;
+            let result = async {
+                let (paths, sheets, force) = match input {
+                    ScanInput::Import { path, name } => {
+                        import = Some((name, Vec::new()));
+                        let prepared = library::prepare_playlist_import(
+                            &path,
+                            &worker_cancellation,
+                            Some(&config.library_roots),
+                        )
+                        .await
+                        .context(
+                            "Preparing playlist import; scan not saved, playlist not created",
+                        )?;
+                        let paths = prepared
+                            .items
+                            .iter()
+                            .map(|item| item.path.clone())
+                            .collect::<Vec<_>>();
+                        import.as_mut().unwrap().1 = prepared.items;
+                        (paths, Some(prepared.sheets), false)
+                    }
+                    ScanInput::Paths { paths, force } => (paths, None, force),
+                };
+                library::scan_paths_with_cues(
+                    &paths,
+                    |paths| {
+                        let sender = sender.clone();
+                        let cancellation = worker_cancellation.clone();
+                        async move {
+                            if force {
+                                Ok(vec![None; paths.len()])
+                            } else {
+                                lookup_scan_sources(sender, id, paths, cancellation).await
+                            }
+                        }
+                    },
+                    ffmpeg_enabled,
+                    &config.library_roots,
+                    config.scan_max_depth,
+                    (&worker_cancellation, sheets),
+                    &mut progress,
+                )
+                .await
+                .map(|mut result| {
+                    result.min_duration_secs = config.scan_min_duration_secs;
+                    result
+                })
+            }
+            .await;
+            tracing::info!(
+                id,
+                elapsed_ms = preparation_started.elapsed().as_millis(),
+                "library_scan_prepared"
+            );
+            match &result {
+                Ok(result) => tracing::info!(
+                    records = result.records.len(),
+                    errors = result.errors.len(),
+                    "library_scan_finished"
+                ),
+                Err(error) => tracing::info!(error = %error, "library_scan_finished"),
+            }
+            ScanFinished {
+                id,
+                result,
+                import,
+                progress: latest,
+            }
+        });
         self.next_scan_id = next_id;
         self.active_scan = Some(ScanTask {
             status: ScanTaskStatus {
@@ -394,6 +412,35 @@ impl Core {
         self.project_scan();
         Ok(())
     }
+
+    pub(in crate::core) fn spawn_scan_preparation(
+        &self,
+        id: u64,
+        prepare: impl Future<Output = ScanFinished> + Send + 'static,
+    ) -> tokio::task::JoinHandle<()> {
+        let sender = self.scan_tx.clone();
+        self.executor.spawn(async move {
+            let finished = std::panic::AssertUnwindSafe(prepare)
+                .catch_unwind()
+                .await
+                .unwrap_or_else(|_| ScanFinished {
+                    id,
+                    result: Err(anyhow::anyhow!(
+                        "Scan preparation worker panicked; scan has not been saved"
+                    )),
+                    import: None,
+                    progress: ScanProgress {
+                        phase: ScanPhase::Discovering,
+                        processed: 0,
+                        total: None,
+                        errors: 1,
+                        path: None,
+                    },
+                });
+            let _ = deliver_scan_event(&sender, ScanEvent::Finished(finished)).await;
+        })
+    }
+
     /// Presentation fields are projections; task status is the only result authority.
     fn project_scan(&mut self) {
         self.state.system.scanning = self.active_scan.is_some();
@@ -428,16 +475,28 @@ impl Core {
 
     pub(in crate::core) fn scan_event(&mut self, event: ScanEvent) {
         match event {
-            ScanEvent::KnownSource { id, path, reply } => {
-                let result = match self.active_scan.as_ref() {
-                    Some(task) if task.status.id == id => task
-                        .cancellation
-                        .check()
-                        .and_then(|()| self.store.known_source(&path)),
-                    _ => Err(anyhow::anyhow!("Scan task is not running")),
-                };
+            ScanEvent::KnownSources { id, paths, reply } => {
+                let result = (|| {
+                    let task = self
+                        .active_scan
+                        .as_ref()
+                        .filter(|task| task.status.id == id)
+                        .context("Scan task is not running")?;
+                    task.cancellation.check()?;
+                    ensure!(
+                        paths.len() <= library::SOURCE_BATCH_SIZE,
+                        "Scan source lookup batch exceeds limit"
+                    );
+                    paths
+                        .iter()
+                        .map(|path| {
+                            task.cancellation.check()?;
+                            self.store.known_source(path)
+                        })
+                        .collect()
+                })();
                 // The worker may have cancelled while this indexed read ran.
-                let _ = reply.try_send(result);
+                let _ = reply.send(result);
                 return;
             }
             ScanEvent::Progress { id, progress } => {
@@ -474,9 +533,9 @@ impl Core {
             // Saving is an accepted commit, not cancellable traversal. Drain its
             // sole completion before joining, even if delivery is backpressured.
             while self.active_scan.is_some() {
-                match self.scan_rx.recv() {
-                    Ok(event) => self.scan_event(event),
-                    Err(_) => {
+                match self.scan_rx.blocking_recv() {
+                    Some(event) => self.scan_event(event),
+                    None => {
                         let task = self.active_scan.take().unwrap();
                         self.complete_unsaved_scan(
                             task,
@@ -493,12 +552,12 @@ impl Core {
                 task.cancellation.cancel();
             }
             // Disconnect before joining: final traversal delivery may be full.
-            self.scan_rx = crossbeam_channel::never();
+            self.scan_rx.close();
             if let Some(task) = self.active_scan.take() {
                 self.complete_unsaved_scan(task, Ok(()), true);
             }
         }
-        self.scan_rx = crossbeam_channel::never();
+        self.scan_rx.close();
         self.project_scan();
     }
 
@@ -567,25 +626,42 @@ impl Core {
         });
         let sender = self.scan_tx.clone();
         let current_id = self.state.queue.current_id;
-        let worker = thread::Builder::new()
-            .name("rivu-scan-saving".into())
-            .spawn(move || save_scan(&database_path, current_id, scan, import_revisions, sender));
-        match worker {
-            Ok(worker) => {
-                // Finished is emitted only after traversal has stopped; the old
-                // worker has no remaining I/O or owner request to wait for.
-                let previous = std::mem::replace(&mut task.worker, worker);
-                let _ = previous.join();
-                task.status.progress.phase = ScanPhase::Saving;
-                task.status.message = "Saving library…".into();
-                self.active_scan = Some(task);
-            }
-            Err(error) => self.complete_unsaved_scan(task, Err(error.into()), false),
-        }
+        // Finished no longer awaits Core. Join preparation before scheduling the
+        // accepted, non-cancellable transaction, then supervise its retirement.
+        let _ = futures::executor::block_on(task.worker);
+        task.worker = self.executor.spawn(async move {
+            let id = scan.id;
+            let progress = scan.progress.clone();
+            let (completed, completion) = tokio::sync::oneshot::channel();
+            let joined = tokio::task::spawn_blocking(move || {
+                save_scan(&database_path, current_id, scan, import_revisions, completed)
+            }).await;
+            let saved = completion.await.unwrap_or_else(|_| ScanSaved {
+                id,
+                progress,
+                library_committed: false,
+                playlist_id: None,
+                playlist_entry_revisions: None,
+                outcome_uncertain: true,
+                impacts: None,
+                summary: String::new(),
+                scan_errors: None,
+                error: Some(anyhow::anyhow!(
+                    "Scan saving completion failed ({joined:?}); database changes may already be committed; inspect the library before retrying"
+                )),
+                library_total: None,
+                history: None,
+                playlist_total: None,
+            });
+            let _ = deliver_scan_event(&sender, ScanEvent::Saved(saved)).await;
+        });
+        task.status.progress.phase = ScanPhase::Saving;
+        task.status.message = "Saving library…".into();
+        self.active_scan = Some(task);
     }
 
     fn complete_unsaved_scan(&mut self, mut task: ScanTask, result: Result<()>, cancelled: bool) {
-        let _ = task.worker.join();
+        let _ = futures::executor::block_on(task.worker);
         if cancelled {
             task.status.progress.phase = ScanPhase::Cancelled;
             task.status.message = "Scan cancelled".into();
@@ -608,7 +684,7 @@ impl Core {
         // Retire maintenance ownership before any projection refresh may stop
         // playback. The worker has released its writable connection already.
         let mut task = self.active_scan.take().unwrap();
-        let _ = task.worker.join();
+        let _ = futures::executor::block_on(task.worker);
         task.status.progress = saved.progress;
         task.status.library_committed = saved.library_committed;
         task.status.playlist_id = saved.playlist_id;
@@ -728,10 +804,10 @@ mod tests {
             let directory = tempfile::tempdir().unwrap();
             let database_path = directory.path().join("library.db");
             drop(Store::open(&database_path).unwrap());
-            let (sender, receiver) = bounded(1);
+            let (sender, receiver) = tokio::sync::oneshot::channel();
             let worker = thread::spawn(move || {
                 let mut completion = ScanSavingCompletion {
-                    sender,
+                    sender: Some(sender),
                     saved: Some(ScanSaved {
                         id: 1,
                         progress: ScanProgress {
@@ -765,10 +841,7 @@ mod tests {
                 }
                 panic!("saving worker failure");
             });
-            let ScanEvent::Saved(saved) = receiver.recv_timeout(Duration::from_secs(5)).unwrap()
-            else {
-                panic!("Expected saving completion");
-            };
+            let saved = futures::executor::block_on(receiver).unwrap();
             assert!(worker.join().is_err());
             assert!(saved.outcome_uncertain);
             assert_eq!(saved.library_committed, committed);

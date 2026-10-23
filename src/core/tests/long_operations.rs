@@ -52,11 +52,12 @@ fn processing_cancellation_remains_available_while_scan_holds_saving_phase() {
     assert!(core.database_maintenance_active());
     core.command(Command::CancelProcessing { id: 1 }).unwrap();
     loop {
-        let event = core
-            .processing
-            .receiver
-            .recv_timeout(Duration::from_secs(5))
-            .unwrap();
+        let event = wait_on(&core.executor, async {
+            tokio::time::timeout(Duration::from_secs(5), core.processing.receiver.recv())
+                .await
+                .unwrap()
+                .unwrap()
+        });
         let finished = matches!(event, crate::processing::Event::Finished { .. });
         core.processing_event(event);
         if finished {
@@ -190,7 +191,13 @@ fn export_cancelled_after_last_row_preserves_existing_destination() {
         final_check.cancel();
         None
     }));
-    assert!(library::export_m3u(&destination, tracks, &cancellation).is_err());
+    assert!(
+        wait_on(
+            &core.executor,
+            library::export_m3u(&destination, futures::stream::iter(tracks), &cancellation),
+        )
+        .is_err()
+    );
     assert_eq!(std::fs::read(&destination).unwrap(), b"original\n");
 }
 

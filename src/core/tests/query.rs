@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn cancelled_queued_read_skips_store_and_does_not_cancel_another_owner() {
-    let (directory, mut core) = fixture_with_database(Some(10.0), true);
+    let (directory, core) = fixture_with_database(Some(10.0), true);
     core.store.set_track_cache_page_size(0);
     let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
     connection
@@ -12,11 +12,11 @@ fn cancelled_queued_read_skips_store_and_does_not_cancel_another_owner() {
 
     let mut cancelled = QueryEpoch::default();
     let mut current = QueryEpoch::default();
-    let (sender, requests) = bounded(3);
+    let (sender, requests) = mpsc::channel(3);
     let enqueue = |track_id, ticket| {
-        let (reply, response) = bounded(1);
+        let (reply, response) = oneshot::channel();
         sender
-            .send(Request {
+            .blocking_send(Request {
                 operation: Operation::Query {
                     query: Query::Track { track_id },
                     ticket,
@@ -31,24 +31,24 @@ fn cancelled_queued_read_skips_store_and_does_not_cancel_another_owner() {
     let unconditional = enqueue(1, None);
     cancelled.cancel();
     drop(sender);
-    run_until_disconnected(&mut core, requests);
+    drop(run_until_disconnected(core, requests));
 
     assert!(matches!(
-        stale.recv().unwrap(),
+        stale.blocking_recv().unwrap(),
         CoreResponse::Query(QueryResponse {
             result: Err(QueryError::Cancelled),
             ..
         })
     ));
     assert!(matches!(
-        independent.recv().unwrap(),
+        independent.blocking_recv().unwrap(),
         CoreResponse::Query(QueryResponse {
             result: Ok(ViewResponse::Track(Some(track))),
             ..
         }) if track.id == 2
     ));
     assert!(matches!(
-        unconditional.recv().unwrap(),
+        unconditional.blocking_recv().unwrap(),
         CoreResponse::Query(QueryResponse {
             result: Err(QueryError::Message(_)),
             ..
@@ -58,7 +58,7 @@ fn cancelled_queued_read_skips_store_and_does_not_cancel_another_owner() {
 
 #[test]
 fn already_cancelled_read_never_enters_the_request_queue() {
-    let (handle, _analysis, requests) = display_fixture();
+    let (handle, _analysis, mut requests) = display_fixture();
     let mut epoch = QueryEpoch::default();
     let ticket = epoch.ticket();
     epoch.cancel();
@@ -76,7 +76,7 @@ fn cancellation_after_dispatch_waits_for_the_physical_reply() {
     use std::sync::atomic::AtomicBool;
 
     let (_directory, core) = fixture();
-    let (handle, _analysis, requests) = display_fixture();
+    let (handle, _analysis, mut requests) = display_fixture();
     let mut epoch = QueryEpoch::default();
     let ticket = epoch.ticket();
     let gate = Arc::new(AtomicBool::new(true));
@@ -114,7 +114,7 @@ fn cancellation_after_dispatch_waits_for_the_physical_reply() {
 #[test]
 fn gui_timeout_notifies_without_retiring_and_discards_late_reply_or_disconnect() {
     for disconnect in [false, true] {
-        let (handle, _analysis, requests) = display_fixture();
+        let (handle, _analysis, mut requests) = display_fixture();
         let (notice, notices) = bounded(1);
         let handle = handle.with_query_timeout(move |response| notice.send(response).unwrap());
         let mut epoch = QueryEpoch::default();
@@ -130,7 +130,7 @@ fn gui_timeout_notifies_without_retiring_and_discards_late_reply_or_disconnect()
                 ))
                 .unwrap();
         });
-        let request = requests.recv().unwrap();
+        let request = requests.blocking_recv().unwrap();
         let notification = notices.recv().unwrap();
         assert!(matches!(notification.result, Err(QueryError::Message(_))));
         // Logical replacement/cancellation cannot complete the submitted worker.
@@ -160,12 +160,12 @@ fn gui_timeout_notifies_without_retiring_and_discards_late_reply_or_disconnect()
 
 #[test]
 fn non_gui_timeout_does_not_wait_for_physical_retirement_or_notify_gui() {
-    let (handle, _analysis, requests) = display_fixture();
+    let (handle, _analysis, mut requests) = display_fixture();
     let handle = handle.with_query_timeout(|_| panic!("non-GUI query notified GUI"));
     let result =
         handle.query_with_ticket(Query::Track { track_id: 1 }, None, false, Duration::ZERO);
     assert!(matches!(result.result, Err(QueryError::Message(_))));
-    let request = requests.recv().unwrap();
+    let request = requests.blocking_recv().unwrap();
     assert!(
         request
             .reply

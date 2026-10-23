@@ -52,8 +52,8 @@ signal-hook = "0.3.18"
 # Artwork needs container/tag probing; codecs and decoding belong to rivu-audio.
 symphonia = { version = "0.6.1", default-features = false, features = ["all-formats", "all-meta", "flac", "mp1", "mp2", "mp3"] }
 symphonia-metadata = "0.6.1"
-tokio = { version = "1", default-features = false, features = ["rt", "net", "io-util", "sync", "time", "macros"] }
-walkdir = "2"
+tokio = { version = "1", default-features = false, features = ["rt", "net", "fs", "io-util", "sync", "time", "macros"] }
+tokio-util = { version = "0.7", default-features = false, features = ["rt"] }
 tempfile = "3.27"
 zbus = "5.19"
 url = "2"
