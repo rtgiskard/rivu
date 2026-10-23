@@ -183,16 +183,23 @@ avoids separate analyzers for different views while allowing unused result
 storage to be released. A demand transition invalidates the sampling window,
 including a quick hide/show that the worker did not observe as a steady state.
 
-The GUI presentation owner consumes analysis on window frames and owns the
-shared visual models, staging buffer, display demand, and per-panel view
-entities. Business/configuration changes update its inputs; frame callbacks
-never refresh the business root. Native callbacks, local redraws, and core
-wakeups share one pending frame or deadline rather than parallel analysis loops.
-A frame consumes the latest publication and requests the next one; paused
-business updates permit a single refresh without starting an idle clock.
+The GUI presentation owner owns the shared visual models, staging buffer,
+display demand, and per-panel view entities. One analysis timer requests frames
+at `analysis_fps`; one pending native window callback consumes the latest
+publication and advances display animation independently of that timer.
+Business/configuration changes update its inputs; neither clock refreshes the
+business root. Missed analysis deadlines coalesce rather than replaying a backlog.
 A configuration-only refresh reuses the current staging frame when its analysis
-sequence is unchanged. It reapplies presentation settings without copying the
-spectrum, density, or spatial payload again or advancing accepted audio time.
+sequence is unchanged, without copying its payloads or treating it as new audio.
+
+The display clock advances at wall-clock speed but never beyond the latest
+accepted audio timestamp. Spectrum hold/release and smoothing, radial rotation
+and smoothing, generative motion, and Spectrogram placement can therefore change
+between analysis publications without another FFT or history insertion. If the
+producer stalls, display time stops at the accepted boundary rather than inventing
+audio. Generation/sample-rate changes, clock rewinds, and accepted gaps longer
+than half a second reset continuity. Pause cancels both clocks; a paused business
+update can still request one refresh without starting an idle animation loop.
 
 Only affected visual panel entities are invalidated by analysis or waveform
 updates. Cached scenes retain their measured panel dimensions until geometry or
@@ -201,11 +208,11 @@ scenes so every panel uses the current history dimensions. Disabling visualizati
 caching also disables scene caching for these panels. Playback, commands, and
 shutdown remain independent of presentation.
 
-A reliable Hidden notification cancels frame scheduling and disables analysis.
-Without that notification, compositor-throttled frames reduce analysis demand
-rather than declaring the window hidden. Loss of focus alone never disables
-analysis, and a compositor that still delivers occasional offscreen frames
-does not imply zero analysis work.
+A reliable Hidden notification cancels both clocks and disables analysis.
+Loss of focus alone never disables analysis. Without a reliable visibility
+notification, compositor throttling limits native animation callbacks but not
+the independent analysis timer; analysis remains bounded by `analysis_fps` and
+retains only the latest publication until visibility is revoked.
 
 == Still Mode
 
@@ -419,11 +426,12 @@ The radial presentation adapts Noctalia Shell v5's
 https://github.com/noctalia-dev/noctalia-shell/blob/e56a9db5/Widgets/AudioSpectrum/NMirroredSpectrum.qml[`NMirroredSpectrum.qml`]
 concept and parameter model, not its rendering implementation or pixel output.
 GPUI-native paths use a bounded display of at most 32 logarithmic bands.
-Rotation and smoothing follow accepted sample time. Replaying the same
-generation and sample time with an unchanged valid band mapping leaves the
-displayed levels intact, including partially decayed falling levels. A reset,
-configuration change, or return from hidden state invalidates that display and
-allows the latest frame to be mapped again without inventing new audio time.
+Each accepted spectrum maps its levels to retained target bands once. Native
+display ticks smooth toward those targets and advance rotation using the bounded
+display clock. Replaying the same generation and sample time with an unchanged
+valid band mapping does not inject new input or advance animation. A reset,
+configuration change, or return from hidden state invalidates the mapping so the
+latest compatible frame can initialize it again without inventing audio time.
 Paint and panel size changes do not advance these levels or rotation; the
 optional idle fade is a wall-clock presentation overlay, not audio smoothing.
 There is no reusable rendering cache for these styles.
@@ -471,6 +479,10 @@ transients without storing every frame. Display mapping can recolor compatible
 retained frequency data without re-running audio analysis. A gap starts a new
 interval instead of drawing new audio across the missing time.
 
+Only accepted analysis frames write or pool history. Native display ticks move
+the time cursor and tile placements without rebuilding unchanged numerical
+publications; portions newer than the display cursor remain clipped.
+
 History width and sampling resolution bound retained resources. Increasing display
 resolution does not create additional FFT information. Multiple panels share
 history rather than maintaining competing copies; the cache document describes
@@ -491,9 +503,12 @@ Both styles take band power from the stereo FFT bins with window-energy normaliz
 not from summed dB values or maximum-pooled display bands. Opposite-phase
 channels retain their energy.
 
-Simulation advances once per accepted analysis frame and is shared across
-visible panels. Paint and resize never advance the scene. Discontinuities clear
-the state, and hidden views do not request the optional band-power analysis.
+A first valid frame seeds visible geometry; subsequent simulation advances on
+native display ticks toward the latest accepted band-power targets. Accepted
+energy rises inject each onset once, not once per display tick. Simulation and
+publications remain shared across visible panels. Paint and resize never advance
+the scene. Discontinuities clear state, and hidden styles do not request optional
+band-power analysis.
 Glow uses batched, widening translucent strokes rather than image feedback
 history or a blur post-pass. This bounds retained scene storage and submissions,
 at the cost of approximating the light spread. Beams retains 189 branches, 756
@@ -501,10 +516,10 @@ line segments, and 12 pulse slots. Flow retains 96 filaments with at most 24
 points each and 2208 line segments. Both styles publish shared segment endpoints
 with nine intensity/color groups and three ordered stroke layers per panel,
 instead of rebuilding 27 CPU light paths. Flow limits each integration step to
-1/120 second and each accepted-frame update to 60 steps. Integration, history
-fading, and respawn retain those
-substeps, but render segments are rebuilt only from the final state. A gap longer
-than half a second resets the scene instead of attempting unbounded catch-up.
+1/120 second and each display tick to 60 steps. Integration, history fading, and
+respawn retain those substeps, but render segments are rebuilt only from the
+final state. An accepted-audio gap longer than half a second resets the scene
+instead of attempting unbounded catch-up.
 FFT/window changes revoke the scene until compatible audio arrives. Color or Bloom
 changes republish material over the accepted geometry without advancing simulation;
 background changes only repaint. Sensitivity and display-range changes affect future

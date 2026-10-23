@@ -59,6 +59,53 @@ pub(super) struct PresentationState<'a> {
     pub(super) duration: Option<f64>,
 }
 
+/// Display time consumes accepted audio time at wall-clock speed, never inventing
+/// samples during a stalled producer or catching up a hidden interval in one draw.
+#[derive(Default)]
+struct AnimationClock {
+    source: Option<(u64, u32)>,
+    latest: Option<Duration>,
+    time: Duration,
+    last_tick: Option<Instant>,
+}
+
+impl AnimationClock {
+    fn accept(&mut self, frame: &AnalysisFrame, now: Instant) {
+        if frame.settings.is_none() {
+            *self = Self::default();
+            return;
+        }
+        let source = (frame.generation, frame.sample_rate);
+        let discontinuity = self.source != Some(source)
+            || self.latest.is_none_or(|last| {
+                frame.sample_time < last
+                    || frame.sample_time.saturating_sub(last) > Duration::from_millis(500)
+            });
+        if discontinuity {
+            self.time = frame.sample_time;
+            self.last_tick = Some(now);
+        }
+        self.source = Some(source);
+        self.latest = Some(frame.sample_time);
+    }
+
+    fn advance(&mut self, now: Instant) -> Duration {
+        let elapsed = self
+            .last_tick
+            .replace(now)
+            .map(|last| now.saturating_duration_since(last))
+            .unwrap_or_default();
+        if let Some(latest) = self.latest {
+            self.time = self.time.saturating_add(elapsed).min(latest);
+        }
+        self.time
+    }
+
+    fn suspend(&mut self) {
+        self.last_tick = None;
+    }
+}
+
 pub(super) struct Presentation {
     handle: CoreHandle,
     i18n: Arc<Localizer>,
@@ -80,8 +127,8 @@ pub(super) struct Presentation {
     frame_requested: bool,
     frame_pending: bool,
     frame_generation: u64,
-    frame_timer: Option<Task<()>>,
-    last_request: Option<Instant>,
+    analysis_timer: Option<Task<()>>,
+    animation_clock: AnimationClock,
     _waveform_subscription: Subscription,
 }
 
@@ -117,8 +164,8 @@ impl Presentation {
             frame_requested: false,
             frame_pending: false,
             frame_generation: 0,
-            frame_timer: None,
-            last_request: None,
+            analysis_timer: None,
+            animation_clock: AnimationClock::default(),
             _waveform_subscription: subscription,
         }
     }
@@ -148,7 +195,7 @@ impl Presentation {
                 PanelKind::from_panel(panel, &config)
                     .is_some_and(|kind| self.panels.get(&panel.id) != Some(&kind))
             });
-        let was_running = self.frame_interval();
+        let was_running = self.analysis_interval();
         self.config = config;
         self.visible = visible;
         self.shutting_down = shutting_down;
@@ -219,7 +266,7 @@ impl Presentation {
             }
             self.demand = demand;
         }
-        if was_running != self.frame_interval() || visibility_changed || still_changed {
+        if was_running != self.analysis_interval() || visibility_changed || still_changed {
             self.cancel_clock();
         }
         let waveform_enabled = !self.config.still_mode && !self.shutting_down;
@@ -246,29 +293,68 @@ impl Presentation {
         self.visible && !self.shutting_down && !self.config.still_mode
     }
 
-    fn frame_interval(&self) -> Option<Duration> {
+    fn analysis_interval(&self) -> Option<Duration> {
         (self.active() && self.demand.enabled && self.status == PlaybackStatus::Playing)
             .then(|| Duration::from_secs_f64(1.0 / self.config.analysis_fps as f64))
     }
 
     fn cancel_clock(&mut self) {
         self.frame_generation = self.frame_generation.wrapping_add(1);
-        self.frame_timer.take();
-        self.last_request = None;
+        self.analysis_timer.take();
+        self.animation_clock.suspend();
         self.frame_requested = false;
         // Native callbacks cannot be removed. Keep their pending slot occupied
         // until delivery; the generation check retires them without consumption.
     }
 
+    fn start_analysis_clock(&mut self, cx: &mut Context<Self>) {
+        let Some(interval) = self.analysis_interval() else {
+            return;
+        };
+        if self.analysis_timer.is_some() {
+            return;
+        }
+        self.handle.request_analysis_frame();
+        let generation = self.frame_generation;
+        let executor = cx.background_executor().clone();
+        self.analysis_timer = Some(cx.spawn(async move |this, cx| {
+            let mut deadline = Instant::now() + interval;
+            loop {
+                executor
+                    .timer(deadline.saturating_duration_since(Instant::now()))
+                    .await;
+                let running = this
+                    .update(cx, |this, _| {
+                        if this.frame_generation != generation || this.analysis_interval().is_none()
+                        {
+                            return false;
+                        }
+                        this.handle.request_analysis_frame();
+                        true
+                    })
+                    .unwrap_or(false);
+                if !running {
+                    break;
+                }
+                deadline += interval;
+                let now = Instant::now();
+                if deadline <= now {
+                    // Coalesce missed requests instead of replaying a timer backlog.
+                    deadline = now + interval;
+                }
+            }
+        }));
+    }
+
     pub(super) fn request_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.active()
             || !self.demand.enabled
-            || (!self.frame_requested && self.frame_interval().is_none())
+            || (!self.frame_requested && self.analysis_interval().is_none())
             || self.frame_pending
-            || self.frame_timer.is_some()
         {
             return;
         }
+        self.start_analysis_clock(cx);
         self.frame_pending = true;
         let generation = self.frame_generation;
         let entity = cx.weak_entity();
@@ -283,35 +369,25 @@ impl Presentation {
                     return;
                 }
                 this.frame_requested = false;
-                this.consume_analysis(cx);
-                let Some(interval) = this.frame_interval() else {
-                    this.last_request = None;
-                    return;
-                };
                 let now = Instant::now();
-                if this.last_request.is_none_or(|last| now - last >= interval) {
-                    this.last_request = Some(now);
-                    this.handle.request_analysis_frame();
+                if this.analysis_interval().is_some() {
+                    let time = this.animation_clock.advance(now);
+                    let visuals_changed = this.visuals.animate(time);
+                    let audio_changed = this.audio_visualizer.animate(time);
+                    this.notify_animation(visuals_changed, audio_changed, cx);
+                    this.consume_analysis(now, cx);
+                    this.request_frame(window, cx);
+                } else {
+                    this.animation_clock.suspend();
+                    this.consume_analysis(now, cx);
                 }
-                let delay = interval.saturating_sub(this.last_request.unwrap().elapsed());
-                let timer = cx.background_executor().timer(delay);
-                this.frame_timer = Some(cx.spawn_in(window, async move |this, cx| {
-                    timer.await;
-                    let _ = this.update_in(cx, |this, window, cx| {
-                        if this.frame_generation == generation {
-                            this.frame_timer = None;
-                            this.request_frame(window, cx);
-                        }
-                    });
-                }));
             });
         });
-        // Dirty a visual view to obtain a real native frame, never the business
-        // root. A pending timer and native callback share this single gate.
-        self.notify_panels(true, cx);
+        // on_next_frame wakes the native frame source without forcing a repaint.
+        // Accepted input or changed animation dirties only the affected panels.
     }
 
-    fn consume_analysis(&mut self, cx: &mut Context<Self>) {
+    fn consume_analysis(&mut self, now: Instant, cx: &mut Context<Self>) {
         let frame = self.handle.analysis.read();
         if !stage_analysis_frame(
             &mut self.staging,
@@ -324,9 +400,31 @@ impl Presentation {
         }
         drop(frame);
         self.needs_refresh = false;
-        self.visuals.update(&self.staging);
-        self.audio_visualizer.update(&self.staging);
+        self.animation_clock.accept(&self.staging, now);
+        let time = self.animation_clock.advance(now);
+        self.visuals.update(&self.staging, time);
+        self.audio_visualizer.update(&self.staging, time);
         self.notify_panels(true, cx);
+    }
+
+    fn notify_animation(&self, visuals: bool, audio: bool, cx: &mut Context<Self>) {
+        for (id, view) in &self.views {
+            let changed = match self.panels.get(id) {
+                Some(PanelKind::Spectrum | PanelKind::Spectrogram) => visuals,
+                Some(PanelKind::Audio(options)) => {
+                    audio
+                        && !matches!(
+                            options.style,
+                            AudioVisualizerStyle::StereoDensity
+                                | AudioVisualizerStyle::SpatialSpectrum
+                        )
+                }
+                _ => false,
+            };
+            if changed {
+                view.update(cx, |_, cx| cx.notify());
+            }
+        }
     }
 
     fn notify_panels(&self, analysis: bool, cx: &mut Context<Self>) {
@@ -496,6 +594,85 @@ mod tests {
     use crate::core::Runtime;
 
     #[test]
+    fn display_clock_moves_between_analysis_frames_and_stops_at_accepted_audio() {
+        let start = Instant::now();
+        let mut frame = AnalysisFrame {
+            generation: 1,
+            sample_rate: 48_000,
+            sample_time: Duration::from_secs(1),
+            settings: Some((&Config::default()).into()),
+            ..Default::default()
+        };
+        let mut clock = AnimationClock::default();
+        clock.accept(&frame, start);
+        assert_eq!(
+            clock.advance(start + Duration::from_millis(190)),
+            frame.sample_time
+        );
+        frame.sample_time += Duration::from_millis(200);
+        clock.accept(&frame, start + Duration::from_millis(200));
+        for millis in (200..=390).step_by(10) {
+            assert_eq!(
+                clock.advance(start + Duration::from_millis(millis)),
+                Duration::from_millis(1000 + millis - 190)
+            );
+        }
+        assert_eq!(
+            clock.advance(start + Duration::from_secs(5)),
+            frame.sample_time
+        );
+        clock.accept(&frame, start + Duration::from_secs(5));
+        assert_eq!(
+            clock.advance(start + Duration::from_secs(6)),
+            frame.sample_time
+        );
+    }
+
+    #[test]
+    fn display_clock_suspension_and_discontinuities_do_not_replay_elapsed_time() {
+        let start = Instant::now();
+        let mut frame = AnalysisFrame {
+            generation: 1,
+            sample_rate: 48_000,
+            sample_time: Duration::from_secs(1),
+            settings: Some((&Config::default()).into()),
+            ..Default::default()
+        };
+        let mut clock = AnimationClock::default();
+        clock.accept(&frame, start);
+        frame.sample_time += Duration::from_millis(200);
+        clock.accept(&frame, start);
+        assert_eq!(
+            clock.advance(start + Duration::from_millis(10)),
+            Duration::from_millis(1010)
+        );
+        clock.suspend();
+        assert_eq!(
+            clock.advance(start + Duration::from_secs(5)),
+            Duration::from_millis(1010)
+        );
+        for change in 0..4 {
+            match change {
+                0 => frame.generation += 1,
+                1 => frame.sample_rate = 44_100,
+                2 => frame.sample_time = Duration::from_millis(100),
+                _ => frame.sample_time += Duration::from_secs(1),
+            }
+            clock.accept(&frame, start + Duration::from_secs(6));
+            assert_eq!(
+                clock.advance(start + Duration::from_secs(6)),
+                frame.sample_time
+            );
+        }
+        frame.settings = None;
+        clock.accept(&frame, start + Duration::from_secs(7));
+        assert_eq!(
+            clock.advance(start + Duration::from_secs(8)),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
     fn same_sequence_invalidation_retires_staged_visualizer_data() {
         let mut frame = AnalysisFrame {
             sequence: 7,
@@ -595,7 +772,7 @@ mod tests {
                 let generation = owner.frame_generation;
                 owner.request_frame(window, cx);
                 assert_eq!(owner.frame_generation, generation);
-                assert!(owner.frame_timer.is_none());
+                assert!(owner.analysis_timer.is_none());
                 owner.sync(
                     PresentationState {
                         config: Arc::clone(&config),
@@ -610,7 +787,7 @@ mod tests {
                     cx,
                 );
                 assert_eq!(owner.demand, DisplayDemand::default());
-                assert!(owner.frame_timer.is_none());
+                assert!(owner.analysis_timer.is_none());
                 assert!(
                     owner.frame_pending,
                     "native callback keeps its slot until delivery"
@@ -661,7 +838,11 @@ mod tests {
             });
             window.simulate_next_frame(cx);
             owner.update(cx, |owner, cx| {
-                assert!(owner.frame_timer.is_some());
+                assert!(owner.analysis_timer.is_some());
+                assert!(
+                    owner.frame_pending,
+                    "native animation continues while analysis waits"
+                );
                 let mut still = config.as_ref().clone();
                 still.still_mode = true;
                 owner.sync(
@@ -678,8 +859,8 @@ mod tests {
                     cx,
                 );
                 assert_eq!(owner.demand, DisplayDemand::default());
-                assert!(owner.frame_timer.is_none());
-                assert!(owner.frame_interval().is_none());
+                assert!(owner.analysis_timer.is_none());
+                assert!(owner.analysis_interval().is_none());
                 assert_eq!(owner.staging.settings, None);
                 owner.sync(
                     PresentationState {
@@ -709,7 +890,7 @@ mod tests {
                     cx,
                 );
                 assert_eq!(owner.demand, DisplayDemand::default());
-                assert!(owner.frame_timer.is_none());
+                assert!(owner.analysis_timer.is_none());
                 owner.sync(
                     PresentationState {
                         config: Arc::clone(&config),

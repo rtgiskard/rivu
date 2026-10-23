@@ -1,4 +1,4 @@
-//! Shared, accepted-audio-clocked generative light views. No simulation in paint.
+//! Shared generative light views with accepted targets and display-clocked simulation.
 use super::{fractal_beams, fractal_flow};
 use crate::config::{AudioVisualizerOptions, AudioVisualizerStyle, Config};
 use crate::i18n::Localizer;
@@ -84,6 +84,9 @@ struct Data {
     settings: AnalysisSettings,
     source: Option<(u64, u32)>,
     last_time: Option<Duration>,
+    last_presentation_time: Option<Duration>,
+    target: Drive,
+    pending_onset: f32,
     drive: Drive,
     previous_energy: f32,
     scene: Option<Scene>,
@@ -113,6 +116,9 @@ impl FractalVisualizer {
                 settings: AnalysisSettings::from(&config),
                 source: None,
                 last_time: None,
+                last_presentation_time: None,
+                target: Drive::default(),
+                pending_onset: 0.0,
                 drive: Drive::default(),
                 previous_energy: 0.0,
                 scene: None,
@@ -172,8 +178,12 @@ impl FractalVisualizer {
         restored
     }
 
-    pub(super) fn update(&self, frame: &AnalysisFrame) {
-        self.data.borrow_mut().update(frame);
+    pub(super) fn update(&self, frame: &AnalysisFrame, presentation_time: Duration) {
+        self.data.borrow_mut().update(frame, presentation_time);
+    }
+
+    pub(super) fn animate(&self, presentation_time: Duration) -> bool {
+        self.data.borrow_mut().animate(presentation_time)
     }
 
     pub(super) fn view(
@@ -218,6 +228,9 @@ impl Data {
         self.gpu_segments.clear();
         self.source = None;
         self.last_time = None;
+        self.last_presentation_time = None;
+        self.target = Drive::default();
+        self.pending_onset = 0.0;
         self.drive = Drive::default();
         self.previous_energy = 0.0;
         if let Some(scene) = &mut self.scene {
@@ -230,15 +243,12 @@ impl Data {
         self.scene.as_ref().map(Scene::segments).unwrap_or(&[])
     }
 
-    fn update(&mut self, frame: &AnalysisFrame) {
+    fn update(&mut self, frame: &AnalysisFrame, presentation_time: Duration) {
         if !self.visible {
             return;
         }
-        if self.source != Some((frame.generation, frame.sample_rate)) {
-            self.reset();
-            self.source = Some((frame.generation, frame.sample_rate));
-        }
-        // Never consume an undemanded payload or an old window during reconfiguration.
+        // Reject stale settings and undemanded payloads before any future tick
+        // can animate a previous source's drive.
         if !frame.visualizer.demand.band_energy
             || !frame.settings.is_some_and(|s| {
                 s.fft_size == self.settings.fft_size
@@ -246,7 +256,17 @@ impl Data {
                     && s.signal == self.settings.signal
             })
         {
+            self.reset();
             return;
+        }
+        if self.source != Some((frame.generation, frame.sample_rate))
+            || self.last_time.is_some_and(|last| {
+                frame.sample_time < last
+                    || frame.sample_time.saturating_sub(last) > Duration::from_millis(500)
+            })
+        {
+            self.reset();
+            self.source = Some((frame.generation, frame.sample_rate));
         }
         if self.last_time == Some(frame.sample_time) {
             return;
@@ -254,16 +274,7 @@ impl Data {
         if self.scene.is_none() {
             self.scene = Scene::new(self.style);
         }
-        let mut elapsed = self
-            .last_time
-            .map(|last| frame.sample_time.saturating_sub(last).as_secs_f32())
-            .unwrap_or(1.0 / self.settings.fps.max(1) as f32);
-        if self.last_time.is_some_and(|last| frame.sample_time < last) || elapsed > 0.5 {
-            self.reset();
-            self.source = Some((frame.generation, frame.sample_rate));
-            elapsed = 1.0 / self.settings.fps.max(1) as f32;
-        }
-        let target = Drive {
+        self.target = Drive {
             bands: frame
                 .visualizer
                 .band_rms
@@ -276,9 +287,48 @@ impl Data {
             ),
             onset: 0.0,
         };
-        let onset = ((target.energy - self.previous_energy).max(0.0) * 3.0).clamp(0.0, 1.0);
-        self.previous_energy = target.energy;
-        // Flow needs bounded particle-integration steps; beams only deform geometry.
+        let onset = ((self.target.energy - self.previous_energy).max(0.0) * 3.0).clamp(0.0, 1.0);
+        self.pending_onset = self.pending_onset.max(onset);
+        self.previous_energy = self.target.energy;
+        self.last_time = Some(frame.sample_time);
+        if self.last_presentation_time.is_none() {
+            // Seed visible geometry immediately, independent of analysis FPS.
+            // All subsequent simulation belongs exclusively to native ticks.
+            self.last_presentation_time = Some(presentation_time);
+            self.advance(1.0 / 60.0);
+        }
+    }
+
+    fn animate(&mut self, presentation_time: Duration) -> bool {
+        if !self.visible || self.last_time.is_none() {
+            return false;
+        }
+        let Some(last) = self.last_presentation_time else {
+            return false;
+        };
+        if presentation_time <= last {
+            return false;
+        }
+        // The display owner bounds this clock to accepted audio. Bound work as
+        // well when a native callback is delayed; do not reset a held drive.
+        let elapsed = presentation_time
+            .saturating_sub(last)
+            .as_secs_f32()
+            .min(0.5);
+        self.last_presentation_time = Some(presentation_time);
+        let had_light = self
+            .scene
+            .as_ref()
+            .is_some_and(|scene| !scene.segments().is_empty());
+        self.advance(elapsed);
+        had_light
+            || self
+                .scene
+                .as_ref()
+                .is_some_and(|scene| !scene.segments().is_empty())
+    }
+
+    fn advance(&mut self, elapsed: f32) {
         let step_rate = if self.style == AudioVisualizerStyle::FractalFlow {
             120.0
         } else {
@@ -286,22 +336,23 @@ impl Data {
         };
         let steps = (elapsed * step_rate).ceil().clamp(1.0, 60.0) as usize;
         let dt = elapsed / steps as f32;
+        let onset = std::mem::take(&mut self.pending_onset);
         for step in 0..steps {
-            for (value, target) in self.drive.bands.iter_mut().zip(target.bands) {
+            for (value, target) in self.drive.bands.iter_mut().zip(self.target.bands) {
                 *value = smooth(*value, target, dt);
             }
-            self.drive.energy = smooth(self.drive.energy, target.energy, dt);
+            self.drive.energy = smooth(self.drive.energy, self.target.energy, dt);
             self.drive.onset = if step == 0 { onset } else { 0.0 };
             if let Some(scene) = &mut self.scene {
                 scene.advance(dt, self.drive);
             }
         }
+        self.drive.onset = 0.0;
         match &mut self.scene {
             Some(Scene::Beams(scene)) => scene.rebuild_segments(),
             Some(Scene::Flow(scene)) => scene.rebuild_segments(),
             None => {}
         }
-        self.last_time = Some(frame.sample_time);
         self.publish();
     }
 
@@ -567,6 +618,94 @@ fn blend(from: u32, to: u32, t: f32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn accept(visual: &FractalVisualizer, frame: &AnalysisFrame) {
+        visual.update(frame, frame.sample_time);
+        visual.animate(frame.sample_time);
+    }
+
+    #[test]
+    fn five_hz_inputs_keep_native_motion_without_repeating_onsets() {
+        for style in [
+            AudioVisualizerStyle::FractalBeams,
+            AudioVisualizerStyle::FractalFlow,
+        ] {
+            let visual = plot(style);
+            let reference = plot(style);
+            let start = Duration::from_millis(1000);
+            let first = frame(1000);
+            visual.update(&first, start);
+            reference.update(&first, start);
+            assert!(
+                visual
+                    .data
+                    .borrow()
+                    .segments()
+                    .iter()
+                    .any(|s| s.strength > 0.001)
+            );
+            let mut next = frame(1200);
+            next.rms_left = 0.7;
+            next.rms_right = 0.7;
+            visual.update(&next, start);
+            reference.update(&next, start);
+            let energy = visual.data.borrow().previous_energy;
+            for tick in 1..=12 {
+                let now = start + Duration::from_micros(16_000 * tick);
+                let before = visual.data.borrow().segments().to_vec();
+                assert!(visual.animate(now));
+                assert!(reference.animate(now));
+                let snapshot = publication(&visual);
+                assert_ne!(visual.data.borrow().segments(), before);
+                assert_eq!(
+                    visual.data.borrow().segments(),
+                    reference.data.borrow().segments()
+                );
+                assert!(!visual.animate(now));
+                assert!(Arc::ptr_eq(&snapshot, &publication(&visual)));
+                assert_eq!(visual.data.borrow().last_time, Some(next.sample_time));
+                assert_eq!(visual.data.borrow().pending_onset, 0.0);
+                assert_eq!(visual.data.borrow().drive.onset, 0.0);
+                // A material refresh and repeated accepted payload must neither
+                // reset motion nor treat changed payload values as another onset.
+                if tick == 4 {
+                    visual.configure(&Config {
+                        audio_visualizer_primary_color: "#ff0000".parse().unwrap(),
+                        ..Config::default()
+                    });
+                    next.rms_left = 1.0;
+                    next.rms_right = 1.0;
+                    visual.update(&next, now);
+                    assert_eq!(visual.data.borrow().previous_energy, energy);
+                    assert_eq!(visual.data.borrow().pending_onset, 0.0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_and_hidden_scenes_cannot_animate_previous_drive() {
+        for style in [
+            AudioVisualizerStyle::FractalBeams,
+            AudioVisualizerStyle::FractalFlow,
+        ] {
+            for invalid in 0..3 {
+                let visual = plot(style);
+                let mut audio = frame(1000);
+                visual.update(&audio, audio.sample_time);
+                match invalid {
+                    0 => audio.visualizer.demand.band_energy = false,
+                    1 => audio.settings = None,
+                    _ => {
+                        visual.set_visible(false);
+                    }
+                }
+                visual.update(&audio, audio.sample_time);
+                assert!(!visual.animate(audio.sample_time + Duration::from_millis(16)));
+                assert!(visual.data.borrow().gpu_frame.is_none());
+                assert!(visual.data.borrow().last_time.is_none());
+            }
+        }
+    }
     use rivu_audio::analysis::{VisualizerDemand, VisualizerFrame};
 
     fn plot(style: AudioVisualizerStyle) -> FractalVisualizer {
@@ -607,7 +746,7 @@ mod tests {
     }
 
     #[test]
-    fn background_and_response_configuration_preserve_publication_until_new_audio() {
+    fn response_and_background_refresh_do_not_inject_audio_or_animation() {
         for style in [
             AudioVisualizerStyle::FractalBeams,
             AudioVisualizerStyle::FractalFlow,
@@ -638,8 +777,8 @@ mod tests {
                 let visual = plot(style);
                 let reference = plot(style);
                 for t in (50..=1000).step_by(50) {
-                    visual.update(&frame(t));
-                    reference.update(&frame(t));
+                    accept(&visual, &frame(t));
+                    accept(&reference, &frame(t));
                 }
                 let before = publication(&visual);
                 let geometry = visual.data.borrow().segments().to_vec();
@@ -650,7 +789,7 @@ mod tests {
                 let mut paused = frame(1000);
                 paused.sequence += 1;
                 paused.visualizer.band_rms = [1.0; 3];
-                visual.update(&paused);
+                accept(&visual, &paused);
                 assert!(Arc::ptr_eq(&before, &publication(&visual)));
                 {
                     let data = visual.data.borrow();
@@ -662,8 +801,8 @@ mod tests {
                     assert_eq!(data.drive.onset, drive.onset);
                     assert_eq!(data.previous_energy, previous_energy);
                 }
-                visual.update(&frame(1050));
-                reference.update(&frame(1050));
+                accept(&visual, &frame(1050));
+                accept(&reference, &frame(1050));
                 let after = publication(&visual);
                 assert!(!Arc::ptr_eq(&before, &after));
                 assert!(Arc::ptr_eq(before.palette(), after.palette()));
@@ -693,7 +832,7 @@ mod tests {
         ] {
             let visual = plot(style);
             for t in (50..=1000).step_by(50) {
-                visual.update(&frame(t));
+                accept(&visual, &frame(t));
             }
             let geometry = visual.data.borrow().segments().to_vec();
             let drive = visual.data.borrow().drive;
@@ -727,7 +866,7 @@ mod tests {
                     }
                 }
                 assert!(!visual.configure(&config));
-                visual.update(&frame(1000));
+                accept(&visual, &frame(1000));
                 assert!(Arc::ptr_eq(&after, &publication(&visual)));
                 let data = visual.data.borrow();
                 assert_eq!(data.segments(), geometry);
@@ -756,23 +895,23 @@ mod tests {
                 },
             ] {
                 let visual = plot(style);
-                visual.update(&frame(50));
+                accept(&visual, &frame(50));
                 let old = publication(&visual);
                 config.audio_visualizer_primary_color = "#ff0000".parse().unwrap();
                 assert!(visual.configure(&config));
                 assert!(visual.data.borrow().gpu_frame.is_none());
                 assert!(visual.data.borrow().segments().is_empty());
-                visual.update(&frame(50));
+                accept(&visual, &frame(50));
                 assert!(visual.data.borrow().last_time.is_none());
                 config.audio_visualizer_secondary_color = "#0000ff".parse().unwrap();
                 assert!(visual.configure(&config));
                 assert!(visual.data.borrow().gpu_frame.is_none());
                 let mut accepted = frame(50);
                 accepted.settings = Some(AnalysisSettings::from(&config));
-                visual.update(&accepted);
+                accept(&visual, &accepted);
                 let fresh = plot(style);
                 fresh.configure(&config);
-                fresh.update(&accepted);
+                accept(&fresh, &accepted);
                 assert!(!Arc::ptr_eq(&old, &publication(&visual)));
                 assert_eq!(
                     visual.data.borrow().segments(),
@@ -789,9 +928,9 @@ mod tests {
     #[test]
     fn flow_refresh_preserves_state_and_discontinuities_reset() {
         let visual = plot(AudioVisualizerStyle::FractalFlow);
-        visual.update(&frame(50));
+        accept(&visual, &frame(50));
         // 500 ms requires all 60 bounded integration steps, but one publication.
-        visual.update(&frame(550));
+        accept(&visual, &frame(550));
         let before = visual.data.borrow().segments().to_vec();
         let accepted_time = visual.data.borrow().last_time;
         let config = Config {
@@ -799,23 +938,23 @@ mod tests {
             ..Config::default()
         };
         assert!(visual.configure(&config));
-        visual.update(&frame(550));
+        accept(&visual, &frame(550));
         assert_eq!(visual.data.borrow().last_time, accepted_time);
         assert_eq!(visual.data.borrow().segments(), before);
         let mut gap = frame(1100);
-        visual.update(&gap);
+        accept(&visual, &gap);
         let fresh = plot(AudioVisualizerStyle::FractalFlow);
         fresh.configure(&config);
-        fresh.update(&gap);
+        accept(&fresh, &gap);
         assert_eq!(
             visual.data.borrow().segments(),
             fresh.data.borrow().segments()
         );
         gap.sample_time = Duration::from_millis(100);
-        visual.update(&gap);
+        accept(&visual, &gap);
         let rewound = plot(AudioVisualizerStyle::FractalFlow);
         rewound.configure(&config);
-        rewound.update(&gap);
+        accept(&rewound, &gap);
         assert_eq!(
             visual.data.borrow().segments(),
             rewound.data.borrow().segments()
@@ -829,22 +968,22 @@ mod tests {
             AudioVisualizerStyle::FractalFlow,
         ] {
             let visual = plot(style);
-            visual.update(&frame(50));
-            visual.update(&frame(100));
+            accept(&visual, &frame(50));
+            accept(&visual, &frame(100));
             let config = Config {
                 visualization_signal: crate::config::VisualizationSignal::Before,
                 ..Config::default()
             };
             visual.configure(&config);
-            visual.update(&frame(150));
+            accept(&visual, &frame(150));
             assert_eq!(visual.data.borrow().last_time, None);
             assert!(visual.data.borrow().gpu_frame.is_none());
             let mut selected = frame(200);
             selected.settings.as_mut().unwrap().signal = crate::config::VisualizationSignal::Before;
-            visual.update(&selected);
+            accept(&visual, &selected);
             let fresh = plot(style);
             fresh.configure(&config);
-            fresh.update(&selected);
+            accept(&fresh, &selected);
             assert_eq!(visual.data.borrow().last_time, Some(selected.sample_time));
             assert_eq!(
                 visual.data.borrow().segments(),
@@ -861,14 +1000,14 @@ mod tests {
         ] {
             let visual = plot(style);
             for t in (50..=1000).step_by(50) {
-                visual.update(&frame(t));
+                accept(&visual, &frame(t));
             }
             let before = visual.data.borrow().segments().to_vec();
             assert!(before.iter().any(|s| s.strength > 0.05));
             let mut repeated = frame(1000);
             repeated.sequence += 20;
             repeated.visualizer.band_rms = [1.0; 3];
-            visual.update(&repeated);
+            accept(&visual, &repeated);
             assert_eq!(visual.data.borrow().segments(), &before);
             let mut silence = frame(1000);
             silence.visualizer.band_rms = [0.0; 3];
@@ -876,7 +1015,7 @@ mod tests {
             silence.rms_right = 0.0;
             for t in (1050..=11000).step_by(50) {
                 silence.sample_time = Duration::from_millis(t);
-                visual.update(&silence);
+                accept(&visual, &silence);
             }
             assert!(
                 visual
@@ -898,7 +1037,7 @@ mod tests {
             for discontinuity in 0..4 {
                 let visual = plot(style);
                 for t in (50..=1000).step_by(50) {
-                    visual.update(&frame(t));
+                    accept(&visual, &frame(t));
                 }
                 let old = publication(&visual);
                 let mut next = frame(1000);
@@ -911,7 +1050,7 @@ mod tests {
                 if discontinuity < 2 {
                     let mut undemanded = next.clone();
                     undemanded.visualizer.demand.band_energy = false;
-                    visual.update(&undemanded);
+                    accept(&visual, &undemanded);
                     assert!(visual.data.borrow().gpu_frame.is_none());
                     assert!(visual.data.borrow().segments().is_empty());
                     // Material changes cannot resurrect a reset scene before audio arrives.
@@ -922,9 +1061,9 @@ mod tests {
                     assert!(visual.data.borrow().gpu_frame.is_none());
                     visual.configure(&Config::default());
                 }
-                visual.update(&next);
+                accept(&visual, &next);
                 let fresh = plot(style);
-                fresh.update(&next);
+                accept(&fresh, &next);
                 assert!(!Arc::ptr_eq(&old, &publication(&visual)));
                 assert_eq!(
                     visual.data.borrow().segments(),
@@ -946,12 +1085,12 @@ mod tests {
         ] {
             let visual = plot(style);
             for t in (50..=1000).step_by(50) {
-                visual.update(&frame(t));
+                accept(&visual, &frame(t));
             }
             let mut stale = frame(1050);
             stale.generation += 1;
             stale.visualizer.demand.band_energy = false;
-            visual.update(&stale);
+            accept(&visual, &stale);
             assert!(visual.data.borrow().gpu_frame.is_none());
             assert!(
                 visual
@@ -963,14 +1102,14 @@ mod tests {
             );
             let fresh = plot(style);
             stale.visualizer.demand.band_energy = true;
-            visual.update(&stale);
-            fresh.update(&stale);
+            accept(&visual, &stale);
+            accept(&fresh, &stale);
             assert_eq!(
                 visual.data.borrow().segments(),
                 fresh.data.borrow().segments()
             );
             visual.set_visible(false);
-            visual.update(&frame(1100));
+            accept(&visual, &frame(1100));
             assert!(visual.data.borrow().last_time.is_none());
             visual.set_visible(true);
             visual.configure(&Config {
@@ -978,7 +1117,7 @@ mod tests {
                 analysis_fft_size: 4096,
                 ..Config::default()
             });
-            visual.update(&frame(1150));
+            accept(&visual, &frame(1150));
             assert!(visual.data.borrow().last_time.is_none());
         }
     }
@@ -992,8 +1131,8 @@ mod tests {
         audio.visualizer.demand.spatial_spectrum = true;
         for t in (50..=1000).step_by(50) {
             audio.sample_time = Duration::from_millis(t);
-            beams.update(&audio);
-            flow.update(&audio);
+            accept(&beams, &audio);
+            accept(&flow, &audio);
         }
         let beams_before = beams.data.borrow().segments().to_vec();
         let flow_before = flow.data.borrow().segments().to_vec();
@@ -1012,14 +1151,14 @@ mod tests {
         assert!(beams.data.borrow().scene.is_none());
         assert_eq!(flow.data.borrow().segments(), &flow_before);
         audio.sample_time += Duration::from_millis(50);
-        beams.update(&audio);
-        flow.update(&audio);
+        accept(&beams, &audio);
+        accept(&flow, &audio);
         assert!(beams.data.borrow().scene.is_none());
         assert_ne!(flow.data.borrow().segments(), &flow_before);
         beams.set_visible(true);
-        beams.update(&audio);
+        accept(&beams, &audio);
         let fresh = plot(AudioVisualizerStyle::FractalBeams);
-        fresh.update(&audio);
+        accept(&fresh, &audio);
         assert_eq!(
             beams.data.borrow().segments(),
             fresh.data.borrow().segments()
@@ -1033,23 +1172,23 @@ mod tests {
             AudioVisualizerStyle::FractalFlow,
         ] {
             let visual = plot(style);
-            visual.update(&frame(50));
+            accept(&visual, &frame(50));
             assert!(visual.data.borrow().scene.is_some());
             visual.set_visible(false);
             assert!(visual.data.borrow().gpu_frame.is_none());
             assert!(visual.data.borrow().scene.is_none());
-            visual.update(&frame(100));
+            accept(&visual, &frame(100));
             assert!(visual.data.borrow().scene.is_none());
             visual.set_visible(true);
             assert!(visual.data.borrow().scene.is_none());
             let mut stale = frame(150);
             stale.visualizer.demand.band_energy = false;
-            visual.update(&stale);
+            accept(&visual, &stale);
             assert!(visual.data.borrow().scene.is_none());
             assert!(visual.data.borrow().gpu_frame.is_none());
-            visual.update(&frame(200));
+            accept(&visual, &frame(200));
             let fresh = plot(style);
-            fresh.update(&frame(200));
+            accept(&fresh, &frame(200));
             assert_eq!(
                 visual.data.borrow().segments(),
                 fresh.data.borrow().segments()

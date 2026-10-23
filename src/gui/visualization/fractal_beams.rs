@@ -1,4 +1,4 @@
-//! Deterministic, audio-time-driven branching light. The topology is built once;
+//! Deterministic, display-clocked branching light. The topology is built once;
 //! only its retained geometry and bounded travelling pulses change during playback.
 
 use super::fractal_visualizer::{Drive, LightSegment};
@@ -76,11 +76,11 @@ impl Scene {
         self.next_pulse = 0;
         self.previous_onset = 0.0;
         self.pulse_cooldown = 0.0;
-        // Geometry belongs to accepted-frame publication, never reset itself.
+        // Geometry belongs to native-frame publication, never reset itself.
         self.segments.clear();
     }
 
-    // Integrate state only; the accepted-frame owner rebuilds after the final step.
+    // Integrate state only; the native-frame owner rebuilds after the final step.
     pub(super) fn advance(&mut self, dt: f32, drive: Drive) {
         if dt <= 0.0 || !dt.is_finite() {
             return;

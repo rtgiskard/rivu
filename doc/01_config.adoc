@@ -803,7 +803,12 @@ override equal to the current resolved value leaves the display unchanged.
 Live FFT analysis runs during playback only when Still Mode is off, the
 application window is visible, and a Spectrum, Spectrogram, or Audio Visualizer
 panel is visible.
-`visualizations.analysis_fps` accepts `5`–`60` and defaults to `20`.
+`visualizations.analysis_fps` accepts `5`–`60` and defaults to `20`; it limits FFT
+analysis, not display animation. Spectrum release, Spectrogram scrolling, radial
+motion, and generative light follow native window frames between accepted audio
+updates. Display time never advances beyond received audio; pause, hidden windows,
+and Still Mode stop both clocks. Stereo Density and Spatial Spectrum retain
+their measured analysis-update cadence.
 `visualizations.palette` accepts `tokyo_night` or `deadbeef` (default `deadbeef`) and is
 shared by Spectrum, Spectrogram, and Waveform. See
 link:../src/config.rs[`Config`] for the full setting ranges and defaults.

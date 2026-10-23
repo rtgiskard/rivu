@@ -2,7 +2,7 @@
 //!
 //! Audio bands deform distinct spatial scales; the onset input is an energy-rise
 //! pulse, not a beat clock. History and render storage stay bounded for the
-//! entire playback session, and only accepted audio time advances the scene.
+//! entire playback session; the bounded display clock advances held audio targets.
 
 use super::fractal_visualizer::{Drive, LightSegment};
 use std::f32::consts::TAU;
@@ -110,7 +110,7 @@ impl Scene {
         self.segments.clear();
     }
 
-    // Integrate every bounded substep; the accepted-frame owner publishes geometry
+    // Integrate every bounded substep; the native-frame owner publishes geometry
     // with rebuild_segments only after the final step. No substep reads segments.
     pub(super) fn advance(&mut self, dt: f32, drive: Drive) {
         if dt <= 0.0 {
