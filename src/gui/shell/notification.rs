@@ -1,14 +1,5 @@
 use super::*;
-use rivu_ui::{icon_button, row};
-
-fn notification_button(
-    theme: &'static rivu_ui::theme::Palette,
-    control: gpui::Stateful<gpui::Div>,
-) -> gpui::Stateful<gpui::Div> {
-    rivu_ui::quiet_icon_button(theme, control)
-        .group_hover("control", |style| style.bg(rgb(theme.text).alpha(0.08)))
-        .flex_shrink_0()
-}
+use rivu_ui::{IconButton, IconButtonDensity, IconButtonStyle, row};
 
 impl GuiApp {
     pub(super) fn footer_notification(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -28,42 +19,44 @@ impl GuiApp {
         };
         let theme = rivu_ui::theme::palette(cx);
         let copied_message = message.clone();
-        let mut buttons = row()
-            .flex_shrink_0()
-            .gap_0()
-            .ml_4()
-            .child(notification_button(
-                theme,
-                icon_button(
-                    if is_error {
-                        "copy-error"
-                    } else {
-                        "copy-scan-message"
-                    },
-                    "",
-                    self.tr("shell-copy-message"),
-                    cx,
-                    move |_, _, cx| {
-                        cx.write_to_clipboard(ClipboardItem::new_string(
-                            copied_message.to_string(),
-                        ));
-                    },
-                ),
-            ));
+        let mut buttons = row().flex_shrink_0().gap_0().ml_4().child(
+            IconButton::new(
+                if is_error {
+                    "copy-error"
+                } else {
+                    "copy-scan-message"
+                },
+                "",
+                self.tr("shell-copy-message"),
+            )
+            .build_with(
+                IconButtonStyle::Quiet,
+                IconButtonDensity::Regular,
+                cx,
+                move |_, _, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(copied_message.to_string()));
+                },
+                |control| {
+                    control.group_hover("control", |style| style.bg(rgb(theme.text).alpha(0.08)))
+                },
+            ),
+        );
         if is_error {
-            buttons = buttons.child(notification_button(
-                theme,
-                icon_button(
-                    "dismiss-error",
-                    "",
-                    self.tr("shell-dismiss-message"),
+            buttons = buttons.child(
+                IconButton::new("dismiss-error", "", self.tr("shell-dismiss-message")).build_with(
+                    IconButtonStyle::Quiet,
+                    IconButtonDensity::Regular,
                     cx,
                     |this, _, cx| {
                         this.error = None;
                         this.send(Command::DismissError, cx);
                     },
+                    |control| {
+                        control
+                            .group_hover("control", |style| style.bg(rgb(theme.text).alpha(0.08)))
+                    },
                 ),
-            ));
+            );
         }
         Some(
             row()

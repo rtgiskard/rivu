@@ -1,7 +1,7 @@
 //! Expandable search field with caller-supplied labels and debounce policy.
 
 use super::{
-    control::{icon_button, icon_button_height},
+    control::{IconButton, IconButtonDensity, IconButtonStyle, icon_button_height},
     input::{Input, InputEvent},
     layout::row,
 };
@@ -200,13 +200,14 @@ impl Render for SearchField {
                 .track_focus(&self.focus_handle)
                 .h(height)
                 .flex_shrink_0()
-                .child(icon_button(
-                    "search-toggle",
-                    "󰍉",
-                    self.labels.toggle.clone(),
-                    cx,
-                    |this, window, cx| this.toggle(window, cx),
-                ))
+                .child(
+                    IconButton::new("search-toggle", "󰍉", self.labels.toggle.clone()).build(
+                        IconButtonStyle::Surface,
+                        IconButtonDensity::Regular,
+                        cx,
+                        |this, window, cx| this.toggle(window, cx),
+                    ),
+                )
                 .into_any_element();
         }
         let mut field = row()
@@ -224,19 +225,19 @@ impl Render for SearchField {
                 rgb(theme.border)
             })
             .child(
-                icon_button(
-                    "search-toggle",
-                    "󰍉",
-                    self.labels.toggle.clone(),
-                    cx,
-                    |this, window, cx| this.toggle(window, cx),
-                )
-                .border_0()
-                .p_1()
-                .min_w_6()
-                .min_h_6()
-                .bg(gpui::transparent_black())
-                .rounded_none(),
+                IconButton::new("search-toggle", "󰍉", self.labels.toggle.clone())
+                    .build(
+                        IconButtonStyle::Surface,
+                        IconButtonDensity::Regular,
+                        cx,
+                        |this, window, cx| this.toggle(window, cx),
+                    )
+                    .border_0()
+                    .p_1()
+                    .min_w_6()
+                    .min_h_6()
+                    .bg(gpui::transparent_black())
+                    .rounded_none(),
             );
         field = field
             .child(
@@ -249,23 +250,24 @@ impl Render for SearchField {
             )
             .when(!self.input.read(cx).text().is_empty(), |field| {
                 field.child(
-                    icon_button(
-                        "search-clear",
-                        "",
-                        self.labels.clear.clone(),
-                        cx,
-                        |this, window, cx| {
-                            this.clear(cx);
-                            this.input
-                                .update(cx, |input, cx| input.focus_handle(cx).focus(window, cx));
-                        },
-                    )
-                    .border_0()
-                    .p_1()
-                    .min_w_6()
-                    .min_h_6()
-                    .bg(gpui::transparent_black())
-                    .rounded_none(),
+                    IconButton::new("search-clear", "", self.labels.clear.clone())
+                        .build(
+                            IconButtonStyle::Surface,
+                            IconButtonDensity::Regular,
+                            cx,
+                            |this, window, cx| {
+                                this.clear(cx);
+                                this.input.update(cx, |input, cx| {
+                                    input.focus_handle(cx).focus(window, cx)
+                                });
+                            },
+                        )
+                        .border_0()
+                        .p_1()
+                        .min_w_6()
+                        .min_h_6()
+                        .bg(gpui::transparent_black())
+                        .rounded_none(),
                 )
             });
         let control = row()

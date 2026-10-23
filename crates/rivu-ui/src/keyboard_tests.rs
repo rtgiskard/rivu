@@ -1,7 +1,7 @@
 use crate::{
     control::{button, disabled_control, toggle_button},
     focus::FocusScope,
-    layout::form_field,
+    layout::FormField,
     overlay::{ButtonTooltip, ListDragPreview},
 };
 use gpui::{
@@ -34,7 +34,7 @@ impl Render for KeyboardControls {
             self.scope
                 .menu_surface(div().id("menu").flex().flex_col())
                 .child(first)
-                .child(form_field(theme, "Direction", middle))
+                .child(FormField::new(theme, "Direction", middle).into_div())
                 .child(toggle),
         )
     }

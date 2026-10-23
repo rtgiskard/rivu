@@ -13,8 +13,8 @@ use crate::{
 use gpui::{AnyElement, Context, Div, EntityId, SharedString, Window, prelude::*, px, rgb};
 use rivu_ui::{
     IconButton, IconButtonDensity, IconButtonGroup, IconButtonStyle, StatusKind, VirtualList,
-    button, caption, disabled_control, hover_actions, icon_button, list_panel_header,
-    list_viewport, panel_surface, panel_toolbar, row, status_message,
+    button, caption, hover_actions, list_panel_header, list_viewport, panel_surface, panel_toolbar,
+    row, status_message,
 };
 use std::cell::RefCell;
 
@@ -158,17 +158,20 @@ impl Queue {
         let tools = panel_toolbar()
             .min_h(px(32.))
             .child(self.queue_search.clone())
-            .child(disabled_control(
-                theme,
-                icon_button(
+            .child(
+                IconButton::new(
                     ("queue-locate-playing", panel_id),
                     "",
                     self.tr("gl-locate-playing-entry"),
+                )
+                .enabled(self.state.queue.current_id.is_some())
+                .build(
+                    IconButtonStyle::Surface,
+                    IconButtonDensity::Regular,
                     cx,
                     |this, window, cx| this.locate_playing_queue(window, cx),
                 ),
-                self.state.queue.current_id.is_none(),
-            ))
+            )
             .min_w_0()
             .max_w(gpui::rems(20.5))
             .flex_shrink(1.);
@@ -196,18 +199,24 @@ impl Queue {
                     .tooltip(rivu_ui::text_tooltip(selection_message)),
             )
             .when(self.model.selection_error.is_some(), |status| {
-                status.child(icon_button(
-                    ("queue-selection-retry", panel_id),
-                    "󰑐",
-                    self.tr("gl-retry-selection"),
-                    cx,
-                    |this, _, cx| {
-                        if this.model.selection_error.is_some() {
-                            this.refresh_queue(cx);
-                            cx.notify();
-                        }
-                    },
-                ))
+                status.child(
+                    IconButton::new(
+                        ("queue-selection-retry", panel_id),
+                        "󰑐",
+                        self.tr("gl-retry-selection"),
+                    )
+                    .build(
+                        IconButtonStyle::Surface,
+                        IconButtonDensity::Regular,
+                        cx,
+                        |this, _, cx| {
+                            if this.model.selection_error.is_some() {
+                                this.refresh_queue(cx);
+                                cx.notify();
+                            }
+                        },
+                    ),
+                )
             });
         let scroll = self.context.scroll.borrow_mut().list(("queue", panel_id));
         self.reveal_queue_locate(&scroll, cx);

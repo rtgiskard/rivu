@@ -126,18 +126,84 @@ pub fn two_column(first: Div, second: Div) -> Div {
         .child(second.flex_1())
 }
 
-/// Shared label-and-control form field layout.
-pub fn form_field(
+/// Shared label-and-control field with optional, content-sized feedback.
+pub struct FormField {
+    surface: Div,
+    theme: &'static crate::theme::Palette,
+}
+
+impl FormField {
+    pub fn new(
+        theme: &'static crate::theme::Palette,
+        label: impl Into<SharedString>,
+        control: impl IntoElement,
+    ) -> Self {
+        Self {
+            surface: column()
+                .w_full()
+                .flex_shrink_0()
+                .gap_1()
+                .child(caption(theme, label))
+                .child(control),
+            theme,
+        }
+    }
+
+    /// Append a field action without creating an additional layout wrapper.
+    pub fn action(mut self, action: impl IntoElement) -> Self {
+        self.surface = self.surface.child(action);
+        self
+    }
+
+    pub fn hint(mut self, text: impl Into<SharedString>) -> Self {
+        self.surface = self
+            .surface
+            .child(caption(self.theme, text).text_color(rgb(self.theme.muted)));
+        self
+    }
+
+    pub fn error(mut self, text: impl Into<SharedString>) -> Self {
+        self.surface = self
+            .surface
+            .child(caption(self.theme, text).text_color(rgb(self.theme.error)));
+        self
+    }
+
+    pub fn into_div(self) -> Div {
+        self.surface
+    }
+}
+
+/// Baseline-aligned label/value row with a stable trailing action hit area.
+pub fn label_value_row(
     theme: &'static crate::theme::Palette,
     label: impl Into<SharedString>,
-    control: impl IntoElement,
+    value: impl Into<SharedString>,
+    label_width: gpui::Pixels,
+    action: Option<Stateful<Div>>,
 ) -> Div {
-    column()
-        .w_full()
-        .flex_shrink_0()
-        .gap_1()
-        .child(caption(theme, label))
-        .child(control)
+    row()
+        .items_baseline()
+        .group("label-value-row")
+        .gap_4()
+        .flex_1()
+        .min_w_0()
+        .child(caption(theme, label).w(label_width).flex_shrink_0())
+        .child(
+            row()
+                .flex_1()
+                .min_w_0()
+                .gap_1()
+                .child(
+                    div()
+                        .flex_initial()
+                        .min_w_0()
+                        .text_sm()
+                        .truncate()
+                        .child(value.into()),
+                )
+                .child(div().min_w_8().flex_shrink_0().children(action)),
+        )
 }
 
 /// Secondary text used throughout panels and controls.

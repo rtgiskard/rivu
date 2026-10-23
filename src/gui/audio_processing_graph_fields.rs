@@ -527,8 +527,7 @@ impl AudioProcessing {
         };
         let text = self.text(&key, cx);
         let choices = enum_choices(path);
-        let mut control = column().gap_1().child(caption(theme, label.clone()));
-        if !choices.is_empty() {
+        let control = if !choices.is_empty() {
             let mut options = row().flex_wrap().gap_1();
             for &(choice, label) in choices {
                 let key = key.clone();
@@ -542,17 +541,18 @@ impl AudioProcessing {
                     .when(text == choice, |view| view.bg(rgb(theme.selected))),
                 );
             }
-            control = control.child(options);
+            options.into_any_element()
         } else if value.is_boolean() {
             let key = key.clone();
-            control = control.child(checkbox(
+            checkbox(
                 SharedString::from(format!("graph-bool-{panel}-{key}")),
                 SharedString::from(self.tr("processing-fields-enabled").to_string()),
                 text == "true",
                 true,
                 cx,
                 move |this, enabled, cx| this.stage_graph_text(&key, enabled.to_string(), cx),
-            ));
+            )
+            .into_any_element()
         } else {
             let input = self.graph_panel_input(panel, &key, &label, cx);
             let mut editor = row().gap_1().child(div().flex_1().min_w_0().child(input));
@@ -580,10 +580,10 @@ impl AudioProcessing {
                     self.graph_ui.choosing_path.is_some(),
                 ));
             }
-            control = control.child(editor);
-        }
+            editor.into_any_element()
+        };
         let apply_key = key.clone();
-        control = control.child(disabled_control(
+        let mut field = FormField::new(theme, label, control).action(disabled_control(
             theme,
             button(
                 SharedString::from(format!("graph-apply-{panel}-{key}")),
@@ -594,9 +594,9 @@ impl AudioProcessing {
             self.graph_busy() || !dirty,
         ));
         if let Some(error) = self.graph_ui.field_errors.get(&key) {
-            control = control.child(caption(theme, error.clone()));
+            field = field.error(error.clone());
         }
-        control
+        field.into_div()
     }
 
     pub(super) fn graph_inspector(

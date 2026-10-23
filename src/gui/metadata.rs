@@ -19,7 +19,7 @@ mod tests;
 
 use super::{
     artwork::{Artwork, ArtworkImages, ArtworkLoader, ArtworkView},
-    components::{artwork::artwork_preview, metadata::metadata_item},
+    components::artwork::artwork_preview,
     feature::FeatureContext,
     format_time,
 };
@@ -36,9 +36,10 @@ use gpui::{
 use read::{MetadataReadCoordinator, MetadataReadTask, ReadCompletion, ReadEnvironment};
 use rivu_audio::DecoderHint;
 use rivu_ui::{
-    active_control, button, caption, column, disabled_control, form_field, icon_button,
+    FormField, IconButton, IconButtonDensity, IconButtonStyle, active_control, button, caption,
+    column, disabled_control,
     input::{Input, InputEvent},
-    panel_surface, row, section_group,
+    label_value_row, panel_surface, row, section_group,
 };
 use session::{
     MetadataAvailability, MetadataDraft, MetadataReadState, MetadataSession, MetadataValues,
@@ -536,7 +537,7 @@ impl Metadata {
         field: Field,
         label: SharedString,
     ) -> Div {
-        form_field(theme, label, self.inputs[&field].clone())
+        FormField::new(theme, label, self.inputs[&field].clone()).into_div()
     }
 
     fn last_played_text(&self, track_id: i64, stored_at: Option<i64>) -> String {
@@ -591,18 +592,20 @@ fn metadata_copy(
     cx: &mut Context<Metadata>,
 ) -> Option<gpui::Stateful<Div>> {
     let hint = hint.filter(|_| !value.is_empty() && value.as_ref() != "—")?;
-    let theme = rivu_ui::theme::palette(cx);
     Some(
-        rivu_ui::quiet_icon_button(
-            theme,
-            icon_button(label, "", hint, cx, move |_, _, cx| {
-                cx.write_to_clipboard(gpui::ClipboardItem::new_string(value.to_string()));
-            }),
-        )
-        .text_size(gpui::rems(0.75))
-        .opacity(0.)
-        .group_hover("metadata-field", |style| style.opacity(1.))
-        .focus(|style| style.opacity(1.)),
+        IconButton::new(label, "", hint)
+            .build(
+                IconButtonStyle::Quiet,
+                IconButtonDensity::Regular,
+                cx,
+                move |_, _, cx| {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(value.to_string()));
+                },
+            )
+            .text_size(gpui::rems(0.75))
+            .opacity(0.)
+            .group_hover("label-value-row", |style| style.opacity(1.))
+            .focus(|style| style.opacity(1.)),
     )
 }
 
@@ -617,14 +620,14 @@ fn metadata_rows(
         .gap_1()
         .children(rows.into_iter().map(|[first, second]| {
             metadata_row(
-                metadata_item(
+                label_value_row(
                     theme,
                     first.0.clone(),
                     first.1.clone(),
                     label_widths[0],
                     metadata_copy(first.0, first.1, copy_hint.clone(), cx),
                 ),
-                metadata_item(
+                label_value_row(
                     theme,
                     second.0.clone(),
                     second.1.clone(),
@@ -1002,9 +1005,8 @@ impl Metadata {
                                     .child(
                                         row()
                                             .gap_2()
-                                            .child(disabled_control(
-                                                theme,
-                                                icon_button(
+                                            .child(
+                                                IconButton::new(
                                                     ("metadata-favorite", panel_id),
                                                     if favorite { "󰓎" } else { "󰓐" },
                                                     if favorite {
@@ -1012,6 +1014,12 @@ impl Metadata {
                                                     } else {
                                                         self.tr("gl-favorite")
                                                     },
+                                                )
+                                                .enabled(editable)
+                                                .toggled(favorite)
+                                                .build(
+                                                    IconButtonStyle::Surface,
+                                                    IconButtonDensity::Regular,
                                                     cx,
                                                     move |this, _, cx| {
                                                         if this.metadata.editor_identity()
@@ -1034,20 +1042,18 @@ impl Metadata {
                                                             cx,
                                                         );
                                                     },
-                                                )
-                                                .text_color(rgb(if favorite {
-                                                    theme.accent
-                                                } else {
-                                                    theme.text
-                                                })),
-                                                !editable,
-                                            ))
-                                            .child(disabled_control(
-                                                theme,
-                                                icon_button(
+                                                ),
+                                            )
+                                            .child(
+                                                IconButton::new(
                                                     ("metadata-save", panel_id),
                                                     "󰆓",
                                                     self.tr("gl-save-metadata"),
+                                                )
+                                                .enabled(can_save)
+                                                .build(
+                                                    IconButtonStyle::Surface,
+                                                    IconButtonDensity::Regular,
                                                     cx,
                                                     move |this, _, cx| {
                                                         if this.metadata.editor_identity()
@@ -1057,21 +1063,26 @@ impl Metadata {
                                                         }
                                                     },
                                                 ),
-                                                !can_save,
-                                            ))
-                                            .child(icon_button(
-                                                ("metadata-retry", panel_id),
-                                                "󰑐",
-                                                self.tr("gl-reload-playback"),
-                                                cx,
-                                                move |this, _, cx| {
-                                                    if this.metadata.editor_identity()
-                                                        == editor_identity
-                                                    {
-                                                        this.reload_playback_metadata(cx);
-                                                    }
-                                                },
-                                            )),
+                                            )
+                                            .child(
+                                                IconButton::new(
+                                                    ("metadata-retry", panel_id),
+                                                    "󰑐",
+                                                    self.tr("gl-reload-playback"),
+                                                )
+                                                .build(
+                                                    IconButtonStyle::Surface,
+                                                    IconButtonDensity::Regular,
+                                                    cx,
+                                                    move |this, _, cx| {
+                                                        if this.metadata.editor_identity()
+                                                            == editor_identity
+                                                        {
+                                                            this.reload_playback_metadata(cx);
+                                                        }
+                                                    },
+                                                ),
+                                            ),
                                     ),
                             )
                             .child(
@@ -1093,7 +1104,7 @@ impl Metadata {
                         self.tr("gl-file"),
                         metadata_row(
                             div().flex_1().min_w_0().child(
-                                metadata_item(
+                                label_value_row(
                                     theme,
                                     file[0][0].0.clone(),
                                     file[0][0].1.clone(),
@@ -1108,7 +1119,7 @@ impl Metadata {
                                 .id(("metadata-path", panel_id))
                                 .tooltip(rivu_ui::text_tooltip(path_tooltip)),
                             ),
-                            metadata_item(
+                            label_value_row(
                                 theme,
                                 file[0][1].0.clone(),
                                 file[0][1].1.clone(),
@@ -1127,84 +1138,75 @@ impl Metadata {
                         self.tr("gl-metadata"),
                         metadata_rows(theme, metadata, label_widths, copy_hint.clone(), cx),
                     ))
-                    .child(metadata_group(
-                        theme,
-                        self.tr("gl-decoder-hint"),
-                        column()
-                            .gap_2()
-                            .child(
-                                row().flex_wrap().children(
-                                    [
-                                        (
-                                            "metadata-decoder-auto",
-                                            self.tr("gl-auto"),
-                                            DecoderHint::Auto,
-                                        ),
-                                        (
-                                            "metadata-decoder-native",
-                                            self.tr("gl-native"),
-                                            DecoderHint::Native,
-                                        ),
-                                        (
-                                            "metadata-decoder-ffmpeg",
-                                            SharedString::from("FFmpeg"),
-                                            DecoderHint::Ffmpeg,
-                                        ),
-                                    ]
-                                    .into_iter()
-                                    .map(
-                                        |(key, label, decoder_hint)| {
-                                            disabled_control(
-                                                theme,
-                                                active_control(
-                                                    theme,
-                                                    button(
-                                                        (key, panel_id),
-                                                        label,
-                                                        cx,
-                                                        move |this, _, cx| {
-                                                            if this.metadata.editor_identity()
-                                                                == editor_identity
-                                                            {
-                                                                this.set_decoder_hint(
-                                                                    decoder_hint,
-                                                                    cx,
-                                                                );
-                                                            }
-                                                        },
-                                                    )
-                                                    .role(gpui::Role::RadioButton)
-                                                    .aria_toggled(
-                                                        if editable
-                                                            && self.metadata_decoder_hint
-                                                                == decoder_hint
-                                                        {
-                                                            gpui::Toggled::True
-                                                        } else {
-                                                            gpui::Toggled::False
-                                                        },
-                                                    ),
-                                                    editable
-                                                        && self.metadata_decoder_hint
-                                                            == decoder_hint,
-                                                ),
-                                                !editable,
-                                            )
-                                        },
+                    .child(
+                        FormField::new(
+                            theme,
+                            self.tr("gl-decoder-hint"),
+                            row().flex_wrap().children(
+                                [
+                                    (
+                                        "metadata-decoder-auto",
+                                        self.tr("gl-auto"),
+                                        DecoderHint::Auto,
                                     ),
+                                    (
+                                        "metadata-decoder-native",
+                                        self.tr("gl-native"),
+                                        DecoderHint::Native,
+                                    ),
+                                    (
+                                        "metadata-decoder-ffmpeg",
+                                        SharedString::from("FFmpeg"),
+                                        DecoderHint::Ffmpeg,
+                                    ),
+                                ]
+                                .into_iter()
+                                .map(
+                                    |(key, label, decoder_hint)| {
+                                        disabled_control(
+                                            theme,
+                                            active_control(
+                                                theme,
+                                                button(
+                                                    (key, panel_id),
+                                                    label,
+                                                    cx,
+                                                    move |this, _, cx| {
+                                                        if this.metadata.editor_identity()
+                                                            == editor_identity
+                                                        {
+                                                            this.set_decoder_hint(decoder_hint, cx);
+                                                        }
+                                                    },
+                                                )
+                                                .role(gpui::Role::RadioButton)
+                                                .aria_toggled(
+                                                    if editable
+                                                        && self.metadata_decoder_hint
+                                                            == decoder_hint
+                                                    {
+                                                        gpui::Toggled::True
+                                                    } else {
+                                                        gpui::Toggled::False
+                                                    },
+                                                ),
+                                                editable
+                                                    && self.metadata_decoder_hint == decoder_hint,
+                                            ),
+                                            !editable,
+                                        )
+                                    },
                                 ),
-                            )
-                            .child(
-                                caption(theme, self.tr("gl-decoder-save-note"))
-                                    .text_xs()
-                                    .text_color(rgb(theme.muted)),
-                            )
-                            .child(
-                                caption(theme, self.tr("gl-decoder-warning"))
-                                    .text_xs()
-                                    .text_color(rgb(theme.muted)),
                             ),
-                    ))
+                        )
+                        .hint(self.tr("gl-decoder-save-note"))
+                        .hint(self.tr("gl-decoder-warning"))
+                        .into_div()
+                        .gap_2()
+                        .p_2()
+                        .border_1()
+                        .border_color(gpui::transparent_black()),
+                    )
                     .child(metadata_group(
                         theme,
                         self.tr("gl-tags"),
@@ -1216,7 +1218,7 @@ impl Metadata {
                             ))
                             .child(metadata_row(
                                 self.panel_field(theme, Field::Album, self.tr("gl-album")),
-                                metadata_item(
+                                label_value_row(
                                     theme,
                                     disc.0.clone(),
                                     disc.1.clone(),

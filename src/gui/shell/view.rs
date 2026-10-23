@@ -1,7 +1,7 @@
 use super::*;
 use rivu_ui::{
     Dialog, IconButton, IconButtonDensity, IconButtonGroup, IconButtonStyle, Popover, caption,
-    column, icon_button, menu_item, row,
+    column, menu_item, row,
 };
 
 impl Render for GuiApp {
@@ -118,14 +118,30 @@ impl Render for GuiApp {
                     this.update_panel_docking(window.mouse_position(), window, cx);
                 },
             ))
-            .capture_any_mouse_up(cx.listener(|_, event: &MouseUpEvent, window, cx| {
+            .capture_any_mouse_up(cx.listener(|this, event: &MouseUpEvent, window, cx| {
                 if event.button == MouseButton::Left {
+                    // A disabled child may stop Bubble, but cannot own the end of a
+                    // window gesture. Let normal drop/seek handlers run first.
+                    let docking_source = this
+                        .workspace
+                        .interaction
+                        .docking()
+                        .map(|session| session.source);
                     let entity = cx.entity().downgrade();
-                    window.defer(cx, move |_, cx| {
+                    window.defer(cx, move |window, cx| {
                         let _ = entity.update(cx, |this, cx| {
-                            if this.workspace.interaction.cancel_docking() {
-                                cx.notify();
+                            this.synchronize_interaction(window, cx);
+                            if let Some(source) = docking_source
+                                && this
+                                    .workspace
+                                    .interaction
+                                    .docking()
+                                    .is_some_and(|session| session.source == source)
+                            {
+                                // Revalidate and commit through the same path as on_drop.
+                                this.drop_panel_docking(source, window, cx);
                             }
+                            this.finish_drag(cx);
                             let cancelled = this
                                 .waveform
                                 .update(cx, |waveform, _| waveform.cancel_unreleased_seek());
@@ -148,13 +164,6 @@ impl Render for GuiApp {
                     if let Some(Dragging::Split(drag)) = this.workspace.interaction.dragging() {
                         this.drag_position(drag.pointer, event.modifiers.alt, cx);
                     }
-                }),
-            )
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _, window, cx| {
-                    this.synchronize_interaction(window, cx);
-                    this.finish_drag(cx);
                 }),
             )
             .on_mouse_up_out(
@@ -560,23 +569,20 @@ impl Render for GuiApp {
                                     ),
                             )
                             .child(
-                                rivu_ui::quiet_icon_button(
-                                    theme,
-                                    icon_button(
-                                        "about-close",
-                                        "",
-                                        self.tr("shell-close-about"),
+                                IconButton::new("about-close", "", self.tr("shell-close-about"))
+                                    .build(
+                                        IconButtonStyle::Quiet,
+                                        IconButtonDensity::Regular,
                                         cx,
                                         |this, window, cx| {
                                             this.shell.dismiss(shell::Surface::About);
                                             this.focus_layout(window, cx);
                                             cx.notify();
                                         },
-                                    ),
-                                )
-                                .absolute()
-                                .top(px(8.))
-                                .right(px(8.)),
+                                    )
+                                    .absolute()
+                                    .top(px(8.))
+                                    .right(px(8.)),
                             ),
                     ),
             );

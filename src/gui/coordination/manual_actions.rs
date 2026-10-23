@@ -5,7 +5,7 @@
 
 use crate::gui::GuiApp;
 use gpui::{AnyElement, Context, Window, prelude::*};
-use rivu_ui::{icon_button, panel_header, row};
+use rivu_ui::{IconButton, IconButtonDensity, IconButtonStyle, panel_header, row};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::gui) struct ManualIntentId(u64);
@@ -330,19 +330,29 @@ impl GuiApp {
                             row()
                                 .flex_shrink_0()
                                 .justify_end()
-                                .child(icon_button(
-                                    "metadata-confirmation-cancel",
-                                    "",
-                                    self.tr("gl-cancel"),
-                                    cx,
-                                    |this, _, cx| this.cancel_manual_action(cx),
-                                ))
+                                .child(
+                                    IconButton::new(
+                                        "metadata-confirmation-cancel",
+                                        "",
+                                        self.tr("gl-cancel"),
+                                    )
+                                    .build(
+                                        IconButtonStyle::Surface,
+                                        IconButtonDensity::Regular,
+                                        cx,
+                                        |this, _, cx| this.cancel_manual_action(cx),
+                                    ),
+                                )
                                 .child(rivu_ui::danger_control(
                                     theme,
-                                    icon_button(
+                                    IconButton::new(
                                         "metadata-confirmation-discard",
                                         "󰆴",
                                         self.tr("gl-metadata-discard"),
+                                    )
+                                    .build(
+                                        IconButtonStyle::Surface,
+                                        IconButtonDensity::Regular,
                                         cx,
                                         |this, _, cx| this.discard_metadata_and_continue(cx),
                                     ),

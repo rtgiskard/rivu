@@ -12,8 +12,8 @@ use crate::{
 };
 use gpui::{prelude::*, *};
 use rivu_ui::{
-    StatusKind, active_control, button, caption, column, icon_button, panel_header, panel_toolbar,
-    row, status_message,
+    IconButton, IconButtonDensity, IconButtonStyle, StatusKind, active_control, button, caption,
+    column, panel_header, panel_toolbar, row, status_message,
 };
 use std::{rc::Rc, time::Duration};
 
@@ -1153,19 +1153,20 @@ impl Duplicates {
             }
         }
         if review.groups_failed && !review.groups_loading {
-            groups = groups.child(icon_button(
-                "review-groups-retry",
-                "󰑐",
-                self.tr("gl-retry-loading"),
-                cx,
-                |this, _, cx| {
-                    if this.duplicate_review.busy.is_none() {
-                        let offset = this.duplicate_review.groups_offset;
-                        this.request_duplicate_groups(offset, cx);
-                        cx.notify();
-                    }
-                },
-            ));
+            groups = groups.child(
+                IconButton::new("review-groups-retry", "󰑐", self.tr("gl-retry-loading")).build(
+                    IconButtonStyle::Surface,
+                    IconButtonDensity::Regular,
+                    cx,
+                    |this, _, cx| {
+                        if this.duplicate_review.busy.is_none() {
+                            let offset = this.duplicate_review.groups_offset;
+                            this.request_duplicate_groups(offset, cx);
+                            cx.notify();
+                        }
+                    },
+                ),
+            );
         }
         let group_total = review.groups.as_ref().map_or(0, |page| page.total);
         let group_offset = review.groups_offset;
@@ -1212,21 +1213,22 @@ impl Duplicates {
             members = members.child(caption(theme, self.tr("gl-members-empty")));
         }
         if review.members_failed && !review.members_loading {
-            members = members.child(icon_button(
-                "review-members-retry",
-                "󰑐",
-                self.tr("gl-retry-loading"),
-                cx,
-                |this, _, cx| {
-                    if this.duplicate_review.busy.is_none()
-                        && let Some(hash) = this.duplicate_review.fingerprint.clone()
-                    {
-                        let offset = this.duplicate_review.members_offset;
-                        this.request_duplicate_members(hash, offset, cx);
-                        cx.notify();
-                    }
-                },
-            ));
+            members = members.child(
+                IconButton::new("review-members-retry", "󰑐", self.tr("gl-retry-loading")).build(
+                    IconButtonStyle::Surface,
+                    IconButtonDensity::Regular,
+                    cx,
+                    |this, _, cx| {
+                        if this.duplicate_review.busy.is_none()
+                            && let Some(hash) = this.duplicate_review.fingerprint.clone()
+                        {
+                            let offset = this.duplicate_review.members_offset;
+                            this.request_duplicate_members(hash, offset, cx);
+                            cx.notify();
+                        }
+                    },
+                ),
+            );
         }
         for member in &review.members {
             let value = &member.value;
@@ -1505,16 +1507,18 @@ impl Duplicates {
                                 |this, _, cx| this.submit_duplicate_action(false, cx),
                             ),
                         ))
-                        .child(icon_button(
-                            "review-back",
-                            "",
-                            self.tr("gl-back-selection"),
-                            cx,
-                            |this, _, cx| {
-                                this.duplicate_review.confirm(false);
-                                cx.notify();
-                            },
-                        )),
+                        .child(
+                            IconButton::new("review-back", "", self.tr("gl-back-selection"))
+                                .build(
+                                    IconButtonStyle::Surface,
+                                    IconButtonDensity::Regular,
+                                    cx,
+                                    |this, _, cx| {
+                                        this.duplicate_review.confirm(false);
+                                        cx.notify();
+                                    },
+                                ),
+                        ),
                 );
         } else if !busy {
             let can_relocate = review.can_relocate();
@@ -1522,17 +1526,23 @@ impl Duplicates {
                 panel_toolbar()
                     .flex_wrap()
                     .when(can_relocate, |view| {
-                        view.child(icon_button(
-                            "review-relocate",
-                            "󰁔",
-                            self.tr("gl-review-relocation"),
-                            cx,
-                            |this, _, cx| {
-                                if this.duplicate_review.confirm(true) {
-                                    cx.notify();
-                                }
-                            },
-                        ))
+                        view.child(
+                            IconButton::new(
+                                "review-relocate",
+                                "󰁔",
+                                self.tr("gl-review-relocation"),
+                            )
+                            .build(
+                                IconButtonStyle::Surface,
+                                IconButtonDensity::Regular,
+                                cx,
+                                |this, _, cx| {
+                                    if this.duplicate_review.confirm(true) {
+                                        cx.notify();
+                                    }
+                                },
+                            ),
+                        )
                     })
                     .when(review.members_current && review.target.is_some(), |view| {
                         view.child(button(
@@ -1556,13 +1566,19 @@ impl Duplicates {
                 StatusKind::Info,
             ));
             if matches!(task, Busy::Relocating(_)) {
-                decisions = decisions.child(icon_button(
-                    "review-cancel-verification",
-                    "",
-                    self.tr("gl-cancel-verification"),
-                    cx,
-                    |this, _, cx| this.cancel_review_verification(cx),
-                ));
+                decisions = decisions.child(
+                    IconButton::new(
+                        "review-cancel-verification",
+                        "",
+                        self.tr("gl-cancel-verification"),
+                    )
+                    .build(
+                        IconButtonStyle::Surface,
+                        IconButtonDensity::Regular,
+                        cx,
+                        |this, _, cx| this.cancel_review_verification(cx),
+                    ),
+                );
             }
         }
         if let Some(feedback) = &review.feedback {
@@ -1597,14 +1613,12 @@ impl Duplicates {
                             self.tr("gl-same-files-title"),
                             self.tr("gl-same-files-note"),
                         )))
-                        .child(rivu_ui::disabled_control(
-                            theme,
-                            rivu_ui::quiet_icon_button(
-                                theme,
-                                icon_button(
-                                    "review-refresh",
-                                    "󰑐",
-                                    self.tr("gl-refresh-groups"),
+                        .child(
+                            IconButton::new("review-refresh", "󰑐", self.tr("gl-refresh-groups"))
+                                .enabled(!busy)
+                                .build(
+                                    IconButtonStyle::Quiet,
+                                    IconButtonDensity::Regular,
                                     cx,
                                     |this, _, cx| {
                                         if this
@@ -1616,19 +1630,15 @@ impl Duplicates {
                                         }
                                     },
                                 ),
-                            ),
-                            busy,
-                        ))
-                        .child(rivu_ui::quiet_icon_button(
-                            theme,
-                            icon_button(
-                                "review-close",
-                                "",
-                                self.tr("gl-close-review"),
+                        )
+                        .child(
+                            IconButton::new("review-close", "", self.tr("gl-close-review")).build(
+                                IconButtonStyle::Quiet,
+                                IconButtonDensity::Regular,
                                 cx,
                                 |this, _, cx| this.dismiss(cx),
                             ),
-                        )),
+                        ),
                 )
                 .child(
                     row()
@@ -1726,9 +1736,8 @@ impl Duplicates {
             (offset + size, "󰁔", self.tr("gl-next-page"), false),
         ] {
             let enabled = !disabled && (if previous { offset > 0 } else { next < total });
-            pager = pager.child(rivu_ui::disabled_control(
-                theme,
-                icon_button(
+            pager = pager.child(
+                IconButton::new(
                     (
                         if groups {
                             "review-group-page"
@@ -1739,6 +1748,11 @@ impl Duplicates {
                     ),
                     icon,
                     hint,
+                )
+                .enabled(enabled)
+                .build(
+                    IconButtonStyle::Surface,
+                    IconButtonDensity::Regular,
                     cx,
                     move |this, _, cx| {
                         if !enabled
@@ -1755,8 +1769,7 @@ impl Duplicates {
                         cx.notify();
                     },
                 ),
-                !enabled,
-            ));
+            );
         }
         pager
     }

@@ -12,7 +12,7 @@ use crate::{
 use gpui::{AnyElement, Context, EventEmitter, Pixels, Point, Window, div, prelude::*, rgb};
 use rivu_ui::{
     IconButton, IconButtonDensity, IconButtonGroup, IconButtonStyle, Slider, SliderInput,
-    SliderKey, caption, column, disabled_control, icon_button, quiet_icon_button, row,
+    SliderKey, caption, column, row,
 };
 use std::rc::Rc;
 
@@ -389,35 +389,38 @@ impl Playback {
                         row()
                             .gap_0()
                             .flex_shrink_0()
-                            .child(disabled_control(
-                                theme,
-                                quiet_icon_button(
-                                    theme,
-                                    icon_button(
-                                        ("playback-locate", panel_id),
-                                        "",
-                                        self.context.tr("gl-locate-playing-entry"),
-                                        cx,
-                                        |this, _, cx| {
-                                            if this.state.queue.current_id.is_some() {
-                                                cx.emit(PlaybackEvent::LocateQueue);
-                                            }
-                                        },
-                                    ),
+                            .child(
+                                IconButton::new(
+                                    ("playback-locate", panel_id),
+                                    "",
+                                    self.context.tr("gl-locate-playing-entry"),
                                 )
-                                .text_color(rgb(theme.muted).alpha(0.4))
-                                .when(
-                                    self.state.queue.current_id.is_some(),
+                                .enabled(self.state.queue.current_id.is_some())
+                                .build_with(
+                                    IconButtonStyle::Quiet,
+                                    IconButtonDensity::Regular,
+                                    cx,
+                                    |this, _, cx| {
+                                        if this.state.queue.current_id.is_some() {
+                                            cx.emit(PlaybackEvent::LocateQueue);
+                                        }
+                                    },
                                     |control| {
-                                        control
-                                            .group_hover("control", |style| {
-                                                style.text_color(rgb(theme.text))
-                                            })
-                                            .focus(|style| style.text_color(rgb(theme.text)))
+                                        control.text_color(rgb(theme.muted).alpha(0.4)).when(
+                                            self.state.queue.current_id.is_some(),
+                                            |control| {
+                                                control
+                                                    .group_hover("control", |style| {
+                                                        style.text_color(rgb(theme.text))
+                                                    })
+                                                    .focus(|style| {
+                                                        style.text_color(rgb(theme.text))
+                                                    })
+                                            },
+                                        )
                                     },
                                 ),
-                                self.state.queue.current_id.is_none(),
-                            ))
+                            )
                             .child(caption(theme, status)),
                     ),
             )

@@ -2,10 +2,10 @@
 //! A component consumer: all values, filtering and loading transitions are host-owned.
 use gpui::{prelude::*, *};
 use rivu_ui::{
-    ChoiceAction, ChoiceMode, ChoicePopup, ChoiceState, DropdownItem, FocusScope, IconButton,
-    IconButtonDensity, IconButtonGroup, IconButtonStyle, ProgressBar, Slider, SliderInput,
-    SliderKey, VirtualList, button, checkbox, column, disabled_control, dropdown_trigger,
-    form_field,
+    ChoiceAction, ChoiceMode, ChoicePopup, ChoiceState, DropdownItem, FocusScope, FormField,
+    IconButton, IconButtonDensity, IconButtonGroup, IconButtonStyle, ProgressBar, Slider,
+    SliderInput, SliderKey, VirtualList, button, checkbox, column, disabled_control,
+    dropdown_trigger,
     input::{Input, InputEvent},
     input_aligned_control, list_row,
     loading::{LoadingRowLabels, LoadingText, paged_loading_row},
@@ -477,7 +477,7 @@ impl Render for Showcase {
                 this.enabled = next; this.input.update(cx,|input,cx| input.set_enabled(next,cx));
             }))
             .child(checkbox("checked", "A host-owned setting", self.checked, self.enabled, cx, |this,next,_| { this.checked = next; }))
-            .child(row().items_start().child(form_field(colors,"Retained text",self.input.clone()).flex_1()).child(form_field(colors,"Choice",dropdown).flex_1()))
+            .child(row().items_start().child(FormField::new(colors, "Retained text", self.input.clone()).hint("The host retains this draft and decides when to apply it.").into_div().flex_1()).child(FormField::new(colors, "Choice", dropdown).into_div().flex_1()))
             .child(format!("User edits: {} · Draft: {}",self.edits,self.input.read(cx).text()))
             .child(slider_demo)
             .child(row().flex_wrap()

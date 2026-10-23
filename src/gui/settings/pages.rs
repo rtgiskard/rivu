@@ -1,7 +1,7 @@
 //! Settings page composition; session transitions and control text remain with the owner.
 use super::{
     Field, Measured, SettingChoice, Settings, SettingsEvent, SettingsPage, VisualPage,
-    dropdown_button, ffmpeg_hint, icon_button, model::Target, settings_card, settings_group,
+    dropdown_button, ffmpeg_hint, model::Target, settings_card, settings_group,
     spectrum_style_label, visual_switch, visualization_palette_label,
 };
 use crate::{
@@ -17,8 +17,8 @@ use crate::{
 };
 use gpui::{Context, Div, SharedString, div, prelude::*, rems, rgb};
 use rivu_ui::{
-    DropdownItem, StatusKind, button, caption, column, copyable_message, disabled_control,
-    form_field, row, status_message, text_tooltip, theme::palette, two_column,
+    DropdownItem, FormField, StatusKind, button, caption, column, copyable_message,
+    disabled_control, row, status_message, text_tooltip, theme::palette, two_column,
 };
 
 impl Settings {
@@ -70,28 +70,34 @@ impl Settings {
                             row()
                                 .gap_2()
                                 .flex_shrink_0()
-                                .child(disabled_control(
-                                    colors,
-                                    icon_button(
+                                .child(
+                                    rivu_ui::IconButton::new(
                                         "settings-artwork-cache-calculate",
                                         "󰃬",
                                         self.tr("settings-calculate-usage"),
+                                    )
+                                    .enabled(!(busy))
+                                    .build(
+                                        rivu_ui::IconButtonStyle::Surface,
+                                        rivu_ui::IconButtonDensity::Regular,
                                         cx,
                                         |this, _, cx| this.maintain_artwork_cache(false, cx),
                                     ),
-                                    busy,
-                                ))
-                                .child(disabled_control(
-                                    colors,
-                                    icon_button(
+                                )
+                                .child(
+                                    rivu_ui::IconButton::new(
                                         "settings-artwork-cache-clean",
                                         "󰆴",
                                         self.tr("settings-clean-expired"),
+                                    )
+                                    .enabled(!(busy))
+                                    .build(
+                                        rivu_ui::IconButtonStyle::Surface,
+                                        rivu_ui::IconButtonDensity::Regular,
                                         cx,
                                         |this, _, cx| this.maintain_artwork_cache(true, cx),
                                     ),
-                                    busy,
-                                )),
+                                ),
                         ),
                 ),
         );
@@ -239,18 +245,19 @@ impl Settings {
                             .tooltip(text_tooltip(path)),
                     )
                     .child(
-                        rivu_ui::quiet_icon_button(
-                            colors,
-                            icon_button(
-                                ("settings-library-root-remove", index),
-                                "",
-                                self.tr("settings-remove-library-folder"),
-                                cx,
-                                move |this, _, cx| {
-                                    this.model.draft.library_roots.remove(index);
-                                    cx.notify();
-                                },
-                            ),
+                        rivu_ui::IconButton::new(
+                            ("settings-library-root-remove", index),
+                            "",
+                            self.tr("settings-remove-library-folder"),
+                        )
+                        .build(
+                            rivu_ui::IconButtonStyle::Quiet,
+                            rivu_ui::IconButtonDensity::Regular,
+                            cx,
+                            move |this, _, cx| {
+                                this.model.draft.library_roots.remove(index);
+                                cx.notify();
+                            },
                         )
                         .opacity(0.)
                         .group_hover("settings-root-row", |style| style.opacity(1.))
@@ -511,11 +518,11 @@ impl Settings {
             column()
                 .gap_2()
                 .child(two_column(
-                    form_field(colors, self.tr("settings-theme"), theme),
+                    FormField::new(colors, self.tr("settings-theme"), theme).into_div(),
                     div(),
                 ))
                 .child(two_column(
-                    form_field(colors, self.tr("settings-language"), language),
+                    FormField::new(colors, self.tr("settings-language"), language).into_div(),
                     div(),
                 ))
                 .child(two_column(
@@ -842,7 +849,8 @@ impl Settings {
                     "settings-new-instance-defaults"
                 }),
                 row().child(
-                    form_field(colors, settings.tr("settings-style"), style)
+                    FormField::new(colors, settings.tr("settings-style"), style)
+                        .into_div()
                         .w(gpui::relative(0.5))
                         .min_w(rems(180. / 16.))
                         .pr_2(),
@@ -854,14 +862,16 @@ impl Settings {
                 column()
                     .gap_2()
                     .child(two_column(
-                        form_field(colors, settings.tr("settings-mode"), mode)
+                        FormField::new(colors, settings.tr("settings-mode"), mode)
+                            .into_div()
                             .min_w(rems(180. / 16.)),
                         div().min_w(rems(180. / 16.)).child(
-                            form_field(
+                            FormField::new(
                                 colors,
                                 settings.tr("settings-direction"),
                                 disabled_control(colors, direction, !rotating),
                             )
+                            .into_div()
                             .id("settings-artwork-direction-field"),
                         ),
                     ))
@@ -1012,11 +1022,12 @@ impl Settings {
                                 settings
                                     .field(Field::Background, cx)
                                     .min_w(rems(180. / 16.)),
-                                form_field(
+                                FormField::new(
                                     palette(cx),
                                     settings.tr("settings-color-scheme"),
                                     palette_control,
                                 )
+                                .into_div()
                                 .min_w(rems(180. / 16.)),
                             ))
                             .id("settings-appearance-help")
@@ -1033,14 +1044,20 @@ impl Settings {
                         column()
                             .gap_2()
                             .child(two_column(
-                                form_field(
+                                FormField::new(
                                     palette(cx),
                                     settings.tr("settings-fft-size-samples"),
                                     fft,
                                 )
+                                .into_div()
                                 .min_w(rems(180. / 16.)),
-                                form_field(palette(cx), settings.tr("settings-fft-window"), window)
-                                    .min_w(rems(180. / 16.)),
+                                FormField::new(
+                                    palette(cx),
+                                    settings.tr("settings-fft-window"),
+                                    window,
+                                )
+                                .into_div()
+                                .min_w(rems(180. / 16.)),
                             ))
                             .child(settings.single(Field::Fps, cx))
                             .id("settings-analysis-help")
@@ -1052,11 +1069,12 @@ impl Settings {
                         column()
                             .gap_2()
                             .child(
-                                form_field(
+                                FormField::new(
                                     palette(cx),
                                     settings.tr("settings-visualization-signal"),
                                     signal,
                                 )
+                                .into_div()
                                 .id("settings-visualization-signal-help")
                                 .tooltip(text_tooltip(
                                     settings.tr("settings-visualization-signal-hint"),
@@ -1132,7 +1150,8 @@ impl Settings {
                         column()
                             .gap_2()
                             .child(two_column(
-                                form_field(palette(cx), settings.tr("settings-style"), style)
+                                FormField::new(palette(cx), settings.tr("settings-style"), style)
+                                    .into_div()
                                     .min_w(rems(180. / 16.)),
                                 settings.field_state(Field::SpectrumBars, cx),
                             ))
@@ -1295,13 +1314,14 @@ impl Settings {
                         .gap_2()
                         .child(
                             row().child(
-                                form_field(
+                                FormField::new(
                                     palette(cx),
                                     settings.tr("settings-style"),
                                     style.when(!hint.is_empty(), |control| {
                                         control.tooltip(text_tooltip(hint))
                                     }),
                                 )
+                                .into_div()
                                 .w(gpui::relative(0.5))
                                 .min_w(rems(180. / 16.))
                                 .pr_2(),

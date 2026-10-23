@@ -28,8 +28,7 @@ use gpui::{App, Entity, EventEmitter, FocusHandle, Focusable, Subscription};
 use rivu_ui::loading::LoadingText;
 use rivu_ui::{
     FocusScope, IconButton, IconButtonDensity, IconButtonGroup, IconButtonStyle, LIST_ROW_REMS,
-    StatusKind, VirtualList, caption, column, danger_control, disabled_control, hover_actions,
-    icon_button,
+    StatusKind, VirtualList, caption, column, danger_control, hover_actions,
     input::{Input, InputEvent},
     list_panel_header, list_row, list_row_height, list_viewport, panel_header, panel_surface,
     panel_toolbar, row,
@@ -844,19 +843,29 @@ impl Playlists {
                         row()
                             .flex_shrink_0()
                             .justify_end()
-                            .child(icon_button(
-                                "playlist-action-cancel",
-                                "",
-                                self.tr("gl-cancel"),
-                                cx,
-                                |this, window, cx| this.dismiss_playlist_action(window, cx),
-                            ))
+                            .child(
+                                IconButton::new(
+                                    "playlist-action-cancel",
+                                    "",
+                                    self.tr("gl-cancel"),
+                                )
+                                .build(
+                                    IconButtonStyle::Surface,
+                                    IconButtonDensity::Regular,
+                                    cx,
+                                    |this, window, cx| this.dismiss_playlist_action(window, cx),
+                                ),
+                            )
                             .child(danger_control(
                                 theme,
-                                icon_button(
+                                IconButton::new(
                                     "playlist-action-confirm",
                                     "󰆴",
                                     self.tr("gl-delete-playlist"),
+                                )
+                                .build(
+                                    IconButtonStyle::Surface,
+                                    IconButtonDensity::Regular,
                                     cx,
                                     move |this, window, cx| {
                                         this.dismiss_playlist_action(window, cx);
@@ -946,34 +955,40 @@ impl Playlists {
                 .tooltip(rivu_ui::text_tooltip(message)),
             )
             .when(rows_error.is_some(), |view| {
-                view.child(icon_button(
-                    (
-                        if kind == ViewRequestKind::Entries {
-                            "playlist-entries-empty-retry"
-                        } else {
-                            "playlist-catalog-empty-retry"
-                        },
-                        panel_id,
-                    ),
-                    "󰑐",
-                    self.tr("gl-retry"),
-                    cx,
-                    move |this, _, cx| {
-                        if this.browser.view_pending(kind) {
-                            return;
-                        }
-                        if kind == ViewRequestKind::Entries {
-                            if this.browser.playlists().selected() == playlist_id
-                                && this.browser.playlists().entries().rows.error(0).is_some()
-                                && let Some(id) = playlist_id
-                            {
-                                this.request_playlist_entries(id, 0, cx);
+                view.child(
+                    IconButton::new(
+                        (
+                            if kind == ViewRequestKind::Entries {
+                                "playlist-entries-empty-retry"
+                            } else {
+                                "playlist-catalog-empty-retry"
+                            },
+                            panel_id,
+                        ),
+                        "󰑐",
+                        self.tr("gl-retry"),
+                    )
+                    .build(
+                        IconButtonStyle::Surface,
+                        IconButtonDensity::Regular,
+                        cx,
+                        move |this, _, cx| {
+                            if this.browser.view_pending(kind) {
+                                return;
                             }
-                        } else if this.browser.playlists().summaries().rows.error(0).is_some() {
-                            this.request_playlist_summaries(0, cx);
-                        }
-                    },
-                ))
+                            if kind == ViewRequestKind::Entries {
+                                if this.browser.playlists().selected() == playlist_id
+                                    && this.browser.playlists().entries().rows.error(0).is_some()
+                                    && let Some(id) = playlist_id
+                                {
+                                    this.request_playlist_entries(id, 0, cx);
+                                }
+                            } else if this.browser.playlists().summaries().rows.error(0).is_some() {
+                                this.request_playlist_summaries(0, cx);
+                            }
+                        },
+                    ),
+                )
             })
     }
 
@@ -1034,23 +1049,29 @@ impl Playlists {
             .child(div().min_w_16().min_h_8().flex_shrink_0().when(
                 selection_unavailable && !selection_pending,
                 |slot| {
-                    slot.child(icon_button(
-                        ("retry-playlist-entry", panel_id),
-                        "󰑐",
-                        self.tr("gl-retry"),
-                        cx,
-                        move |this, _, cx| {
-                            this.refresh(cx);
-                            if this.browser.playlists().selected() == playlist_id
-                                && this.browser.playlists().selected_entry() == selection_entry
-                                && !this.browser.playlists().track_selection.ready()
-                                && !this.browser.playlists().track_selection.busy
-                            {
-                                this.refresh_entry_selection(cx);
-                                cx.notify();
-                            }
-                        },
-                    ))
+                    slot.child(
+                        IconButton::new(
+                            ("retry-playlist-entry", panel_id),
+                            "󰑐",
+                            self.tr("gl-retry"),
+                        )
+                        .build(
+                            IconButtonStyle::Surface,
+                            IconButtonDensity::Regular,
+                            cx,
+                            move |this, _, cx| {
+                                this.refresh(cx);
+                                if this.browser.playlists().selected() == playlist_id
+                                    && this.browser.playlists().selected_entry() == selection_entry
+                                    && !this.browser.playlists().track_selection.ready()
+                                    && !this.browser.playlists().track_selection.busy
+                                {
+                                    this.refresh_entry_selection(cx);
+                                    cx.notify();
+                                }
+                            },
+                        ),
+                    )
                 },
             ));
         let summary_status = self.browser.playlist_lookup_failure().map(|(key, error)| {
@@ -1074,13 +1095,19 @@ impl Playlists {
                         .truncate()
                         .tooltip(rivu_ui::text_tooltip(message)),
                 )
-                .child(icon_button(
-                    ("retry-playlist-summary", panel_id),
-                    "󰑐",
-                    self.tr("gl-retry"),
-                    cx,
-                    move |this, _, cx| this.retry_playlist_selection(key, cx),
-                ))
+                .child(
+                    IconButton::new(
+                        ("retry-playlist-summary", panel_id),
+                        "󰑐",
+                        self.tr("gl-retry"),
+                    )
+                    .build(
+                        IconButtonStyle::Surface,
+                        IconButtonDensity::Regular,
+                        cx,
+                        move |this, _, cx| this.retry_playlist_selection(key, cx),
+                    ),
+                )
         });
         let catalog_len = self.browser.playlists().summaries().rows.len();
         self.context.scroll.borrow_mut().register_list(
@@ -1811,35 +1838,51 @@ impl Playlists {
                         ),
                     )
                     .child(self.playlist_search.clone())
-                    .child(icon_button(
-                        ("playlist-create", panel_id),
-                        "",
-                        self.tr("gl-new-playlist"),
-                        cx,
-                        |this, window, cx| {
-                            this.begin_playlist_name(
-                                editor::PlaylistNameAction::Create {
-                                    track_ids: Vec::new(),
-                                },
-                                String::new(),
-                                window,
-                                cx,
-                            );
-                        },
-                    ))
-                    .child(icon_button(
-                        ("playlist-import", panel_id),
-                        "",
-                        self.tr("gl-import-m3u"),
-                        cx,
-                        |this, _, cx| this.choose_playlist_import(cx),
-                    ))
-                    .child(disabled_control(
-                        theme,
-                        icon_button(
+                    .child(
+                        IconButton::new(
+                            ("playlist-create", panel_id),
+                            "",
+                            self.tr("gl-new-playlist"),
+                        )
+                        .build(
+                            IconButtonStyle::Surface,
+                            IconButtonDensity::Regular,
+                            cx,
+                            |this, window, cx| {
+                                this.begin_playlist_name(
+                                    editor::PlaylistNameAction::Create {
+                                        track_ids: Vec::new(),
+                                    },
+                                    String::new(),
+                                    window,
+                                    cx,
+                                );
+                            },
+                        ),
+                    )
+                    .child(
+                        IconButton::new(
+                            ("playlist-import", panel_id),
+                            "",
+                            self.tr("gl-import-m3u"),
+                        )
+                        .build(
+                            IconButtonStyle::Surface,
+                            IconButtonDensity::Regular,
+                            cx,
+                            |this, _, cx| this.choose_playlist_import(cx),
+                        ),
+                    )
+                    .child(
+                        IconButton::new(
                             ("playlist-export", panel_id),
                             "",
                             self.tr("gl-export-playlist"),
+                        )
+                        .enabled(playlist_id.is_some())
+                        .build(
+                            IconButtonStyle::Surface,
+                            IconButtonDensity::Regular,
                             cx,
                             move |this, _, cx| {
                                 if let Some(id) = playlist_id {
@@ -1847,8 +1890,7 @@ impl Playlists {
                                 }
                             },
                         ),
-                        playlist_id.is_none(),
-                    )),
+                    ),
             )
             .when(selection_unavailable, |panel| panel.child(selection_status))
             .when_some(summary_status, |panel, status| panel.child(status))

@@ -35,13 +35,22 @@ impl ScrollSource {
     }
 }
 
-/// Applies the same scrollbar and edge treatment to a standard scroll viewport.
+/// Attach a viewport to the caller-owned stable handle and add its scrollbar.
+/// The host retains scroll state and decides when its viewport is input-active.
 pub fn scrollable_area(
     id: impl Into<ElementId>,
-    child: impl IntoElement,
+    viewport: gpui::Stateful<gpui::Div>,
     scroll: &Rc<gpui::ScrollHandle>,
 ) -> impl IntoElement {
-    scrollable(id, child, ScrollSource::Area(scroll.clone()))
+    scrollable(
+        id,
+        viewport
+            .min_w_0()
+            .min_h_0()
+            .overflow_y_scroll()
+            .track_scroll(scroll),
+        ScrollSource::Area(scroll.clone()),
+    )
 }
 
 pub(super) fn scrollable_list(

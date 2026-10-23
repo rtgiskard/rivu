@@ -382,6 +382,15 @@ and `switch` exposes a Switch. Standalone items can use the same construction.
 Settings keeps independent configuration switches; only its Apply/Discard footer
 actions form a group.
 
+`IconButton::build_with` customizes a standalone item's geometry or emphasis
+without introducing a second construction path. State and disabled behavior are
+applied by the same builder used by grouped items. Disabled native-activation
+barriers remain intact; the window observes left release in Capture and defers
+gesture finalization until child handlers finish. An unconsumed catalog drag
+re-enters the ordinary validated docking commit; an already-consumed session is
+not committed again. Cleanup also covers a waveform drag whose Preview did not
+acquire a workspace interaction session.
+
 Input owns text, selection, IME conversion, focus and pointer-selection capture.
 Editable combo inputs can use the select-trigger surface without changing input
 geometry or editing behavior; ordinary standalone inputs keep their input surface.
@@ -424,6 +433,14 @@ actions opt into `input_aligned_control`, sharing standalone Input's scaled line
 and padding geometry while keeping the border unscaled. Toolbar defaults and
 embedded inputs retain their separate sizing contracts.
 
+`FormField` supplies the label/control shell and optional action, hint and error
+rows. It owns no input, validation, draft, submission or enabled state; callers
+retain those decisions and pass existing controls and feedback. Settings,
+metadata decoder hints and processing graph fields use this same presentation.
+`label_value_row` supplies a width-constrained muted label, a flexible value and
+an optional hover action. Metadata still owns value formatting, label measurement
+and copy eligibility; the shared row owns only geometry and hover presentation.
+
 `VirtualList` accepts an absolute logical row count, a stable identity, an existing
 scroll handle and a range renderer. It owns neither records nor selection and
 does not fetch data. Only its actual viewport decoration reports demand: GPUI's
@@ -444,13 +461,20 @@ Library's sparse tree, album grid projection, and History's column geometry rema
 feature-owned; bounded heterogeneous duplicate-review pages use ordinary scroll
 areas rather than uniform-row virtualization.
 
+`scrollable_area` assembles a supplied vertical viewport and its scrollbar around
+the same owner-retained `Rc<ScrollHandle>`; it creates no scroll state. Workspace
+`ScrollViews` retains the one handle per panel/region. Hiding a tab preserves it;
+activating a layout resets the registry and the next render obtains its current
+handle. Processing workbench regions do not keep a second handle cache. Settings
+and keyboard help retain their independent owner-held handles; Metadata and
+Playback keep their existing ordinary tracked scrolling without added scrollbars.
+
 `ProgressBar` displays a host-provided fraction without input handling. `Slider`
 adds focus, disabled presentation, pointer-start and keyboard intent handling.
 Both use the host palette; neither owns playback state or performs Core commands.
 Disabled sliders reject activation and Tab navigation and suppress native
 pointer-focus transfer, preserving focus on another control when clicked.
-Their pointer releases still reach the window owner so an existing drag can finish
-when released over a disabled slider.
+Window-level release arbitration follows the shared disabled-control policy.
 Slider values and step policy remain host-owned. The window arbitrates pointer
 sessions, while the playback owner retains seek target identity, preview and
 commit/cancellation semantics. Keyboard takeover cancels an existing pointer

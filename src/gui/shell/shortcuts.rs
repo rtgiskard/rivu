@@ -1,6 +1,6 @@
 use crate::gui::*;
 use crate::keyboard::{self, Action, Context as KeyContext, Modifiers as KeyModifiers};
-use rivu_ui::{Dialog, caption, column, icon_button, row};
+use rivu_ui::{Dialog, IconButton, IconButtonDensity, IconButtonStyle, caption, column, row};
 
 fn visible_panel(node: &Node, id: u64) -> Option<&layout::Panel> {
     match node {
@@ -338,18 +338,19 @@ impl GuiApp {
                     .gap_3()
                     .child(
                         row().child(self.tr("shell-keyboard-help")).child(
-                            rivu_ui::quiet_icon_button(
-                                theme,
-                                icon_button(
-                                    "keyboard-help-close",
-                                    "",
-                                    self.tr("shell-close-keyboard-help"),
-                                    cx,
-                                    |this, _, cx| {
-                                        this.shell.close_help();
-                                        cx.notify();
-                                    },
-                                ),
+                            IconButton::new(
+                                "keyboard-help-close",
+                                "",
+                                self.tr("shell-close-keyboard-help"),
+                            )
+                            .build(
+                                IconButtonStyle::Quiet,
+                                IconButtonDensity::Regular,
+                                cx,
+                                |this, _, cx| {
+                                    this.shell.close_help();
+                                    cx.notify();
+                                },
                             )
                             .focus(|style| {
                                 style
@@ -368,13 +369,7 @@ impl GuiApp {
                             .px_4()
                             .child(rivu_ui::scrollable_area(
                                 "keyboard-help-scrollbar",
-                                column()
-                                    .id("keyboard-help-scroll")
-                                    .size_full()
-                                    .min_h_0()
-                                    .overflow_y_scroll()
-                                    .track_scroll(self.shell.help_scroll())
-                                    .child(rows),
+                                column().id("keyboard-help-scroll").size_full().child(rows),
                                 self.shell.help_scroll(),
                             )),
                     )

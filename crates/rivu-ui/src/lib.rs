@@ -18,13 +18,13 @@ pub use choice::{ChoiceAction, ChoiceMode, ChoicePopup, ChoiceState, DropdownIte
 pub use control::{
     IconButton, IconButtonDensity, IconButtonGroup, IconButtonStyle, activate_control,
     active_control, button, button_style, checkbox, danger_control, disabled_control,
-    dropdown_trigger, icon, icon_button, quiet_icon_button, sortable_header, toggle_button,
+    dropdown_trigger, icon, sortable_header, toggle_button,
 };
 pub use focus::{FocusScope, context_menu_key, dropdown_key, tab_key};
 pub use input::input_aligned_control;
 pub use layout::{
-    StatusKind, caption, column, form_field, list_panel_header, list_viewport, panel_header,
-    panel_surface, panel_toolbar, row, section_group, status_message, two_column,
+    FormField, StatusKind, caption, column, label_value_row, list_panel_header, list_viewport,
+    panel_header, panel_surface, panel_toolbar, row, section_group, status_message, two_column,
 };
 pub use list::VirtualList;
 pub use menu::{

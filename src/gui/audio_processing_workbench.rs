@@ -15,7 +15,6 @@ pub(super) struct WorkbenchPanel {
     wide: bool,
     area: Area,
     connections: bool,
-    scrolls: HashMap<&'static str, Rc<ScrollHandle>>,
 }
 
 impl AudioProcessing {
@@ -50,26 +49,10 @@ impl AudioProcessing {
         region: &'static str,
         body: Div,
     ) -> AnyElement {
-        let handle = self.context.scroll.borrow_mut().content((region, panel));
-        let scroll = self
-            .graph_ui
-            .workbenches
-            .entry(panel)
-            .or_default()
-            .scrolls
-            .entry(region)
-            .or_insert_with(|| Rc::new(handle))
-            .clone();
+        let scroll = self.context.scroll.borrow_mut().content((region, panel));
         scrollable_area(
             (region, panel),
-            div()
-                .id((region, panel))
-                .size_full()
-                .min_w_0()
-                .min_h_0()
-                .overflow_y_scroll()
-                .track_scroll(&scroll)
-                .child(body),
+            div().id((region, panel)).size_full().child(body),
             &scroll,
         )
         .into_any_element()

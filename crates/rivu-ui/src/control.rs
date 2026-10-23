@@ -147,23 +147,6 @@ pub(crate) fn icon_button_height(window: &Window, cx: &gpui::App) -> gpui::Pixel
     (rem * 2.).max((rem * crate::theme::font_size_scale(cx)).round() + rem + gpui::px(2.))
 }
 
-/// Icon button with the Nerd symbol font and shared tooltip behavior.
-/// Glyph size follows configured typography; padding and minimum hit area follow UI scale.
-pub fn icon_button<T: 'static>(
-    id: impl Into<ElementId>,
-    icon: impl Into<SharedString>,
-    hint: impl Into<SharedString>,
-    cx: &mut Context<T>,
-    action: impl Fn(&mut T, &mut Window, &mut Context<T>) + 'static,
-) -> Stateful<Div> {
-    let theme = crate::theme::palette(cx);
-    activate_control(
-        icon_button_surface(theme, id, icon, hint, cx, IconButtonSizing::Natural),
-        cx,
-        action,
-    )
-}
-
 enum IconButtonSizing {
     Natural,
     Square,
@@ -290,7 +273,8 @@ impl IconButton {
         self.build_with(style, density, cx, action, |control| control)
     }
 
-    fn build_with<T: 'static>(
+    /// Customize geometry, focus tracking or emphasis before disabled barriers apply.
+    pub fn build_with<T: 'static>(
         self,
         style: IconButtonStyle,
         density: IconButtonDensity,
@@ -311,7 +295,10 @@ impl IconButton {
             control = control.px_1().py_2().min_w_6().min_h_8();
         }
         if style != IconButtonStyle::Surface {
-            control = quiet_icon_button(theme, control);
+            control = control
+                .border_color(gpui::transparent_black())
+                .bg(rgb(theme.panel).alpha(0.0))
+                .text_color(rgb(theme.secondary));
         }
         if let IconButtonSemantics::Toggled(on) | IconButtonSemantics::Switch(on) = self.semantics {
             control = control.aria_toggled(if on { Toggled::True } else { Toggled::False });
@@ -417,17 +404,6 @@ impl IconButtonGroup {
     }
 }
 
-/// Low-emphasis inline action; preserve the shared icon hit area and tooltip.
-pub fn quiet_icon_button(
-    theme: &'static crate::theme::Palette,
-    control: Stateful<Div>,
-) -> Stateful<Div> {
-    control
-        .border_color(gpui::transparent_black())
-        .bg(rgb(theme.panel).alpha(0.0))
-        .text_color(rgb(theme.secondary))
-}
-
 /// Unavailable actions retain owner guards and suppress all native activation paths.
 pub fn disabled_control(
     theme: &'static crate::theme::Palette,
@@ -443,6 +419,9 @@ pub fn disabled_control(
     })
 }
 
+// GPUI dispatches native mouse clicks in Bubble without checking prevent_default.
+// Keep the capture barrier even after a press began while enabled. Window-owned
+// gestures must observe release in ancestor Capture and finalize after child handlers.
 fn disable_control_interaction(control: Stateful<Div>) -> Stateful<Div> {
     control
         .cursor_default()
@@ -596,38 +575,52 @@ mod tests {
         disabled: bool,
         grouped: bool,
         clicks: usize,
+        releases: Vec<usize>,
     }
 
     impl Render for Controls {
         fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             let theme = crate::theme::palette(cx);
-            if self.grouped {
-                return div().size_full().child(
-                    IconButtonGroup::new(IconButtonStyle::Quiet, IconButtonDensity::Compact)
-                        .button_with(
-                            IconButton::new("action", "♥", "Favorite")
-                                .toggled(true)
-                                .enabled(!self.disabled),
-                            cx,
-                            |this, _, cx| {
-                                this.clicks += 1;
-                                cx.notify();
-                            },
-                            |control| control.track_focus(&self.focus),
-                        )
-                        .into_div(),
-                );
-            }
-            div().size_full().child(disabled_control(
-                theme,
-                button("action", "Apply", cx, |this, _, cx| {
-                    this.clicks += 1;
-                    cx.notify();
-                })
-                .track_focus(&self.focus)
-                .w(gpui::px(160.)),
-                self.disabled,
-            ))
+            let control = if self.grouped {
+                IconButtonGroup::new(IconButtonStyle::Quiet, IconButtonDensity::Compact)
+                    .button_with(
+                        IconButton::new("action", "♥", "Favorite")
+                            .toggled(true)
+                            .enabled(!self.disabled),
+                        cx,
+                        |this, _, cx| {
+                            this.clicks += 1;
+                            cx.notify();
+                        },
+                        |control| control.track_focus(&self.focus),
+                    )
+                    .into_div()
+                    .into_any_element()
+            } else {
+                disabled_control(
+                    theme,
+                    button("action", "Apply", cx, |this, _, cx| {
+                        this.clicks += 1;
+                        cx.notify();
+                    })
+                    .track_focus(&self.focus)
+                    .w(gpui::px(160.)),
+                    self.disabled,
+                )
+                .into_any_element()
+            };
+            div()
+                .id("window-owner")
+                .size_full()
+                .capture_any_mouse_up(cx.listener(|_, event: &gpui::MouseUpEvent, window, cx| {
+                    if event.button == gpui::MouseButton::Left {
+                        let entity = cx.entity().downgrade();
+                        window.defer(cx, move |_, cx| {
+                            let _ = entity.update(cx, |this, _| this.releases.push(this.clicks));
+                        });
+                    }
+                }))
+                .child(control)
         }
     }
 
@@ -645,6 +638,7 @@ mod tests {
             disabled: true,
             grouped,
             clicks: 0,
+            releases: Vec::new(),
         });
         let controls = window.root(cx).unwrap();
         let handle = window.into();
@@ -701,6 +695,145 @@ mod tests {
         }
     }
 
+    fn activation_edge(input: &str, pressed: bool) -> gpui::PlatformInput {
+        if input == "pointer" {
+            let position = gpui::point(gpui::px(12.), gpui::px(12.));
+            if pressed {
+                gpui::MouseDownEvent {
+                    button: gpui::MouseButton::Left,
+                    position,
+                    click_count: 1,
+                    ..Default::default()
+                }
+                .to_platform_input()
+            } else {
+                gpui::MouseUpEvent {
+                    button: gpui::MouseButton::Left,
+                    position,
+                    click_count: 1,
+                    ..Default::default()
+                }
+                .to_platform_input()
+            }
+        } else {
+            let keystroke = gpui::Keystroke::parse(input).unwrap();
+            if pressed {
+                gpui::KeyDownEvent {
+                    keystroke,
+                    is_held: false,
+                    prefer_character_input: false,
+                }
+                .to_platform_input()
+            } else {
+                gpui::KeyUpEvent { keystroke }.to_platform_input()
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn disabling_pressed_controls_cancels_pointer_and_keyboard_activation(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init_test);
+        for grouped in [false, true] {
+            for input in ["pointer", "enter", "space"] {
+                let focus = cx.update(|cx| cx.focus_handle());
+                let window = cx.add_window(|_, _| Controls {
+                    focus: focus.clone(),
+                    disabled: false,
+                    grouped,
+                    clicks: 0,
+                    releases: Vec::new(),
+                });
+                let controls = window.root(cx).unwrap();
+                cx.update_window(window.into(), |_, window, cx| {
+                    window.focus(&focus, cx);
+                    window.draw(cx).clear(cx);
+                    window.dispatch_event(activation_edge(input, true), cx);
+                })
+                .unwrap();
+                controls.update(cx, |this, cx| {
+                    this.disabled = true;
+                    cx.notify();
+                });
+                cx.run_until_parked();
+                cx.update_window(window.into(), |_, window, cx| {
+                    window.draw(cx).clear(cx);
+                    window.dispatch_event(activation_edge(input, false), cx);
+                })
+                .unwrap();
+                cx.run_until_parked();
+                controls.read_with(cx, |this, _| {
+                    assert_eq!(this.clicks, 0, "grouped={grouped}, input={input}");
+                    if input == "pointer" {
+                        assert_eq!(
+                            this.releases,
+                            [0],
+                            "window release survives disabled capture"
+                        );
+                    }
+                });
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn disabled_controls_preserve_deferred_window_release(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init_test);
+        for grouped in [false, true] {
+            let window = cx.add_window(|_, cx| Controls {
+                focus: cx.focus_handle(),
+                disabled: true,
+                grouped,
+                clicks: 0,
+                releases: Vec::new(),
+            });
+            let controls = window.root(cx).unwrap();
+            cx.update_window(window.into(), |_, window, cx| {
+                window.draw(cx).clear(cx);
+                // An existing window gesture began outside the unavailable button.
+                window.dispatch_event(
+                    gpui::MouseDownEvent {
+                        button: gpui::MouseButton::Left,
+                        position: gpui::point(gpui::px(200.), gpui::px(12.)),
+                        ..Default::default()
+                    }
+                    .to_platform_input(),
+                    cx,
+                );
+                window.dispatch_event(activation_edge("pointer", false), cx);
+                // The accessibility Click fallback synthesizes the same down/up pair.
+                window.dispatch_event(activation_edge("pointer", true), cx);
+                window.dispatch_event(activation_edge("pointer", false), cx);
+            })
+            .unwrap();
+            cx.run_until_parked();
+            controls.read_with(cx, |this, _| {
+                assert_eq!(this.clicks, 0);
+                assert_eq!(this.releases, [0, 0]);
+            });
+            controls.update(cx, |this, cx| {
+                this.disabled = false;
+                cx.notify();
+            });
+            cx.run_until_parked();
+            cx.update_window(window.into(), |_, window, cx| {
+                window.draw(cx).clear(cx);
+                // Enabled child activation still precedes deferred owner finalization.
+                window.dispatch_event(activation_edge("pointer", true), cx);
+                window.dispatch_event(activation_edge("pointer", false), cx);
+            })
+            .unwrap();
+            cx.run_until_parked();
+            controls.read_with(cx, |this, _| {
+                assert_eq!(this.clicks, 1);
+                assert_eq!(
+                    this.releases,
+                    [0, 0, 1],
+                    "finalization runs once, after the child action"
+                );
+            });
+        }
+    }
+
     #[gpui::test]
     fn grouped_icons_preserve_boolean_semantics_when_disabled(cx: &mut TestAppContext) {
         cx.update(crate::theme::init_test);
@@ -709,6 +842,7 @@ mod tests {
             disabled: false,
             grouped: true,
             clicks: 0,
+            releases: Vec::new(),
         });
         entity.update(cx, |_, cx| {
             for enabled in [true, false] {
@@ -871,9 +1005,15 @@ mod tests {
             disabled: false,
             grouped: false,
             clicks: 0,
+            releases: Vec::new(),
         });
         entity.update(cx, |_, cx| {
-            let icon = icon_button("save", "󰆓", "Save changes", cx, |_, _, _| {});
+            let icon = IconButton::new("save", "󰆓", "Save changes").build(
+                IconButtonStyle::Surface,
+                IconButtonDensity::Regular,
+                cx,
+                |_, _, _| {},
+            );
             let mut node = gpui::accesskit::Node::new(icon.a11y_role().unwrap());
             icon.write_a11y_info(&mut node);
             assert_eq!(node.role(), Role::Button);

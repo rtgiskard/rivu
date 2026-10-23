@@ -24,7 +24,7 @@ use super::{
 };
 use rivu_ui::{
     ButtonTooltip, IconButton, IconButtonDensity, IconButtonGroup, IconButtonStyle, VirtualList,
-    caption, column, icon_button, panel_surface, row,
+    caption, column, panel_surface, row,
     search::{SearchEvent, SearchField},
 };
 
@@ -458,13 +458,15 @@ impl AlbumBrowser {
                 }),
             )
             .when(error.is_some(), |view| {
-                view.child(icon_button(
-                    ("album-retry", index),
-                    "󰑐",
-                    self.tr("gl-retry-loading"),
-                    cx,
-                    |this, _, cx| this.retry(cx),
-                ))
+                view.child(
+                    IconButton::new(("album-retry", index), "󰑐", self.tr("gl-retry-loading"))
+                        .build(
+                            IconButtonStyle::Surface,
+                            IconButtonDensity::Regular,
+                            cx,
+                            |this, _, cx| this.retry(cx),
+                        ),
+                )
             })
     }
 
@@ -902,19 +904,17 @@ impl Render for AlbumBrowser {
             let enqueue_key = key.clone();
             let menu_key = key.clone();
             header = header
-                .child(rivu_ui::quiet_icon_button(
-                    theme,
-                    icon_button(
-                        "albums-back",
-                        "",
-                        self.tr("gl-back-albums"),
+                .child(
+                    IconButton::new("albums-back", "", self.tr("gl-back-albums")).build(
+                        IconButtonStyle::Quiet,
+                        IconButtonDensity::Regular,
                         cx,
                         |this, _, cx| {
                             let change = this.model.select(None);
                             this.reload(change.data, cx);
                         },
                     ),
-                ))
+                )
                 .child(
                     div()
                         .id("album-selected-title")
@@ -938,29 +938,31 @@ impl Render for AlbumBrowser {
                         .child(key.title.clone()),
                 )
                 .child(self.tracks_search.clone())
-                .child(icon_button(
-                    "album-play-all",
-                    "",
-                    self.tr("gl-play-album"),
-                    cx,
-                    move |_, _, cx| {
-                        cx.emit(AlbumPlayRequest(play_key.clone()));
-                    },
-                ))
-                .child(icon_button(
-                    "album-add-all",
-                    "󰐕",
-                    self.tr("gl-enqueue-album"),
-                    cx,
-                    move |this, _, cx| {
-                        this.send(
-                            Command::EnqueueAlbum {
-                                key: enqueue_key.clone(),
-                            },
-                            cx,
-                        )
-                    },
-                ));
+                .child(
+                    IconButton::new("album-play-all", "", self.tr("gl-play-album")).build(
+                        IconButtonStyle::Surface,
+                        IconButtonDensity::Regular,
+                        cx,
+                        move |_, _, cx| {
+                            cx.emit(AlbumPlayRequest(play_key.clone()));
+                        },
+                    ),
+                )
+                .child(
+                    IconButton::new("album-add-all", "󰐕", self.tr("gl-enqueue-album")).build(
+                        IconButtonStyle::Surface,
+                        IconButtonDensity::Regular,
+                        cx,
+                        move |this, _, cx| {
+                            this.send(
+                                Command::EnqueueAlbum {
+                                    key: enqueue_key.clone(),
+                                },
+                                cx,
+                            )
+                        },
+                    ),
+                );
         } else {
             header = header
                 .child(
@@ -979,23 +981,29 @@ impl Render for AlbumBrowser {
                     .min_w_12(),
                 )
                 .child(self.album_search.clone())
-                .child(icon_button(
-                    "albums-sort",
-                    match self.model.sort() {
-                        AlbumSort::Title => "󰉿",
-                        AlbumSort::Artist => "󰀄",
-                    },
-                    match self.model.sort() {
-                        AlbumSort::Title => self.tr("gl-album-sort-title"),
-                        AlbumSort::Artist => self.tr("gl-album-sort-artist"),
-                    },
-                    cx,
-                    |this, _, cx| {
-                        let change = this.model.toggle_sort();
-                        this.reset_grid();
-                        this.reload(change, cx);
-                    },
-                ));
+                .child(
+                    IconButton::new(
+                        "albums-sort",
+                        match self.model.sort() {
+                            AlbumSort::Title => "󰉿",
+                            AlbumSort::Artist => "󰀄",
+                        },
+                        match self.model.sort() {
+                            AlbumSort::Title => self.tr("gl-album-sort-title"),
+                            AlbumSort::Artist => self.tr("gl-album-sort-artist"),
+                        },
+                    )
+                    .build(
+                        IconButtonStyle::Surface,
+                        IconButtonDensity::Regular,
+                        cx,
+                        |this, _, cx| {
+                            let change = this.model.toggle_sort();
+                            this.reset_grid();
+                            this.reload(change, cx);
+                        },
+                    ),
+                );
         }
         let generation = self.model.generation();
         let track_demand_owner = cx.weak_entity();

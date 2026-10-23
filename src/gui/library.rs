@@ -13,8 +13,8 @@ use crate::{
 };
 use gpui::{AnyElement, Context, Div, Render, SharedString, Window, div, prelude::*, px, rgb};
 use rivu_ui::{
-    VirtualList, active_control, button, caption, column, disabled_control, icon_button,
-    list_panel_header, list_viewport, panel_surface, panel_toolbar, quiet_icon_button, row,
+    IconButton, IconButtonDensity, IconButtonStyle, VirtualList, button, caption, column,
+    list_panel_header, list_viewport, panel_surface, panel_toolbar, row,
 };
 use std::{path::Path, sync::Arc};
 
@@ -571,16 +571,10 @@ impl Library {
                                                 )
                                                 .when(failed, |view| {
                                                     view.child(
-                                                        rivu_ui::quiet_icon_button(theme, icon_button(
-                                                            gpui::ElementId::named_usize("library-retry", index),
-                                                            "󰑐",
-                                                            this.tr("gl-retry-folder"),
-                                                            cx,
-                                                            move |this, _, cx| {
-                                                                this.library.retry_directory(&branch);
-                                                                this.request_directory_page(branch.clone(), offset, cx);
-                                                            },
-                                                        )),
+                                                        IconButton::new(gpui::ElementId::named_usize("library-retry", index), "󰑐", this.tr("gl-retry-folder")).build(IconButtonStyle::Quiet, IconButtonDensity::Regular, cx, move |this, _, cx| {
+                                                            this.library.retry_directory(&branch);
+                                                            this.request_directory_page(branch.clone(), offset, cx);
+                                                        }),
                                                     )
                                                 }),
                                         ),
@@ -632,26 +626,20 @@ impl Library {
                             } else {
                                 this.i18n.format("gl-rescan-path", &[("path", scan_path.display().to_string().into())])
                             };
-                            rivu_ui::quiet_icon_button(theme, icon_button(
-                                gpui::ElementId::named_usize("library-scan", index),
-                                "󰑐",
-                                hint,
-                                cx,
-                                move |this, _, cx| {
-                                    if this.library.root_count_failed(&scan_path) {
-                                        this.library.retry_root_counts();
-                                        this.request_root_counts(cx);
-                                    } else {
-                                        this.send(
-                                            Command::Scan {
-                                                paths: vec![scan_path.clone()],
-                                                force: this.library.force_scan(),
-                                            },
-                                            cx,
-                                        );
-                                    }
-                                },
-                            ))
+                            IconButton::new(gpui::ElementId::named_usize("library-scan", index), "󰑐", hint).build(IconButtonStyle::Quiet, IconButtonDensity::Regular, cx, move |this, _, cx| {
+                                if this.library.root_count_failed(&scan_path) {
+                                    this.library.retry_root_counts();
+                                    this.request_root_counts(cx);
+                                } else {
+                                    this.send(
+                                        Command::Scan {
+                                            paths: vec![scan_path.clone()],
+                                            force: this.library.force_scan(),
+                                        },
+                                        cx,
+                                    );
+                                }
+                            })
                             .when(retry_counts, |view| view.text_color(gpui::rgb(theme.error)))
                         });
                         let title = gpui::SharedString::from(title);
@@ -962,16 +950,19 @@ impl Library {
             .min_h_8()
             .flex_shrink_0()
             .when(dismissible, |slot| {
-                slot.child(quiet_icon_button(
-                    theme,
-                    icon_button(
+                slot.child(
+                    IconButton::new(
                         ("dismiss-scan-result", panel_id),
                         "",
                         self.tr("gl-dismiss-scan"),
+                    )
+                    .build(
+                        IconButtonStyle::Quiet,
+                        IconButtonDensity::Regular,
                         cx,
                         |this, _, cx| this.send(Command::DismissScanResult, cx),
                     ),
-                ))
+                )
             });
         let mut bar = div()
             .w_full()
@@ -1080,72 +1071,76 @@ impl Library {
             .min_w_0()
             .flex_shrink(1.)
             .child(self.library_search.clone())
-            .child(disabled_control(
-                theme,
-                icon_button(
+            .child(
+                IconButton::new(
                     ("library-locate-playing", panel_id),
                     "",
                     self.tr("gl-locate-library"),
+                )
+                .enabled(self.state.current_track().is_some() && !self.library.locate.loading)
+                .build(
+                    IconButtonStyle::Surface,
+                    IconButtonDensity::Regular,
                     cx,
                     |this, window, cx| this.locate_playing_library(window, cx),
                 ),
-                self.state.current_track().is_none() || self.library.locate.loading,
-            ))
-            .child(icon_button(
-                ("library-view", panel_id),
-                if self.library.tree_active() {
-                    "󰉋"
-                } else {
-                    "󰉢"
-                },
-                if self.library.tree_active() {
-                    self.tr("gl-flat-view")
-                } else {
-                    self.tr("gl-tree-view")
-                },
-                cx,
-                |this, _, cx| this.toggle_library_view(cx),
-            ))
-            .child(active_control(
-                theme,
-                icon_button(
+            )
+            .child(
+                IconButton::new(
+                    ("library-view", panel_id),
+                    if self.library.tree_active() {
+                        "󰉋"
+                    } else {
+                        "󰉢"
+                    },
+                    if self.library.tree_active() {
+                        self.tr("gl-flat-view")
+                    } else {
+                        self.tr("gl-tree-view")
+                    },
+                )
+                .build(
+                    IconButtonStyle::Surface,
+                    IconButtonDensity::Regular,
+                    cx,
+                    |this, _, cx| this.toggle_library_view(cx),
+                ),
+            )
+            .child(
+                IconButton::new(
                     ("library-filter-favorites", panel_id),
                     "󰓎",
                     self.tr("gl-filter-favorites"),
+                )
+                .toggled(self.library.favorites_only())
+                .build(
+                    IconButtonStyle::Surface,
+                    IconButtonDensity::Regular,
                     cx,
                     |this, _, cx| {
                         this.refresh_favorite_filter(cx);
                     },
-                )
-                .aria_toggled(if self.library.favorites_only() {
-                    gpui::Toggled::True
-                } else {
-                    gpui::Toggled::False
-                }),
-                self.library.favorites_only(),
-            ))
-            .child(active_control(
-                theme,
-                icon_button(
+                ),
+            )
+            .child(
+                IconButton::new(
                     ("library-filter-missing", panel_id),
                     "󰩋",
                     self.tr("gl-filter-missing"),
+                )
+                .toggled(self.library.missing_only())
+                .build(
+                    IconButtonStyle::Surface,
+                    IconButtonDensity::Regular,
                     cx,
                     |this, _, cx| {
                         this.library.toggle_missing();
                         this.refresh_filter(cx);
                     },
-                )
-                .aria_toggled(if self.library.missing_only() {
-                    gpui::Toggled::True
-                } else {
-                    gpui::Toggled::False
-                }),
-                self.library.missing_only(),
-            ))
-            .child(active_control(
-                theme,
-                icon_button(
+                ),
+            )
+            .child(
+                IconButton::new(
                     ("library-force-scan", panel_id),
                     "󱉶",
                     if self.library.force_scan() {
@@ -1153,26 +1148,26 @@ impl Library {
                     } else {
                         self.tr("gl-force-off")
                     },
+                )
+                .toggled(self.library.force_scan())
+                .build(
+                    IconButtonStyle::Surface,
+                    IconButtonDensity::Regular,
                     cx,
                     |this, _, cx| {
                         this.library.toggle_force_scan();
                         cx.notify();
                     },
-                )
-                .aria_toggled(if self.library.force_scan() {
-                    gpui::Toggled::True
-                } else {
-                    gpui::Toggled::False
-                }),
-                self.library.force_scan(),
-            ))
-            .child(icon_button(
-                ("library-add-root", panel_id),
-                "󰐕",
-                self.tr("gl-add-root"),
-                cx,
-                |this, _, cx| this.choose_library_root(cx),
-            ));
+                ),
+            )
+            .child(
+                IconButton::new(("library-add-root", panel_id), "󰐕", self.tr("gl-add-root")).build(
+                    IconButtonStyle::Surface,
+                    IconButtonDensity::Regular,
+                    cx,
+                    |this, _, cx| this.choose_library_root(cx),
+                ),
+            );
         let mut panel = panel_surface(("library-panel", panel_id))
             .child(row().items_end().child(heading).child(tools));
         if let Some((track_id, result)) = &self.library.locate.notice

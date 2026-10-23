@@ -1,6 +1,6 @@
 //! Confirmation of commands that replace the playback queue, not playlist management.
 use crate::gui::*;
-use rivu_ui::{danger_control, icon_button, panel_header, row};
+use rivu_ui::{IconButton, IconButtonDensity, IconButtonStyle, danger_control, panel_header, row};
 
 #[derive(Clone)]
 pub(in crate::gui) enum QueueReplacement {
@@ -74,19 +74,25 @@ impl GuiApp {
                         row()
                             .flex_shrink_0()
                             .justify_end()
-                            .child(icon_button(
-                                "queue-replace-cancel",
-                                "",
-                                self.tr("gl-cancel"),
-                                cx,
-                                |this, window, cx| this.dismiss_queue_replace(window, cx),
-                            ))
+                            .child(
+                                IconButton::new("queue-replace-cancel", "", self.tr("gl-cancel"))
+                                    .build(
+                                        IconButtonStyle::Surface,
+                                        IconButtonDensity::Regular,
+                                        cx,
+                                        |this, window, cx| this.dismiss_queue_replace(window, cx),
+                                    ),
+                            )
                             .child(danger_control(
                                 theme,
-                                icon_button(
+                                IconButton::new(
                                     "queue-replace-confirm",
                                     "",
                                     self.tr("gl-replace-playlist"),
+                                )
+                                .build(
+                                    IconButtonStyle::Surface,
+                                    IconButtonDensity::Regular,
                                     cx,
                                     move |this, window, cx| {
                                         this.dismiss_queue_replace(window, cx);

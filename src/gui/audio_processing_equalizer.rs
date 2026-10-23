@@ -600,11 +600,9 @@ impl EqualizerEditor {
                 ),
                 !enabled,
             ));
-        column()
+        FormField::new(theme, label, control)
+            .into_div()
             .min_w_0()
-            .gap_1()
-            .child(caption(theme, label))
-            .child(control)
             .opacity(if enabled { 1. } else { 0.5 })
     }
     fn update_response(&mut self) {

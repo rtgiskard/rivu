@@ -23,9 +23,8 @@ use anyhow::{Context as _, Result};
 use gpui::{prelude::*, *};
 use rivu_ui::{
     ButtonTooltip, ChoiceAction, ChoiceMode, ChoicePopup, ChoiceState, Dialog, DropdownItem,
-    FocusScope, IconButton, IconButtonDensity, IconButtonGroup, IconButtonStyle, StatusKind,
-    activate_control, active_control, column, copyable_message, dropdown_trigger, form_field,
-    icon_button as common_icon_button,
+    FocusScope, FormField, IconButton, IconButtonDensity, IconButtonGroup, IconButtonStyle,
+    StatusKind, activate_control, active_control, column, copyable_message, dropdown_trigger,
     input::{Input, InputEvent},
     input_aligned_control, row, section_group, status_message,
     theme::{Palette, palette},
@@ -289,18 +288,8 @@ impl Field {
                 ))
                 .child(control);
         }
-        form_field(theme, settings.tr(self.label_id()), control)
+        FormField::new(theme, settings.tr(self.label_id()), control).into_div()
     }
-}
-
-fn icon_button(
-    id: impl Into<ElementId>,
-    icon: impl Into<SharedString>,
-    hint: impl Into<SharedString>,
-    cx: &mut Context<Settings>,
-    action: impl Fn(&mut Settings, &mut Window, &mut Context<Settings>) + 'static,
-) -> Stateful<Div> {
-    common_icon_button(id, icon, hint, cx, action)
 }
 
 fn dropdown_button(
@@ -1844,22 +1833,13 @@ impl Settings {
         let mut body = row().flex_1().min_h_0().items_start();
         if self.model.target() == Target::Global {
             let sidebar_scroll = self.scrolls.entry("settings-sidebar").or_default().clone();
-            body = body.child(
-                div()
-                    .w(rems(11.))
-                    .h_full()
-                    .flex_shrink_0()
-                    .child(rivu_ui::scrollable_area(
-                        "settings-sidebar-surface",
-                        self.sidebar(cx)
-                            .id("settings-sidebar")
-                            .w_full()
-                            .h_full()
-                            .overflow_y_scroll()
-                            .track_scroll(&sidebar_scroll),
-                        &sidebar_scroll,
-                    )),
-            );
+            body = body.child(div().w(rems(11.)).h_full().flex_shrink_0().child(
+                rivu_ui::scrollable_area(
+                    "settings-sidebar-surface",
+                    self.sidebar(cx).id("settings-sidebar").w_full().h_full(),
+                    &sidebar_scroll,
+                ),
+            ));
         }
         panel = panel.child(
             body.child(rivu_ui::scrollable_area(
@@ -1872,8 +1852,6 @@ impl Settings {
                     .min_h_0()
                     .min_w_0()
                     .h_full()
-                    .overflow_y_scroll()
-                    .track_scroll(&scroll)
                     .child(content.flex_shrink_0().p_2()),
                 &scroll,
             )),

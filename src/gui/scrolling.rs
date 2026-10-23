@@ -1,19 +1,19 @@
 use super::layout::Layout;
 use gpui::{Pixels, Point, ScrollHandle, UniformListScrollHandle, px};
-use std::collections::HashMap;
+use std::{collections::HashMap, rc::Rc};
 
 type Target = (&'static str, u64);
 
 #[derive(Clone)]
 enum Handle {
-    Content(ScrollHandle),
+    Content(Rc<ScrollHandle>),
     List(UniformListScrollHandle),
 }
 
 impl Handle {
     fn base(&self) -> ScrollHandle {
         match self {
-            Self::Content(handle) => handle.clone(),
+            Self::Content(handle) => handle.as_ref().clone(),
             Self::List(handle) => handle.0.borrow().base_handle.clone(),
         }
     }
@@ -123,9 +123,9 @@ impl ScrollViews {
         }
     }
 
-    pub(super) fn content(&mut self, target: Target) -> ScrollHandle {
+    pub(super) fn content(&mut self, target: Target) -> Rc<ScrollHandle> {
         let region = self.regions.entry(target).or_insert_with(|| Region {
-            handle: Handle::Content(ScrollHandle::new()),
+            handle: Handle::Content(Rc::new(ScrollHandle::new())),
             visible: true,
         });
         region.visible = true;

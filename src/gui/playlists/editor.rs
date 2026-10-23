@@ -1,7 +1,10 @@
 use super::{PlaylistEvent, Playlists};
 use crate::model::Command;
 use gpui::{AnyElement, Context, Focusable, Window, div, prelude::*, rems};
-use rivu_ui::{StatusKind, caption, column, form_field, icon_button, row, status_message};
+use rivu_ui::{
+    FormField, IconButton, IconButtonDensity, IconButtonStyle, StatusKind, caption, column, row,
+    status_message,
+};
 
 pub(in crate::gui) enum PlaylistNameAction {
     Create { track_ids: Vec<i64> },
@@ -156,28 +159,31 @@ impl Playlists {
                     StatusKind::Info,
                 ));
         } else {
-            content = content.child(form_field(
-                theme,
-                self.tr("gl-name"),
-                self.name_input.clone(),
-            ));
+            content = content.child(
+                FormField::new(theme, self.tr("gl-name"), self.name_input.clone()).into_div(),
+            );
             if let Some(error) = &editor.error {
                 content = content.child(status_message(theme, error.clone(), StatusKind::Error));
             }
             content = content.child(
                 row()
                     .justify_end()
-                    .child(icon_button(
-                        "playlist-name-cancel",
-                        "",
-                        self.tr("gl-playlist-name-cancel"),
-                        cx,
-                        |this, window, cx| this.cancel_playlist_name(window, cx),
-                    ))
-                    .child(icon_button(
-                        "playlist-name-submit",
-                        "",
-                        submit,
+                    .child(
+                        IconButton::new(
+                            "playlist-name-cancel",
+                            "",
+                            self.tr("gl-playlist-name-cancel"),
+                        )
+                        .build(
+                            IconButtonStyle::Surface,
+                            IconButtonDensity::Regular,
+                            cx,
+                            |this, window, cx| this.cancel_playlist_name(window, cx),
+                        ),
+                    )
+                    .child(IconButton::new("playlist-name-submit", "", submit).build(
+                        IconButtonStyle::Surface,
+                        IconButtonDensity::Regular,
                         cx,
                         |this, _, cx| this.submit_playlist_name(cx),
                     )),

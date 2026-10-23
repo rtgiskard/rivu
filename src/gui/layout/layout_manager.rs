@@ -1,7 +1,7 @@
 use super::super::*;
 use rivu_ui::{
-    StatusKind, button, caption, column, copyable_message, form_field, icon_button, menu_item, row,
-    status_message,
+    FormField, IconButton, IconButtonDensity, IconButtonStyle, StatusKind, button, caption, column,
+    copyable_message, menu_item, row, status_message,
 };
 
 #[derive(Clone)]
@@ -141,12 +141,10 @@ impl GuiApp {
                 row()
                     .child(div().flex_1().text_lg().child(self.tr("shell-layouts")))
                     .child(
-                        rivu_ui::quiet_icon_button(
-                            theme,
-                            icon_button(
-                                "layouts-close",
-                                "",
-                                self.tr("shell-close-layouts"),
+                        IconButton::new("layouts-close", "", self.tr("shell-close-layouts"))
+                            .build(
+                                IconButtonStyle::Quiet,
+                                IconButtonDensity::Regular,
                                 cx,
                                 |this, window, cx| {
                                     this.shell.dismiss(shell::Surface::Layouts);
@@ -154,13 +152,12 @@ impl GuiApp {
                                     this.focus_layout(window, cx);
                                     cx.notify();
                                 },
-                            ),
-                        )
-                        .focus(|style| {
-                            style
-                                .border_color(gpui::transparent_black())
-                                .text_color(rgb(theme.accent))
-                        }),
+                            )
+                            .focus(|style| {
+                                style
+                                    .border_color(gpui::transparent_black())
+                                    .text_color(rgb(theme.accent))
+                            }),
                     ),
             );
         if let Some(action) = self.layout_action.clone() {
@@ -185,25 +182,30 @@ impl GuiApp {
                     &[("name", name.as_str().into())],
                 )));
             } else {
-                content = content.child(form_field(
-                    theme,
-                    self.tr("shell-name"),
-                    self.layout_name.clone(),
-                ));
+                content = content.child(
+                    FormField::new(theme, self.tr("shell-name"), self.layout_name.clone())
+                        .into_div(),
+                );
             }
             content = content.child(
                 row()
-                    .child(icon_button(
-                        "layout-action-cancel",
-                        "",
-                        self.tr("shell-cancel-layout-action"),
-                        cx,
-                        |this, window, cx| {
-                            this.layout_action = None;
-                            this.focus_layout(window, cx);
-                            cx.notify();
-                        },
-                    ))
+                    .child(
+                        IconButton::new(
+                            "layout-action-cancel",
+                            "",
+                            self.tr("shell-cancel-layout-action"),
+                        )
+                        .build(
+                            IconButtonStyle::Surface,
+                            IconButtonDensity::Regular,
+                            cx,
+                            |this, window, cx| {
+                                this.layout_action = None;
+                                this.focus_layout(window, cx);
+                                cx.notify();
+                            },
+                        ),
+                    )
                     .child(if matches!(action, Action::Delete(_)) {
                         rivu_ui::danger_control(
                             theme,
@@ -212,10 +214,9 @@ impl GuiApp {
                             }),
                         )
                     } else {
-                        icon_button(
-                            "layout-action-submit",
-                            "",
-                            submit,
+                        IconButton::new("layout-action-submit", "", submit).build(
+                            IconButtonStyle::Surface,
+                            IconButtonDensity::Regular,
                             cx,
                             |this, window, cx| this.finish_layout_action(window, cx),
                         )
@@ -260,24 +261,21 @@ impl GuiApp {
                 } else {
                     let name = name.to_owned();
                     choice = choice.child(
-                        rivu_ui::quiet_icon_button(
-                            theme,
-                            icon_button(
-                                ("layout-delete", index),
-                                "󰆴",
-                                self.i18n.format(
-                                    "shell-delete-layout-hint",
-                                    &[("name", name.as_str().into())],
-                                ),
-                                cx,
-                                move |this, window, cx| {
-                                    this.begin_layout_action(
-                                        Action::Delete(name.clone()),
-                                        window,
-                                        cx,
-                                    )
-                                },
+                        IconButton::new(
+                            ("layout-delete", index),
+                            "󰆴",
+                            self.i18n.format(
+                                "shell-delete-layout-hint",
+                                &[("name", name.as_str().into())],
                             ),
+                        )
+                        .build(
+                            IconButtonStyle::Quiet,
+                            IconButtonDensity::Regular,
+                            cx,
+                            move |this, window, cx| {
+                                this.begin_layout_action(Action::Delete(name.clone()), window, cx)
+                            },
                         )
                         .flex_shrink_0()
                         .opacity(0.)
@@ -303,33 +301,45 @@ impl GuiApp {
                 )
                 .child(
                     row()
-                        .child(icon_button(
-                            "layout-duplicate",
-                            "",
-                            self.tr("shell-duplicate-layout-as"),
-                            cx,
-                            |this, window, cx| {
-                                this.begin_layout_action(Action::Duplicate, window, cx)
-                            },
-                        ))
-                        .child(icon_button(
-                            "layout-rename",
-                            "󰏫",
-                            self.tr("shell-rename-layout"),
-                            cx,
-                            |this, window, cx| this.begin_layout_action(Action::Rename, window, cx),
-                        ))
-                        .child(icon_button(
-                            "layout-sync",
-                            "󱈖",
-                            self.tr("shell-sync-layouts"),
-                            cx,
-                            |this, window, cx| {
-                                this.cancel_interaction(window, cx);
-                                this.workspace.request_save();
-                                cx.notify();
-                            },
-                        )),
+                        .child(
+                            IconButton::new(
+                                "layout-duplicate",
+                                "",
+                                self.tr("shell-duplicate-layout-as"),
+                            )
+                            .build(
+                                IconButtonStyle::Surface,
+                                IconButtonDensity::Regular,
+                                cx,
+                                |this, window, cx| {
+                                    this.begin_layout_action(Action::Duplicate, window, cx)
+                                },
+                            ),
+                        )
+                        .child(
+                            IconButton::new("layout-rename", "󰏫", self.tr("shell-rename-layout"))
+                                .build(
+                                    IconButtonStyle::Surface,
+                                    IconButtonDensity::Regular,
+                                    cx,
+                                    |this, window, cx| {
+                                        this.begin_layout_action(Action::Rename, window, cx)
+                                    },
+                                ),
+                        )
+                        .child(
+                            IconButton::new("layout-sync", "󱈖", self.tr("shell-sync-layouts"))
+                                .build(
+                                    IconButtonStyle::Surface,
+                                    IconButtonDensity::Regular,
+                                    cx,
+                                    |this, window, cx| {
+                                        this.cancel_interaction(window, cx);
+                                        this.workspace.request_save();
+                                        cx.notify();
+                                    },
+                                ),
+                        ),
                 );
         }
         match self.workspace.save_status {

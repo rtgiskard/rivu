@@ -10,7 +10,7 @@ use crate::{
 };
 use gpui::{prelude::*, *};
 use rivu_ui::{
-    button, caption, checkbox, column, disabled_control,
+    FormField, button, caption, checkbox, column, disabled_control,
     input::{Input, InputEvent},
     row, scrollable_area,
 };
@@ -554,11 +554,9 @@ impl AudioProcessing {
                 !enabled,
             ));
         }
-        column()
+        FormField::new(theme, label, control)
+            .into_div()
             .min_w_0()
-            .gap_1()
-            .child(caption(theme, label))
-            .child(control)
             .opacity(if enabled { 1. } else { 0.5 })
     }
 

@@ -194,7 +194,11 @@ mod tests {
     }
 }
 
-use crate::{caption, list_row};
+use crate::{
+    caption,
+    control::{IconButton, IconButtonDensity, IconButtonStyle},
+    list_row,
+};
 use gpui::{Div, ElementId, SharedString, Stateful, prelude::*};
 
 /// Host-localized labels for a page placeholder and its recovery actions.
@@ -227,23 +231,21 @@ pub fn paged_loading_row<T: 'static>(
             |row, error| {
                 row.role(gpui::Role::Group)
                     .aria_label(error.clone())
-                    .child(crate::quiet_icon_button(
-                        theme,
-                        crate::icon_button(
-                            "copy-error",
-                            "⧉",
-                            labels.copy_error,
-                            cx,
-                            move |_, _, cx| {
-                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                                    error.to_string(),
-                                ));
-                            },
-                        ),
+                    .child(IconButton::new("copy-error", "⧉", labels.copy_error).build(
+                        IconButtonStyle::Quiet,
+                        IconButtonDensity::Regular,
+                        cx,
+                        move |_, _, cx| {
+                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                error.to_string(),
+                            ));
+                        },
                     ))
-                    .child(crate::quiet_icon_button(
-                        theme,
-                        crate::icon_button("retry", "󰑐", labels.retry, cx, retry),
+                    .child(IconButton::new("retry", "󰑐", labels.retry).build(
+                        IconButtonStyle::Quiet,
+                        IconButtonDensity::Regular,
+                        cx,
+                        retry,
                     ))
             },
         )
