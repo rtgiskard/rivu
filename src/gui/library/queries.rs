@@ -484,6 +484,16 @@ mod tests {
         assert_eq!(library.search_counts(), Some((3, 5)));
         assert_eq!(library.root_count_label(&parent), "1 / 2");
         assert_eq!(library.root_count_label(&sibling), "1 / 2");
+        library.refresh_search("not indexed".into());
+        let (_, request) = library.prepare_search_counts(&roots, revisions);
+        let request = request.unwrap();
+        let result = super::library_search_counts(&runtime.handle, &request).unwrap();
+        assert_eq!(result.totals, (0, 5));
+        assert_eq!(result.other_tracks, (0, 1));
+        assert!(library.accept_search_counts(request, &roots, revisions, Some(result)));
+        assert!(!library.other_tracks_empty());
+        assert_eq!(library.tree().root_total(), Some(3));
+        library.refresh_search("needle".into());
         for root in &roots {
             runtime
                 .handle

@@ -14,7 +14,12 @@ impl GuiApp {
         let is_error = error.is_some();
         let message: SharedString = match error {
             Some(error) => error.clone().into(),
-            None if self.state.system.scanning => self.state.system.scan_message.clone().into(),
+            None if self.state.system.scanning
+                && self.state.system.scan_owner
+                    != Some(crate::projection::MediaTaskOwner::Library) =>
+            {
+                self.state.system.scan_message.clone().into()
+            }
             None => return None,
         };
         let theme = rivu_ui::theme::palette(cx);

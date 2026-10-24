@@ -33,6 +33,7 @@ fn display_changed(previous: &GuiSnapshot, next: &GuiSnapshot) -> bool {
         || previous.playback.status != next.playback.status
         || previous.system.scanning != next.system.scanning
         || previous.system.scan_task_id != next.system.scan_task_id
+        || previous.system.scan_owner != next.system.scan_owner
         || previous.system.scan_message != next.system.scan_message
         || previous.system.scan_progress != next.system.scan_progress
         || previous.system.shutting_down != next.system.shutting_down
@@ -62,6 +63,7 @@ impl Library {
             library_search,
             requests: Default::default(),
             loading_text: rivu_ui::loading::LoadingText::new(std::time::Duration::from_millis(150)),
+            scan_error: None,
             visible: false,
             available: false,
             focused: false,
@@ -185,6 +187,32 @@ impl Library {
     }
 
     pub(super) fn send(&mut self, command: Command, cx: &mut Context<Self>) {
+        if matches!(
+            command,
+            Command::Scan { .. } | Command::CheckOtherTracks { .. }
+        ) {
+            self.scan_error = None;
+            let handle = self.context.handle().clone();
+            cx.spawn(async move |this, cx| {
+                let ack = cx
+                    .background_executor()
+                    .spawn(async move { handle.request_ack(command) })
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    if !ack.is_success() {
+                        this.scan_error = Some(
+                            ack.error
+                                .unwrap_or_else(|| this.i18n.text("gl-scan-failed").to_owned()),
+                        );
+                    }
+                    this.refresh(cx);
+                    cx.notify();
+                });
+            })
+            .detach();
+            cx.notify();
+            return;
+        }
         if let Err(error) = self.context.handle().send(command) {
             self.report_error(format!("{error:#}"), cx);
         }

@@ -92,7 +92,7 @@ impl Library {
             .iter()
             .enumerate()
             .find(|(_, root)| track.path.starts_with(root))
-            .map(|(index, root)| (index + 1, root.clone()));
+            .map(|(index, root)| (index, root.clone()));
         cx.emit(LibraryEvent::Reveal);
         if !self.available {
             return;
@@ -105,7 +105,9 @@ impl Library {
         }
         self.library.locate.invalidate();
         let other_tracks = root.is_none();
-        let (root_index, mut path) = root.unwrap_or_default();
+        let (root_index, mut path) = root
+            .map(|(index, path)| (Some(index), path))
+            .unwrap_or_default();
         let revisions = self.state.query_revisions(None);
         let buffer = self.library.buffer();
         let query = buffer.query.clone();

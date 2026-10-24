@@ -114,6 +114,7 @@ impl Queue {
             || self.state.queue.current_position != state.queue.current_position;
         let media_task_changed = self.state.system.scanning != state.system.scanning
             || self.state.system.scan_task_id != state.system.scan_task_id
+            || self.state.system.scan_owner != state.system.scan_owner
             || self.state.system.scan_progress != state.system.scan_progress
             || self.state.system.scan_message != state.system.scan_message;
         self.state = state;

@@ -31,7 +31,7 @@ use rivu_ui::{
     VirtualList, caption, column, danger_control, hover_actions,
     input::{Input, InputEvent},
     list_panel_header, list_row, list_row_height, list_viewport, panel_header,
-    panel_header_actions, panel_heading_row, panel_surface, panel_toolbar, row,
+    panel_header_actions, panel_heading_row, panel_surface, row,
     search::{SearchEvent, SearchField},
     status_message,
 };
@@ -189,6 +189,11 @@ impl Playlists {
             || self.state.library.playlist_total != state.library.playlist_total
             || self.state.current_track().map(|track| track.id)
                 != state.current_track().map(|track| track.id)
+            || self.state.system.scanning != state.system.scanning
+            || self.state.system.scan_owner != state.system.scan_owner
+            || self.state.system.scan_task_id != state.system.scan_task_id
+            || self.state.system.scan_progress != state.system.scan_progress
+            || self.state.system.scan_message != state.system.scan_message
             || self.state.system.shutting_down != state.system.shutting_down;
         self.browser
             .configure_page_size(state.system.config.page_size as usize);
@@ -1354,29 +1359,26 @@ impl Playlists {
                     .max_h(gpui::relative(1. / 3.))
             }));
         if let Some(playlist_id) = playlist_id {
-            lists = lists.child(
-                panel_toolbar()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .on_mouse_down(
-                                gpui::MouseButton::Left,
-                                cx.listener(|this, _, _, cx| this.focus_list(cx)),
-                            )
-                            .child(caption(
-                                theme,
-                                total.map_or_else(
-                                    || "—".to_owned(),
-                                    |count| {
-                                        self.i18n
-                                            .format("gl-track-count", &[("count", count.into())])
-                                    },
-                                ),
-                            )),
+            lists = lists.child(panel_heading_row(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(|this, _, _, cx| this.focus_list(cx)),
                     )
-                    .child(self.playlist_entries_search.clone()),
-            );
+                    .child(caption(
+                        theme,
+                        total.map_or_else(
+                            || "—".to_owned(),
+                            |count| {
+                                self.i18n
+                                    .format("gl-track-count", &[("count", count.into())])
+                            },
+                        ),
+                    )),
+                panel_header_actions().child(self.playlist_entries_search.clone()),
+            ));
             self.context.scroll.borrow_mut().register_list(
                 ("playlist-entries", panel_id),
                 &self.browser.playlists().entries().scroll,
@@ -1986,6 +1988,20 @@ impl Playlists {
                         ),
                     ),
             ))
+            .when(
+                self.state
+                    .system
+                    .scan_visible(crate::projection::MediaTaskOwner::Playlist),
+                |panel| {
+                    panel.child(crate::gui::components::media_task::media_task_status(
+                        &self.state.system,
+                        &self.i18n,
+                        panel_id,
+                        cx,
+                        Self::send,
+                    ))
+                },
+            )
             .when(selection_unavailable, |panel| panel.child(selection_status))
             .when_some(summary_status, |panel, status| panel.child(status))
             .child(lists)

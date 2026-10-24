@@ -96,24 +96,8 @@ impl Library {
             .library
             .prepare_directory(branch.clone(), offset, page_size, generation);
         if branch.is_forest() {
-            self.library.accept_directory(
-                &branch,
-                generation,
-                crate::model::Page {
-                    total: roots.len() + 1,
-                    rows: std::iter::once(crate::model::DirectoryRow::OtherTracks)
-                        .chain(
-                            roots
-                                .iter()
-                                .map(|path| crate::model::DirectoryRow::Directory {
-                                    path: path.clone(),
-                                }),
-                        )
-                        .skip(offset)
-                        .take(page_size)
-                        .collect(),
-                },
-            );
+            let page = self.library.forest_page(roots, offset, page_size);
+            self.library.accept_directory(&branch, generation, page);
             return DirectoryRequest {
                 published: true,
                 read: None,
@@ -369,7 +353,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn other_collection_is_present_without_roots_and_uses_its_own_query(
+    fn other_collection_is_present_while_total_unknown_and_uses_its_own_query(
         cx: &mut gpui::TestAppContext,
     ) {
         with_library(cx, |browser| {
@@ -405,6 +389,36 @@ mod tests {
         });
     }
 
+    #[gpui::test]
+    fn forest_pages_keep_configured_root_order_and_append_other(cx: &mut gpui::TestAppContext) {
+        with_library(cx, |browser| {
+            let roots = vec!["/b".into(), "/a".into(), "/b/child".into()];
+            let forest = library::TreeBranch::default();
+            for offset in [0, 2] {
+                let request = browser.prepare_directory_read(
+                    forest.clone(),
+                    offset,
+                    2,
+                    &roots,
+                    QueryRevisions::default(),
+                );
+                assert!(request.published);
+                assert!(request.read.is_none());
+            }
+            assert_eq!(browser.library.tree().root_total(), Some(4));
+            for (index, root) in roots.iter().enumerate() {
+                assert!(matches!(
+                    browser.library.tree().cached_row(&forest, index),
+                    Some(crate::model::DirectoryRow::Directory { path }) if path == root
+                ));
+            }
+            assert!(matches!(
+                browser.library.tree().cached_row(&forest, roots.len()),
+                Some(crate::model::DirectoryRow::OtherTracks)
+            ));
+        });
+    }
+
     fn root_branches(
         browser: &mut Library,
         roots: &[std::path::PathBuf],
@@ -418,7 +432,7 @@ mod tests {
         );
         assert!(request.published);
         assert!(request.read.is_none());
-        (1..=roots.len())
+        (0..roots.len())
             .map(|index| {
                 let library::tree::TreeItem::Entry(entry) =
                     browser.library.tree().item(index).unwrap()

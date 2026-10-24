@@ -510,7 +510,8 @@ impl LibraryBrowser {
                 let result = match &slice.source {
                     Source::Tree(branch) if branch.is_forest() => {
                         if self.tree.root_total() != Some(slice.total)
-                            || slice.offset + slice.len > roots.len() + 1
+                            || (slice.total != roots.len() && slice.total != roots.len() + 1)
+                            || slice.offset + slice.len > slice.total
                         {
                             Err(SelectionError::Message("gl-library-roots-changed"))
                         } else if let Some(rows) = self
@@ -519,15 +520,15 @@ impl LibraryBrowser {
                         {
                             rows.iter().try_for_each(|row| job.add_row(&slice, row))
                         } else {
-                            std::iter::once(DirectoryRow::OtherTracks)
-                                .chain(
-                                    roots
-                                        .iter()
-                                        .map(|path| DirectoryRow::Directory { path: path.clone() }),
-                                )
-                                .skip(slice.offset)
-                                .take(slice.len)
-                                .try_for_each(|row| job.add_row(&slice, &row))
+                            super::tree::forest_page(
+                                roots,
+                                slice.total > roots.len(),
+                                slice.offset,
+                                slice.len,
+                            )
+                            .rows
+                            .iter()
+                            .try_for_each(|row| job.add_row(&slice, row))
                         }
                     }
                     Source::Tree(branch) | Source::Flat(branch) => self
@@ -1228,6 +1229,55 @@ mod tests {
         );
         library.expand_directory(&root, false);
         assert!(library.tree.expanded(&overlapping));
+    }
+
+    #[test]
+    fn evicted_forest_ranges_preserve_root_order_and_optional_last_other_without_queries() {
+        for other_tracks in [false, true] {
+            let mut library = LibraryBrowser::default();
+            let roots: Vec<_> = (0..34)
+                .map(|index| std::path::PathBuf::from(format!("/root/{index}")))
+                .collect();
+            let forest = TreeBranch::default();
+            let total = roots.len() + usize::from(other_tracks);
+            for offset in (0..total).step_by(2) {
+                let generation = offset as u64 + 1;
+                library.prepare_directory(forest.clone(), offset, 2, generation);
+                library.accept_directory(
+                    &forest,
+                    generation,
+                    super::super::tree::forest_page(&roots, other_tracks, offset, 2),
+                );
+            }
+            assert!(library.tree.cached_row(&forest, 0).is_none());
+            let first = LibraryNode::Directory(Arc::from(roots[0].as_path()));
+            publish_row(&mut library, first, 0);
+            let endpoint = if other_tracks {
+                LibraryNode::OtherTracks
+            } else {
+                LibraryNode::Directory(Arc::from(roots.last().unwrap().as_path()))
+            };
+            assert!(
+                library
+                    .start_range_selection(&endpoint, total - 1, false, revisions(7, 3), 2)
+                    .unwrap()
+            );
+            let RangeStep::Selected(commit) =
+                library.advance_range(revisions(7, 3), &roots).unwrap()
+            else {
+                panic!("forest headers are reconstructed locally, not queried");
+            };
+            library.publish_selection(commit);
+            let mut expected: HashSet<_> = roots
+                .iter()
+                .map(|path| LibraryNode::Directory(Arc::from(path.as_path())))
+                .collect();
+            if other_tracks {
+                expected.insert(LibraryNode::OtherTracks);
+            }
+            assert_eq!(library.selected_nodes(), &expected);
+            assert_eq!(library.tree.selected_index(), Some(total - 1));
+        }
     }
 
     fn job(start: usize, end: usize, additive: bool) -> RangeJob {

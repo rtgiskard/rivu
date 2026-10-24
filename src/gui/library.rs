@@ -11,9 +11,9 @@ use crate::{
     config::{LibraryColumn, LibraryColumns},
     model::{Command, DirectoryRow, LibraryRow},
 };
-use gpui::{AnyElement, Context, Div, Render, SharedString, Window, div, prelude::*, px, rgb};
+use gpui::{AnyElement, Context, Render, SharedString, Window, div, prelude::*, px, rgb};
 use rivu_ui::{
-    IconButton, IconButtonDensity, IconButtonStyle, VirtualList, button, caption, column,
+    IconButton, IconButtonDensity, IconButtonStyle, VirtualList, button, caption,
     list_panel_header, list_viewport, panel_surface, row,
 };
 use std::{path::Path, sync::Arc};
@@ -57,6 +57,7 @@ pub(in crate::gui) struct Library {
     library_search: gpui::Entity<rivu_ui::search::SearchField>,
     requests: requests::LibraryRequests,
     loading_text: rivu_ui::loading::LoadingText<TreeBranch>,
+    scan_error: Option<String>,
     visible: bool,
     available: bool,
     focused: bool,
@@ -621,7 +622,7 @@ impl Library {
                             DirectoryRow::OtherTracks => (
                                 LibraryNode::OtherTracks,
                                 this.i18n.text("library-other").to_owned(),
-                                if visible.status == BranchStatus::Empty && this.library.other_tracks_empty() { this.i18n.text("library-other-empty").to_owned() } else { String::new() },
+                                String::new(),
                                 None,
                             ),
                             DirectoryRow::Directory { path } => {
@@ -651,7 +652,7 @@ impl Library {
                             DirectoryRow::Track(track) => (
                                 LibraryNode::Track(track.id),
                                 track.title.clone(),
-                                if visible.other_tracks { track.path.parent().map(|path| path.display().to_string()).unwrap_or_default() } else { String::new() },
+                                String::new(),
                                 None,
                             ),
                         };
@@ -807,11 +808,7 @@ impl Library {
                                         "library-track-row",
                                         selected,
                                     )
-                                        .bg(rivu_ui::row_background(theme, selected, false))
                                         .when(retry_counts, |view| view.opacity(1.))
-                                        .group_hover("library-track-row", move |style| {
-                                            style.bg(rivu_ui::row_background(theme, selected, true))
-                                        })
                                         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                                         .on_click(|_, _, cx| cx.stop_propagation())
                                         .child(scan),
@@ -976,149 +973,6 @@ impl Library {
 }
 
 impl Library {
-    fn library_scan_status(&self, panel_id: u64, cx: &mut Context<Self>) -> Div {
-        let theme = rivu_ui::theme::palette(cx);
-        use crate::model::ScanPhase;
-        let progress = self.state.system.scan_progress.as_ref();
-        let header_text = progress.map_or_else(
-            || self.i18n.text("gl-scanning").to_owned(),
-            |progress| {
-                let phase = match progress.phase {
-                    ScanPhase::Discovering => self.i18n.text("gl-scan-discovering"),
-                    ScanPhase::ReadingMetadata => self.i18n.text("gl-scan-metadata"),
-                    ScanPhase::Saving => self.i18n.text("gl-scan-saving"),
-                    ScanPhase::Completed => self.i18n.text("gl-scan-completed"),
-                    ScanPhase::Failed => self.i18n.text("gl-scan-failed"),
-                    ScanPhase::Cancelled => self.i18n.text("gl-scan-cancelled"),
-                };
-                match progress.total {
-                    Some(total) => self.i18n.format(
-                        "gl-scan-progress",
-                        &[
-                            ("phase", (phase).into()),
-                            ("processed", (progress.processed).into()),
-                            ("total", (total).into()),
-                            ("errors", (progress.errors).into()),
-                        ],
-                    ),
-                    None => self.i18n.format(
-                        "gl-scan-found",
-                        &[
-                            ("phase", (phase).into()),
-                            ("processed", (progress.processed).into()),
-                            ("errors", (progress.errors).into()),
-                        ],
-                    ),
-                }
-            },
-        );
-        let dismissible = !self.state.system.scanning
-            && progress.is_some_and(|progress| {
-                matches!(
-                    progress.phase,
-                    ScanPhase::Completed | ScanPhase::Failed | ScanPhase::Cancelled
-                )
-            });
-        let dismiss = div()
-            .min_w_8()
-            .min_h_8()
-            .flex_shrink_0()
-            .when(dismissible, |slot| {
-                slot.child(
-                    IconButton::new(
-                        ("dismiss-scan-result", panel_id),
-                        "",
-                        self.tr("gl-dismiss-scan"),
-                    )
-                    .build(
-                        IconButtonStyle::Quiet,
-                        IconButtonDensity::Regular,
-                        cx,
-                        |this, _, cx| this.send(Command::DismissScanResult, cx),
-                    ),
-                )
-            });
-        let mut bar = div()
-            .w_full()
-            .h(px(3.))
-            .flex_shrink_0()
-            .bg(rgb(theme.border));
-        if let Some(progress) = progress
-            && let Some(total) = progress.total.filter(|total| *total > 0)
-        {
-            let fraction = (progress.processed as f32 / total as f32).clamp(0., 1.);
-            bar = bar.child(div().h_full().w(gpui::relative(fraction)).bg(rgb(
-                if progress.phase == ScanPhase::Failed {
-                    theme.error
-                } else {
-                    theme.accent
-                },
-            )));
-        }
-        let path: SharedString = progress
-            .and_then(|progress| progress.path.as_ref())
-            .map(|path| path.to_string_lossy().into_owned())
-            .unwrap_or_default()
-            .into();
-        let message: SharedString = self.state.system.scan_message.clone().into();
-        // Keep every scan phase in the same cells; only dismissal removes the surface.
-        column()
-            .gap_1()
-            .min_w_0()
-            .flex_shrink_0()
-            .child(
-                row()
-                    .min_h_8()
-                    .flex_shrink_0()
-                    .child(caption(theme, header_text).flex_1().min_w_0().truncate())
-                    .when_some(
-                        self.state
-                            .system
-                            .scan_task_id
-                            .filter(|_| self.state.system.scanning),
-                        |view, id| {
-                            view.child(
-                                IconButton::new(
-                                    ("library-cancel-media-task", panel_id),
-                                    "󰜺",
-                                    self.tr("library-cancel-task"),
-                                )
-                                .enabled(
-                                    progress
-                                        .is_none_or(|progress| progress.phase != ScanPhase::Saving),
-                                )
-                                .build(
-                                    IconButtonStyle::Quiet,
-                                    IconButtonDensity::Regular,
-                                    cx,
-                                    move |this, _, cx| this.send(Command::CancelScan { id }, cx),
-                                ),
-                            )
-                        },
-                    )
-                    .child(dismiss),
-            )
-            .child(bar)
-            .child(
-                caption(theme, path.clone())
-                    .id(("scan-path", panel_id))
-                    .min_h_5()
-                    .flex_shrink_0()
-                    .min_w_0()
-                    .truncate()
-                    .tooltip(rivu_ui::text_tooltip(path)),
-            )
-            .child(
-                caption(theme, message.clone())
-                    .id(("scan-message", panel_id))
-                    .min_h_5()
-                    .flex_shrink_0()
-                    .min_w_0()
-                    .truncate()
-                    .tooltip(rivu_ui::text_tooltip(message)),
-            )
-    }
-
     pub(super) fn render_panel(
         &mut self,
         panel_id: u64,
@@ -1268,60 +1122,6 @@ impl Library {
                     cx,
                     |this, _, cx| this.choose_library_root(cx),
                 ),
-            )
-            .child(
-                IconButton::new(
-                    ("library-sort", panel_id),
-                    "󰒺",
-                    self.tr(match self.library.buffer().sort {
-                        crate::model::LibrarySort::Id => "library-sort-id",
-                        crate::model::LibrarySort::Album => "library-sort-album",
-                        crate::model::LibrarySort::MostPlayed => "library-sort-played",
-                    }),
-                )
-                .build(
-                    IconButtonStyle::Surface,
-                    IconButtonDensity::Regular,
-                    cx,
-                    |this, _, cx| {
-                        this.library.buffer.sort = match this.library.buffer.sort {
-                            crate::model::LibrarySort::Id => crate::model::LibrarySort::Album,
-                            crate::model::LibrarySort::Album => {
-                                crate::model::LibrarySort::MostPlayed
-                            }
-                            crate::model::LibrarySort::MostPlayed => crate::model::LibrarySort::Id,
-                        };
-                        this.refresh_filter(cx);
-                    },
-                ),
-            )
-            .child(
-                IconButton::new(
-                    ("other-tracks-check", panel_id),
-                    "󰑐",
-                    self.tr("library-other-check"),
-                )
-                .enabled(!self.state.system.scanning)
-                .build(
-                    IconButtonStyle::Surface,
-                    IconButtonDensity::Regular,
-                    cx,
-                    |this, _, cx| this.send(Command::CheckOtherTracks { force: false }, cx),
-                ),
-            )
-            .child(
-                IconButton::new(
-                    ("other-tracks-force", panel_id),
-                    "󱉶",
-                    self.tr("library-other-force"),
-                )
-                .enabled(!self.state.system.scanning)
-                .build(
-                    IconButtonStyle::Surface,
-                    IconButtonDensity::Regular,
-                    cx,
-                    |this, _, cx| this.send(Command::CheckOtherTracks { force: true }, cx),
-                ),
             );
         let mut panel = panel_surface(("library-panel", panel_id))
             .child(rivu_ui::panel_heading_row(heading, tools));
@@ -1360,8 +1160,44 @@ impl Library {
         if self.state.library.track_total == 0 {
             panel = panel.child(caption(theme, self.tr("library-other-empty")));
         }
-        if self.state.system.scan_progress.is_some() || self.state.system.scanning {
-            panel = panel.child(self.library_scan_status(panel_id, cx));
+        if self
+            .state
+            .system
+            .scan_visible(crate::projection::MediaTaskOwner::Library)
+        {
+            panel = panel.child(crate::gui::components::media_task::media_task_status(
+                &self.state.system,
+                &self.i18n,
+                panel_id,
+                cx,
+                Self::send,
+            ));
+        }
+        if let Some(error) = &self.scan_error {
+            let message: SharedString = error.clone().into();
+            panel = panel.child(rivu_ui::panel_heading_row(
+                caption(theme, message.clone())
+                    .id(("library-scan-request-error", panel_id))
+                    .text_color(rgb(theme.error))
+                    .truncate()
+                    .tooltip(rivu_ui::text_tooltip(message)),
+                rivu_ui::panel_header_actions().child(
+                    IconButton::new(
+                        ("library-dismiss-scan-request-error", panel_id),
+                        "",
+                        self.tr("gl-dismiss-scan"),
+                    )
+                    .build(
+                        IconButtonStyle::Quiet,
+                        IconButtonDensity::Regular,
+                        cx,
+                        |this, _, cx| {
+                            this.scan_error = None;
+                            cx.notify();
+                        },
+                    ),
+                ),
+            ));
         }
         self.context.scroll.borrow_mut().register_list(
             ("library-projection", panel_id),
@@ -1427,19 +1263,19 @@ mod library_root_tests {
     fn assert_roots(window: &mut VisualTestContext, app: &Entity<Library>, roots: &[PathBuf]) {
         app.update(&mut window.cx, |this, _| {
             let tree = this.library.tree();
-            assert!(matches!(tree.item(0), Some(TreeItem::Entry(row)) if matches!(row.row, DirectoryRow::OtherTracks)));
             let rendered = (0..tree.row_count())
-                .filter_map(|index| match tree.item(index) {
+                .map(|index| match tree.item(index) {
                     Some(TreeItem::Entry(row)) if row.depth == 0 => match row.row {
-                        DirectoryRow::Directory { path } => Some(path),
-                        DirectoryRow::OtherTracks => None,
+                        DirectoryRow::Directory { path } => path,
+                        DirectoryRow::OtherTracks => {
+                            panic!("empty Other collection remains visible")
+                        }
                         DirectoryRow::Track(_) => panic!("forest contains a track"),
                     },
                     _ => panic!("configured root was not projected by viewport demand"),
                 })
                 .collect::<Vec<_>>();
             assert_eq!(rendered, roots);
-            assert_eq!((0..tree.row_count()).filter(|index| matches!(tree.item(*index), Some(TreeItem::Entry(row)) if matches!(row.row, DirectoryRow::OtherTracks))).count(), 1);
             assert_eq!(this.library.search_counts(), Some((0, 0)));
             assert_eq!(this.state.library.track_total, 0);
             assert!(!this.state.system.scanning);

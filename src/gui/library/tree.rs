@@ -10,6 +10,24 @@ use std::{
 // visible demand plus unverified ancestry. Expansion identities are independent.
 const MAX_CACHED_PAGES: usize = 16;
 
+pub(super) fn forest_page(
+    roots: &[PathBuf],
+    other_tracks: bool,
+    offset: usize,
+    limit: usize,
+) -> Page<DirectoryRow> {
+    Page {
+        total: roots.len() + usize::from(other_tracks),
+        rows: roots
+            .iter()
+            .map(|path| DirectoryRow::Directory { path: path.clone() })
+            .chain(other_tracks.then_some(DirectoryRow::OtherTracks))
+            .skip(offset)
+            .take(limit)
+            .collect(),
+    }
+}
+
 /// A directory occurrence belongs to one configured root, even when roots overlap.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(in crate::gui) struct TreeBranch {
@@ -427,6 +445,51 @@ impl DirectoryTree {
         self.branches
             .get(&TreeBranch::default())
             .and_then(|branch| branch.total)
+    }
+
+    /// Only the optional tail changes; keep physical-root pages and expansions.
+    pub(super) fn sync_forest(&mut self, roots: &[PathBuf], other_tracks: bool) -> bool {
+        let total = roots.len() + usize::from(other_tracks);
+        if self.root_total() == Some(total) {
+            return false;
+        }
+        let forest = TreeBranch::default();
+        let offset = roots.len() / self.page_size * self.page_size;
+        self.begin(forest.clone(), offset, 0);
+        self.accept(
+            &forest,
+            0,
+            forest_page(roots, other_tracks, offset, self.page_size),
+        );
+        if !other_tracks {
+            let other = forest
+                .child_row(roots.len(), &DirectoryRow::OtherTracks)
+                .unwrap();
+            if let Some(branch) = self.branches.get_mut(&other) {
+                branch.pending = None;
+            }
+            self.pages.retain(|(candidate, _), _| candidate != &other);
+            self.demanded.retain(|(candidate, _)| candidate != &other);
+            self.selected_locations
+                .retain(|(_, branch), _| branch != &other);
+            if self
+                .navigation_target
+                .as_ref()
+                .is_some_and(|(branch, index)| {
+                    branch == &other || (branch.is_forest() && *index >= total)
+                })
+            {
+                self.navigation_target = None;
+            }
+            if self
+                .focused
+                .as_ref()
+                .is_some_and(|key| !self.selected_locations.contains_key(key))
+            {
+                self.focused = None;
+            }
+        }
+        true
     }
 
     pub(in crate::gui) fn clear(&mut self) {
@@ -928,21 +991,27 @@ impl DirectoryTree {
     /// Only one ancestry chain is retained; payloads still use the bounded page LRU.
     pub(in crate::gui) fn reveal_playing(
         &mut self,
-        root_index: usize,
+        root_index: Option<usize>,
         roots: &[PathBuf],
+        other_tracks: bool,
         locations: &[crate::model::LibraryLocation],
     ) -> Option<(TreeBranch, usize)> {
-        let row = if root_index == 0 {
-            DirectoryRow::OtherTracks
+        let (root_index, row) = if let Some(index) = root_index {
+            (
+                index,
+                DirectoryRow::Directory {
+                    path: roots.get(index)?.clone(),
+                },
+            )
         } else {
-            DirectoryRow::Directory {
-                path: roots.get(root_index - 1)?.clone(),
-            }
+            (roots.len(), DirectoryRow::OtherTracks)
         };
         let forest = TreeBranch::default();
         let entry = self.branches.entry(forest.clone()).or_default();
-        entry.total = Some(roots.len() + 1);
-        entry.layout_len = roots.len() + 1;
+        let total =
+            roots.len() + usize::from(other_tracks || matches!(row, DirectoryRow::OtherTracks));
+        entry.total = Some(total);
+        entry.layout_len = total;
         let mut branch = forest.child_row(root_index, &row)?;
         self.attach(&forest, root_index, &branch);
         for location in locations {
@@ -1065,6 +1134,71 @@ impl DirectoryTree {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reveal_uses_zero_based_roots_and_keeps_other_at_the_optional_tail() {
+        let mut tree = DirectoryTree::default();
+        let roots = vec![PathBuf::from("/a"), PathBuf::from("/b")];
+        let locations = [crate::model::LibraryLocation {
+            offset: 0,
+            total: 1,
+            child: None,
+        }];
+        let (first, offset) = tree
+            .reveal_playing(Some(0), &roots, false, &locations)
+            .unwrap();
+        assert_eq!(first.root, Some(0));
+        assert_eq!(first.path(), Path::new("/a"));
+        assert_eq!(tree.location_index(&first, offset), Some(1));
+        assert_eq!(tree.root_total(), Some(2));
+        let (second, offset) = tree
+            .reveal_playing(Some(1), &roots, false, &locations)
+            .unwrap();
+        assert_eq!(second.root, Some(1));
+        assert_eq!(second.path(), Path::new("/b"));
+        assert_eq!(tree.location_index(&second, offset), Some(3));
+        let (other, offset) = tree.reveal_playing(None, &roots, true, &locations).unwrap();
+        assert!(other.is_other_tracks());
+        assert_eq!(tree.location_index(&other, offset), Some(5));
+        assert_eq!(tree.root_total(), Some(3));
+
+        let mut without_roots = DirectoryTree::default();
+        let (other, offset) = without_roots
+            .reveal_playing(None, &[], true, &locations)
+            .unwrap();
+        assert!(other.is_other_tracks());
+        assert_eq!(without_roots.location_index(&other, offset), Some(1));
+        assert_eq!(without_roots.root_total(), Some(1));
+    }
+
+    #[test]
+    fn forest_tail_changes_preserve_root_pages_focus_and_cancel_removed_other_demand() {
+        let mut tree = DirectoryTree::default();
+        tree.configure_page_size(2);
+        let roots = vec![PathBuf::from("/a"), PathBuf::from("/b")];
+        let forest = TreeBranch::default();
+        tree.begin(forest.clone(), 0, 1);
+        tree.accept(&forest, 1, forest_page(&roots, true, 0, 2));
+        assert!(tree.sync_forest(&roots, false));
+        assert!(tree.cached_rows(&forest, 0..2).is_some());
+        assert_eq!(tree.root_total(), Some(2));
+        assert!(tree.sync_forest(&roots, true));
+        let TreeItem::Entry(entry) = tree.item(2).unwrap() else {
+            panic!("Other follows the last root across a page boundary");
+        };
+        let other = entry.branch.unwrap();
+        tree.expand(&other);
+        tree.begin(other.clone(), 0, 2);
+        let selected = super::super::LibraryNode::Directory(std::sync::Arc::from(Path::new("/b")));
+        tree.focus_selection(&selected, 1);
+        assert!(tree.sync_forest(&roots, false));
+        assert!(!tree.request_pending(&other, 2));
+        assert_eq!(tree.selected_index(), Some(1));
+        assert_eq!(tree.row_count(), 2);
+        assert!(tree.cached_rows(&forest, 0..2).is_some());
+        assert!(!tree.accept(&other, 2, page(&[], 0)));
+        assert!(!tree.sync_forest(&roots, false));
+    }
 
     fn branch(path: &str) -> TreeBranch {
         if path.is_empty() {

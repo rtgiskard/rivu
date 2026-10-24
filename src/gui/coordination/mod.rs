@@ -351,9 +351,6 @@ impl GuiApp {
                 playlist_overlay = open;
             }),
             cx.observe(&self.metadata, |this, _, cx| {
-                let selected = this.metadata.read(cx).track_snapshot();
-                this.audio_processing
-                    .update(cx, |owner, cx| owner.set_selected(selected, cx));
                 if this.manual_confirmation_open() {
                     cx.notify();
                 }

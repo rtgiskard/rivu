@@ -11,15 +11,15 @@ use crate::{
         list_interaction::{ContentDrag, ContentMenuRequest, TrackSource},
         playlists::PlaylistDrag,
     },
-    model::{Command, ScanPhase},
+    model::Command,
 };
 use gpui::{
-    AnyElement, Context, Div, EntityId, ExternalPaths, SharedString, Window, prelude::*, px, rgb,
+    AnyElement, Context, Div, EntityId, ExternalPaths, SharedString, Window, prelude::*, rgb,
 };
 use rivu_ui::{
     IconButton, IconButtonDensity, IconButtonGroup, IconButtonStyle, StatusKind, VirtualList,
-    button, caption, column, hover_actions, list_panel_header, list_viewport, panel_surface,
-    panel_toolbar, row, status_message,
+    button, caption, hover_actions, list_panel_header, list_viewport, panel_surface, row,
+    status_message,
 };
 use std::cell::RefCell;
 
@@ -158,155 +158,6 @@ impl Queue {
         );
     }
 
-    fn queue_scan_status(&self, panel_id: u64, cx: &mut Context<Self>) -> Div {
-        let theme = rivu_ui::theme::palette(cx);
-        let system = &self.state.system;
-        let progress = system.scan_progress.as_ref();
-        let header_text = progress.map_or_else(
-            || self.context.i18n.text("gl-scanning").to_owned(),
-            |progress| {
-                let phase = self.context.i18n.text(match progress.phase {
-                    ScanPhase::Discovering => "gl-scan-discovering",
-                    ScanPhase::ReadingMetadata => "gl-scan-metadata",
-                    ScanPhase::Saving => "gl-scan-saving",
-                    ScanPhase::Completed => "gl-scan-completed",
-                    ScanPhase::Failed => "gl-scan-failed",
-                    ScanPhase::Cancelled => "gl-scan-cancelled",
-                });
-                match progress.total {
-                    Some(total) => self.context.i18n.format(
-                        "gl-scan-progress",
-                        &[
-                            ("phase", phase.into()),
-                            ("processed", progress.processed.into()),
-                            ("total", total.into()),
-                            ("errors", progress.errors.into()),
-                        ],
-                    ),
-                    None => self.context.i18n.format(
-                        "gl-scan-found",
-                        &[
-                            ("phase", phase.into()),
-                            ("processed", progress.processed.into()),
-                            ("errors", progress.errors.into()),
-                        ],
-                    ),
-                }
-            },
-        );
-        let failed = progress.is_some_and(|progress| progress.phase == ScanPhase::Failed);
-        let dismissible = !system.scanning
-            && progress.is_some_and(|progress| {
-                matches!(
-                    progress.phase,
-                    ScanPhase::Completed | ScanPhase::Failed | ScanPhase::Cancelled
-                )
-            });
-        let task_id = system.scan_task_id;
-        let cancellable = system.scanning
-            && task_id.is_some()
-            && !progress.is_some_and(|progress| progress.phase == ScanPhase::Saving);
-        let actions = gpui::div()
-            .min_w_8()
-            .min_h_8()
-            .flex_shrink_0()
-            .when(system.scanning, |slot| {
-                slot.child(
-                    IconButton::new(
-                        ("queue-cancel-scan", panel_id),
-                        "",
-                        self.tr("library-cancel-task"),
-                    )
-                    .enabled(cancellable)
-                    .build(
-                        IconButtonStyle::Quiet,
-                        IconButtonDensity::Regular,
-                        cx,
-                        move |this, _, cx| {
-                            if let Some(id) = task_id {
-                                this.send(Command::CancelScan { id }, cx);
-                            }
-                        },
-                    ),
-                )
-            })
-            .when(dismissible, |slot| {
-                slot.child(
-                    IconButton::new(
-                        ("queue-dismiss-scan", panel_id),
-                        "",
-                        self.tr("gl-dismiss-scan"),
-                    )
-                    .build(
-                        IconButtonStyle::Quiet,
-                        IconButtonDensity::Regular,
-                        cx,
-                        |this, _, cx| this.send(Command::DismissScanResult, cx),
-                    ),
-                )
-            });
-        let mut bar = gpui::div()
-            .w_full()
-            .h(px(3.))
-            .flex_shrink_0()
-            .bg(rgb(theme.border));
-        if let Some(progress) = progress
-            && let Some(total) = progress.total.filter(|total| *total > 0)
-        {
-            let fraction = (progress.processed as f32 / total as f32).clamp(0., 1.);
-            bar = bar.child(
-                gpui::div()
-                    .h_full()
-                    .w(gpui::relative(fraction))
-                    .bg(rgb(if failed { theme.error } else { theme.accent })),
-            );
-        }
-        let path: SharedString = progress
-            .and_then(|progress| progress.path.as_ref())
-            .map(|path| path.to_string_lossy().into_owned())
-            .unwrap_or_default()
-            .into();
-        let message: SharedString = system.scan_message.clone().into();
-        column()
-            .gap_1()
-            .min_w_0()
-            .flex_shrink_0()
-            .child(
-                row()
-                    .min_h_8()
-                    .flex_shrink_0()
-                    .child(caption(theme, header_text).flex_1().min_w_0().truncate())
-                    .child(actions),
-            )
-            .child(bar)
-            .child(
-                caption(theme, path.clone())
-                    .id(("queue-scan-path", panel_id))
-                    .min_h_5()
-                    .flex_shrink_0()
-                    .min_w_0()
-                    .truncate()
-                    .tooltip(rivu_ui::text_tooltip(path)),
-            )
-            .child(
-                status_message(
-                    theme,
-                    message.clone(),
-                    if failed {
-                        StatusKind::Error
-                    } else {
-                        StatusKind::Info
-                    },
-                )
-                .id(("queue-scan-message", panel_id))
-                .min_h_5()
-                .flex_shrink_0()
-                .min_w_0()
-                .truncate()
-                .tooltip(rivu_ui::text_tooltip(message)),
-            )
-    }
-
     pub(in crate::gui) fn render_panel(
         &mut self,
         panel_id: u64,
@@ -355,10 +206,7 @@ impl Queue {
                     cx,
                     |this, window, cx| this.locate_playing_queue(window, cx),
                 ),
-            )
-            .min_w_0()
-            .max_w(gpui::rems(20.5))
-            .flex_shrink(1.);
+            );
         let (selection_message, selection_kind): (SharedString, _) =
             if let Some(error) = &self.model.selection_error {
                 (error.clone().into(), StatusKind::Error)
@@ -486,8 +334,18 @@ impl Queue {
                 |panel| panel.child(status),
             )
             .when(
-                self.state.system.scanning || self.state.system.scan_progress.is_some(),
-                |panel| panel.child(self.queue_scan_status(panel_id, cx)),
+                self.state
+                    .system
+                    .scan_visible(crate::projection::MediaTaskOwner::Queue),
+                |panel| {
+                    panel.child(crate::gui::components::media_task::media_task_status(
+                        &self.state.system,
+                        &self.context.i18n,
+                        panel_id,
+                        cx,
+                        Self::send,
+                    ))
+                },
             )
             .child(list_viewport(
                 VirtualList::new(

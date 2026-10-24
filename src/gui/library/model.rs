@@ -57,6 +57,8 @@ struct SearchCounts {
     totals: Option<(usize, usize)>,
     root_counts: std::collections::HashMap<std::path::PathBuf, (usize, usize)>,
     other_tracks: Option<(usize, usize)>,
+    // Membership is structure-owned, not the current filter's matched count.
+    other_total: Option<usize>,
 }
 
 #[derive(Clone)]
@@ -142,7 +144,14 @@ impl LibraryBrowser {
         };
         let counts = &mut self.search_counts;
         let roots_changed = counts.roots != roots;
+        let structure_changed = counts
+            .projection
+            .stamp()
+            .is_none_or(|stamp| stamp.revisions().structure != revisions.structure);
         let changed = counts.projection.sync(&query, revisions) || roots_changed;
+        if roots_changed || structure_changed {
+            counts.other_total = None;
+        }
         if changed {
             if roots_changed {
                 counts.projection.cancel();
@@ -153,21 +162,21 @@ impl LibraryBrowser {
             counts.other_tracks = None;
             counts.failed = false;
         }
-        if counts.totals.is_some() || counts.failed || counts.worker.is_some() {
-            return (changed, None);
-        }
-        let generation = counts.projection.generation();
-        counts.worker = Some(generation);
-        (
-            changed,
+        let request = if counts.totals.is_some() || counts.failed || counts.worker.is_some() {
+            None
+        } else {
+            let generation = counts.projection.generation();
+            counts.worker = Some(generation);
             Some(SearchCountRequest {
                 query,
                 roots: roots.to_vec(),
                 revisions,
                 ticket: counts.projection.ticket(),
                 generation,
-            }),
-        )
+            })
+        };
+        self.reconcile_forest(roots);
+        (changed, request)
     }
     pub(super) fn retire_search_counts(&mut self, request: &SearchCountRequest) {
         if self.search_counts.worker == Some(request.generation) {
@@ -227,7 +236,9 @@ impl LibraryBrowser {
             counts.totals = Some(result.totals);
             counts.root_counts = result.roots;
             counts.other_tracks = Some(result.other_tracks);
+            counts.other_total = Some(result.other_tracks.1);
         }
+        self.reconcile_forest(roots);
         true
     }
 
@@ -240,7 +251,27 @@ impl LibraryBrowser {
     }
 
     pub(super) fn other_tracks_empty(&self) -> bool {
-        matches!(self.search_counts.other_tracks, Some((_, 0)))
+        self.search_counts.other_total == Some(0)
+    }
+
+    pub(super) fn forest_page(
+        &self,
+        roots: &[std::path::PathBuf],
+        offset: usize,
+        limit: usize,
+    ) -> Page<DirectoryRow> {
+        super::tree::forest_page(roots, !self.other_tracks_empty(), offset, limit)
+    }
+
+    fn reconcile_forest(&mut self, roots: &[std::path::PathBuf]) {
+        let show_other = !self.other_tracks_empty();
+        if self.tree.sync_forest(roots, show_other) {
+            self.invalidate_selection();
+            if !show_other {
+                self.selected_nodes.remove(&LibraryNode::OtherTracks);
+            }
+            self.remember_selection();
+        }
     }
 
     pub(super) fn other_count_failed(&self) -> bool {
@@ -543,12 +574,14 @@ impl LibraryBrowser {
 
     pub(super) fn reveal_playing(
         &mut self,
-        root_index: usize,
+        root_index: Option<usize>,
         roots: &[std::path::PathBuf],
         locations: &[crate::model::LibraryLocation],
     ) -> Option<(TreeBranch, usize)> {
         self.invalidate_selection();
-        self.tree.reveal_playing(root_index, roots, locations)
+        let other_tracks = !self.other_tracks_empty();
+        self.tree
+            .reveal_playing(root_index, roots, other_tracks, locations)
     }
 
     pub(super) fn clear_locate_filters(&mut self) {
@@ -682,6 +715,7 @@ impl LibraryBrowser {
         self.invalidate_projection();
         self.tree.clear();
         self.counts.invalidate();
+        self.search_counts.other_total = None;
         self.selected_nodes.clear();
     }
 
@@ -950,6 +984,112 @@ mod tests {
     }
 
     #[test]
+    fn other_membership_preserves_filtered_zero_and_removes_the_last_item_asynchronously() {
+        for roots in [vec![], vec![std::path::PathBuf::from("/music")]] {
+            for grouped in [false, true] {
+                let mut library = LibraryBrowser::default();
+                if grouped {
+                    library.toggle_view();
+                }
+                library.refresh_search("needle".into());
+                let mut revisions = QueryRevisions::default();
+                let (_, request) = library.prepare_search_counts(&roots, revisions);
+                assert!(!library.other_tracks_empty());
+                assert_eq!(library.tree.root_total(), Some(roots.len() + 1));
+                assert!(library.accept_search_counts(
+                    request.unwrap(),
+                    &roots,
+                    revisions,
+                    Some(SearchCountResult {
+                        totals: (0, 3),
+                        roots: Default::default(),
+                        other_tracks: (0, 3),
+                    }),
+                ));
+                assert!(!library.other_tracks_empty());
+                assert_eq!(library.other_count_label(), "0 / 3");
+                assert_eq!(library.tree.root_total(), Some(roots.len() + 1));
+                library.select_node(&LibraryNode::Track(41), false);
+                library.select_node(&LibraryNode::OtherTracks, true);
+
+                revisions.structure += 1;
+                let (_, request) = library.prepare_search_counts(&roots, revisions);
+                assert!(!library.other_tracks_empty());
+                assert!(library.accept_search_counts(
+                    request.unwrap(),
+                    &roots,
+                    revisions,
+                    Some(SearchCountResult {
+                        totals: (0, 0),
+                        roots: Default::default(),
+                        other_tracks: (0, 0),
+                    }),
+                ));
+                assert!(library.other_tracks_empty());
+                assert_eq!(library.tree.root_total(), Some(roots.len()));
+                assert!(!library.selected_nodes().contains(&LibraryNode::OtherTracks));
+                assert!(library.selected().contains(&41));
+                if roots.is_empty() {
+                    assert_eq!(library.tree.row_count(), 0);
+                    assert!(library.demand_directories(0..1).is_empty());
+                }
+
+                // Filter-only changes cannot turn an authoritative zero into unknown.
+                library.refresh_search("another".into());
+                let (_, request) = library.prepare_search_counts(&roots, revisions);
+                assert!(library.other_tracks_empty());
+                assert_eq!(library.tree.root_total(), Some(roots.len()));
+                assert!(library.accept_search_counts(request.unwrap(), &roots, revisions, None));
+                assert!(library.other_tracks_empty());
+
+                revisions.structure += 1;
+                let (_, request) = library.prepare_search_counts(&roots, revisions);
+                assert!(!library.other_tracks_empty());
+                assert!(library.accept_search_counts(
+                    request.unwrap(),
+                    &roots,
+                    revisions,
+                    Some(SearchCountResult {
+                        totals: (0, 1),
+                        roots: Default::default(),
+                        other_tracks: (0, 1),
+                    }),
+                ));
+                assert_eq!(library.tree.root_total(), Some(roots.len() + 1));
+                assert!(!library.other_tracks_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn initially_empty_other_counts_remove_the_no_root_placeholder_without_redemand() {
+        for grouped in [false, true] {
+            let mut library = LibraryBrowser::default();
+            if grouped {
+                library.toggle_view();
+            }
+            let revisions = QueryRevisions::default();
+            let (_, request) = library.prepare_search_counts(&[], revisions);
+            assert_eq!(library.tree.root_total(), Some(1));
+            assert!(library.accept_search_counts(
+                request.unwrap(),
+                &[],
+                revisions,
+                Some(SearchCountResult {
+                    totals: (0, 0),
+                    roots: Default::default(),
+                    other_tracks: (0, 0),
+                }),
+            ));
+            assert_eq!(library.tree.root_total(), Some(0));
+            assert_eq!(library.tree.row_count(), 0);
+            assert!(library.demand_directories(0..1).is_empty());
+            assert!(library.prepare_search_counts(&[], revisions).1.is_none());
+            assert_eq!(library.tree.row_count(), 0);
+        }
+    }
+
+    #[test]
     fn library_locate_expands_ancestry_without_changing_selected_identities() {
         use crate::model::LibraryLocation;
         let mut library = LibraryBrowser::default();
@@ -962,7 +1102,7 @@ mod tests {
         let roots = vec!["/music".into(), "/music/Album".into()];
         let (branch, offset) = library
             .reveal_playing(
-                1,
+                Some(0),
                 &roots,
                 &[
                     LibraryLocation {
@@ -980,7 +1120,7 @@ mod tests {
             .unwrap();
         assert_eq!(offset, 79);
         assert_eq!(branch.path(), std::path::Path::new("/music/Album"));
-        assert_eq!(library.tree().location_index(&branch, offset), Some(86));
+        assert_eq!(library.tree().location_index(&branch, offset), Some(85));
         assert_eq!(library.selected(), &selected);
         assert_eq!(library.selected_nodes(), &nodes);
         library.clear_locate_filters();
