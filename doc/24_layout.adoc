@@ -617,6 +617,19 @@ Tab suppression belongs to the rendered disabled item, not its owner's focus
 handle; re-enabling preserves the handle's original Tab participation policy.
 `IconButton::selected` changes appearance only, `toggled` exposes a toggle Button,
 and `switch` exposes a Switch. Standalone items can use the same construction.
+`selected_fill(false)` retains the selected accent and semantic state without a
+selected background. All track-favorite actions use this policy, including the
+Track details surface; filters, switches and playback modes retain their fills.
+`hover_reveal` owns row-hover and descendant-focus visibility on a separate,
+non-Tab-stop container. Child buttons retain their own hover and focus styles.
+`hover_actions` applies that reveal to out-of-flow actions. Its opaque background
+matches the row's selection and pointer-hover state; keyboard-only reveal keeps
+the unhovered row material.
+The reveal container uses descendant-aware `focus_within`, not `in_focus`
+(which styles descendants of a focused ancestor). Focus on a list itself must
+not reveal every row's actions. Checked menu indicators reserve a centered slot
+in both checked and unchecked states so labels and popup widths stay stable.
+
 Settings keeps independent configuration switches; only its Apply/Discard footer
 actions form a group.
 

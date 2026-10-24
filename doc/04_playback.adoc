@@ -111,6 +111,8 @@ duplicate.
 Hover a queue row to reveal its favorite, play, remove, move-up and move-down
 controls. Each action targets that occurrence without changing the selection;
 the favorite toggle updates its library track, including other occurrences.
+An active favorite uses an accented icon; its button background appears only on
+hover, independently of the track's favorite state.
 Move-up is unavailable on the first row and move-down on the last. The toolbar
 offers removal for a multi-selection and saving the entire queue as a playlist.
 Dragging a selected row moves the selected group in its original queue order;

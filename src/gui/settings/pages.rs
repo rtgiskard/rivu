@@ -244,7 +244,9 @@ impl Settings {
                             .child(path.clone())
                             .tooltip(text_tooltip(path)),
                     )
-                    .child(
+                    .child(rivu_ui::hover_reveal(
+                        ("settings-root-remove-reveal", index),
+                        "settings-root-row",
                         rivu_ui::IconButton::new(
                             ("settings-library-root-remove", index),
                             "",
@@ -258,11 +260,8 @@ impl Settings {
                                 this.model.draft.library_roots.remove(index);
                                 cx.notify();
                             },
-                        )
-                        .opacity(0.)
-                        .group_hover("settings-root-row", |style| style.opacity(1.))
-                        .focus(|style| style.opacity(1.)),
-                    ),
+                        ),
+                    )),
             );
         }
         if self.model.draft.library_roots.is_empty() {

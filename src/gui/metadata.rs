@@ -19,7 +19,7 @@ mod tests;
 
 use super::{
     artwork::{Artwork, ArtworkImages, ArtworkLoader, ArtworkView},
-    components::artwork::artwork_preview,
+    components::{artwork::artwork_preview, track::favorite_button},
     feature::FeatureContext,
     format_time,
 };
@@ -592,7 +592,9 @@ fn metadata_copy(
     cx: &mut Context<Metadata>,
 ) -> Option<gpui::Stateful<Div>> {
     let hint = hint.filter(|_| !value.is_empty() && value.as_ref() != "—")?;
-    Some(
+    Some(rivu_ui::hover_reveal(
+        label.clone(),
+        "label-value-row",
         IconButton::new(label, "", hint)
             .build(
                 IconButtonStyle::Quiet,
@@ -602,11 +604,8 @@ fn metadata_copy(
                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(value.to_string()));
                 },
             )
-            .text_size(gpui::rems(0.75))
-            .opacity(0.)
-            .group_hover("label-value-row", |style| style.opacity(1.))
-            .focus(|style| style.opacity(1.)),
-    )
+            .text_size(gpui::rems(0.75)),
+    ))
 }
 
 fn metadata_rows(
@@ -1006,17 +1005,12 @@ impl Metadata {
                                         row()
                                             .gap_2()
                                             .child(
-                                                IconButton::new(
+                                                favorite_button(
                                                     ("metadata-favorite", panel_id),
-                                                    if favorite { "󰓎" } else { "󰓐" },
-                                                    if favorite {
-                                                        self.tr("gl-unfavorite")
-                                                    } else {
-                                                        self.tr("gl-favorite")
-                                                    },
+                                                    favorite,
+                                                    |key| self.tr(key),
                                                 )
                                                 .enabled(editable)
-                                                .toggled(favorite)
                                                 .build(
                                                     IconButtonStyle::Surface,
                                                     IconButtonDensity::Regular,

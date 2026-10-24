@@ -1099,9 +1099,9 @@ impl Duplicates {
                         ("count", group.total_members.into()),
                     ],
                 );
-                groups = groups.child(active_control(
+                groups = groups.child(rivu_ui::disabled_control(
                     theme,
-                    rivu_ui::disabled_control(
+                    active_control(
                         theme,
                         button(
                             (gpui::SharedString::from(group.fingerprint.clone()), 0usize),
@@ -1146,26 +1146,28 @@ impl Duplicates {
                                     .whitespace_normal(),
                                 ),
                         ),
-                        busy || review.confirming,
+                        selected,
                     ),
-                    selected,
+                    busy || review.confirming,
                 ));
             }
         }
         if review.groups_failed && !review.groups_loading {
             groups = groups.child(
-                IconButton::new("review-groups-retry", "󰑐", self.tr("gl-retry-loading")).build(
-                    IconButtonStyle::Surface,
-                    IconButtonDensity::Regular,
-                    cx,
-                    |this, _, cx| {
-                        if this.duplicate_review.busy.is_none() {
-                            let offset = this.duplicate_review.groups_offset;
-                            this.request_duplicate_groups(offset, cx);
-                            cx.notify();
-                        }
-                    },
-                ),
+                IconButton::new("review-groups-retry", "󰑐", self.tr("gl-retry-loading"))
+                    .build(
+                        IconButtonStyle::Surface,
+                        IconButtonDensity::Regular,
+                        cx,
+                        |this, _, cx| {
+                            if this.duplicate_review.busy.is_none() {
+                                let offset = this.duplicate_review.groups_offset;
+                                this.request_duplicate_groups(offset, cx);
+                                cx.notify();
+                            }
+                        },
+                    )
+                    .self_start(),
             );
         }
         let group_total = review.groups.as_ref().map_or(0, |page| page.total);
@@ -1214,20 +1216,22 @@ impl Duplicates {
         }
         if review.members_failed && !review.members_loading {
             members = members.child(
-                IconButton::new("review-members-retry", "󰑐", self.tr("gl-retry-loading")).build(
-                    IconButtonStyle::Surface,
-                    IconButtonDensity::Regular,
-                    cx,
-                    |this, _, cx| {
-                        if this.duplicate_review.busy.is_none()
-                            && let Some(hash) = this.duplicate_review.fingerprint.clone()
-                        {
-                            let offset = this.duplicate_review.members_offset;
-                            this.request_duplicate_members(hash, offset, cx);
-                            cx.notify();
-                        }
-                    },
-                ),
+                IconButton::new("review-members-retry", "󰑐", self.tr("gl-retry-loading"))
+                    .build(
+                        IconButtonStyle::Surface,
+                        IconButtonDensity::Regular,
+                        cx,
+                        |this, _, cx| {
+                            if this.duplicate_review.busy.is_none()
+                                && let Some(hash) = this.duplicate_review.fingerprint.clone()
+                            {
+                                let offset = this.duplicate_review.members_offset;
+                                this.request_duplicate_members(hash, offset, cx);
+                                cx.notify();
+                            }
+                        },
+                    )
+                    .self_start(),
             );
         }
         for member in &review.members {
@@ -1400,9 +1404,9 @@ impl Duplicates {
                 ));
             let mut actions = panel_toolbar().flex_wrap();
             if selectable_source {
-                actions = actions.child(active_control(
+                actions = actions.child(rivu_ui::disabled_control(
                     theme,
-                    rivu_ui::disabled_control(
+                    active_control(
                         theme,
                         button(
                             ("review-source", id as u64),
@@ -1420,15 +1424,15 @@ impl Duplicates {
                         } else {
                             gpui::Toggled::False
                         }),
-                        busy || review.confirming,
+                        source_selected,
                     ),
-                    source_selected,
+                    busy || review.confirming,
                 ));
             }
             if selectable_target {
-                actions = actions.child(active_control(
+                actions = actions.child(rivu_ui::disabled_control(
                     theme,
-                    rivu_ui::disabled_control(
+                    active_control(
                         theme,
                         button(
                             ("review-target", id as u64),
@@ -1446,9 +1450,9 @@ impl Duplicates {
                         } else {
                             gpui::Toggled::False
                         }),
-                        busy || review.confirming,
+                        target_selected,
                     ),
-                    target_selected,
+                    busy || review.confirming,
                 ));
             }
             if selectable_target && has_target_state(value) {
@@ -1577,7 +1581,8 @@ impl Duplicates {
                         IconButtonDensity::Regular,
                         cx,
                         |this, _, cx| this.cancel_review_verification(cx),
-                    ),
+                    )
+                    .self_start(),
                 );
             }
         }
