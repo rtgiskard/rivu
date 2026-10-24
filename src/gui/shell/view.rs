@@ -551,7 +551,7 @@ impl Render for GuiApp {
                                     .child(div().text_2xl().child("Rivu"))
                                     .child(
                                         column()
-                                            .gap_4()
+                                            .gap_2()
                                             .child(caption(theme, self.tr("shell-tagline")))
                                             .children(
                                                 [
@@ -581,7 +581,7 @@ impl Render for GuiApp {
                                                 .into_iter()
                                                 .map(|(label, value)| {
                                                     row()
-                                                        .gap_3()
+                                                        .gap_2()
                                                         .child(
                                                             div()
                                                                 .w_16()
