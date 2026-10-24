@@ -19,11 +19,13 @@ Monitor EQ, Restoration, Speech enhancement, Separation, and Results are separat
 single-line tabs. Tabs scroll horizontally when space is limited. Switching tabs
 does not run a job, change the audition, or discard field drafts. Settings remain
 core-owned and shared with the CLI. Monitor EQ changes live playback independently
-of graph-node EQ. Source selection stays above the working area; the footer shows
-the actual audition and task state. Processing never edits library media. Keep
-headroom when boosting or remixing: there is no implicit loudness matching or limiter.
+of graph-node EQ. The footer identifies the source track, its sample rate and
+channel count, the actual audition and transport state; Monitor EQ status stays
+at the right. Processing never edits library media. Keep headroom when boosting
+or remixing: there is no implicit loudness matching or limiter.
 
-. Choose the source: Current track or Selected track.
+. Make the desired input track current in playback; it may remain paused while
+  configuring or rendering. CLI processing commands accept an explicit track ID.
 . For live tonal adjustment, use Monitor EQ. For restoration or neural processing,
   configure that operation; neural backends need explicit preparation below.
 . For a combined chain, connect graph ports, apply field drafts, then Preview a
@@ -44,8 +46,8 @@ selection unchanged; playback retirement clears it.
 
 === Node graph desktop workflow
 
-Choose Current track or Selected track, then an execution mode. Preview executes
-the selected node output's ancestors; Run executes an Output node. Algorithm and
+Choose an execution mode for the current playback track. Preview executes the
+selected node output's ancestors; Run executes an Output node. Algorithm and
 model settings belong to each node, so separate nodes can use different prepared
 backends. A completed task reports its frozen graph revision separately from
 later edits. Audition and export operate on that retained snapshot.
@@ -58,9 +60,10 @@ The desktop Export WAV path must be absolute and name a new file in an existing
 directory; relative destinations are supported by the CLI, not this field.
 
 Choose Add node from the graph toolbar, then select a node to inspect its algorithm
-and parameters. The toolbar groups icon actions for history, zoom, fit and locate;
-More contains Reset view; the adjacent info icon shows editor and shortcut help
-on hover. Execution mode is selected from a dropdown. Wide panels
+and parameters. The toolbar groups history, viewport navigation and inspector
+controls. Reset view is directly available with zoom, fit and locate; it restores
+pan and zoom without changing graph nodes or settings. The adjacent info icon
+shows editor and shortcut help on hover. Execution mode uses a dropdown. Wide panels
 place the canvas and independently scrolling, collapsible inspector side by side.
 Drag the separator or focus it and use Left/Right to resize the inspector. Narrow
 panels switch between the canvas and parameters using the parameter toggle and
@@ -85,12 +88,12 @@ the selected node. The Connections toggle exposes explicit source/destination
 pairs; selecting one locates its endpoints and highlights that wire. Disconnect
 remains a separate action. Canvas space follows the available panel height; short
 panels scroll the graph tools and canvas independently rather than letting them
-overlap the execution bar. Working-area scrolling never moves the source or
+overlap the execution bar. Working-area scrolling never moves the footer or
 execution bar. Multiple processing panels share typed graph drafts and
-acknowledged settings, but EQ editors retain panel-local drafts and reject
-conflicting values when applying them together. Each field has its own focus,
-cursor and hit-test geometry; each panel retains its graph parameter view and
-scroll positions.
+acknowledged settings. EQ band editors retain panel-local drafts and reject
+conflicting values when applying them together; valid overall-gain edits submit
+directly. Each field has its own focus, cursor and hit-test geometry; each panel
+retains its graph parameter view and scroll positions.
 Node parameters use typed choices, toggles, precision numeric entry/steps and
 explicit file selection. Backend paths and parameters unused by the current
 algorithm are available in an expandable section, not discarded. Enter and
@@ -110,12 +113,17 @@ linear-phase FIR with an odd tap count from 3 to 16,385. FIR changes phase,
 preparation cost and latency; graph execution aligns branches and compensates
 published audio back to the source timeline. It is not a quality label for IIR.
 The EQ curve and precision editor share a row in wide editors and stack in narrow
-ones. Channel selectors scroll horizontally; there is no separate band-selector
-row. Band numeric step icons stage drafts; Enter or the check icon commits a field.
-Overall gain uses compact paired Input and Output fields with Enter/check commit
-and no step buttons. The overall toolbar groups the EQ power icon switch,
-the monitor preset dropdown and management control, band count/capacity and batch
-addition, and reset/A-B/help actions. Groups wrap together in narrow panels.
+ones; an empty bank does not reserve an empty property column. Input and Output
+gain remain above that working area. Valid finite values within ±24 dB submit as
+you type, without Enter or a separate Apply control. Empty text, a lone sign,
+incomplete exponents and out-of-range values remain drafts and do not
+change the committed gain. Acknowledgements preserve newer typed text.
+Band numeric step icons stage drafts; Enter or the check icon commits a band field.
+The response-channel selector belongs to the curve, not to the band target editor.
+It is hidden for mono, follows the available stream channels and scrolls horizontally;
+changing it only changes the displayed response, never the channels a band processes.
+The overall toolbar groups the EQ power switch and monitor presets, band count
+and batch addition, and reset/A-B/help actions. Groups wrap together in narrow panels.
 The preset dropdown loads a preset; its management popover exposes naming, save,
 delete, copy and file actions without expanding the toolbar.
 
@@ -178,14 +186,16 @@ and shelf filters have one stage. Gain, preamp and output gain are bounded to
 ±24 dB, Q to 0.1–20, and the bank to 32 bands. Active EQ supports up to 64
 channels. Frequencies are bounded below Nyquist (0.499 × sample rate).
 
-Channel targets are `all` or zero-based channel indices (GUI: comma-separated;
-JSON: `{"selected":[0,1]}`). Solo is global: any enabled solo band excludes
+Channel targets are `all`, or selected channels numbered from 1 in GUI text fields
+and from 0 in JSON (`{"selected":[0,1]}`). Solo is global: any enabled solo band excludes
 enabled non-solo bands, even when their channel targets differ. Disable a band
 to exclude it, or disable EQ for global bypass. Monitor EQ edits and bypass
 transitions crossfade complete filter banks over 10 ms; settled bypass preserves
 samples. Graph node edits affect future snapshots, not an already admitted run.
-Save/load/delete named presets, or import/export an EqualizerConfig JSON file
-(maximum 64 KiB on import). A/B swaps the current configuration with the saved
+Save/load/delete named presets, or import/export an EqualizerConfig JSON file.
+Imports require an ordinary file of at most 64 KiB; FIFOs and devices are rejected
+without waiting for a writer, and a bounded descriptor read enforces the size limit
+even if the source grows. A/B swaps the current configuration with the saved
 alternate; the first swap uses a disabled empty alternate. Save a named preset
 before experimenting if both alternatives must be retained.
 
@@ -227,11 +237,13 @@ damaged musical attacks. Hum and repair remain independent of spectral mode,
 including `off`. Classical restoration supports 8–384 kHz, with validated channel
 and allocation bounds; unsupported input fails instead of silently downmixing.
 
-The Restoration page shows parameters for the selected spectral mode. Noise-range
-fields appear only for Profile; hum and impulse controls expand independently.
+The Restoration page exposes Off, Stationary, Profile and Adaptive as direct mode
+choices. Off hides only spectral-noise parameters; hum removal and impulse repair
+each have their own enable switch and reveal their parameters when enabled.
+Noise-range fields appear only for Profile. Wet controls the complete chain.
 Speech enhancement and Separation have separate pages with operation-specific
-controls; their environment/model paths and shared device/thread settings are
-available under advanced settings. Collapsing a section preserves its drafts.
+controls; environment/model paths and shared device/thread settings live under
+advanced settings. Collapsing an advanced section preserves its drafts.
 
 [source,shell]
 ----
@@ -348,6 +360,10 @@ accepts the request, not proof that the worker has already retired. Cancellation
 invalidates publication, terminates/reaps neural workers and retires partial
 scratch; it does not publish a partial result. Source identity and job settings
 are captured and source changes invalidate stale results.
+Native source preparation checks cancellation between decoder calls; a backend
+call or filesystem operation has no hard cancellation-time guarantee. A retained
+audition or stem mix is rejected if the registered source's decoder hint changed,
+as well as when its media identity no longer matches.
 
 Scratch lives in session-owned `processing-*` directories under the data
 directory. Up to four retained results share 4 GiB; the selected audition stays
@@ -364,6 +380,9 @@ require nonempty input of at most four hours and total stem output at most 8 GiB
 the worker also checks free space for its predicted outputs plus 256 MiB. These
 checks do not reserve disk space or supersede the retained-cache limit. Leave
 room for rendered input, stems, graph intermediates and an optional remix.
+The neural worker chooses RIFF or RF64 independently for each output stem;
+combined stem size does not force individually small files into RF64. Application
+rendering and retained-cache limits still apply.
 
 [source,shell]
 ----
@@ -472,6 +491,8 @@ result. Source files are not modified.
   callback performs no model loading, FFT planning, file I/O or unbounded work.
 * Disabled processing preserves the original signal path. Protection, resampling,
   gain compensation and latency are explicit, not silent quality fallbacks.
+* Non-finite graph input or intermediate PCM fails before downstream publication.
+  Finite over-range samples are not clipped or replaced with silence.
 * Every task result is bound to source identity, processing configuration and model
   identity. Cancellation or supersession prevents publication, not necessarily
   physical completion. Source files and existing results are never overwritten.

@@ -169,6 +169,16 @@ and shutdown cancel preparation without saving results or creating a playlist.
 Once Saving begins, the link:02_library.adoc#_cancellation[scan maintenance and cancellation rules]
 apply instead.
 
+In the desktop, accepted imports show their phase, counts, current path, and
+message in the Playlists panel. Cancel is available during preparation, not
+Saving. Completed, failed, and cancelled results stay visible until dismissed or
+replaced by a later media task. Dismissing a result hides its progress and message;
+it does not undo saved tracks or a created playlist. A rejected import request is
+an error, not an accepted task or a replacement for its progress. Closing the
+desktop window does not cancel an accepted import. The shared lifecycle and
+resource-release boundary are described under
+link:02_library.adoc#_cancellation[Library cancellation].
+
 === Input limits and cancellation
 
 Import inputs must be ordinary files, including CUE sheets referenced by M3U;

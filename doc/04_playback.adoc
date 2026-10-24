@@ -89,10 +89,12 @@ the listing to obtain a consistent new traversal.
 === Adding local files
 
 Drag ordinary local audio files from a file manager into Queue. A drop in blank
-space appends; a drop on a row inserts at that boundary. Files are registered
-persistently, reusing existing track identities. Input order and repeated files
-are preserved as separate queue occurrences. Adding files neither starts nor
-interrupts playback, replaces the queue, creates a playlist, nor configures a folder.
+space appends; a drop on a row inserts at that boundary. No configured library
+folder is required, and files may be outside configured folders. Files are
+registered persistently, reusing existing track identities. Input order and
+repeated files are preserved as separate queue occurrences. Adding files neither
+starts nor interrupts playback, replaces the queue, creates a playlist, nor
+configures a folder.
 
 This operation does not scan parent folders or apply the scan minimum-duration
 filter. Directories, CUE sheets, and playlists are not expanded. Unsupported or
@@ -110,6 +112,12 @@ the observed queue state (`rivu --json library status`). `--wait` reports the
 operation's completion, including skipped-file errors even when valid files were
 saved. Registered tracks appear under their configured folder or in
 link:02_library.adoc#_other[Other]. Clearing Queue does not remove them from Library.
+
+The desktop Queue panel shows accepted file-addition progress and retains the
+terminal result until dismissed or replaced by another media task. Cancelling is
+available before Saving; dismissal does not remove registered tracks or inserted
+occurrences. See link:02_library.adoc#_cancellation[Library cancellation] for the
+shared cancellation and resource-release rules.
 
 === Queue controls
 
@@ -347,6 +355,19 @@ results returns to the query; Esc from the query returns to Queue. The query own
 printable characters, including playback shortcuts and `?`; F1 still opens help.
 Text edits use the shared
 link:02_library.adoc#_desktop_list_search[delayed application and immediate clearing].
+
+Library also offers link:02_library.adoc#_other[Other], a flat collection of
+registered tracks outside configured folders (all tracks when no folders are
+configured). Within Other, `/` edits its own search, applying text changes
+immediately; `Alt+f` and `Alt+m` toggle
+favorite-only and missing-only filters, and `Alt+s` cycles ID, album, and most-played
+sorting. Selection follows the same track ID through sort/filter changes and
+library refreshes while that track remains in the results, including when another
+change arrives before relocation or page loading finishes. Obsolete results cannot
+move selection back. `e` appends the selected track; `Alt+e` appends the complete
+Other collection independently of filters. `Alt+c` checks its registered files;
+`Alt+Shift+c` forces metadata rereading. The collection-wide Alt actions also work
+on the Other header.
 
 Outside the query editor, `m` toggles the selected track's favorite in Queue,
 Library, Search, or playlist entries. It never changes a whole directory or

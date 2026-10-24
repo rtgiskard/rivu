@@ -271,7 +271,10 @@ the server bridge rather than classifying commands again. Local ShowWindow and
 Shutdown operations have a twelve-second budget without queue admission.
 Each server response write, including Hello, Error, busy replies, and shutdown
 acknowledgements, has a five-second completion deadline covering write and flush.
-A stalled write closes that connection; it does not block teardown indefinitely.
+Client request writes use the same five-second write-and-flush deadline, including
+Hello and Watch requests. Serialization precedes that deadline; the client response
+read deadline starts only after the request write and flush complete. A stalled
+write discards that connection; server writes cannot block teardown indefinitely.
 Accepted operations still finish their replies during shutdown rather than
 cancelling acknowledgements when shutdown starts.
 Client response reads cover the operation budget, bridge allowance, response-write
@@ -290,9 +293,12 @@ Do not automatically repeat a mutation; inspect authoritative state or the outpu
 If startup timed out before its task ID arrived and reconciliation is unavailable,
 keep the result unknown rather than guessing that no task started.
 
-IPC command failures before handshake/encoding completes are `NotAdmitted`;
-once writing the command has begun, exchange failures are conservatively `Unknown`.
-The client exposes `CommandFailure` without inventing a Core revision or task ID.
+IPC command failures before handshake/encoding completes are `NotAdmitted`.
+After successful encoding, the client marks `write_started` before attempting the
+socket write. From that point, write, flush, response, and cancellation failures
+are conservatively `Unknown`, even if no bytes are known to have reached the peer.
+A request-write timeout therefore does not authorize mutation replay. The client
+exposes `CommandFailure` without inventing a Core revision or task ID.
 Shutdown acknowledgement means accepted shutdown, not final persistence or worker
 retirement. Blocking I/O and cooperative cancellation provide no hard exit deadline.
 
@@ -601,11 +607,6 @@ ID order. With `after = false`, the group goes before the target; `after = true`
 places it after the target. `before_entry_id = None` appends in either case.
 The target is a stable entry identity in the same playlist, not a row index.
 Moving onto a selected target or requesting an already-current order is a no-op.
-
-Playlist moves use the shared interval algorithm in
-<<_ordered_collections_and_transaction_ownership,Ordered collections and transaction
-ownership>>. No track metadata is loaded for movement; widely separated selections
-can still require work proportional to the playlist length.
 
 Both commands compare `expected_revision` with that playlist's current scalar
 entry token at core dispatch, before storage mutation. A nonexistent playlist,

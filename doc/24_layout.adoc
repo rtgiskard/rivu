@@ -225,10 +225,10 @@ rules so switching tabs does not change separator behavior. Saved proportions,
 docking and cramped viewports may still produce smaller panels: lists must shrink
 inside them rather than overflow neighbors, and longer headings do not increase
 the layout minimum.
-List headings wrap their action rows; the title block has a shrinkable preferred
-width rather than imposing a panel minimum. Track details field pairs stack in
-narrow panels and return to equal columns when space permits; individual
-label/value rows retain their baseline alignment.
+Headings give remaining width to a shrinkable title block and keep the right-hand
+actions together on one line; long titles do not force the controls onto another
+row. Track details field pairs stack in narrow panels and return to equal columns
+when space permits; individual label/value rows retain their baseline alignment.
 
 The main shell owns a uniform 0.25rem outer inset (4px at the default interface
 scale) around the workspace and footer, separated by a 0.25rem gap. Neither child
@@ -260,27 +260,27 @@ edge padding. Cards, list rows (including placeholder rows), and form groups
 retain their internal spacing; scrollable content remains bounded by the shell's
 inset and clipping region.
 
-Each list heading reserves at least 3 rem within its header row. Its title and
-count each stay on one line and truncate independently when space is limited;
-expanding search does not turn either into a multi-line block.
-Library, Queue, Playlists, Track details and Recent tracks use
-`panel_heading_row` and `panel_header_actions` for their heading/tool composition.
-The tools align with the bottom of the complete title and subtitle/status block.
-Search belongs to the same wrapping action container as its neighboring buttons.
-Header icon buttons use Surface/Regular styling, with `gap_1` (0.25rem) between
-controls; the title-to-tools separation remains independent of that inner gap.
+Library, Queue, Albums, Playlists, Track details and Recent tracks compose headings
+with `panel_heading_row` and `panel_header_actions`. The same composition serves
+peer surfaces such as duplicate review and layout management. The title block
+shrinks into the width left by the fixed, non-wrapping actions; list titles and
+counts each truncate independently on one line, without a minimum title width.
+Tools align with the bottom of the complete title and subtitle/status block.
+Both the title-to-tools separation and the space between controls use `gap_1`
+(0.25rem). A separate `panel_toolbar` remains available for wrapping toolbars;
+it is not the heading's overflow policy.
 
-Icon buttons derive their size from the symbol and 0.5rem padding on each side,
-with a 2rem minimum width and height. Symbols follow configured text size; padding
-and minimum hit areas follow UI scale. List search reserves a single-line height
-for these actions in both collapsed and expanded states, including its outer border.
-Search expands only into available inline space up to 14rem.
-Its text region shrinks before
-neighboring action buttons need another row; showing the clear button consumes
-space inside that same allocation. Embedded input lines center within the search
-control and retain editable text space by truncating the inline result count
-when needed; standalone inputs retain their own sizing. Existing wrapping at widths
-that cannot fit even the collapsed controls is unchanged.
+Header icon buttons use Surface/Regular styling. They derive their size from the
+symbol and 0.5rem padding on each side, with a 2rem minimum width and height.
+Symbols follow configured text size; padding and minimum hit areas follow UI
+scale. List search reserves a single-line height in both collapsed and expanded
+states, including its outer border. Expanded search grows up to 14rem within its
+action allocation; its editable region can shrink, and its clear button consumes
+space inside the same field. Embedded input lines center within the control and
+truncate the inline result count when necessary to retain editable text space.
+Standalone inputs retain their own sizing. At widths too small for the fixed
+actions, the panel's clipping boundary remains authoritative; heading actions do
+not reflow or enlarge the saved panel proportions.
 
 Tooltip placement belongs to the vendored GPUI window overlay, shared by action
 and row hints. It uses the pointer position captured when the hint opens, not
@@ -403,11 +403,10 @@ coordinates explicit cross-feature actions and metadata confirmation, not a
 second aggregate browser model or query dispatcher. See
 link:22_cache.adoc#_query_projection_retention[Query projection retention].
 
-The panel catalog includes `audio_processing` (Audio processing), with Processing
-graph, Monitor EQ, Restoration and Speech & separation pages. Wide graphs place
-the canvas and inspector side by side; narrow graphs use working-area tabs.
-Source selection, admitted audition identity and task state remain outside the
-scrolling forms. Its configuration and jobs belong to
+The panel catalog includes `audio_processing` (Audio processing). Wide graphs
+place the canvas and inspector side by side; narrow graphs use working-area tabs.
+The source/audition footer and task state remain outside the scrolling forms.
+Its configuration and jobs belong to
 the core, not the saved docking tree. Hiding the panel or switching layouts does
 not disable EQ or cancel a file job. Obsolete graph pointer gestures are cancelled
 when layout geometry changes; numerical drafts and response inspection do not

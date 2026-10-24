@@ -31,23 +31,49 @@ not be strictly synchronized to the output callback's audible clock. Spectrum
 combines channel energy rather than averaging signed channels, so opposite-phase
 stereo does not cancel. Optional spatial analysis retains the channels' relationship.
 
-The tap holds at most 32,768 frames. Analysis backpressure never blocks playback:
-dropped samples mark a discontinuity in the next accepted input. Ordinary
-processing consumes only the queued prefix present at its start; overflow
-recovery has a finite acquisition deadline, so continued production cannot
-postpone publication or shutdown indefinitely. One latest
-shared frame is published rather than an unbounded queue of analysis results.
-The priority is reliable playback and coherent displays, not collecting every
-frame regardless of whether it can be consumed.
+=== PCM admission
 
-The worker parks until a consumer requests another frame. Requests coalesce
-into one pending permit, and `analysis_fps` remains an upper bound, not an
-independent production clock. If the ring overflows, the worker discards the
-stale queued prefix and acquires a fresh sampling window within that request,
-with a deadline of twice the FFT window duration plus 20 ms. This also covers
-normal low-FPS/high-sample-rate operation where every ordinary request interval
-can exceed the ring capacity. Recovery is cancelable, never replays the backlog,
-and does not keep polling after the request ends.
+The tap holds at most 32,768 frames. Playback submits analysis only for PCM
+admitted to output, not an entire decoded packet ahead of its pending tail.
+Each refill admits at most 16,384 frames, independently of output queue or packet
+size, and returns through control handling before another ready refill. DSP and
+monitor EQ still process each packet once; pending processed output is unchanged
+by later monitor EQ edits. Rolling waveform capture remains decoder-driven.
+
+After and bypass taps borrow admitted PCM. A processed Before tap retains a
+reusable stereo FIFO because its source-aligned samples can lead graph output
+by algorithmic latency. Its length is bounded by that latency plus one decoder
+packet; realtime graphs admit at most two seconds of latency and 65,536 frames
+per packet, excluding source preguard from the retained lead. Each stored frame
+contains two `f32` channels and a gap flag, with layout padding and deque capacity
+slack. Source replacement, seeking, signal changes and Still Mode discard
+incompatible pending tap state; inactive analysis releases the retained FIFO.
+
+=== Ingestion and publication
+
+While playback and display demand are active, audio arrival wakes the worker to
+ingest a finite queued prefix into its rolling sampling window and demanded
+accumulators. Ingestion does not wait
+for a display request or its FPS deadline: at 192 kHz and 5 FPS, the 38,400 frames
+between publications need not fit in the tap at once. Continuing production
+cannot postpone control handling or shutdown beyond one queued prefix.
+
+Consumer requests coalesce into one publication permit, retained until a fresh,
+complete FFT window is available. `analysis_fps` caps transforms and publications,
+not PCM ingestion; audio arrival without a permit never runs an FFT. One latest
+shared frame is published rather than an unbounded result queue. An incomplete
+window waits for input, not repeated deadline wakeups; a complete window with a
+pending permit waits only for its publication deadline. Hidden, paused and Still
+Mode gates revoke permits and stop timed wakeups.
+
+Analysis backpressure never blocks playback. A genuinely stalled worker drops
+the stale queued prefix and resets continuity; the next accepted tap marks the
+gap. Fresh audio wakes recovery without a polling/acquisition loop. A ready
+replacement and its generation are published together, without an intermediate
+invalid frame. When fresh analysis is unavailable, invalidation remains visible
+so consumers never smooth across unrelated audio.
+
+=== Demand and continuity
 
 The display enable flag and optional-payload demand are submitted as one
 coalesced control state, independently of the core business-command queue.
@@ -75,6 +101,8 @@ one accepted audio window and stereo FFT supply all requested payloads. This
 avoids separate analyzers for different views while allowing unused result
 storage to be released. A demand transition invalidates the sampling window,
 including a quick hide/show that the worker did not observe as a steady state.
+
+=== Presentation scheduling and visibility
 
 The GUI presentation owner owns the shared visual models, staging buffer,
 display demand, and per-panel view entities. One analysis timer requests frames
@@ -238,7 +266,7 @@ height and one-logical-pixel Peak thickness after resizing or physical scaling.
 Height and placement do not alter numerical publication identity. Cursor and glow
 remain dynamic. There are no application rectangle tiles or colored images.
 Buffer admission and completion-aware retirement use the shared
-GPU material budget described in link:22_cache.adoc[Caching and Resource Lifecycles].
+link:25_gpu_rendering.adoc#_admission_and_retirement[GPU material budget].
 
 == Spectrum
 

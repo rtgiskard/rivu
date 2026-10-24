@@ -14,14 +14,15 @@ library commands address the running host for the selected data directory.
 
 == Other
 
-`Other` is always shown before configured music folders. It contains registered
-tracks whose paths are outside every configured folder; with no configured
-folders, it contains all registered tracks. Adding or removing a folder changes
-where its tracks appear, without changing tracks, user edits, or saved references.
-It is a view of the shared library, not a separate library or a temporary queue.
+`Other` appears after configured music folders and is hidden when it contains no
+registered tracks. It contains tracks whose paths are outside every configured
+folder; with no configured folders, it contains all registered tracks. Adding or
+removing a folder changes where its tracks appear, without changing tracks, user
+edits, or saved references. It is a view of the shared library, not a separate
+library or a temporary queue.
 
-Tracks appear in a flat list with their source directories. Search, favorite and
-missing-file filters, sorting, selection, and track actions work within this
+Tracks appear in a flat list; hover a track for its full source path. Search,
+favorite and missing-file filters, sorting, selection, and track actions work within this
 collection. Dragging its header adds the complete collection, not only search
 matches. To add local files, see link:04_playback.adoc#_adding_local_files[Adding local files].
 
@@ -81,6 +82,12 @@ Requested paths must be inside a configured logical root. A failed scan may stil
 save readable tracks; fix errors and rescan before cleaning missing records.
 See <<_scan_policies_and_recovery,Scan policies and recovery>> for depth and
 duration admission, source checks, and the point after which cancellation is refused.
+
+Library scans and Other checks keep progress, cancellation and retained terminal
+results in Library. Playlist imports use the Playlists panel; external-file queue
+admission uses Queue. A rejected Library request is a separate dismissible error,
+not a replacement for an already accepted task's progress or outcome. Dismissing
+that request error leaves the accepted task and its result unchanged.
 
 Cancelling a desktop file chooser leaves configuration, commands, and existing
 errors unchanged. This also applies to
@@ -188,11 +195,11 @@ While the search field is open, counts inside its right edge show matches and th
 unfiltered total; counts are hidden when it is folded. No matches is distinct from an empty
 collection. Searching changes the view, not the saved contents or playback order.
 
-Desktop and terminal text searches apply nonempty edits after 150 ms without
-further input. Until then, the previous query and its results remain active.
-Leading and trailing whitespace is ignored; clearing the text or leaving only
-whitespace restores the unfiltered query immediately. Enter does not bypass the
-delay.
+Desktop list searches and the terminal Search view apply nonempty edits after
+150 ms without further input. Until then, the previous query and results remain
+active. Leading and trailing whitespace is ignored; clearing the text or leaving
+only whitespace restores the unfiltered query immediately. Enter does not bypass
+the delay. The terminal Other view applies its text edits immediately.
 
 Library searches title, artist, and the full source path, combined with its
 favorite and missing-file filters; it does not search album metadata. Albums

@@ -15,13 +15,13 @@ link:01_config.adoc#_configuration_upgrades[Configuration upgrades].
 === Current implementation
 
 The database schema and configuration schema are both `1`; they are independent
-version authorities. The current album-trigger maintenance revision is `2`.
+version authorities. The current album-trigger maintenance revision is `3`.
 
 * `rivu-migrate check` validates existing current configuration and the required
   structure of a schema 1 database, reporting outdated album-trigger maintenance.
 * `rivu-migrate apply` backs up and replaces outdated album-trigger definitions
-  and their marker under offline ownership. It preserves existing album summaries
-  and does not rebuild or repair their contents.
+  and their marker under offline ownership. It preserves existing album summaries,
+  queue occurrences, and current selection; it does not rebuild or repair summaries.
 * No historical database-schema or configuration conversion is implemented.
   Unversioned populated databases and unsupported explicit versions are errors.
   An unversioned valid configuration is already current and is left untouched.
@@ -47,8 +47,8 @@ changes to layout/cache formats, and invented conversions for undocumented histo
 `rivu-format` owns the current disk contracts: database version and current schema,
 configuration representation, necessary value types, defaults, and validation.
 It has no dependency on the application, UI, audio engine, or migration package.
-Current defaults and validation must have one implementation; extraction must not
-create a second configuration model with different rules.
+Current defaults and validation share this implementation rather than a second
+configuration model with different rules.
 
 The application depends on that current contract. Runtime owners, connection caches,
 Settings patches, Core, and UI remain application responsibilities. Application
@@ -85,6 +85,12 @@ version/maintenance-marker guard rather than repeating offline structural prefli
 A missing version is not evidence of a known oldest schema. Unknown, future, or
 malformed formats are rejected; current trigger maintenance cannot make them current.
 
+Empty-database detection excludes only tables whose names begin with the literal
+`sqlite_` internal prefix. Names such as `sqlitex_data` are user tables, not SQLite
+internals: without a supported Rivu version marker, such a populated database is
+rejected and preserved rather than initialized as an empty library. This rule is
+shared by application opening and offline inspection.
+
 === Configuration schema
 
 The current configuration schema is `1`. A top-level integer `schema_version` is
@@ -109,7 +115,8 @@ link:01_config.adoc#_configuration_upgrades[Configuration upgrades].
 
 == Derived-trigger maintenance
 
-`albums` and `album_artists` are derived summaries maintained by SQLite triggers.
+`albums` and `album_artists` are derived summaries maintained by SQLite triggers;
+the same maintenance revision also covers queue display-metadata invalidation.
 Business consumers need correct maintenance, not knowledge of historical trigger
 versions. A trigger's existence or successful execution does not prove semantic
 correctness: it might omit a relevant update or maintain the wrong grouping rule.

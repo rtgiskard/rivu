@@ -264,6 +264,9 @@ connections and canvas positions, lives in `[processing_graph]` and its nested
 arrays. These are core settings in `config.toml`, not preferences in `layout.json`.
 The default graph connects Source directly to Output; the top-level Monitor EQ
 and restoration/neural defaults do not implicitly insert graph nodes.
+Unknown fields are rejected throughout the graph, including node-kind settings,
+node-local EQ/restoration/neural configuration, edges, ports, and noise selections;
+they are not silently ignored. Use the documented field names when editing TOML.
 
 For example, the following sets Monitor EQ and restoration/neural defaults; it
 does not construct a processing graph:
@@ -676,9 +679,13 @@ failed write preserves the old file and all session edits. Retry with manual
 sync, not another layout edit or instance-settings Apply. Orderly application
 exit writes the latest dirty collection, waits for completion, and reports a
 remaining failure.
-Errors and scan progress appear in the footer. Use the copy action to copy the
-complete text, including text truncated on screen. Errors also provide a dismiss
-action; these actions remain visible without hovering. Drag the empty footer area
+Application errors appear in the footer; accepted media tasks show progress and
+results in their owning Library, Queue, or Playlists panel. See
+link:02_library.adoc#_cancellation[Library cancellation] and
+link:03_playlist.adoc#_import_workflow[Playlist import]. Use the footer copy action
+to copy complete notification text, including text truncated on screen. Errors
+also provide a dismiss action; these actions remain visible without hovering.
+Drag the empty footer area
 with the left mouse button to move the window using the window manager's native
 move operation. Notification text and controls do not start a window move.
 Menus and dialogs suppress footer dragging.
