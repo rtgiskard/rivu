@@ -98,7 +98,9 @@ struct EqualizerEditor {
     pointer_count: Rc<Cell<usize>>,
     bounds: MeasuredGraph,
     removing_band: Option<(EqualizerConfig, usize)>,
+    pending_added_band: Option<(usize, usize)>,
     geometry_epoch: u64,
+    _preset_subscription: Option<Subscription>,
 }
 
 impl EqualizerEditor {
@@ -118,6 +120,13 @@ impl EqualizerEditor {
         let pending = parent.pending;
         let geometry_epoch = parent.geometry_epoch;
         let format = parent.equalizer_format_from(&state, target);
+        let preset_subscription = if target == EqTarget::Monitor {
+            owner
+                .upgrade()
+                .map(|owner| cx.observe(&owner, |_, _, cx| cx.notify()))
+        } else {
+            None
+        };
         let mut editor = Self {
             owner,
             context,
@@ -145,8 +154,10 @@ impl EqualizerEditor {
             frequencies: [0.; 257],
             frequency_limit: 0.,
             removing_band: None,
+            pending_added_band: None,
             geometry_epoch,
             pointer_count: Rc::clone(&parent.equalizer_ui.pointer_count),
+            _preset_subscription: preset_subscription,
         };
         editor.sync_fields(cx);
         editor.update_response();
@@ -190,17 +201,29 @@ impl EqualizerEditor {
         self.state = state;
         self.format = format;
         if config_changed {
-            self.config.clone_from(config);
-            for (focus, band) in self.band_focus.iter_mut().zip(&config.bands) {
-                if !band.enabled {
-                    *focus = None;
-                }
+            if let Some((start, count)) = self.pending_added_band.take()
+                && start == self.config.bands.len()
+                && config.bands.len() == start + count
+                && config.bands.starts_with(&self.config.bands)
+            {
+                self.band = start;
             }
+            self.config.clone_from(config);
+        } else if pending == 0 {
+            self.pending_added_band = None;
         }
         self.revision = revision;
         self.blocked = blocked;
         self.pending = pending;
         self.geometry_epoch = geometry_epoch;
+        if changed {
+            let enabled = !self.config_locked();
+            for field in self.fields.values() {
+                field
+                    .input
+                    .update(cx, |input, cx| input.set_enabled(enabled, cx));
+            }
+        }
         if config_changed || format_changed || fence_changed || geometry_changed || blocked {
             self.take_drag();
         }
@@ -305,7 +328,7 @@ impl EqualizerEditor {
                 owner.equalizer_format_from(&snapshot, self.target)
             })
             .is_ok_and(|format| format == self.format);
-        let valid = !self.blocked
+        let valid = !self.config_locked()
             && format_valid
             && config == Some(&self.config)
             && (self.target == EqTarget::Monitor
@@ -320,6 +343,10 @@ impl EqualizerEditor {
         valid
     }
 
+    fn config_locked(&self) -> bool {
+        self.blocked || !self.config.enabled
+    }
+
     fn eq(&mut self, edit: EqualizerEdit, cx: &mut Context<Self>) {
         self.submit_edit(edit, None, cx);
     }
@@ -330,7 +357,7 @@ impl EqualizerEditor {
         submitted: Option<SubmittedField>,
         cx: &mut Context<Self>,
     ) {
-        if self.blocked {
+        if self.blocked || (!self.config.enabled && !matches!(edit, EqualizerEdit::Enabled(_))) {
             return;
         }
         let target = self.target;
@@ -372,6 +399,8 @@ impl EqualizerEditor {
             return;
         }
         let input = cx.new(|cx| Input::new(label.to_owned(), value.clone(), label.to_owned(), cx));
+        let enabled = !self.config_locked();
+        input.update(cx, |input, cx| input.set_enabled(enabled, cx));
         let subscription = self.subscribe_field(&input, key.to_owned(), cx);
         self.fields.insert(
             key.to_owned(),
@@ -548,7 +577,7 @@ impl EqualizerEditor {
         });
     }
     fn apply_field(&mut self, key: &str, cx: &mut Context<Self>) {
-        if self.blocked {
+        if self.config_locked() {
             return;
         }
         if matches!(self.target, EqTarget::Node(_))
@@ -637,6 +666,32 @@ impl EqualizerEditor {
         };
         Ok(edit)
     }
+    fn step_field(&mut self, key: &str, step: f64, cx: &mut Context<Self>) {
+        if self.config_locked() {
+            return;
+        }
+        let Some(field) = self.fields.get_mut(key) else {
+            return;
+        };
+        let value = field.input.read(cx).text().trim().parse::<f64>();
+        match value {
+            Ok(value) if value.is_finite() && (value + step).is_finite() => {
+                if !field.dirty {
+                    field.draft_revision = Some(self.revision);
+                }
+                field.dirty = true;
+                field.generation = field.generation.wrapping_add(1);
+                field.input.update(cx, |input, cx| {
+                    input.set_text((value + step).to_string(), cx);
+                });
+                self.error = None;
+                let _ = self.owner.update(cx, |_, cx| cx.notify());
+            }
+            _ => self.error = Some(self.tr("processing-invalid-number").to_string()),
+        }
+        cx.notify();
+    }
+
     fn field_view(
         &self,
         key: &str,
@@ -646,30 +701,89 @@ impl EqualizerEditor {
     ) -> Div {
         let theme = rivu_ui::theme::palette(cx);
         let field = &self.fields[key];
-        let label: SharedString = label.into();
-        let label: SharedString = if field.dirty {
-            format!("{label} · {}", self.context.i18n.text("processing-draft")).into()
-        } else {
-            label
+        let name = key.rsplit('.').next().unwrap_or(key);
+        let compact = matches!(name, "preamp_db" | "output_gain_db");
+        let (unit, step) = match name {
+            "frequency_hz" => ("Hz", Some(1.)),
+            "preamp_db" | "output_gain_db" => ("dB", None),
+            "gain_db" => ("dB", Some(0.5)),
+            "q" | "shelf_slope" => ("", Some(0.1)),
+            "stages" => ("", Some(1.)),
+            _ => ("", None),
         };
-        let key_owned = key.to_owned();
-        let control = row()
-            .min_w_0()
+        let help = match name {
+            "channels" => Some("processing-channel-help"),
+            "stages" => Some("processing-stage-help"),
+            _ => None,
+        };
+        let mut control = row()
             .gap_1()
-            .child(div().flex_1().min_w_0().child(field.input.clone()))
-            .child(disabled_control(
-                theme,
-                button(
+            .when(compact, |view| view.flex_shrink_0())
+            .child(
+                caption(theme, label)
+                    .w(if compact { rems(3.) } else { rems(7.) })
+                    .flex_shrink_0()
+                    .truncate()
+                    .id(SharedString::from(format!("eq-label-{key}")))
+                    .when_some(help, |view, help| {
+                        view.tooltip(rivu_ui::text_tooltip(self.tr(help)))
+                    }),
+            )
+            .child(
+                div()
+                    .w(rems(0.4))
+                    .flex_shrink_0()
+                    .text_color(rgb(theme.accent))
+                    .id(SharedString::from(format!("eq-draft-{key}")))
+                    .tooltip(rivu_ui::text_tooltip(self.tr("processing-draft")))
+                    .when(field.dirty, |view| view.child("·")),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .when(compact, |view| view.w(rems(4.5)).flex_shrink_0())
+                    .when(!compact, |view| view.flex_1())
+                    .child(field.input.clone()),
+            )
+            .child(caption(theme, unit).w(rems(1.5)).flex_shrink_0());
+        if let Some(step) = step {
+            for (suffix, glyph, hint, delta) in [
+                ("less", "−", "processing-field-decrease", -step),
+                ("more", "+", "processing-field-increase", step),
+            ] {
+                let key_owned = key.to_owned();
+                control = control.child(
+                    rivu_ui::IconButton::new(
+                        SharedString::from(format!("eq-step-{key}-{suffix}")),
+                        glyph,
+                        self.tr(hint),
+                    )
+                    .enabled(enabled)
+                    .build(
+                        rivu_ui::IconButtonStyle::Quiet,
+                        rivu_ui::IconButtonDensity::Compact,
+                        cx,
+                        move |this, _, cx| this.step_field(&key_owned, delta, cx),
+                    ),
+                );
+            }
+        }
+        let key_owned = key.to_owned();
+        control
+            .child(
+                rivu_ui::IconButton::new(
                     SharedString::from(format!("apply-{key}")),
+                    "",
                     self.tr("processing-apply"),
+                )
+                .enabled(enabled)
+                .build(
+                    rivu_ui::IconButtonStyle::Quiet,
+                    rivu_ui::IconButtonDensity::Compact,
                     cx,
                     move |this, _, cx| this.apply_field(&key_owned, cx),
                 ),
-                !enabled,
-            ));
-        FormField::new(theme, label, control)
-            .into_div()
-            .min_w_0()
+            )
             .opacity(if enabled { 1. } else { 0.5 })
     }
     fn update_response(&mut self) {
@@ -809,7 +923,6 @@ impl EqualizerEditor {
             .iter()
             .take(MAX_BANDS)
             .enumerate()
-            .filter(|(_, b)| b.enabled)
             .map(|(i, b)| {
                 let (frequency, gain) = self
                     .drag
@@ -827,7 +940,11 @@ impl EqualizerEditor {
         let geometry_epoch = self.geometry_epoch;
         let ui_scale = self.state.system.config.ui_scale;
         let mut controls = Vec::with_capacity(nodes.len());
-        for &(index, x, y) in &nodes {
+        for &(index, x, y) in nodes
+            .iter()
+            .filter(|(index, _, _)| *index != selected)
+            .chain(nodes.iter().filter(|(index, _, _)| *index == selected))
+        {
             let focus = self.band_focus_handle(index, window, cx);
             let band = &self.config.bands[index];
             let mut stack_count = 0usize;
@@ -850,14 +967,15 @@ impl EqualizerEditor {
             controls.push(
                 div()
                     .id(SharedString::from(format!("eq-node-{panel}-{index}")))
+                    .debug_selector(move || format!("eq-node-{panel}-{index}"))
                     .absolute()
                     .left(relative(x))
                     .top(relative(y))
-                    .ml(-px(8.))
-                    .mt(-px(8.))
-                    .size(px(16.))
+                    .ml(-px(11.))
+                    .mt(-px(11.))
+                    .size(px(22.))
                     .tab_index(0)
-                    .tab_stop(!self.response.is_empty())
+                    .tab_stop(!self.blocked)
                     .track_focus(&focus)
                     .role(Role::Slider)
                     .aria_label(SharedString::from(format!(
@@ -870,8 +988,34 @@ impl EqualizerEditor {
                         "{:.1} Hz, {:.2} dB",
                         band.frequency_hz, band.gain_db
                     )))
-                    .border_1()
-                    .border_color(transparent_black())
+                    .border_2()
+                    .rounded_full()
+                    .border_color(rgb(if index == selected {
+                        theme.accent
+                    } else {
+                        theme.muted
+                    }))
+                    .bg(rgb(if band.enabled {
+                        if index == selected {
+                            theme.accent
+                        } else {
+                            theme.secondary
+                        }
+                    } else {
+                        theme.bg
+                    }))
+                    .text_color(rgb(if band.enabled {
+                        theme.bg
+                    } else if index == selected {
+                        theme.accent
+                    } else {
+                        theme.muted
+                    }))
+                    .text_xs()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child((index + 1).to_string())
                     .focus(|style| style.border_color(rgb(theme.accent)))
                     .when(stack_count > 1 && representative == index, |node| {
                         node.child(
@@ -921,7 +1065,7 @@ impl EqualizerEditor {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                    if this.blocked || this.response.is_empty() {
+                    if this.blocked {
                         return;
                     }
                     let Some((bounds, geometry)) = measured.get() else {
@@ -940,14 +1084,7 @@ impl EqualizerEditor {
                     let mut member_count = 0;
                     let mut nearest = None;
                     let mut nearest_distance = f32::INFINITY;
-                    for (index, band) in this
-                        .config
-                        .bands
-                        .iter()
-                        .take(MAX_BANDS)
-                        .enumerate()
-                        .filter(|(_, band)| band.enabled)
-                    {
+                    for (index, band) in this.config.bands.iter().take(MAX_BANDS).enumerate() {
                         let x = bounds.origin.x
                             + bounds.size.width * this.frequency_x(band.frequency_hz);
                         let y = bounds.origin.y
@@ -976,6 +1113,10 @@ impl EqualizerEditor {
                         let frequency = b.frequency_hz;
                         let gain = b.gain_db;
                         this.focus_graph_band(index, window, cx);
+                        if this.config_locked() {
+                            cx.notify();
+                            return;
+                        }
                         let subscriptions = [
                             cx.observe_window_activation(window, |this, window, cx| {
                                 if !window.is_window_active() {
@@ -1066,24 +1207,6 @@ impl EqualizerEditor {
                         {
                             window.paint_path(path, rgb(theme.accent));
                         }
-                        for (index, x, y) in nodes
-                            .iter()
-                            .filter(|(index, _, _)| *index != selected)
-                            .chain(nodes.iter().filter(|(index, _, _)| *index == selected))
-                        {
-                            let center = point(
-                                bounds.origin.x + bounds.size.width * *x,
-                                bounds.origin.y + bounds.size.height * *y,
-                            );
-                            window.paint_quad(fill(
-                                Bounds::new(center - point(px(4.), px(4.)), size(px(8.), px(8.))),
-                                rgb(if *index == selected {
-                                    theme.accent
-                                } else {
-                                    theme.text
-                                }),
-                            ));
-                        }
                     },
                 )
                 .size_full(),
@@ -1130,6 +1253,9 @@ impl EqualizerEditor {
             }
             _ => return,
         };
+        if self.config_locked() {
+            return;
+        }
         self.cancel_pointer(cx);
         self.band = index;
         self.sync_fields(cx);
@@ -1173,46 +1299,7 @@ impl EqualizerEditor {
         let theme = rivu_ui::theme::palette(cx);
         let graph = self.graph(panel, window, cx);
         let eq = &self.config;
-        let mut content = column()
-            .gap_3()
-            .child(
-                row()
-                    .flex_wrap()
-                    .gap_2()
-                    .child(checkbox(
-                        ("eq-enabled", panel),
-                        self.tr("processing-eq-enabled"),
-                        eq.enabled,
-                        !self.blocked,
-                        cx,
-                        |this, value, cx| this.eq(EqualizerEdit::Enabled(value), cx),
-                    ))
-                    .child(disabled_control(
-                        theme,
-                        button(
-                            ("eq-flat", panel),
-                            self.tr("processing-flat"),
-                            cx,
-                            |this, _, cx| {
-                                let mut config =
-                                    rivu_dsp::equalizer::config::EqualizerConfig::default();
-                                config.enabled = this.config.enabled;
-                                this.eq(EqualizerEdit::Replace { config }, cx);
-                            },
-                        ),
-                        self.blocked,
-                    ))
-                    .when(self.target == EqTarget::Monitor, |r| {
-                        r.child(button(
-                            ("eq-ab", panel),
-                            self.tr("processing-ab"),
-                            cx,
-                            |this, _, cx| this.eq(EqualizerEdit::SwapAb, cx),
-                        ))
-                    }),
-            )
-            .child(graph)
-            .child(caption(theme, self.tr("processing-graph-help")));
+        let mut curve = column().gap_1().min_w_0().child(graph);
         if self.response_error.is_none() {
             let mut labels = row().justify_between().gap_1();
             for fraction in [0., 0.25, 0.5, 0.75, 1.] {
@@ -1226,13 +1313,13 @@ impl EqualizerEditor {
                     },
                 ));
             }
-            content = content.child(labels);
+            curve = curve.child(labels);
         }
         if let Some(error) = &self.response_error {
-            content = content.child(caption(theme, error.clone()).text_color(rgb(theme.error)));
+            curve = curve.child(caption(theme, error.clone()).text_color(rgb(theme.error)));
         }
         if let Some((_, sample_rate, channel_count)) = self.format {
-            content = content.child(caption(
+            curve = curve.child(caption(
                 theme,
                 format!(
                     "{} Hz · {} {} · 20–{:.0} Hz · ±24 dB",
@@ -1242,7 +1329,10 @@ impl EqualizerEditor {
                     self.maximum_frequency
                 ),
             ));
-            let mut channels = row().flex_wrap().gap_1();
+            let mut channels = row()
+                .gap_1()
+                .id(("eq-response-channels", panel))
+                .overflow_x_scroll();
             for channel in 0..channel_count as usize {
                 channels = channels.child(
                     button(
@@ -1261,130 +1351,232 @@ impl EqualizerEditor {
                             }
                         },
                     )
+                    .flex_shrink_0()
                     .when(channel == self.response_channel, |v| {
                         v.bg(rgb(theme.selected))
                     }),
                 );
             }
-            content = content.child(channels);
+            curve = curve.child(channels);
         }
-        content = content
-            .child(self.field_view("preamp_db", self.tr("processing-preamp"), !self.blocked, cx))
-            .child(self.field_view(
-                "output_gain_db",
-                self.tr("processing-output-gain"),
-                !self.blocked,
-                cx,
-            ));
-        let mut bands = row().flex_wrap().gap_1();
-        for (index, band) in eq.bands.iter().enumerate() {
-            let label = SharedString::from(format!(
-                "{} {}{}",
-                index + 1,
-                if band.enabled { "" } else { "○ " },
-                if band.solo { "S" } else { "" }
-            ));
-            bands = bands.child(
-                button(
-                    SharedString::from(format!("select-band-{index}")),
-                    (index + 1).to_string(),
+        curve = curve.child(
+            row()
+                .flex_wrap()
+                .gap_2()
+                .child(self.field_view(
+                    "preamp_db",
+                    self.tr("processing-input-gain-short"),
+                    !self.config_locked(),
                     cx,
-                    move |this, _, cx| {
-                        this.cancel_pointer(cx);
-                        this.band = index;
-                        this.sync_fields(cx);
-                        cx.notify();
-                    },
-                )
-                .debug_selector(move || format!("eq-band-selector-{panel}-{index}"))
-                .aria_label(label)
-                // Status marks retain their slots when hidden so toggling a band
-                // cannot move later selectors or change the wrapping boundary.
-                .child(
-                    div()
-                        .w_4()
-                        .flex_shrink_0()
-                        .text_center()
-                        .opacity(if band.enabled { 0. } else { 1. })
-                        .child("○"),
-                )
-                .child(
-                    div()
-                        .w_4()
-                        .flex_shrink_0()
-                        .text_center()
-                        .opacity(if band.solo { 1. } else { 0. })
-                        .child("S"),
-                )
-                .when(index == self.band, |v| v.bg(rgb(theme.selected))),
-            );
-        }
+                ))
+                .child(self.field_view(
+                    "output_gain_db",
+                    self.tr("processing-output-gain-short"),
+                    !self.config_locked(),
+                    cx,
+                )),
+        );
+        let mut precision = column().gap_1().min_w_0();
         let remaining = MAX_BANDS.saturating_sub(eq.bands.len());
         let count = self.add_band_count.min(remaining);
-        let add_disabled = self.blocked || self.pending > 0 || remaining == 0;
+        let add_disabled = self.config_locked() || self.pending > 0 || remaining == 0;
         let add_controls = row()
-            .flex_wrap()
-            .gap_2()
-            .child(disabled_control(
-                theme,
-                button(("eq-add-less", panel), "−", cx, |this, _, cx| {
-                    if this.pending == 0 && this.add_band_count > 1 {
-                        this.add_band_count -= 1;
-                        cx.notify();
-                    }
-                })
-                .aria_label(self.tr("processing-add-fewer")),
-                add_disabled || count <= 1,
-            ))
+            .gap_1()
+            .flex_shrink_0()
             .child(caption(
                 theme,
                 self.context.i18n.format(
-                    "processing-add-count",
-                    &[("count", count.into()), ("remaining", remaining.into())],
+                    "processing-band-count",
+                    &[
+                        ("count", eq.bands.len().into()),
+                        ("maximum", MAX_BANDS.into()),
+                    ],
                 ),
             ))
-            .child(disabled_control(
-                theme,
-                button(("eq-add-more", panel), "+", cx, |this, _, cx| {
-                    let remaining = MAX_BANDS.saturating_sub(this.config.bands.len());
-                    if this.pending == 0 && this.add_band_count < remaining {
-                        this.add_band_count += 1;
-                        cx.notify();
-                    }
-                })
-                .aria_label(self.tr("processing-add-more")),
-                add_disabled || count >= remaining,
-            ))
-            .child(disabled_control(
-                theme,
-                button(
+            .child(
+                rivu_ui::IconButton::new(
+                    ("eq-add-less", panel),
+                    "−",
+                    self.tr("processing-add-fewer"),
+                )
+                .enabled(!add_disabled && count > 1)
+                .build(
+                    rivu_ui::IconButtonStyle::Quiet,
+                    rivu_ui::IconButtonDensity::Compact,
+                    cx,
+                    |this, _, cx| {
+                        if this.pending == 0 && this.add_band_count > 1 {
+                            this.add_band_count -= 1;
+                            cx.notify();
+                        }
+                    },
+                ),
+            )
+            .child(
+                caption(theme, count.to_string())
+                    .id(("eq-add-count", panel))
+                    .tooltip(rivu_ui::text_tooltip(self.context.i18n.format(
+                        "processing-add-count",
+                        &[("count", count.into()), ("remaining", remaining.into())],
+                    ))),
+            )
+            .child(
+                rivu_ui::IconButton::new(
+                    ("eq-add-more", panel),
+                    "+",
+                    self.tr("processing-add-more"),
+                )
+                .enabled(!add_disabled && count < remaining)
+                .build(
+                    rivu_ui::IconButtonStyle::Quiet,
+                    rivu_ui::IconButtonDensity::Compact,
+                    cx,
+                    |this, _, cx| {
+                        let remaining = MAX_BANDS.saturating_sub(this.config.bands.len());
+                        if this.pending == 0 && this.add_band_count < remaining {
+                            this.add_band_count += 1;
+                            cx.notify();
+                        }
+                    },
+                ),
+            )
+            .child(
+                rivu_ui::IconButton::new(
                     ("add-band", panel),
-                    self.tr("processing-add-bands"),
+                    "󰐕",
+                    format!(
+                        "{} · {}",
+                        self.tr("processing-add-bands"),
+                        self.tr("processing-add-bands-help"),
+                    ),
+                )
+                .enabled(!add_disabled)
+                .build(
+                    rivu_ui::IconButtonStyle::Surface,
+                    rivu_ui::IconButtonDensity::Compact,
                     cx,
                     |this, _, cx| {
                         let remaining = MAX_BANDS.saturating_sub(this.config.bands.len());
                         let count = this.add_band_count.min(remaining);
                         if this.pending == 0 && count > 0 {
                             this.cancel_pointer(cx);
+                            this.pending_added_band = Some((this.config.bands.len(), count));
                             this.eq(EqualizerEdit::AddBands { count }, cx);
                         }
                     },
                 )
+                .debug_selector(move || format!("eq-add-bands-{panel}"))
                 .aria_description(self.tr("processing-add-bands-help")),
-                add_disabled,
-            ));
-        content = content.child(bands).child(add_controls);
+            );
+        let tools = row()
+            .flex_wrap()
+            .gap_2()
+            .child(
+                IconButton::new(("eq-power", panel), "⏻", self.tr("processing-eq-enabled"))
+                    .switch(eq.enabled)
+                    .enabled(!self.blocked)
+                    .build(
+                        IconButtonStyle::Surface,
+                        IconButtonDensity::Compact,
+                        cx,
+                        |this, _, cx| this.eq(EqualizerEdit::Enabled(!this.config.enabled), cx),
+                    )
+                    .debug_selector(move || format!("eq-power-{panel}")),
+            )
+            .when(self.target == EqTarget::Monitor, |view| {
+                let preset = self
+                    .owner
+                    .update(cx, |owner, cx| owner.preset_view(panel, cx))
+                    .ok();
+                view.child(
+                    div()
+                        .flex_shrink_0()
+                        .max_w_full()
+                        .min_w_0()
+                        .children(preset),
+                )
+            })
+            .child(add_controls)
+            .child(
+                row()
+                    .gap_1()
+                    .flex_shrink_0()
+                    .child(
+                        rivu_ui::IconButton::new(
+                            ("eq-flat", panel),
+                            "󰑐",
+                            self.tr("processing-flat"),
+                        )
+                        .enabled(!self.config_locked())
+                        .build(
+                            rivu_ui::IconButtonStyle::Quiet,
+                            rivu_ui::IconButtonDensity::Compact,
+                            cx,
+                            |this, _, cx| {
+                                let mut config = EqualizerConfig::default();
+                                config.enabled = this.config.enabled;
+                                this.eq(EqualizerEdit::Replace { config }, cx);
+                            },
+                        ),
+                    )
+                    .when(self.target == EqTarget::Monitor, |r| {
+                        r.child(
+                            rivu_ui::IconButton::new(
+                                ("eq-ab", panel),
+                                "󰓡",
+                                self.tr("processing-ab"),
+                            )
+                            .enabled(!self.config_locked())
+                            .build(
+                                rivu_ui::IconButtonStyle::Quiet,
+                                rivu_ui::IconButtonDensity::Compact,
+                                cx,
+                                |this, _, cx| this.eq(EqualizerEdit::SwapAb, cx),
+                            ),
+                        )
+                    })
+                    .child(
+                        rivu_ui::icon("", cx)
+                            .text_color(rgb(theme.secondary))
+                            .id(("eq-help", panel))
+                            .tooltip(rivu_ui::text_tooltip(self.tr("processing-graph-help"))),
+                    ),
+            );
         if let Some(band) = eq.bands.get(self.band) {
             let index = self.band;
-            content = content.child(
+            let kind_key = match band.kind {
+                FilterKind::Peak => "processing-peak",
+                FilterKind::LowShelf => "processing-low-shelf",
+                FilterKind::HighShelf => "processing-high-shelf",
+                FilterKind::LowPass => "processing-low-pass",
+                FilterKind::HighPass => "processing-high-pass",
+                FilterKind::BandPass => "processing-band-pass",
+                FilterKind::Notch => "processing-notch",
+            };
+            let title = self.context.i18n.format(
+                "processing-band-properties",
+                &[
+                    ("band", (index + 1).into()),
+                    ("kind", self.tr(kind_key).to_string().into()),
+                ],
+            );
+            precision = precision.child(
                 row()
                     .flex_wrap()
                     .gap_2()
+                    .id(("eq-band-properties", panel))
+                    .debug_selector(move || format!("eq-band-properties-{panel}"))
+                    .border_b_1()
+                    .border_color(rgb(theme.accent))
+                    .child(caption(theme, title).text_color(rgb(theme.accent)))
+                    .when(!band.enabled, |view| {
+                        view.child(caption(theme, self.tr("processing-band-disabled")))
+                    })
                     .child(checkbox(
                         ("band-enabled", panel),
                         self.tr("processing-enabled"),
                         band.enabled,
-                        !self.blocked,
+                        !self.config_locked(),
                         cx,
                         move |this, value, cx| {
                             this.band_edit(index, EqBandEdit::Enabled(value), cx)
@@ -1394,20 +1586,24 @@ impl EqualizerEditor {
                         ("band-solo", panel),
                         self.tr("processing-solo"),
                         band.solo,
-                        !self.blocked,
+                        !self.config_locked(),
                         cx,
                         move |this, value, cx| this.band_edit(index, EqBandEdit::Solo(value), cx),
                     ))
-                    .child(disabled_control(
-                        theme,
-                        button(
+                    .child(
+                        rivu_ui::IconButton::new(
                             ("remove-band", panel),
+                            "󰆴",
                             self.tr("processing-remove-band"),
+                        )
+                        .enabled(!self.config_locked())
+                        .build(
+                            rivu_ui::IconButtonStyle::Quiet,
+                            rivu_ui::IconButtonDensity::Compact,
                             cx,
                             move |this, _, cx| this.eq(EqualizerEdit::RemoveBand { index }, cx),
                         ),
-                        self.blocked,
-                    )),
+                    ),
             );
             let mut types = row().flex_wrap().gap_1();
             for (kind, key) in [
@@ -1428,10 +1624,10 @@ impl EqualizerEditor {
                         move |this, _, cx| this.band_edit(index, EqBandEdit::Kind(kind), cx),
                     )
                     .when(kind == band.kind, |v| v.bg(rgb(theme.selected))),
-                    self.blocked,
+                    self.config_locked(),
                 ));
             }
-            content = content.child(types);
+            precision = precision.child(types);
             for (name, key, applicable) in [
                 ("frequency_hz", "processing-frequency", true),
                 (
@@ -1463,19 +1659,25 @@ impl EqualizerEditor {
                 ("channels", "processing-channels", true),
             ] {
                 if applicable {
-                    content = content.child(self.field_view(
+                    precision = precision.child(self.field_view(
                         &format!("band.{index}.{name}"),
                         self.tr(key),
-                        !self.blocked,
+                        !self.config_locked(),
                         cx,
                     ));
                 }
             }
-            content = content
-                .child(caption(theme, self.tr("processing-channel-help")))
-                .child(caption(theme, self.tr("processing-stage-help")));
+        } else {
+            precision = precision.child(caption(theme, self.tr("processing-band-empty")));
         }
-        content
+        column().gap_2().child(tools).child(
+            row()
+                .items_start()
+                .flex_wrap()
+                .gap_3()
+                .child(curve.flex_1().flex_basis(rems(28.)))
+                .child(precision.flex_1().flex_basis(rems(24.))),
+        )
     }
 }
 
@@ -1522,6 +1724,11 @@ fn target_config(state: &GuiSnapshot, target: EqTarget) -> Option<&EqualizerConf
 
 impl AudioProcessing {
     pub(super) fn eq(&mut self, edit: EqualizerEdit, cx: &mut Context<Self>) {
+        if !self.context.snapshot().system.config.equalizer.enabled
+            && !matches!(edit, EqualizerEdit::Enabled(_))
+        {
+            return;
+        }
         self.send(Command::EqualizerEdit { edit }, cx);
     }
 
@@ -1695,7 +1902,6 @@ impl AudioProcessing {
                 self.tr("processing-editor-monitor"),
             ))
             .child(editor)
-            .child(self.preset_view(panel, cx))
     }
 
     pub(super) fn node_equalizer_view(
@@ -2156,10 +2362,508 @@ impl AudioProcessing {
 }
 #[cfg(test)]
 mod tests {
-    use super::{
-        EqBand, EqBandEdit, EqualizerConfig, EqualizerEdit, merge_draft_edit, rebase_draft_origin,
+    use super::*;
+    use crate::{
+        config::{Config, ConfigPersistence},
+        core::Runtime,
+        gui::feature::SnapshotSource,
+        i18n::Localizer,
     };
-    use std::collections::HashMap;
+    use core::prelude::v1::test;
+
+    const PANEL: u64 = 7;
+
+    struct EditorWindow(Entity<EqualizerEditor>);
+
+    impl Render for EditorWindow {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child(self.0.clone())
+        }
+    }
+
+    fn fixture(
+        cx: &mut TestAppContext,
+    ) -> (
+        tempfile::TempDir,
+        Runtime,
+        Entity<EqualizerEditor>,
+        AnyWindowHandle,
+    ) {
+        cx.update(|cx| {
+            rivu_ui::theme::set_palette(crate::theme::palette(crate::theme::Theme::default()), cx);
+            rivu_ui::theme::set_typography(
+                gpui::font("sans-serif"),
+                crate::gui::appearance::fonts::SYMBOLS_FAMILY,
+                12,
+                cx,
+            );
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let mut config = Config {
+            volume: 0.,
+            ffmpeg_enabled: false,
+            mpris_enabled: false,
+            tray_enabled: false,
+            ..Default::default()
+        };
+        config.equalizer.enabled = true;
+        config.equalizer.bands = [(80., -8.), (800., 0.), (8_000., 8.)]
+            .into_iter()
+            .enumerate()
+            .map(|(index, (frequency_hz, gain_db))| EqBand {
+                frequency_hz,
+                gain_db,
+                enabled: index != 1,
+                ..Default::default()
+            })
+            .collect();
+        config.save(&path).unwrap();
+        let runtime = Runtime::start(directory.path(), &path).unwrap();
+        let i18n = Arc::new(Localizer::new("en-US"));
+        let context = FeatureContext {
+            snapshots: Rc::new(SnapshotSource::new(runtime.handle.clone())),
+            labels: Rc::new(
+                i18n.fixed_texts()
+                    .map(|(id, text)| (id.to_owned(), SharedString::from(text.to_owned())))
+                    .collect(),
+            ),
+            i18n,
+            scroll: Default::default(),
+        };
+        let processing = cx.new(|cx| AudioProcessing::new(context, cx));
+        let owner = processing.downgrade();
+        let editor = processing.update(cx, |parent, cx| {
+            cx.new(|cx| {
+                EqualizerEditor::new(
+                    owner,
+                    EqTarget::Monitor,
+                    PANEL,
+                    parent,
+                    &parent.state.system.config.equalizer,
+                    cx,
+                )
+            })
+        });
+        // Exercise the real controls and subscriptions, but do not start native
+        // command workers: committed snapshots below enter through reconcile.
+        drop(processing);
+        let window = cx.open_window(size(px(1200.), px(900.)), {
+            let editor = editor.clone();
+            move |_, _| EditorWindow(editor)
+        });
+        let handle = window.into();
+        cx.update_window(handle, |_, window, _| window.activate_window())
+            .unwrap();
+        draw(cx, handle);
+        assert!(editor.read_with(cx, |editor, _| editor.format.is_none()));
+        assert!(editor.read_with(cx, |editor, _| editor.owner.upgrade().is_none()));
+        (directory, runtime, editor, handle)
+    }
+
+    fn draw(cx: &mut TestAppContext, handle: AnyWindowHandle) {
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| window.draw(cx).clear(cx))
+            .unwrap();
+    }
+
+    fn click(cx: &mut TestAppContext, handle: AnyWindowHandle, selector: &'static str) {
+        use gpui::InputEvent as _;
+        let position = VisualTestContext::from_window(handle, cx)
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("missing painted control {selector}"))
+            .center();
+        cx.update_window(handle, |_, window, cx| {
+            window.dispatch_event(
+                MouseDownEvent {
+                    button: MouseButton::Left,
+                    position,
+                    ..Default::default()
+                }
+                .to_platform_input(),
+                cx,
+            );
+            window.dispatch_event(
+                MouseUpEvent {
+                    button: MouseButton::Left,
+                    position,
+                    ..Default::default()
+                }
+                .to_platform_input(),
+                cx,
+            );
+        })
+        .unwrap();
+        draw(cx, handle);
+    }
+
+    fn assert_selected(
+        cx: &mut TestAppContext,
+        editor: &Entity<EqualizerEditor>,
+        handle: AnyWindowHandle,
+        index: usize,
+    ) {
+        assert!(
+            VisualTestContext::from_window(handle, cx)
+                .debug_bounds("eq-band-properties-7")
+                .is_some(),
+            "the selected band's property header is painted"
+        );
+        editor.read_with(cx, |editor, _| {
+            assert_eq!(editor.band, index);
+            for name in ["frequency_hz", "gain_db", "q", "channels"] {
+                assert!(editor.fields.contains_key(&format!("band.{index}.{name}")));
+            }
+            assert!(editor.fields.iter().all(|(key, field)| {
+                !key.starts_with("band.")
+                    || key.starts_with(&format!("band.{index}."))
+                    || field.dirty
+            }));
+        });
+    }
+
+    fn reconcile_config(
+        cx: &mut TestAppContext,
+        editor: &Entity<EqualizerEditor>,
+        config: &EqualizerConfig,
+        pending: usize,
+    ) {
+        editor.update(cx, |editor, cx| {
+            let mut state = Rc::clone(&editor.state);
+            Arc::make_mut(&mut Rc::make_mut(&mut state).system.config)
+                .equalizer
+                .clone_from(config);
+            editor.reconcile(
+                state,
+                config,
+                (false, pending, editor.format),
+                editor.geometry_epoch,
+                cx,
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn disabling_equalizer_preserves_drafts_and_locks_native_inputs_and_field_actions(
+        cx: &mut TestAppContext,
+    ) {
+        use gpui::EntityInputHandler as _;
+
+        let (_directory, _runtime, editor, handle) = fixture(cx);
+        let inputs = editor.read_with(cx, |editor, _| {
+            [
+                "preamp_db",
+                "output_gain_db",
+                "band.0.frequency_hz",
+                "band.0.gain_db",
+                "band.0.q",
+                "band.0.channels",
+            ]
+            .map(|key| (key, editor.fields[key].input.clone()))
+        });
+        cx.update_window(handle, |_, window, cx| {
+            for (key, input) in &inputs {
+                input.update(cx, |input, cx| {
+                    input.focus_and_select_all(window, cx);
+                    input.replace_text_in_range(
+                        None,
+                        if *key == "band.0.frequency_hz" {
+                            "invalid"
+                        } else {
+                            "4.75"
+                        },
+                        window,
+                        cx,
+                    );
+                });
+            }
+        })
+        .unwrap();
+        draw(cx, handle);
+        let drafts = editor.read_with(cx, |editor, cx| {
+            inputs.each_ref().map(|(key, input)| {
+                assert!(editor.fields[*key].dirty);
+                (
+                    input.read(cx).text().to_owned(),
+                    editor.fields[*key].generation,
+                )
+            })
+        });
+        let mut config = editor.read_with(cx, |editor, _| editor.config.clone());
+        config.enabled = false;
+        reconcile_config(cx, &editor, &config, 0);
+        draw(cx, handle);
+        click(cx, handle, "eq-node-7-2");
+        assert_selected(cx, &editor, handle, 2);
+        click(cx, handle, "eq-node-7-0");
+        assert_selected(cx, &editor, handle, 0);
+        // Reconcile the authoritative snapshot rather than imitating the power
+        // command: this fixture deliberately has no live command owner.
+        cx.update_window(handle, |_, window, cx| {
+            for (_, input) in &inputs {
+                input.update(cx, |input, cx| {
+                    input.focus_and_select_all(window, cx);
+                    input.replace_text_in_range(None, "999", window, cx);
+                });
+            }
+        })
+        .unwrap();
+        editor.update(cx, |editor, cx| {
+            assert!(editor.config_locked());
+            assert!(editor.error.is_none());
+            editor.apply_field("band.0.frequency_hz", cx);
+            editor.step_field("band.0.gain_db", 0.5, cx);
+            assert!(
+                editor.error.is_none(),
+                "locked fields must not even validate drafts"
+            );
+        });
+        draw(cx, handle);
+        editor.read_with(cx, |editor, cx| {
+            assert_eq!(editor.config, config);
+            for ((key, input), (text, generation)) in inputs.iter().zip(&drafts) {
+                let field = &editor.fields[*key];
+                assert_eq!(&field.input, input);
+                assert!(field.dirty);
+                assert_eq!(field.input.read(cx).text(), text);
+                assert_eq!(field.generation, *generation);
+            }
+        });
+        config.enabled = true;
+        reconcile_config(cx, &editor, &config, 0);
+        draw(cx, handle);
+        editor.update(cx, |editor, cx| {
+            assert!(!editor.config_locked());
+            editor.apply_field("band.0.frequency_hz", cx);
+            assert!(
+                editor.error.is_some(),
+                "reenabled fields validate preserved drafts"
+            );
+            editor.step_field("band.0.gain_db", 0.5, cx);
+            assert_eq!(
+                editor.fields["band.0.gain_db"].input.read(cx).text(),
+                "5.25"
+            );
+        });
+        cx.update_window(handle, |_, window, cx| {
+            let input = &inputs[0].1;
+            input.update(cx, |input, cx| {
+                input.focus_and_select_all(window, cx);
+                input.replace_text_in_range(None, "6.25", window, cx);
+            });
+        })
+        .unwrap();
+        assert_eq!(
+            inputs[0]
+                .1
+                .read_with(cx, |input, _| input.text().to_owned()),
+            "6.25"
+        );
+    }
+
+    #[gpui::test]
+    fn disabled_equalizer_allows_graph_selection_but_cannot_start_or_move_drag(
+        cx: &mut TestAppContext,
+    ) {
+        use gpui::InputEvent as _;
+
+        let (_directory, _runtime, editor, handle) = fixture(cx);
+        let mut config = editor.read_with(cx, |editor, _| editor.config.clone());
+        for enabled in [false, true] {
+            config.enabled = enabled;
+            reconcile_config(cx, &editor, &config, 0);
+            draw(cx, handle);
+            click(cx, handle, "eq-node-7-2");
+            assert_selected(cx, &editor, handle, 2);
+            let position = VisualTestContext::from_window(handle, cx)
+                .debug_bounds("eq-node-7-2")
+                .unwrap()
+                .center();
+            cx.update_window(handle, |_, window, cx| {
+                window.dispatch_event(
+                    MouseDownEvent {
+                        button: MouseButton::Left,
+                        position,
+                        ..Default::default()
+                    }
+                    .to_platform_input(),
+                    cx,
+                );
+                editor.read_with(cx, |editor, _| {
+                    assert_eq!(editor.drag.is_some(), enabled);
+                });
+                if !enabled {
+                    window.dispatch_event(
+                        MouseMoveEvent {
+                            position: position + point(px(24.), px(-12.)),
+                            pressed_button: Some(MouseButton::Left),
+                            ..Default::default()
+                        }
+                        .to_platform_input(),
+                        cx,
+                    );
+                    editor.read_with(cx, |editor, _| {
+                        assert_eq!(editor.config, config);
+                        assert!(editor.drag.is_none());
+                    });
+                } else {
+                    // Motion validates a live owner; this fixture only proves
+                    // that reenabling restores the real pointer-down entry.
+                    editor.update(cx, |editor, cx| editor.cancel_pointer(cx));
+                }
+                window.dispatch_event(
+                    MouseUpEvent {
+                        button: MouseButton::Left,
+                        position: position + point(px(24.), px(-12.)),
+                        ..Default::default()
+                    }
+                    .to_platform_input(),
+                    cx,
+                );
+            })
+            .unwrap();
+            draw(cx, handle);
+            assert!(editor.read_with(cx, |editor, _| editor.drag.is_none()));
+        }
+    }
+
+    #[gpui::test]
+    fn graph_click_selects_properties_and_preserves_other_band_draft_keys(cx: &mut TestAppContext) {
+        let (_directory, _runtime, editor, handle) = fixture(cx);
+        click(cx, handle, "eq-node-7-2");
+        assert_selected(cx, &editor, handle, 2);
+        let input = editor.read_with(cx, |editor, _| {
+            editor.fields["band.2.gain_db"].input.clone()
+        });
+        cx.update_window(handle, |_, window, cx| {
+            input.update(cx, |input, cx| input.focus_and_select_all(window, cx));
+        })
+        .unwrap();
+        draw(cx, handle);
+        cx.simulate_keystrokes(handle, "4 . 7 5");
+        draw(cx, handle);
+        editor.read_with(cx, |editor, cx| {
+            let field = &editor.fields["band.2.gain_db"];
+            assert!(field.dirty);
+            assert_eq!(field.input.read(cx).text(), "4.75");
+        });
+        click(cx, handle, "eq-node-7-0");
+        assert_selected(cx, &editor, handle, 0);
+        editor.read_with(cx, |editor, cx| {
+            let draft = &editor.fields["band.2.gain_db"];
+            assert_eq!(draft.input, input);
+            assert!(draft.dirty);
+            assert_eq!(draft.input.read(cx).text(), "4.75");
+            assert_eq!(editor.config.bands[2].gain_db, 8.);
+            assert!(editor.drag.is_none());
+        });
+        click(cx, handle, "eq-node-7-2");
+        assert_selected(cx, &editor, handle, 2);
+        assert_eq!(
+            editor.read_with(cx, |editor, _| editor.fields["band.2.gain_db"]
+                .input
+                .clone()),
+            input
+        );
+    }
+
+    #[gpui::test]
+    fn disabled_band_can_be_selected_and_enable_changes_preserve_native_identity(
+        cx: &mut TestAppContext,
+    ) {
+        let (_directory, _runtime, editor, handle) = fixture(cx);
+        click(cx, handle, "eq-node-7-1");
+        assert_selected(cx, &editor, handle, 1);
+        let (focus, input, mut config) = editor.read_with(cx, |editor, _| {
+            assert!(!editor.config.bands[1].enabled);
+            (
+                editor.band_focus[1].as_ref().unwrap().handle.clone(),
+                editor.fields["band.1.frequency_hz"].input.clone(),
+                editor.config.clone(),
+            )
+        });
+        for enabled in [true, false] {
+            config.bands[1].enabled = enabled;
+            reconcile_config(cx, &editor, &config, 0);
+            draw(cx, handle);
+            assert_selected(cx, &editor, handle, 1);
+            editor.read_with(cx, |editor, _| {
+                assert_eq!(editor.band_focus[1].as_ref().unwrap().handle, focus);
+                assert_eq!(editor.fields["band.1.frequency_hz"].input, input);
+            });
+            cx.update_window(handle, |_, window, _| assert!(focus.is_focused(window)))
+                .unwrap();
+        }
+    }
+
+    #[gpui::test]
+    fn native_graph_focus_changes_selected_properties_without_pointer_input(
+        cx: &mut TestAppContext,
+    ) {
+        let (_directory, _runtime, editor, handle) = fixture(cx);
+        for index in [2, 0, 1] {
+            let focus = editor.read_with(cx, |editor, _| {
+                editor.band_focus[index].as_ref().unwrap().handle.clone()
+            });
+            cx.update_window(handle, |_, window, cx| focus.focus(window, cx))
+                .unwrap();
+            draw(cx, handle);
+            assert_selected(cx, &editor, handle, index);
+            assert!(editor.read_with(cx, |editor, _| editor.drag.is_none()));
+        }
+    }
+
+    #[gpui::test]
+    fn add_button_intent_selects_first_new_band_when_reconciled(cx: &mut TestAppContext) {
+        let (_directory, _runtime, editor, handle) = fixture(cx);
+        editor.update(cx, |editor, cx| {
+            editor.add_band_count = 2;
+            cx.notify();
+        });
+        draw(cx, handle);
+        click(cx, handle, "eq-add-bands-7");
+        let mut config = editor.read_with(cx, |editor, _| {
+            assert_eq!(editor.pending_added_band, Some((3, 2)));
+            editor.config.clone()
+        });
+        reconcile_config(cx, &editor, &config, 1);
+        draw(cx, handle);
+        assert_selected(cx, &editor, handle, 0);
+        EqualizerEdit::AddBands { count: 2 }
+            .apply_config(&mut config, None)
+            .unwrap();
+        reconcile_config(cx, &editor, &config, 0);
+        draw(cx, handle);
+        assert_selected(cx, &editor, handle, 3);
+        assert!(editor.read_with(cx, |editor, _| editor.pending_added_band.is_none()));
+    }
+
+    #[gpui::test]
+    fn append_selection_rejects_wrong_count_changed_prefix_and_completed_failure(
+        cx: &mut TestAppContext,
+    ) {
+        for mismatch in 0..3 {
+            let (_directory, _runtime, editor, handle) = fixture(cx);
+            click(cx, handle, "eq-add-bands-7");
+            let mut config = editor.read_with(cx, |editor, _| editor.config.clone());
+            if mismatch == 2 {
+                // A failed/no-op completion must not select a later external append.
+                reconcile_config(cx, &editor, &config, 0);
+            }
+            EqualizerEdit::AddBands {
+                count: if mismatch == 0 { 2 } else { 1 },
+            }
+            .apply_config(&mut config, None)
+            .unwrap();
+            if mismatch == 1 {
+                config.bands[0].gain_db += 1.;
+            }
+            reconcile_config(cx, &editor, &config, 0);
+            draw(cx, handle);
+            assert_selected(cx, &editor, handle, 0);
+            assert!(editor.read_with(cx, |editor, _| editor.pending_added_band.is_none()));
+        }
+    }
 
     #[test]
     fn panel_drafts_merge_equal_values_and_reject_conflicts_without_replacement() {

@@ -1,5 +1,6 @@
 //! Typed node drafts and their optimistic, atomic commit boundary.
 use super::*;
+use rivu_ui::{FormField, IconButton, IconButtonDensity, IconButtonStyle};
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct DraftStamp {
@@ -630,38 +631,49 @@ impl AudioProcessing {
             .p_2()
             .border_1()
             .border_color(rgb(theme.border))
-            .child(caption(
-                theme,
-                format!(
-                    "{} · {} #{id}",
-                    self.tr("processing-graph-inspector"),
-                    self.tr(node_label(&node.kind))
-                ),
-            ))
             .child(
                 row()
-                    .flex_wrap()
                     .gap_1()
-                    .child(disabled_control(
-                        theme,
-                        button(
+                    .child(
+                        caption(
+                            theme,
+                            format!(
+                                "{} · {} #{id}",
+                                self.tr("processing-graph-inspector"),
+                                self.tr(node_label(&node.kind))
+                            ),
+                        )
+                        .flex_1()
+                        .min_w_0(),
+                    )
+                    .child(
+                        IconButton::new(
                             ("graph-duplicate", panel),
+                            "",
                             self.tr("processing-graph-duplicate"),
+                        )
+                        .enabled(!busy && !fixed && drafts == 0)
+                        .build(
+                            IconButtonStyle::Quiet,
+                            IconButtonDensity::Compact,
                             cx,
                             |this, _, cx| this.graph_duplicate(cx),
                         ),
-                        busy || fixed || drafts > 0,
-                    ))
-                    .child(disabled_control(
-                        theme,
-                        button(
+                    )
+                    .child(
+                        IconButton::new(
                             ("graph-delete", panel),
+                            "󰆴",
                             self.tr("processing-graph-delete"),
+                        )
+                        .enabled(!busy && !fixed && drafts == 0)
+                        .build(
+                            IconButtonStyle::Quiet,
+                            IconButtonDensity::Compact,
                             cx,
                             |this, _, cx| this.graph_remove(cx),
                         ),
-                        busy || fixed || drafts > 0,
-                    )),
+                    ),
             )
             .child(
                 caption(

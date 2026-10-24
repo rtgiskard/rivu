@@ -2,6 +2,31 @@
 use super::*;
 
 impl AudioProcessing {
+    pub(in crate::gui) fn processing_results_view(
+        &mut self,
+        panel: u64,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        if self.state.system.processing.is_none() {
+            return column().p_2().child(caption(
+                rivu_ui::theme::palette(cx),
+                self.tr("processing-result-empty"),
+            ));
+        }
+        let results = if self
+            .state
+            .system
+            .processing
+            .as_ref()
+            .is_some_and(|task| task.operation != ProcessingOperation::Graph)
+        {
+            self.task_status(panel, cx)
+        } else {
+            self.graph_task_status(panel, cx)
+        };
+        let body = self.processing_scroll(panel, "processing-results", results.p_2());
+        column().size_full().min_h_0().child(body)
+    }
     pub(in super::super) fn graph_task_summary(
         &mut self,
         panel: u64,
@@ -47,13 +72,7 @@ impl AudioProcessing {
                 })
                 .unwrap_or_else(|| "—".into());
             summary.push_str(&format!(
-                " · {mode} · {} {} → {} {} · {}",
-                self.tr("processing-result-frozen-revision"),
-                task.graph_revision
-                    .map(|v| v.to_string())
-                    .unwrap_or_else(|| "—".into()),
-                self.tr("processing-result-current-revision"),
-                self.state.system.config.processing_graph.revision,
+                " · {mode} · {}",
                 self.tr(
                     if graph.audio_eq(&self.state.system.config.processing_graph) {
                         "processing-result-current"
@@ -219,6 +238,20 @@ impl AudioProcessing {
             .self_start(),
         );
         if expanded {
+            if task.settings.graph.is_some() {
+                content = content.child(caption(
+                    theme,
+                    format!(
+                        "{} {} · {} {}",
+                        self.tr("processing-result-frozen-revision"),
+                        task.graph_revision
+                            .map(|revision| revision.to_string())
+                            .unwrap_or_else(|| "—".into()),
+                        self.tr("processing-result-current-revision"),
+                        self.state.system.config.processing_graph.revision
+                    ),
+                ));
+            }
             content = content.child(caption(
                 theme,
                 format!(
@@ -301,42 +334,14 @@ impl AudioProcessing {
                         theme,
                         format!("#{} · {}", node.id, self.tr(node_label(&node.kind))),
                     ));
-                    let neural = match &node.kind {
-                        GraphNodeKind::Speech { config } => Some((
-                            config,
-                            config.speech_manifest.as_ref(),
-                            &config.speech_interpreter,
-                        )),
-                        GraphNodeKind::Separate { config } => Some((
-                            config,
-                            config.separation_manifest.as_ref(),
-                            &config.separation_interpreter,
-                        )),
-                        _ => None,
-                    };
-                    if let Some((config, manifest, interpreter)) = neural {
-                        content = content
-                            .child(caption(
-                                theme,
-                                format!(
-                                    "{} · {}",
-                                    manifest
-                                        .map(|p| p.display().to_string())
-                                        .unwrap_or_else(|| "—".into()),
-                                    interpreter.display()
-                                ),
-                            ))
-                            .child(caption(
-                                theme,
-                                format!(
-                                    "{}: {} · {:?} · {} {}",
-                                    self.tr("processing-worker"),
-                                    config.worker.display(),
-                                    config.device,
-                                    config.threads,
-                                    self.tr("processing-threads")
-                                ),
-                            ));
+                    let mut fields = Vec::new();
+                    scalar_fields(
+                        &serde_json::to_value(&node.kind).expect("serializable frozen graph node"),
+                        "",
+                        &mut fields,
+                    );
+                    for (path, value) in fields {
+                        content = content.child(caption(theme, format!("{path}: {value}")));
                     }
                 }
             }

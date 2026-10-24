@@ -15,12 +15,13 @@ separately describe evaluation requirements and their remaining limits.
 == Practical workflow
 
 Add the Audio processing panel from the layout panel catalog. Processing graph,
-Monitor EQ, Restoration, and Speech & separation pages share core-owned settings
-with the CLI. Monitor EQ controls the separate live playback EQ; graph nodes
-have independent settings. The source selector and monitor-EQ bypass state stay
-visible above the working area. Restoration and neural jobs retain separate
-results. Processing never edits library media. Keep headroom when boosting or
-remixing: there is no implicit loudness matching or limiter.
+Monitor EQ, Restoration, Speech enhancement, Separation, and Results are separate
+single-line tabs. Tabs scroll horizontally when space is limited. Switching tabs
+does not run a job, change the audition, or discard field drafts. Settings remain
+core-owned and shared with the CLI. Monitor EQ changes live playback independently
+of graph-node EQ. Source selection stays above the working area; the footer shows
+the actual audition and task state. Processing never edits library media. Keep
+headroom when boosting or remixing: there is no implicit loudness matching or limiter.
 
 . Choose the source: Current track or Selected track.
 . For live tonal adjustment, use Monitor EQ. For restoration or neural processing,
@@ -51,16 +52,21 @@ later edits. Audition and export operate on that retained snapshot.
 Requested execution mode and selected output are editing choices, not proof of
 the current audio path. The persistent task summary reports captured settings,
 actual execution mode, progress and cancellation independently of the editor.
-Results & export contains retained outputs and destination controls. Running never
-applies field drafts implicitly; unapplied fields are reported at the execution bar.
+The Results tab contains task details, retained outputs and graph export controls.
+Running never applies field drafts implicitly; unapplied fields are reported at the execution bar.
 The desktop Export WAV path must be absolute and name a new file in an existing
 directory; relative destinations are supported by the CLI, not this field.
 
-Add nodes from the graph library, then select a node to inspect its own algorithm
-and parameters. Wide panels place the canvas and independently scrolling inspector
-side by side. Narrow panels expose Graph, Parameters, and Results & export tabs
-without putting execution controls below a long form. Press and drag a node header
-or its non-port card surface to select and move it in one gesture; no preliminary click is needed.
+Choose Add node from the graph toolbar, then select a node to inspect its algorithm
+and parameters. The toolbar groups icon actions for history, zoom, fit and locate;
+More contains Reset view; the adjacent info icon shows editor and shortcut help
+on hover. Execution mode is selected from a dropdown. Wide panels
+place the canvas and independently scrolling, collapsible inspector side by side.
+Drag the separator or focus it and use Left/Right to resize the inspector. Narrow
+panels switch between the canvas and parameters using the parameter toggle and
+return control. Execution controls remain outside the scrolling working area.
+Press and drag a node header or its non-port card surface to select and move it
+in one gesture; no preliminary click is needed.
 A click without movement selects without editing the graph and transfers keyboard
 focus to the node, so Delete/Backspace and graph shortcuts work immediately after
 leaving another control. Positions do not change execution order. Port labels and
@@ -83,7 +89,7 @@ overlap the execution bar. Working-area scrolling never moves the source or
 execution bar. Multiple processing panels share typed graph drafts and
 acknowledged settings, but EQ editors retain panel-local drafts and reject
 conflicting values when applying them together. Each field has its own focus,
-cursor and hit-test geometry; each panel retains its own working-area tab and
+cursor and hit-test geometry; each panel retains its graph parameter view and
 scroll positions.
 Node parameters use typed choices, toggles, precision numeric entry/steps and
 explicit file selection. Backend paths and parameters unused by the current
@@ -103,6 +109,15 @@ Monitor EQ uses recursive IIR filters. An EQ graph node can instead select
 linear-phase FIR with an odd tap count from 3 to 16,385. FIR changes phase,
 preparation cost and latency; graph execution aligns branches and compensates
 published audio back to the source timeline. It is not a quality label for IIR.
+The EQ curve and precision editor share a row in wide editors and stack in narrow
+ones. Channel selectors scroll horizontally; there is no separate band-selector
+row. Band numeric step icons stage drafts; Enter or the check icon commits a field.
+Overall gain uses compact paired Input and Output fields with Enter/check commit
+and no step buttons. The overall toolbar groups the EQ power icon switch,
+the monitor preset dropdown and management control, band count/capacity and batch
+addition, and reset/A-B/help actions. Groups wrap together in narrow panels.
+The preset dropdown loads a preset; its management popover exposes naming, save,
+delete, copy and file actions without expanding the toolbar.
 
 Accepted graph and processing-setting edits are saved to `config.toml`
 immediately, independently of Settings Apply. Field drafts, the canvas viewport
@@ -112,10 +127,19 @@ link:01_config.adoc#_saving_configuration[Saving configuration] for all save tri
 
 === Equalizer
 
-Enable EQ separately from adding bands. Set the quantity with the minus/plus
-controls (initially 1, up to the remaining capacity), then choose Add. Add appends
+Use the power icon switch to enable or bypass EQ. While EQ is off, its desktop
+configuration controls are locked: input/output gain, band properties and curve
+edits, batch addition, reset, A/B and preset actions are unavailable. The curve
+still supports band selection and overlap cycling, and the selected band's values
+remain visible. Switching EQ off preserves existing field drafts and band
+selection; switching it back on makes those drafts editable again without
+committing them automatically.
+
+With EQ enabled, set the quantity with the minus/plus controls (initially 1, up to
+the remaining capacity), then choose Add. Add appends
 the whole batch atomically: new bands are enabled peak filters at 0 dB, with
-default Q and all channels selected. It never changes existing bands, preamp,
+default Q and all channels selected. The first new band becomes selected in the
+linked property editor. Adding bands never changes existing bands, preamp,
 output gain or the EQ enable state. An empty bank uses logarithmically uniform
 cell centers from 20 Hz to the lower of 20 kHz and 0.499 × the known current
 track sample rate; an unknown rate uses 20 kHz. With existing bands, each new
@@ -124,6 +148,13 @@ range edges. Existing bands outside this range keep their original frequencies.
 Zero quantities or batches exceeding the 32-band capacity are rejected without
 changing the configuration. Add is unavailable when full or while a processing
 command is pending.
+
+Numbered nodes on the EQ curve select the band shown in the linked property
+editor, whose heading identifies the band number and filter kind. Disabled bands
+remain selectable as hollow numbered nodes, with their disabled state shown in
+the editor. Input and output gain remain distinct overall-gain controls, not
+properties of the selected band. An empty bank prompts you to add a band before
+editing its properties.
 
 Select a band node and drag horizontally for frequency and vertically for
 peak/shelf gain. Overlapping nodes stay at their true Hz/dB positions and show
@@ -195,6 +226,12 @@ dropouts. Threshold, floor and transient protection trade missed clicks against
 damaged musical attacks. Hum and repair remain independent of spectral mode,
 including `off`. Classical restoration supports 8–384 kHz, with validated channel
 and allocation bounds; unsupported input fails instead of silently downmixing.
+
+The Restoration page shows parameters for the selected spectral mode. Noise-range
+fields appear only for Profile; hum and impulse controls expand independently.
+Speech enhancement and Separation have separate pages with operation-specific
+controls; their environment/model paths and shared device/thread settings are
+available under advanced settings. Collapsing a section preserves its drafts.
 
 [source,shell]
 ----

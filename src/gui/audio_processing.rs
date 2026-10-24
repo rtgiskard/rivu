@@ -10,9 +10,10 @@ use crate::{
 };
 use gpui::{prelude::*, *};
 use rivu_ui::{
-    FormField, button, caption, checkbox, column, disabled_control,
+    IconButton, IconButtonDensity, IconButtonStyle, Popover, activate_control, button, caption,
+    checkbox, column, disabled_control, dropdown_trigger, icon,
     input::{Input, InputEvent},
-    row, scrollable_area,
+    menu_item, row, scrollable_area,
 };
 use serde_json::{Value, json};
 use std::{
@@ -31,11 +32,13 @@ mod equalizer_editor;
 use equalizer_editor::EqualizerUi;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Page {
+pub(super) enum Page {
     Graph,
     Equalizer,
     Restoration,
-    Neural,
+    Speech,
+    Separation,
+    Results,
 }
 
 struct Field {
@@ -67,6 +70,14 @@ pub(super) struct AudioProcessing {
     geometry_epoch: u64,
     graph_ui: GraphUi,
     equalizer_ui: EqualizerUi,
+    hum_open: bool,
+    impulse_open: bool,
+    speech_advanced: bool,
+    separation_advanced: bool,
+    preset_open: bool,
+    preset_manage: bool,
+    preset_bounds: HashMap<u64, Rc<Cell<Option<Bounds<Pixels>>>>>,
+    task_details: bool,
 }
 
 impl AudioProcessing {
@@ -86,6 +97,14 @@ impl AudioProcessing {
             geometry_epoch: 0,
             graph_ui: GraphUi::default(),
             equalizer_ui: EqualizerUi::default(),
+            hum_open: false,
+            impulse_open: false,
+            speech_advanced: false,
+            separation_advanced: false,
+            preset_open: false,
+            preset_manage: false,
+            preset_bounds: HashMap::new(),
+            task_details: false,
         };
         this.sync_fields(cx);
         this
@@ -115,6 +134,11 @@ impl AudioProcessing {
             || self.state.system.processing_audition != state.system.processing_audition
             || self.state.playback.status != state.playback.status
             || format_changed;
+        if self.state.system.processing.as_ref().map(|task| task.id)
+            != state.system.processing.as_ref().map(|task| task.id)
+        {
+            self.task_details = false;
+        }
         self.state = state;
         self.reconcile_graph(cx);
         self.reconcile_equalizers(cx);
@@ -127,7 +151,9 @@ impl AudioProcessing {
     pub(super) fn cancel_pointer(&mut self, cx: &mut Context<Self>) {
         let graph_pointer = self.graph_ui.pointer.take().is_some();
         let eq_pointer = self.cancel_equalizer_pointer(cx);
-        if graph_pointer || eq_pointer {
+        let workbench_pointer = self.workbench_pointer_active();
+        self.cancel_workbench_resize();
+        if graph_pointer || eq_pointer || workbench_pointer {
             cx.notify();
         }
     }
@@ -138,11 +164,17 @@ impl AudioProcessing {
         for bounds in self.graph_ui.bounds.values() {
             bounds.set(None);
         }
+        for bounds in self.preset_bounds.values() {
+            bounds.set(None);
+        }
+        self.preset_open = false;
         self.cancel_pointer(cx);
     }
 
     pub(super) fn pointer_active(&self) -> bool {
-        self.equalizer_pointer_active() || self.graph_ui.pointer.is_some()
+        self.equalizer_pointer_active()
+            || self.graph_ui.pointer.is_some()
+            || self.workbench_pointer_active()
     }
 
     pub(super) fn input_focused(&self, window: &Window, cx: &App) -> bool {
@@ -161,10 +193,18 @@ impl AudioProcessing {
         cx: &mut Context<Self>,
     ) {
         self.retain_equalizer_panels(layout, visible, cx);
+        self.preset_bounds
+            .retain(|id, _| layout.contains_panel(*id));
+        if !visible {
+            self.preset_open = false;
+            self.preset_manage = false;
+            self.cancel_pointer(cx);
+        }
         self.graph_ui
             .bounds
             .retain(|id, _| layout.contains_panel(*id));
         self.graph_ui.retain_panel_inputs(layout);
+        self.retain_workbench_controls(layout, visible);
         if self
             .graph_ui
             .pointer
@@ -532,193 +572,343 @@ impl AudioProcessing {
         let field = &self.fields[key];
         let label: SharedString = label.into();
         let persisted = key.starts_with("denoise.") || key.starts_with("neural.");
-        let label: SharedString = if field.dirty && persisted {
-            format!("{label} · {}", self.context.i18n.text("processing-draft")).into()
-        } else {
-            label
-        };
         let key_owned = key.to_owned();
         let mut control = row()
             .min_w_0()
-            .gap_1()
+            .items_center()
+            .gap_2()
+            .child(
+                caption(theme, label.clone())
+                    .w(relative(0.42))
+                    .min_w_0()
+                    .truncate()
+                    .id(SharedString::from(format!("field-label-{key}")))
+                    .tooltip(rivu_ui::text_tooltip(label)),
+            )
             .child(div().flex_1().min_w_0().child(field.input.clone()));
         if persisted {
-            control = control.child(disabled_control(
-                theme,
-                button(
+            control = control.child(
+                IconButton::new(
                     SharedString::from(format!("apply-{key}")),
+                    "",
                     self.tr("processing-apply"),
+                )
+                .enabled(enabled && field.dirty)
+                .build(
+                    IconButtonStyle::Quiet,
+                    IconButtonDensity::Compact,
                     cx,
                     move |this, _, cx| this.apply_field(&key_owned, cx),
                 ),
-                !enabled,
-            ));
+            );
         }
-        FormField::new(theme, label, control)
-            .into_div()
-            .min_w_0()
-            .opacity(if enabled { 1. } else { 0.5 })
+        control.opacity(if enabled { 1. } else { 0.5 })
     }
 
-    fn preset_view(&self, panel: u64, cx: &mut Context<Self>) -> Div {
+    fn preset_view(&mut self, panel: u64, cx: &mut Context<Self>) -> Div {
         let theme = rivu_ui::theme::palette(cx);
-        let mut presets = row().flex_wrap().gap_1();
-        for (index, preset) in self
-            .state
-            .system
-            .config
-            .equalizer_presets
-            .iter()
-            .enumerate()
+        let enabled = self.state.system.config.equalizer.enabled;
+        if !enabled {
+            self.preset_open = false;
+            self.preset_manage = false;
+        }
+        for key in ["preset_name", "preset_path"] {
+            if let Some(field) = self.fields.get(key) {
+                field
+                    .input
+                    .update(cx, |input, cx| input.set_enabled(enabled, cx));
+            }
+        }
+        let bounds = self
+            .preset_bounds
+            .entry(panel)
+            .or_insert_with(|| Rc::new(Cell::new(None)))
+            .clone();
+        let measure = bounds.clone();
+        let name = self.text("preset_name", cx);
+        let label = if name.is_empty() {
+            self.tr("processing-presets")
+        } else {
+            name.into()
+        };
+        let trigger = activate_control(
+            dropdown_trigger(theme, ("eq-presets", panel), label, self.preset_open, cx),
+            cx,
+            |this, _, cx| {
+                this.preset_open = !this.preset_open;
+                this.preset_manage = false;
+                cx.notify();
+            },
+        );
+        let mut content = column().min_w_0().gap_1().child(
+            row()
+                .relative()
+                .min_w_0()
+                .w_auto()
+                .max_w_full()
+                .gap_1()
+                .child(
+                    canvas(
+                        move |bounds, _, _| measure.set(Some(bounds)),
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .size_full(),
+                )
+                .child(div().w(rems(6.)).min_w_0().child(trigger))
+                .child(
+                    IconButton::new(
+                        ("manage-presets", panel),
+                        "󰒓",
+                        self.tr("processing-preset-manage"),
+                    )
+                    .toggled(self.preset_manage)
+                    .build(
+                        IconButtonStyle::Quiet,
+                        IconButtonDensity::Compact,
+                        cx,
+                        |this, _, cx| {
+                            this.preset_manage = !this.preset_manage;
+                            this.preset_open = false;
+                            cx.notify();
+                        },
+                    ),
+                ),
+        );
+        if self.preset_open
+            && let Some(bounds) = bounds.get()
         {
-            let name = preset.name.clone();
-            presets = presets.child(button(
-                SharedString::from(format!("eq-preset-{panel}-{index}")),
-                name.clone(),
-                cx,
-                move |this, _, cx| {
-                    if let Some(field) = this.fields.get_mut("preset_name") {
-                        field
-                            .input
-                            .update(cx, |input, cx| input.set_text(name.clone(), cx));
-                        field.dirty = false;
+            let mut choices = Popover::surface(theme, ("eq-preset-choices", panel))
+                .role(Role::Menu)
+                .flex()
+                .flex_col()
+                .max_h(rems(12.))
+                .overflow_y_scroll()
+                .p_1()
+                .w(bounds.size.width)
+                .on_mouse_down_out(cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    if !bounds.contains(&event.position) {
+                        this.preset_open = false;
+                        cx.notify();
                     }
-                    this.eq(EqualizerEdit::LoadPreset { name: name.clone() }, cx);
-                },
-            ));
+                }))
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                    if event.keystroke.key == "escape" {
+                        this.preset_open = false;
+                        cx.notify();
+                    }
+                }));
+            for (index, preset) in self
+                .state
+                .system
+                .config
+                .equalizer_presets
+                .iter()
+                .enumerate()
+            {
+                let name = preset.name.clone();
+                choices = choices.child(menu_item(
+                    SharedString::from(format!("eq-preset-{panel}-{index}")),
+                    name.clone(),
+                    cx,
+                    move |this, _, cx| {
+                        if let Some(field) = this.fields.get_mut("preset_name") {
+                            field
+                                .input
+                                .update(cx, |input, cx| input.set_text(name.clone(), cx));
+                            field.dirty = false;
+                        }
+                        this.preset_open = false;
+                        this.eq(EqualizerEdit::LoadPreset { name: name.clone() }, cx);
+                    },
+                ));
+            }
+            if self.state.system.config.equalizer_presets.is_empty() {
+                choices = choices.child(caption(theme, self.tr("processing-preset-empty")));
+            }
+            content = content.child(
+                deferred(
+                    anchored()
+                        .position(bounds.bottom_left())
+                        .snap_to_window()
+                        .child(choices),
+                )
+                .with_priority(2),
+            );
         }
-        if self.state.system.config.equalizer_presets.is_empty() {
-            presets = presets.child(caption(theme, self.tr("processing-preset-empty")));
+        if self.preset_manage
+            && let Some(bounds) = bounds.get()
+        {
+            content = content.child(
+                deferred(
+                    anchored()
+                        .position(bounds.bottom_left())
+                        .snap_to_window()
+                        .child(
+                            Popover::surface(theme, ("eq-preset-management", panel))
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .p_2()
+                                .w(rems(24.))
+                                .max_h(rems(24.))
+                                .overflow_y_scroll()
+                                .on_mouse_down_out(cx.listener(
+                                    move |this, event: &MouseDownEvent, _, cx| {
+                                        if !bounds.contains(&event.position) {
+                                            this.preset_manage = false;
+                                            cx.notify();
+                                        }
+                                    },
+                                ))
+                                .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                                    if event.keystroke.key == "escape" {
+                                        this.preset_manage = false;
+                                        cx.notify();
+                                    }
+                                }))
+                                .child(self.field_view(
+                                    "preset_name",
+                                    self.tr("processing-preset-name"),
+                                    true,
+                                    cx,
+                                ))
+                                .child(menu_item(
+                                    ("save-preset", panel),
+                                    self.tr("processing-save-copy"),
+                                    cx,
+                                    |this, _, cx| {
+                                        this.eq(
+                                            EqualizerEdit::SavePreset {
+                                                name: this.text("preset_name", cx),
+                                            },
+                                            cx,
+                                        );
+                                    },
+                                ))
+                                .child(menu_item(
+                                    ("load-preset", panel),
+                                    self.tr("processing-load"),
+                                    cx,
+                                    |this, _, cx| {
+                                        this.eq(
+                                            EqualizerEdit::LoadPreset {
+                                                name: this.text("preset_name", cx),
+                                            },
+                                            cx,
+                                        );
+                                    },
+                                ))
+                                .child(menu_item(
+                                    ("delete-preset", panel),
+                                    self.tr("processing-delete"),
+                                    cx,
+                                    |this, _, cx| {
+                                        this.eq(
+                                            EqualizerEdit::DeletePreset {
+                                                name: this.text("preset_name", cx),
+                                            },
+                                            cx,
+                                        );
+                                    },
+                                ))
+                                .child(menu_item(
+                                    ("copy-eq", panel),
+                                    self.tr("processing-copy"),
+                                    cx,
+                                    |this, _, cx| match serde_json::to_string_pretty(
+                                        &this.state.system.config.equalizer,
+                                    ) {
+                                        Ok(text) => {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(text))
+                                        }
+                                        Err(error) => {
+                                            this.error = Some(error.to_string());
+                                            cx.notify();
+                                        }
+                                    },
+                                ))
+                                .child(self.field_view(
+                                    "preset_path",
+                                    self.tr("processing-preset-path"),
+                                    true,
+                                    cx,
+                                ))
+                                .child(menu_item(
+                                    ("import-preset", panel),
+                                    self.tr("processing-import"),
+                                    cx,
+                                    |this, _, cx| {
+                                        this.eq(
+                                            EqualizerEdit::ImportPreset {
+                                                name: this.text("preset_name", cx),
+                                                path: PathBuf::from(this.text("preset_path", cx)),
+                                            },
+                                            cx,
+                                        );
+                                    },
+                                ))
+                                .child(menu_item(
+                                    ("export-preset", panel),
+                                    self.tr("processing-export"),
+                                    cx,
+                                    |this, _, cx| {
+                                        this.eq(
+                                            EqualizerEdit::ExportPreset {
+                                                name: this.text("preset_name", cx),
+                                                path: PathBuf::from(this.text("preset_path", cx)),
+                                            },
+                                            cx,
+                                        );
+                                    },
+                                )),
+                        ),
+                )
+                .with_priority(2),
+            );
         }
-        column()
-            .gap_2()
-            .child(caption(theme, self.tr("processing-presets")).text_color(rgb(theme.text)))
-            .child(presets)
-            .child(self.field_view("preset_name", self.tr("processing-preset-name"), true, cx))
-            .child(
-                row()
-                    .flex_wrap()
-                    .gap_1()
-                    .child(button(
-                        ("save-preset", panel),
-                        self.tr("processing-save-copy"),
-                        cx,
-                        |this, _, cx| {
-                            let name = this.text("preset_name", cx);
-                            this.eq(EqualizerEdit::SavePreset { name }, cx);
-                        },
-                    ))
-                    .child(button(
-                        ("load-preset", panel),
-                        self.tr("processing-load"),
-                        cx,
-                        |this, _, cx| {
-                            let name = this.text("preset_name", cx);
-                            this.eq(EqualizerEdit::LoadPreset { name }, cx);
-                        },
-                    ))
-                    .child(button(
-                        ("delete-preset", panel),
-                        self.tr("processing-delete"),
-                        cx,
-                        |this, _, cx| {
-                            let name = this.text("preset_name", cx);
-                            this.eq(EqualizerEdit::DeletePreset { name }, cx);
-                        },
-                    ))
-                    .child(button(
-                        ("copy-eq", panel),
-                        self.tr("processing-copy"),
-                        cx,
-                        |this, _, cx| match serde_json::to_string_pretty(
-                            &this.state.system.config.equalizer,
-                        ) {
-                            Ok(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
-                            Err(error) => {
-                                this.error = Some(error.to_string());
-                                cx.notify();
-                            }
-                        },
-                    )),
-            )
-            .child(self.field_view("preset_path", self.tr("processing-preset-path"), true, cx))
-            .child(
-                row()
-                    .flex_wrap()
-                    .gap_1()
-                    .child(button(
-                        ("import-preset", panel),
-                        self.tr("processing-import"),
-                        cx,
-                        |this, _, cx| {
-                            let name = this.text("preset_name", cx);
-                            let path = PathBuf::from(this.text("preset_path", cx));
-                            this.eq(EqualizerEdit::ImportPreset { path, name }, cx);
-                        },
-                    ))
-                    .child(button(
-                        ("export-preset", panel),
-                        self.tr("processing-export"),
-                        cx,
-                        |this, _, cx| {
-                            let name = this.text("preset_name", cx);
-                            let path = PathBuf::from(this.text("preset_path", cx));
-                            this.eq(EqualizerEdit::ExportPreset { path, name }, cx);
-                        },
-                    )),
-            )
+        div().child(disabled_control(
+            theme,
+            content
+                .id(("eq-presets-disabled", panel))
+                .opacity(if enabled { 1. } else { 0.5 }),
+            !enabled,
+        ))
     }
 
-    fn object_controls(&self, prefix: &str, value: &Value, cx: &mut Context<Self>) -> Div {
-        let theme = rivu_ui::theme::palette(cx);
-        let mut content = column().gap_2();
-        if let Some(object) = value.as_object() {
-            for (key, value) in object {
-                let path = format!("{prefix}.{key}");
-                if key == "mode" || key == "device" {
-                    continue;
-                }
-                if value.is_object() {
-                    content = content.child(
-                        column()
-                            .gap_2()
-                            .p_2()
-                            .border_1()
-                            .border_color(rgb(theme.border))
-                            .child(
-                                caption(theme, self.parameter_label(key))
-                                    .text_color(rgb(theme.text)),
-                            )
-                            .child(self.object_controls(&path, value, cx)),
-                    );
-                } else if let Some(checked) = value.as_bool() {
-                    let neural = prefix == "neural";
-                    let local = path
-                        .strip_prefix(if neural { "neural." } else { "denoise." })
-                        .unwrap_or(&path)
-                        .to_owned();
-                    content = content.child(checkbox(
-                        SharedString::from(path),
-                        self.parameter_path_label(prefix, key),
-                        checked,
-                        true,
-                        cx,
-                        move |this, value, cx| {
-                            if neural {
-                                this.patch_neural(&local, json!(value), cx);
-                            } else {
-                                this.patch_denoise(&local, json!(value), cx);
-                            }
-                        },
-                    ));
-                } else if self.fields.contains_key(&path) {
-                    content = content.child(self.field_view(
-                        &path,
-                        self.parameter_path_label(prefix, key),
-                        true,
-                        cx,
-                    ));
-                }
+    fn parameter_controls(
+        &self,
+        prefix: &str,
+        keys: &[&str],
+        value: &Value,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let mut content = column().min_w_0().gap_1();
+        for &key in keys {
+            let path = format!("{prefix}.{key}");
+            if let Some(checked) = value[key].as_bool() {
+                let neural = prefix == "neural";
+                let local = path
+                    .strip_prefix(if neural { "neural." } else { "denoise." })
+                    .unwrap_or(&path)
+                    .to_owned();
+                content = content.child(checkbox(
+                    SharedString::from(path),
+                    self.parameter_label(key),
+                    checked,
+                    true,
+                    cx,
+                    move |this, value, cx| {
+                        if neural {
+                            this.patch_neural(&local, json!(value), cx);
+                        } else {
+                            this.patch_denoise(&local, json!(value), cx);
+                        }
+                    },
+                ));
+            } else if self.fields.contains_key(&path) {
+                content =
+                    content.child(self.field_view(&path, self.parameter_label(key), true, cx));
             }
         }
         content
@@ -728,7 +918,7 @@ impl AudioProcessing {
         let theme = rivu_ui::theme::palette(cx);
         let config =
             serde_json::to_value(&self.state.system.config.denoise).expect("serializable denoise");
-        let mut modes = row().flex_wrap().gap_1();
+        let mut modes = row().gap_1();
         for (mode, label) in [
             ("off", "processing-off"),
             ("stationary", "processing-stationary"),
@@ -742,62 +932,202 @@ impl AudioProcessing {
                     cx,
                     move |this, _, cx| this.patch_denoise("mode", json!(mode), cx),
                 )
+                .flex_shrink_0()
+                .whitespace_nowrap()
                 .when(config["mode"] == mode, |v| v.bg(rgb(theme.selected))),
             );
         }
-        column()
-            .gap_3()
-            .child(caption(theme, self.tr("processing-restoration-help")))
-            .child(modes)
-            .child(self.object_controls("denoise", &config, cx))
-            .child(self.field_view(
-                "profile_start",
-                self.tr("processing-profile-start"),
-                true,
+        let mut content = column()
+            .min_w_0()
+            .gap_2()
+            .child(
+                row()
+                    .min_w_0()
+                    .id(("denoise-modes", panel))
+                    .overflow_x_scroll()
+                    .child(modes),
+            )
+            .child(self.parameter_controls("denoise", &["wet"], &config, cx));
+        if config["mode"] != "off" {
+            content = content.child(self.parameter_controls(
+                "denoise",
+                &[
+                    "strength",
+                    "noise_floor_db",
+                    "attack_ms",
+                    "release_ms",
+                    "smoothing_bins",
+                    "transient_protection",
+                    "fft_size",
+                ],
+                &config,
                 cx,
-            ))
-            .child(self.field_view("profile_end", self.tr("processing-profile-end"), true, cx))
-            .child(self.task_controls(panel, ProcessingOperation::Denoise, cx))
+            ));
+        }
+        if config["mode"] == "stationary" || config["mode"] == "adaptive" {
+            content = content.child(self.parameter_controls(
+                "denoise",
+                &["stationary_noise_dbfs"],
+                &config,
+                cx,
+            ));
+        }
+        if config["mode"] == "profile" {
+            content = content
+                .child(self.field_view(
+                    "profile_start",
+                    self.tr("processing-profile-start"),
+                    true,
+                    cx,
+                ))
+                .child(self.field_view("profile_end", self.tr("processing-profile-end"), true, cx));
+        }
+        for (group, open, keys) in [
+            (
+                "hum",
+                self.hum_open,
+                &["fundamental_hz", "harmonics", "q"][..],
+            ),
+            (
+                "impulse",
+                self.impulse_open,
+                &[
+                    "max_width",
+                    "threshold",
+                    "floor_dbfs",
+                    "transient_protection",
+                ][..],
+            ),
+        ] {
+            let label = format!(
+                "{} · {}",
+                self.parameter_label(group),
+                self.tr(if config[group]["enabled"] == true {
+                    "processing-enabled"
+                } else {
+                    "processing-off"
+                })
+            );
+            content = content.child(activate_control(
+                dropdown_trigger(
+                    theme,
+                    SharedString::from(format!("restoration-{group}-{panel}")),
+                    label,
+                    open,
+                    cx,
+                ),
+                cx,
+                move |this, _, cx| {
+                    if group == "hum" {
+                        this.hum_open = !this.hum_open;
+                    } else {
+                        this.impulse_open = !this.impulse_open;
+                    }
+                    cx.notify();
+                },
+            ));
+            if open {
+                let prefix = format!("denoise.{group}");
+                content = content.child(self.parameter_controls(
+                    &prefix,
+                    &["enabled"],
+                    &config[group],
+                    cx,
+                ));
+                if config[group]["enabled"] == true {
+                    content =
+                        content.child(self.parameter_controls(&prefix, keys, &config[group], cx));
+                }
+            }
+        }
+        content.child(self.task_controls(panel, ProcessingOperation::Denoise, cx))
     }
 
-    fn neural_view(&self, panel: u64, cx: &mut Context<Self>) -> Div {
+    fn neural_view(&self, panel: u64, speech: bool, cx: &mut Context<Self>) -> Div {
         let theme = rivu_ui::theme::palette(cx);
         let neural =
             serde_json::to_value(&self.state.system.config.neural).expect("serializable neural");
-        let mut devices = row().flex_wrap().gap_1();
-        for (device, label) in [("cpu", "CPU"), ("cuda", "CUDA")] {
-            devices = devices.child(
-                button(
-                    SharedString::from(format!("neural-device-{device}")),
-                    label,
+        let open = if speech {
+            self.speech_advanced
+        } else {
+            self.separation_advanced
+        };
+        let mut content = column()
+            .min_w_0()
+            .gap_2()
+            .child(self.parameter_controls(
+                "neural",
+                if speech {
+                    &[
+                        "speech_wet_mix",
+                        "speech_attenuation_limit_db",
+                        "speech_post_filter",
+                    ][..]
+                } else {
+                    &["separation_overlap"][..]
+                },
+                &neural,
+                cx,
+            ))
+            .child(activate_control(
+                dropdown_trigger(
+                    theme,
+                    ("neural-advanced", panel),
+                    self.tr("processing-advanced"),
+                    open,
                     cx,
-                    move |this, _, cx| match serde_json::from_value::<NeuralPatch>(
-                        json!({"device":device}),
-                    ) {
-                        Ok(patch) => this.send(
-                            Command::NeuralEdit {
-                                patch: Box::new(patch),
-                            },
-                            cx,
-                        ),
-                        Err(error) => {
-                            this.error = Some(error.to_string());
-                            cx.notify();
-                        }
-                    },
-                )
-                .when(neural["device"] == device, |v| v.bg(rgb(theme.selected))),
-            );
+                ),
+                cx,
+                move |this, _, cx| {
+                    if speech {
+                        this.speech_advanced = !this.speech_advanced;
+                    } else {
+                        this.separation_advanced = !this.separation_advanced;
+                    }
+                    cx.notify();
+                },
+            ));
+        if open {
+            content = content.child(self.parameter_controls(
+                "neural",
+                if speech {
+                    &["speech_manifest", "speech_interpreter", "worker", "threads"][..]
+                } else {
+                    &[
+                        "separation_manifest",
+                        "separation_interpreter",
+                        "worker",
+                        "threads",
+                    ][..]
+                },
+                &neural,
+                cx,
+            ));
+            let mut devices = row()
+                .gap_1()
+                .child(caption(theme, self.tr("processing-device")));
+            for (device, label) in [("cpu", "CPU"), ("cuda", "CUDA")] {
+                devices = devices.child(
+                    button(
+                        SharedString::from(format!("neural-device-{device}")),
+                        label,
+                        cx,
+                        move |this, _, cx| this.patch_neural("device", json!(device), cx),
+                    )
+                    .when(neural["device"] == device, |v| v.bg(rgb(theme.selected))),
+                );
+            }
+            content = content.child(devices);
         }
-        column()
-            .gap_3()
-            .child(caption(theme, self.tr("processing-neural-help")))
-            .child(self.object_controls("neural", &neural, cx))
-            .child(devices)
-            .child(caption(theme, self.tr("processing-speech")).text_color(rgb(theme.text)))
-            .child(self.task_controls(panel, ProcessingOperation::Speech, cx))
-            .child(caption(theme, self.tr("processing-separation")).text_color(rgb(theme.text)))
-            .child(self.task_controls(panel, ProcessingOperation::Separate, cx))
+        content.child(self.task_controls(
+            panel,
+            if speech {
+                ProcessingOperation::Speech
+            } else {
+                ProcessingOperation::Separate
+            },
+            cx,
+        ))
     }
 
     fn input_track(&self) -> Option<&Track> {
@@ -849,7 +1179,11 @@ impl AudioProcessing {
                 cx,
                 move |this, _, cx| this.start(operation, cx),
             )
-            .self_start(),
+            .self_start()
+            .gap_1()
+            .child(icon("", cx))
+            .bg(rgb(theme.selected))
+            .text_color(rgb(theme.accent)),
             busy || !supported || !model_ready || self.pending > 0,
         ));
         if !supported {
@@ -1072,25 +1406,45 @@ impl AudioProcessing {
                     .render(cx),
                 );
             }
-            if let Some(model) = &task.model_id {
-                content = content.child(caption(
+            content = content.child(activate_control(
+                dropdown_trigger(
                     theme,
-                    format!(
-                        "{} · {}",
-                        model,
-                        task.model_sha256.as_deref().unwrap_or("?")
-                    ),
-                ));
+                    ("processing-task-details", panel),
+                    self.tr(if self.task_details {
+                        "processing-result-hide-details"
+                    } else {
+                        "processing-result-show-details"
+                    }),
+                    self.task_details,
+                    cx,
+                ),
+                cx,
+                |this, _, cx| {
+                    this.task_details = !this.task_details;
+                    cx.notify();
+                },
+            ));
+            if self.task_details {
+                if let Some(model) = &task.model_id {
+                    content = content.child(caption(
+                        theme,
+                        format!(
+                            "{} · {}",
+                            model,
+                            task.model_sha256.as_deref().unwrap_or("?")
+                        ),
+                    ));
+                }
+                if let (Some(rate), Some(channels), Some(frames)) =
+                    (task.sample_rate, task.channels, task.frames)
+                {
+                    content = content.child(caption(
+                        theme,
+                        format!("{rate} Hz · {channels} ch · {frames} frames"),
+                    ));
+                }
+                content = content.child(self.task_settings(task, cx));
             }
-            if let (Some(rate), Some(channels), Some(frames)) =
-                (task.sample_rate, task.channels, task.frames)
-            {
-                content = content.child(caption(
-                    theme,
-                    format!("{rate} Hz · {channels} ch · {frames} frames"),
-                ));
-            }
-            content = content.child(self.task_settings(task, cx));
             if !terminal {
                 content = content.child(
                     button(
@@ -1204,12 +1558,17 @@ impl AudioProcessing {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = rivu_ui::theme::palette(cx);
-        let mut tabs = row().flex_wrap().gap_1();
+        let mut tabs = row()
+            .gap_1()
+            .id(("processing-tab-list", panel))
+            .role(Role::TabList);
         for (page, label) in [
-            (Page::Graph, "processing-routing-graph"),
-            (Page::Equalizer, "processing-workspace-monitor-eq"),
-            (Page::Restoration, "processing-restoration"),
-            (Page::Neural, "processing-neural"),
+            (Page::Graph, "processing-tab-graph"),
+            (Page::Equalizer, "processing-tab-equalizer"),
+            (Page::Restoration, "processing-tab-restoration"),
+            (Page::Speech, "processing-tab-speech"),
+            (Page::Separation, "processing-tab-separation"),
+            (Page::Results, "processing-tab-results"),
         ] {
             tabs = tabs.child(
                 button(
@@ -1218,11 +1577,34 @@ impl AudioProcessing {
                     cx,
                     move |this, _, cx| {
                         this.cancel_pointer(cx);
+                        this.close_workbench_controls();
+                        this.preset_open = false;
+                        this.preset_manage = false;
                         this.page = page;
                         cx.notify();
                     },
                 )
-                .when(self.page == page, |v| v.bg(rgb(theme.selected))),
+                .role(Role::Tab)
+                .aria_selected(self.page == page)
+                .flex_shrink_0()
+                .whitespace_nowrap()
+                .rounded_none()
+                .border_0()
+                .border_b_2()
+                .border_color(if self.page == page {
+                    rgb(theme.accent).into()
+                } else {
+                    transparent_black()
+                })
+                .bg(transparent_black())
+                .text_color(rgb(if self.page == page {
+                    theme.text
+                } else {
+                    theme.muted
+                }))
+                .group_hover("control", |style| {
+                    style.bg(transparent_black()).text_color(rgb(theme.accent))
+                }),
             );
         }
         let input = self
@@ -1230,7 +1612,7 @@ impl AudioProcessing {
             .map(|t| format!("{} · {} Hz · {} ch", t.title, t.sample_rate, t.channels))
             .unwrap_or_else(|| self.context.i18n.text("processing-no-input").to_owned());
         let source = row()
-            .flex_wrap()
+            .min_w_0()
             .gap_1()
             .child(
                 button(
@@ -1242,7 +1624,16 @@ impl AudioProcessing {
                         cx.notify();
                     },
                 )
-                .when(!self.use_selected, |v| v.bg(rgb(theme.selected))),
+                .flex_shrink_0()
+                .whitespace_nowrap()
+                .px_1()
+                .text_xs()
+                .aria_toggled(if !self.use_selected {
+                    Toggled::True
+                } else {
+                    Toggled::False
+                })
+                .when(!self.use_selected, |view| view.bg(rgb(theme.selected))),
             )
             .child(
                 button(
@@ -1254,17 +1645,37 @@ impl AudioProcessing {
                         cx.notify();
                     },
                 )
-                .when(self.use_selected, |v| v.bg(rgb(theme.selected))),
-            )
-            .child(caption(theme, input).flex_1().min_w_0().truncate())
-            .child(caption(
-                theme,
-                self.tr(if self.state.system.config.equalizer.enabled {
-                    "processing-workspace-monitor-on"
+                .flex_shrink_0()
+                .whitespace_nowrap()
+                .px_1()
+                .text_xs()
+                .aria_toggled(if self.use_selected {
+                    Toggled::True
                 } else {
-                    "processing-workspace-monitor-off"
-                }),
-            ));
+                    Toggled::False
+                })
+                .when(self.use_selected, |view| view.bg(rgb(theme.selected))),
+            )
+            .child(
+                caption(theme, input.clone())
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .id(("processing-source-title", panel))
+                    .tooltip(rivu_ui::text_tooltip(input)),
+            )
+            .child(
+                caption(
+                    theme,
+                    self.tr(if self.state.system.config.equalizer.enabled {
+                        "processing-workspace-monitor-on"
+                    } else {
+                        "processing-workspace-monitor-off"
+                    }),
+                )
+                .flex_shrink_0()
+                .whitespace_nowrap(),
+            );
         let transport = self.tr(match self.state.playback.status {
             crate::model::PlaybackStatus::Playing => "processing-workspace-playing",
             crate::model::PlaybackStatus::Paused => "processing-workspace-paused",
@@ -1297,19 +1708,19 @@ impl AudioProcessing {
             }
             None => self.tr("processing-workspace-original").to_string(),
         };
-        let selected_audio = caption(
-            theme,
-            format!(
-                "{}: {} · {selected_audio} · {transport}",
-                self.tr("processing-workspace-selected-audio"),
-                self.state
-                    .current_track()
-                    .map(|track| track.title.as_str())
-                    .unwrap_or("—")
-            ),
-        )
-        .min_w_0()
-        .truncate();
+        let selected_audio_text = format!(
+            "{}: {selected_audio} · {transport} · {}",
+            self.tr("processing-workspace-selected-audio"),
+            self.state
+                .current_track()
+                .map(|track| track.title.as_str())
+                .unwrap_or("—"),
+        );
+        let selected_audio = caption(theme, selected_audio_text.clone())
+            .min_w_0()
+            .truncate()
+            .id(("processing-audition-status", panel))
+            .tooltip(rivu_ui::text_tooltip(selected_audio_text));
         let mut selected_audio = row()
             .min_w_0()
             .gap_2()
@@ -1317,49 +1728,49 @@ impl AudioProcessing {
             .child(selected_audio.flex_1());
         if let Some(audition) = self.state.system.processing_audition {
             let id = audition.id;
-            selected_audio = selected_audio.child(button(
-                ("processing-original-source", panel),
-                self.tr("processing-workspace-restore-original"),
-                cx,
-                move |this, _, cx| this.send(Command::CancelProcessing { id }, cx),
-            ));
+            selected_audio = selected_audio.child(
+                IconButton::new(
+                    ("processing-original-source", panel),
+                    "󰑖",
+                    self.tr("processing-workspace-restore-original"),
+                )
+                .build(
+                    IconButtonStyle::Quiet,
+                    IconButtonDensity::Compact,
+                    cx,
+                    move |this, _, cx| this.send(Command::CancelProcessing { id }, cx),
+                ),
+            );
         }
         if self.page != Page::Graph {
             self.deactivate_graph_inputs(panel, window, cx);
         }
-        if matches!(self.page, Page::Restoration | Page::Neural) {
+        if !matches!(self.page, Page::Graph | Page::Equalizer) {
             self.deactivate_equalizer_panel(panel, window, cx);
         }
         let body = match self.page {
             Page::Graph => self
                 .routing_graph_view(panel, window, cx)
                 .into_any_element(),
+            Page::Results => self.processing_results_view(panel, cx).into_any_element(),
             page => {
                 let body = match page {
                     Page::Equalizer => self.equalizer_view(panel, window, cx),
                     Page::Restoration => self.restoration_view(panel, cx),
-                    Page::Neural => self.neural_view(panel, cx),
-                    Page::Graph => unreachable!(),
-                };
-                let body = if self
-                    .state
-                    .system
-                    .processing
-                    .as_ref()
-                    .is_some_and(|task| task.operation != ProcessingOperation::Graph)
-                {
-                    body.child(self.task_status(panel, cx))
-                } else {
-                    body
+                    Page::Speech => self.neural_view(panel, true, cx),
+                    Page::Separation => self.neural_view(panel, false, cx),
+                    Page::Graph | Page::Results => unreachable!(),
                 };
                 self.processing_scroll(panel, "processing-page-body", body.p_2())
             }
         };
-        let mut footer = if self.page == Page::Graph {
-            self.graph_execution_bar(panel, cx)
-        } else {
-            self.graph_task_summary(panel, cx)
-        };
+        let mut footer = column().min_w_0().gap_1();
+        if self.page == Page::Graph {
+            footer = footer.child(self.graph_execution_bar(panel, cx));
+        }
+        footer = footer
+            .child(self.graph_task_summary(panel, cx))
+            .child(selected_audio);
         if self.fields.iter().any(|(key, field)| {
             field.dirty && (key.starts_with("denoise.") || key.starts_with("neural."))
         }) {
@@ -1377,11 +1788,17 @@ impl AudioProcessing {
             .min_h_0()
             .min_w_0()
             .p_2()
-            .gap_2()
+            .gap_1()
             .child(self.processing_workbench_measure(panel, cx))
-            .child(tabs.flex_shrink_0())
+            .child(
+                row()
+                    .min_w_0()
+                    .flex_shrink_0()
+                    .id(("processing-tabs", panel))
+                    .overflow_x_scroll()
+                    .child(tabs),
+            )
             .child(source.flex_shrink_0())
-            .child(selected_audio.flex_shrink_0())
             .child(div().flex_1().min_h_0().min_w_0().child(body))
             .child(footer.flex_shrink_0())
             .into_any_element()
