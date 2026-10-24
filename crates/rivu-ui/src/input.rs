@@ -399,7 +399,7 @@ impl Input {
             return;
         }
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-            self.replace_selection(None, &text.replace('\n', " "), window, cx);
+            self.replace_selection(None, &text.replace(['\r', '\n'], " "), window, cx);
         }
     }
 
@@ -1376,6 +1376,29 @@ mod tests {
             other.read_with(&cx, |input, _| input.text().to_owned()),
             "untouchedx"
         );
+    }
+
+    #[test]
+    fn clipboard_line_endings_never_enter_single_line_values() {
+        let mut cx = gpui::TestAppContext::single();
+        cx.update(crate::theme::init_test);
+        let (input, _, handle) = selection_fixture(&mut cx);
+        cx.update_window(handle, |_, window, cx| {
+            for (text, expected) in [
+                ("中\rvalue", "中 value"),
+                ("中\nvalue", "中 value"),
+                ("中\r\nvalue", "中  value"),
+            ] {
+                cx.write_to_clipboard(ClipboardItem::new_string(text.into()));
+                input.update(cx, |input, cx| {
+                    input.focus_and_select_all(window, cx);
+                    input.paste(&Paste, window, cx);
+                    assert_eq!(input.text(), expected);
+                    assert_eq!(input.selected_range, expected.len()..expected.len());
+                });
+            }
+        })
+        .unwrap();
     }
 
     #[test]
