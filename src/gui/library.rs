@@ -638,6 +638,10 @@ impl Library {
                                 None,
                             ),
                         };
+                        let row_id = match &node {
+                            LibraryNode::Track(id) => gpui::ElementId::NamedInteger("library-track".into(), *id as u64),
+                            LibraryNode::Directory(path) => gpui::ElementId::Path(Arc::clone(path)),
+                        };
                         let selected = this.directory_row_selected(entry);
                         let id = node.clone();
                         let retry_counts = path.as_deref().is_some_and(|path| {
@@ -770,7 +774,7 @@ impl Library {
                         let row_view = rivu_ui::lazy_row_tooltip(
                             rivu_ui::tree_row(
                                 theme,
-                                gpui::ElementId::named_usize("library-node", index),
+                                row_id,
                                 0,
                                 selected,
                             )

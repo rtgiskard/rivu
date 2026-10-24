@@ -237,11 +237,11 @@ impl GuiApp {
                 );
             for (index, name) in names.enumerate() {
                 let current = name == self.workspace.layouts.active_name();
-                let target = name.to_owned();
-                let mut choice = row().group("layout-choice-row").child(
+                let target: SharedString = name.to_owned().into();
+                let mut choice = row().id(target.clone()).group("layout-choice-row").child(
                     menu_item(
                         ("layout-select", index),
-                        name.to_owned(),
+                        target.clone(),
                         cx,
                         move |this, window, cx| this.select_layout(&target, window, cx),
                     )

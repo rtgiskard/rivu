@@ -473,6 +473,11 @@ Capture-phase bookkeeping, outside dismissal, wheel/drop routing, and gesture
 move/release delivery retain their separate owners; stopping activation does not
 transfer or cancel a gesture's lifecycle.
 
+Interactive row identities follow their business target, not their current display
+index: Library uses track IDs or directory paths, Albums uses directory/title keys,
+and named layouts use their names. Replacement cannot inherit another target's
+pending native activation merely by occupying the same visible slot.
+
 Native accessibility Focus is authorized against the live shell surface and its
 published focus scope before custom Focus listeners or built-in Focus run.
 Opening or replacing a surface invalidates the previous publication; native

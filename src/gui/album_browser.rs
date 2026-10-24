@@ -689,6 +689,10 @@ impl AlbumBrowser {
         let directory = key.directory.to_string_lossy().into_owned();
         let title = key.title.clone();
         let drag_label: SharedString = title.clone().into();
+        let card_id = gpui::ElementId::NamedChild(
+            Arc::new(gpui::ElementId::Path(Arc::from(key.directory.as_path()))),
+            drag_label.clone(),
+        );
         let cover_fade = |color: u32| {
             linear_gradient(
                 0.,
@@ -739,7 +743,7 @@ impl AlbumBrowser {
                     .into_div(),
             ));
         column()
-            .id(("album-card", index))
+            .id(card_id)
             .group("album-card")
             .relative()
             .flex_1()
