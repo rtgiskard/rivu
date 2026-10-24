@@ -126,7 +126,100 @@ pub fn checked_menu_item<T: 'static>(
         .child(
             div()
                 .ml_auto()
+                .w(rems(crate::theme::font_size_scale(cx)))
+                .flex_shrink_0()
+                .flex()
+                .justify_center()
                 .text_color(rgb(if checked { theme.accent } else { theme.muted }))
                 .child(mark),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::prelude::v1::test;
+    use std::{cell::Cell, rc::Rc};
+
+    struct CheckedMenus {
+        bounds: Rc<Cell<[Bounds<Pixels>; 4]>>,
+    }
+
+    impl Render for CheckedMenus {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let mut menus = column()
+                .items_start()
+                .font_size_scale(crate::theme::font_size_scale(cx));
+            for (index, (indicator, checked)) in [
+                (MenuIndicator::Check, false),
+                (MenuIndicator::Check, true),
+                (MenuIndicator::Radio, false),
+                (MenuIndicator::Radio, true),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let bounds = self.bounds.clone();
+                menus = menus.child(
+                    column()
+                        .relative()
+                        .child(checked_menu_item(
+                            ("choice", index),
+                            "Keep the same label",
+                            checked,
+                            indicator,
+                            cx,
+                            |_, _, _| {},
+                        ))
+                        .child(
+                            canvas(
+                                move |value, _, _| {
+                                    let mut measured = bounds.get();
+                                    measured[index] = value;
+                                    bounds.set(measured);
+                                },
+                                |_, _, _, _| {},
+                            )
+                            .absolute()
+                            .size_full(),
+                        ),
+                );
+            }
+            menus
+        }
+    }
+
+    #[gpui::test]
+    fn checked_menu_indicators_keep_intrinsic_width_across_states_and_scales(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(crate::theme::init_test);
+        let bounds = Rc::new(Cell::new([Bounds::default(); 4]));
+        let window = cx.add_window({
+            let bounds = bounds.clone();
+            move |_, _| CheckedMenus { bounds }
+        });
+        for interface_scale in [0.75, 1., 1.5, 2.] {
+            for font_size in [8, 11, 18] {
+                cx.update(|cx| {
+                    crate::theme::set_typography(
+                        gpui::font("sans-serif"),
+                        "sans-serif",
+                        font_size,
+                        cx,
+                    )
+                });
+                cx.update_window(window.into(), |_, window, cx| {
+                    window.set_rem_size(px(16. * interface_scale));
+                    window.draw(cx).clear(cx);
+                })
+                .unwrap();
+                let measured = bounds.get();
+                assert!(measured[0].size.width > px(0.));
+                for menu in &measured[1..] {
+                    assert_eq!(menu.size, measured[0].size);
+                }
+            }
+        }
+    }
 }

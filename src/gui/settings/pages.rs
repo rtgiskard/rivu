@@ -56,7 +56,7 @@ impl Settings {
                 ))
                 .child(
                     row()
-                        .items_end()
+                        .items_center()
                         .flex_wrap()
                         .gap_2()
                         .child(
@@ -379,15 +379,18 @@ impl Settings {
             column()
                 .gap_2()
                 .child(self.pair(Field::Volume, Field::PlayCountThreshold, cx))
-                .child(visual_switch(
-                    &self.i18n,
-                    "settings-confirm-queue-replace",
-                    "󰁨",
-                    self.tr("settings-confirm-queue-replace"),
-                    self.model.draft.confirm_queue_replace,
-                    cx,
-                    |draft| draft.confirm_queue_replace = !draft.confirm_queue_replace,
-                )),
+                .child(
+                    visual_switch(
+                        &self.i18n,
+                        "settings-confirm-queue-replace",
+                        "󰁨",
+                        self.tr("settings-confirm-queue-replace"),
+                        self.model.draft.confirm_queue_replace,
+                        cx,
+                        |draft| draft.confirm_queue_replace = !draft.confirm_queue_replace,
+                    )
+                    .self_start(),
+                ),
         );
         let audio = settings_card(
             palette(cx),

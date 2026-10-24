@@ -418,7 +418,8 @@ impl Render for Showcase {
                                 cx.notify();
                             },
                         )
-                        .into_div(),
+                        .into_div()
+                        .self_start(),
                 )
             }),
         );

@@ -312,16 +312,19 @@ impl GuiApp {
         for binding in keyboard::help_rows(&[context]) {
             rows = rows.child(
                 row()
+                    .items_start()
+                    .flex_wrap()
                     .gap_4()
                     .line_height(rems(1.25))
                     .child(
                         div()
                             .w_48()
+                            .max_w_full()
                             .flex_shrink_0()
                             .text_color(rgb(theme.accent))
                             .child(binding.label()),
                     )
-                    .child(div().flex_1().child(self.tr(binding.description))),
+                    .child(div().flex_1().min_w_0().child(self.tr(binding.description))),
             );
             row_count += 1;
         }

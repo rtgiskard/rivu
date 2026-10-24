@@ -247,6 +247,8 @@ overlong label truncates within its button and exposes its full text in a
 tooltip. Oversized menus scroll within the available height. Shared
 menus, tooltip width limits, and drag-preview width limits likewise retain
 0.5rem clearance on both sides of the viewport, following interface scale.
+The catalog's second row groups artwork and visualizations, followed by Audio
+processing after Audio visualizer; the first row contains the other panels.
 
 The shell owns the 0.5rem outer content inset for every docked panel. Panel roots and
 standalone headings, empty-state captions, and error captions do not repeat that
@@ -574,9 +576,10 @@ select triggers into form geometry. Icon buttons and independent `toggle_button`
 switches use the same centered square glyph slot, growing with configured
 typography and UI scale. Padding and minimum hit areas remain density-specific;
 glyph and state changes do not change a button's width. Standalone controls and
-groups align to their content rather than stretching across a parent column.
-Text buttons retain content width up to the parent's available width; overlong
-labels truncate on one line and expose their full text in a tooltip.
+groups inherit their parent's cross-axis alignment; column compositions opt into
+content width at the callsite instead of forcing top alignment in centered rows.
+Text buttons remain bounded by the parent's available width; overlong labels
+truncate on one line and expose their full text in a tooltip.
 Within each icon-button density, Quiet and Bare retain the Surface hit area.
 Uniform tree rows reserve enough height for inline icon actions; two-line text
 gap and line height remain separate from outer row spacing.

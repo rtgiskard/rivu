@@ -200,21 +200,24 @@ impl AudioProcessing {
         if let Some(error) = &task.error {
             content = content.child(caption(theme, error.clone()).text_color(rgb(theme.error)));
         }
-        content = content.child(button(
-            ("graph-result-details", panel),
-            self.tr(if expanded {
-                "processing-result-hide-details"
-            } else {
-                "processing-result-show-details"
-            }),
-            cx,
-            move |this, _, cx| {
-                if !this.graph_ui.result_details.remove(&panel) {
-                    this.graph_ui.result_details.insert(panel);
-                }
-                cx.notify();
-            },
-        ));
+        content = content.child(
+            button(
+                ("graph-result-details", panel),
+                self.tr(if expanded {
+                    "processing-result-hide-details"
+                } else {
+                    "processing-result-show-details"
+                }),
+                cx,
+                move |this, _, cx| {
+                    if !this.graph_ui.result_details.remove(&panel) {
+                        this.graph_ui.result_details.insert(panel);
+                    }
+                    cx.notify();
+                },
+            )
+            .self_start(),
+        );
         if expanded {
             content = content.child(caption(
                 theme,
@@ -418,12 +421,15 @@ impl AudioProcessing {
                     .gap_1()
                     .child(caption(theme, self.tr("processing-export-path")))
                     .child(caption(theme, self.tr("processing-result-new-file")))
-                    .child(button(
-                        ("graph-choose-export", panel),
-                        self.tr("processing-result-choose-path"),
-                        cx,
-                        move |this, _, cx| this.choose_graph_export_path(panel, id, cx),
-                    ))
+                    .child(
+                        button(
+                            ("graph-choose-export", panel),
+                            self.tr("processing-result-choose-path"),
+                            cx,
+                            move |this, _, cx| this.choose_graph_export_path(panel, id, cx),
+                        )
+                        .self_start(),
+                    )
                     .child(
                         div()
                             .flex_1()

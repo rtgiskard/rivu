@@ -848,7 +848,8 @@ impl AudioProcessing {
                 self.tr("processing-start"),
                 cx,
                 move |this, _, cx| this.start(operation, cx),
-            ),
+            )
+            .self_start(),
             busy || !supported || !model_ready || self.pending > 0,
         ));
         if !supported {
@@ -1091,12 +1092,15 @@ impl AudioProcessing {
             }
             content = content.child(self.task_settings(task, cx));
             if !terminal {
-                content = content.child(button(
-                    ("cancel-processing", panel),
-                    self.tr("processing-cancel"),
-                    cx,
-                    move |this, _, cx| this.send(Command::CancelProcessing { id }, cx),
-                ));
+                content = content.child(
+                    button(
+                        ("cancel-processing", panel),
+                        self.tr("processing-cancel"),
+                        cx,
+                        move |this, _, cx| this.send(Command::CancelProcessing { id }, cx),
+                    )
+                    .self_start(),
+                );
             }
             if let Some(error) = &task.error {
                 content = content.child(caption(theme, error.clone()).text_color(rgb(theme.error)));
@@ -1140,12 +1144,15 @@ impl AudioProcessing {
                             true,
                             cx,
                         ))
-                        .child(button(
-                            ("apply-mix-gains", panel),
-                            self.tr("processing-apply-mix"),
-                            cx,
-                            move |this, _, cx| this.audition(id, AuditionMode::Mix, cx),
-                        ));
+                        .child(
+                            button(
+                                ("apply-mix-gains", panel),
+                                self.tr("processing-apply-mix"),
+                                cx,
+                                move |this, _, cx| this.audition(id, AuditionMode::Mix, cx),
+                            )
+                            .self_start(),
+                        );
                 }
             }
         }

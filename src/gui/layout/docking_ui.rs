@@ -349,6 +349,8 @@ impl GuiApp {
                     .absolute()
                     .left(owner.origin.x + px(6.))
                     .top(owner.origin.y + px(6.))
+                    .max_w((owner.size.width - px(12.)).max(px(0.)))
+                    .truncate()
                     .px_2()
                     .py_1()
                     .bg(rgb(theme.panel))

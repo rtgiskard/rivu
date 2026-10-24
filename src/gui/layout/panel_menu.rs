@@ -101,7 +101,12 @@ impl GuiApp {
                 .tooltip(rivu_ui::text_tooltip(title));
             if matches!(
                 kind,
-                "spectrum" | "waveform" | "spectrogram" | "audio_visualizer" | "album_artwork"
+                "spectrum"
+                    | "waveform"
+                    | "spectrogram"
+                    | "audio_visualizer"
+                    | "album_artwork"
+                    | "audio_processing"
             ) {
                 visualizations = visualizations.child(choice);
             } else {

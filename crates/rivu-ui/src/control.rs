@@ -66,7 +66,6 @@ pub fn button_style(
         .role(Role::Button)
         .aria_label(label.clone())
         .justify_center()
-        .self_start()
         .max_w_full()
         .tooltip(text_tooltip(label.clone()))
         .child(div().min_w_0().truncate().child(label))
@@ -171,7 +170,6 @@ fn icon_button_surface(
         .child(glyph)
         .w_auto()
         .h_auto()
-        .self_start()
         .min_w_8()
         .min_h_8()
         .text_size(gpui::rems(1.))
@@ -213,6 +211,7 @@ pub struct IconButton {
     hint: SharedString,
     enabled: bool,
     selected: bool,
+    selected_fill: bool,
     semantics: IconButtonSemantics,
 }
 
@@ -228,6 +227,7 @@ impl IconButton {
             hint: hint.into(),
             enabled: true,
             selected: false,
+            selected_fill: true,
             semantics: IconButtonSemantics::Action,
         }
     }
@@ -240,6 +240,12 @@ impl IconButton {
     /// Appearance only; does not imply selected or toggled accessibility semantics.
     pub fn selected(mut self, selected: bool) -> Self {
         self.selected = selected;
+        self
+    }
+
+    /// Keep selected accent glyphs without selected background material when false.
+    pub fn selected_fill(mut self, selected_fill: bool) -> Self {
+        self.selected_fill = selected_fill;
         self
     }
 
@@ -294,9 +300,12 @@ impl IconButton {
                 control = control.role(Role::Switch);
             }
         }
-        control = active_control(theme, control, self.selected);
+        control = active_control(theme, control, self.selected && self.selected_fill);
+        if self.selected && !self.selected_fill {
+            control = control.text_color(rgb(theme.accent));
+        }
         if self.enabled {
-            if style == IconButtonStyle::Bare && !self.selected {
+            if style == IconButtonStyle::Bare && !(self.selected && self.selected_fill) {
                 control = control.group_hover("control", |style| {
                     style
                         .bg(gpui::transparent_black())
@@ -309,7 +318,7 @@ impl IconButton {
         if self.enabled {
             control
         } else {
-            let background = if self.selected {
+            let background = if self.selected && self.selected_fill {
                 rgb(theme.selected).into()
             } else if style == IconButtonStyle::Surface {
                 rgb(theme.control).into()
@@ -349,7 +358,6 @@ impl IconButtonGroup {
             surface: div()
                 .flex()
                 .items_center()
-                .self_start()
                 .min_w_0()
                 .gap_0()
                 .flex_shrink_0()
@@ -404,7 +412,7 @@ pub fn disabled_control(
         disable_control_interaction(
             view.text_color(rgb(theme.disabled))
                 .border_color(rgb(theme.structure_border))
-                .group_hover("control", |style| style.bg(rgb(theme.control))),
+                .group_hover("control", |style| style),
         )
     })
 }
@@ -882,6 +890,206 @@ mod tests {
         });
     }
 
+    struct DisabledSelected {
+        observed: std::rc::Rc<std::cell::RefCell<Option<gpui::Style>>>,
+        clicks: usize,
+    }
+
+    impl Render for DisabledSelected {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let theme = crate::theme::palette(cx);
+            let decorate =
+                |control| disabled_control(theme, active_control(theme, control, true), true);
+            let mut probe = decorate(button("selected-probe", "Selected", cx, |_, _, _| {}));
+            let observed = self.observed.clone();
+            let control = decorate(button("selected", "Selected", cx, |this, _, _| {
+                this.clicks += 1;
+            }))
+            .child(gpui::canvas(
+                |_, _, _| {},
+                move |_, _, window, cx| {
+                    *observed.borrow_mut() =
+                        Some(probe.interactivity().compute_style(None, None, window, cx));
+                },
+            ));
+            div().flex().items_start().size_full().child(control)
+        }
+    }
+
+    #[gpui::test]
+    fn disabled_selected_buttons_preserve_fill_across_hover(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init_test);
+        let observed = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let window = cx.add_window({
+            let observed = observed.clone();
+            move |_, _| DisabledSelected {
+                observed,
+                clicks: 0,
+            }
+        });
+        let root = window.root(cx).unwrap();
+        for hovered in [false, true, false] {
+            cx.update_window(window.into(), |_, window, cx| {
+                window.draw(cx).clear(cx);
+                window.dispatch_event(
+                    gpui::MouseMoveEvent {
+                        position: gpui::point(
+                            gpui::px(if hovered { 12. } else { 300. }),
+                            gpui::px(12.),
+                        ),
+                        ..Default::default()
+                    }
+                    .to_platform_input(),
+                    cx,
+                );
+                window.draw(cx).clear(cx);
+                let theme = crate::theme::palette(cx);
+                let observed = observed.borrow();
+                let actual = observed.as_ref().unwrap();
+                assert_eq!(actual.background, Some(rgb(theme.selected).into()));
+                assert_eq!(actual.text.color, Some(rgb(theme.disabled).into()));
+                assert_eq!(
+                    actual.border_color,
+                    Some(rgb(theme.structure_border).into())
+                );
+                window.dispatch_event(activation_edge("pointer", true), cx);
+                window.dispatch_event(activation_edge("pointer", false), cx);
+            })
+            .unwrap();
+            cx.run_until_parked();
+            assert_eq!(root.read_with(cx, |this, _| this.clicks), 0);
+        }
+    }
+
+    struct GlyphSelection {
+        style: IconButtonStyle,
+        enabled: bool,
+        focus: FocusHandle,
+        clicks: usize,
+        observed: std::rc::Rc<std::cell::RefCell<Option<gpui::Style>>>,
+    }
+
+    impl Render for GlyphSelection {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let item = || {
+                IconButton::new("glyph-selection", "♥", "Favorite")
+                    .toggled(true)
+                    .selected_fill(false)
+                    .enabled(self.enabled)
+            };
+            let mut probe = item().build(self.style, IconButtonDensity::Compact, cx, |_, _, _| {});
+            let mut node = gpui::accesskit::Node::new(probe.a11y_role().unwrap());
+            probe.write_a11y_info(&mut node);
+            assert_eq!(node.role(), Role::Button);
+            assert_eq!(node.toggled(), Some(Toggled::True));
+            assert_eq!(
+                node.supports_action(gpui::AccessibleAction::Click),
+                self.enabled
+            );
+            let observed = self.observed.clone();
+            let control = item()
+                .build(self.style, IconButtonDensity::Compact, cx, |this, _, _| {
+                    this.clicks += 1;
+                })
+                .track_focus(&self.focus)
+                .child(gpui::canvas(
+                    |_, _, _| {},
+                    move |_, _, window, cx| {
+                        *observed.borrow_mut() =
+                            Some(probe.interactivity().compute_style(None, None, window, cx));
+                    },
+                ));
+            div().flex().items_start().size_full().child(control)
+        }
+    }
+
+    #[gpui::test]
+    fn glyph_only_selection_preserves_hover_semantics_and_disabled_barriers(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(crate::theme::init_test);
+        for style in [
+            IconButtonStyle::Surface,
+            IconButtonStyle::Quiet,
+            IconButtonStyle::Bare,
+        ] {
+            let observed = std::rc::Rc::new(std::cell::RefCell::new(None));
+            let window = cx.add_window({
+                let observed = observed.clone();
+                move |_, cx| GlyphSelection {
+                    style,
+                    enabled: true,
+                    focus: cx.focus_handle(),
+                    clicks: 0,
+                    observed,
+                }
+            });
+            let root = window.root(cx).unwrap();
+            for enabled in [true, false] {
+                root.update(cx, |this, cx| {
+                    this.enabled = enabled;
+                    cx.notify();
+                });
+                cx.run_until_parked();
+                for hovered in [false, true, false] {
+                    cx.update_window(window.into(), |_, window, cx| {
+                        window.draw(cx).clear(cx);
+                        window.dispatch_event(
+                            gpui::MouseMoveEvent {
+                                position: gpui::point(
+                                    gpui::px(if hovered { 12. } else { 300. }),
+                                    gpui::px(12.),
+                                ),
+                                ..Default::default()
+                            }
+                            .to_platform_input(),
+                            cx,
+                        );
+                        window.draw(cx).clear(cx);
+                        let theme = crate::theme::palette(cx);
+                        let observed = observed.borrow();
+                        let actual = observed.as_ref().unwrap();
+                        let background: gpui::Fill =
+                            if enabled && hovered && style != IconButtonStyle::Bare {
+                                rgb(theme.highlight).into()
+                            } else if style == IconButtonStyle::Surface {
+                                rgb(theme.control).into()
+                            } else if enabled && !(hovered && style == IconButtonStyle::Bare) {
+                                rgb(theme.panel).alpha(0.0).into()
+                            } else {
+                                gpui::transparent_black().into()
+                            };
+                        assert_eq!(actual.background, Some(background));
+                        assert_eq!(
+                            actual.text.color,
+                            Some(
+                                rgb(if enabled {
+                                    theme.accent
+                                } else {
+                                    theme.disabled
+                                })
+                                .into()
+                            )
+                        );
+                    })
+                    .unwrap();
+                }
+                for input in ["pointer", "enter", "space"] {
+                    cx.update_window(window.into(), |_, window, cx| {
+                        let focus = root.read(cx).focus.clone();
+                        window.focus(&focus, cx);
+                        window.draw(cx).clear(cx);
+                        window.dispatch_event(activation_edge(input, true), cx);
+                        window.dispatch_event(activation_edge(input, false), cx);
+                    })
+                    .unwrap();
+                    cx.run_until_parked();
+                }
+                assert_eq!(root.read_with(cx, |this, _| this.clicks), 3);
+            }
+        }
+    }
+
     struct GroupFocus {
         before: FocusHandle,
         external: Option<FocusHandle>,
@@ -1109,7 +1317,7 @@ mod tests {
             }
             let bounds = self.bounds.clone();
             crate::column().w(gpui::px(self.width)).child(
-                group.into_div().relative().child(
+                group.into_div().self_start().relative().child(
                     gpui::canvas(
                         move |value, _, _| {
                             let mut measured = bounds.get();
@@ -1242,7 +1450,7 @@ mod tests {
                     .enumerate()
                     .map(|(index, label)| {
                         measure_width(
-                            button(("text-width", index), label, cx, |_, _, _| {}),
+                            button(("text-width", index), label, cx, |_, _, _| {}).self_start(),
                             index,
                             self.0.clone(),
                         )
@@ -1264,5 +1472,213 @@ mod tests {
         assert!(short.size.width < long.size.width);
         assert_eq!(long.size.width, gpui::px(120.));
         assert_eq!(short.size.height, long.size.height);
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum ControlFamily {
+        Text,
+        Icon,
+        Toggle,
+        Checkbox,
+        Dropdown,
+        Group,
+    }
+
+    struct CenteredControls {
+        family: ControlFamily,
+        density: IconButtonDensity,
+        alternate: bool,
+        focus: FocusHandle,
+        bounds: MeasuredBounds,
+    }
+
+    impl Render for CenteredControls {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let theme = crate::theme::palette(cx);
+            let glyph = if self.alternate { "󰏤" } else { "" };
+            let control = match self.family {
+                ControlFamily::Text => disabled_control(
+                    theme,
+                    active_control(
+                        theme,
+                        button("centered-text", "Apply", cx, |_, _, _| {})
+                            .w(gpui::px(112.))
+                            .h(gpui::px(40.))
+                            .track_focus(&self.focus),
+                        self.alternate,
+                    ),
+                    self.alternate,
+                ),
+                ControlFamily::Icon => IconButton::new("centered-icon", glyph, "Play")
+                    .toggled(self.alternate)
+                    .selected_fill(false)
+                    .enabled(!self.alternate)
+                    .build_with(
+                        IconButtonStyle::Quiet,
+                        self.density,
+                        cx,
+                        |_, _, _| {},
+                        |control| control.track_focus(&self.focus),
+                    ),
+                ControlFamily::Toggle => toggle_button(
+                    "centered-toggle",
+                    glyph,
+                    "Playback",
+                    self.alternate,
+                    cx,
+                    |_, _| {},
+                ),
+                ControlFamily::Checkbox => checkbox(
+                    "centered-checkbox",
+                    "Include",
+                    self.alternate,
+                    !self.alternate,
+                    cx,
+                    |_, _, _| {},
+                ),
+                ControlFamily::Dropdown => dropdown_trigger(
+                    theme,
+                    "centered-dropdown",
+                    if self.alternate {
+                        "A deliberately long selected option that must remain bounded"
+                    } else {
+                        "Short"
+                    },
+                    self.alternate,
+                    cx,
+                ),
+                ControlFamily::Group => IconButtonGroup::new(IconButtonStyle::Bare, self.density)
+                    .button_with(
+                        IconButton::new("centered-primary", glyph, "Primary")
+                            .toggled(self.alternate)
+                            .enabled(!self.alternate),
+                        cx,
+                        |_, _, _| {},
+                        |control| {
+                            measure_width(
+                                control
+                                    .w(gpui::px(72.))
+                                    .h(gpui::px(64.))
+                                    .track_focus(&self.focus),
+                                1,
+                                self.bounds.clone(),
+                            )
+                        },
+                    )
+                    .button_with(
+                        IconButton::new("centered-secondary", "♥", "Secondary")
+                            .toggled(self.alternate)
+                            .selected_fill(false),
+                        cx,
+                        |_, _, _| {},
+                        |control| measure_width(control, 2, self.bounds.clone()),
+                    )
+                    .into_div()
+                    .id("centered-group"),
+            };
+            let control = if matches!(self.family, ControlFamily::Toggle | ControlFamily::Dropdown)
+                || (matches!(self.family, ControlFamily::Checkbox) && !self.alternate)
+            {
+                control.track_focus(&self.focus)
+            } else {
+                control
+            };
+            crate::row()
+                .w(gpui::px(400.))
+                .h(gpui::px(128.))
+                .child(measure_width(control, 0, self.bounds.clone()))
+        }
+    }
+
+    #[gpui::test]
+    fn controls_inherit_centered_rows_and_preserve_state_geometry(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init_test);
+        let bounds = MeasuredBounds::default();
+        let window = cx.add_window({
+            let bounds = bounds.clone();
+            move |_, cx| CenteredControls {
+                family: ControlFamily::Text,
+                density: IconButtonDensity::Regular,
+                alternate: false,
+                focus: cx.focus_handle(),
+                bounds,
+            }
+        });
+        let pixel_tolerance = cx
+            .update_window(window.into(), |_, window, _| 0.5 / window.scale_factor())
+            .unwrap();
+        let assert_centered = |actual: gpui::Pixels, expected: gpui::Pixels| {
+            // Rounded positions can differ by half a device pixel.
+            assert!(
+                (f32::from(actual) - f32::from(expected)).abs() <= pixel_tolerance,
+                "{actual:?} is not centered on {expected:?}"
+            );
+        };
+        for family in [
+            ControlFamily::Text,
+            ControlFamily::Icon,
+            ControlFamily::Toggle,
+            ControlFamily::Checkbox,
+            ControlFamily::Dropdown,
+            ControlFamily::Group,
+        ] {
+            for density in [IconButtonDensity::Regular, IconButtonDensity::Compact] {
+                let mut original = None;
+                for alternate in [false, true, false] {
+                    window
+                        .update(cx, |this, window, cx| {
+                            this.family = family;
+                            this.density = density;
+                            this.alternate = alternate;
+                            if alternate {
+                                window.focus(&this.focus, cx);
+                            } else {
+                                window.blur(cx);
+                            }
+                            cx.notify();
+                        })
+                        .unwrap();
+                    cx.update_window(window.into(), |_, window, cx| {
+                        window.draw(cx).clear(cx);
+                        let position = if alternate {
+                            bounds.get()[0].center()
+                        } else {
+                            gpui::point(gpui::px(500.), gpui::px(200.))
+                        };
+                        window.dispatch_event(
+                            gpui::MouseMoveEvent {
+                                position,
+                                ..Default::default()
+                            }
+                            .to_platform_input(),
+                            cx,
+                        );
+                        window.draw(cx).clear(cx);
+                    })
+                    .unwrap();
+                    let measured = bounds.get();
+                    assert_centered(measured[0].center().y, gpui::px(64.));
+                    match family {
+                        ControlFamily::Text => {
+                            assert_eq!(measured[0].size, gpui::size(gpui::px(112.), gpui::px(40.)));
+                        }
+                        ControlFamily::Dropdown => {
+                            assert_eq!(measured[0].size.width, gpui::px(400.));
+                        }
+                        ControlFamily::Group => {
+                            assert_eq!(measured[1].size, gpui::size(gpui::px(72.), gpui::px(64.)));
+                            assert_centered(measured[1].center().y, measured[0].center().y);
+                            assert_centered(measured[2].center().y, measured[0].center().y);
+                            assert!(measured[1].size.height > measured[2].size.height);
+                        }
+                        _ => assert!(measured[0].size.height >= gpui::px(32.)),
+                    }
+                    if let Some(original) = original {
+                        assert_eq!(measured, original, "{family:?} / {density:?}");
+                    }
+                    original = Some(measured);
+                }
+            }
+        }
     }
 }

@@ -277,6 +277,7 @@ impl Render for GuiApp {
             });
             footer_popup = Some(
                 Popover::menu(theme, "app-menu-popup", window)
+                    .min_w(rems(7.))
                     .map(|surface| self.menu_surface(surface, cx))
                     .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                         this.shell.dismiss(shell::Surface::AppMenu);
@@ -324,18 +325,28 @@ impl Render for GuiApp {
                             },
                         )
                         .child(
-                            div()
-                                .ml_auto()
-                                .text_color(rgb(if !self.state.system.config.still_mode {
-                                    theme.accent
-                                } else {
-                                    theme.muted
-                                }))
-                                .child(if !self.state.system.config.still_mode {
+                            rivu_ui::icon(
+                                if !self.state.system.config.still_mode {
                                     "✓"
                                 } else {
                                     ""
-                                }),
+                                },
+                                cx,
+                            )
+                            .ml_auto()
+                            .size(rems(1.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_size(rems(0.875))
+                            .line_height(relative(1.))
+                            .text_color(rgb(
+                                if !self.state.system.config.still_mode {
+                                    theme.accent
+                                } else {
+                                    theme.muted
+                                },
+                            )),
                         ),
                     )
                     .child(rivu_ui::menu_separator(theme))
@@ -499,11 +510,10 @@ impl Render for GuiApp {
                 Dialog::backdrop("about-modal")
                     .map(|surface| self.dialog_surface(surface))
                     .child(
-                        Dialog::card(theme)
+                        Dialog::scroll_card(theme, "about-card", window)
                             .flex_row()
-                            .id("about-card")
+                            .flex_wrap()
                             .relative()
-                            .max_w(relative(0.9))
                             .items_center()
                             .gap_6()
                             .p_12()

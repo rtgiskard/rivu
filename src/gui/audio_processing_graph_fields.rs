@@ -590,7 +590,8 @@ impl AudioProcessing {
                 self.tr("processing-fields-apply-one"),
                 cx,
                 move |this, _, cx| this.apply_graph_field(&apply_key, cx),
-            ),
+            )
+            .self_start(),
             self.graph_busy() || !dirty,
         ));
         if let Some(error) = self.graph_ui.field_errors.get(&key) {
@@ -733,7 +734,8 @@ impl AudioProcessing {
                             cx,
                         );
                     },
-                ),
+                )
+                .self_start(),
                 busy || drafts > 0,
             ));
         }
@@ -820,21 +822,24 @@ impl AudioProcessing {
                 content = content.child(caption(theme, self.tr("processing-fields-runtime")));
             }
             if group == 2 && neural {
-                content = content.child(button(
-                    ("graph-backends", panel),
-                    self.tr(if expanded {
-                        "processing-fields-hide-backends"
-                    } else {
-                        "processing-fields-show-backends"
-                    }),
-                    cx,
-                    move |this, _, cx| {
-                        if !this.graph_ui.expanded_backends.remove(&id) {
-                            this.graph_ui.expanded_backends.insert(id);
-                        }
-                        cx.notify();
-                    },
-                ));
+                content = content.child(
+                    button(
+                        ("graph-backends", panel),
+                        self.tr(if expanded {
+                            "processing-fields-hide-backends"
+                        } else {
+                            "processing-fields-show-backends"
+                        }),
+                        cx,
+                        move |this, _, cx| {
+                            if !this.graph_ui.expanded_backends.remove(&id) {
+                                this.graph_ui.expanded_backends.insert(id);
+                            }
+                            cx.notify();
+                        },
+                    )
+                    .self_start(),
+                );
                 if !expanded {
                     continue;
                 }

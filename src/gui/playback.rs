@@ -415,7 +415,9 @@ impl Playback {
                                             |control| {
                                                 control
                                                     .group_hover("control", |style| {
-                                                        style.text_color(rgb(theme.text))
+                                                        style
+                                                            .bg(rgb(theme.highlight))
+                                                            .text_color(rgb(theme.text))
                                                     })
                                                     .focus(|style| {
                                                         style.text_color(rgb(theme.text))

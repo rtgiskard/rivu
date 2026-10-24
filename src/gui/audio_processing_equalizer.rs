@@ -1204,15 +1204,16 @@ impl EqualizerEditor {
             ));
         let mut bands = row().flex_wrap().gap_1();
         for (index, band) in eq.bands.iter().enumerate() {
+            let label = SharedString::from(format!(
+                "{} {}{}",
+                index + 1,
+                if band.enabled { "" } else { "○ " },
+                if band.solo { "S" } else { "" }
+            ));
             bands = bands.child(
                 button(
                     SharedString::from(format!("select-band-{index}")),
-                    format!(
-                        "{} {}{}",
-                        index + 1,
-                        if band.enabled { "" } else { "○ " },
-                        if band.solo { "S" } else { "" }
-                    ),
+                    (index + 1).to_string(),
                     cx,
                     move |this, _, cx| {
                         this.cancel_pointer(cx);
@@ -1220,6 +1221,26 @@ impl EqualizerEditor {
                         this.sync_fields(cx);
                         cx.notify();
                     },
+                )
+                .debug_selector(move || format!("eq-band-selector-{panel}-{index}"))
+                .aria_label(label)
+                // Status marks retain their slots when hidden so toggling a band
+                // cannot move later selectors or change the wrapping boundary.
+                .child(
+                    div()
+                        .w_4()
+                        .flex_shrink_0()
+                        .text_center()
+                        .opacity(if band.enabled { 0. } else { 1. })
+                        .child("○"),
+                )
+                .child(
+                    div()
+                        .w_4()
+                        .flex_shrink_0()
+                        .text_center()
+                        .opacity(if band.solo { 1. } else { 0. })
+                        .child("S"),
                 )
                 .when(index == self.band, |v| v.bg(rgb(theme.selected))),
             );
@@ -1275,7 +1296,7 @@ impl EqualizerEditor {
                         }
                     },
                 )
-                .tooltip(rivu_ui::text_tooltip(self.tr("processing-add-bands-help"))),
+                .aria_description(self.tr("processing-add-bands-help")),
                 add_disabled,
             ));
         content = content.child(bands).child(add_controls);

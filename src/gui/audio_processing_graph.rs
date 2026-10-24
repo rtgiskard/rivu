@@ -1035,7 +1035,7 @@ impl AudioProcessing {
                         .top_0()
                         .w_full()
                         .h(px(HEADER * zoom))
-                        .px_2()
+                        .px(px(8. * zoom))
                         .flex()
                         .items_center()
                         .truncate()
@@ -1072,9 +1072,10 @@ impl AudioProcessing {
                         .top(px((HEADER + PORT_ROW * port as f32) * zoom))
                         .h(px(PORT_ROW * zoom))
                         .max_w(px(NODE_WIDTH * zoom / 2.))
-                        .px_1()
+                        .px(px(4. * zoom))
                         .flex()
                         .items_center()
+                        .gap(px(3. * zoom))
                         .text_size(px(11. * zoom))
                         .text_color(rgb(if active { theme.accent } else { theme.text }))
                         .when(output, |v| v.right_0().justify_end())
@@ -1092,11 +1093,9 @@ impl AudioProcessing {
                             })
                         )))
                         .focus(|v| v.bg(rgb(theme.selected)))
-                        .child(if output {
-                            format!("{label} ●")
-                        } else {
-                            format!("● {label}")
-                        })
+                        .when(!output, |view| view.child(div().flex_shrink_0().child("●")))
+                        .child(div().min_w_0().truncate().child(label))
+                        .when(output, |view| view.child(div().flex_shrink_0().child("●")))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.graph_connect(endpoint, output, cx);
                             cx.stop_propagation();
@@ -1331,6 +1330,20 @@ mod tests {
         }
     }
 
+    struct EqualizerWindow {
+        processing: Entity<AudioProcessing>,
+        width: f32,
+    }
+
+    impl Render for EqualizerWindow {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            column().w(rems(self.width)).child(
+                self.processing
+                    .update(cx, |this, cx| this.equalizer_view(PANEL, window, cx)),
+            )
+        }
+    }
+
     fn fixture(
         cx: &mut TestAppContext,
     ) -> (
@@ -1463,6 +1476,101 @@ mod tests {
         })
         .unwrap();
         draw(cx, handle);
+    }
+
+    #[gpui::test]
+    fn equalizer_band_selector_geometry_survives_enabled_and_solo_changes(cx: &mut TestAppContext) {
+        const SELECTORS: [&str; 12] = [
+            "eq-band-selector-7-0",
+            "eq-band-selector-7-1",
+            "eq-band-selector-7-2",
+            "eq-band-selector-7-3",
+            "eq-band-selector-7-4",
+            "eq-band-selector-7-5",
+            "eq-band-selector-7-6",
+            "eq-band-selector-7-7",
+            "eq-band-selector-7-8",
+            "eq-band-selector-7-9",
+            "eq-band-selector-7-10",
+            "eq-band-selector-7-11",
+        ];
+        let (_directory, _runtime, processing, _graph_window) = fixture(cx);
+        processing.update(cx, |this, cx| {
+            Arc::make_mut(&mut Rc::make_mut(&mut this.state).system.config)
+                .equalizer
+                .bands = vec![rivu_dsp::equalizer::config::EqBand::default(); SELECTORS.len()];
+            cx.notify();
+        });
+        let window = cx.open_window(size(px(1200.), px(1800.)), {
+            let processing = processing.clone();
+            move |_, _| EqualizerWindow {
+                processing,
+                width: 23.,
+            }
+        });
+        let handle = window.into();
+        let mut visual = VisualTestContext::from_window(handle, cx);
+        for scale in [1., 1.5] {
+            for width in [12., 23.] {
+                let mut original = None;
+                for (enabled, solo) in [
+                    (true, false),
+                    (false, false),
+                    (false, true),
+                    (true, true),
+                    (true, false),
+                ] {
+                    // Feed state into the real editor's reconciliation path without
+                    // dispatching unrelated processing commands or duplicating its UI.
+                    processing.update(cx, |this, cx| {
+                        for band in
+                            &mut Arc::make_mut(&mut Rc::make_mut(&mut this.state).system.config)
+                                .equalizer
+                                .bands
+                        {
+                            band.enabled = enabled;
+                            band.solo = solo;
+                        }
+                        cx.notify();
+                    });
+                    window
+                        .update(cx, |this, window, cx| {
+                            this.width = width;
+                            window.set_rem_size(px(16. * scale));
+                            cx.notify();
+                        })
+                        .unwrap();
+                    draw(cx, handle);
+                    let measured = SELECTORS
+                        .iter()
+                        .map(|selector| {
+                            visual
+                                .debug_bounds(selector)
+                                .expect("composed EQ band selector is painted")
+                        })
+                        .collect::<Vec<_>>();
+                    assert!(measured.iter().all(|bounds| {
+                        bounds.size.width > px(0.)
+                            && bounds.size.height > px(0.)
+                            && bounds.right() <= px(width * 16. * scale)
+                    }));
+                    assert!(
+                        measured
+                            .windows(2)
+                            .any(|pair| { pair[0].origin.y != pair[1].origin.y }),
+                        "exercise an actual selector wrapping boundary"
+                    );
+                    if let Some(original) = &original {
+                        assert_eq!(
+                            &measured, original,
+                            "selector bounds changed: scale={scale}, width={width}, enabled={enabled}, solo={solo}"
+                        );
+                    } else {
+                        original = Some(measured);
+                    }
+                }
+            }
+        }
     }
 
     #[gpui::test]
