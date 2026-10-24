@@ -22,7 +22,10 @@ impl AudioProcessing {
         {
             self.task_status(panel, cx)
         } else {
-            self.graph_task_status(panel, cx)
+            column()
+                .gap_2()
+                .child(self.graph_task_summary(panel, cx))
+                .child(self.graph_task_status(panel, cx))
         };
         let body = self.processing_scroll(panel, "processing-results", results.p_2());
         column().size_full().min_h_0().child(body)
@@ -90,28 +93,33 @@ impl AudioProcessing {
                 ));
             }
         }
-        let mut content = row()
-            .flex_wrap()
-            .gap_2()
-            .child(caption(theme, summary))
-            .child(button(
+        let mut actions = rivu_ui::panel_header_actions();
+        if self.page != Page::Results {
+            actions = actions.child(button(
                 ("graph-show-results", panel),
                 self.tr("processing-result-open"),
                 cx,
                 move |this, _, cx| this.show_graph_results(panel, cx),
             ));
+        }
         if !matches!(
             task.phase,
             ProcessingPhase::Complete | ProcessingPhase::Cancelled | ProcessingPhase::Failed
         ) {
-            content = content.child(button(
+            actions = actions.child(button(
                 ("graph-cancel-task", panel),
                 self.tr("processing-cancel"),
                 cx,
                 move |this, _, cx| this.send(Command::CancelProcessing { id }, cx),
             ));
         }
-        content
+        rivu_ui::panel_heading_row(
+            caption(theme, summary.clone())
+                .truncate()
+                .id(("processing-task-summary", panel))
+                .tooltip(rivu_ui::text_tooltip(summary)),
+            actions,
+        )
     }
 
     fn choose_graph_export_path(&mut self, panel: u64, task_id: u64, cx: &mut Context<Self>) {
@@ -217,6 +225,163 @@ impl AudioProcessing {
         let expanded = self.graph_ui.result_details.contains(&panel);
         let mut content = column().flex_shrink_0().gap_2();
         if let Some(error) = &task.error {
+            content = content.child(caption(theme, error.clone()).text_color(rgb(theme.error)));
+        }
+        if let Some(boundary) = task.settings.graph_boundary {
+            content = content.child(caption(
+                theme,
+                format!(
+                    "{} #{}:{}",
+                    self.tr("processing-graph-boundary"),
+                    boundary.node,
+                    boundary.port
+                ),
+            ));
+        }
+        if let Some(path) = &task.graph_exported_path {
+            content = content.child(caption(
+                theme,
+                format!(
+                    "{}: {}",
+                    self.tr("processing-graph-exported"),
+                    path.display()
+                ),
+            ));
+        }
+        if task.phase == ProcessingPhase::Complete {
+            let live = matches!(
+                task.settings.graph_mode,
+                Some(GraphExecutionMode::Realtime | GraphExecutionMode::Hybrid)
+            );
+            let ready = if task.graph_exported_path.is_some() {
+                "processing-graph-export-ready"
+            } else if live {
+                "processing-result-live-prepared"
+            } else {
+                "processing-graph-file-ready"
+            };
+            content = content.child(caption(theme, self.tr(ready)));
+            content = content.child(
+                column()
+                    .min_w_0()
+                    .gap_1()
+                    .child(caption(theme, self.tr("processing-export-path")))
+                    .child(caption(theme, self.tr("processing-result-new-file")))
+                    .child(
+                        button(
+                            ("graph-choose-export", panel),
+                            self.tr("processing-result-choose-path"),
+                            cx,
+                            move |this, _, cx| this.choose_graph_export_path(panel, id, cx),
+                        )
+                        .self_start(),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(export_input.expect("complete graph task export input")),
+                    ),
+            );
+            let ports = task
+                .settings
+                .graph
+                .iter()
+                .flat_map(|graph| graph.nodes.iter())
+                .flat_map(|node| {
+                    (0..output_count(&node.kind)).map(move |index| {
+                        (
+                            &node.kind,
+                            GraphPort {
+                                node: node.id,
+                                port: index as u16,
+                            },
+                        )
+                    })
+                });
+            for (kind, port) in ports {
+                let file = task.graph_outputs.iter().find(|output| output.port == port);
+                let label = self.tr(node_label(kind));
+                let availability = file
+                    .map(|output| {
+                        format!(
+                            "{} · {}",
+                            self.tr("processing-graph-cached"),
+                            output.path.display()
+                        )
+                    })
+                    .unwrap_or_else(|| self.tr("processing-result-not-rendered").to_string());
+                content = content.child(
+                    row()
+                        .flex_wrap()
+                        .gap_1()
+                        .child(caption(
+                            theme,
+                            format!(
+                                "{label} #{} · {} {} · {availability}",
+                                port.node,
+                                self.tr("processing-result-port"),
+                                port.port
+                            ),
+                        ))
+                        .child(button(
+                            SharedString::from(format!(
+                                "graph-audition-{panel}-{id}-{}-{}",
+                                port.node, port.port
+                            )),
+                            self.tr(if file.is_some() {
+                                "processing-result-audition-cached"
+                            } else {
+                                "processing-result-calculate-audition"
+                            }),
+                            cx,
+                            move |this, _, cx| {
+                                this.send(Command::ProcessingGraphAudition { id, node: port }, cx)
+                            },
+                        ))
+                        .child(button(
+                            SharedString::from(format!(
+                                "graph-export-{panel}-{id}-{}-{}",
+                                port.node, port.port
+                            )),
+                            self.tr(if file.is_some() {
+                                "processing-result-export-cached"
+                            } else {
+                                "processing-result-calculate-export"
+                            }),
+                            cx,
+                            move |this, _, cx| {
+                                let path = this
+                                    .fields
+                                    .get("graph_export")
+                                    .map(|field| field.input.read(cx).text().to_owned())
+                                    .unwrap_or_default();
+                                if !path.is_empty() {
+                                    this.graph_ui.result_errors.remove(&panel);
+                                    this.send(
+                                        Command::ProcessingGraphExport {
+                                            id,
+                                            node: port,
+                                            path: PathBuf::from(path),
+                                        },
+                                        cx,
+                                    );
+                                } else {
+                                    this.graph_ui.result_errors.insert(
+                                        panel,
+                                        this.context
+                                            .i18n
+                                            .text("processing-graph-export-required")
+                                            .to_owned(),
+                                    );
+                                    cx.notify();
+                                }
+                            },
+                        )),
+                );
+            }
+        }
+        if let Some(error) = self.graph_ui.result_errors.get(&panel) {
             content = content.child(caption(theme, error.clone()).text_color(rgb(theme.error)));
         }
         content = content.child(
@@ -385,166 +550,6 @@ impl AudioProcessing {
                     ),
                 ));
             }
-        }
-        if let Some(boundary) = task.settings.graph_boundary {
-            content = content.child(caption(
-                theme,
-                format!(
-                    "{} #{}:{}",
-                    self.tr("processing-graph-boundary"),
-                    boundary.node,
-                    boundary.port
-                ),
-            ));
-        }
-        if let Some(path) = &task.graph_exported_path {
-            content = content.child(caption(
-                theme,
-                format!(
-                    "{}: {}",
-                    self.tr("processing-graph-exported"),
-                    path.display()
-                ),
-            ));
-        }
-        if task.phase == ProcessingPhase::Complete {
-            let live = matches!(
-                task.settings.graph_mode,
-                Some(GraphExecutionMode::Realtime | GraphExecutionMode::Hybrid)
-            );
-            let ready = if task.graph_exported_path.is_some() {
-                "processing-graph-export-ready"
-            } else if live {
-                "processing-result-live-prepared"
-            } else {
-                "processing-graph-file-ready"
-            };
-            content = content.child(caption(theme, self.tr(ready)));
-            content = content.child(
-                column()
-                    .min_w_0()
-                    .gap_1()
-                    .child(caption(theme, self.tr("processing-export-path")))
-                    .child(caption(theme, self.tr("processing-result-new-file")))
-                    .child(
-                        button(
-                            ("graph-choose-export", panel),
-                            self.tr("processing-result-choose-path"),
-                            cx,
-                            move |this, _, cx| this.choose_graph_export_path(panel, id, cx),
-                        )
-                        .self_start(),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(export_input.expect("complete graph task export input")),
-                    ),
-            );
-            let ports = task
-                .settings
-                .graph
-                .iter()
-                .flat_map(|graph| graph.nodes.iter())
-                .flat_map(|node| {
-                    (0..output_count(&node.kind)).map(move |index| {
-                        (
-                            &node.kind,
-                            GraphPort {
-                                node: node.id,
-                                port: index as u16,
-                            },
-                        )
-                    })
-                });
-            for (kind, port) in ports {
-                let file = task.graph_outputs.iter().find(|output| output.port == port);
-                let label = self.tr(node_label(kind));
-                let availability = file
-                    .map(|output| {
-                        format!(
-                            "{} · {}",
-                            self.tr("processing-graph-cached"),
-                            output.path.display()
-                        )
-                    })
-                    .unwrap_or_else(|| self.tr("processing-result-not-rendered").to_string());
-                content = content.child(
-                    row()
-                        .flex_wrap()
-                        .gap_1()
-                        .child(caption(
-                            theme,
-                            format!(
-                                "{label} #{} · {} {} · {availability}",
-                                port.node,
-                                self.tr("processing-result-port"),
-                                port.port
-                            ),
-                        ))
-                        .child(button(
-                            SharedString::from(format!(
-                                "graph-audition-{panel}-{id}-{}-{}",
-                                port.node, port.port
-                            )),
-                            self.tr(if file.is_some() {
-                                "processing-result-audition-cached"
-                            } else {
-                                "processing-result-calculate-audition"
-                            }),
-                            cx,
-                            move |this, _, cx| {
-                                this.send(Command::ProcessingGraphAudition { id, node: port }, cx)
-                            },
-                        ))
-                        .child(button(
-                            SharedString::from(format!(
-                                "graph-export-{panel}-{id}-{}-{}",
-                                port.node, port.port
-                            )),
-                            self.tr(if file.is_some() {
-                                "processing-result-export-cached"
-                            } else {
-                                "processing-result-calculate-export"
-                            }),
-                            cx,
-                            move |this, _, cx| {
-                                let path = this
-                                    .fields
-                                    .get("graph_export")
-                                    .map(|field| field.input.read(cx).text().to_owned())
-                                    .unwrap_or_default();
-                                if !path.is_empty() {
-                                    this.graph_ui.result_errors.remove(&panel);
-                                    this.send(
-                                        Command::ProcessingGraphExport {
-                                            id,
-                                            node: port,
-                                            path: PathBuf::from(path),
-                                        },
-                                        cx,
-                                    );
-                                } else {
-                                    this.graph_ui.result_errors.insert(
-                                        panel,
-                                        this.context
-                                            .i18n
-                                            .text("processing-graph-export-required")
-                                            .to_owned(),
-                                    );
-                                    cx.notify();
-                                }
-                            },
-                        )),
-                );
-            }
-        }
-        if let Some(error) = self.graph_ui.result_errors.get(&panel) {
-            content = content.child(caption(theme, error.clone()).text_color(rgb(theme.error)));
-        }
-        if let Some(error) = &self.error {
-            content = content.child(caption(theme, error.clone()).text_color(rgb(theme.error)));
         }
         content
     }

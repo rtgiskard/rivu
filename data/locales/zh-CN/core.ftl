@@ -118,7 +118,4 @@ library-other = 其它
 library-other-empty = 将本地音频文件拖入队列即可在此添加歌曲。已配置根目录内的歌曲会显示在对应目录下。
 library-other-check = 其它：检查文件
 library-other-force = 其它：强制重读
-library-sort-id = 按添加顺序排列；切换为专辑
-library-sort-album = 按专辑排列；切换为播放次数
-library-sort-played = 按播放次数排列；切换为添加顺序
 library-cancel-task = 取消文件操作

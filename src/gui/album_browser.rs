@@ -896,12 +896,13 @@ impl Render for AlbumBrowser {
         self.scroll_views.borrow_mut().begin_panel(self.panel_id);
         let theme = rivu_ui::theme::palette(cx);
         let total = self.model.total();
-        let mut header = row().flex_wrap().items_end().flex_shrink_0().min_w_0();
+        let header;
         if let Some(key) = self.model.selected() {
             let play_key = key.clone();
             let enqueue_key = key.clone();
             let menu_key = key.clone();
-            header = header
+            let heading = row()
+                .gap_1()
                 .child(
                     IconButton::new("albums-back", "", self.tr("gl-back-albums")).build(
                         IconButtonStyle::Quiet,
@@ -934,7 +935,8 @@ impl Render for AlbumBrowser {
                         .truncate()
                         .text_color(rgb(theme.text))
                         .child(key.title.clone()),
-                )
+                );
+            let actions = rivu_ui::panel_header_actions()
                 .child(self.tracks_search.clone())
                 .child(
                     IconButton::new("album-play-all", "", self.tr("gl-play-album")).build(
@@ -961,24 +963,20 @@ impl Render for AlbumBrowser {
                         },
                     ),
                 );
+            header = rivu_ui::panel_heading_row(heading, actions);
         } else {
-            header = header
-                .child(
-                    rivu_ui::list_panel_header(
-                        theme,
-                        self.tr("gl-albums"),
-                        total.map_or_else(
-                            || "—".to_owned(),
-                            |count| {
-                                self.i18n
-                                    .format("gl-entry-count", &[("count", count.into())])
-                            },
-                        ),
-                    )
-                    .flex_1()
-                    .min_w_0()
-                    .flex_basis(gpui::rems(12.)),
-                )
+            let heading = rivu_ui::list_panel_header(
+                theme,
+                self.tr("gl-albums"),
+                total.map_or_else(
+                    || "—".to_owned(),
+                    |count| {
+                        self.i18n
+                            .format("gl-entry-count", &[("count", count.into())])
+                    },
+                ),
+            );
+            let actions = rivu_ui::panel_header_actions()
                 .child(self.album_search.clone())
                 .child(
                     IconButton::new(
@@ -1003,6 +1001,7 @@ impl Render for AlbumBrowser {
                         },
                     ),
                 );
+            header = rivu_ui::panel_heading_row(heading, actions);
         }
         let generation = self.model.generation();
         let track_demand_owner = cx.weak_entity();

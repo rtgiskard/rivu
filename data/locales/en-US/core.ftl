@@ -118,7 +118,4 @@ library-other = Other
 library-other-empty = Drop local audio files into Queue to add songs here. Songs inside configured roots appear under those roots instead.
 library-other-check = Other: Check files
 library-other-force = Other: Force reread
-library-sort-id = Added order; switch to album
-library-sort-album = Album order; switch to most played
-library-sort-played = Most played; switch to added order
 library-cancel-task = Cancel file operation

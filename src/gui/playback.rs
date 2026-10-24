@@ -407,61 +407,48 @@ impl Playback {
             .gap_1()
             .overflow_y_scroll()
             .track_scroll(&scroll)
-            .child(
-                row()
-                    .w_full()
+            .child(rivu_ui::panel_heading_row(
+                div()
                     .min_w_0()
-                    .flex_shrink_0()
+                    .text_xl()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .truncate()
+                    .child(title),
+                rivu_ui::panel_header_actions()
                     .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .text_xl()
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .truncate()
-                            .child(title),
-                    )
-                    .child(
-                        row()
-                            .gap_0()
-                            .flex_shrink_0()
-                            .child(
-                                IconButton::new(
-                                    ("playback-locate", panel_id),
-                                    "",
-                                    self.context.tr("gl-locate-playing-entry"),
-                                )
-                                .enabled(self.state.queue.current_id.is_some())
-                                .build_with(
-                                    IconButtonStyle::Quiet,
-                                    IconButtonDensity::Regular,
-                                    cx,
-                                    |this, _, cx| {
-                                        if this.state.queue.current_id.is_some() {
-                                            cx.emit(PlaybackEvent::LocateQueue);
-                                        }
-                                    },
+                        IconButton::new(
+                            ("playback-locate", panel_id),
+                            "",
+                            self.context.tr("gl-locate-playing-entry"),
+                        )
+                        .enabled(self.state.queue.current_id.is_some())
+                        .build_with(
+                            IconButtonStyle::Quiet,
+                            IconButtonDensity::Regular,
+                            cx,
+                            |this, _, cx| {
+                                if this.state.queue.current_id.is_some() {
+                                    cx.emit(PlaybackEvent::LocateQueue);
+                                }
+                            },
+                            |control| {
+                                control.text_color(rgb(theme.muted).alpha(0.4)).when(
+                                    self.state.queue.current_id.is_some(),
                                     |control| {
-                                        control.text_color(rgb(theme.muted).alpha(0.4)).when(
-                                            self.state.queue.current_id.is_some(),
-                                            |control| {
-                                                control
-                                                    .group_hover("control", |style| {
-                                                        style
-                                                            .bg(rgb(theme.highlight))
-                                                            .text_color(rgb(theme.text))
-                                                    })
-                                                    .focus(|style| {
-                                                        style.text_color(rgb(theme.text))
-                                                    })
-                                            },
-                                        )
+                                        control
+                                            .group_hover("control", |style| {
+                                                style
+                                                    .bg(rgb(theme.highlight))
+                                                    .text_color(rgb(theme.text))
+                                            })
+                                            .focus(|style| style.text_color(rgb(theme.text)))
                                     },
-                                ),
-                            )
-                            .child(caption(theme, status)),
-                    ),
-            )
+                                )
+                            },
+                        ),
+                    )
+                    .child(caption(theme, status)),
+            ))
             .child(
                 row()
                     .w_full()

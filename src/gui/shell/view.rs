@@ -292,7 +292,7 @@ impl Render for GuiApp {
             });
             footer_popup = Some(
                 Popover::menu(theme, "app-menu-popup", window)
-                    .min_w(rems(7.))
+                    .min_w(rems(8.))
                     .map(|surface| self.menu_surface(surface, cx))
                     .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                         this.shell.dismiss(shell::Surface::AppMenu);
@@ -553,43 +553,46 @@ impl Render for GuiApp {
                                         column()
                                             .gap_2()
                                             .child(caption(theme, self.tr("shell-tagline")))
-                                            .children(
-                                                [
-                                                    (
-                                                        self.tr("shell-version"),
-                                                        self.i18n.format(
-                                                            "shell-version-features",
-                                                            &[
-                                                                (
-                                                                    "version",
-                                                                    env!("RIVU_GIT_VERSION").into(),
-                                                                ),
-                                                                (
-                                                                    "features",
-                                                                    env!("RIVU_BUILD_FEATURES")
-                                                                        .into(),
-                                                                ),
-                                                            ],
+                                            .child(
+                                                column().gap_1().children(
+                                                    [
+                                                        (
+                                                            self.tr("shell-version"),
+                                                            self.i18n.format(
+                                                                "shell-version-features",
+                                                                &[
+                                                                    (
+                                                                        "version",
+                                                                        env!("RIVU_GIT_VERSION")
+                                                                            .into(),
+                                                                    ),
+                                                                    (
+                                                                        "features",
+                                                                        env!("RIVU_BUILD_FEATURES")
+                                                                            .into(),
+                                                                    ),
+                                                                ],
+                                                            ),
                                                         ),
-                                                    ),
-                                                    (self.tr("shell-built"), built),
-                                                    (
-                                                        self.tr("shell-license"),
-                                                        "GPL-3.0-or-later".to_owned(),
-                                                    ),
-                                                ]
-                                                .into_iter()
-                                                .map(|(label, value)| {
-                                                    row()
-                                                        .gap_2()
-                                                        .child(
-                                                            div()
-                                                                .w_16()
-                                                                .flex_shrink_0()
-                                                                .child(caption(theme, label)),
-                                                        )
-                                                        .child(caption(theme, value))
-                                                }),
+                                                        (self.tr("shell-built"), built),
+                                                        (
+                                                            self.tr("shell-license"),
+                                                            "GPL-3.0-or-later".to_owned(),
+                                                        ),
+                                                    ]
+                                                    .into_iter()
+                                                    .map(|(label, value)| {
+                                                        row()
+                                                            .gap_2()
+                                                            .child(
+                                                                div()
+                                                                    .w_16()
+                                                                    .flex_shrink_0()
+                                                                    .child(caption(theme, label)),
+                                                            )
+                                                            .child(caption(theme, value))
+                                                    }),
+                                                ),
                                             ),
                                     ),
                             )

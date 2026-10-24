@@ -137,29 +137,32 @@ impl GuiApp {
         let theme = rivu_ui::theme::palette(cx);
         let mut content = rivu_ui::Dialog::scroll_card(theme, "layouts-content", window)
             .gap_2()
-            .child(
-                row()
-                    .child(div().flex_1().text_lg().child(self.tr("shell-layouts")))
-                    .child(
-                        IconButton::new("layouts-close", "", self.tr("shell-close-layouts"))
-                            .build(
-                                IconButtonStyle::Quiet,
-                                IconButtonDensity::Regular,
-                                cx,
-                                |this, window, cx| {
-                                    this.shell.dismiss(shell::Surface::Layouts);
-                                    this.layout_action = None;
-                                    this.focus_layout(window, cx);
-                                    cx.notify();
-                                },
-                            )
-                            .focus(|style| {
-                                style
-                                    .border_color(gpui::transparent_black())
-                                    .text_color(rgb(theme.accent))
-                            }),
-                    ),
-            );
+            .child(rivu_ui::panel_heading_row(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_lg()
+                    .child(self.tr("shell-layouts")),
+                rivu_ui::panel_header_actions().child(
+                    IconButton::new("layouts-close", "", self.tr("shell-close-layouts"))
+                        .build(
+                            IconButtonStyle::Quiet,
+                            IconButtonDensity::Regular,
+                            cx,
+                            |this, window, cx| {
+                                this.shell.dismiss(shell::Surface::Layouts);
+                                this.layout_action = None;
+                                this.focus_layout(window, cx);
+                                cx.notify();
+                            },
+                        )
+                        .focus(|style| {
+                            style
+                                .border_color(gpui::transparent_black())
+                                .text_color(rgb(theme.accent))
+                        }),
+                ),
+            ));
         if let Some(action) = self.layout_action.clone() {
             let (title, submit) = match &action {
                 Action::Duplicate => (

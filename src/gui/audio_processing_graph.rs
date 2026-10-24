@@ -196,6 +196,19 @@ fn scalar_fields(value: &Value, path: &str, fields: &mut Vec<(String, Value)>) {
 }
 
 impl AudioProcessing {
+    fn graph_output_label(&self, kind: &GraphNodeKind, port: usize) -> String {
+        if matches!(kind, GraphNodeKind::Separate { .. }) {
+            self.tr(if port == 0 {
+                "processing-graph-vocals"
+            } else {
+                "processing-graph-accompaniment"
+            })
+            .to_string()
+        } else {
+            format!("PCM {}", port + 1)
+        }
+    }
+
     fn graph_panel_input(
         &mut self,
         panel: u64,
@@ -1059,13 +1072,8 @@ impl AudioProcessing {
                         node: id,
                         port: port as u16,
                     };
-                    let label = if output && matches!(node.kind, GraphNodeKind::Separate { .. }) {
-                        self.tr(if port == 0 {
-                            "processing-graph-vocals"
-                        } else {
-                            "processing-graph-accompaniment"
-                        })
-                        .to_string()
+                    let label = if output {
+                        self.graph_output_label(&node.kind, port)
                     } else {
                         format!("PCM {}", port + 1)
                     };
@@ -1589,5 +1597,104 @@ mod tests {
             ]
         );
         processing.read_with(cx, |this, _| assert_eq!(this.graph_ui.selected, Some(3)));
+    }
+    struct WorkbenchWindow(Entity<AudioProcessing>);
+
+    impl Render for WorkbenchWindow {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            self.0
+                .update(cx, |this, cx| this.render_panel(PANEL, window, cx))
+        }
+    }
+
+    #[gpui::test]
+    fn completed_graph_results_keep_export_focus_across_redraws_and_typing(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(Input::init);
+        let (_directory, _runtime, processing, _) = fixture(cx);
+        processing.update(cx, |this, cx| {
+            this.reconcile_graph(cx);
+            let config = &this.state.system.config;
+            let task = crate::model::ProcessingTaskStatus {
+                id: 1,
+                track_id: 1,
+                operation: ProcessingOperation::Graph,
+                phase: ProcessingPhase::Complete,
+                completed: 1,
+                total: Some(1),
+                error: None,
+                outputs: None,
+                sample_rate: Some(48_000),
+                channels: Some(2),
+                frames: Some(48_000),
+                model_id: None,
+                model_sha256: None,
+                source_path: "source.wav".into(),
+                source_version: "source".into(),
+                source_cue: None,
+                settings: crate::model::ProcessingSettings {
+                    denoise: config.denoise.clone(),
+                    neural: config.neural.clone(),
+                    profile: None,
+                    graph: Some(config.processing_graph.clone()),
+                    graph_target: None,
+                    graph_mode: Some(GraphExecutionMode::Offline),
+                    graph_boundary: None,
+                    graph_export_path: None,
+                },
+                graph_revision: Some(config.processing_graph.revision),
+                graph_outputs: Vec::new(),
+                graph_exported_path: None,
+                graph_nodes: Vec::new(),
+                graph_plan: None,
+            };
+            Rc::make_mut(&mut this.state).system.processing = Some(task);
+            this.page = Page::Results;
+        });
+        let window = cx.open_window(size(px(1200.), px(900.)), {
+            let processing = processing.clone();
+            move |_, _| WorkbenchWindow(processing)
+        });
+        let handle = window.into();
+        draw(cx, handle);
+        let input = processing.read_with(cx, |this, _| {
+            this.graph_ui.panel_inputs[&PANEL]["graph_export"]
+                .input
+                .clone()
+        });
+        cx.update_window(handle, |_, window, cx| {
+            input.read(cx).focus_handle(cx).focus(window, cx);
+        })
+        .unwrap();
+        for key in ["o", "u", "t", ".", "w", "a", "v"] {
+            cx.update_window(handle, |_, window, cx| {
+                window.refresh();
+                window.draw(cx).clear(cx);
+                assert!(input.read(cx).is_focused(window));
+                window.dispatch_keystroke(Keystroke::parse(key).unwrap(), cx);
+            })
+            .unwrap();
+            draw(cx, handle);
+        }
+        processing.read_with(cx, |this, cx| {
+            assert_eq!(input.read(cx).text(), "out.wav");
+            assert_eq!(this.fields["graph_export"].input.read(cx).text(), "out.wav");
+        });
+        // The same retained input is no longer a focus owner when its result disappears.
+        processing.update(cx, |this, _| {
+            Rc::make_mut(&mut this.state)
+                .system
+                .processing
+                .as_mut()
+                .unwrap()
+                .phase = ProcessingPhase::Failed;
+        });
+        cx.update_window(handle, |_, window, cx| {
+            window.refresh();
+            window.draw(cx).clear(cx);
+            assert!(!input.read(cx).is_focused(window));
+        })
+        .unwrap();
     }
 }

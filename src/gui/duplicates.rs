@@ -13,7 +13,7 @@ use crate::{
 use gpui::{prelude::*, *};
 use rivu_ui::{
     IconButton, IconButtonDensity, IconButtonStyle, StatusKind, active_control, button, caption,
-    column, panel_header, panel_toolbar, row, status_message,
+    column, panel_toolbar, row, status_message,
 };
 use std::{rc::Rc, time::Duration};
 
@@ -1610,14 +1610,13 @@ impl Duplicates {
                 .p_3()
                 .gap_2()
                 .overflow_y_scroll()
-                .child(
-                    row()
-                        .flex_shrink_0()
-                        .child(div().flex_1().min_w_0().child(panel_header(
-                            theme,
-                            self.tr("gl-same-files-title"),
-                            self.tr("gl-same-files-note"),
-                        )))
+                .child(rivu_ui::panel_heading_row(
+                    rivu_ui::list_panel_header(
+                        theme,
+                        self.tr("gl-same-files-title"),
+                        self.tr("gl-same-files-note"),
+                    ),
+                    rivu_ui::panel_header_actions()
                         .child(
                             IconButton::new("review-refresh", "󰑐", self.tr("gl-refresh-groups"))
                                 .enabled(!busy)
@@ -1644,7 +1643,7 @@ impl Duplicates {
                                 |this, _, cx| this.dismiss(cx),
                             ),
                         ),
-                )
+                ))
                 .child(
                     row()
                         .flex_shrink(1.)
@@ -1720,7 +1719,7 @@ impl Duplicates {
         cx: &mut Context<Self>,
     ) -> Div {
         let theme = rivu_ui::theme::palette(cx);
-        let mut pager = panel_toolbar().flex_shrink_0().child(caption(
+        let heading = caption(
             theme,
             self.context.i18n.format(
                 "gl-page-range",
@@ -1730,7 +1729,10 @@ impl Duplicates {
                     ("total", (total).into()),
                 ],
             ),
-        ));
+        )
+        .min_w_0()
+        .truncate();
+        let mut pager = rivu_ui::panel_header_actions();
         for (next, icon, hint, previous) in [
             (
                 offset.saturating_sub(size),
@@ -1776,7 +1778,7 @@ impl Duplicates {
                 ),
             );
         }
-        pager
+        rivu_ui::panel_heading_row(heading, pager)
     }
 }
 

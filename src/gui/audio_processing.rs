@@ -59,8 +59,6 @@ type MeasuredGraph = Rc<Cell<Option<(Bounds<Pixels>, DockGeometry)>>>;
 pub(super) struct AudioProcessing {
     context: FeatureContext,
     state: Rc<GuiSnapshot>,
-    selected: Option<Arc<Track>>,
-    use_selected: bool,
     page: Page,
     fields: HashMap<String, Field>,
     error: Option<String>,
@@ -70,8 +68,6 @@ pub(super) struct AudioProcessing {
     geometry_epoch: u64,
     graph_ui: GraphUi,
     equalizer_ui: EqualizerUi,
-    hum_open: bool,
-    impulse_open: bool,
     speech_advanced: bool,
     separation_advanced: bool,
     preset_open: bool,
@@ -86,8 +82,6 @@ impl AudioProcessing {
         let mut this = Self {
             context,
             state,
-            selected: None,
-            use_selected: false,
             page: Page::Graph,
             fields: HashMap::new(),
             error: None,
@@ -97,8 +91,6 @@ impl AudioProcessing {
             geometry_epoch: 0,
             graph_ui: GraphUi::default(),
             equalizer_ui: EqualizerUi::default(),
-            hum_open: false,
-            impulse_open: false,
             speech_advanced: false,
             separation_advanced: false,
             preset_open: false,
@@ -112,13 +104,6 @@ impl AudioProcessing {
 
     fn tr(&self, id: &str) -> SharedString {
         self.context.tr(id)
-    }
-
-    pub(super) fn set_selected(&mut self, track: Option<Arc<Track>>, cx: &mut Context<Self>) {
-        if self.selected.as_deref() != track.as_deref() {
-            self.selected = track;
-            cx.notify();
-        }
     }
 
     pub(super) fn reconcile(&mut self, state: Rc<GuiSnapshot>, cx: &mut Context<Self>) {
@@ -571,9 +556,7 @@ impl AudioProcessing {
         let theme = rivu_ui::theme::palette(cx);
         let field = &self.fields[key];
         let label: SharedString = label.into();
-        let persisted = key.starts_with("denoise.") || key.starts_with("neural.");
-        let key_owned = key.to_owned();
-        let mut control = row()
+        let control = row()
             .min_w_0()
             .items_center()
             .gap_2()
@@ -586,22 +569,6 @@ impl AudioProcessing {
                     .tooltip(rivu_ui::text_tooltip(label)),
             )
             .child(div().flex_1().min_w_0().child(field.input.clone()));
-        if persisted {
-            control = control.child(
-                IconButton::new(
-                    SharedString::from(format!("apply-{key}")),
-                    "",
-                    self.tr("processing-apply"),
-                )
-                .enabled(enabled && field.dirty)
-                .build(
-                    IconButtonStyle::Quiet,
-                    IconButtonDensity::Compact,
-                    cx,
-                    move |this, _, cx| this.apply_field(&key_owned, cx),
-                ),
-            );
-        }
         control.opacity(if enabled { 1. } else { 0.5 })
     }
 
@@ -940,14 +907,14 @@ impl AudioProcessing {
         let mut content = column()
             .min_w_0()
             .gap_2()
+            .child(caption(theme, self.tr("processing-denoise-mode")))
             .child(
                 row()
                     .min_w_0()
                     .id(("denoise-modes", panel))
                     .overflow_x_scroll()
                     .child(modes),
-            )
-            .child(self.parameter_controls("denoise", &["wet"], &config, cx));
+            );
         if config["mode"] != "off" {
             content = content.child(self.parameter_controls(
                 "denoise",
@@ -982,15 +949,15 @@ impl AudioProcessing {
                 ))
                 .child(self.field_view("profile_end", self.tr("processing-profile-end"), true, cx));
         }
-        for (group, open, keys) in [
-            (
-                "hum",
-                self.hum_open,
-                &["fundamental_hz", "harmonics", "q"][..],
-            ),
+        let mut content = column().min_w_0().gap_3().child(rivu_ui::section_group(
+            theme,
+            self.tr("processing-noise-reduction"),
+            content,
+        ));
+        for (group, keys) in [
+            ("hum", &["fundamental_hz", "harmonics", "q"][..]),
             (
                 "impulse",
-                self.impulse_open,
                 &[
                     "max_width",
                     "threshold",
@@ -999,48 +966,37 @@ impl AudioProcessing {
                 ][..],
             ),
         ] {
-            let label = format!(
-                "{} · {}",
-                self.parameter_label(group),
-                self.tr(if config[group]["enabled"] == true {
-                    "processing-enabled"
-                } else {
-                    "processing-off"
-                })
-            );
-            content = content.child(activate_control(
-                dropdown_trigger(
-                    theme,
-                    SharedString::from(format!("restoration-{group}-{panel}")),
-                    label,
-                    open,
+            let enabled = config[group]["enabled"] == true;
+            let prefix = format!("denoise.{group}");
+            let enabled_key = format!("{group}.enabled");
+            let mut section = column()
+                .min_w_0()
+                .gap_1()
+                .pt_2()
+                .border_t_1()
+                .border_color(rgb(theme.border))
+                .child(checkbox(
+                    SharedString::from(format!("restoration-enable-{group}-{panel}")),
+                    self.parameter_label(group),
+                    enabled,
+                    true,
                     cx,
-                ),
-                cx,
-                move |this, _, cx| {
-                    if group == "hum" {
-                        this.hum_open = !this.hum_open;
-                    } else {
-                        this.impulse_open = !this.impulse_open;
-                    }
-                    cx.notify();
-                },
-            ));
-            if open {
-                let prefix = format!("denoise.{group}");
-                content = content.child(self.parameter_controls(
-                    &prefix,
-                    &["enabled"],
-                    &config[group],
-                    cx,
+                    move |this, enabled, cx| {
+                        this.patch_denoise(&enabled_key, json!(enabled), cx);
+                    },
                 ));
-                if config[group]["enabled"] == true {
-                    content =
-                        content.child(self.parameter_controls(&prefix, keys, &config[group], cx));
-                }
+            if enabled {
+                section = section.child(self.parameter_controls(&prefix, keys, &config[group], cx));
             }
+            content = content.child(section);
         }
-        content.child(self.task_controls(panel, ProcessingOperation::Denoise, cx))
+        content.child(
+            div()
+                .pt_2()
+                .border_t_1()
+                .border_color(rgb(theme.border))
+                .child(self.parameter_controls("denoise", &["wet"], &config, cx)),
+        )
     }
 
     fn neural_view(&self, panel: u64, speech: bool, cx: &mut Context<Self>) -> Div {
@@ -1052,28 +1008,48 @@ impl AudioProcessing {
         } else {
             self.separation_advanced
         };
+        let parameters = self.parameter_controls(
+            "neural",
+            if speech {
+                &[
+                    "speech_wet_mix",
+                    "speech_attenuation_limit_db",
+                    "speech_post_filter",
+                ][..]
+            } else {
+                &["separation_overlap"][..]
+            },
+            &neural,
+            cx,
+        );
+        let model = self.parameter_controls(
+            "neural",
+            if speech {
+                &["speech_manifest", "speech_interpreter"][..]
+            } else {
+                &["separation_manifest", "separation_interpreter"][..]
+            },
+            &neural,
+            cx,
+        );
         let mut content = column()
             .min_w_0()
-            .gap_2()
-            .child(self.parameter_controls(
-                "neural",
-                if speech {
-                    &[
-                        "speech_wet_mix",
-                        "speech_attenuation_limit_db",
-                        "speech_post_filter",
-                    ][..]
-                } else {
-                    &["separation_overlap"][..]
-                },
-                &neural,
-                cx,
+            .gap_3()
+            .child(rivu_ui::section_group(
+                theme,
+                self.tr("processing-parameters"),
+                parameters,
+            ))
+            .child(rivu_ui::section_group(
+                theme,
+                self.tr("processing-model-runtime"),
+                model,
             ))
             .child(activate_control(
                 dropdown_trigger(
                     theme,
                     ("neural-advanced", panel),
-                    self.tr("processing-advanced"),
+                    self.tr("processing-runtime-options"),
                     open,
                     cx,
                 ),
@@ -1090,16 +1066,7 @@ impl AudioProcessing {
         if open {
             content = content.child(self.parameter_controls(
                 "neural",
-                if speech {
-                    &["speech_manifest", "speech_interpreter", "worker", "threads"][..]
-                } else {
-                    &[
-                        "separation_manifest",
-                        "separation_interpreter",
-                        "worker",
-                        "threads",
-                    ][..]
-                },
+                &["worker", "threads"],
                 &neural,
                 cx,
             ));
@@ -1119,22 +1086,61 @@ impl AudioProcessing {
             }
             content = content.child(devices);
         }
-        content.child(self.task_controls(
-            panel,
-            if speech {
-                ProcessingOperation::Speech
-            } else {
-                ProcessingOperation::Separate
-            },
-            cx,
-        ))
+        content
     }
 
     fn input_track(&self) -> Option<&Track> {
-        if self.use_selected {
-            self.selected.as_deref()
-        } else {
-            self.state.current_track()
+        self.state.current_track()
+    }
+
+    fn page_parameter_key(&self, key: &str) -> bool {
+        match self.page {
+            Page::Restoration => key.starts_with("denoise."),
+            Page::Speech => {
+                key.starts_with("neural.speech_")
+                    || matches!(key, "neural.worker" | "neural.threads")
+            }
+            Page::Separation => {
+                key.starts_with("neural.separation_")
+                    || matches!(key, "neural.worker" | "neural.threads")
+            }
+            _ => false,
+        }
+    }
+
+    fn page_has_parameter_drafts(&self) -> bool {
+        self.fields
+            .iter()
+            .any(|(key, field)| field.dirty && self.page_parameter_key(key))
+    }
+
+    fn apply_page_parameters(&mut self, cx: &mut Context<Self>) {
+        let mut submissions = Vec::new();
+        for (key, field) in &self.fields {
+            if !field.dirty || !self.page_parameter_key(key) {
+                continue;
+            }
+            let value = field.input.read(cx).text().trim().to_owned();
+            match self.field_command(key, &value) {
+                Ok(Some(command)) => {
+                    submissions.push((key.clone(), command, field.input.clone(), value))
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    self.error = Some(error);
+                    cx.notify();
+                    return;
+                }
+            }
+        }
+        if self.pending + submissions.len() > 64 {
+            self.error = Some(self.tr("processing-command-queue-full").to_string());
+            cx.notify();
+            return;
+        }
+        submissions.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        for (_, command, input, value) in submissions {
+            self.send_field(command, Some((input, value)), cx);
         }
     }
 
@@ -1171,7 +1177,21 @@ impl AudioProcessing {
             ProcessingOperation::Denoise => true,
             ProcessingOperation::Graph => true,
         };
-        let mut content = column().gap_2().child(disabled_control(
+        let drafts = self.page_has_parameter_drafts();
+        let mut actions = row().gap_1().flex_shrink_0();
+        if drafts {
+            actions = actions.child(disabled_control(
+                theme,
+                button(
+                    ("apply-processing-parameters", panel),
+                    self.tr("processing-apply-changes"),
+                    cx,
+                    |this, _, cx| this.apply_page_parameters(cx),
+                ),
+                self.pending > 0,
+            ));
+        }
+        actions = actions.child(disabled_control(
             theme,
             button(
                 SharedString::from(format!("start-processing-{panel}-{operation:?}")),
@@ -1179,17 +1199,29 @@ impl AudioProcessing {
                 cx,
                 move |this, _, cx| this.start(operation, cx),
             )
-            .self_start()
             .gap_1()
             .child(icon("", cx))
             .bg(rgb(theme.selected))
             .text_color(rgb(theme.accent)),
-            busy || !supported || !model_ready || self.pending > 0,
+            busy || !supported || !model_ready || self.pending > 0 || drafts,
         ));
+        let mut content = column().gap_1().child(actions);
         if !supported {
             content = content.child(
-                caption(theme, self.tr("processing-input-unsupported"))
-                    .text_color(rgb(theme.muted)),
+                caption(
+                    theme,
+                    self.tr(if self.input_track().is_none() {
+                        "processing-source-required"
+                    } else {
+                        match operation {
+                            ProcessingOperation::Speech => "processing-speech-layout",
+                            ProcessingOperation::Separate => "processing-separation-layout",
+                            ProcessingOperation::Denoise => "processing-restoration-layout",
+                            ProcessingOperation::Graph => "processing-input-unsupported",
+                        }
+                    }),
+                )
+                .text_color(rgb(theme.muted)),
             );
         }
         if !model_ready {
@@ -1201,6 +1233,11 @@ impl AudioProcessing {
     }
 
     fn start(&mut self, operation: ProcessingOperation, cx: &mut Context<Self>) {
+        if self.page_has_parameter_drafts() {
+            self.error = Some(self.tr("processing-pending-edits").to_string());
+            cx.notify();
+            return;
+        }
         let Some(track) = self.input_track() else {
             return;
         };
@@ -1376,13 +1413,13 @@ impl AudioProcessing {
             content = content.child(caption(
                 theme,
                 format!(
-                    "{} #{} · {} · {} {} · {}",
+                    "{} #{} · {operation} · {} · {phase}",
                     self.context.i18n.text("processing-task"),
                     id,
-                    operation,
-                    self.context.i18n.text("processing-source"),
-                    task.track_id,
-                    phase
+                    task.source_path
+                        .file_name()
+                        .map(|name| name.to_string_lossy())
+                        .unwrap_or_else(|| "—".into()),
                 ),
             ));
             content = content.child(caption(
@@ -1405,45 +1442,6 @@ impl AudioProcessing {
                     )
                     .render(cx),
                 );
-            }
-            content = content.child(activate_control(
-                dropdown_trigger(
-                    theme,
-                    ("processing-task-details", panel),
-                    self.tr(if self.task_details {
-                        "processing-result-hide-details"
-                    } else {
-                        "processing-result-show-details"
-                    }),
-                    self.task_details,
-                    cx,
-                ),
-                cx,
-                |this, _, cx| {
-                    this.task_details = !this.task_details;
-                    cx.notify();
-                },
-            ));
-            if self.task_details {
-                if let Some(model) = &task.model_id {
-                    content = content.child(caption(
-                        theme,
-                        format!(
-                            "{} · {}",
-                            model,
-                            task.model_sha256.as_deref().unwrap_or("?")
-                        ),
-                    ));
-                }
-                if let (Some(rate), Some(channels), Some(frames)) =
-                    (task.sample_rate, task.channels, task.frames)
-                {
-                    content = content.child(caption(
-                        theme,
-                        format!("{rate} Hz · {channels} ch · {frames} frames"),
-                    ));
-                }
-                content = content.child(self.task_settings(task, cx));
             }
             if !terminal {
                 content = content.child(
@@ -1508,6 +1506,45 @@ impl AudioProcessing {
                             .self_start(),
                         );
                 }
+            }
+            content = content.child(activate_control(
+                dropdown_trigger(
+                    theme,
+                    ("processing-task-details", panel),
+                    self.tr(if self.task_details {
+                        "processing-result-hide-details"
+                    } else {
+                        "processing-result-show-details"
+                    }),
+                    self.task_details,
+                    cx,
+                ),
+                cx,
+                |this, _, cx| {
+                    this.task_details = !this.task_details;
+                    cx.notify();
+                },
+            ));
+            if self.task_details {
+                if let Some(model) = &task.model_id {
+                    content = content.child(caption(
+                        theme,
+                        format!(
+                            "{} · {}",
+                            model,
+                            task.model_sha256.as_deref().unwrap_or("?")
+                        ),
+                    ));
+                }
+                if let (Some(rate), Some(channels), Some(frames)) =
+                    (task.sample_rate, task.channels, task.frames)
+                {
+                    content = content.child(caption(
+                        theme,
+                        format!("{rate} Hz · {channels} ch · {frames} frames"),
+                    ));
+                }
+                content = content.child(self.task_settings(task, cx));
             }
         }
         content
@@ -1607,75 +1644,16 @@ impl AudioProcessing {
                 }),
             );
         }
-        let input = self
-            .input_track()
-            .map(|t| format!("{} · {} Hz · {} ch", t.title, t.sample_rate, t.channels))
-            .unwrap_or_else(|| self.context.i18n.text("processing-no-input").to_owned());
-        let source = row()
-            .min_w_0()
-            .gap_1()
-            .child(
-                button(
-                    ("processing-current", panel),
-                    self.tr("processing-current"),
-                    cx,
-                    |this, _, cx| {
-                        this.use_selected = false;
-                        cx.notify();
-                    },
-                )
-                .flex_shrink_0()
-                .whitespace_nowrap()
-                .px_1()
-                .text_xs()
-                .aria_toggled(if !self.use_selected {
-                    Toggled::True
-                } else {
-                    Toggled::False
-                })
-                .when(!self.use_selected, |view| view.bg(rgb(theme.selected))),
-            )
-            .child(
-                button(
-                    ("processing-selected", panel),
-                    self.tr("processing-selected"),
-                    cx,
-                    |this, _, cx| {
-                        this.use_selected = true;
-                        cx.notify();
-                    },
-                )
-                .flex_shrink_0()
-                .whitespace_nowrap()
-                .px_1()
-                .text_xs()
-                .aria_toggled(if self.use_selected {
-                    Toggled::True
-                } else {
-                    Toggled::False
-                })
-                .when(self.use_selected, |view| view.bg(rgb(theme.selected))),
-            )
-            .child(
-                caption(theme, input.clone())
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .id(("processing-source-title", panel))
-                    .tooltip(rivu_ui::text_tooltip(input)),
-            )
-            .child(
-                caption(
-                    theme,
-                    self.tr(if self.state.system.config.equalizer.enabled {
-                        "processing-workspace-monitor-on"
-                    } else {
-                        "processing-workspace-monitor-off"
-                    }),
-                )
-                .flex_shrink_0()
-                .whitespace_nowrap(),
-            );
+        let monitor_status = caption(
+            theme,
+            self.tr(if self.state.system.config.equalizer.enabled {
+                "processing-workspace-monitor-on"
+            } else {
+                "processing-workspace-monitor-off"
+            }),
+        )
+        .flex_shrink_0()
+        .whitespace_nowrap();
         let transport = self.tr(match self.state.playback.status {
             crate::model::PlaybackStatus::Playing => "processing-workspace-playing",
             crate::model::PlaybackStatus::Paused => "processing-workspace-paused",
@@ -1708,14 +1686,19 @@ impl AudioProcessing {
             }
             None => self.tr("processing-workspace-original").to_string(),
         };
-        let selected_audio_text = format!(
-            "{}: {selected_audio} · {transport} · {}",
-            self.tr("processing-workspace-selected-audio"),
-            self.state
-                .current_track()
-                .map(|track| track.title.as_str())
-                .unwrap_or("—"),
-        );
+        let selected_audio_text = match self.state.current_track() {
+            Some(track) => format!(
+                "{}: {selected_audio} · {transport} · {} · {} Hz · {} ch",
+                self.tr("processing-workspace-selected-audio"),
+                track.title,
+                track.sample_rate,
+                track.channels,
+            ),
+            None => format!(
+                "{}: {selected_audio} · {transport} · —",
+                self.tr("processing-workspace-selected-audio"),
+            ),
+        };
         let selected_audio = caption(theme, selected_audio_text.clone())
             .min_w_0()
             .truncate()
@@ -1742,6 +1725,14 @@ impl AudioProcessing {
                 ),
             );
         }
+        if self.pending > 0 {
+            selected_audio = selected_audio.child(
+                caption(theme, self.tr("processing-applying"))
+                    .flex_shrink_0()
+                    .whitespace_nowrap(),
+            );
+        }
+        selected_audio = selected_audio.child(monitor_status);
         if self.page != Page::Graph {
             self.deactivate_graph_inputs(panel, window, cx);
         }
@@ -1765,19 +1756,25 @@ impl AudioProcessing {
             }
         };
         let mut footer = column().min_w_0().gap_1();
-        if self.page == Page::Graph {
-            footer = footer.child(self.graph_execution_bar(panel, cx));
+        footer = match self.page {
+            Page::Graph => footer.child(self.graph_execution_bar(panel, cx)),
+            Page::Restoration => {
+                footer.child(self.task_controls(panel, ProcessingOperation::Denoise, cx))
+            }
+            Page::Speech => {
+                footer.child(self.task_controls(panel, ProcessingOperation::Speech, cx))
+            }
+            Page::Separation => {
+                footer.child(self.task_controls(panel, ProcessingOperation::Separate, cx))
+            }
+            Page::Equalizer | Page::Results => footer,
+        };
+        if self.page != Page::Results {
+            footer = footer.child(self.graph_task_summary(panel, cx));
         }
-        footer = footer
-            .child(self.graph_task_summary(panel, cx))
-            .child(selected_audio);
-        if self.fields.iter().any(|(key, field)| {
-            field.dirty && (key.starts_with("denoise.") || key.starts_with("neural."))
-        }) {
+        footer = footer.child(selected_audio);
+        if self.page_has_parameter_drafts() {
             footer = footer.child(caption(theme, self.tr("processing-pending-edits")));
-        }
-        if self.pending > 0 {
-            footer = footer.child(caption(theme, self.tr("processing-applying")));
         }
         if let Some(error) = &self.error {
             footer = footer.child(caption(theme, error.clone()).text_color(rgb(theme.error)));
@@ -1798,7 +1795,6 @@ impl AudioProcessing {
                     .overflow_x_scroll()
                     .child(tabs),
             )
-            .child(source.flex_shrink_0())
             .child(div().flex_1().min_h_0().min_w_0().child(body))
             .child(footer.flex_shrink_0())
             .into_any_element()

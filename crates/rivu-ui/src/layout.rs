@@ -33,20 +33,19 @@ pub fn panel_toolbar() -> Div {
     row().flex_wrap().flex_shrink_0()
 }
 
-/// Bottom-align panel actions with the complete title and subtitle block.
+/// Bottom-align a shrinking heading and fixed actions on one compact line.
 pub fn panel_heading_row(heading: impl IntoElement + Styled, actions: impl IntoElement) -> Div {
     row()
-        .flex_wrap()
+        .gap_1()
         .flex_shrink_0()
         .items_end()
-        .justify_end()
-        .child(heading.flex_1().min_w_0().flex_basis(gpui::rems(12.)))
+        .child(heading.flex_1().min_w_0())
         .child(actions)
 }
 
-/// Shared spacing and wrapping for upper-right panel header controls.
+/// Keep upper-right panel controls together with compact spacing.
 pub fn panel_header_actions() -> Div {
-    row().gap_1().flex_wrap().flex_shrink(1.)
+    row().gap_1().flex_shrink_0()
 }
 
 /// Shared root surface for docked panels.

@@ -10,14 +10,12 @@ use rivu_ui::{
 pub(super) enum WorkbenchMenu {
     Add,
     Mode,
-    More,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum WorkbenchChoice {
     Add(usize),
     Mode(GraphExecutionMode),
-    Reset,
 }
 
 pub(super) struct WorkbenchPanel {
@@ -27,7 +25,7 @@ pub(super) struct WorkbenchPanel {
     inspector_width: f32,
     resize: Option<(Pixels, f32, DockGeometry)>,
     connections: bool,
-    menu_bounds: Rc<Cell<[Option<Bounds<Pixels>>; 3]>>,
+    menu_bounds: Rc<Cell<[Option<Bounds<Pixels>>; 2]>>,
     pub(super) canvas_focus: Option<FocusHandle>,
 }
 
@@ -40,7 +38,7 @@ impl Default for WorkbenchPanel {
             inspector_width: 25.,
             resize: None,
             connections: false,
-            menu_bounds: Rc::new(Cell::new([None; 3])),
+            menu_bounds: Rc::new(Cell::new([None; 2])),
             canvas_focus: None,
         }
     }
@@ -53,14 +51,21 @@ impl AudioProcessing {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let export_visible = self.page == Page::Results
+            && self.state.system.processing.as_ref().is_some_and(|task| {
+                task.operation == ProcessingOperation::Graph
+                    && task.phase == ProcessingPhase::Complete
+            });
         if self
             .graph_ui
             .panel_inputs
             .get(&panel)
             .is_some_and(|fields| {
-                fields
-                    .values()
-                    .any(|field| field.input.read(cx).is_focused(window))
+                fields.iter().any(|(key, field)| {
+                    // Results owns its export editor even though graph parameters are hidden.
+                    (key != "graph_export" || !export_visible)
+                        && field.input.read(cx).is_focused(window)
+                })
             })
         {
             window.blur(cx);
@@ -244,16 +249,22 @@ impl AudioProcessing {
         let theme = rivu_ui::theme::palette(cx);
         let busy = self.graph_busy();
         let drafts = self.graph_dirty_count(cx) > 0;
-        let mut tools = row().flex_wrap().gap_1().child(disabled_control(
-            theme,
-            self.workbench_dropdown(
-                panel,
-                WorkbenchMenu::Add,
-                self.tr("processing-workspace-add-node"),
-                cx,
-            ),
-            busy,
-        ));
+        let mut editing = row()
+            .flex_shrink_0()
+            .max_w_full()
+            .flex_wrap()
+            .gap_1()
+            .child(caption(theme, self.tr("processing-workspace-edit")).whitespace_nowrap())
+            .child(disabled_control(
+                theme,
+                self.workbench_dropdown(
+                    panel,
+                    WorkbenchMenu::Add,
+                    self.tr("processing-workspace-add-node"),
+                    cx,
+                ),
+                busy,
+            ));
         for (redo, glyph, label) in [
             (false, "󰕌", "processing-graph-undo"),
             (true, "󰑎", "processing-graph-redo"),
@@ -263,7 +274,7 @@ impl AudioProcessing {
             } else {
                 self.graph_ui.undo.is_empty()
             };
-            tools = tools.child(
+            editing = editing.child(
                 IconButton::new(
                     SharedString::from(format!("history-{panel}-{redo}")),
                     glyph,
@@ -278,11 +289,17 @@ impl AudioProcessing {
                 ),
             );
         }
+        let mut navigation = row()
+            .flex_shrink_0()
+            .max_w_full()
+            .flex_wrap()
+            .gap_1()
+            .child(caption(theme, self.tr("processing-workspace-view")).whitespace_nowrap());
         for (factor, glyph, label) in [
             (1. / 1.2, "󰍴", "processing-workspace-zoom-out"),
             (1.2, "󰐕", "processing-workspace-zoom-in"),
         ] {
-            tools = tools.child(
+            navigation = navigation.child(
                 IconButton::new(
                     SharedString::from(format!("zoom-{panel}-{label}")),
                     glyph,
@@ -296,7 +313,7 @@ impl AudioProcessing {
                 ),
             );
         }
-        tools = tools
+        navigation = navigation
             .child(caption(theme, format!("{:.0}%", self.graph_ui.zoom * 100.)))
             .child(
                 IconButton::new(
@@ -331,6 +348,39 @@ impl AudioProcessing {
             )
             .child(
                 IconButton::new(
+                    ("reset-graph-view", panel),
+                    "󰑐",
+                    self.tr("processing-graph-reset-view"),
+                )
+                .build(
+                    IconButtonStyle::Quiet,
+                    IconButtonDensity::Compact,
+                    cx,
+                    |this, _, cx| {
+                        this.cancel_pointer(cx);
+                        this.graph_ui.pan = [24., 24.];
+                        this.graph_ui.zoom = 1.;
+                        cx.notify();
+                    },
+                ),
+            )
+            .child(
+                rivu_ui::icon("", cx)
+                    .id(("graph-workspace-help", panel))
+                    .opacity(0.6)
+                    .hover(|style| style.opacity(1.))
+                    .tooltip(rivu_ui::text_tooltip(
+                        self.tr("processing-graph-editor-help"),
+                    )),
+            );
+        let mut inspection = row()
+            .flex_shrink_0()
+            .max_w_full()
+            .flex_wrap()
+            .gap_1()
+            .child(caption(theme, self.tr("processing-workspace-inspect")).whitespace_nowrap())
+            .child(
+                IconButton::new(
                     ("workbench-connections", panel),
                     "󰌷",
                     self.tr("processing-graph-connections"),
@@ -341,6 +391,7 @@ impl AudioProcessing {
                     IconButtonDensity::Compact,
                     cx,
                     move |this, _, cx| {
+                        this.cancel_pointer(cx);
                         let state = this.graph_ui.workbenches.entry(panel).or_default();
                         state.connections = !state.connections;
                         cx.notify();
@@ -374,39 +425,38 @@ impl AudioProcessing {
                         cx.notify();
                     },
                 ),
-            )
-            .child(self.workbench_dropdown(
-                panel,
-                WorkbenchMenu::More,
-                self.tr("processing-workspace-more"),
-                cx,
-            ))
-            .child(
-                rivu_ui::icon("", cx)
-                    .id(("graph-workspace-help", panel))
-                    .opacity(0.6)
-                    .hover(|style| style.opacity(1.))
-                    .tooltip(rivu_ui::text_tooltip(
-                        self.tr("processing-graph-editor-help"),
-                    )),
             );
         if !self.graph_ui.workbenches[&panel].wide && parameters_visible {
-            tools = tools.child(button(
-                ("workbench-back", panel),
-                self.tr("processing-workspace-back-graph"),
-                cx,
-                move |this, _, cx| {
-                    this.cancel_pointer(cx);
-                    this.graph_ui
-                        .workbenches
-                        .entry(panel)
-                        .or_default()
-                        .parameters = false;
-                    cx.notify();
-                },
-            ));
+            inspection = inspection.child(
+                button(
+                    ("workbench-back", panel),
+                    self.tr("processing-workspace-back-graph"),
+                    cx,
+                    move |this, _, cx| {
+                        this.cancel_pointer(cx);
+                        this.graph_ui
+                            .workbenches
+                            .entry(panel)
+                            .or_default()
+                            .parameters = false;
+                        cx.notify();
+                    },
+                )
+                .flex_shrink_0()
+                .whitespace_nowrap(),
+            );
         }
-        tools
+        row()
+            .flex_wrap()
+            .gap_2()
+            .child(editing.pr_2().border_r_1().border_color(rgb(theme.border)))
+            .child(
+                navigation
+                    .pr_2()
+                    .border_r_1()
+                    .border_color(rgb(theme.border)),
+            )
+            .child(inspection)
     }
 
     fn graph_canvas_workspace(&mut self, panel: u64, cx: &mut Context<Self>) -> Div {
@@ -502,38 +552,47 @@ impl AudioProcessing {
             .is_some_and(|task| !task.phase.is_terminal());
         let busy = self.graph_busy() || running;
         let mode = self.tr(mode_label(self.graph_ui.mode));
-        let mut controls = row().flex_wrap().gap_1().child(self.workbench_dropdown(
-            panel,
-            WorkbenchMenu::Mode,
-            mode,
-            cx,
-        ));
+        let mode_control = self.workbench_dropdown(panel, WorkbenchMenu::Mode, mode, cx);
+        let mut controls = row().flex_wrap().gap_2().child(
+            row()
+                .flex_shrink_0()
+                .gap_1()
+                .pr_2()
+                .border_r_1()
+                .border_color(rgb(theme.border))
+                .child(caption(theme, self.tr("processing-workspace-mode")).whitespace_nowrap())
+                .child(mode_control),
+        );
         let no_input = self.input_track().is_none();
         for (output, label) in [
             (false, "processing-graph-preview"),
             (true, "processing-graph-run"),
         ] {
-            let target = if output {
-                self.state
-                    .system
-                    .config
-                    .processing_graph
-                    .nodes
-                    .iter()
-                    .find(|node| matches!(node.kind, GraphNodeKind::Output))
-                    .map(|node| GraphPort {
-                        node: node.id,
-                        port: 0,
-                    })
-            } else {
-                self.graph_ui.selected.map(|node| GraphPort {
-                    node,
-                    port: self.graph_ui.target_port,
-                })
-            };
+            let target = self
+                .state
+                .system
+                .config
+                .processing_graph
+                .nodes
+                .iter()
+                .find(|node| {
+                    if output {
+                        matches!(node.kind, GraphNodeKind::Output)
+                    } else {
+                        Some(node.id) == self.graph_ui.selected
+                    }
+                });
+            let port = if output { 0 } else { self.graph_ui.target_port };
             let label = target.map_or_else(
                 || self.tr(label).to_string(),
-                |port| format!("{} #{}:{}", self.tr(label), port.node, port.port),
+                |node| {
+                    format!(
+                        "{} · #{} · {}",
+                        self.tr(label),
+                        node.id,
+                        self.graph_output_label(&node.kind, port as usize),
+                    )
+                },
             );
             controls = controls.child(disabled_control(
                 theme,
@@ -544,6 +603,8 @@ impl AudioProcessing {
                     move |this, _, cx| this.graph_run_target(output, cx),
                 )
                 .gap_1()
+                .flex_shrink_0()
+                .whitespace_nowrap()
                 .child(rivu_ui::icon(if output { "󰑮" } else { "" }, cx))
                 .when(output, |view| {
                     view.bg(rgb(theme.selected)).text_color(rgb(theme.accent))
@@ -625,7 +686,6 @@ impl AudioProcessing {
         let hint = self.tr(match menu {
             WorkbenchMenu::Add => "processing-workspace-add-node",
             WorkbenchMenu::Mode => "processing-workspace-mode",
-            WorkbenchMenu::More => "processing-workspace-more",
         });
         let measured = Rc::clone(
             &self
@@ -661,11 +721,6 @@ impl AudioProcessing {
         .top_0()
         .left_0()
         .size_full();
-        let label = if menu == WorkbenchMenu::More {
-            SharedString::from("󰇙")
-        } else {
-            label
-        };
         let trigger = dropdown_trigger(
             rivu_ui::theme::palette(cx),
             SharedString::from(format!("workbench-menu-{panel}-{}", menu as u8)),
@@ -679,9 +734,6 @@ impl AudioProcessing {
         .role(Role::ComboBox)
         .aria_label(hint.clone())
         .tooltip(rivu_ui::text_tooltip(hint))
-        .when(menu == WorkbenchMenu::More, |view| {
-            view.font_family(rivu_ui::theme::icon_family(cx))
-        })
         .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
             match this
                 .graph_ui
@@ -752,13 +804,6 @@ impl AudioProcessing {
                             selected,
                         )
                     }
-                    WorkbenchMenu::More => (
-                        vec![DropdownItem::new(
-                            WorkbenchChoice::Reset,
-                            this.tr("processing-graph-reset-view"),
-                        )],
-                        0,
-                    ),
                 };
                 this.graph_ui.workbench_menu = Some((panel, menu));
                 this.graph_ui.workbench_choices.open(items, selected);
@@ -813,11 +858,6 @@ impl AudioProcessing {
                 self.graph_add(panel, kind, cx);
             }
             WorkbenchChoice::Mode(mode) => self.graph_ui.mode = mode,
-            WorkbenchChoice::Reset => {
-                self.cancel_pointer(cx);
-                self.graph_ui.pan = [24., 24.];
-                self.graph_ui.zoom = 1.;
-            }
         }
         cx.notify();
     }
