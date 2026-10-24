@@ -289,10 +289,11 @@ impl Core {
         self.write_config(&config)?;
         self.state.system.config = Arc::new(config);
         if equalizer_changed {
-            self.audio(AudioCommand::Equalizer(Arc::new(
-                self.state.system.config.equalizer.clone(),
-            )))
-            .context("Configuration saved, but equalizer delivery failed")?;
+            self.engine
+                .send(AudioCommand::Equalizer(Arc::new(
+                    self.state.system.config.equalizer.clone(),
+                )))
+                .context("Configuration saved, but equalizer delivery failed")?;
         }
         Ok(())
     }
@@ -981,7 +982,7 @@ impl Core {
                 listened_seconds: heard,
             }
         };
-        if let Err(error) = self.audio(command) {
+        if let Err(error) = self.engine.send(command) {
             return self.finish_playback(Ok(None), false, Err(error));
         }
         self.processing.audition = (!original || is_graph).then_some(id);

@@ -37,7 +37,7 @@ impl Core {
                     || current.album != track.album
             })
         {
-            self.audio(AudioCommand::Metadata {
+            self.engine.send(AudioCommand::Metadata {
                 generation: self.generation,
                 metadata: Self::playback_metadata(track),
             })?;
@@ -153,22 +153,7 @@ impl Core {
         }
         // Keep the selection on failure; only a committed cascade clears it.
         let impact = self.store.remove_prepared_tracks(removal)?;
-        self.invalidate_playlist_members(&impact.playlists);
-        let catalog = self.apply_scan_impacts(crate::store::ScanImpacts {
-            changed: true,
-            library: true,
-            structure: true,
-            duplicate_groups: impact.duplicate_groups,
-            duplicate_members: false,
-            ..crate::store::ScanImpacts::default()
-        });
-        let queue = self
-            .reload_queue()
-            .and_then(|()| self.refresh_queue_tracks());
-        catalog.and(queue).context(
-            "Track deletion committed, but refreshing views failed; some projections may be stale",
-        )?;
-        Ok(())
+        self.finish_track_removal(&impact.playlists, impact.duplicate_groups)
     }
 
     pub(in crate::core) fn set_favorite(
@@ -223,21 +208,36 @@ impl Core {
         // A stopped decoder does not imply the database deletion succeeded.
         let impact = self.store.remove_missing_tracks()?;
         if impact.removed != 0 {
-            self.invalidate_playlist_members(&impact.playlists);
-            let catalog = self.apply_scan_impacts(crate::store::ScanImpacts {
-                changed: true,
-                library: true,
-                structure: true,
-                duplicate_groups: impact.duplicate_groups,
-                duplicate_members: false,
-                ..crate::store::ScanImpacts::default()
-            });
-            let queue = self
-                .reload_queue()
-                .and_then(|()| self.refresh_queue_tracks());
-            catalog.and(queue).context("Track deletion committed, but refreshing views failed; some projections may be stale")?;
+            self.finish_track_removal(&impact.playlists, impact.duplicate_groups)?;
         }
         Ok(())
+    }
+
+    fn finish_track_removal(
+        &mut self,
+        affected_playlists: &[i64],
+        duplicate_groups_changed: bool,
+    ) -> Result<()> {
+        let impacts = crate::store::ScanImpacts {
+            changed: true,
+            library: true,
+            structure: true,
+            duplicate_groups: duplicate_groups_changed,
+            ..crate::store::ScanImpacts::default()
+        };
+        self.invalidate_scan_impacts(impacts);
+        self.invalidate_playlist_members(affected_playlists);
+        let catalog = self.refresh_scan_catalog(impacts);
+        // Only a fresh ID set can supply the queue projection's total. Retain
+        // the previous queue snapshot if reading the committed IDs fails.
+        let queue = self.store.queue_ids().and_then(|ids| {
+            self.queue_ids = ids;
+            self.prune_queue_history();
+            self.refresh_queue_tracks()
+        });
+        catalog.and(queue).context(
+            "Track deletion committed, but refreshing views failed; some projections may be stale",
+        )
     }
 
     pub(in crate::core) fn update_track_stats(
@@ -315,6 +315,17 @@ impl Core {
         impacts: crate::store::ScanImpacts,
     ) -> Result<()> {
         self.invalidate_scan_impacts(impacts);
+        let catalog = self.refresh_scan_catalog(impacts);
+        // A failed projection read cannot hide another committed domain.
+        let queue = if impacts.library {
+            self.refresh_queue_tracks()
+        } else {
+            Ok(())
+        };
+        catalog.and(queue)
+    }
+
+    fn refresh_scan_catalog(&mut self, impacts: crate::store::ScanImpacts) -> Result<()> {
         let library = if impacts.structure {
             self.store
                 .track_count()
@@ -331,12 +342,6 @@ impl Core {
         } else {
             Ok(())
         };
-        // A failed projection read cannot hide another committed domain.
-        let queue = if impacts.library {
-            self.refresh_queue_tracks()
-        } else {
-            Ok(())
-        };
-        library.and(history).and(queue)
+        library.and(history)
     }
 }

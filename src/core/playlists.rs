@@ -22,7 +22,8 @@ impl Core {
         name: String,
     ) -> Result<()> {
         if self.store.rename_playlist(playlist_id, &name)? {
-            self.reload_playlists()?;
+            self.state.library.playlist_revision =
+                self.state.library.playlist_revision.wrapping_add(1);
         }
         Ok(())
     }
@@ -38,14 +39,15 @@ impl Core {
         track_ids: Vec<i64>,
     ) -> Result<()> {
         if self.store.add_playlist(playlist_id, &track_ids)? {
-            self.playlist_members_changed(playlist_id)?;
+            self.invalidate_playlist_members(&[playlist_id]);
         }
         Ok(())
     }
 
     pub(in crate::core) fn remove_playlist_entry(&mut self, entry_id: i64) -> Result<()> {
         let playlist_id = self.store.remove_playlist_entry(entry_id)?;
-        self.playlist_members_changed(playlist_id)
+        self.invalidate_playlist_members(&[playlist_id]);
+        Ok(())
     }
 
     pub(in crate::core) fn move_playlist_entry(
@@ -111,7 +113,8 @@ impl Core {
                 .duplicate_members_revision
                 .wrapping_add(1);
         }
-        self.reload_playlists()
+        self.state.library.playlist_revision = self.state.library.playlist_revision.wrapping_add(1);
+        self.refresh_playlist_count()
     }
 
     pub(in crate::core) fn invalidate_playlist_members(&mut self, ids: &[i64]) {
@@ -134,16 +137,6 @@ impl Core {
             .library
             .duplicate_members_revision
             .wrapping_add(1);
-    }
-
-    pub(in crate::core) fn playlist_members_changed(&mut self, playlist_id: i64) -> Result<()> {
-        self.invalidate_playlist_members(&[playlist_id]);
-        self.refresh_playlist_count()
-    }
-
-    pub(in crate::core) fn reload_playlists(&mut self) -> Result<()> {
-        self.state.library.playlist_revision = self.state.library.playlist_revision.wrapping_add(1);
-        self.refresh_playlist_count()
     }
 
     fn refresh_playlist_count(&mut self) -> Result<()> {
@@ -175,7 +168,7 @@ impl Core {
     ) -> Result<()> {
         self.check_playlist_entry_revision(playlist_id, expected_revision)?;
         if self.store.remove_playlist_entries(playlist_id, entry_ids)? {
-            self.playlist_members_changed(playlist_id)?;
+            self.invalidate_playlist_members(&[playlist_id]);
         }
         Ok(())
     }

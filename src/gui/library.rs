@@ -1020,7 +1020,7 @@ impl Library {
             )
     }
 
-    pub(super) fn library_panel(
+    pub(super) fn render_panel(
         &mut self,
         panel_id: u64,
         window: &mut Window,

@@ -101,7 +101,7 @@ impl Core {
                         .context("Queue is empty")?;
                     self.start(id, true)?;
                 } else {
-                    self.audio(AudioCommand::Pause(false))?;
+                    self.engine.send(AudioCommand::Pause(false))?;
                     if let Some(playback) = self.playback.as_mut() {
                         // A resumed session may continue with a larger cumulative
                         // backend counter; release the old timestamp bound.
@@ -112,7 +112,7 @@ impl Core {
             }
             Command::Pause => {
                 if self.state.playback.status == PlaybackStatus::Playing {
-                    self.audio(AudioCommand::Pause(true))?;
+                    self.engine.send(AudioCommand::Pause(true))?;
                     if let Some(playback) = self.playback.as_mut() {
                         // Capture the wall-clock boundary once after Pause is accepted.
                         playback.paused_at.get_or_insert(now());
@@ -146,7 +146,7 @@ impl Core {
                 if !value.is_finite() || !(0.0..=1.0).contains(&value) {
                     bail!("Volume must be between 0 and 1");
                 }
-                self.audio(AudioCommand::Volume(value))?;
+                self.engine.send(AudioCommand::Volume(value))?;
                 self.state.playback.volume = value;
             }
             Command::AdjustVolume { delta } => {
@@ -220,7 +220,7 @@ impl Core {
                     .store
                     .add_playlist_sources(playlist_id, &directories, &track_ids)?
                 {
-                    self.playlist_members_changed(playlist_id)?;
+                    self.invalidate_playlist_members(&[playlist_id]);
                 }
             }
             Command::RemovePlaylistEntry { entry_id } => self.remove_playlist_entry(entry_id)?,
@@ -279,7 +279,7 @@ impl Core {
             Command::RemoveMissingTracks => self.remove_missing_tracks()?,
             Command::Device { name } => {
                 let request = self.output_settings_request.wrapping_add(1);
-                self.audio(AudioCommand::OutputSettings {
+                self.engine.send(AudioCommand::OutputSettings {
                     request,
                     device: name.clone(),
                     auto_mix: self.state.system.config.pipewire_auto_mix,

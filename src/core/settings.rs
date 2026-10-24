@@ -53,7 +53,8 @@ impl Core {
         // Quick controls change desired memory state; Apply or shutdown persists it.
         self.state.system.config = Arc::new(config);
         if still_mode {
-            self.audio(AudioCommand::StillMode(self.state.system.config.still_mode))
+            self.engine
+                .send(AudioCommand::StillMode(self.state.system.config.still_mode))
                 .context("Configuration applied, but audio application failed")?;
         }
         Ok(())
@@ -96,13 +97,18 @@ impl Core {
         let request = self.output_settings_request.wrapping_add(1);
         let config = &self.state.system.config;
         (|| -> Result<()> {
-            self.audio(AudioCommand::StillMode(config.still_mode))?;
-            self.audio(AudioCommand::MediaReadBuffer(config.media_read_buffer_mb))?;
-            self.audio(AudioCommand::Volume(config.volume))?;
-            self.audio(AudioCommand::AnalysisSettings(config.as_ref().into()))?;
-            self.audio(AudioCommand::Equalizer(Arc::new(config.equalizer.clone())))?;
-            self.audio(AudioCommand::FfmpegEnabled(config.ffmpeg_enabled))?;
-            self.audio(AudioCommand::OutputSettings {
+            self.engine
+                .send(AudioCommand::StillMode(config.still_mode))?;
+            self.engine
+                .send(AudioCommand::MediaReadBuffer(config.media_read_buffer_mb))?;
+            self.engine.send(AudioCommand::Volume(config.volume))?;
+            self.engine
+                .send(AudioCommand::AnalysisSettings(config.as_ref().into()))?;
+            self.engine
+                .send(AudioCommand::Equalizer(Arc::new(config.equalizer.clone())))?;
+            self.engine
+                .send(AudioCommand::FfmpegEnabled(config.ffmpeg_enabled))?;
+            self.engine.send(AudioCommand::OutputSettings {
                 request,
                 device: config.output_device.clone(),
                 auto_mix: config.pipewire_auto_mix,

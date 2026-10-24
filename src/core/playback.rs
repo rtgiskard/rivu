@@ -215,7 +215,7 @@ impl Core {
                 tracing::warn!(error = ?error, "playback_bitrate_identity_unavailable");
                 None
             });
-            self.audio(AudioCommand::Load {
+            self.engine.send(AudioCommand::Load {
                 path: track.path.clone(),
                 decoder_hint: track.decoder_hint,
                 metadata: Self::playback_metadata(&track),
@@ -607,7 +607,7 @@ impl Core {
             .and_then(|track| track.cue.as_ref())
             .and_then(|cue| cue.end_seconds().map(|end| end - cue.start_seconds()));
         let seconds = end.map_or(seconds, |end| seconds.min(end));
-        self.audio(AudioCommand::Seek(seconds))?;
+        self.engine.send(AudioCommand::Seek(seconds))?;
         self.state.playback.position = seconds;
         self.state.playback.seek_revision = self.state.playback.seek_revision.wrapping_add(1);
         Ok(())

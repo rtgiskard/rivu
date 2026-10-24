@@ -376,14 +376,6 @@ impl Playlists {
             surface
         }
     }
-    pub(in crate::gui) fn render_panel(
-        &mut self,
-        panel_id: u64,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        self.playlists_panel(panel_id, window, cx)
-    }
     pub(in crate::gui) fn focus_name(&self, window: &mut Window, cx: &mut Context<Self>) {
         self.name_input.read(cx).focus_handle(cx).focus(window, cx);
     }
@@ -992,7 +984,7 @@ impl Playlists {
             })
     }
 
-    pub(super) fn playlists_panel(
+    pub(super) fn render_panel(
         &mut self,
         panel_id: u64,
         window: &mut Window,

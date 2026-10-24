@@ -108,7 +108,9 @@ fn pause_accepted_before_queued_eof_keeps_next_and_repeat_one_paused() {
         // another thread. Its snapshot reply follows recording every earlier
         // FIFO command, so draining cannot race the final paused Load.
         let (snapshot, recorded_through_snapshot) = oneshot::channel();
-        core.audio(AudioCommand::StopAndSnapshot(snapshot)).unwrap();
+        core.engine
+            .send(AudioCommand::StopAndSnapshot(snapshot))
+            .unwrap();
         wait_on(&core.executor, async {
             tokio::time::timeout(Duration::from_secs(5), recorded_through_snapshot)
                 .await

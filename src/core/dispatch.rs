@@ -179,20 +179,24 @@ impl Core {
                 "initial_load_completed"
             );
         }
-        let _ = self.audio(AudioCommand::StillMode(self.state.system.config.still_mode));
-        let _ = self.audio(AudioCommand::Volume(self.state.playback.volume));
-        let _ = self.audio(AudioCommand::FfmpegEnabled(
+        let _ = self
+            .engine
+            .send(AudioCommand::StillMode(self.state.system.config.still_mode));
+        let _ = self
+            .engine
+            .send(AudioCommand::Volume(self.state.playback.volume));
+        let _ = self.engine.send(AudioCommand::FfmpegEnabled(
             self.state.system.config.ffmpeg_enabled,
         ));
-        let _ = self.audio(AudioCommand::OutputSettings {
+        let _ = self.engine.send(AudioCommand::OutputSettings {
             request: self.output_settings_request,
             device: self.state.system.selected_device.clone(),
             auto_mix: self.state.system.config.pipewire_auto_mix,
         });
-        let _ = self.audio(AudioCommand::Equalizer(Arc::new(
+        let _ = self.engine.send(AudioCommand::Equalizer(Arc::new(
             self.state.system.config.equalizer.clone(),
         )));
-        let _ = self.audio(AudioCommand::AnalysisSettings(
+        let _ = self.engine.send(AudioCommand::AnalysisSettings(
             self.state.system.config.as_ref().into(),
         ));
     }
@@ -206,7 +210,10 @@ impl Core {
                 }
             }
             Operation::WaveformSnapshot(reply) => {
-                if let Err(error) = self.audio(AudioCommand::WaveformSnapshot(reply.clone())) {
+                if let Err(error) = self
+                    .engine
+                    .send(AudioCommand::WaveformSnapshot(reply.clone()))
+                {
                     let _ = reply.try_send(Err(format!("{error:#}")));
                 }
             }
@@ -398,9 +405,6 @@ impl Core {
         if let Some(callback) = callback {
             callback();
         }
-    }
-    pub(in crate::core) fn audio(&self, command: AudioCommand) -> Result<()> {
-        self.engine.send(command)
     }
 
     /// This is the read dispatch boundary: cancellation never interrupts SQL

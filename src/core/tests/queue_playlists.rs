@@ -238,6 +238,8 @@ fn playlist_group_commands_reject_stale_intents_and_preserve_noop_revisions() {
     })
     .unwrap();
     let reordered = core.state.playlist_query_revisions(1);
+    assert_eq!(core.state.library.playlist_total, 2);
+    assert_eq!(reordered.duplicate_members, baseline.duplicate_members);
     assert_eq!(reordered.playlist, baseline.playlist);
     assert_ne!(reordered.playlist_entries, baseline.playlist_entries);
     assert_eq!(core.store.playlist_track_ids(1, 4).unwrap(), [2, 4, 1, 3]);
@@ -264,7 +266,9 @@ fn playlist_group_commands_reject_stale_intents_and_preserve_noop_revisions() {
         expected_revision: reordered.playlist_entries.unwrap().revision,
     })
     .unwrap();
+    assert_eq!(core.state.library.playlist_total, 2);
     let removed = core.state.playlist_query_revisions(1);
+    assert_ne!(removed.duplicate_members, reordered.duplicate_members);
     assert_ne!(removed.playlist, reordered.playlist);
     assert_ne!(removed.playlist_entries, reordered.playlist_entries);
     assert_eq!(core.store.playlist_track_ids(1, 4).unwrap(), [2, 4]);
@@ -627,18 +631,24 @@ fn playlist_catalog_changes_preserve_unrelated_content_and_metadata_has_its_own_
         .unwrap()
         .rows[0]
         .id;
-    for command in [
-        Command::CreatePlaylist { name: "two".into() },
-        Command::RenamePlaylist {
-            playlist_id: 1,
-            name: "renamed".into(),
-        },
-        Command::AddPlaylist {
-            playlist_id: 1,
-            track_ids: vec![4],
-        },
-        Command::RemovePlaylistEntry { entry_id: removed },
-        Command::DeletePlaylist { playlist_id: 1 },
+    for (command, total) in [
+        (Command::CreatePlaylist { name: "two".into() }, 2),
+        (
+            Command::RenamePlaylist {
+                playlist_id: 1,
+                name: "renamed".into(),
+            },
+            2,
+        ),
+        (
+            Command::AddPlaylist {
+                playlist_id: 1,
+                track_ids: vec![4],
+            },
+            2,
+        ),
+        (Command::RemovePlaylistEntry { entry_id: removed }, 2),
+        (Command::DeletePlaylist { playlist_id: 1 }, 1),
     ] {
         let page = core.store.playlist_entries_page(1, None, 0, 1).unwrap();
         core.command(Command::MovePlaylistEntry {
@@ -654,6 +664,7 @@ fn playlist_catalog_changes_preserve_unrelated_content_and_metadata_has_its_own_
                 | Command::DeletePlaylist { .. }
         );
         core.command(command).unwrap();
+        assert_eq!(core.state.library.playlist_total, total);
         assert_ne!(core.state.library.playlist_revision, expected.playlist);
         assert_eq!(core.state.library.revision, expected.library);
         let current = core.state.playlist_query_revisions(1);

@@ -11,7 +11,7 @@ use crate::{
     model::{Command, DirectoryRow},
     projection::GuiSnapshot,
 };
-use gpui::{AnyElement, App, Context, SharedString, Window, prelude::*};
+use gpui::{App, Context, SharedString, Window, prelude::*};
 use rivu_ui::search::SearchEvent;
 use std::{cell::RefCell, rc::Rc, sync::Arc, time::Instant};
 
@@ -210,15 +210,6 @@ impl Library {
     ) -> bool {
         self.library_search
             .update(cx, |search, cx| search.escape(window, cx))
-    }
-
-    pub(in crate::gui) fn render_panel(
-        &mut self,
-        panel_id: u64,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        self.library_panel(panel_id, window, cx)
     }
 
     pub(super) fn directory_row_selected(&self, row: &DirectoryRow) -> bool {

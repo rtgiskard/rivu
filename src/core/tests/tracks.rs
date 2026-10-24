@@ -185,6 +185,84 @@ fn committed_track_deletions_invalidate_before_failed_refresh() {
 }
 
 #[test]
+fn committed_deletions_isolate_history_and_queue_read_failures() {
+    for missing in [false, true] {
+        for fail_queue_ids in [false, true] {
+            let (directory, mut core) = fixture_with_database(Some(10.0), true);
+            if missing {
+                let path = core.track(2).unwrap().path;
+                let impacts = core
+                    .store
+                    .apply_scan(&ScanResult {
+                        roots: vec![path],
+                        ..ScanResult::default()
+                    })
+                    .unwrap();
+                core.apply_scan_impacts(impacts).unwrap();
+            }
+            core.store.mark_played(2, 7).unwrap();
+            core.state.library.history = Arc::new(core.store.history(MAX_QUERY_ROWS).unwrap());
+            let history = Arc::clone(&core.state.library.history);
+            assert_eq!(history[0].track_id, 2);
+            core.store.set_queue_current(Some(1)).unwrap();
+            core.refresh_queue_tracks().unwrap();
+            let current = Arc::clone(core.state.current_track.as_ref().unwrap());
+            let queue = core.state.queue.clone();
+            let queue_ids = core.queue_ids.clone();
+            core.played = vec![1, 2, 3, 4, 5];
+            core.played_cursor = 4;
+            let before = core.state.query_revisions();
+            let connection =
+                rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+            let failure = if fail_queue_ids {
+                // A negative persisted ID cannot be represented by the queue cache.
+                "UPDATE queue_entries SET id=-5 WHERE id=5;"
+            } else {
+                // Only history reads this surviving, non-current row's timestamp.
+                "UPDATE tracks SET last_played='unreadable' WHERE id=3;"
+            };
+            connection
+                .execute_batch(&format!(
+                    "CREATE TRIGGER fail_delete_refresh AFTER DELETE ON tracks WHEN OLD.id=2
+                     BEGIN {failure} END;"
+                ))
+                .unwrap();
+            let command = if missing {
+                Command::RemoveMissingTracks
+            } else {
+                Command::RemoveTracks { track_ids: vec![2] }
+            };
+            let error = core.command(command).unwrap_err();
+            assert!(error.to_string().contains("Track deletion committed"));
+            assert!(core.store.track(2).unwrap().is_none());
+            assert_eq!(core.state.library.track_total, 3);
+            let committed = core.state.query_revisions();
+            assert_ne!(committed.library, before.library);
+            assert_ne!(committed.structure, before.structure);
+            if fail_queue_ids {
+                assert!(core.state.library.history.is_empty());
+                assert_eq!(core.queue_ids, queue_ids);
+                assert_eq!(core.state.queue, queue);
+                assert!(Arc::ptr_eq(
+                    core.state.current_track.as_ref().unwrap(),
+                    &current
+                ));
+                assert_eq!(core.played, [1, 2, 3, 4, 5]);
+                assert_eq!(core.played_cursor, 4);
+            } else {
+                assert!(format!("{error:#}").contains("Refreshing history failed"));
+                assert!(Arc::ptr_eq(&core.state.library.history, &history));
+                assert_eq!(core.queue_ids, [1, 4, 5]);
+                assert_eq!(core.state.queue, core.store.queue_state().unwrap());
+                assert_eq!(core.state.current_track().unwrap().id, 1);
+                assert_eq!(core.played, [1, 4, 5]);
+                assert_eq!(core.played_cursor, 2);
+            }
+        }
+    }
+}
+
+#[test]
 fn metadata_intents_merge_and_pages_invalidate_only_for_queued_changes() {
     for title_first in [true, false] {
         let (_directory, mut core) = fixture();
