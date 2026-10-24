@@ -1069,16 +1069,21 @@ impl Settings {
                         column()
                             .gap_2()
                             .child(
-                                FormField::new(
-                                    palette(cx),
-                                    settings.tr("settings-visualization-signal"),
-                                    signal,
-                                )
-                                .into_div()
-                                .id("settings-visualization-signal-help")
-                                .tooltip(text_tooltip(
-                                    settings.tr("settings-visualization-signal-hint"),
-                                )),
+                                row().child(
+                                    FormField::new(
+                                        palette(cx),
+                                        settings.tr("settings-visualization-signal"),
+                                        signal,
+                                    )
+                                    .into_div()
+                                    .w(gpui::relative(0.5))
+                                    .min_w(rems(180. / 16.))
+                                    .pr_2()
+                                    .id("settings-visualization-signal-help")
+                                    .tooltip(text_tooltip(
+                                        settings.tr("settings-visualization-signal-hint"),
+                                    )),
+                                ),
                             )
                             .child(
                                 row()
@@ -1095,7 +1100,7 @@ impl Settings {
                                     .child(visual_switch(
                                         &self.i18n,
                                         "visual-cache",
-                                        "",
+                                        "󰃨",
                                         settings.tr("settings-rendering-cache"),
                                         draft.visualization_cache,
                                         cx,
