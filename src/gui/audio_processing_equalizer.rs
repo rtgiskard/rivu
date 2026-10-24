@@ -19,6 +19,9 @@ pub(super) struct EqualizerUi {
     active: HashMap<u64, EqTarget>,
     pointer_count: Rc<Cell<usize>>,
     removing: HashMap<EqTarget, (EqualizerConfig, usize)>,
+    // Replacement intent follows serialized command start/ack, not refreshes.
+    reset_band_focus: Option<EqTarget>,
+    pending_node_focus_reset: Option<(u64, u64)>,
 }
 
 struct EqualizerField {
@@ -62,6 +65,11 @@ struct NodeDrag {
     _subscriptions: [Subscription; 2],
 }
 
+struct BandFocus {
+    handle: FocusHandle,
+    _subscription: Subscription,
+}
+
 struct EqualizerEditor {
     owner: WeakEntity<AudioProcessing>,
     context: FeatureContext,
@@ -76,6 +84,7 @@ struct EqualizerEditor {
     active: bool,
     response_dirty: bool,
     band: usize,
+    band_focus: [Option<BandFocus>; MAX_BANDS],
     add_band_count: usize,
     response_channel: usize,
     fields: HashMap<String, EqualizerField>,
@@ -123,6 +132,7 @@ impl EqualizerEditor {
             active: true,
             response_dirty: true,
             band: 0,
+            band_focus: std::array::from_fn(|_| None),
             add_band_count: 1,
             response_channel: 0,
             fields: HashMap::new(),
@@ -164,8 +174,12 @@ impl EqualizerEditor {
         let revision = state.system.config.processing_graph.revision;
         let fence_changed = matches!(self.target, EqTarget::Node(_)) && self.revision != revision;
         let geometry_changed = self.geometry_epoch != geometry_epoch;
+        // Ordinary same-length parameter updates preserve native keyboard focus.
         if self.config.bands.len() != config.bands.len() {
+            // Without persistent band IDs, duplicate rows cannot be disambiguated
+            // after an arbitrary structural snapshot. Retire native identities.
             self.remap_band_fields(&config.bands, cx);
+            self.retire_band_focus();
         }
         let changed = config_changed
             || format_changed
@@ -177,6 +191,11 @@ impl EqualizerEditor {
         self.format = format;
         if config_changed {
             self.config.clone_from(config);
+            for (focus, band) in self.band_focus.iter_mut().zip(&config.bands) {
+                if !band.enabled {
+                    *focus = None;
+                }
+            }
         }
         self.revision = revision;
         self.blocked = blocked;
@@ -208,6 +227,54 @@ impl EqualizerEditor {
         if changed {
             cx.notify();
         }
+    }
+
+    fn retire_band_focus(&mut self) {
+        self.band_focus.iter_mut().for_each(|focus| *focus = None);
+    }
+
+    fn band_focus_handle(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> FocusHandle {
+        if let Some(focus) = &self.band_focus[index] {
+            return focus.handle.clone();
+        }
+        let handle = cx.focus_handle();
+        let weak = handle.downgrade();
+        let subscription = cx.on_focus(&handle, window, move |this, window, cx| {
+            let Some(handle) = weak.upgrade() else {
+                return;
+            };
+            // Resolve the live native identity, never a stale band index.
+            let index = this
+                .band_focus
+                .iter()
+                .position(|focus| focus.as_ref().is_some_and(|focus| focus.handle == handle));
+            if this.active
+                && handle.is_focused(window)
+                && let Some(index) = index
+                && this.band != index
+            {
+                this.cancel_pointer(cx);
+                this.band = index;
+                this.sync_fields(cx);
+                cx.notify();
+            }
+        });
+        self.band_focus[index] = Some(BandFocus {
+            handle: handle.clone(),
+            _subscription: subscription,
+        });
+        handle
+    }
+
+    fn focus_graph_band(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.band = index;
+        self.sync_fields(cx);
+        self.band_focus_handle(index, window, cx).focus(window, cx);
     }
 
     fn cancel_pointer(&mut self, cx: &mut Context<Self>) {
@@ -716,8 +783,8 @@ impl EqualizerEditor {
                                     .iter()
                                     .position(|index| *index == drag.band)
                                     .unwrap_or(0);
-                                this.band = drag.members[(current + 1) % drag.member_count];
-                                this.sync_fields(cx);
+                                let index = drag.members[(current + 1) % drag.member_count];
+                                this.focus_graph_band(index, window, cx);
                             }
                             cx.notify();
                         }
@@ -732,7 +799,7 @@ impl EqualizerEditor {
         });
     }
 
-    fn graph(&mut self, panel: u64, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn graph(&mut self, panel: u64, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = rivu_ui::theme::palette(cx);
         let measured = Rc::clone(&self.bounds);
         let curve = Arc::clone(&self.response);
@@ -761,6 +828,7 @@ impl EqualizerEditor {
         let ui_scale = self.state.system.config.ui_scale;
         let mut controls = Vec::with_capacity(nodes.len());
         for &(index, x, y) in &nodes {
+            let focus = self.band_focus_handle(index, window, cx);
             let band = &self.config.bands[index];
             let mut stack_count = 0usize;
             let mut representative = index;
@@ -790,6 +858,7 @@ impl EqualizerEditor {
                     .size(px(16.))
                     .tab_index(0)
                     .tab_stop(!self.response.is_empty())
+                    .track_focus(&focus)
                     .role(Role::Slider)
                     .aria_label(SharedString::from(format!(
                         "{} {}: {}",
@@ -828,8 +897,14 @@ impl EqualizerEditor {
                                 .tooltip(rivu_ui::text_tooltip(self.tr("processing-overlap-help"))),
                         )
                     })
-                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
-                        this.node_key(index, event, cx)
+                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                        if this.band_focus[index]
+                            .as_ref()
+                            .is_some_and(|current| current.handle == focus)
+                            && focus.is_focused(window)
+                        {
+                            this.node_key(index, event, cx);
+                        }
                     }))
                     .into_any_element(),
             );
@@ -895,13 +970,12 @@ impl EqualizerEditor {
                         nearest
                     };
                     if let Some(index) = target {
-                        this.band = index;
                         let Some(b) = this.config.bands.get(index) else {
                             return;
                         };
                         let frequency = b.frequency_hz;
                         let gain = b.gain_db;
-                        this.sync_fields(cx);
+                        this.focus_graph_band(index, window, cx);
                         let subscriptions = [
                             cx.observe_window_activation(window, |this, window, cx| {
                                 if !window.is_window_active() {
@@ -1513,6 +1587,7 @@ impl AudioProcessing {
                 let sample_rate = self
                     .equalizer_format_from(&snapshot, target)
                     .map(|(_, rate, _)| rate);
+                let replaces_band_identity = replaces_band_identity(&edit);
                 match edit.apply_config(&mut next, sample_rate) {
                     Ok(None) => {
                         let mut submission = NodeEqualizerSubmission {
@@ -1522,6 +1597,9 @@ impl AudioProcessing {
                             fields: submitted.into_iter().collect(),
                         };
                         let config = std::mem::take(&mut submission.config);
+                        if replaces_band_identity {
+                            self.equalizer_ui.pending_node_focus_reset = Some((id, revision));
+                        }
                         self.graph_edit_equalizer(
                             GraphEdit::Replace {
                                 id,
@@ -1646,12 +1724,20 @@ impl AudioProcessing {
         let monitor_format = self.equalizer_format_from(&state, EqTarget::Monitor);
         let node_format = self.equalizer_format_from(&state, EqTarget::Node(0));
         let removals = &self.equalizer_ui.removing;
+        let reset_band_focus = self.equalizer_ui.reset_band_focus;
+        let command_active = self.command_active;
         self.equalizer_ui.editors.retain(|(_, target), editor| {
             let Some(config) = target_config(&state, *target) else {
                 editor.update(cx, |editor, cx| editor.cancel_pointer(cx));
                 return false;
             };
             editor.update(cx, |editor, cx| {
+                if reset_band_focus == Some(*target)
+                    && (!command_active || editor.config.bands != config.bands)
+                {
+                    editor.retire_band_focus();
+                    cx.notify();
+                }
                 if editor.config.bands.len() != config.bands.len()
                     && let Some((previous, index)) = removals.get(target)
                 {
@@ -1681,6 +1767,9 @@ impl AudioProcessing {
         self.equalizer_ui.removing.retain(|target, (previous, _)| {
             target_config(&state, *target).is_some_and(|config| config.bands == previous.bands)
         });
+        if !command_active {
+            self.equalizer_ui.reset_band_focus = None;
+        }
     }
 
     pub(super) fn cancel_equalizer_pointer(&mut self, cx: &mut Context<Self>) -> bool {
@@ -1967,6 +2056,7 @@ impl AudioProcessing {
             }
             editor.update(cx, |editor, cx| {
                 editor.active = false;
+                editor.retire_band_focus();
                 editor.cancel_pointer(cx);
                 editor.fields.retain(|_, field| field.dirty);
             });
@@ -2016,8 +2106,36 @@ impl AudioProcessing {
     }
 }
 
+fn replaces_band_identity(edit: &EqualizerEdit) -> bool {
+    matches!(
+        edit,
+        EqualizerEdit::Band { .. }
+            | EqualizerEdit::Replace { .. }
+            | EqualizerEdit::LoadPreset { .. }
+            | EqualizerEdit::SwapAb
+    )
+}
+
 impl AudioProcessing {
     pub(super) fn begin_equalizer_command(&mut self, command: &Command) {
+        self.equalizer_ui.reset_band_focus = match command {
+            Command::EqualizerEdit { edit } if replaces_band_identity(edit) => {
+                Some(EqTarget::Monitor)
+            }
+            Command::ProcessingGraphEdit { revision, edit }
+                if matches!(
+                    edit.as_ref(),
+                    GraphEdit::Replace { id, .. }
+                        if self.equalizer_ui.pending_node_focus_reset == Some((*id, *revision))
+                ) =>
+            {
+                self.equalizer_ui
+                    .pending_node_focus_reset
+                    .take()
+                    .map(|(id, _)| EqTarget::Node(id))
+            }
+            _ => None,
+        };
         if let Command::EqualizerEdit {
             edit: EqualizerEdit::RemoveBand { index },
         } = command
@@ -2032,6 +2150,7 @@ impl AudioProcessing {
     pub(super) fn finish_equalizer_command(&mut self, success: bool) {
         if !success {
             self.equalizer_ui.removing.clear();
+            self.equalizer_ui.reset_band_focus = None;
         }
     }
 }

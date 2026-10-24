@@ -129,10 +129,13 @@ Select a band node and drag horizontally for frequency and vertically for
 peak/shelf gain. Overlapping nodes stay at their true Hz/dB positions and show
 the stack count and current member. A press prefers the selected member;
 clicking without dragging cycles through overlapping members, while dragging
-keeps the chosen member. Selection alone does not edit the EQ configuration.
-Numerical fields provide exact frequency, gain, Q, shelf slope, stages and
-channel selection. Focused nodes support Left/Right in semitone steps and
-Up/Down in 0.5 dB steps for gain-bearing filters. Enter/Space selects the node.
+keeps the chosen member. Pointer selection and overlap cycling transfer keyboard
+focus to that member; Tab or accessibility focus also selects its corresponding
+band. Selection alone does not edit the EQ configuration. Numerical fields provide
+exact frequency, gain, Q, shelf slope, stages and channel selection. Focused nodes
+support Left/Right in semitone steps and Up/Down in 0.5 dB steps for gain-bearing
+filters. Enter/Space selects the node. Removing bands or replacing the bank retires
+obsolete node focus; selecting a surviving node establishes the new keyboard target.
 The response is evaluated at the current stream rate; an unavailable rate is
 not proof of a playback measurement.
 
