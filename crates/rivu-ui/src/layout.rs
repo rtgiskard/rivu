@@ -33,6 +33,22 @@ pub fn panel_toolbar() -> Div {
     row().flex_wrap().flex_shrink_0()
 }
 
+/// Bottom-align panel actions with the complete title and subtitle block.
+pub fn panel_heading_row(heading: impl IntoElement + Styled, actions: impl IntoElement) -> Div {
+    row()
+        .flex_wrap()
+        .flex_shrink_0()
+        .items_end()
+        .justify_end()
+        .child(heading.flex_1().min_w_0().flex_basis(gpui::rems(12.)))
+        .child(actions)
+}
+
+/// Shared spacing and wrapping for upper-right panel header controls.
+pub fn panel_header_actions() -> Div {
+    row().gap_1().flex_wrap().flex_shrink(1.)
+}
+
 /// Shared root surface for docked panels.
 pub fn panel_surface(id: impl Into<ElementId>) -> Stateful<Div> {
     div()

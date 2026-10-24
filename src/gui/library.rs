@@ -14,7 +14,7 @@ use crate::{
 use gpui::{AnyElement, Context, Div, Render, SharedString, Window, div, prelude::*, px, rgb};
 use rivu_ui::{
     IconButton, IconButtonDensity, IconButtonStyle, VirtualList, button, caption, column,
-    list_panel_header, list_viewport, panel_surface, panel_toolbar, row,
+    list_panel_header, list_viewport, panel_surface, row,
 };
 use std::{path::Path, sync::Arc};
 
@@ -1089,13 +1089,9 @@ impl Library {
             self.i18n.text("gl-loading").to_owned()
         };
         let heading = list_panel_header(theme, self.tr("gl-library"), selection_label.clone())
-            .flex_1()
-            .min_w_12()
             .id(("library-selection-count", panel_id))
             .tooltip(rivu_ui::text_tooltip(selection_label));
-        let tools = panel_toolbar()
-            .min_w_0()
-            .flex_shrink(1.)
+        let tools = rivu_ui::panel_header_actions()
             .child(self.library_search.clone())
             .child(
                 IconButton::new(
@@ -1195,7 +1191,7 @@ impl Library {
                 ),
             );
         let mut panel = panel_surface(("library-panel", panel_id))
-            .child(row().items_end().child(heading).child(tools));
+            .child(rivu_ui::panel_heading_row(heading, tools));
         if let Some((track_id, result)) = &self.library.locate.notice
             && self
                 .state

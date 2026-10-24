@@ -13,11 +13,11 @@ use crate::{
     },
     model::Command,
 };
-use gpui::{AnyElement, Context, Div, EntityId, SharedString, Window, prelude::*, px, rgb};
+use gpui::{AnyElement, Context, Div, EntityId, SharedString, Window, prelude::*, rgb};
 use rivu_ui::{
     IconButton, IconButtonDensity, IconButtonGroup, IconButtonStyle, StatusKind, VirtualList,
-    button, caption, hover_actions, list_panel_header, list_viewport, panel_surface, panel_toolbar,
-    row, status_message,
+    button, caption, hover_actions, list_panel_header, list_viewport, panel_surface, row,
+    status_message,
 };
 use std::cell::RefCell;
 
@@ -158,15 +158,12 @@ impl Queue {
                 ],
             ),
         )
-        .flex_1()
-        .min_w_12()
         .id(("queue-count", panel_id))
         .tooltip({
             let text = self.tr("gl-queue-drag-hint");
             rivu_ui::text_tooltip(text)
         });
-        let tools = panel_toolbar()
-            .min_h(px(32.))
+        let tools = rivu_ui::panel_header_actions()
             .child(self.queue_search.clone())
             .child(
                 IconButton::new(
@@ -268,7 +265,7 @@ impl Queue {
             }))
             .drag_over::<ContentDrag>(|style, _, _, _| style.border_color(rgb(theme.accent)))
             .drag_over::<PlaylistDrag>(|style, _, _, _| style.border_color(rgb(theme.accent)))
-            .child(row().items_end().child(header).child(tools))
+            .child(rivu_ui::panel_heading_row(header, tools))
             .when(
                 self.model
                     .locate_filtered

@@ -225,8 +225,10 @@ rules so switching tabs does not change separator behavior. Saved proportions,
 docking and cramped viewports may still produce smaller panels: lists must shrink
 inside them rather than overflow neighbors, and longer headings do not increase
 the layout minimum.
-Track details field pairs stack in narrow panels and return to equal columns when
-space permits; individual label/value rows retain their baseline alignment.
+List headings wrap their action rows; the title block has a shrinkable preferred
+width rather than imposing a panel minimum. Track details field pairs stack in
+narrow panels and return to equal columns when space permits; individual
+label/value rows retain their baseline alignment.
 
 The main shell owns a uniform 0.25rem outer inset (4px at the default interface
 scale) around the workspace and footer, separated by a 0.25rem gap. Neither child
@@ -261,6 +263,13 @@ inset and clipping region.
 Each list heading reserves at least 3 rem within its header row. Its title and
 count each stay on one line and truncate independently when space is limited;
 expanding search does not turn either into a multi-line block.
+Library, Queue, Playlists, Track details and Recent tracks use
+`panel_heading_row` and `panel_header_actions` for their heading/tool composition.
+The tools align with the bottom of the complete title and subtitle/status block.
+Search belongs to the same wrapping action container as its neighboring buttons.
+Header icon buttons use Surface/Regular styling, with `gap_1` (0.25rem) between
+controls; the title-to-tools separation remains independent of that inner gap.
+
 Icon buttons derive their size from the symbol and 0.5rem padding on each side,
 with a 2rem minimum width and height. Symbols follow configured text size; padding
 and minimum hit areas follow UI scale. List search reserves a single-line height

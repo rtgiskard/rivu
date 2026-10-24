@@ -30,8 +30,8 @@ use rivu_ui::{
     FocusScope, IconButton, IconButtonDensity, IconButtonGroup, IconButtonStyle, StatusKind,
     VirtualList, caption, column, danger_control, hover_actions,
     input::{Input, InputEvent},
-    list_panel_header, list_row, list_row_height, list_viewport, panel_header, panel_surface,
-    panel_toolbar, row,
+    list_panel_header, list_row, list_row_height, list_viewport, panel_header,
+    panel_header_actions, panel_heading_row, panel_surface, panel_toolbar, row,
     search::{SearchEvent, SearchField},
     status_message,
 };
@@ -1905,44 +1905,32 @@ impl Playlists {
             .drag_over::<super::ContentDrag>(|style, _, _, _| style.border_color(rgb(theme.accent)))
             .drag_over::<QueueDrag>(|style, _, _, _| style.border_color(rgb(theme.accent)))
             .drag_over::<PlaylistDrag>(|style, _, _, _| style.border_color(rgb(theme.accent)))
-            .child(
-                row()
-                    .min_h_8()
-                    .flex_wrap()
-                    .flex_shrink_0()
-                    .items_end()
-                    .child(
-                        list_panel_header(
-                            theme,
-                            self.tr("gl-playlists"),
-                            if let Some(total) = self.browser.playlists().summaries().rows.total() {
-                                self.i18n
-                                    .format(
-                                        "gl-playlist-count",
-                                        &[
-                                            ("total", total.into()),
-                                            (
-                                                "selected",
-                                                self.browser
-                                                    .playlists()
-                                                    .track_selection
-                                                    .len()
-                                                    .into(),
-                                            ),
-                                        ],
-                                    )
-                                    .into()
-                            } else {
-                                self.tr("gl-loading")
-                            },
-                        )
-                        .flex_1()
-                        .min_w_12()
-                        .on_mouse_down(
-                            gpui::MouseButton::Left,
-                            cx.listener(|this, _, _, cx| this.focus_catalog(cx)),
-                        ),
-                    )
+            .child(panel_heading_row(
+                list_panel_header(
+                    theme,
+                    self.tr("gl-playlists"),
+                    if let Some(total) = self.browser.playlists().summaries().rows.total() {
+                        self.i18n
+                            .format(
+                                "gl-playlist-count",
+                                &[
+                                    ("total", total.into()),
+                                    (
+                                        "selected",
+                                        self.browser.playlists().track_selection.len().into(),
+                                    ),
+                                ],
+                            )
+                            .into()
+                    } else {
+                        self.tr("gl-loading")
+                    },
+                )
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(|this, _, _, cx| this.focus_catalog(cx)),
+                ),
+                panel_header_actions()
                     .child(self.playlist_search.clone())
                     .child(
                         IconButton::new(
@@ -1997,7 +1985,7 @@ impl Playlists {
                             },
                         ),
                     ),
-            )
+            ))
             .when(selection_unavailable, |panel| panel.child(selection_status))
             .when_some(summary_status, |panel, status| panel.child(status))
             .child(lists)

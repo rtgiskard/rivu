@@ -988,95 +988,15 @@ impl Metadata {
                 column()
                     .flex_shrink_0()
                     .gap_3()
-                    .child(
+                    .child(rivu_ui::panel_heading_row(
                         column()
                             .gap_1()
                             .child(
-                                row()
-                                    .justify_between()
-                                    .items_center()
-                                    .child(
-                                        caption(theme, heading)
-                                            .text_lg()
-                                            .text_color(rgb(theme.text)),
-                                    )
-                                    .child(
-                                        row()
-                                            .gap_2()
-                                            .child(
-                                                favorite_button(
-                                                    ("metadata-favorite", panel_id),
-                                                    favorite,
-                                                    |key| self.tr(key),
-                                                )
-                                                .enabled(editable)
-                                                .build(
-                                                    IconButtonStyle::Surface,
-                                                    IconButtonDensity::Regular,
-                                                    cx,
-                                                    move |this, _, cx| {
-                                                        if this.metadata.editor_identity()
-                                                            != editor_identity
-                                                        {
-                                                            return;
-                                                        }
-                                                        let Some((track_id, favorite)) =
-                                                            this.metadata.track().map(|track| {
-                                                                (track.id, track.favorite)
-                                                            })
-                                                        else {
-                                                            return;
-                                                        };
-                                                        this.send(
-                                                            Command::SetFavorite {
-                                                                track_ids: vec![track_id],
-                                                                favorite: !favorite,
-                                                            },
-                                                            cx,
-                                                        );
-                                                    },
-                                                ),
-                                            )
-                                            .child(
-                                                IconButton::new(
-                                                    ("metadata-save", panel_id),
-                                                    "󰆓",
-                                                    self.tr("gl-save-metadata"),
-                                                )
-                                                .enabled(can_save)
-                                                .build(
-                                                    IconButtonStyle::Surface,
-                                                    IconButtonDensity::Regular,
-                                                    cx,
-                                                    move |this, _, cx| {
-                                                        if this.metadata.editor_identity()
-                                                            == editor_identity
-                                                        {
-                                                            this.save(cx);
-                                                        }
-                                                    },
-                                                ),
-                                            )
-                                            .child(
-                                                IconButton::new(
-                                                    ("metadata-retry", panel_id),
-                                                    "󰑐",
-                                                    self.tr("gl-reload-playback"),
-                                                )
-                                                .build(
-                                                    IconButtonStyle::Surface,
-                                                    IconButtonDensity::Regular,
-                                                    cx,
-                                                    move |this, _, cx| {
-                                                        if this.metadata.editor_identity()
-                                                            == editor_identity
-                                                        {
-                                                            this.reload_playback_metadata(cx);
-                                                        }
-                                                    },
-                                                ),
-                                            ),
-                                    ),
+                                caption(theme, heading)
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_lg()
+                                    .text_color(rgb(theme.text)),
                             )
                             .child(
                                 div()
@@ -1091,7 +1011,73 @@ impl Metadata {
                                     )
                                     .tooltip(rivu_ui::text_tooltip(status)),
                             ),
-                    )
+                        rivu_ui::panel_header_actions()
+                            .child(
+                                favorite_button(("metadata-favorite", panel_id), favorite, |key| {
+                                    self.tr(key)
+                                })
+                                .enabled(editable)
+                                .build(
+                                    IconButtonStyle::Surface,
+                                    IconButtonDensity::Regular,
+                                    cx,
+                                    move |this, _, cx| {
+                                        if this.metadata.editor_identity() != editor_identity {
+                                            return;
+                                        }
+                                        let Some((track_id, favorite)) = this
+                                            .metadata
+                                            .track()
+                                            .map(|track| (track.id, track.favorite))
+                                        else {
+                                            return;
+                                        };
+                                        this.send(
+                                            Command::SetFavorite {
+                                                track_ids: vec![track_id],
+                                                favorite: !favorite,
+                                            },
+                                            cx,
+                                        );
+                                    },
+                                ),
+                            )
+                            .child(
+                                IconButton::new(
+                                    ("metadata-save", panel_id),
+                                    "󰆓",
+                                    self.tr("gl-save-metadata"),
+                                )
+                                .enabled(can_save)
+                                .build(
+                                    IconButtonStyle::Surface,
+                                    IconButtonDensity::Regular,
+                                    cx,
+                                    move |this, _, cx| {
+                                        if this.metadata.editor_identity() == editor_identity {
+                                            this.save(cx);
+                                        }
+                                    },
+                                ),
+                            )
+                            .child(
+                                IconButton::new(
+                                    ("metadata-retry", panel_id),
+                                    "󰑐",
+                                    self.tr("gl-reload-playback"),
+                                )
+                                .build(
+                                    IconButtonStyle::Surface,
+                                    IconButtonDensity::Regular,
+                                    cx,
+                                    move |this, _, cx| {
+                                        if this.metadata.editor_identity() == editor_identity {
+                                            this.reload_playback_metadata(cx);
+                                        }
+                                    },
+                                ),
+                            ),
+                    ))
                     .child(metadata_group(
                         theme,
                         self.tr("gl-file"),

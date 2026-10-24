@@ -7,7 +7,7 @@ use chrono::{DateTime, Local};
 use gpui::{AnyElement, Context, Div, SharedString, Window, div, prelude::*, px, rgb};
 use rivu_ui::{
     VirtualList, caption, column, hover_actions, list_panel_header, list_row, list_viewport,
-    panel_surface, row, sortable_header,
+    panel_header_actions, panel_heading_row, panel_surface, row, sortable_header,
 };
 use std::cell::RefCell;
 
@@ -281,19 +281,15 @@ impl History {
         let scroll = self.context.scroll.borrow_mut().list(("history", panel_id));
         panel_surface(("history-panel", panel_id))
             .child(
-                row()
-                    .items_end()
-                    .child(
-                        list_panel_header(
-                            theme,
-                            self.tr("gl-recent-tracks"),
-                            self.context.i18n
-                                .format("gl-track-count", &[("count", history_total.into())]),
-                        )
-                        .flex_1()
-                        .min_w_12(),
-                    )
-                    .child(self.search.clone()),
+                panel_heading_row(
+                    list_panel_header(
+                        theme,
+                        self.tr("gl-recent-tracks"),
+                        self.context.i18n
+                            .format("gl-track-count", &[("count", history_total.into())]),
+                    ),
+                    panel_header_actions().child(self.search.clone()),
+                ),
             )
             .when(history_len == 0, |panel| {
                 panel.child(caption(theme, self.tr(if history_total == 0 {
