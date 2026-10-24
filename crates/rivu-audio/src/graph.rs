@@ -586,6 +586,11 @@ impl GraphRunner {
                     }
                 }
             }
+            ensure!(
+                output.iter().all(|value| value.is_finite()),
+                "graph node {} produced non-finite PCM",
+                node.id
+            );
             node.blocks = node.blocks.saturating_add(1);
         }
         chunk.copy_from_slice(&self.nodes.last().expect("compiled target").output[..chunk.len()]);
@@ -751,6 +756,20 @@ mod tests {
             }
         }
         assert!(runner.node_process_counts().all(|(_, count)| count == 8));
+    }
+    #[test]
+    fn finite_mix_overflow_is_rejected_before_pcm_is_published() {
+        let mut graph = branch_graph();
+        graph.nodes[1].kind = graph.nodes[2].kind.clone();
+        let mut runner = GraphRunner::compile(&graph, port(5, 0), 48_000, 1).unwrap();
+        let mut input = [f32::MAX * 0.75];
+        let original = input;
+        assert!(runner.process_interleaved(&mut input).is_err());
+        assert_eq!(input, original);
+        runner.reset();
+        let mut input = [0.75, -0.75];
+        runner.process_interleaved(&mut input).unwrap();
+        assert_eq!(input, [1.5, -1.5]);
     }
     #[test]
     fn preview_uses_only_ancestors_and_cached_boundary_is_exact() {

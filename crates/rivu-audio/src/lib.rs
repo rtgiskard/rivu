@@ -20,8 +20,8 @@
 //! read-ahead barriers. Opening retains decoder progress and yields after at
 //! most 64 decode work steps; queued controls update or cancel that opening
 //! before the next round. Cancelled openings publish no lifecycle completion.
-//! A refill submits only the initially vacant ring prefix and decodes at most
-//! 64 PCM chunks; concurrently reclaimed space belongs to the next round.
+//! A refill submits at most 16,384 frames from the initially vacant ring prefix
+//! and decodes at most 64 PCM chunks; reclaimed space belongs to the next round.
 //! A partial packet tail stays ahead of later PCM and EOF. Ready commands,
 //! opening or refill work run another round without a timer wait. These are
 //! work bounds, not wall-clock bounds on decoder/device/file calls.
@@ -128,6 +128,7 @@ pub use output::devices;
 pub use render::{RenderInfo, render_source};
 pub use source::{
     ProbeBackend, ProbeResult, SourceIdentity, metadata_budget, probe, probe_details, probe_file,
+    probe_with_cancel,
 };
 pub use waveform::{WaveformFrame, WaveformIdentity};
 

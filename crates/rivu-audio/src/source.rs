@@ -129,6 +129,22 @@ pub fn probe(path: &Path, ffmpeg_enabled: bool) -> Result<MediaInfo> {
     Ok(Source::open(path, PROBE_BUFFER_LEN, DecoderHint::Auto, ffmpeg_enabled)?.info)
 }
 
+/// Probe metadata while observing job cancellation between decoder work rounds.
+pub fn probe_with_cancel(
+    path: &Path,
+    ffmpeg_enabled: bool,
+    cancelled: &AtomicBool,
+) -> Result<MediaInfo> {
+    Ok(Source::open_with_cancel(
+        path,
+        PROBE_BUFFER_LEN,
+        DecoderHint::Auto,
+        ffmpeg_enabled,
+        Some(cancelled),
+    )?
+    .info)
+}
+
 /// Probe the already opened object without looking up its original path again.
 pub fn probe_file(path: &Path, mut file: File, ffmpeg_enabled: bool) -> Result<MediaInfo> {
     SourceIdentity::from_file(&file)?;
@@ -1542,6 +1558,20 @@ mod tests {
     use super::*;
     use std::io::Write;
     use symphonia::core::{checksum::Crc32, io::Monitor};
+
+    #[test]
+    fn cancelled_probe_rejects_before_opening_and_can_be_retried() {
+        let file = opening_prefix_file(DECODE_WORK_BUDGET * 3 + 1, true);
+        let cancelled = AtomicBool::new(true);
+        let error = probe_with_cancel(file.path(), false, &cancelled)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("cancelled"));
+        cancelled.store(false, Ordering::Release);
+        let info = probe_with_cancel(file.path(), false, &cancelled).unwrap();
+        assert_eq!((info.sample_rate, info.channels), (8000, 1));
+        assert_eq!(probe(file.path(), false).unwrap().sample_rate, 8000);
+    }
 
     #[test]
     fn opening_rounds_keep_real_packet_progress_and_the_first_pcm() {

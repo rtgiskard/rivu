@@ -14,10 +14,20 @@ use crossbeam_channel::Receiver;
 use parking_lot::RwLock;
 use rivu_dsp::equalizer::{config::EqualizerConfig, iir::Equalizer};
 use rivu_format::config::VisualizationSignal;
-use std::{path::PathBuf, sync::Arc};
+use std::{collections::VecDeque, path::PathBuf, sync::Arc};
 
 const PENDING_BUFFER_CAPACITY: usize = 16_384;
+// Bound output/tap admission independently of device queue and decoder packet
+// sizes. A ready refill returns through command/control handling before more work.
+const MAX_REFILL_FRAMES: usize = 16_384;
 const MAX_GRAPH_PACKET_FRAMES: usize = 65_536;
+
+#[derive(Clone, Copy)]
+enum PendingTap {
+    Direct(VisualizationSignal),
+    Before,
+    None,
+}
 
 pub(super) struct PlaybackOptions {
     pub(super) path: PathBuf,
@@ -51,6 +61,7 @@ pub(super) struct Playback {
     source_info: Option<MediaInfo>,
     pending: Vec<f32>,
     pending_start: f64,
+    pending_tap: PendingTap,
     before_skip_frames: usize,
     before_output_frames: u64,
     offset_frames: usize,
@@ -74,6 +85,12 @@ struct VisualizationCapture {
     signal: VisualizationSignal,
     last_end: Option<f64>,
     timestamp_tolerance: f64,
+    tap_last_end: Option<f64>,
+    // Destructive DSP needs a separate Before signal, bounded by its output
+    // latency plus one decoder packet. Other taps borrow admitted PCM directly.
+    before: VecDeque<([f32; 2], bool)>,
+    before_start: f64,
+    before_offset_frames: u64,
 }
 
 impl VisualizationCapture {
@@ -84,25 +101,20 @@ impl VisualizationCapture {
         }
     }
 
-    fn push(&mut self, start: f64, pcm: &[f32], rate: u32, channels: usize) {
+    fn push(&mut self, start: f64, pcm: &[f32], rate: u32, channels: usize) -> bool {
         if pcm.is_empty() {
-            return;
+            return false;
         }
-        if self.last_end.is_some_and(|end| {
+        let gap = self.last_end.is_some_and(|end| {
             (start - end).abs() > self.timestamp_tolerance.max(0.5 / rate as f64)
-        }) {
+        });
+        if gap {
             self.begin_traversal();
-            if let Some(producer) = &mut self.producer {
-                producer.discontinuity();
-            }
         }
         self.last_end = Some(start + (pcm.len() / channels) as f64 / rate as f64);
-        if let Some(producer) = &mut self.producer {
-            producer.push(pcm, &self.weights);
-        }
         if self.still_mode {
             self.coverage.skip();
-            return;
+            return gap;
         }
         self.coverage.record(start, pcm.len() / channels, rate);
         let accumulator = self.accumulator.get_or_insert_with(|| {
@@ -114,6 +126,107 @@ impl VisualizationCapture {
         });
         accumulator.push(start, pcm, rate, channels);
         accumulator.publish(&mut self.waveform.write());
+        gap
+    }
+
+    fn reset_tap(&mut self) {
+        self.before.clear();
+        self.tap_last_end = None;
+        if let Some(producer) = &mut self.producer {
+            producer.discontinuity();
+        }
+    }
+
+    fn stage_before(
+        &mut self,
+        start: f64,
+        pcm: &[f32],
+        rate: u32,
+        channels: usize,
+        limit: usize,
+    ) -> Result<()> {
+        let gap = self.push(start, pcm, rate, channels);
+        if pcm.is_empty() {
+            return Ok(());
+        }
+        if self.still_mode
+            || !self
+                .producer
+                .as_ref()
+                .is_some_and(AnalysisProducer::accepts_audio)
+        {
+            self.before = VecDeque::new();
+            return Ok(());
+        }
+        if self.before.len() + pcm.len() / channels > limit {
+            bail!("Before analysis staging exceeds graph latency plus packet bound");
+        }
+        if self.before.is_empty() {
+            self.before_start = start;
+            self.before_offset_frames = 0;
+        }
+        self.before.extend(
+            pcm.chunks_exact(channels)
+                .enumerate()
+                .map(|(index, frame)| {
+                    let mut samples = [0.0; 2];
+                    for (sample, weight) in frame.iter().zip(&self.weights) {
+                        samples[0] += sample * weight[0];
+                        samples[1] += sample * weight[1];
+                    }
+                    (samples, gap && index == 0)
+                }),
+        );
+        Ok(())
+    }
+
+    fn submit_tap(&mut self, tap: PendingTap, start: f64, pcm: &[f32], rate: u32, channels: usize) {
+        let Some(producer) = &mut self.producer else {
+            return;
+        };
+        if !producer.accepts_audio() || self.still_mode {
+            self.before = VecDeque::new();
+            self.tap_last_end = None;
+            producer.discontinuity();
+            return;
+        }
+        match tap {
+            PendingTap::Direct(signal) if signal == self.signal => {
+                if self.tap_last_end.is_some_and(|end| {
+                    (start - end).abs() > self.timestamp_tolerance.max(0.5 / rate as f64)
+                }) {
+                    producer.discontinuity();
+                }
+                producer.push(pcm, &self.weights);
+                self.tap_last_end = Some(start + (pcm.len() / channels) as f64 / rate as f64);
+            }
+            PendingTap::Before if self.signal == VisualizationSignal::Before => {
+                let frames = pcm.len() / channels;
+                let queued_start =
+                    self.before_start + self.before_offset_frames as f64 / rate as f64;
+                let skip = (((start - queued_start) * rate as f64).round().max(0.0) as usize)
+                    .min(self.before.len());
+                drop(self.before.drain(..skip));
+                self.before_offset_frames += skip as u64;
+                let queued_start =
+                    self.before_start + self.before_offset_frames as f64 / rate as f64;
+                let lead =
+                    (((queued_start - start) * rate as f64).round().max(0.0) as usize).min(frames);
+                let count = (frames - lead).min(self.before.len());
+                if lead != 0 || skip != 0 {
+                    producer.discontinuity();
+                }
+                producer.push_samples(self.before.drain(..count));
+                self.before_offset_frames += count as u64;
+                if count != 0 {
+                    self.tap_last_end = Some(start + (lead + count) as f64 / rate as f64);
+                }
+                if count + lead != frames {
+                    producer.discontinuity();
+                }
+            }
+            _ => producer.discontinuity(),
+        }
     }
 
     fn finish(&mut self) {
@@ -231,6 +344,7 @@ impl Playback {
             source_info,
             pending: Vec::with_capacity(PENDING_BUFFER_CAPACITY * channels),
             pending_start: start,
+            pending_tap: PendingTap::None,
             before_skip_frames,
             before_output_frames: 0,
             offset_frames: 0,
@@ -250,6 +364,10 @@ impl Playback {
                 signal: analyzer.settings().signal,
                 last_end: None,
                 timestamp_tolerance,
+                tap_last_end: None,
+                before: VecDeque::new(),
+                before_start: start,
+                before_offset_frames: 0,
             },
             scan_source,
         })
@@ -307,6 +425,8 @@ impl Playback {
         let output = create(&self.source, self.paused)?;
         self.output = output;
         self.pending.clear();
+        self.pending_tap = PendingTap::None;
+        self.visualization.reset_tap();
         self.offset_frames = 0;
         self.base_position = position;
         self.prior_heard = heard;
@@ -364,6 +484,8 @@ impl Playback {
         if self.visualization.signal != signal {
             self.visualization.signal = signal;
             self.scan_source.signal = signal;
+            self.pending_tap = PendingTap::None;
+            self.visualization.reset_tap();
             self.visualization.begin_traversal();
         }
     }
@@ -389,6 +511,8 @@ impl Playback {
             // Discarding the prefix invalidates coverage even when no PCM is
             // decoded during a quick on/off transition.
             self.visualization.coverage.skip();
+            self.visualization.reset_tap();
+            self.visualization.before = VecDeque::new();
         }
         self.visualization.waveform.write().set_still_mode(enabled);
         self.visualization.still_mode = enabled;
@@ -426,17 +550,11 @@ impl Playback {
         let sample_rate = self.source.info().sample_rate;
         // Concurrent callback consumption belongs to the next refill, not this
         // prefix. Both submitted frames and decoded packets bound this round.
-        let mut remaining_frames = self.output.vacant_frames();
+        let mut remaining_frames = self.output.vacant_frames().min(MAX_REFILL_FRAMES);
         let mut remaining_packets = DECODE_WORK_BUDGET;
         while remaining_frames > 0 {
             if self.offset_frames < self.pending.len() / channels {
-                let end =
-                    (self.offset_frames + remaining_frames).min(self.pending.len() / channels);
-                let count = self
-                    .output
-                    .push(&self.pending[self.offset_frames * channels..end * channels]);
-                remaining_frames -= count;
-                self.offset_frames += count;
+                remaining_frames -= self.submit_pending(remaining_frames, sample_rate, channels);
                 if self.offset_frames < self.pending.len() / channels {
                     break;
                 }
@@ -478,6 +596,7 @@ impl Playback {
                             "Decoded packet exceeds realtime graph's 65,536-frame work bound; use Offline execution"
                         );
                     }
+                    let borrowed = self.graph.is_none() && self.equalizer.is_bypassed();
                     if let Some(graph) = &self.graph {
                         let skip = self.before_skip_frames.min(frames.len() / channels);
                         self.before_skip_frames -= skip;
@@ -492,15 +611,34 @@ impl Playback {
                         let start = self.base_position
                             + self.before_output_frames as f64 / sample_rate as f64;
                         if self.visualization.signal == VisualizationSignal::Before {
-                            self.visualization
-                                .push(start, samples, sample_rate, channels);
+                            let limit = frames.len() / channels
+                                + graph
+                                    .latency_frames()
+                                    .saturating_sub(graph.source_lead_frames());
+                            self.visualization.stage_before(
+                                start,
+                                samples,
+                                sample_rate,
+                                channels,
+                                limit,
+                            )?;
                         }
                         self.before_output_frames += (samples.len() / channels) as u64;
                     } else if self.visualization.signal == VisualizationSignal::Before {
-                        self.visualization
-                            .push(start_seconds, frames, sample_rate, channels);
+                        if borrowed {
+                            self.visualization
+                                .push(start_seconds, frames, sample_rate, channels);
+                        } else {
+                            self.visualization.stage_before(
+                                start_seconds,
+                                frames,
+                                sample_rate,
+                                channels,
+                                frames.len() / channels,
+                            )?;
+                        }
                     }
-                    if self.graph.is_none() && self.equalizer.is_bypassed() {
+                    if borrowed {
                         if self.visualization.signal == VisualizationSignal::After {
                             self.visualization
                                 .push(start_seconds, frames, sample_rate, channels);
@@ -508,6 +646,15 @@ impl Playback {
                         // Settled disabled EQ keeps the original borrowed fast path.
                         let prefix = frames.len().min(remaining_frames * channels);
                         let count = self.output.push(&frames[..prefix]);
+                        self.pending_tap = PendingTap::Direct(self.visualization.signal);
+                        self.visualization.submit_tap(
+                            self.pending_tap,
+                            start_seconds,
+                            &frames[..count * channels],
+                            sample_rate,
+                            channels,
+                        );
+                        self.pending_start = start_seconds + count as f64 / sample_rate as f64;
                         remaining_frames -= count;
                         self.pending.extend_from_slice(&frames[count * channels..]);
                     } else {
@@ -523,10 +670,8 @@ impl Playback {
                         self.pending.extend_from_slice(frames);
                         self.pending_start = start_seconds;
                         self.process_graph_pending(channels)?;
-                        let prefix = self.pending.len().min(remaining_frames * channels);
-                        let count = self.output.push(&self.pending[..prefix]);
-                        remaining_frames -= count;
-                        self.offset_frames = count;
+                        remaining_frames -=
+                            self.submit_pending(remaining_frames, sample_rate, channels);
                     }
                     after_packet();
                 }
@@ -558,6 +703,23 @@ impl Playback {
         )
     }
 
+    fn submit_pending(&mut self, max_frames: usize, rate: u32, channels: usize) -> usize {
+        let start = self.offset_frames;
+        let end = (start + max_frames).min(self.pending.len() / channels);
+        let count = self
+            .output
+            .push(&self.pending[start * channels..end * channels]);
+        self.visualization.submit_tap(
+            self.pending_tap,
+            self.pending_start + start as f64 / rate as f64,
+            &self.pending[start * channels..(start + count) * channels],
+            rate,
+            channels,
+        );
+        self.offset_frames += count;
+        count
+    }
+
     fn process_graph_pending(&mut self, channels: usize) -> Result<()> {
         if let Some(graph) = &mut self.graph {
             self.graph_input_frames += (self.pending.len() / channels) as u64;
@@ -577,6 +739,12 @@ impl Playback {
                 + self.graph_output_frames as f64 / self.source.info().sample_rate as f64
         } else {
             self.pending_start
+        };
+        self.pending_start = start;
+        self.pending_tap = if self.visualization.signal == VisualizationSignal::Before {
+            PendingTap::Before
+        } else {
+            PendingTap::Direct(VisualizationSignal::After)
         };
         if self.graph.is_some() {
             let skip = self.graph_skip_frames.min(self.pending.len() / channels);
@@ -656,6 +824,33 @@ mod tests {
         file
     }
 
+    fn large_packet_flac(rate: u32) -> tempfile::NamedTempFile {
+        use symphonia::core::checksum::{Crc8Ccitt, Crc16Ansi};
+        use symphonia::core::io::Monitor;
+
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        let mut info = [0; 34];
+        info[..2].copy_from_slice(&65_535_u16.to_be_bytes());
+        info[2..4].copy_from_slice(&65_535_u16.to_be_bytes());
+        info[10..18]
+            .copy_from_slice(&((u64::from(rate) << 44) | (15 << 36) | 65_535).to_be_bytes());
+        file.write_all(b"fLaC\x80\0\0\x22").unwrap();
+        file.write_all(&info).unwrap();
+        // Fixed block, explicit 16-bit length, STREAMINFO rate, mono 16-bit PCM.
+        let mut frame = vec![0xff, 0xf8, 0x70, 0x08, 0];
+        frame.extend_from_slice(&65_534_u16.to_be_bytes());
+        let mut crc8 = Crc8Ccitt::new(0);
+        crc8.process_buf_bytes(&frame);
+        frame.push(crc8.crc());
+        frame.push(0); // Constant subframe.
+        frame.extend_from_slice(&8192_i16.to_be_bytes());
+        let mut crc16 = Crc16Ansi::new(0);
+        crc16.process_buf_bytes(&frame);
+        frame.extend_from_slice(&crc16.crc().to_be_bytes());
+        file.write_all(&frame).unwrap();
+        file
+    }
+
     fn assert_mono_waveform_bin(frame: &WaveformFrame, bin: usize, samples: &[f32]) {
         let span = frame.rms_spans[bin].as_ref().unwrap();
         let samples = &samples[span.start as usize..span.end as usize];
@@ -695,12 +890,13 @@ mod tests {
         waveform
             .write()
             .select_source(path, range, DecoderHint::Auto, &source);
-        let (output, render) = crate::output::test_backend(8_000, false, source.layout());
+        let rate = source.info().sample_rate;
+        let (output, render) = crate::output::test_backend(rate, false, source.layout());
         let waveform_weights = crate::channels::analysis_weights(source.layout());
         let timestamp_tolerance = source.waveform_timestamp_tolerance();
         let waveform_coverage = WaveformCoverage::new(0.0, timestamp_tolerance);
         let equalizer =
-            Equalizer::new(&EqualizerConfig::default(), 8_000, source.layout().len()).unwrap();
+            Equalizer::new(&EqualizerConfig::default(), rate, source.layout().len()).unwrap();
         let playback = Playback {
             source,
             output,
@@ -714,6 +910,7 @@ mod tests {
             source_info: None,
             pending: Vec::new(),
             pending_start: 0.0,
+            pending_tap: PendingTap::None,
             before_skip_frames: 0,
             before_output_frames: 0,
             offset_frames: 0,
@@ -733,6 +930,10 @@ mod tests {
                 signal: VisualizationSignal::After,
                 last_end: None,
                 timestamp_tolerance,
+                tap_last_end: None,
+                before: VecDeque::new(),
+                before_start: 0.0,
+                before_offset_frames: 0,
             },
             scan_source: crate::WaveformScanSnapshot::original(
                 path.to_owned(),
@@ -743,6 +944,201 @@ mod tests {
             ),
         };
         (playback, render)
+    }
+
+    #[test]
+    fn large_decoder_packet_publishes_before_its_pending_audio_finishes() {
+        use crate::analysis::{AnalysisFrame, AnalysisSettings};
+        use rivu_format::config::AnalysisWindow;
+        use std::time::{Duration, Instant};
+
+        for rate in [48_000, 192_000] {
+            let file = large_packet_flac(rate);
+            for fps in [5, 20] {
+                for signal in [VisualizationSignal::Before, VisualizationSignal::After] {
+                    for processed in [false, true] {
+                        let (mut playback, _) =
+                            test_playback_with_waveform(file.path(), None, Arc::default());
+                        let shared = Arc::new(RwLock::new(AnalysisFrame::default()));
+                        let worker = AnalysisWorker::new(shared.clone()).unwrap();
+                        worker.configure(AnalysisSettings {
+                            fps,
+                            fft_size: 512,
+                            window: AnalysisWindow::None,
+                            signal,
+                        });
+                        worker.reset(rate);
+                        worker.set_playback_active(true);
+                        worker.control.set_display_enabled(true);
+                        playback.visualization.producer = Some(worker.audio_producer());
+                        playback.set_signal(signal);
+                        if processed {
+                            playback.equalizer = Equalizer::new(
+                                &EqualizerConfig {
+                                    enabled: true,
+                                    preamp_db: 6.0,
+                                    ..Default::default()
+                                },
+                                rate,
+                                1,
+                            )
+                            .unwrap();
+                        }
+                        let capacity = rate as usize / 4;
+                        let admitted = capacity.min(MAX_REFILL_FRAMES);
+                        let (output, mut render) = crate::output::test_backend_with_capacity(
+                            rate,
+                            false,
+                            playback.source.layout(),
+                            capacity,
+                        );
+                        playback.output = output;
+                        let deadline = Instant::now() + Duration::from_secs(3);
+                        while shared.read().display_token != worker.control.display_token() {
+                            assert!(
+                                Instant::now() < deadline,
+                                "analysis demand did not activate"
+                            );
+                            std::thread::sleep(Duration::from_millis(1));
+                        }
+                        playback.fill().unwrap();
+                        assert_eq!(playback.output.vacant_frames(), capacity - admitted);
+                        assert!(!playback.eof);
+                        assert!(!playback.finished());
+                        assert!(playback.pending.len() - playback.offset_frames > 32_768);
+                        // Rolling waveform ownership remains decoder-driven.
+                        assert_eq!(
+                            playback
+                                .visualization
+                                .waveform
+                                .read()
+                                .rms_counts
+                                .iter()
+                                .sum::<u64>(),
+                            65_535
+                        );
+                        worker.control.request_frame();
+                        let deadline = Instant::now() + Duration::from_secs(3);
+                        while shared.read().settings.is_none() {
+                            assert!(
+                                Instant::now() < deadline,
+                                "large packet failed to publish during playback"
+                            );
+                            std::thread::sleep(Duration::from_millis(1));
+                        }
+                        let expected = if processed && signal == VisualizationSignal::After {
+                            0.25 * 10.0_f32.powf(6.0 / 20.0)
+                        } else {
+                            0.25
+                        };
+                        let weights = &playback.visualization.weights;
+                        {
+                            let frame = shared.read();
+                            assert!((frame.rms_left - expected * weights[0][0]).abs() < 1e-5);
+                            assert!((frame.rms_right - expected * weights[0][1]).abs() < 1e-5);
+                            assert!(
+                                (frame.sample_time.as_secs_f64() - admitted as f64 / rate as f64)
+                                    .abs()
+                                    < 1e-8
+                            );
+                        }
+                        let mut audible = vec![0.0; admitted];
+                        render(&mut audible, 0);
+                        assert!(
+                            audible
+                                .iter()
+                                .all(|sample| sample.is_finite() && *sample > 0.0)
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn processed_before_and_after_taps_follow_admitted_audio_through_graph_eof() {
+        use ringbuf::traits::Consumer;
+        use rivu_format::config::processing_graph::GraphPort;
+
+        let file = pcm_level(149, 8192);
+        for signal in [VisualizationSignal::Before, VisualizationSignal::After] {
+            let (mut playback, _) = test_playback_with_waveform(file.path(), None, Arc::default());
+            let mut graph =
+                GraphRunner::compile(&unity_fir_graph(), GraphPort { node: 2, port: 0 }, 8_000, 1)
+                    .unwrap();
+            graph.set_source_context(-32, 117).unwrap();
+            playback.graph_skip_frames = graph.latency_frames();
+            playback.before_skip_frames = graph.source_lead_frames();
+            playback.graph_output_remaining = Some(117);
+            playback.graph = Some(graph);
+            playback.equalizer = Equalizer::new(
+                &EqualizerConfig {
+                    enabled: true,
+                    preamp_db: 6.0,
+                    ..Default::default()
+                },
+                8_000,
+                1,
+            )
+            .unwrap();
+            let worker = AnalysisWorker::new(Arc::default()).unwrap();
+            worker.set_playback_active(true);
+            worker.control.set_display_enabled(true);
+            let (producer, mut captured) = AnalysisProducer::capture_for_test(&worker, 32);
+            playback.visualization.producer = Some(producer);
+            playback.set_signal(signal);
+            let (output, mut render) = crate::output::test_backend_with_capacity(
+                8_000,
+                false,
+                playback.source.layout(),
+                17,
+            );
+            playback.output = output;
+            let weights = playback.visualization.weights[0];
+            let mut submitted = 0;
+            for step in 0..64 {
+                playback.fill().unwrap();
+                let mut taps = Vec::new();
+                while let Some(frame) = captured.try_pop() {
+                    taps.push(frame.samples);
+                }
+                let count = 17.min(117 - submitted);
+                assert_eq!(
+                    taps.len(),
+                    count,
+                    "tap must follow output admission, not graph input"
+                );
+                let mut audible = vec![0.0; count];
+                render(&mut audible, step * 3);
+                for (tap, sample) in taps.into_iter().zip(audible) {
+                    let selected = if signal == VisualizationSignal::Before {
+                        0.25
+                    } else {
+                        sample
+                    };
+                    assert!((tap[0] - selected * weights[0]).abs() < 1e-6);
+                    assert!((tap[1] - selected * weights[1]).abs() < 1e-6);
+                }
+                submitted += count;
+                if submitted == 117 {
+                    break;
+                }
+            }
+            assert_eq!(submitted, 117);
+            playback.fill().unwrap();
+            assert!(playback.eof);
+            assert!(captured.try_pop().is_none());
+            assert_eq!(
+                playback
+                    .visualization
+                    .waveform
+                    .read()
+                    .rms_counts
+                    .iter()
+                    .sum::<u64>(),
+                117
+            );
+        }
     }
 
     #[test]
@@ -1135,7 +1531,7 @@ mod tests {
     }
 
     #[test]
-    fn packet_budget_yields_with_room_then_reaches_ordered_eof() {
+    fn finite_refills_yield_with_room_then_reach_ordered_eof() {
         let file = pcm_samples(96_000);
         let (mut playback, _) = test_playback(
             file.path(),
@@ -1153,14 +1549,29 @@ mod tests {
         playback.output = output;
         let mut packets = 0;
         assert!(playback.fill_with(|| packets += 1).unwrap());
-        assert_eq!(packets, DECODE_WORK_BUDGET);
+        assert!(packets <= DECODE_WORK_BUDGET);
+        assert!(128_000 - playback.output.vacant_frames() <= MAX_REFILL_FRAMES);
         assert!(playback.output.vacant_frames() > 0);
         assert!(!playback.eof);
         assert!(
             !playback.visualization.waveform.read().complete,
             "yield is not decoder EOF"
         );
-        assert!(!playback.fill().unwrap());
+        loop {
+            let vacant = playback.output.vacant_frames();
+            let mut packets = 0;
+            let ready = playback.fill_with(|| packets += 1).unwrap();
+            let admitted = vacant - playback.output.vacant_frames();
+            assert!(admitted <= MAX_REFILL_FRAMES);
+            assert!(packets <= DECODE_WORK_BUDGET);
+            if !ready {
+                break;
+            }
+            assert!(
+                admitted > 0,
+                "ready refill must make progress on decoded PCM"
+            );
+        }
         assert!(playback.eof);
         let mut data = vec![0.0; 96_000];
         render(&mut data, 0);
@@ -1311,6 +1722,110 @@ mod tests {
         for bin in 0..rolling.peaks.len() {
             if rolling.rms_counts[bin] > 0 {
                 assert_mono_waveform_bin(&rolling, bin, &expected);
+            }
+        }
+    }
+
+    #[test]
+    fn before_analysis_stays_continuous_across_monitor_eq_bypass_roundtrip() {
+        use crate::analysis::{AnalysisFrame, AnalysisSettings};
+        use ringbuf::traits::{Consumer, Producer};
+        use rivu_format::config::AnalysisWindow;
+        use std::time::{Duration, Instant};
+
+        let file = pcm_samples(24_000);
+        let (mut playback, _) = test_playback_with_waveform(file.path(), None, Arc::default());
+        let shared = Arc::new(RwLock::new(AnalysisFrame::default()));
+        let worker = AnalysisWorker::new(shared.clone()).unwrap();
+        worker.configure(AnalysisSettings {
+            fps: 60,
+            fft_size: 512,
+            window: AnalysisWindow::None,
+            signal: VisualizationSignal::Before,
+        });
+        worker.reset(8_000);
+        worker.set_playback_active(true);
+        worker.control.set_display_enabled(true);
+        let (producer, mut captured) = AnalysisProducer::capture_for_test(&worker, 512);
+        playback.visualization.producer = Some(producer);
+        playback.set_signal(VisualizationSignal::Before);
+        let (output, mut render) =
+            crate::output::test_backend_with_capacity(8_000, false, playback.source.layout(), 512);
+        playback.output = output;
+        let weights = playback.visualization.weights[0];
+        let mut taps = Vec::new();
+        let mut audible = Vec::new();
+        for first in (0..24_000).step_by(512) {
+            if first == 4096 {
+                playback
+                    .set_equalizer(&EqualizerConfig {
+                        enabled: true,
+                        preamp_db: 6.0,
+                        ..Default::default()
+                    })
+                    .unwrap();
+            } else if first == 12_288 {
+                playback.set_equalizer(&EqualizerConfig::default()).unwrap();
+            }
+            playback.fill().unwrap();
+            let count = 512.min(24_000 - first);
+            let mut samples = vec![0.0; count];
+            render(&mut samples, first as u64 / 8);
+            audible.extend(samples);
+            for index in first..first + count {
+                let frame = captured
+                    .try_pop()
+                    .expect("every admitted Before sample is captured");
+                let original = (index % 16_000) as f32 / 32768.0;
+                assert_eq!(
+                    frame.samples,
+                    [original * weights[0], original * weights[1]]
+                );
+                taps.push(frame);
+            }
+            assert!(captured.try_pop().is_none());
+        }
+        assert!(audible[8192] > (8192.0 / 32768.0) * 1.9);
+        assert_eq!(audible[20_000], 4000.0 / 32768.0);
+
+        // Public generations must preserve continuity, not just tap values.
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while shared.read().display_token != worker.control.display_token() {
+            assert!(
+                Instant::now() < deadline,
+                "analysis demand did not activate"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let mut analysis_input = worker.producer();
+        let mut generation = None;
+        let mut accepted = 0;
+        for chunk in taps.chunks(2048) {
+            assert_eq!(analysis_input.push_slice(chunk), chunk.len());
+            accepted += chunk.len();
+            let sequence = shared.read().sequence;
+            worker.control.request_frame();
+            let deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                let frame = shared.read();
+                if frame.sequence > sequence && frame.settings.is_some() {
+                    let expected_generation = *generation.get_or_insert(frame.generation);
+                    assert_eq!(frame.generation, expected_generation);
+                    let expected_rms = (taps[accepted - 512..accepted]
+                        .iter()
+                        .map(|tap| tap.samples[0] * tap.samples[0])
+                        .sum::<f32>()
+                        / 512.0)
+                        .sqrt();
+                    assert!((frame.rms_left - expected_rms).abs() < 1e-6);
+                    break;
+                }
+                drop(frame);
+                assert!(
+                    Instant::now() < deadline,
+                    "analysis did not publish captured Before audio"
+                );
+                std::thread::sleep(Duration::from_millis(1));
             }
         }
     }

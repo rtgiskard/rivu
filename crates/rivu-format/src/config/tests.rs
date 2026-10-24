@@ -183,6 +183,20 @@ fn processing_graph_roundtrip_preserves_node_local_settings_and_layout() {
         config.neural.speech_interpreter,
         PathBuf::from("/node-local/python")
     );
+    for index in 2..config.processing_graph.nodes.len() {
+        let mut document: toml::Value = toml::from_str(&saved).unwrap();
+        let variant = document["processing_graph"]["nodes"][index]["kind"]
+            .as_table_mut()
+            .unwrap()
+            .iter_mut()
+            .next()
+            .unwrap()
+            .1
+            .as_table_mut()
+            .unwrap();
+        variant.insert("unknown_setting".into(), toml::Value::Boolean(true));
+        assert!(from_toml(&toml::to_string(&document).unwrap()).is_err());
+    }
 }
 
 #[test]

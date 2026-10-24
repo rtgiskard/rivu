@@ -277,11 +277,12 @@ impl AnalysisControl {
     }
 
     pub fn request_frame(&self) {
-        if self.accepts_audio()
-            && !self.frame_requested.swap(true, Ordering::AcqRel)
-            && let Some(worker) = self.worker_thread.get()
-        {
-            worker.unpark();
+        if self.accepts_audio() {
+            self.frame_requested.store(true, Ordering::Release);
+            if let Some(worker) = self.worker_thread.get() {
+                // A coalesced permit may be parked waiting for fresh input.
+                worker.unpark();
+            }
         }
     }
 
@@ -341,38 +342,56 @@ impl AnalysisProducer {
         self.gap = true;
     }
 
+    pub(crate) fn accepts_audio(&self) -> bool {
+        self.control.accepts_audio()
+    }
+
     pub(crate) fn push(&mut self, pcm: &[f32], weights: &[[f32; 2]]) {
+        if weights.is_empty() {
+            self.gap = true;
+            return;
+        }
+        self.push_samples(pcm.chunks_exact(weights.len()).map(|frame| {
+            let mut samples = [0.0; 2];
+            for (sample, weight) in frame.iter().zip(weights) {
+                samples[0] += sample * weight[0];
+                samples[1] += sample * weight[1];
+            }
+            (samples, false)
+        }));
+    }
+
+    pub(crate) fn push_samples(
+        &mut self,
+        samples: impl ExactSizeIterator<Item = ([f32; 2], bool)>,
+    ) {
+        if samples.len() == 0 {
+            return;
+        }
         let token = self.control.display_token();
         let epoch = self.control.epoch.load(Ordering::Acquire);
-        if weights.is_empty() || !epoch.is_multiple_of(2) || !self.control.accepts_audio_for(token)
-        {
+        if !epoch.is_multiple_of(2) || !self.control.accepts_audio_for(token) {
             self.gap = true;
             return;
         }
         let gap = self.gap;
-        let frames = pcm.len() / weights.len();
-        let accepted = self
-            .ring
-            .push_iter(
-                pcm.chunks_exact(weights.len())
-                    .enumerate()
-                    .map(|(index, frame)| {
-                        let mut samples = [0.0; 2];
-                        for (sample, weight) in frame.iter().zip(weights) {
-                            samples[0] += sample * weight[0];
-                            samples[1] += sample * weight[1];
-                        }
-                        TapFrame {
-                            samples,
-                            epoch,
-                            demand_token: token,
-                            gap: gap && index == 0,
-                        }
-                    }),
-            );
+        let frames = samples.len();
+        let accepted = self.ring.push_iter(samples.enumerate().map(
+            |(index, (samples, discontinuity))| TapFrame {
+                samples,
+                epoch,
+                demand_token: token,
+                gap: discontinuity || (gap && index == 0),
+            },
+        ));
         self.gap = accepted < frames;
         if self.gap {
             self.control.tap_overflow.store(true, Ordering::Release);
+        }
+        if (accepted != 0 || self.gap)
+            && let Some(worker) = self.control.worker_thread.get()
+        {
+            worker.unpark();
         }
     }
 }
@@ -689,6 +708,47 @@ impl SpectrumAnalyzer {
         self.push(frame.samples);
     }
 
+    /// Consume one finite prefix; retain a newer control identity for its cycle.
+    fn ingest_available(
+        &mut self,
+        consumer: &mut HeapCons<TapFrame>,
+        control: &AnalysisControl,
+        epoch: u64,
+        demand_token: u64,
+        active: bool,
+    ) -> (usize, bool) {
+        let mut accepted = 0;
+        let mut remaining = consumer.occupied_len();
+        while remaining != 0 {
+            let (first, second) = consumer.as_slices();
+            let mut consumed = 0;
+            let mut controls_changed = false;
+            for frame in first.iter().chain(second).take(remaining.min(1024)) {
+                if frame.epoch == epoch && frame.demand_token == demand_token {
+                    if active {
+                        accepted += 1;
+                        self.push_tap(frame);
+                    }
+                } else if frame.epoch == control.epoch.load(Ordering::Acquire)
+                    && frame.demand_token == control.display_token()
+                    && control.accepts_audio_for(frame.demand_token)
+                {
+                    // A control transition can finish while a cycle reads its
+                    // snapshot. Do not discard that next cycle's fresh window.
+                    controls_changed = true;
+                    break;
+                }
+                consumed += 1;
+            }
+            consumer.skip(consumed);
+            remaining -= consumed;
+            if controls_changed || consumed == 0 {
+                return (accepted, controls_changed);
+            }
+        }
+        (accepted, false)
+    }
+
     fn transform(&mut self) -> [f32; 2] {
         let n = self.rolling.len();
         let mut rms = [0.0_f32; 2];
@@ -846,12 +906,12 @@ fn analyze(
         *control.settings.read(),
         control.sample_rate.load(Ordering::Acquire),
     );
-    let mut incoming = [TapFrame::default(); 1024];
     let mut epoch = 0;
     let mut still_token = 0;
     let mut demand_token = u64::MAX;
     let mut sample_time = Duration::ZERO;
     let mut last_frame_at: Option<Instant> = None;
+    let mut fresh = false;
     loop {
         if control.shutdown.load(Ordering::Acquire) {
             break;
@@ -861,9 +921,11 @@ fn analyze(
             discard_analysis(&mut analyzer, &shared);
             still_token = current_still_token;
             demand_token = u64::MAX;
+            fresh = false;
         }
         if current_still_token & 1 != 0 {
             consumer.clear();
+            control.tap_overflow.store(false, Ordering::Release);
             thread::park();
             continue;
         }
@@ -880,31 +942,12 @@ fn analyze(
             // when an off/on transition was coalesced before this worker ran.
             discard_analysis(&mut analyzer, &shared);
             analyzer.set_visualizer_demand(demand);
+            fresh = false;
             let mut frame = shared.write();
             frame.visualizer.demand = demand;
             frame.display_token = current_demand_token;
         }
-        if !control.accepts_audio() {
-            consumer.clear();
-            analyzer.reset();
-            thread::park();
-            continue;
-        }
-        if !control.frame_requested.load(Ordering::Acquire) {
-            thread::park();
-            continue;
-        }
         let settings = *control.settings.read();
-        let interval = Duration::from_secs_f64(1.0 / settings.fps as f64);
-        if let Some(started) = last_frame_at {
-            let remaining = (started + interval).saturating_duration_since(Instant::now());
-            if !remaining.is_zero() {
-                // Only an outstanding consumer request owns a timed wait.
-                // Control transitions and shutdown can interrupt it immediately.
-                thread::park_timeout(remaining);
-                continue;
-            }
-        }
         let current_epoch = control.epoch.load(Ordering::Acquire);
         let sample_rate = control.sample_rate.load(Ordering::Acquire);
         if !current_epoch.is_multiple_of(2)
@@ -913,10 +956,6 @@ fn analyze(
             thread::park();
             continue;
         }
-        if !control.frame_requested.swap(false, Ordering::AcqRel) {
-            continue;
-        }
-        last_frame_at = Some(Instant::now());
         let previous_generation = analyzer.generation;
         if sample_rate != analyzer.sample_rate
             || settings.fft_size != analyzer.settings.fft_size
@@ -926,91 +965,89 @@ fn analyze(
             analyzer = SpectrumAnalyzer::new(settings, sample_rate);
             analyzer.generation = generation;
             analyzer.set_visualizer_demand(demand);
+            fresh = false;
         }
         analyzer.settings = settings;
         if current_epoch != epoch {
             epoch = current_epoch;
             analyzer.reset();
+            fresh = false;
         }
-        let mut recovery_deadline = None;
-        if control.tap_overflow.swap(false, Ordering::AcqRel) {
-            // The full ring contains the oldest prefix, not the latest window.
-            // Never replay it after a stalled consumer. Clearing the flag before
-            // the ring preserves any overflow reported concurrently with clear.
+        let active = control.accepts_audio_for(current_demand_token);
+        if !active {
+            control.tap_overflow.store(false, Ordering::Release);
+        } else if control.tap_overflow.swap(false, Ordering::AcqRel) {
+            // A stalled consumer drops the stale prefix, never blocking playback.
+            // Fresh PCM wakes recovery independently of the next display request.
             consumer.clear();
             analyzer.reset();
-            // This request must acquire a fresh window now: at low FPS/high
-            // sample rates the next ordinary request can overflow again.
-            // Bound recovery even if playback pauses without disabling analysis.
-            recovery_deadline = Some(
-                Instant::now()
-                    + Duration::from_secs_f64(
-                        2.0 * settings.fft_size as f64 / sample_rate.max(1) as f64 + 0.02,
-                    ),
-            );
+            fresh = false;
         }
-        let mut accepted = 0;
-        // Bound a cycle to the queued prefix; continuous production must not
-        // postpone publication or shutdown indefinitely.
-        let mut remaining = consumer.occupied_len();
-        loop {
-            if remaining == 0 {
-                let Some(deadline) = recovery_deadline else {
-                    break;
+        // PCM ingestion follows arrival, not the publication permit or FPS.
+        let (accepted, controls_changed) = analyzer.ingest_available(
+            &mut consumer,
+            &control,
+            current_epoch,
+            current_demand_token,
+            active,
+        );
+        sample_time += Duration::from_secs_f64(accepted as f64 / sample_rate.max(1) as f64);
+        fresh |= accepted != 0;
+        let interval = Duration::from_secs_f64(1.0 / settings.fps as f64);
+        let remaining = last_frame_at.map_or(Duration::ZERO, |started| {
+            (started + interval).saturating_duration_since(Instant::now())
+        });
+        let ready = fresh && analyzer.filled == analyzer.rolling.len();
+        let requested = active
+            && ready
+            && remaining.is_zero()
+            && control.frame_requested.swap(false, Ordering::AcqRel);
+        let rms = requested.then(|| {
+            last_frame_at = Some(Instant::now());
+            fresh = false;
+            analyzer.transform()
+        });
+        if rms.is_some() || analyzer.generation != previous_generation {
+            let mut frame = shared.write();
+            let published = rms.is_some_and(|rms| {
+                control.epoch.load(Ordering::Acquire) == current_epoch
+                    && control.accepts_audio()
+                    && *control.settings.read() == settings
+                    && control.display_token() == current_demand_token
+                    && control.still_mode.load(Ordering::Acquire) == current_still_token
+                    && !control.tap_overflow.load(Ordering::Acquire)
+                    && !control.shutdown.load(Ordering::Acquire)
+                    && analyzer.publish(&mut frame, rms, sample_time)
+            });
+            if published {
+                frame.display_token = current_demand_token;
+            } else if analyzer.generation != previous_generation {
+                // A ready replacement and its generation commit together. Only
+                // a genuine wait for fresh analysis exposes an invalid frame.
+                frame.visualizer = VisualizerFrame {
+                    demand,
+                    ..VisualizerFrame::default()
                 };
-                if analyzer.filled == analyzer.rolling.len()
-                    || Instant::now() >= deadline
-                    || control.shutdown.load(Ordering::Acquire)
-                    || !control.accepts_audio()
-                    || control.epoch.load(Ordering::Acquire) != current_epoch
-                    || control.display_token() != current_demand_token
-                    || control.still_mode.load(Ordering::Acquire) != current_still_token
-                {
-                    break;
-                }
-                thread::park_timeout(Duration::from_secs_f64(
-                    (1024.0 / sample_rate.max(1) as f64).min(0.01),
-                ));
-                remaining = consumer.occupied_len();
+                frame.generation = analyzer.generation;
+                frame.settings = None;
+            }
+        }
+        if controls_changed || (active && consumer.occupied_len() != 0) {
+            continue;
+        }
+        if active && fresh && ready && control.frame_requested.load(Ordering::Acquire) {
+            // Only a ready, requested publication owns a deadline. Keep an
+            // incomplete window's permit parked until fresh PCM or a request
+            // wakes ingestion, without consuming the permit or polling.
+            let remaining = last_frame_at.map_or(Duration::ZERO, |started| {
+                (started + interval).saturating_duration_since(Instant::now())
+            });
+            if remaining.is_zero() {
                 continue;
             }
-            let limit = remaining.min(incoming.len());
-            let count = consumer.pop_slice(&mut incoming[..limit]);
-            if count == 0 {
-                break;
-            }
-            remaining -= count;
-            for frame in &incoming[..count] {
-                if frame.epoch == current_epoch && frame.demand_token == current_demand_token {
-                    accepted += 1;
-                    analyzer.push_tap(frame);
-                }
-            }
-        }
-        if analyzer.generation != previous_generation {
-            let mut frame = shared.write();
-            frame.visualizer = VisualizerFrame {
-                demand,
-                ..VisualizerFrame::default()
-            };
-            frame.generation = analyzer.generation;
-            frame.settings = None;
-        }
-        sample_time += Duration::from_secs_f64(accepted as f64 / sample_rate.max(1) as f64);
-        if accepted != 0 && analyzer.filled == analyzer.rolling.len() {
-            let rms = analyzer.transform();
-            let mut frame = shared.write();
-            if control.epoch.load(Ordering::Acquire) == current_epoch
-                && control.accepts_audio()
-                && *control.settings.read() == settings
-                && control.display_token() == current_demand_token
-                && control.still_mode.load(Ordering::Acquire) == current_still_token
-                && !control.tap_overflow.load(Ordering::Acquire)
-                && !control.shutdown.load(Ordering::Acquire)
-                && analyzer.publish(&mut frame, rms, sample_time)
-            {
-                frame.display_token = current_demand_token;
-            }
+            thread::park_timeout(remaining);
+        } else {
+            thread::park();
         }
     }
 }
@@ -1021,7 +1058,11 @@ mod tests {
 
     #[test]
     fn worker_producer_marks_overflow_and_suspended_gaps_with_native_downmix() {
-        let worker = AnalysisWorker::new(Arc::default()).unwrap();
+        let shared = Arc::new(RwLock::new(AnalysisFrame::default()));
+        // This producer uses a separate capture ring; keep the real consumer
+        // from clearing its overflow flag while producer behavior is inspected.
+        let held = shared.read();
+        let worker = AnalysisWorker::new(shared.clone()).unwrap();
         worker.set_playback_active(true);
         worker.control.set_display_enabled(true);
         let (mut producer, mut captured) = AnalysisProducer::capture_for_test(&worker, 2);
@@ -1047,6 +1088,7 @@ mod tests {
         worker.control.set_display_enabled(true);
         producer.push(&[0.5, 1.0, 2.0], &weights);
         assert!(captured.try_pop().unwrap().gap);
+        drop(held);
     }
 
     const DENSITY_DEMAND: VisualizerDemand = VisualizerDemand {
@@ -1803,9 +1845,16 @@ mod tests {
         let frame = shared.read();
         assert_eq!(frame.visualizer.density.as_ptr(), released);
         assert_eq!(frame.sequence, previous.sequence + 1);
-        assert_eq!(
-            frame.sample_time - previous.sample_time,
-            Duration::from_secs_f64(512.0 / frame.sample_rate as f64) * 2,
+        let retained_samples = 512 * 2;
+        let retained_time = frame.sample_time - previous.sample_time;
+        let expected_time =
+            Duration::from_secs_f64(retained_samples as f64 / frame.sample_rate as f64);
+        // Each nonempty ingestion prefix rounds to nanoseconds independently.
+        // Even one prefix per sample must preserve the complete retained span.
+        assert!(
+            retained_time.abs_diff(expected_time) <= Duration::from_nanos(retained_samples),
+            "retained {retained_samples} samples at {} Hz took {retained_time:?}, expected {expected_time:?}",
+            frame.sample_rate,
         );
         assert_eq!(frame.generation, previous.generation);
         assert_eq!(frame.rms_left, 0.0);
@@ -1884,63 +1933,132 @@ mod tests {
     }
 
     #[test]
-    fn low_fps_high_rate_overflow_recovers_within_the_same_request() {
-        use ringbuf::traits::Producer;
-        let shared = Arc::new(RwLock::new(AnalysisFrame::default()));
-        let worker = AnalysisWorker::new(shared.clone()).unwrap();
-        worker.configure(AnalysisSettings {
-            fps: 5,
-            fft_size: 8192,
-            window: AnalysisWindow::None,
-            signal: VisualizationSignal::After,
-        });
-        worker.reset(192_000);
+    fn ingestion_retains_new_epoch_and_demand_input_for_their_own_cycle() {
+        let worker = AnalysisWorker::new(Arc::default()).unwrap();
         set_test_playback(&worker, true);
-        let mut producer = worker.producer();
         let epoch = worker.control.epoch.load(Ordering::Acquire);
-        push_window(
-            &mut producer,
-            epoch,
-            worker.control.display_token(),
-            [0.25; 2],
-        );
-        worker.control.request_frame();
-        wait_until(|| producer.occupied_len() == 0);
-        for _ in 0..32768 {
-            assert!(
-                producer
-                    .try_push(TapFrame {
-                        samples: [1.0; 2],
-                        epoch,
-                        demand_token: worker.control.display_token(),
-                        gap: false
-                    })
-                    .is_ok()
+        let token = worker.control.display_token();
+        for epoch_change in [false, true] {
+            let ring = Arc::new(HeapRb::new(1024));
+            let mut producer = HeapProd::new(ring.clone());
+            let mut consumer = HeapCons::new(ring);
+            let old_epoch = if epoch_change {
+                epoch.wrapping_sub(2)
+            } else {
+                epoch
+            };
+            let old_token = if epoch_change {
+                token
+            } else {
+                token.wrapping_sub(16)
+            };
+            push_window(&mut producer, old_epoch, old_token, [0.25; 2]);
+            push_window(&mut producer, epoch, token, [0.75; 2]);
+            let mut analyzer = visualizer_analyzer(BAND_ENERGY_DEMAND);
+            assert_eq!(
+                analyzer.ingest_available(
+                    &mut consumer,
+                    &worker.control,
+                    old_epoch,
+                    old_token,
+                    true
+                ),
+                (512, true)
             );
-        }
-        worker.control.tap_overflow.store(true, Ordering::Release);
-        worker.control.request_frame();
-        wait_until(|| producer.occupied_len() == 0);
-        for index in 0..8192 {
-            assert!(
-                producer
-                    .try_push(TapFrame {
-                        samples: [0.0; 2],
-                        epoch,
-                        demand_token: worker.control.display_token(),
-                        gap: index == 0
-                    })
-                    .is_ok()
+            assert_eq!(consumer.occupied_len(), 512);
+            analyzer.reset();
+            assert_eq!(
+                analyzer.ingest_available(&mut consumer, &worker.control, epoch, token, true),
+                (512, false)
             );
+            let rms = analyzer.transform();
+            let mut frame = AnalysisFrame::default();
+            assert!(analyzer.publish(&mut frame, rms, Duration::from_millis(100)));
+            assert_eq!(frame.settings, Some(analyzer.settings));
+            assert!((frame.rms_left - 0.75).abs() < 0.0001);
+            assert!((frame.rms_right - 0.75).abs() < 0.0001);
+            assert_eq!(consumer.occupied_len(), 0);
         }
-        // A new GUI permit at 5 FPS would overflow again before it was serviced.
-        wait_for_frame(&shared, |frame| frame.settings.is_some());
-        let frame = shared.read();
-        assert_eq!([frame.rms_left, frame.rms_right], [0.0; 2]);
     }
 
     #[test]
-    fn worker_requires_consumer_demand_and_coalesces_requests_at_the_fps_cap() {
+    fn publication_permit_survives_an_incomplete_window_until_fresh_pcm_arrives() {
+        let shared = Arc::new(RwLock::new(AnalysisFrame::default()));
+        let worker = AnalysisWorker::new(shared.clone()).unwrap();
+        worker.configure(AnalysisSettings {
+            fps: 60,
+            fft_size: 512,
+            window: AnalysisWindow::None,
+            signal: VisualizationSignal::After,
+        });
+        set_test_playback(&worker, true);
+        let mut producer = worker.audio_producer();
+        producer.push_samples(std::iter::repeat_n(([0.5, -0.25], false), 511));
+        worker.control.request_frame();
+        wait_until(|| producer.ring.occupied_len() == 0);
+        assert_eq!(shared.read().settings, None);
+        assert!(worker.control.frame_requested.load(Ordering::Acquire));
+
+        // No second permit: completing the window must publish the outstanding
+        // request, even if its first ingestion cycle saw only 511 samples.
+        producer.push_samples(std::iter::once(([0.5, -0.25], false)));
+        wait_for_frame(&shared, |frame| frame.settings.is_some());
+        let frame = shared.read();
+        assert_eq!(frame.settings, Some(worker.settings()));
+        assert_eq!(frame.display_token, worker.control.display_token());
+        assert_eq!([frame.rms_left, frame.rms_right], [0.5, 0.25]);
+        assert!(!worker.control.frame_requested.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn low_fps_ingestion_preserves_consumer_continuity_without_publication_permits() {
+        for sample_rate in [48_000, 192_000] {
+            for fps in [5, 20] {
+                let shared = Arc::new(RwLock::new(AnalysisFrame::default()));
+                let worker = AnalysisWorker::new(shared.clone()).unwrap();
+                worker.configure(AnalysisSettings {
+                    fps,
+                    fft_size: 8192,
+                    window: AnalysisWindow::None,
+                    signal: VisualizationSignal::After,
+                });
+                worker.reset(sample_rate);
+                set_test_playback(&worker, true);
+                let mut producer = worker.audio_producer();
+                let weights = [[1.0, 0.0], [0.0, 1.0]];
+                producer.push(&[0.25; 8192 * 2], &weights);
+                worker.control.request_frame();
+                wait_for_frame(&shared, |frame| frame.settings.is_some());
+                let previous = shared.read().clone();
+
+                // More PCM than the whole ring, with no publication permit.
+                // Each arrival must wake ingestion rather than waiting for FPS.
+                for _ in 0..75 {
+                    producer.push(&[0.5; 512 * 2], &weights);
+                    wait_until(|| producer.ring.occupied_len() == 0);
+                    let frame = shared.read();
+                    assert_eq!(frame.sequence, previous.sequence);
+                    assert_eq!(frame.generation, previous.generation);
+                    assert_eq!(frame.settings, previous.settings);
+                }
+                assert!(!worker.control.tap_overflow.load(Ordering::Acquire));
+                worker.control.request_frame();
+                wait_for_frame(&shared, |frame| frame.sequence > previous.sequence);
+                let frame = shared.read();
+                assert_eq!(frame.sequence, previous.sequence + 1);
+                assert_eq!(frame.generation, previous.generation);
+                assert_eq!(frame.display_token, previous.display_token);
+                assert_eq!(frame.settings, previous.settings);
+                assert!((frame.rms_left - 0.5).abs() < 0.0001);
+                assert!((frame.rms_right - 0.5).abs() < 0.0001);
+                let accepted = (frame.sample_time - previous.sample_time).as_secs_f64();
+                assert!((accepted - 38_400.0 / sample_rate as f64).abs() < 0.000001);
+            }
+        }
+    }
+
+    #[test]
+    fn worker_requires_publication_permits_and_coalesces_requests_at_the_fps_cap() {
         let shared = Arc::new(RwLock::new(AnalysisFrame::default()));
         let worker = AnalysisWorker::new(shared.clone()).unwrap();
         worker.configure(AnalysisSettings {
@@ -1950,27 +2068,18 @@ mod tests {
             signal: VisualizationSignal::After,
         });
         set_test_playback(&worker, true);
-        let mut producer = worker.producer();
-        let epoch = worker.control.epoch.load(Ordering::Acquire);
-        push_window(
-            &mut producer,
-            epoch,
-            worker.control.display_token(),
-            [0.25; 2],
-        );
+        let mut producer = worker.audio_producer();
+        let weights = [[1.0, 0.0], [0.0, 1.0]];
+        producer.push(&[0.25; 512 * 2], &weights);
+        wait_until(|| producer.ring.occupied_len() == 0);
         thread::sleep(Duration::from_millis(250));
         assert_eq!(shared.read().settings, None);
-        assert_eq!(producer.occupied_len(), 512);
+        assert_eq!(producer.ring.occupied_len(), 0);
 
         worker.control.request_frame();
         wait_for_frame(&shared, |frame| frame.settings.is_some());
         let first_sequence = shared.read().sequence;
-        push_window(
-            &mut producer,
-            epoch,
-            worker.control.display_token(),
-            [0.5; 2],
-        );
+        producer.push(&[0.5; 512 * 2], &weights);
         for _ in 0..100 {
             worker.control.request_frame();
         }
@@ -1980,15 +2089,11 @@ mod tests {
         assert_eq!(shared.read().sequence, first_sequence + 1);
 
         // Extra requests must not remain as an accumulating job queue.
-        push_window(
-            &mut producer,
-            epoch,
-            worker.control.display_token(),
-            [0.75; 2],
-        );
+        producer.push(&[0.75; 512 * 2], &weights);
+        wait_until(|| producer.ring.occupied_len() == 0);
         thread::sleep(Duration::from_millis(250));
         assert_eq!(shared.read().sequence, first_sequence + 1);
-        assert_eq!(producer.occupied_len(), 512);
+        assert_eq!(producer.ring.occupied_len(), 0);
     }
 
     #[test]
