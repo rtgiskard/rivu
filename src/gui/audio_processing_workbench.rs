@@ -15,6 +15,7 @@ pub(super) struct WorkbenchPanel {
     wide: bool,
     area: Area,
     connections: bool,
+    pub(super) canvas_focus: Option<FocusHandle>,
 }
 
 impl AudioProcessing {

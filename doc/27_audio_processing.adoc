@@ -61,11 +61,16 @@ and parameters. Wide panels place the canvas and independently scrolling inspect
 side by side. Narrow panels expose Graph, Parameters, and Results & export tabs
 without putting execution controls below a long form. Press and drag a node header
 or its non-port card surface to select and move it in one gesture; no preliminary click is needed.
-A click without movement selects without editing the graph. Positions do not
-change execution order. Port labels and dots are separate connection controls:
-click an output port, then an input port explicitly. Disconnecting or deleting
-a node never guesses replacement connections. Undo/Redo applies graph edits,
-not playback or completed results.
+A click without movement selects without editing the graph and transfers keyboard
+focus to the node, so Delete/Backspace and graph shortcuts work immediately after
+leaving another control. Positions do not change execution order. Port labels and
+dots are separate connection controls: they focus and select their node without
+starting a drag. Click an output port, then an input port explicitly; Escape cancels
+the pending connection without changing the selected preview output. Disconnecting
+or deleting a node never guesses replacement connections. Undo/Redo applies graph
+edits, not playback or completed results. Keyboard deletion, duplication and history
+commands leave focus on the canvas: Undo/Redo remain available after a card disappears,
+and the next edit targets the current selection rather than a previously focused node.
 
 Middle-drag or wheel over the canvas pans its viewport. Ctrl+wheel zooms around
 the pointer; zoom buttons and Reset view provide alternatives. Fit graph includes

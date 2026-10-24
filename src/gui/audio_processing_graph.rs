@@ -477,8 +477,10 @@ impl AudioProcessing {
     }
 
     fn graph_select(&mut self, id: u64, cx: &mut Context<Self>) {
-        self.graph_ui.selected = Some(id);
-        self.graph_ui.target_port = 0;
+        if self.graph_ui.selected != Some(id) {
+            self.graph_ui.selected = Some(id);
+            self.graph_ui.target_port = 0;
+        }
         self.sync_graph_fields(cx);
         cx.notify();
     }
@@ -695,11 +697,10 @@ impl AudioProcessing {
     }
 
     fn graph_connect(&mut self, port: GraphPort, output: bool, cx: &mut Context<Self>) {
+        self.graph_select(port.node, cx);
         if output {
             self.graph_ui.connecting = Some(port);
-            self.graph_ui.selected = Some(port.node);
             self.graph_ui.target_port = port.port;
-            self.sync_graph_fields(cx);
             cx.notify();
         } else if let Some(from) = self.graph_ui.connecting.take() {
             self.graph_edit(GraphEdit::Connect { from, to: port }, cx);
@@ -732,6 +733,10 @@ impl AudioProcessing {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A child port's default focus handler claims its press before the card.
+        if node.is_some() && window.default_prevented() {
+            return;
+        }
         if self.graph_busy() && node.is_some() {
             return;
         }
@@ -784,7 +789,6 @@ impl AudioProcessing {
             button: event.button,
             _subscriptions: subscriptions,
         });
-        cx.stop_propagation();
         cx.notify();
     }
 
@@ -958,6 +962,14 @@ impl AudioProcessing {
     }
 
     fn routing_canvas(&mut self, panel: u64, cx: &mut Context<Self>) -> AnyElement {
+        let focus = self
+            .graph_ui
+            .workbenches
+            .entry(panel)
+            .or_default()
+            .canvas_focus
+            .get_or_insert_with(|| cx.focus_handle())
+            .clone();
         let theme = rivu_ui::theme::palette(cx);
         let graph = &self.state.system.config.processing_graph;
         let edges = graph.edges.clone();
@@ -1085,10 +1097,6 @@ impl AudioProcessing {
                         } else {
                             format!("● {label}")
                         })
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|_, _, _, cx| cx.stop_propagation()),
-                        )
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.graph_connect(endpoint, output, cx);
                             cx.stop_propagation();
@@ -1110,8 +1118,22 @@ impl AudioProcessing {
             .border_color(rgb(theme.border))
             .tab_index(0)
             .tab_stop(true)
+            .track_focus(&focus)
             .aria_label(self.tr("processing-routing-graph"))
-            .on_key_down(cx.listener(|this, event, _, cx| this.graph_key(event, cx)))
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                this.graph_key(event, cx);
+                let key = event.keystroke.key.as_str();
+                let editing =
+                    if event.keystroke.modifiers.control || event.keystroke.modifiers.platform {
+                        matches!(key, "d" | "y" | "z")
+                    } else {
+                        matches!(key, "delete" | "backspace")
+                    };
+                if editing {
+                    // Editing may remove the focused card or select a new identity.
+                    focus.focus(window, cx);
+                }
+            }))
             .on_mouse_down(
                 MouseButton::Middle,
                 cx.listener(move |this, event, window, cx| {
@@ -1277,5 +1299,290 @@ impl AudioProcessing {
         cx: &mut Context<Self>,
     ) -> Div {
         self.graph_workspace(panel, window, cx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        config::{Config, ConfigPersistence},
+        core::Runtime,
+        gui::feature::SnapshotSource,
+        i18n::Localizer,
+    };
+    use core::prelude::v1::test;
+
+    const PANEL: u64 = 7;
+
+    struct GraphWindow {
+        processing: Entity<AudioProcessing>,
+        input: Entity<Input>,
+    }
+
+    impl Render for GraphWindow {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            column().size_full().child(self.input.clone()).child(
+                div().w_full().h(px(500.)).child(
+                    self.processing
+                        .update(cx, |this, cx| this.routing_canvas(PANEL, cx)),
+                ),
+            )
+        }
+    }
+
+    fn fixture(
+        cx: &mut TestAppContext,
+    ) -> (
+        tempfile::TempDir,
+        Runtime,
+        Entity<AudioProcessing>,
+        AnyWindowHandle,
+    ) {
+        cx.update(|cx| {
+            rivu_ui::theme::set_palette(crate::theme::palette(crate::theme::Theme::default()), cx);
+            rivu_ui::theme::set_typography(
+                gpui::font("sans-serif"),
+                crate::gui::appearance::fonts::SYMBOLS_FAMILY,
+                12,
+                cx,
+            );
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let mut config = Config {
+            volume: 0.,
+            ffmpeg_enabled: false,
+            mpris_enabled: false,
+            tray_enabled: false,
+            ..Default::default()
+        };
+        config.processing_graph.nodes.push(GraphNode {
+            id: 3,
+            position: [360., 240.],
+            kind: GraphNodeKind::Separate {
+                config: Default::default(),
+            },
+        });
+        config.processing_graph.next_id = 4;
+        config.save(&path).unwrap();
+        let runtime = Runtime::start(directory.path(), &path).unwrap();
+        let i18n = Arc::new(Localizer::new("en-US"));
+        let context = FeatureContext {
+            snapshots: Rc::new(SnapshotSource::new(runtime.handle.clone())),
+            labels: Rc::new(
+                i18n.fixed_texts()
+                    .map(|(id, text)| (id.to_owned(), SharedString::from(text.to_owned())))
+                    .collect(),
+            ),
+            i18n,
+            scroll: Default::default(),
+        };
+        let processing = cx.new(|cx| AudioProcessing::new(context, cx));
+        let input = cx.new(|cx| Input::new("Editor", "12", "", cx));
+        let window = cx.add_window({
+            let processing = processing.clone();
+            let input = input.clone();
+            move |_, _| GraphWindow { processing, input }
+        });
+        let handle = window.into();
+        draw(cx, handle);
+        cx.update_window(handle, |_, window, cx| {
+            input.read(cx).focus_handle(cx).focus(window, cx);
+        })
+        .unwrap();
+        (directory, runtime, processing, handle)
+    }
+
+    fn draw(cx: &mut TestAppContext, handle: AnyWindowHandle) {
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| window.draw(cx).clear(cx))
+            .unwrap();
+    }
+
+    fn node_point(
+        processing: &Entity<AudioProcessing>,
+        id: u64,
+        cx: &TestAppContext,
+    ) -> Point<Pixels> {
+        processing.read_with(cx, |this, _| {
+            let bounds = this.graph_ui.bounds[&PANEL].get().unwrap().0;
+            let node = this
+                .state
+                .system
+                .config
+                .processing_graph
+                .nodes
+                .iter()
+                .find(|n| n.id == id)
+                .unwrap();
+            bounds.origin
+                + point(
+                    px(24. + node.position[0] + 80.),
+                    px(24. + node.position[1] + 16.),
+                )
+        })
+    }
+
+    fn press(cx: &mut TestAppContext, handle: AnyWindowHandle, position: Point<Pixels>) {
+        use gpui::InputEvent as _;
+        cx.update_window(handle, |_, window, cx| {
+            window.dispatch_event(
+                MouseDownEvent {
+                    button: MouseButton::Left,
+                    position,
+                    ..Default::default()
+                }
+                .to_platform_input(),
+                cx,
+            );
+        })
+        .unwrap();
+    }
+
+    fn release(cx: &mut TestAppContext, handle: AnyWindowHandle, position: Point<Pixels>) {
+        use gpui::InputEvent as _;
+        cx.update_window(handle, |_, window, cx| {
+            window.dispatch_event(
+                MouseUpEvent {
+                    button: MouseButton::Left,
+                    position,
+                    ..Default::default()
+                }
+                .to_platform_input(),
+                cx,
+            );
+        })
+        .unwrap();
+        draw(cx, handle);
+    }
+
+    fn key(cx: &mut TestAppContext, handle: AnyWindowHandle, key: &str) {
+        cx.update_window(handle, |_, window, cx| {
+            window.dispatch_keystroke(Keystroke::parse(key).unwrap(), cx);
+        })
+        .unwrap();
+        draw(cx, handle);
+    }
+
+    #[gpui::test]
+    fn clicking_nodes_moves_keyboard_ownership_and_delete_respects_source_protection(
+        cx: &mut TestAppContext,
+    ) {
+        let (_directory, runtime, processing, handle) = fixture(cx);
+        let original = runtime.handle.config_snapshot().processing_graph.clone();
+        let output = node_point(&processing, 2, cx);
+        press(cx, handle, output);
+        release(cx, handle, output);
+        cx.update_window(handle, |root, window, cx| {
+            let root = root.downcast::<GraphWindow>().unwrap();
+            assert!(!root.read(cx).input.read(cx).is_focused(window));
+        })
+        .unwrap();
+        // A different card must replace the previous card's keyboard target.
+        let source = node_point(&processing, 1, cx);
+        press(cx, handle, source);
+        release(cx, handle, source);
+        key(cx, handle, "delete");
+        assert_eq!(runtime.handle.config_snapshot().processing_graph, original);
+        press(cx, handle, output);
+        release(cx, handle, output);
+        key(cx, handle, "delete");
+        let graph = &runtime.handle.config_snapshot().processing_graph;
+        assert_eq!(graph.nodes.iter().map(|n| n.id).collect::<Vec<_>>(), [1, 3]);
+        assert!(graph.edges.is_empty());
+        assert_eq!(graph.revision, 1);
+        key(cx, handle, "ctrl-z");
+        let restored = &runtime.handle.config_snapshot().processing_graph;
+        assert_eq!(restored.nodes, original.nodes);
+        assert_eq!(restored.edges, original.edges);
+        key(cx, handle, "ctrl-y");
+        assert_eq!(
+            runtime
+                .handle
+                .config_snapshot()
+                .processing_graph
+                .nodes
+                .iter()
+                .map(|n| n.id)
+                .collect::<Vec<_>>(),
+            [1, 3]
+        );
+        key(cx, handle, "ctrl-z");
+        press(cx, handle, output);
+        release(cx, handle, output);
+        key(cx, handle, "ctrl-d");
+        processing.read_with(cx, |this, _| assert_eq!(this.graph_ui.selected, Some(4)));
+        assert!(
+            runtime
+                .handle
+                .config_snapshot()
+                .processing_graph
+                .nodes
+                .iter()
+                .any(|n| n.id == 4)
+        );
+        key(cx, handle, "delete");
+        let after_duplicate_delete = &runtime.handle.config_snapshot().processing_graph;
+        assert_eq!(after_duplicate_delete.nodes, original.nodes);
+        assert_eq!(after_duplicate_delete.edges, original.edges);
+    }
+
+    #[gpui::test]
+    fn port_press_keeps_drag_idle_and_escape_preserves_the_selected_output(
+        cx: &mut TestAppContext,
+    ) {
+        let (_directory, runtime, processing, handle) = fixture(cx);
+        let original = runtime.handle.config_snapshot().processing_graph.clone();
+        let port = node_point(&processing, 3, cx)
+            + point(px(NODE_WIDTH - 92.), px(HEADER + PORT_ROW * 1.5 - 16.));
+        press(cx, handle, port);
+        processing.read_with(cx, |this, _| assert!(this.graph_ui.pointer.is_none()));
+        release(cx, handle, port);
+        processing.read_with(cx, |this, _| {
+            assert_eq!(
+                this.graph_ui.connecting,
+                Some(GraphPort { node: 3, port: 1 })
+            );
+            assert_eq!(this.graph_ui.target_port, 1);
+        });
+        key(cx, handle, "escape");
+        processing.read_with(cx, |this, _| {
+            assert_eq!(this.graph_ui.selected, Some(3));
+            assert!(this.graph_ui.connecting.is_none());
+            assert_eq!(this.graph_ui.target_port, 1);
+        });
+        assert_eq!(runtime.handle.config_snapshot().processing_graph, original);
+        // An input port also owns selection, even without a pending connection.
+        let input =
+            node_point(&processing, 2, cx) + point(px(-68.), px(HEADER + PORT_ROW * 0.5 - 16.));
+        press(cx, handle, input);
+        processing.read_with(cx, |this, _| assert!(this.graph_ui.pointer.is_none()));
+        release(cx, handle, input);
+        processing.read_with(cx, |this, _| assert_eq!(this.graph_ui.selected, Some(2)));
+        let output = node_point(&processing, 2, cx)
+            + point(px(NODE_WIDTH - 92.), px(HEADER + PORT_ROW * 0.5 - 16.));
+        let free_input =
+            node_point(&processing, 3, cx) + point(px(-68.), px(HEADER + PORT_ROW * 0.5 - 16.));
+        press(cx, handle, output);
+        release(cx, handle, output);
+        press(cx, handle, free_input);
+        release(cx, handle, free_input);
+        let graph = &runtime.handle.config_snapshot().processing_graph;
+        assert_eq!(graph.nodes, original.nodes);
+        assert_eq!(
+            graph.edges,
+            [
+                rivu_format::config::processing_graph::GraphEdge {
+                    from: GraphPort { node: 1, port: 0 },
+                    to: GraphPort { node: 2, port: 0 },
+                },
+                rivu_format::config::processing_graph::GraphEdge {
+                    from: GraphPort { node: 2, port: 0 },
+                    to: GraphPort { node: 3, port: 0 },
+                },
+            ]
+        );
+        processing.read_with(cx, |this, _| assert_eq!(this.graph_ui.selected, Some(3)));
     }
 }
