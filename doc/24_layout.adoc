@@ -425,9 +425,13 @@ barriers, not global surface state or an automatic outside-close policy. Shell
 focus restoration, draft protection and asynchronous business guards stay with
 their existing owners; a disabled visual control does not replace those guards.
 
-Choice callbacks are bound to the candidate generation that produced the popup.
-Closing, reopening or replacing candidates invalidates both pointer and native
-selection callbacks; moving the keyboard highlight does not.
+Choice callbacks and retained row presses are bound to the candidate generation
+that produced the popup. Closing, reopening or replacing candidates invalidates
+both callbacks and an in-progress press, including across a repaint; moving the
+keyboard highlight does not. A fresh press can select the replacement candidate.
+Owners handle select-mode keys in capture, before GPUI arms native Enter/Space
+activation. `ChoiceDisposition::apply` prevents that activation from being armed;
+it cannot clear one already registered by an earlier listener.
 
 Ordinary form and confirmation dialogs use `Dialog::scroll_card` for padded,
 viewport-bounded vertical scrolling, with width chosen by the caller. Specialized

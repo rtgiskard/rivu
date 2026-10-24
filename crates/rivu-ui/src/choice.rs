@@ -50,7 +50,8 @@ pub struct ChoiceDisposition {
 impl ChoiceDisposition {
     pub fn apply(self, window: &mut Window, cx: &mut App) -> ChoiceAction {
         if self.prevent_default {
-            // Clear GPUI's pending native keyboard click before key-up can reopen a trigger.
+            // Handle in capture, before GPUI arms its native keyboard click.
+            // Preventing this event's default does not clear an already-armed click.
             window.prevent_default();
         }
         if self.stop_propagation {
@@ -336,7 +337,15 @@ impl ChoicePopup {
                             cx.notify();
                         }
                     }))
-                    .child(div().h(px(height)).w_full().child(list)),
+                    .child(
+                        div()
+                            // Retained row press state belongs to this candidate set,
+                            // not to a replacement row at the same list index.
+                            .id(("choice-revision", revision))
+                            .h(px(height))
+                            .w_full()
+                            .child(list),
+                    ),
                 ),
         )
         .with_priority(2)
@@ -666,6 +675,83 @@ mod tests {
                     click_first_choice(window, cx);
                     assert_eq!(choice.read(cx).committed.len(), before + 1);
                     assert_eq!(choice.read(cx).committed.last(), Some(&value));
+                }
+            }
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn repainted_popup_press_belongs_to_candidate_revision_not_highlight() {
+        use gpui::InputEvent as _;
+        let mut cx = TestAppContext::single();
+        cx.update(crate::theme::init_test);
+        let window = cx.add_window(|_, _| PopupChoice {
+            choices: ChoiceState::default(),
+            committed: Vec::new(),
+        });
+        let choice = window.root(&mut cx).unwrap();
+        cx.update_window(window.into(), |_, window, cx| {
+            let position = point(px(16.), px(40.));
+            // Replacement, close/reopen, and highlight-only repaint retain
+            // the same pointer position and row index.
+            for (close_first, replace) in [(false, true), (true, true), (false, false)] {
+                choice.update(cx, |this, cx| {
+                    this.choices.open(
+                        [DropdownItem::new(1, "Old"), DropdownItem::new(3, "Other")],
+                        0,
+                    );
+                    cx.notify();
+                });
+                window.draw(cx).clear(cx);
+                let before = choice.read(cx).committed.len();
+                window.dispatch_event(
+                    MouseDownEvent {
+                        button: MouseButton::Left,
+                        position,
+                        ..Default::default()
+                    }
+                    .to_platform_input(),
+                    cx,
+                );
+                choice.update(cx, |this, cx| {
+                    if close_first {
+                        this.choices.close();
+                    }
+                    if replace {
+                        this.choices.open([DropdownItem::new(2, "New")], 0);
+                    } else {
+                        this.choices.select_index(1);
+                    }
+                    cx.notify();
+                });
+                window.draw(cx).clear(cx);
+                window.dispatch_event(
+                    MouseMoveEvent {
+                        position,
+                        pressed_button: Some(MouseButton::Left),
+                        ..Default::default()
+                    }
+                    .to_platform_input(),
+                    cx,
+                );
+                window.dispatch_event(
+                    MouseUpEvent {
+                        button: MouseButton::Left,
+                        position,
+                        ..Default::default()
+                    }
+                    .to_platform_input(),
+                    cx,
+                );
+                if replace {
+                    assert_eq!(choice.read(cx).committed.len(), before);
+                    click_first_choice(window, cx);
+                    assert_eq!(choice.read(cx).committed.len(), before + 1);
+                    assert_eq!(choice.read(cx).committed.last(), Some(&2));
+                } else {
+                    assert_eq!(choice.read(cx).committed.len(), before + 1);
+                    assert_eq!(choice.read(cx).committed.last(), Some(&1));
                 }
             }
         })
