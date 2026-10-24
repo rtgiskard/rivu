@@ -33,6 +33,8 @@ an error. If the next entry cannot be opened at natural end, playback stops.
 The desktop Playback panel shows title, artist, album, progress, transport, and
 volume. Its favorite button changes the current track's library favorite, not
 the browsing selection. Use the separate Album artwork panel for covers.
+Hover the volume icon or slider to see its current percentage. The same value
+remains visible while dragging the slider or using it with keyboard focus.
 The crosshair beside its title (*Locate playing entry in Queue*) reveals the
 Queue tab and locates the current occurrence, subject to layout locking;
 see <<_queue,Queue>>.

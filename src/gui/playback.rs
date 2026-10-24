@@ -266,7 +266,7 @@ impl Playback {
                     .toggled(self.state.playback.shuffle),
                     cx,
                     |this, _, cx| this.send(Command::ToggleShuffle, cx),
-                    |button| button.rounded_full().text_lg(),
+                    |button| button.aspect_square().rounded_full().text_lg(),
                 )
                 .button_with(
                     IconButton::new(
@@ -276,7 +276,7 @@ impl Playback {
                     ),
                     cx,
                     |this, _, cx| this.send(Command::Previous, cx),
-                    |button| button.rounded_full().text_lg(),
+                    |button| button.aspect_square().rounded_full().text_lg(),
                 )
                 .button_with(
                     IconButton::new(
@@ -299,6 +299,7 @@ impl Playback {
                         button
                             .bg(rgb(theme.control))
                             .text_color(rgb(theme.text))
+                            .aspect_square()
                             .rounded_full()
                             .text_xl()
                     },
@@ -307,7 +308,7 @@ impl Playback {
                     IconButton::new(("next", panel_id), "󰒭", self.context.tr("gl-next-track")),
                     cx,
                     |this, _, cx| this.send(Command::Next, cx),
-                    |button| button.rounded_full().text_lg(),
+                    |button| button.aspect_square().rounded_full().text_lg(),
                 )
                 .button_with(
                     IconButton::new(
@@ -327,7 +328,7 @@ impl Playback {
                     cx,
                     |this, _, cx| this.send(Command::CycleRepeat, cx),
                     |button| {
-                        button.rounded_full().text_lg().aria_value(
+                        button.aspect_square().rounded_full().text_lg().aria_value(
                             match self.state.playback.repeat {
                                 RepeatMode::Off => self.context.tr("gl-repeat-off"),
                                 RepeatMode::All => self.context.tr("gl-repeat-all"),
@@ -339,6 +340,7 @@ impl Playback {
                 .into_div(),
         );
         let volume_control = row()
+            .id(("volume-control", panel_id))
             .gap_1()
             .w(gpui::rems(9.))
             .max_w(gpui::relative(1.))
@@ -351,13 +353,15 @@ impl Playback {
                     .text_color(rgb(theme.muted))
                     .font_family(super::appearance::fonts::SYMBOLS_FAMILY)
                     .font_size_scale(1.)
-                    .child("󰕾")
-                    .tooltip({
-                        let text = self.context.tr("gl-volume");
-                        rivu_ui::text_tooltip(text)
-                    }),
+                    .child("󰕾"),
             )
-            .child(div().flex_1().min_w_0().child(volume));
+            .child(div().flex_1().min_w_0().child(volume))
+            .when(!show_volume_value, |control| {
+                control.tooltip(rivu_ui::text_tooltip(format!(
+                    "{:.0}%",
+                    self.state.playback.volume * 100.
+                )))
+            });
         let scroll = self
             .context
             .scroll
