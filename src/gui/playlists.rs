@@ -27,8 +27,8 @@ use crate::projection::GuiSnapshot;
 use gpui::{App, Entity, EventEmitter, FocusHandle, Focusable, Subscription};
 use rivu_ui::loading::LoadingText;
 use rivu_ui::{
-    FocusScope, IconButton, IconButtonDensity, IconButtonGroup, IconButtonStyle, LIST_ROW_REMS,
-    StatusKind, VirtualList, caption, column, danger_control, hover_actions,
+    FocusScope, IconButton, IconButtonDensity, IconButtonGroup, IconButtonStyle, StatusKind,
+    VirtualList, caption, column, danger_control, hover_actions,
     input::{Input, InputEvent},
     list_panel_header, list_row, list_row_height, list_viewport, panel_header, panel_surface,
     panel_toolbar, row,
@@ -928,6 +928,7 @@ impl Playlists {
         &self,
         kind: ViewRequestKind,
         panel_id: u64,
+        row_height: gpui::Pixels,
         cx: &mut Context<Self>,
     ) -> Div {
         let theme = rivu_ui::theme::palette(cx);
@@ -965,7 +966,7 @@ impl Playlists {
         };
         let message: SharedString = message.to_owned().into();
         row()
-            .h(gpui::rems(LIST_ROW_REMS))
+            .h(row_height)
             .flex_shrink_0()
             .w_full()
             .overflow_hidden()
@@ -1336,7 +1337,7 @@ impl Playlists {
         .min_h_0()
         .w_full();
         let catalog = if catalog_len == 0 {
-            self.empty_playlist_view(ViewRequestKind::Summaries, panel_id, cx)
+            self.empty_playlist_view(ViewRequestKind::Summaries, panel_id, row_height, cx)
                 .into_any_element()
         } else {
             catalog
@@ -1806,7 +1807,7 @@ impl Playlists {
             .min_h_0()
             .w_full();
             let entries = if entries_len == 0 {
-                self.empty_playlist_view(ViewRequestKind::Entries, panel_id, cx)
+                self.empty_playlist_view(ViewRequestKind::Entries, panel_id, row_height, cx)
                     .into_any_element()
             } else {
                 entries

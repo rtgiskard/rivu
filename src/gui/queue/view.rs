@@ -274,16 +274,19 @@ impl Queue {
                     .locate_filtered
                     .is_some_and(|id| Some(id) == self.state.queue.current_id),
                 |panel| {
-                    panel.child(button(
-                        ("queue-clear-and-locate", panel_id),
-                        self.tr("search-clear-and-locate"),
-                        cx,
-                        |this, window, cx| {
-                            this.queue_search.update(cx, |search, cx| search.clear(cx));
-                            this.apply_queue_search(None, cx);
-                            this.locate_playing_queue(window, cx);
-                        },
-                    ))
+                    panel.child(
+                        button(
+                            ("queue-clear-and-locate", panel_id),
+                            self.tr("search-clear-and-locate"),
+                            cx,
+                            |this, window, cx| {
+                                this.queue_search.update(cx, |search, cx| search.clear(cx));
+                                this.apply_queue_search(None, cx);
+                                this.locate_playing_queue(window, cx);
+                            },
+                        )
+                        .self_start(),
+                    )
                 },
             )
             .when(matched == Some(0), |panel| {

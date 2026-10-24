@@ -441,18 +441,21 @@ impl AlbumBrowser {
 
     fn loading_row(&self, index: usize, cx: &mut Context<Self>) -> Div {
         let theme = rivu_ui::theme::palette(cx);
-        let error = if self.model.selected().is_some() {
+        let track_row = self.model.selected().is_some();
+        let error = if track_row {
             self.model.tracks().error(index)
         } else {
             self.model.albums().error(index)
         };
         column()
+            .when(track_row, |view| view.flex_row().items_center())
             .overflow_hidden()
             .child(
                 caption(
                     theme,
                     error.unwrap_or(self.i18n.text("gl-loading")).to_owned(),
                 )
+                .when(track_row, |text| text.flex_1().min_w_0().truncate())
                 .when(!self.loading_text.show(&(), error.is_some()), |text| {
                     text.invisible()
                 }),
@@ -465,7 +468,8 @@ impl AlbumBrowser {
                             IconButtonDensity::Regular,
                             cx,
                             |this, _, cx| this.retry(cx),
-                        ),
+                        )
+                        .when(!track_row, |control| control.self_start()),
                 )
             })
     }
@@ -892,7 +896,7 @@ impl Render for AlbumBrowser {
         self.scroll_views.borrow_mut().begin_panel(self.panel_id);
         let theme = rivu_ui::theme::palette(cx);
         let total = self.model.total();
-        let mut header = row().items_end().flex_shrink_0().min_w_0();
+        let mut header = row().flex_wrap().items_end().flex_shrink_0().min_w_0();
         if let Some(key) = self.model.selected() {
             let play_key = key.clone();
             let enqueue_key = key.clone();
@@ -972,7 +976,8 @@ impl Render for AlbumBrowser {
                         ),
                     )
                     .flex_1()
-                    .min_w_12(),
+                    .min_w_0()
+                    .flex_basis(gpui::rems(12.)),
                 )
                 .child(self.album_search.clone())
                 .child(
@@ -1031,7 +1036,7 @@ impl Render for AlbumBrowser {
                                         .loading_row(index, cx)
                                         .h(rivu_ui::list_row_height(window, cx))
                                         .w_full()
-                                        .p_2()
+                                        .px_2()
                                         .into_any_element();
                                 };
                                 let id = track.id;

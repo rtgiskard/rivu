@@ -225,6 +225,8 @@ rules so switching tabs does not change separator behavior. Saved proportions,
 docking and cramped viewports may still produce smaller panels: lists must shrink
 inside them rather than overflow neighbors, and longer headings do not increase
 the layout minimum.
+Track details field pairs stack in narrow panels and return to equal columns when
+space permits; individual label/value rows retain their baseline alignment.
 
 The main shell owns a uniform 0.25rem outer inset (4px at the default interface
 scale) around the workspace and footer, separated by a 0.25rem gap. Neither child

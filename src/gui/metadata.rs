@@ -638,13 +638,12 @@ fn metadata_rows(
 }
 
 fn metadata_row(first: Div, second: Div) -> Div {
-    div()
-        .grid()
-        .grid_cols(2)
+    row()
+        .flex_wrap()
         .gap_4()
         .items_start()
-        .child(first.min_w_0())
-        .child(second.min_w_0())
+        .child(first.flex_1().flex_basis(gpui::rems(16.)).min_w_0())
+        .child(second.flex_1().flex_basis(gpui::rems(16.)).min_w_0())
 }
 
 fn metadata_group(
@@ -1244,5 +1243,103 @@ impl Metadata {
         panel_surface(("metadata-panel", panel_id))
             .child(details)
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod spatial_tests {
+    use super::*;
+    use core::prelude::v1::test;
+    use std::cell::Cell;
+
+    struct MetadataPair {
+        width: gpui::Pixels,
+        bounds: Rc<Cell<[gpui::Bounds<gpui::Pixels>; 2]>>,
+    }
+
+    impl gpui::Render for MetadataPair {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let theme = rivu_ui::theme::palette(cx);
+            let [first, second] =
+                [(0, "Duration", "12:34"), (1, "Codec", "FLAC")].map(|(index, label, value)| {
+                    let bounds = self.bounds.clone();
+                    label_value_row(theme, label, value, px(64.), None)
+                        .relative()
+                        .child(
+                            gpui::canvas(
+                                move |value, _, _| {
+                                    let mut measured = bounds.get();
+                                    measured[index] = value;
+                                    bounds.set(measured);
+                                },
+                                |_, _, _, _| {},
+                            )
+                            .absolute()
+                            .size_full(),
+                        )
+                });
+            div()
+                .size_full()
+                .child(metadata_row(first, second).w(self.width))
+        }
+    }
+
+    #[gpui::test]
+    fn metadata_pairs_stack_at_narrow_width_and_restore_equal_columns(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            rivu_ui::theme::set_palette(crate::theme::palette(crate::theme::Theme::default()), cx);
+        });
+        let bounds = Rc::new(Cell::new([gpui::Bounds::default(); 2]));
+        let window = cx.add_window({
+            let bounds = bounds.clone();
+            move |_, _| MetadataPair {
+                width: px(640.),
+                bounds,
+            }
+        });
+        for rem in [12., 24.] {
+            for font_size in [8, 18] {
+                cx.update(|cx| {
+                    rivu_ui::theme::set_typography(
+                        gpui::font("sans-serif"),
+                        super::super::appearance::fonts::SYMBOLS_FAMILY,
+                        font_size,
+                        cx,
+                    );
+                });
+                let mut wide_bounds = None;
+                for width_rems in [40., 15., 40.] {
+                    let width = px(rem * width_rems);
+                    window
+                        .update(cx, |this, window, cx| {
+                            this.width = width;
+                            window.set_rem_size(px(rem));
+                            cx.notify();
+                        })
+                        .unwrap();
+                    cx.update_window(window.into(), |_, window, cx| {
+                        window.draw(cx).clear(cx);
+                    })
+                    .unwrap();
+                    let [first, second] = bounds.get();
+                    assert_eq!(first.size.width, second.size.width);
+                    assert!(first.right() <= width && second.right() <= width);
+                    if width_rems < 32. {
+                        assert_eq!(first.left(), second.left());
+                        assert!(second.top() >= first.bottom());
+                        assert_eq!(first.size.width, width);
+                    } else {
+                        assert_eq!(first.top(), second.top());
+                        assert!(second.left() > first.right());
+                        if let Some(original) = wide_bounds {
+                            assert_eq!([first, second], original);
+                        }
+                        wide_bounds = Some([first, second]);
+                    }
+                }
+            }
+        }
     }
 }

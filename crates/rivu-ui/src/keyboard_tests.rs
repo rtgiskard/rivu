@@ -584,6 +584,138 @@ fn row_action_reveal_tracks_own_focus_and_hover_without_layout_or_tab_stops() {
     }
 }
 
+type RowSurfaceBounds = std::rc::Rc<std::cell::Cell<[gpui::Bounds<gpui::Pixels>; 5]>>;
+
+struct RowSurfaces {
+    bounds: RowSurfaceBounds,
+    selected: bool,
+    alternate: bool,
+    width: f32,
+}
+
+impl Render for RowSurfaces {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = crate::theme::palette(cx);
+        let bounds = self.bounds.clone();
+        let text = crate::row::two_line_text(
+            theme,
+            if self.alternate {
+                "短い題名"
+            } else {
+                "A long title that must truncate in a narrow row"
+            },
+            if self.alternate {
+                "Different detail"
+            } else {
+                "A long detail that must truncate independently"
+            },
+        )
+        .on_children_prepainted(move |children, _, _| {
+            let mut measured = bounds.get();
+            measured[3] = children[0];
+            measured[4] = children[1];
+            bounds.set(measured);
+        });
+        let label = if self.alternate {
+            "＋"
+        } else {
+            "A long single-line row label"
+        };
+        let bounds = self.bounds.clone();
+        crate::column()
+            .w(gpui::px(self.width))
+            .font(crate::theme::font(cx).clone())
+            .text_size(gpui::px(14.))
+            .font_size_scale(crate::theme::font_size_scale(cx))
+            .text_sm()
+            .child(
+                crate::row::list_row(theme, "geometry-list", self.selected)
+                    .h(crate::row::list_row_height(window, cx))
+                    .child(text),
+            )
+            .child(
+                crate::row::tree_row(theme, "geometry-tree", 1, self.selected)
+                    .h(crate::row::tree_row_height(window, cx))
+                    .child(div().flex_1().min_w_0().truncate().child(label)),
+            )
+            .child(
+                crate::row::dropdown_row(theme, "geometry-dropdown", self.selected, label)
+                    .h(crate::row::single_line_row_height(window, cx)),
+            )
+            .on_children_prepainted(move |children, _, _| {
+                let mut measured = bounds.get();
+                measured[..3].copy_from_slice(&children);
+                bounds.set(measured);
+            })
+    }
+}
+
+#[test]
+fn list_tree_and_dropdown_geometry_survives_text_selection_hover_and_scaling() {
+    let mut cx = TestAppContext::single();
+    cx.update(crate::theme::init_test);
+    let bounds = RowSurfaceBounds::default();
+    let window = cx.add_window({
+        let bounds = bounds.clone();
+        move |_, _| RowSurfaces {
+            bounds,
+            selected: false,
+            alternate: false,
+            width: 240.,
+        }
+    });
+    let root = window.root(&mut cx).unwrap();
+    let handle = window.into();
+    for rem in [12., 24.] {
+        for font_size in [8, 18] {
+            cx.update(|cx| {
+                crate::theme::set_typography(gpui::font("sans-serif"), "sans-serif", font_size, cx);
+            });
+            cx.update_window(handle, |_, window, _| window.set_rem_size(gpui::px(rem)))
+                .unwrap();
+            for width in [96., 240.] {
+                root.update(&mut cx, |this, cx| {
+                    this.width = width;
+                    cx.notify();
+                });
+                draw(&mut cx, handle);
+                let baseline = bounds.get();
+                for selected in [false, true] {
+                    for alternate in [false, true] {
+                        root.update(&mut cx, |this, cx| {
+                            this.selected = selected;
+                            this.alternate = alternate;
+                            cx.notify();
+                        });
+                        for position in baseline[..3]
+                            .iter()
+                            .map(|bounds| bounds.center())
+                            .chain([gpui::point(gpui::px(500.), gpui::px(500.))])
+                        {
+                            cx.update_window(handle, |_, window, cx| {
+                                window.simulate_mouse_move(position, cx)
+                            })
+                            .unwrap();
+                            draw(&mut cx, handle);
+                            let measured = bounds.get();
+                            assert_eq!(&measured[..3], &baseline[..3]);
+                            for row in &measured[..3] {
+                                assert_eq!(row.size.width, gpui::px(width));
+                            }
+                            for text in &measured[3..] {
+                                assert!(text.left() >= measured[0].left());
+                                assert!(text.right() <= measured[0].right());
+                                assert!(text.top() >= measured[0].top());
+                                assert!(text.bottom() <= measured[0].bottom());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 struct RowActionFocus {
     search: gpui::Entity<crate::input::Input>,
     action_focus: gpui::FocusHandle,
