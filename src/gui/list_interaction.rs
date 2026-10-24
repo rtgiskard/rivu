@@ -1162,6 +1162,7 @@ mod tests {
                     .iter()
                     .map(|id| crate::model::LibraryRow {
                         id: *id,
+                        path: Default::default(),
                         title: String::new(),
                         artist: String::new(),
                         album: String::new(),

@@ -59,6 +59,7 @@ async fn lookup_scan_sources(
 #[derive(Debug)]
 enum ScanInput {
     Paths { paths: Vec<PathBuf>, force: bool },
+    OtherTracks { force: bool },
     Import { path: PathBuf, name: String },
 }
 
@@ -111,6 +112,7 @@ fn save_scan(
     current_id: Option<u64>,
     scan: ScanFinished,
     import_revisions: Option<ImportPlaylistRevisions>,
+    other_roots: Option<Vec<PathBuf>>,
     sender: tokio::sync::oneshot::Sender<ScanSaved>,
 ) {
     let mut completion = ScanSavingCompletion {
@@ -132,7 +134,7 @@ fn save_scan(
         }),
     };
     let saved = completion.saved.as_mut().unwrap();
-    let result = match scan.result {
+    let mut result = match scan.result {
         Ok(result) => result,
         Err(error) => {
             saved.error = Some(error);
@@ -154,7 +156,11 @@ fn save_scan(
         return;
     }
     let save_started = Instant::now();
-    let impacts = match store.apply_scan(&result).with_context(|| {
+    let applied = match other_roots {
+        Some(roots) => store.apply_other_tracks_check(&mut result, &roots),
+        None => store.apply_scan(&result),
+    };
+    let impacts = match applied.with_context(|| {
         if scan.import.is_some() {
             "Failed to save scan; playlist not created"
         } else {
@@ -241,18 +247,25 @@ fn save_scan(
 impl Core {
     pub(in crate::core) fn scan(&mut self, paths: Vec<PathBuf>, force: bool) -> Result<()> {
         self.start_scan(ScanInput::Paths { paths, force })
+            .map(|_| ())
     }
 
     pub(in crate::core) fn import_playlist(&mut self, path: PathBuf, name: String) -> Result<()> {
         self.start_scan(ScanInput::Import { path, name })
+            .map(|_| ())
     }
 
-    fn start_scan(&mut self, mut input: ScanInput) -> Result<()> {
-        if self.active_scan.is_some() {
+    pub(in crate::core) fn start_other_tracks_check(&mut self, force: bool) -> Result<u64> {
+        self.start_scan(ScanInput::OtherTracks { force })
+    }
+
+    fn start_scan(&mut self, mut input: ScanInput) -> Result<u64> {
+        if self.active_scan.is_some() || self.active_external_admission.is_some() {
             bail!("A library scan is already running");
         }
         let config = Arc::clone(&self.state.system.config);
-        if config.library_roots.is_empty() {
+        let other_tracks_check = matches!(input, ScanInput::OtherTracks { .. });
+        if !other_tracks_check && config.library_roots.is_empty() {
             bail!(
                 "No library roots are configured; add a library root in the configuration before scanning"
             );
@@ -271,6 +284,11 @@ impl Core {
                 );
             }
         }
+        let other_database_path = if other_tracks_check {
+            Some(self.store.database_path()?)
+        } else {
+            None
+        };
         let ffmpeg_enabled = config.ffmpeg_enabled;
         tracing::info!(
             input = ?input,
@@ -321,6 +339,46 @@ impl Core {
             let preparation_started = Instant::now();
             let mut import = None;
             let result = async {
+                if let ScanInput::OtherTracks { force } = &input {
+                    worker_cancellation.check()?;
+                    let database_path =
+                        other_database_path.context("Other check database path is unavailable")?;
+                    let query_config = Arc::clone(&config);
+                    let token = worker_cancellation.clone();
+                    // Always await the blocking enumeration: cancellation retires
+                    // the physical worker rather than merely dropping its handle.
+                    let paths = tokio::task::spawn_blocking(move || {
+                        token.check()?;
+                        let roots = library::normalize_roots(&query_config.library_roots)?;
+                        let store = Store::open(&database_path)
+                            .context("Opening Other check database failed")?;
+                        let paths = store.other_tracks_sources(&roots)?;
+                        token.check()?;
+                        Ok::<_, anyhow::Error>(paths)
+                    })
+                    .await
+                    .context("Other source enumeration worker failed")??;
+                    worker_cancellation.check()?;
+                    return library::recheck_sources(
+                        &paths,
+                        |paths| {
+                            let sender = sender.clone();
+                            let cancellation = worker_cancellation.clone();
+                            let force = *force;
+                            async move {
+                                if force {
+                                    Ok(vec![None; paths.len()])
+                                } else {
+                                    lookup_scan_sources(sender, id, paths, cancellation).await
+                                }
+                            }
+                        },
+                        ffmpeg_enabled,
+                        &worker_cancellation,
+                        &mut progress,
+                    )
+                    .await;
+                }
                 let (paths, sheets, force) = match input {
                     ScanInput::Import { path, name } => {
                         import = Some((name, Vec::new()));
@@ -342,6 +400,7 @@ impl Core {
                         (paths, Some(prepared.sheets), false)
                     }
                     ScanInput::Paths { paths, force } => (paths, None, force),
+                    ScanInput::OtherTracks { .. } => unreachable!("Other check handled above"),
                 };
                 library::scan_paths_with_cues(
                     &paths,
@@ -386,6 +445,7 @@ impl Core {
                 id,
                 result,
                 import,
+                other_tracks_check,
                 progress: latest,
             }
         });
@@ -410,7 +470,7 @@ impl Core {
             pending_save: None,
         });
         self.project_scan();
-        Ok(())
+        Ok(id)
     }
 
     pub(in crate::core) fn spawn_scan_preparation(
@@ -429,6 +489,7 @@ impl Core {
                         "Scan preparation worker panicked; scan has not been saved"
                     )),
                     import: None,
+                    other_tracks_check: false,
                     progress: ScanProgress {
                         phase: ScanPhase::Discovering,
                         processed: 0,
@@ -442,20 +503,36 @@ impl Core {
     }
 
     /// Presentation fields are projections; task status is the only result authority.
-    fn project_scan(&mut self) {
-        self.state.system.scanning = self.active_scan.is_some();
+    pub(in crate::core) fn project_scan(&mut self) {
+        self.state.system.scanning =
+            self.active_scan.is_some() || self.active_external_admission.is_some();
         if let Some(status) = self
             .active_scan
             .as_ref()
             .map(|task| &task.status)
+            .or_else(|| {
+                self.active_external_admission
+                    .as_ref()
+                    .map(|task| &task.status)
+            })
             .or_else(|| self.scan_results.back())
         {
+            self.state.system.scan_task_id = Some(status.id);
             self.state.system.scan_progress = Some(status.progress.clone());
             self.state.system.scan_message.clone_from(&status.message);
+        } else {
+            self.state.system.scan_task_id = None;
         }
     }
 
     pub(in crate::core) fn cancel_scan(&mut self, id: u64) -> Result<()> {
+        if self
+            .active_external_admission
+            .as_ref()
+            .is_some_and(|task| task.status.id == id)
+        {
+            return self.cancel_external_admission(id);
+        }
         let task = self
             .active_scan
             .as_ref()
@@ -593,7 +670,7 @@ impl Core {
             return;
         }
         if self.active_relocation.is_some() {
-            task.status.message = "Waiting for track relocation before saving library…".into();
+            task.status.message = "Waiting for relocation before saving library…".into();
             task.pending_save = Some(scan);
             self.active_scan = Some(task);
             return;
@@ -617,6 +694,19 @@ impl Core {
                 return;
             }
         };
+        // Re-resolve membership only at the Saving boundary, after any wait for
+        // relocation. Settings edits are rejected while this accepted save runs.
+        let other_roots = if scan.other_tracks_check {
+            match library::normalize_roots(&self.state.system.config.library_roots) {
+                Ok(roots) => Some(roots),
+                Err(error) => {
+                    self.complete_unsaved_scan(task, Err(error), false);
+                    return;
+                }
+            }
+        } else {
+            None
+        };
         // Capture only after relocation has retired: Saving rejects DB edits,
         // so this O(1) snapshot cannot overwrite concurrent playlist changes.
         // The worker pays for the shared BTreeMap copy only if import succeeds.
@@ -634,7 +724,7 @@ impl Core {
             let progress = scan.progress.clone();
             let (completed, completion) = tokio::sync::oneshot::channel();
             let joined = tokio::task::spawn_blocking(move || {
-                save_scan(&database_path, current_id, scan, import_revisions, completed)
+                save_scan(&database_path, current_id, scan, import_revisions, other_roots, completed)
             }).await;
             let saved = completion.await.unwrap_or_else(|_| ScanSaved {
                 id,
@@ -786,7 +876,7 @@ impl Core {
         self.retain_scan_outcome(task.status);
     }
 
-    fn retain_scan_outcome(&mut self, status: ScanTaskStatus) {
+    pub(in crate::core) fn retain_scan_outcome(&mut self, status: ScanTaskStatus) {
         if let Some(error) = &status.error {
             self.state.system.last_error = Some(error.clone());
         }

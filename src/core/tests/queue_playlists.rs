@@ -13,6 +13,7 @@ fn indexed_playlist_sources_and_after_moves_update_only_the_target_projection() 
     let other = core.state.playlist_query_revisions(2).playlist_entries;
     let baseline = core.state.playlist_query_revisions(1);
     core.command(Command::InsertPlaylistSources {
+        other_tracks: false,
         playlist_id: 1,
         directories: vec![],
         track_ids: vec![4, 1, 4, 3],
@@ -119,6 +120,7 @@ fn indexed_queue_commands_preserve_playing_occurrence_and_reject_stale_empty_int
             expected_revision: revision,
         },
         Command::InsertQueueSources {
+            other_tracks: false,
             directories: vec![],
             track_ids: vec![],
             index: 0,
@@ -130,6 +132,7 @@ fn indexed_queue_commands_preserve_playing_occurrence_and_reject_stale_empty_int
             expected_revision: state.revision,
         },
         Command::InsertQueueSources {
+            other_tracks: false,
             directories: vec![],
             track_ids: vec![],
             index: state.total + 1,
@@ -146,6 +149,7 @@ fn indexed_queue_commands_preserve_playing_occurrence_and_reject_stale_empty_int
         assert_eq!(core.state.queue, state);
     }
     core.command(Command::InsertQueueSources {
+        other_tracks: false,
         directories: vec![],
         track_ids: vec![4, 1, 4],
         index: state.total,
@@ -206,6 +210,7 @@ fn indexed_playlist_commands_advance_only_changed_members_and_reject_stale_drops
             expected_revision: token,
         },
         Command::InsertPlaylistSources {
+            other_tracks: false,
             playlist_id: 1,
             directories: vec![],
             track_ids: vec![1],
@@ -219,6 +224,7 @@ fn indexed_playlist_commands_advance_only_changed_members_and_reject_stale_drops
             expected_revision: next,
         },
         Command::InsertPlaylistSources {
+            other_tracks: false,
             playlist_id: 1,
             directories: vec![],
             track_ids: vec![],
@@ -249,6 +255,7 @@ fn indexed_playlist_commands_advance_only_changed_members_and_reject_stale_drops
     })
     .unwrap();
     core.command(Command::InsertPlaylistSources {
+        other_tracks: false,
         playlist_id: 1,
         directories: vec![],
         track_ids: vec![4, 2],
@@ -351,6 +358,7 @@ fn playlist_mutations_preserve_track_traversal_and_playback_sections() {
         ),
         (
             Command::AddPlaylistSources {
+                other_tracks: false,
                 playlist_id: 2,
                 directories: vec![],
                 track_ids: vec![4],
@@ -658,11 +666,13 @@ fn playlist_append_and_move_only_invalidate_changed_pages() {
             track_ids: vec![2, 1, 2],
         },
         Command::AddPlaylistSources {
+            other_tracks: false,
             playlist_id: 1,
             directories: vec![],
             track_ids: vec![],
         },
         Command::AddPlaylistSources {
+            other_tracks: false,
             playlist_id: 1,
             directories: vec![],
             track_ids: vec![1, 2],
@@ -683,11 +693,13 @@ fn playlist_append_and_move_only_invalidate_changed_pages() {
             track_ids: vec![3, 999],
         },
         Command::AddPlaylistSources {
+            other_tracks: false,
             playlist_id: 999,
             directories: vec![],
             track_ids: vec![],
         },
         Command::AddPlaylistSources {
+            other_tracks: false,
             playlist_id: 1,
             directories: vec![],
             track_ids: vec![3, 999],
@@ -711,6 +723,7 @@ fn playlist_append_and_move_only_invalidate_changed_pages() {
             track_ids: vec![3],
         },
         Command::AddPlaylistSources {
+            other_tracks: false,
             playlist_id: 1,
             directories: vec![],
             track_ids: vec![4],

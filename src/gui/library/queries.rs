@@ -84,9 +84,40 @@ fn library_search_counts(
         total += root_total;
         root_counts.insert(root.clone(), (root_matched, root_total));
     }
+    let response = handle.query_if_current(
+        Query::OtherTracksPage {
+            query: query.clone(),
+            favorite: *favorite,
+            missing: *missing,
+            sort: *sort,
+            offset: 0,
+            limit: 0,
+        },
+        ticket.clone(),
+    );
+    if worker_query.stamp(response.revisions) != worker_query.stamp(*revisions) {
+        return None;
+    }
+    let Ok(ViewResponse::LibraryPage(page)) = response.result else {
+        return None;
+    };
+    let other_matched = page.total;
+    let other_total = if query.is_none() && favorite.is_none() && missing.is_none() {
+        other_matched
+    } else {
+        let response = handle.query_if_current(Query::OtherTracksCount, ticket.clone());
+        if worker_query.stamp(response.revisions) != worker_query.stamp(*revisions) {
+            return None;
+        }
+        let Ok(ViewResponse::OtherTracksCount(total)) = response.result else {
+            return None;
+        };
+        total
+    };
     Some(model::SearchCountResult {
-        totals: (matched, total),
+        totals: (matched + other_matched, total + other_total),
         roots: root_counts,
+        other_tracks: (other_matched, other_total),
     })
 }
 
@@ -356,7 +387,7 @@ mod tests {
     use crate::config::ConfigPersistence;
 
     #[test]
-    fn library_search_counts_query_deduplicates_roots_and_resumes_cancelled_reads() {
+    fn library_search_counts_query_resumes_cancelled_reads_and_tracks_scope_changes() {
         use crate::{
             config::Config,
             core::Runtime,
@@ -371,12 +402,7 @@ mod tests {
         let parent = directory.path().join("music");
         let nested = parent.join("album");
         let sibling = directory.path().join("other");
-        let roots = vec![
-            nested.clone(),
-            parent.clone(),
-            parent.clone(),
-            sibling.clone(),
-        ];
+        let roots = vec![parent.clone(), sibling.clone()];
         let store = Store::open(&directory.path().join("library.db")).unwrap();
         store
             .apply_scan(&ScanResult {
@@ -421,6 +447,7 @@ mod tests {
             volume: 0.0,
             ffmpeg_enabled: false,
             mpris_enabled: false,
+            library_roots: roots.clone(),
             ..Config::default()
         }
         .save(&config_path)
@@ -435,11 +462,11 @@ mod tests {
         let (_, request) = library.prepare_search_counts(&roots, revisions);
         let request = request.unwrap();
         let result = super::library_search_counts(&runtime.handle, &request).unwrap();
-        assert_eq!(result.totals, (4, 4));
+        assert_eq!(result.totals, (5, 5));
+        assert_eq!(result.other_tracks, (1, 1));
         assert_eq!(result.roots.len(), 2);
         assert_eq!(result.roots.get(&parent), Some(&(2, 2)));
         assert_eq!(result.roots.get(&sibling), Some(&(2, 2)));
-        assert!(!result.roots.contains_key(&nested));
         assert!(library.accept_search_counts(request, &roots, revisions, Some(result)));
         library.refresh_search("needle".into());
         let (_, request) = library.prepare_search_counts(&roots, revisions);
@@ -451,17 +478,28 @@ mod tests {
         let (_, request) = library.prepare_search_counts(&roots, revisions);
         let request = request.unwrap();
         let result = super::library_search_counts(&runtime.handle, &request).unwrap();
-        assert_eq!(result.totals, (2, 4));
+        assert_eq!(result.totals, (3, 5));
+        assert_eq!(result.other_tracks, (1, 1));
         assert!(library.accept_search_counts(request, &roots, revisions, Some(result)));
-        assert_eq!(library.search_counts(), Some((2, 4)));
+        assert_eq!(library.search_counts(), Some((3, 5)));
         assert_eq!(library.root_count_label(&parent), "1 / 2");
         assert_eq!(library.root_count_label(&sibling), "1 / 2");
+        for root in &roots {
+            runtime
+                .handle
+                .update_gui_config(crate::core::GuiConfigChange::RemoveLibraryRoot(
+                    root.clone(),
+                ))
+                .unwrap();
+        }
+        let revisions = runtime.handle.query(Query::OtherTracksCount).revisions;
         let (_, request) = library.prepare_search_counts(&[], revisions);
         let request = request.unwrap();
         let result = super::library_search_counts(&runtime.handle, &request).unwrap();
-        assert_eq!(result.totals, (0, 0));
+        assert_eq!(result.totals, (3, 5));
+        assert_eq!(result.other_tracks, (3, 5));
         assert!(result.roots.is_empty());
         assert!(library.accept_search_counts(request, &[], revisions, Some(result)));
-        assert_eq!(library.search_counts(), Some((0, 0)));
+        assert_eq!(library.search_counts(), Some((3, 5)));
     }
 }

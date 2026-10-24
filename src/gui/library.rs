@@ -103,6 +103,10 @@ pub(super) fn track_detail(
         }
         None => detail.push('-'),
     }
+    if let Some(parent) = track.path.parent() {
+        detail.push_str(" · ");
+        detail.push_str(&parent.to_string_lossy());
+    }
     if track.missing {
         detail.push_str(i18n.text("gl-file-missing-suffix"));
     }
@@ -180,6 +184,7 @@ fn track_columns(
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) enum LibraryNode {
+    OtherTracks,
     Directory(Arc<Path>),
     Track(i64),
 }
@@ -218,10 +223,11 @@ impl LibraryDragPreview {
     ) -> Self {
         let directories = nodes
             .iter()
-            .filter(|node| matches!(node, LibraryNode::Directory(_)))
+            .filter(|node| matches!(node, LibraryNode::Directory(_) | LibraryNode::OtherTracks))
             .count();
         let (icon, label) = if nodes.len() == 1 {
             match &nodes[0] {
+                LibraryNode::OtherTracks => ("󰀻", i18n.text("library-other").to_owned().into()),
                 LibraryNode::Directory(path) => (
                     "󰉋",
                     path.file_name()
@@ -313,7 +319,7 @@ impl Library {
             .iter()
             .filter_map(|node| match node {
                 LibraryNode::Track(id) => Some(*id),
-                LibraryNode::Directory(_) => None,
+                LibraryNode::Directory(_) | LibraryNode::OtherTracks => None,
             })
             .collect::<Vec<_>>();
         ids.sort_unstable_by_key(|id| {
@@ -342,15 +348,17 @@ impl Library {
             .iter()
             .filter_map(|node| match node {
                 LibraryNode::Directory(path) => Some(path.to_path_buf()),
-                LibraryNode::Track(_) => None,
+                LibraryNode::Track(_) | LibraryNode::OtherTracks => None,
             })
             .collect::<Vec<_>>();
         directories.sort();
         directories.dedup();
         let track_ids = self.library_drag_track_ids(nodes);
+        let other_tracks = nodes.contains(&LibraryNode::OtherTracks);
         match destination {
             super::DragDestination::Queue => self.send(
                 Command::EnqueueSources {
+                    other_tracks,
                     directories,
                     track_ids,
                 },
@@ -358,6 +366,7 @@ impl Library {
             ),
             super::DragDestination::Playlist(playlist_id) => self.send(
                 Command::AddPlaylistSources {
+                    other_tracks,
                     playlist_id,
                     directories,
                     track_ids,
@@ -366,6 +375,7 @@ impl Library {
             ),
             super::DragDestination::QueueAt { index, revision } => self.send(
                 Command::InsertQueueSources {
+                    other_tracks,
                     directories,
                     track_ids,
                     index,
@@ -379,6 +389,7 @@ impl Library {
                 revision,
             } => self.send(
                 Command::InsertPlaylistSources {
+                    other_tracks,
                     playlist_id,
                     directories,
                     track_ids,
@@ -490,7 +501,7 @@ impl Library {
             return;
         };
         match visible.row {
-            DirectoryRow::Directory { .. } => {
+            DirectoryRow::Directory { .. } | DirectoryRow::OtherTracks => {
                 let branch = visible.branch.expect("directory has an occurrence");
                 self.set_directory_expanded(&branch, !self.library.tree().expanded(&branch), cx);
             }
@@ -607,6 +618,12 @@ impl Library {
                         };
                         let entry = &visible.row;
                         let (node, title, detail, path) = match entry {
+                            DirectoryRow::OtherTracks => (
+                                LibraryNode::OtherTracks,
+                                this.i18n.text("library-other").to_owned(),
+                                if visible.status == BranchStatus::Empty && this.library.other_tracks_empty() { this.i18n.text("library-other-empty").to_owned() } else { String::new() },
+                                None,
+                            ),
                             DirectoryRow::Directory { path } => {
                                 let title = if visible.depth == 0 {
                                     path.display().to_string()
@@ -634,19 +651,22 @@ impl Library {
                             DirectoryRow::Track(track) => (
                                 LibraryNode::Track(track.id),
                                 track.title.clone(),
-                                String::new(),
+                                if visible.other_tracks { track.path.parent().map(|path| path.display().to_string()).unwrap_or_default() } else { String::new() },
                                 None,
                             ),
                         };
                         let row_id = match &node {
+                            LibraryNode::OtherTracks => gpui::ElementId::Name("library-other-tracks".into()),
                             LibraryNode::Track(id) => gpui::ElementId::NamedInteger("library-track".into(), *id as u64),
                             LibraryNode::Directory(path) => gpui::ElementId::Path(Arc::clone(path)),
                         };
                         let selected = this.directory_row_selected(entry);
                         let id = node.clone();
-                        let retry_counts = path.as_deref().is_some_and(|path| {
-                            this.library.root_count_failed(path)
-                        });
+                        let retry_counts = match entry {
+                            DirectoryRow::OtherTracks => this.library.other_count_failed(),
+                            DirectoryRow::Directory { path } => this.library.root_count_failed(path),
+                            DirectoryRow::Track(_) => false,
+                        };
                         let scan = path.clone().map(|scan_path| {
                             let hint = if retry_counts {
                                 this.i18n.format("gl-retry-root-counts", &[("path", scan_path.display().to_string().into())])
@@ -668,10 +688,32 @@ impl Library {
                                 }
                             })
                             .when(retry_counts, |view| view.text_color(gpui::rgb(theme.error)))
-                        });
+                        }).or_else(|| matches!(entry, DirectoryRow::OtherTracks).then(|| {
+                            let hint = if retry_counts {
+                                "gl-retry-other-counts"
+                            } else if this.library.force_scan() {
+                                "library-other-force"
+                            } else {
+                                "library-other-check"
+                            };
+                            IconButton::new(gpui::ElementId::named_usize("library-check-other", index), "󰑐", this.tr(hint))
+                                .enabled(retry_counts || !this.state.system.scanning)
+                                .build(IconButtonStyle::Quiet, IconButtonDensity::Regular, cx, |this, _, cx| {
+                                    if this.library.other_count_failed() {
+                                        this.library.retry_root_counts();
+                                        this.request_root_counts(cx);
+                                    } else {
+                                        this.send(Command::CheckOtherTracks { force: this.library.force_scan() }, cx);
+                                    }
+                                })
+                                .when(retry_counts, |view| view.text_color(gpui::rgb(theme.error)))
+                        }));
                         let title = gpui::SharedString::from(title);
                         let tooltip_title = path.as_ref().map_or_else(
-                            || title.clone(),
+                            || match entry {
+                                DirectoryRow::Track(track) if visible.other_tracks => format!("{}\n{}", track.title, track.path.display()).into(),
+                                _ => title.clone(),
+                            },
                             |path| path.display().to_string().into(),
                         );
                         let name_content = row()
@@ -685,7 +727,7 @@ impl Library {
                                     .text_sm()
                                     .font_family(super::appearance::fonts::SYMBOLS_FAMILY)
                                     .font_size_scale(1.)
-                                    .child(if let Some(branch) = &visible.branch {
+                                    .child(if matches!(entry, DirectoryRow::OtherTracks) { "󰀻" } else if let Some(branch) = &visible.branch {
                                         if this.library.tree().expanded(branch) {
                                             "󰝰"
                                         } else {
@@ -712,10 +754,12 @@ impl Library {
                                             })
                                             .text_overflow(gpui::TextOverflow::Truncate("..".into()))
                                             .child(title.clone())
-                                            .when(path.is_none(), |view| view.flex_1()),
+                                            .when(matches!(entry, DirectoryRow::Track(_)), |view| view.flex_1())
+                                            .when(matches!(entry, DirectoryRow::OtherTracks), |view| view.flex_shrink_0()),
                                     )
-                                    .when(path.is_some() && !detail.is_empty(), |view| {
+                                    .when(!detail.is_empty(), |view| {
                                         view.child(rivu_ui::caption(theme, detail.clone()).min_w_0().truncate()
+                                            .when(path.is_none(), |text| text.flex_1())
                                             .when(visible.status == BranchStatus::Loading && !visible.branch.as_ref().is_some_and(|branch| this.loading_text.show(branch, false)), |text| text.invisible())
                                             .text_overflow(gpui::TextOverflow::Truncate("..".into())))
                                     })
@@ -741,6 +785,10 @@ impl Library {
                                         .child(rivu_ui::caption(theme, count)
                                             .font_features(super::appearance::fonts::tabular_numbers())),
                                 )
+                            })
+                            .when(matches!(entry, DirectoryRow::OtherTracks), |view| {
+                                view.child(rivu_ui::caption(theme, this.library.other_count_label())
+                                    .font_features(super::appearance::fonts::tabular_numbers()))
                             });
                         let name_cell = div()
                             .w_56()
@@ -796,7 +844,7 @@ impl Library {
                                 if this.library_range_pending() { cx.stop_propagation(); return; }
                                 let selected = match &menu_node {
                                     LibraryNode::Track(id) => this.library.selected().contains(id),
-                                    LibraryNode::Directory(_) => this.library.selected_nodes().contains(&menu_node),
+                                    LibraryNode::Directory(_) | LibraryNode::OtherTracks => this.library.selected_nodes().contains(&menu_node),
                                 };
                                 if !selected { this.select_library_row(menu_node.clone(), index, false, false, cx); }
                                 let nodes = this.library.drag_nodes(&menu_node);
@@ -814,14 +862,14 @@ impl Library {
                             .when_some(
                                 match entry {
                                     DirectoryRow::Track(track) => track_columns(theme, track, this.state.system.config.library_columns),
-                                    DirectoryRow::Directory { .. } => None,
+                                    DirectoryRow::Directory { .. } | DirectoryRow::OtherTracks => None,
                                 },
                                 |view, columns| view.child(columns),
                             )
                             .when_some(
                                 match entry {
                                     DirectoryRow::Track(track) => Some((track.id, track.favorite)),
-                                    DirectoryRow::Directory { .. } => None,
+                                    DirectoryRow::Directory { .. } | DirectoryRow::OtherTracks => None,
                                 },
                                 |view, (track_id, favorite)| {
                                     view.child(
@@ -840,7 +888,7 @@ impl Library {
                                 let i18n = Arc::clone(&this.i18n);
                                 move || match &entry {
                                     DirectoryRow::Track(track) => track_detail(&i18n, track).into(),
-                                    DirectoryRow::Directory { .. } => detail.clone().into(),
+                                    DirectoryRow::Directory { .. } | DirectoryRow::OtherTracks => detail.clone().into(),
                                 }
                             },
                         )
@@ -882,7 +930,7 @@ impl Library {
                                             this.send(Command::Play { track_id: id }, cx);
                                         }
                                     }
-                                    LibraryNode::Directory(path) => {
+                                    node @ (LibraryNode::Directory(_) | LibraryNode::OtherTracks) => {
                                         let modifiers = event.modifiers();
                                         let multi = modifiers.control;
                                         if !multi && !modifiers.shift {
@@ -897,7 +945,7 @@ impl Library {
                                             );
                                         }
                                         this.select_library_row(
-                                            LibraryNode::Directory(path),
+                                            node,
                                             index,
                                             modifiers.shift,
                                             multi,
@@ -1023,6 +1071,31 @@ impl Library {
                     .min_h_8()
                     .flex_shrink_0()
                     .child(caption(theme, header_text).flex_1().min_w_0().truncate())
+                    .when_some(
+                        self.state
+                            .system
+                            .scan_task_id
+                            .filter(|_| self.state.system.scanning),
+                        |view, id| {
+                            view.child(
+                                IconButton::new(
+                                    ("library-cancel-media-task", panel_id),
+                                    "󰜺",
+                                    self.tr("library-cancel-task"),
+                                )
+                                .enabled(
+                                    progress
+                                        .is_none_or(|progress| progress.phase != ScanPhase::Saving),
+                                )
+                                .build(
+                                    IconButtonStyle::Quiet,
+                                    IconButtonDensity::Regular,
+                                    cx,
+                                    move |this, _, cx| this.send(Command::CancelScan { id }, cx),
+                                ),
+                            )
+                        },
+                    )
                     .child(dismiss),
             )
             .child(bar)
@@ -1060,7 +1133,13 @@ impl Library {
             .library
             .selected_nodes()
             .iter()
-            .filter(|node| matches!(node, super::library::LibraryNode::Directory(_)))
+            .filter(|node| {
+                matches!(
+                    node,
+                    super::library::LibraryNode::Directory(_)
+                        | super::library::LibraryNode::OtherTracks
+                )
+            })
             .count();
         let selection_label = if range_pending {
             self.i18n.text("gl-selecting").to_owned()
@@ -1189,6 +1268,60 @@ impl Library {
                     cx,
                     |this, _, cx| this.choose_library_root(cx),
                 ),
+            )
+            .child(
+                IconButton::new(
+                    ("library-sort", panel_id),
+                    "󰒺",
+                    self.tr(match self.library.buffer().sort {
+                        crate::model::LibrarySort::Id => "library-sort-id",
+                        crate::model::LibrarySort::Album => "library-sort-album",
+                        crate::model::LibrarySort::MostPlayed => "library-sort-played",
+                    }),
+                )
+                .build(
+                    IconButtonStyle::Surface,
+                    IconButtonDensity::Regular,
+                    cx,
+                    |this, _, cx| {
+                        this.library.buffer.sort = match this.library.buffer.sort {
+                            crate::model::LibrarySort::Id => crate::model::LibrarySort::Album,
+                            crate::model::LibrarySort::Album => {
+                                crate::model::LibrarySort::MostPlayed
+                            }
+                            crate::model::LibrarySort::MostPlayed => crate::model::LibrarySort::Id,
+                        };
+                        this.refresh_filter(cx);
+                    },
+                ),
+            )
+            .child(
+                IconButton::new(
+                    ("other-tracks-check", panel_id),
+                    "󰑐",
+                    self.tr("library-other-check"),
+                )
+                .enabled(!self.state.system.scanning)
+                .build(
+                    IconButtonStyle::Surface,
+                    IconButtonDensity::Regular,
+                    cx,
+                    |this, _, cx| this.send(Command::CheckOtherTracks { force: false }, cx),
+                ),
+            )
+            .child(
+                IconButton::new(
+                    ("other-tracks-force", panel_id),
+                    "󱉶",
+                    self.tr("library-other-force"),
+                )
+                .enabled(!self.state.system.scanning)
+                .build(
+                    IconButtonStyle::Surface,
+                    IconButtonDensity::Regular,
+                    cx,
+                    |this, _, cx| this.send(Command::CheckOtherTracks { force: true }, cx),
+                ),
             );
         let mut panel = panel_surface(("library-panel", panel_id))
             .child(rivu_ui::panel_heading_row(heading, tools));
@@ -1223,6 +1356,9 @@ impl Library {
                         }),
                 );
             }
+        }
+        if self.state.library.track_total == 0 {
+            panel = panel.child(caption(theme, self.tr("library-other-empty")));
         }
         if self.state.system.scan_progress.is_some() || self.state.system.scanning {
             panel = panel.child(self.library_scan_status(panel_id, cx));
@@ -1291,16 +1427,19 @@ mod library_root_tests {
     fn assert_roots(window: &mut VisualTestContext, app: &Entity<Library>, roots: &[PathBuf]) {
         app.update(&mut window.cx, |this, _| {
             let tree = this.library.tree();
+            assert!(matches!(tree.item(0), Some(TreeItem::Entry(row)) if matches!(row.row, DirectoryRow::OtherTracks)));
             let rendered = (0..tree.row_count())
-                .map(|index| match tree.item(index) {
+                .filter_map(|index| match tree.item(index) {
                     Some(TreeItem::Entry(row)) if row.depth == 0 => match row.row {
-                        DirectoryRow::Directory { path } => path,
+                        DirectoryRow::Directory { path } => Some(path),
+                        DirectoryRow::OtherTracks => None,
                         DirectoryRow::Track(_) => panic!("forest contains a track"),
                     },
                     _ => panic!("configured root was not projected by viewport demand"),
                 })
                 .collect::<Vec<_>>();
             assert_eq!(rendered, roots);
+            assert_eq!((0..tree.row_count()).filter(|index| matches!(tree.item(*index), Some(TreeItem::Entry(row)) if matches!(row.row, DirectoryRow::OtherTracks))).count(), 1);
             assert_eq!(this.library.search_counts(), Some((0, 0)));
             assert_eq!(this.state.library.track_total, 0);
             assert!(!this.state.system.scanning);

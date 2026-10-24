@@ -645,6 +645,7 @@ mod tests {
             offset: position,
             track: LibraryRow {
                 id: 1,
+                path: Default::default(),
                 title: String::new(),
                 artist: String::new(),
                 album: String::new(),

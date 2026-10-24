@@ -1,9 +1,12 @@
 //! Persistence over one SQLite connection and its bounded track cache.
 //! Operation modules share this owner; transaction boundaries stay within operations.
 
+mod admission;
 mod albums;
 mod cache;
 mod duplicates;
+#[cfg(test)]
+mod other_tracks_tests;
 mod playlists;
 mod positions;
 mod queue;

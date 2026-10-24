@@ -37,6 +37,7 @@ pub struct GuiSystemSnapshot {
     pub scanning: bool,
     pub scan_message: String,
     pub scan_progress: Option<crate::model::ScanProgress>,
+    pub scan_task_id: Option<u64>,
     pub last_error: Option<String>,
     pub devices: Arc<Vec<String>>,
     pub selected_device: Option<String>,
@@ -74,6 +75,7 @@ impl GuiSnapshot {
                 scanning: state.system.scanning,
                 scan_message: state.system.scan_message.clone(),
                 scan_progress: state.system.scan_progress.clone(),
+                scan_task_id: state.system.scan_task_id,
                 last_error: state.system.last_error.clone(),
                 devices: Arc::clone(&state.system.devices),
                 selected_device: state.system.selected_device.clone(),
@@ -117,6 +119,9 @@ pub struct TuiLibrarySnapshot {
 
 #[derive(Clone, Debug)]
 pub struct TuiSystemSnapshot {
+    pub scanning: bool,
+    pub scan_progress: Option<crate::model::ScanProgress>,
+    pub scan_task_id: Option<u64>,
     pub scan_message: String,
     pub last_error: Option<String>,
     pub revision: u64,
@@ -129,6 +134,9 @@ pub struct TuiSystemSnapshot {
 impl Default for TuiSystemSnapshot {
     fn default() -> Self {
         Self {
+            scanning: false,
+            scan_progress: None,
+            scan_task_id: None,
             scan_message: String::new(),
             last_error: None,
             revision: 0,
@@ -156,6 +164,9 @@ impl TuiSnapshot {
             current_track: state.current_track.clone(),
             playback: state.playback.clone(),
             system: TuiSystemSnapshot {
+                scanning: state.system.scanning,
+                scan_progress: state.system.scan_progress.clone(),
+                scan_task_id: state.system.scan_task_id,
                 scan_message: state.system.scan_message.clone(),
                 last_error: state.system.last_error.clone(),
                 revision: state.system.revision,

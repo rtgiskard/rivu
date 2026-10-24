@@ -10,7 +10,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 // Bump when probing semantics change; fingerprints remain reusable.
-const PROBE_VERSION: i64 = 1;
+pub(super) const PROBE_VERSION: i64 = 1;
 
 /// Semantic facts and admission counts from one committed scan transaction.
 ///
@@ -206,7 +206,68 @@ impl Store {
         )?
         .collect::<rusqlite::Result<Vec<_>>>()?)
     }
+    /// Refresh only identities still registered outside the current logical roots.
+    /// CUE metadata remains owned by its registered sheet; this operation never
+    /// reparses sheets, discovers segments, relocates identities or admits rows.
+    pub fn apply_other_tracks_check(
+        &self,
+        result: &mut ScanResult,
+        library_roots: &[PathBuf],
+    ) -> Result<ScanImpacts> {
+        let current: HashSet<_> = self
+            .other_tracks_sources(library_roots)?
+            .into_iter()
+            .collect();
+        result.roots.retain(|path| current.contains(path));
+        result
+            .records
+            .retain(|record| current.contains(&record.path));
+        let mut records = Vec::new();
+        let mut query = self.conn.prepare_cached(
+            "SELECT cue_sheet,cue_number,cue_start_frame,cue_end_frame,
+                    raw_title,raw_artist,raw_album,track_number,disc_number,release_date
+             FROM tracks INDEXED BY tracks_directory WHERE path=?1 ORDER BY id",
+        )?;
+        for source in result.records.drain(..) {
+            let mut rows =
+                query.query([source.path.to_str().context("Source path is not UTF-8")?])?;
+            let mut ordinary = false;
+            while let Some(row) = rows.next()? {
+                let Some(cue) = cue_from_row(row, 0)? else {
+                    ordinary = true;
+                    continue;
+                };
+                let mut record = source.clone();
+                record.media.title = row.get(4)?;
+                record.media.artist = row.get(5)?;
+                record.media.album = row.get(6)?;
+                record.media.track_number = row.get(7)?;
+                record.media.disc_number = row.get(8)?;
+                record.media.release_date = row.get(9)?;
+                let start = cue.start_frame as f64 / 75.0;
+                record.media.duration = source.media.duration.and_then(|duration| {
+                    let end = cue.end_frame.map_or(duration, |frame| frame as f64 / 75.0);
+                    (duration.is_finite() && start < duration && end > start)
+                        .then_some(end.min(duration) - start)
+                });
+                record.cue = Some(cue);
+                records.push(record);
+            }
+            drop(rows);
+            if ordinary {
+                records.push(source);
+            }
+        }
+        result.records = records;
+        result.min_duration_secs = 0;
+        self.apply_scan_scoped(result, true)
+    }
+
     pub fn apply_scan(&self, result: &ScanResult) -> Result<ScanImpacts> {
+        self.apply_scan_scoped(result, false)
+    }
+
+    fn apply_scan_scoped(&self, result: &ScanResult, exact_sources: bool) -> Result<ScanImpacts> {
         for r in &result.records {
             if r.path.to_str().is_none() {
                 bail!("scan path is not UTF-8: {}", r.path.display());
@@ -223,14 +284,20 @@ impl Store {
         }
         let transaction_started = std::time::Instant::now();
         let tx = self.conn.unchecked_transaction()?;
-        let (mut exact, prefixes) = scan_scope(&result.roots)?;
+        let (mut exact, mut prefixes) = scan_scope(&result.roots)?;
+        if exact_sources {
+            prefixes.clear();
+        }
         exact.extend(result.records.iter().map(|record| {
-            record
-                .cue
-                .as_ref()
-                .map_or(record.path.as_path(), |cue| cue.sheet.as_path())
-                .to_str()
-                .expect("scan record paths validated above")
+            let owner = if exact_sources {
+                record.path.as_path()
+            } else {
+                record
+                    .cue
+                    .as_ref()
+                    .map_or(record.path.as_path(), |cue| cue.sheet.as_path())
+            };
+            owner.to_str().expect("scan record paths validated above")
         }));
         let mut selected = HashMap::new();
         let read_existing = |r: &rusqlite::Row<'_>| {
@@ -242,9 +309,17 @@ impl Store {
                 independent: r.get(7)?,
             })
         };
+        let scope_ids = if exact_sources {
+            "SELECT t.id FROM json_each(?1) AS scope
+             CROSS JOIN tracks AS t INDEXED BY tracks_directory WHERE t.path=scope.value
+             UNION SELECT t.id FROM json_each(?2) AS scope
+             CROSS JOIN tracks AS t INDEXED BY tracks_directory WHERE t.path=scope.value"
+        } else {
+            SCAN_SCOPE_IDS
+        };
         let mut q = tx.prepare(&format!(
             "SELECT id,path,fingerprint,cue_sheet,cue_number,cue_start_frame,cue_end_frame,relocation_independent
-             FROM tracks WHERE id IN ({SCAN_SCOPE_IDS})"
+             FROM tracks WHERE id IN ({scope_ids})"
         ))?;
         for row in q.query_map(
             params![
@@ -257,20 +332,28 @@ impl Store {
             selected.insert(row.id, row);
         }
         drop(q);
-        let candidate_hashes: HashSet<&str> = result
-            .records
-            .iter()
-            .filter_map(|record| record.fingerprint.as_deref())
-            .collect();
-        let ordinary_candidate_hashes: HashSet<&str> = result
-            .records
-            .iter()
-            .filter(|record| record.cue.is_none())
-            .filter_map(|record| record.fingerprint.as_deref())
-            .collect();
+        let candidate_hashes: HashSet<&str> = if exact_sources {
+            HashSet::new()
+        } else {
+            result
+                .records
+                .iter()
+                .filter_map(|record| record.fingerprint.as_deref())
+                .collect()
+        };
+        let ordinary_candidate_hashes: HashSet<&str> = if exact_sources {
+            HashSet::new()
+        } else {
+            result
+                .records
+                .iter()
+                .filter(|record| record.cue.is_none())
+                .filter_map(|record| record.fingerprint.as_deref())
+                .collect()
+        };
         // Incomplete scans cannot relocate or mark missing. Exact record identities
         // are already in scope, so global same-content rows cannot affect this commit.
-        if !result.scan_incomplete {
+        if !exact_sources && !result.scan_incomplete {
             let mut q = tx.prepare(
                 "SELECT id,path,fingerprint,cue_sheet,cue_number,cue_start_frame,cue_end_frame,relocation_independent
                  FROM tracks INDEXED BY tracks_fingerprint WHERE fingerprint=?1",
@@ -342,7 +425,7 @@ impl Store {
         let unconfirmed = |record: &Existing| {
             // Truncation can omit a failed CUE source outside the requested roots:
             // conservatively disable all relocation as well as missing detection.
-            if result.scan_incomplete {
+            if result.scan_incomplete && !exact_sources {
                 return true;
             }
             let owner = match &record.cue {
@@ -377,11 +460,16 @@ impl Store {
         let mut absent_ordinary = HashSet::new();
         for record in &old {
             let key = identity(&record.path, record.cue.as_ref());
-            let owner = record
-                .cue
-                .as_ref()
-                .map_or(record.path.as_path(), |cue| cue.sheet.as_path());
-            if !identities.contains(&key)
+            let owner = if exact_sources {
+                record.path.as_path()
+            } else {
+                record
+                    .cue
+                    .as_ref()
+                    .map_or(record.path.as_path(), |cue| cue.sheet.as_path())
+            };
+            if !exact_sources
+                && !identities.contains(&key)
                 && let Some(hash) = record.hash.as_deref()
                 && candidate_hashes.contains(hash)
                 && !unconfirmed(record)
@@ -477,6 +565,9 @@ impl Store {
                     (!seen.contains(&candidate.id)).then_some(candidate.id)
                 })
             });
+            if exact_sources && id.is_none() {
+                continue;
+            }
             // Resolve exact identities and the existing relocation contract before
             // applying admission. Short existing tracks still refresh their metadata.
             if id.is_none() && result.excludes_new_track(r.media.duration) {
@@ -640,17 +731,23 @@ impl Store {
         let mut mark_missing =
             tx.prepare("UPDATE tracks SET missing=1 WHERE id=?1 AND missing=0")?;
         for o in &old {
-            let owner = o
-                .cue
-                .as_ref()
-                .map_or(o.path.as_path(), |cue| cue.sheet.as_path());
+            let owner = if exact_sources {
+                o.path.as_path()
+            } else {
+                o.cue
+                    .as_ref()
+                    .map_or(o.path.as_path(), |cue| cue.sheet.as_path())
+            };
             if !seen.contains(&o.id)
                 && !(o.cue.is_none() && suppressed.contains(o.path.as_path()))
-                && (result
-                    .roots
-                    .iter()
-                    .any(|root| owner == root || owner.starts_with(root))
-                    || absent_ordinary.contains(&o.id))
+                && ((if exact_sources {
+                    requested_roots.contains(owner)
+                } else {
+                    result
+                        .roots
+                        .iter()
+                        .any(|root| owner == root || owner.starts_with(root))
+                }) || absent_ordinary.contains(&o.id))
                 && !unconfirmed(o)
             {
                 let changed = mark_missing.execute([o.id])?;
@@ -717,7 +814,9 @@ mod tests {
             ..ScanResult::default()
         };
         assert!(store.apply_scan(&scan).unwrap().changed);
-        store.enqueue_sources(&["/music".into()], &[]).unwrap();
+        store
+            .enqueue_sources(&["/music".into()], &[], None)
+            .unwrap();
         let id = store.queue_page(None, 0, 10).unwrap().rows[0].track_id;
         (store, scan, id)
     }
@@ -1124,7 +1223,7 @@ mod tests {
     }
 
     #[test]
-    fn scan_fields_outside_queue_projection_refresh_without_invalidating_queue() {
+    fn scan_metadata_outside_queue_rows_refreshes_without_queue_invalidation() {
         let mut record = record();
         record.cue = Some(CueSegment {
             sheet: "/music/album.cue".into(),
@@ -1136,7 +1235,6 @@ mod tests {
         let page = store.queue_page(None, 0, 10).unwrap();
         let state = store.queue_state().unwrap();
         let record = &mut scan.records[0];
-        record.path = "/music/renamed.wav".into();
         record.fingerprint = None;
         record.size += 1;
         record.modified_ns += 1;
@@ -1154,7 +1252,6 @@ mod tests {
             ScanImpacts {
                 changed: true,
                 library: true,
-                structure: true,
                 ..ScanImpacts::default()
             }
         );
@@ -1201,6 +1298,46 @@ mod tests {
         );
         assert_eq!(store.queue_state().unwrap(), state);
         assert_eq!(store.queue_page(None, 0, 10).unwrap(), page);
+    }
+
+    #[test]
+    fn cue_source_rename_invalidates_queue_rows_without_changing_occurrences_or_current() {
+        let mut record = record();
+        record.cue = Some(CueSegment {
+            sheet: "/music/album.cue".into(),
+            number: 1,
+            start_frame: 0,
+            end_frame: Some(4500),
+        });
+        let (store, mut scan, id) = queued(record);
+        store.enqueue_tracks(&[id]).unwrap();
+        let mut expected = store.queue_page(None, 0, 10).unwrap();
+        store.set_queue_current(Some(expected.rows[1].id)).unwrap();
+        let before = store.queue_state().unwrap();
+        scan.records[0].path = "/music/renamed.wav".into();
+        assert_eq!(
+            store.apply_scan(&scan).unwrap(),
+            ScanImpacts {
+                changed: true,
+                library: true,
+                structure: true,
+                ..ScanImpacts::default()
+            }
+        );
+        let after = store.queue_state().unwrap();
+        assert!(after.revision > before.revision);
+        assert_eq!(
+            (after.total, after.current_id, after.current_position),
+            (before.total, before.current_id, before.current_position)
+        );
+        for row in &mut expected.rows {
+            row.track.path = scan.records[0].path.clone();
+        }
+        assert_eq!(store.queue_page(None, 0, 10).unwrap(), expected);
+        assert_eq!(store.track(id).unwrap().unwrap().path, scan.records[0].path);
+        assert_eq!(store.apply_scan(&scan).unwrap(), ScanImpacts::default());
+        assert_eq!(store.queue_state().unwrap(), after);
+        assert_eq!(store.queue_page(None, 0, 10).unwrap(), expected);
     }
 
     #[test]
@@ -1352,7 +1489,7 @@ mod tests {
             .track_id_for_source(&original.path, None)
             .unwrap()
             .unwrap();
-        store.enqueue_sources(&[], &[id]).unwrap();
+        store.enqueue_sources(&[], &[id], None).unwrap();
         let before = store.track(id).unwrap().unwrap();
         let mut replacement = original.clone();
         replacement.path = directory.path().join("new/source.wav");
@@ -1609,5 +1746,186 @@ mod tests {
                 .unwrap()
                 .independent
         );
+    }
+    #[test]
+    fn other_check_rechecks_current_membership_and_never_admits_or_relocates() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let original = record();
+        let mut inside = record();
+        inside.path = "/configured/inside.wav".into();
+        store
+            .apply_scan(&ScanResult {
+                records: vec![original.clone(), inside.clone()],
+                ..Default::default()
+            })
+            .unwrap();
+        let original_id = store
+            .track_id_for_source(&original.path, None)
+            .unwrap()
+            .unwrap();
+        let mut unknown = original.clone();
+        unknown.path = "/elsewhere/unregistered.wav".into();
+        let mut changed = original.clone();
+        changed.media.title = "Refreshed".into();
+        changed.media.duration = Some(0.25);
+        let mut result = ScanResult {
+            roots: vec![inside.path.clone()],
+            records: vec![changed, unknown.clone()],
+            min_duration_secs: 60,
+            ..Default::default()
+        };
+        store
+            .apply_other_tracks_check(&mut result, &["/configured".into()])
+            .unwrap();
+        assert_eq!(
+            store.track_id_for_source(&original.path, None).unwrap(),
+            Some(original_id)
+        );
+        assert_eq!(
+            store.track_id_for_source(&unknown.path, None).unwrap(),
+            None
+        );
+        assert_eq!(
+            store.track(original_id).unwrap().unwrap().title,
+            "Refreshed"
+        );
+        assert_eq!(
+            store.track(original_id).unwrap().unwrap().duration,
+            Some(0.25)
+        );
+        let inside_id = store
+            .track_id_for_source(&inside.path, None)
+            .unwrap()
+            .unwrap();
+        assert!(!store.track(inside_id).unwrap().unwrap().missing);
+
+        // Roots changed during preparation: neither metadata nor absence from the
+        // old Other scope may affect a source that is now configured.
+        let mut stale = ScanResult {
+            roots: vec![original.path.clone()],
+            records: vec![original.clone()],
+            ..Default::default()
+        };
+        assert!(
+            !store
+                .apply_other_tracks_check(&mut stale, &["/music".into()])
+                .unwrap()
+                .changed
+        );
+        assert_eq!(
+            store.track(original_id).unwrap().unwrap().title,
+            "Refreshed"
+        );
+    }
+
+    #[test]
+    fn other_check_preserves_registered_cue_identity_and_user_state_across_absence() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let ordinary = record();
+        let mut cue = ordinary.clone();
+        cue.media.title = "Registered segment".into();
+        cue.media.duration = Some(10.0);
+        cue.cue = Some(CueSegment {
+            sheet: "/sheets/registered.cue".into(),
+            number: 7,
+            start_frame: 750,
+            end_frame: Some(1500),
+        });
+        store
+            .apply_scan(&ScanResult {
+                records: vec![ordinary.clone(), cue.clone()],
+                ..Default::default()
+            })
+            .unwrap();
+        let id = store
+            .track_id_for_source(&ordinary.path, None)
+            .unwrap()
+            .unwrap();
+        let cue_id = store
+            .track_id_for_source(Path::new("/sheets/registered.cue"), Some(7))
+            .unwrap()
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE tracks SET title_override='Personal',play_count=9 WHERE id=?1",
+                [cue_id],
+            )
+            .unwrap();
+        store.enqueue_tracks(&[cue_id, id, cue_id]).unwrap();
+        let occurrences = || {
+            store
+                .queue_page(None, 0, 10)
+                .unwrap()
+                .rows
+                .into_iter()
+                .map(|row| (row.id, row.track_id, row.position))
+                .collect::<Vec<_>>()
+        };
+        let entries = occurrences();
+        store.set_queue_current(Some(entries[2].0)).unwrap();
+        let queue = store.queue_state().unwrap();
+        let playlist = store
+            .create_playlist_with_tracks("Retained", &[cue_id, id, cue_id])
+            .unwrap();
+        let playlist_tracks = store.playlist_track_ids(playlist, 10).unwrap();
+        let mut absent = ScanResult {
+            roots: vec![ordinary.path.clone()],
+            ..Default::default()
+        };
+        store.apply_other_tracks_check(&mut absent, &[]).unwrap();
+        assert!(store.track(id).unwrap().unwrap().missing);
+        assert!(store.track(cue_id).unwrap().unwrap().missing);
+        let missing_queue = store.queue_state().unwrap();
+        assert!(missing_queue.revision > queue.revision);
+        assert_eq!(occurrences(), entries);
+        assert_eq!(
+            (
+                missing_queue.total,
+                missing_queue.current_id,
+                missing_queue.current_position
+            ),
+            (queue.total, queue.current_id, queue.current_position)
+        );
+        let mut source = ordinary.clone();
+        source.media.title = "Source title must not replace CUE title".into();
+        source.media.sample_rate = 96000;
+        let mut restored = ScanResult {
+            records: vec![source],
+            ..Default::default()
+        };
+        store.apply_other_tracks_check(&mut restored, &[]).unwrap();
+        let segment = store.track(cue_id).unwrap().unwrap();
+        assert!(!segment.missing);
+        assert!(!store.track(id).unwrap().unwrap().missing);
+        assert_eq!(segment.title, "Personal");
+        assert_eq!(segment.duration, Some(10.0));
+        assert_eq!(segment.sample_rate, 96000);
+        assert_eq!(segment.cue, cue.cue);
+        let stored: (String, i64) = store
+            .conn
+            .query_row(
+                "SELECT raw_title,play_count FROM tracks WHERE id=?1",
+                [cue_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(stored, ("Registered segment".into(), 9));
+        let restored_queue = store.queue_state().unwrap();
+        assert!(restored_queue.revision > missing_queue.revision);
+        assert_eq!(occurrences(), entries);
+        assert_eq!(
+            (
+                restored_queue.total,
+                restored_queue.current_id,
+                restored_queue.current_position
+            ),
+            (queue.total, queue.current_id, queue.current_position)
+        );
+        assert_eq!(
+            store.playlist_track_ids(playlist, 10).unwrap(),
+            playlist_tracks
+        );
+        assert_eq!(store.track_count().unwrap(), 2);
     }
 }

@@ -2,14 +2,48 @@
 :toc:
 :toclevels: 2
 
-The library is shared by the desktop GUI, CLI, and TUI. Start by configuring a
-music folder and scanning it; then browse tracks, albums, or recent activity and
-send tracks to the queue or a link:03_playlist.adoc[playlist]. Scanning and edits
-change Rivu's database, not the audio files.
+The library is shared by the desktop GUI, CLI, and TUI. Add individual audio files
+by dropping them into Queue, or configure a music folder and scan it. Browse
+registered tracks, albums, or recent activity and send tracks to the queue or a
+link:03_playlist.adoc[playlist]. Registration, scanning, and edits change Rivu's
+database, not the audio files.
 
 CLI paths are relative to the invoking client's working directory; absolute paths
 are accepted. Except for the local `library probe` and independent migration tool,
 library commands address the running host for the selected data directory.
+
+== Other
+
+`Other` is always shown before configured music folders. It contains registered
+tracks whose paths are outside every configured folder; with no configured
+folders, it contains all registered tracks. Adding or removing a folder changes
+where its tracks appear, without changing tracks, user edits, or saved references.
+It is a view of the shared library, not a separate library or a temporary queue.
+
+Tracks appear in a flat list with their source directories. Search, favorite and
+missing-file filters, sorting, selection, and track actions work within this
+collection. Dragging its header adds the complete collection, not only search
+matches. To add local files, see link:04_playback.adoc#_adding_local_files[Adding local files].
+
+Hover its header for `Check files`, or use the commands below. Checking visits
+only registered audio files: it neither searches their parent folders nor discovers
+new tracks. Confirmed absence marks a track missing; permission and read errors do
+not. Restoring a file clears its missing state on the next successful check.
+`Force reread` refreshes unchanged audio metadata too. Both operations preserve
+track identities, user edits, favorites, listening history, and queue/playlist
+references; neither relocates or deletes tracks. Checking does not reimport CUE sheets.
+
+[source,sh]
+----
+rivu library other list --query "artist"
+rivu library other count
+rivu library other locate TRACK_ID
+rivu library other check --wait
+rivu library other check --force --wait
+----
+
+`library other list` returns one page; use `--offset` and `--limit` to read more.
+`rivu queue add-other` appends the complete collection without starting playback.
 
 == Roots and scanning
 
@@ -194,8 +228,8 @@ playback, or unsaved Details edits. Track changes do not automatically follow.
 
 If search, favorites, or missing-only filters hide the track, Library offers
 `Clear filters and locate`; only that explicit action clears the filters.
-A track outside configured roots or no longer available in the library is
-reported rather than locating a different row. Location queries run in the
+Tracks outside configured folders are located in Other. A track no longer in the
+library is reported rather than substituted with a different row. Location queries run in the
 background; changed tracks, views, roots, or library revisions discard stale results.
 
 == Albums
@@ -329,10 +363,12 @@ Home/End. Clicking Albums, a playlist catalog, Recent or any other panel never
 forwards unsupported row actions to an earlier selection in another panel.
 Hidden or removed panels cannot own these actions.
 
-The TUI Library tree starts at the configured library roots only, including empty
-roots. With no configured roots it is empty; it does not add a filesystem-root
-entry inferred from stored tracks. Enter opens a directory; Left or Backspace
-returns to its parent.
+The TUI Library tree starts with Other, followed by configured roots in their
+configured order, including empty roots. With no roots, Other remains available;
+no filesystem-root entry is inferred from stored tracks. Enter opens a collection
+or directory; Left or Backspace returns to its parent. Within Other, Alt+f and
+Alt+m toggle favorite and missing filters, Alt+s changes sort, Alt+c checks files,
+and Alt+Shift+c forces a metadata reread. Alt+e appends the complete collection to Queue.
 
 In the GUI, unmodified `PageUp` / `PageDown` scroll one viewport height without
 changing selected rows. They target the last-clicked visible scroll viewport;

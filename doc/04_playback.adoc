@@ -86,6 +86,33 @@ returns a streamed JSON array of occurrence rows with absolute zero-based positi
 and display metadata. Listings stop on concurrent queue content changes; repeat
 the listing to obtain a consistent new traversal.
 
+=== Adding local files
+
+Drag ordinary local audio files from a file manager into Queue. A drop in blank
+space appends; a drop on a row inserts at that boundary. Files are registered
+persistently, reusing existing track identities. Input order and repeated files
+are preserved as separate queue occurrences. Adding files neither starts nor
+interrupts playback, replaces the queue, creates a playlist, nor configures a folder.
+
+This operation does not scan parent folders or apply the scan minimum-duration
+filter. Directories, CUE sheets, and playlists are not expanded. Unsupported or
+unreadable files are skipped and reported; valid files are still added. Registration
+and insertion commit together. If the chosen insertion position becomes stale,
+the entire operation fails without registering new tracks or appending elsewhere.
+
+[source,sh]
+----
+rivu queue add-paths song.wav another.flac song.wav --wait
+----
+
+For positional CLI insertion, supply both `--index` and `--expected-revision` from
+the observed queue state (`rivu --json library status`). `--wait` reports the
+operation's completion, including skipped-file errors even when valid files were
+saved. Registered tracks appear under their configured folder or in
+link:02_library.adoc#_other[Other]. Clearing Queue does not remove them from Library.
+
+=== Queue controls
+
 The Queue panel displays occurrences in order and marks the current occurrence.
 Use the link:02_library.adoc#_desktop_selection_and_directory_tree[shared selection rules]
 for clicks, ranges, and row context menus. Double-click plays that occurrence.

@@ -294,9 +294,14 @@ impl Store {
         Ok(())
     }
 
-    pub(crate) fn enqueue_sources(&self, directories: &[PathBuf], ids: &[i64]) -> Result<()> {
+    pub(crate) fn enqueue_sources(
+        &self,
+        directories: &[PathBuf],
+        ids: &[i64],
+        other_roots: Option<&[PathBuf]>,
+    ) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
-        let (directories, ids) = self.source_parameters(directories, ids)?;
+        let (directories, ids) = self.source_parameters(directories, ids, other_roots)?;
         let changed = tx.execute(&format!("INSERT INTO queue_entries(track_id,position) SELECT tracks.id,(SELECT COALESCE(MAX(position)+1,0) FROM queue_entries)+row_number() OVER (ORDER BY tracks.id)-1 FROM tracks WHERE {SOURCE_FILTER} ORDER BY tracks.id"), params![directories, ids])?;
         invalidate_structure(&tx, changed != 0)?;
         tx.commit()?;
@@ -317,10 +322,11 @@ impl Store {
         &self,
         directories: &[PathBuf],
         ids: &[i64],
+        other_roots: Option<&[PathBuf]>,
         index: usize,
         expected_revision: u64,
     ) -> Result<Vec<u64>> {
-        let (directories, ids) = self.source_parameters(directories, ids)?;
+        let (directories, ids) = self.source_parameters(directories, ids, other_roots)?;
         self.insert_queue(&ids, Some(&directories), index, expected_revision)
     }
 
@@ -508,6 +514,7 @@ mod tests {
         store.insert_queue_sources(
             &["/music".into(), "/music".into()],
             &[3, 1, 3],
+            None,
             0,
             before.revision,
         )?;
@@ -531,7 +538,7 @@ mod tests {
             );
             assert!(
                 store
-                    .insert_queue_sources(&[], &[], index, state.revision)
+                    .insert_queue_sources(&[], &[], None, index, state.revision)
                     .is_err()
             );
         }
@@ -542,7 +549,7 @@ mod tests {
         );
         assert!(
             store
-                .insert_queue_sources(&["/music".into()], &[999], 1, state.revision)
+                .insert_queue_sources(&["/music".into()], &[999], None, 1, state.revision)
                 .is_err()
         );
         assert!(
@@ -552,7 +559,7 @@ mod tests {
         );
         assert!(
             store
-                .insert_queue_sources(&["/absent".into()], &[], 0, state.revision)?
+                .insert_queue_sources(&["/absent".into()], &[], None, 0, state.revision)?
                 .is_empty()
         );
         assert_eq!(store.queue_state()?, state);
@@ -575,7 +582,7 @@ mod tests {
         );
         assert!(
             store
-                .insert_queue_sources(&["/music".into()], &[], 1, before.revision)
+                .insert_queue_sources(&["/music".into()], &[], None, 1, before.revision)
                 .is_err()
         );
         assert_eq!(store.queue_ids()?, order);
@@ -595,8 +602,8 @@ mod tests {
         let store = fixture()?;
         let before = store.queue_state()?;
         store.enqueue_tracks(&[])?;
-        store.enqueue_sources(&[], &[])?;
-        store.enqueue_sources(&["/absent".into()], &[])?;
+        store.enqueue_sources(&[], &[], None)?;
+        store.enqueue_sources(&["/absent".into()], &[], None)?;
         store.reorder_queue(&[])?;
         assert!(!store.move_queue_entries(&[], 0)?);
         store.remove_queue_entries(&[])?;
@@ -625,7 +632,7 @@ mod tests {
         revision = assert_invalidated(&store, revision)?;
         store.remove_queue_entries(&[ids[0]])?;
         revision = assert_invalidated(&store, revision)?;
-        store.enqueue_sources(&[], &[1])?;
+        store.enqueue_sources(&[], &[1], None)?;
         revision = assert_invalidated(&store, revision)?;
         store.enqueue_tracks(&[2])?;
         revision = assert_invalidated(&store, revision)?;
@@ -726,7 +733,7 @@ mod tests {
              BEGIN SELECT RAISE(ABORT,'injected invalidation failure'); END;",
         )?;
         assert!(store.enqueue_tracks(&[1]).is_err());
-        assert!(store.enqueue_sources(&[], &[1]).is_err());
+        assert!(store.enqueue_sources(&[], &[1], None).is_err());
         assert!(store.move_queue_entries(&[(ids[0] as i64, 0)], 3).is_err());
         assert!(
             store

@@ -237,9 +237,20 @@ pub(super) enum QueryKind {
     QueueSelection(u64),
     Search(String),
     Directory(PathBuf),
+    OtherTracks {
+        query: String,
+        favorite: Option<bool>,
+        missing: Option<bool>,
+        sort: LibrarySort,
+        anchor: Option<i64>,
+    },
+    OtherTracksCount,
     Playlists,
     Playlist(i64),
-    PlaylistSelection { playlist_id: i64, entry_id: i64 },
+    PlaylistSelection {
+        playlist_id: i64,
+        entry_id: i64,
+    },
     Track(i64),
 }
 
@@ -259,6 +270,7 @@ impl QueryKind {
 
     fn into_query(self, offset: usize, limit: usize) -> Query {
         match self {
+            QueryKind::OtherTracksCount => Query::OtherTracksCount,
             QueryKind::Track(track_id) => Query::Track { track_id },
             QueryKind::Queue => Query::QueuePage {
                 query: None,
@@ -276,6 +288,29 @@ impl QueryKind {
                 sort: LibrarySort::Id,
                 offset,
                 limit,
+            },
+            QueryKind::OtherTracks {
+                query,
+                favorite,
+                missing,
+                sort,
+                anchor,
+            } => match anchor {
+                Some(track_id) => Query::OtherTracksLocate {
+                    track_id,
+                    query: Some(query),
+                    favorite,
+                    missing,
+                    sort,
+                },
+                None => Query::OtherTracksPage {
+                    query: Some(query),
+                    favorite,
+                    missing,
+                    sort,
+                    offset,
+                    limit,
+                },
             },
             QueryKind::Directory(path) => Query::DirectoryPage {
                 path,

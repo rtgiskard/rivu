@@ -100,12 +100,17 @@ impl Library {
                 &branch,
                 generation,
                 crate::model::Page {
-                    total: roots.len(),
-                    rows: roots
-                        .iter()
+                    total: roots.len() + 1,
+                    rows: std::iter::once(crate::model::DirectoryRow::OtherTracks)
+                        .chain(
+                            roots
+                                .iter()
+                                .map(|path| crate::model::DirectoryRow::Directory {
+                                    path: path.clone(),
+                                }),
+                        )
                         .skip(offset)
                         .take(page_size)
-                        .map(|path| crate::model::DirectoryRow::Directory { path: path.clone() })
                         .collect(),
                 },
             );
@@ -115,7 +120,16 @@ impl Library {
             };
         }
         let buffer = self.library.buffer();
-        let query = if self.library.tree_active() {
+        let query = if branch.is_other_tracks() {
+            Query::OtherTracksPage {
+                query: buffer.query.clone(),
+                favorite: buffer.favorite,
+                missing: buffer.missing,
+                sort: buffer.sort,
+                offset,
+                limit: page_size,
+            }
+        } else if self.library.tree_active() {
             Query::DirectoryPage {
                 path: branch.path().to_path_buf(),
                 query: buffer.query.clone(),
@@ -202,7 +216,10 @@ impl Library {
                 page
             }
             Ok(ViewResponse::LibraryPage(page))
-                if matches!(read.query, Query::LibraryRootPage { .. }) =>
+                if matches!(
+                    read.query,
+                    Query::LibraryRootPage { .. } | Query::OtherTracksPage { .. }
+                ) =>
             {
                 crate::model::Page {
                     total: page.total,
@@ -351,6 +368,43 @@ mod tests {
         owner.update(cx, |owner, _| run(owner));
     }
 
+    #[gpui::test]
+    fn other_collection_is_present_without_roots_and_uses_its_own_query(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        with_library(cx, |browser| {
+            let revisions = QueryRevisions::default();
+            let forest = browser.prepare_directory_read(
+                library::TreeBranch::default(),
+                0,
+                20,
+                &[],
+                revisions,
+            );
+            assert!(forest.published);
+            assert!(forest.read.is_none());
+            assert_eq!(browser.library.tree().root_total(), Some(1));
+            let Some(library::tree::TreeItem::Entry(entry)) = browser.library.tree().item(0) else {
+                panic!("other collection row");
+            };
+            assert!(matches!(entry.row, crate::model::DirectoryRow::OtherTracks));
+            let branch = entry.branch.expect("explicit collection branch");
+            assert!(branch.is_other_tracks());
+            assert!(!branch.is_forest());
+            browser.library.expand_directory(&branch, true);
+            browser.library.buffer.query = Some("needle".into());
+            browser.library.buffer.favorite = Some(true);
+            browser.library.buffer.missing = Some(true);
+            let read = browser
+                .prepare_directory_read(branch, 0, 20, &[], revisions)
+                .read
+                .expect("collection read");
+            assert!(
+                matches!(&read.query, Query::OtherTracksPage { query: Some(query), favorite: Some(true), missing: Some(true), offset: 0, limit: 20, .. } if query == "needle")
+            );
+        });
+    }
+
     fn root_branches(
         browser: &mut Library,
         roots: &[std::path::PathBuf],
@@ -364,7 +418,7 @@ mod tests {
         );
         assert!(request.published);
         assert!(request.read.is_none());
-        (0..roots.len())
+        (1..=roots.len())
             .map(|index| {
                 let library::tree::TreeItem::Entry(entry) =
                     browser.library.tree().item(index).unwrap()

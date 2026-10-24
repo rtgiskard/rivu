@@ -3406,7 +3406,9 @@ fn directory_search_reuses_literal_unicode_metadata_and_path_matching() {
             .iter()
             .map(|row| match row {
                 DirectoryRow::Track(row) => row.id,
-                DirectoryRow::Directory { .. } => panic!("expected only tracks"),
+                DirectoryRow::Directory { .. } | DirectoryRow::OtherTracks => {
+                    panic!("expected only tracks")
+                }
             })
             .collect::<Vec<_>>();
         assert_eq!(
@@ -4001,7 +4003,7 @@ fn directory_selections_deduplicate_atomically_without_capping_playlists() {
         PathBuf::from("/music/B"),
         PathBuf::from("/music/A"),
     ];
-    store.enqueue_sources(&directories, &[1, 1]).unwrap();
+    store.enqueue_sources(&directories, &[1, 1], None).unwrap();
     assert_eq!(store.queue_state().unwrap().total, 5000);
     assert_eq!(
         store.queue_page(None, 4999, 1).unwrap().rows[0].track_id,
@@ -4010,7 +4012,7 @@ fn directory_selections_deduplicate_atomically_without_capping_playlists() {
     let playlist = store.create_playlist("Unlimited").unwrap();
     store.add_playlist(playlist, &[5000]).unwrap();
     store
-        .add_playlist_sources(playlist, &directories, &[1, 1])
+        .add_playlist_sources(playlist, &directories, &[1, 1], None)
         .unwrap();
     let first = store.playlist_entries_page(playlist, None, 0, 2).unwrap();
     assert_eq!(first.total, 5000);
@@ -4038,7 +4040,7 @@ fn directory_selections_deduplicate_atomically_without_capping_playlists() {
         4999
     );
     store
-        .add_playlist_sources(playlist, &directories, &[])
+        .add_playlist_sources(playlist, &directories, &[], None)
         .unwrap();
     assert_eq!(
         store
@@ -4050,7 +4052,7 @@ fn directory_selections_deduplicate_atomically_without_capping_playlists() {
     let empty = store.create_playlist("Atomic").unwrap();
     assert!(
         store
-            .add_playlist_sources(empty, &directories, &[99999])
+            .add_playlist_sources(empty, &directories, &[99999], None)
             .is_err()
     );
     assert_eq!(
@@ -4069,7 +4071,7 @@ fn bulk_missing_cleanup_spans_pages_and_preserves_playlist_reordering() {
     let playlist = store.create_playlist("Availability").unwrap();
     store.add_playlist(playlist, &[1000]).unwrap();
     store
-        .add_playlist_sources(playlist, &[PathBuf::from("/music")], &[])
+        .add_playlist_sources(playlist, &[PathBuf::from("/music")], &[], None)
         .unwrap();
     store.mark_played(25, 42).unwrap();
     store.mark_played(1000, 43).unwrap();
@@ -4230,7 +4232,7 @@ fn persistent_queue_accepts_entire_large_library_pages_restarts_and_saves_playli
     let store = Store::open(&path).unwrap();
     store.conn.execute_batch("WITH RECURSIVE ids(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM ids WHERE n<200000) INSERT INTO tracks(path,raw_title) SELECT '/music/'||n||'.wav','Track '||n FROM ids;").unwrap();
     store
-        .enqueue_sources(&[PathBuf::from("/music")], &[])
+        .enqueue_sources(&[PathBuf::from("/music")], &[], None)
         .unwrap();
     let state = store.queue_state().unwrap();
     assert_eq!(state.total, 200_000);

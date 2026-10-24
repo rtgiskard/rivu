@@ -2,11 +2,13 @@ use super::*;
 use crate::library::ScanRecord;
 use std::sync::atomic::Ordering;
 
+mod admission;
 mod catalog;
 mod display;
 mod lifecycle;
 mod long_operations;
 mod navigation;
+mod other_tracks;
 mod playback;
 mod processing;
 mod query;
@@ -119,6 +121,7 @@ fn fixture_with_database(duration: Option<f64>, persistent: bool) -> (tempfile::
         pending_bitrate: None,
         pending_navigation: None,
         active_export: None,
+        active_external_admission: None,
         active_optimization: None,
         processing: crate::processing::Service::new(directory.path().to_path_buf()),
         processing_results: VecDeque::new(),

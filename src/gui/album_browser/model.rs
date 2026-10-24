@@ -520,6 +520,7 @@ mod tests {
     fn row(id: i64) -> LibraryRow {
         LibraryRow {
             id,
+            path: Default::default(),
             title: id.to_string(),
             artist: String::new(),
             album: String::new(),

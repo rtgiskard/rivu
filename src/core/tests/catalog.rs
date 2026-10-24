@@ -31,6 +31,7 @@ fn committed_scan_invalidates_before_failed_refresh() {
     let status = save_prepared_scan(
         &mut core,
         ScanFinished {
+            other_tracks_check: false,
             id: 1,
             result: Ok(ScanResult {
                 roots: vec![path],
@@ -234,6 +235,7 @@ fn unchanged_scans_keep_query_results_valid_and_still_import_playlists() {
     let current = core.state.current_track.clone().unwrap();
     for import in [false, true] {
         let scan = ScanFinished {
+            other_tracks_check: false,
             id: 0,
             result: Ok(result.clone()),
             import: import.then(|| {
@@ -520,6 +522,7 @@ fn failed_playlist_import_keeps_committed_scan_visible() {
         .unwrap();
     media.title = "Updated by scan".into();
     let scan = ScanFinished {
+        other_tracks_check: false,
         id: 0,
         result: Ok(ScanResult {
             records: vec![ScanRecord {
@@ -610,6 +613,7 @@ fn failed_cue_import_never_reuses_old_entries_but_keeps_readable_items() {
             .unwrap();
         let path = directory.path().join("2.wav");
         let scan = ScanFinished {
+            other_tracks_check: false,
             id: 0,
             result: Ok(ScanResult {
                 records: if readable {
@@ -1058,6 +1062,7 @@ fn verification_only_scan_invalidates_member_facts_not_display_or_playlist_pages
     let status = save_prepared_scan(
         &mut core,
         ScanFinished {
+            other_tracks_check: false,
             id: 1,
             result: Ok(ScanResult {
                 records: vec![record],
@@ -1247,6 +1252,7 @@ fn stale_scan_events_cannot_replace_the_active_task() {
         progress: progress.clone(),
     });
     core.scan_event(ScanEvent::Finished(ScanFinished {
+        other_tracks_check: false,
         id: 0,
         result: Ok(ScanResult::default()),
         import: None,
@@ -1869,6 +1875,7 @@ fn cue_playlist_import_deduplicates_segments_in_first_occurrence_order() {
     let status = save_prepared_scan(
         &mut core,
         ScanFinished {
+            other_tracks_check: false,
             id: 0,
             result: Ok(ScanResult {
                 roots: vec![sheet],
@@ -2090,4 +2097,132 @@ fn database_optimization_shutdown_waits_for_final_worker_result() {
     assert!(core.active_optimization.is_none());
     assert!(core.state.system.database_optimization.is_some());
     assert!(core.shutdown_optimization().is_none());
+}
+
+fn prepare_other_check(core: &mut Core, force: bool) -> ScanFinished {
+    let id = core.start_other_tracks_check(force).unwrap();
+    assert!(core.state.system.scanning);
+    assert_eq!(core.state.system.scan_task_id, Some(id));
+    loop {
+        match core.scan_rx.recv_timeout(Duration::from_secs(5)).unwrap() {
+            ScanEvent::Finished(finished) => return finished,
+            event => core.scan_event(event),
+        }
+    }
+}
+
+#[test]
+fn other_check_empty_roots_rechecks_only_registered_sources_without_duration_filter() {
+    let (directory, mut core) = fixture();
+    let existing = directory.path().join("1.wav");
+    let unregistered = directory.path().join("unregistered.wav");
+    write_pcm(&existing);
+    write_pcm(&unregistered);
+    let config = Arc::make_mut(&mut core.state.system.config);
+    config.library_roots.clear();
+    config.scan_min_duration_secs = 3600;
+    core.command(Command::CheckOtherTracks { force: true })
+        .unwrap();
+    let id = core.active_scan.as_ref().unwrap().status.id;
+    assert!(core.state.system.scanning);
+    assert_eq!(core.state.system.scan_task_id, Some(id));
+    assert!(settle_scan(&mut core));
+    assert!(!core.state.system.scanning);
+    assert_eq!(core.state.system.scan_task_id, Some(id));
+    assert!(!core.store.track(1).unwrap().unwrap().missing);
+    for id in 2..=4 {
+        assert!(core.store.track(id).unwrap().unwrap().missing);
+    }
+    assert_eq!(
+        core.store.track_id_for_source(&unregistered, None).unwrap(),
+        None
+    );
+    assert_eq!(core.store.track_count().unwrap(), 4);
+    assert_eq!(core.scan_results.back().unwrap().progress.total, Some(4));
+}
+
+#[test]
+fn other_check_rechecks_roots_after_preparation_and_before_saving() {
+    let (directory, mut core) = fixture();
+    Arc::make_mut(&mut core.state.system.config)
+        .library_roots
+        .clear();
+    let finished = prepare_other_check(&mut core, true);
+    assert_eq!(finished.result.as_ref().unwrap().roots.len(), 4);
+    Arc::make_mut(&mut core.state.system.config).library_roots =
+        vec![directory.path().join("unused/..")];
+    core.scan_event(ScanEvent::Finished(finished));
+    assert!(settle_scan(&mut core));
+    for id in 1..=4 {
+        assert!(!core.store.track(id).unwrap().unwrap().missing);
+    }
+}
+
+#[test]
+fn other_check_cancel_and_shutdown_join_preparation_waiting_on_owner() {
+    for shutdown in [false, true] {
+        let (directory, mut core) = fixture();
+        write_pcm(&directory.path().join("1.wav"));
+        Arc::make_mut(&mut core.state.system.config)
+            .library_roots
+            .clear();
+        let id = core.start_other_tracks_check(false).unwrap();
+        let lookup = loop {
+            let event = core.scan_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            if matches!(event, ScanEvent::KnownSources { .. }) {
+                break event;
+            }
+            core.scan_event(event);
+        };
+        if shutdown {
+            core.shutdown_scan();
+        } else {
+            core.cancel_scan(id).unwrap();
+            assert!(!settle_scan(&mut core));
+        }
+        drop(lookup);
+        assert!(core.active_scan.is_none());
+        assert_eq!(
+            core.scan_results.back().unwrap().progress.phase,
+            ScanPhase::Cancelled
+        );
+        assert!(!core.scan_results.back().unwrap().library_committed);
+        for track_id in 1..=4 {
+            assert!(!core.store.track(track_id).unwrap().unwrap().missing);
+        }
+    }
+}
+
+#[test]
+fn other_check_saving_rejects_cancel_and_shutdown_waits_for_commit() {
+    let (directory, mut core) = fixture();
+    Arc::make_mut(&mut core.state.system.config)
+        .library_roots
+        .clear();
+    let finished = prepare_other_check(&mut core, true);
+    let lock = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+    lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let id = finished.id;
+    core.scan_event(ScanEvent::Finished(finished));
+    assert_eq!(
+        core.active_scan.as_ref().unwrap().status.progress.phase,
+        ScanPhase::Saving
+    );
+    assert!(
+        core.cancel_scan(id)
+            .unwrap_err()
+            .to_string()
+            .contains("can no longer be cancelled")
+    );
+    lock.execute_batch("ROLLBACK").unwrap();
+    core.shutdown_scan();
+    assert!(core.active_scan.is_none());
+    assert!(core.scan_results.back().unwrap().library_committed);
+    assert_eq!(
+        core.scan_results.back().unwrap().progress.phase,
+        ScanPhase::Completed
+    );
+    for track_id in 1..=4 {
+        assert!(core.store.track(track_id).unwrap().unwrap().missing);
+    }
 }

@@ -29,6 +29,16 @@ impl Core {
                 self.append_queue_ids()?;
             }
             Command::Scan { paths, force } => return self.scan(paths, force),
+            Command::CheckOtherTracks { force } => {
+                self.start_other_tracks_check(force)?;
+            }
+            Command::QueueExternalPaths {
+                paths,
+                index,
+                expected_revision,
+            } => {
+                self.start_external_admission(paths, index, expected_revision)?;
+            }
             Command::CancelScan { id } => self.cancel_scan(id)?,
             Command::RelocateTrack {
                 source_id,
@@ -157,10 +167,14 @@ impl Core {
             }
             Command::Enqueue { track_ids } => self.enqueue(&track_ids)?,
             Command::EnqueueSources {
+                other_tracks,
                 directories,
                 track_ids,
             } => {
-                self.store.enqueue_sources(&directories, &track_ids)?;
+                let roots =
+                    other_tracks.then_some(self.state.system.config.library_roots.as_slice());
+                self.store
+                    .enqueue_sources(&directories, &track_ids, roots)?;
                 self.append_queue_ids()?;
             }
             Command::InsertQueue {
@@ -175,6 +189,7 @@ impl Core {
                 self.insert_queue_ids(index, inserted)?;
             }
             Command::InsertQueueSources {
+                other_tracks,
                 directories,
                 track_ids,
                 index,
@@ -184,6 +199,7 @@ impl Core {
                 let inserted = self.store.insert_queue_sources(
                     &directories,
                     &track_ids,
+                    other_tracks.then_some(self.state.system.config.library_roots.as_slice()),
                     index,
                     expected_revision,
                 )?;
@@ -238,14 +254,17 @@ impl Core {
                 track_ids,
             } => self.add_playlist(playlist_id, track_ids)?,
             Command::AddPlaylistSources {
+                other_tracks,
                 playlist_id,
                 directories,
                 track_ids,
             } => {
-                if self
-                    .store
-                    .add_playlist_sources(playlist_id, &directories, &track_ids)?
-                {
+                if self.store.add_playlist_sources(
+                    playlist_id,
+                    &directories,
+                    &track_ids,
+                    other_tracks.then_some(self.state.system.config.library_roots.as_slice()),
+                )? {
                     self.invalidate_playlist_members(&[playlist_id]);
                 }
             }
@@ -264,6 +283,7 @@ impl Core {
                 }
             }
             Command::InsertPlaylistSources {
+                other_tracks,
                 playlist_id,
                 directories,
                 track_ids,
@@ -275,6 +295,7 @@ impl Core {
                     playlist_id,
                     &directories,
                     &track_ids,
+                    other_tracks.then_some(self.state.system.config.library_roots.as_slice()),
                     index,
                 )? {
                     self.invalidate_playlist_members(&[playlist_id]);
@@ -357,6 +378,7 @@ impl Core {
             Command::DismissScanResult => {
                 if !self.state.system.scanning {
                     self.state.system.scan_progress = None;
+                    self.state.system.scan_task_id = None;
                     self.state.system.scan_message.clear();
                 }
                 return Ok(());

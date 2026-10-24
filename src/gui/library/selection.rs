@@ -72,6 +72,7 @@ enum Projection {
         query: Option<String>,
         favorite: Option<bool>,
         missing: Option<bool>,
+        sort: LibrarySort,
         revision: u64,
         total: usize,
     },
@@ -93,6 +94,7 @@ impl Scope {
                     query: view.query.clone(),
                     favorite: browser.favorites_only().then_some(true),
                     missing: view.missing,
+                    sort: view.sort,
                     revision: browser.tree().projection_revision(),
                     total: browser.tree().row_count(),
                 }
@@ -188,11 +190,14 @@ impl RangeJob {
 
     fn add_row(&mut self, slice: &Slice, row: &DirectoryRow) -> Result<(), SelectionError> {
         if let Some(expected) = &slice.check {
-            if !matches!(row, DirectoryRow::Directory { path } if path == expected.path()) {
+            if !matches!(row, DirectoryRow::Directory { path } if !expected.is_other_tracks() && path == expected.path())
+                && !(matches!(row, DirectoryRow::OtherTracks) && expected.is_other_tracks())
+            {
                 return Err(SelectionError::Message("gl-library-tree-changed"));
             }
         } else {
             self.selected.insert(match row {
+                DirectoryRow::OtherTracks => LibraryNode::OtherTracks,
                 DirectoryRow::Directory { path } => {
                     LibraryNode::Directory(Arc::from(path.as_path()))
                 }
@@ -202,29 +207,26 @@ impl RangeJob {
         Ok(())
     }
 
-    fn add_directory(
-        &mut self,
-        slice: &Slice,
-        path: &std::path::Path,
-    ) -> Result<(), SelectionError> {
-        if let Some(expected) = &slice.check {
-            if path != expected.path() {
-                return Err(SelectionError::Message("gl-library-tree-changed"));
-            }
-        } else {
-            self.selected
-                .insert(LibraryNode::Directory(Arc::from(path)));
-        }
-        Ok(())
-    }
-
     fn accept(&mut self, slice: &Slice, response: QueryResponse) -> Result<(), SelectionError> {
-        if self.query(slice).stamp(response.revisions) != self.scope.stamp {
+        let stamp = match &slice.source {
+            Source::Tree(branch) | Source::Flat(branch) if branch.is_forest() => {
+                let expected = self.scope.stamp.revisions();
+                if expected.library != response.revisions.library
+                    || expected.structure != response.revisions.structure
+                {
+                    return Err(SelectionError::Message("gl-library-changed"));
+                }
+                self.scope.stamp
+            }
+            _ => self.query(slice).stamp(response.revisions),
+        };
+        if stamp != self.scope.stamp {
             return Err(SelectionError::Message("gl-library-changed"));
         }
         let result = response.result.map_err(|error| error.to_string())?;
         match (&slice.source, result) {
-            (Source::Flat(_), ViewResponse::LibraryPage(page)) => {
+            (Source::Flat(_), ViewResponse::LibraryPage(page))
+            | (Source::Tree(_), ViewResponse::LibraryPage(page)) => {
                 Self::validate_page(slice, page.total, page.rows.len())?;
                 self.selected
                     .extend(page.rows.into_iter().map(|row| LibraryNode::Track(row.id)));
@@ -251,6 +253,32 @@ impl RangeJob {
 
     fn query(&self, slice: &Slice) -> Query {
         match &slice.source {
+            Source::Tree(branch) | Source::Flat(branch) if branch.is_other_tracks() => {
+                let (query, favorite, missing, sort) = match &self.scope.projection {
+                    Projection::Flat {
+                        query,
+                        favorite,
+                        missing,
+                        sort,
+                        ..
+                    } => (query, favorite, missing, *sort),
+                    Projection::Tree {
+                        query,
+                        favorite,
+                        missing,
+                        sort,
+                        ..
+                    } => (query, favorite, missing, *sort),
+                };
+                Query::OtherTracksPage {
+                    query: query.clone(),
+                    favorite: *favorite,
+                    missing: *missing,
+                    sort,
+                    offset: slice.offset,
+                    limit: slice.len,
+                }
+            }
             Source::Tree(branch) => {
                 let Projection::Tree {
                     query,
@@ -481,12 +509,25 @@ impl LibraryBrowser {
             if cached {
                 let result = match &slice.source {
                     Source::Tree(branch) if branch.is_forest() => {
-                        if roots.len() != slice.total || slice.offset + slice.len > roots.len() {
+                        if self.tree.root_total() != Some(slice.total)
+                            || slice.offset + slice.len > roots.len() + 1
+                        {
                             Err(SelectionError::Message("gl-library-roots-changed"))
+                        } else if let Some(rows) = self
+                            .tree
+                            .cached_rows(branch, slice.offset..slice.offset + slice.len)
+                        {
+                            rows.iter().try_for_each(|row| job.add_row(&slice, row))
                         } else {
-                            roots[slice.offset..slice.offset + slice.len]
-                                .iter()
-                                .try_for_each(|path| job.add_directory(&slice, path))
+                            std::iter::once(DirectoryRow::OtherTracks)
+                                .chain(
+                                    roots
+                                        .iter()
+                                        .map(|path| DirectoryRow::Directory { path: path.clone() }),
+                                )
+                                .skip(slice.offset)
+                                .take(slice.len)
+                                .try_for_each(|row| job.add_row(&slice, &row))
                         }
                     }
                     Source::Tree(branch) | Source::Flat(branch) => self
@@ -834,6 +875,7 @@ mod tests {
     fn row(id: i64) -> LibraryRow {
         LibraryRow {
             id,
+            path: Default::default(),
             title: String::new(),
             artist: String::new(),
             album: String::new(),
@@ -1298,6 +1340,7 @@ mod tests {
                         query: query.map(str::to_owned),
                         favorite: Some(true),
                         missing,
+                        sort: LibrarySort::Album,
                         revision: tree.projection_revision(),
                         total: expected.len(),
                     },
@@ -1649,6 +1692,7 @@ mod tests {
                     query: None,
                     favorite: None,
                     missing: None,
+                    sort: LibrarySort::Album,
                     revision: tree.projection_revision(),
                     total: tree.row_count(),
                 },
@@ -1750,6 +1794,7 @@ mod tests {
                     query: None,
                     favorite: None,
                     missing: None,
+                    sort: LibrarySort::Album,
                     revision: tree.projection_revision(),
                     total: 1,
                 },
@@ -1789,6 +1834,7 @@ mod tests {
                 query: None,
                 favorite: None,
                 missing: None,
+                sort: LibrarySort::Album,
                 revision: tree.projection_revision() + 1,
                 total: 1,
             },

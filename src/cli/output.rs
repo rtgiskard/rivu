@@ -208,6 +208,56 @@ pub(super) fn list_library(
     Ok(())
 }
 
+pub(super) fn show_other_tracks(i18n: &Localizer, view: ViewResponse, json: bool) -> Result<()> {
+    match view {
+        ViewResponse::LibraryPage(page) => {
+            if json {
+                println!("{}", serde_json::to_string_pretty(&page)?);
+            } else {
+                println!("total\t{}", page.total);
+                for track in page.rows {
+                    println!(
+                        "{}\t{}\t{}\t{}\t{}{}{}",
+                        track.id,
+                        Terminal(&track.title),
+                        Terminal(&track.artist),
+                        Terminal(&track.album),
+                        Terminal(track.path.display()),
+                        if track.missing {
+                            i18n.text("core-missing-marker")
+                        } else {
+                            ""
+                        },
+                        if track.favorite {
+                            i18n.text("core-favorite-marker")
+                        } else {
+                            ""
+                        },
+                    );
+                }
+            }
+        }
+        ViewResponse::OtherTracksCount(count) => println!("{count}"),
+        ViewResponse::LibraryLocate(location) => {
+            if json {
+                println!("{}", serde_json::to_string_pretty(&location)?);
+            } else {
+                use rivu::model::LibraryLocateResult;
+                match location {
+                    LibraryLocateResult::Located(location) => {
+                        println!("located\t{}\t{}", location.offset, location.total);
+                    }
+                    LibraryLocateResult::Filtered => println!("filtered"),
+                    LibraryLocateResult::Unavailable => println!("unavailable"),
+                    LibraryLocateResult::OutsideRoot => println!("outside-root"),
+                }
+            }
+        }
+        _ => bail!("Other query returned an unexpected response"),
+    }
+    Ok(())
+}
+
 pub(super) fn list_playlists(i18n: &Localizer, data_dir: &Path, json: bool) -> Result<()> {
     let mut session = ipc::client_session(data_dir)?;
     let _ = session.get_state(StateSections::default())?;

@@ -92,7 +92,7 @@ impl Library {
             .iter()
             .enumerate()
             .find(|(_, root)| track.path.starts_with(root))
-            .map(|(index, root)| (index, root.clone()));
+            .map(|(index, root)| (index + 1, root.clone()));
         cx.emit(LibraryEvent::Reveal);
         if !self.available {
             return;
@@ -104,11 +104,8 @@ impl Library {
             return;
         }
         self.library.locate.invalidate();
-        let Some((root_index, mut path)) = root else {
-            self.library.locate.notice = Some((track_id, LibraryLocateResult::OutsideRoot));
-            cx.notify();
-            return;
-        };
+        let other_tracks = root.is_none();
+        let (root_index, mut path) = root.unwrap_or_default();
         let revisions = self.state.query_revisions(None);
         let buffer = self.library.buffer();
         let query = buffer.query.clone();
@@ -116,14 +113,24 @@ impl Library {
         let missing = buffer.missing;
         let sort = buffer.sort;
         let tree = self.library.tree_active();
-        let locate_query = Query::LibraryLocate {
-            track_id,
-            path: path.clone(),
-            tree,
-            query: query.clone(),
-            favorite,
-            missing,
-            sort,
+        let locate_query = if other_tracks {
+            Query::OtherTracksLocate {
+                track_id,
+                query: query.clone(),
+                favorite,
+                missing,
+                sort,
+            }
+        } else {
+            Query::LibraryLocate {
+                track_id,
+                path: path.clone(),
+                tree,
+                query: query.clone(),
+                favorite,
+                missing,
+                sort,
+            }
         };
         self.library.locate.sync(&locate_query, revisions);
         let request = Request {
@@ -139,14 +146,24 @@ impl Library {
             // One worker and one scalar query per ancestor; no full-library pages.
             let mut locations = Vec::new();
             loop {
-                let query = Query::LibraryLocate {
-                    track_id,
-                    path,
-                    tree,
-                    query: query.clone(),
-                    favorite,
-                    missing,
-                    sort,
+                let query = if other_tracks {
+                    Query::OtherTracksLocate {
+                        track_id,
+                        query: query.clone(),
+                        favorite,
+                        missing,
+                        sort,
+                    }
+                } else {
+                    Query::LibraryLocate {
+                        track_id,
+                        path,
+                        tree,
+                        query: query.clone(),
+                        favorite,
+                        missing,
+                        sort,
+                    }
                 };
                 let handle = handle.clone();
                 let ticket = ticket.clone();

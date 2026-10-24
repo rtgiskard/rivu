@@ -83,6 +83,136 @@ fn scan_task_query_and_cancel_wire_round_trip_preserve_id() {
 }
 
 #[test]
+fn other_tracks_requests_round_trip_boundaries() {
+    use crate::model::LibrarySort;
+    let mut encoded = Vec::new();
+    for query in [None, Some(String::new()), Some("Été_100%".into())] {
+        for favorite in [None, Some(false), Some(true)] {
+            for missing in [None, Some(false), Some(true)] {
+                for sort in [LibrarySort::Id, LibrarySort::Album, LibrarySort::MostPlayed] {
+                    for offset in [0, usize::MAX] {
+                        for expected in [
+                            Query::OtherTracksPage {
+                                query: query.clone(),
+                                favorite,
+                                missing,
+                                sort,
+                                offset,
+                                limit: usize::MAX,
+                            },
+                            Query::OtherTracksLocate {
+                                track_id: i64::MAX,
+                                query: query.clone(),
+                                favorite,
+                                missing,
+                                sort,
+                            },
+                            Query::OtherTracksCount,
+                        ] {
+                            encode_request_frame_into(
+                                &WireRequest::Query(WireQuery::from(expected.clone())),
+                                &mut encoded,
+                            )
+                            .unwrap();
+                            let WireRequest::Query(wire) =
+                                decode_request_frame(&encoded[4..]).unwrap()
+                            else {
+                                panic!("expected query")
+                            };
+                            assert_eq!(Query::try_from(wire).unwrap(), expected);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for other_tracks in [false, true] {
+        for index in [None, Some(0), Some(usize::MAX)] {
+            for expected_revision in [None, Some(0), Some(u64::MAX)] {
+                for command in [
+                    Command::CheckOtherTracks {
+                        force: other_tracks,
+                    },
+                    Command::QueueExternalPaths {
+                        paths: vec!["/音楽/track.wav".into(), "/music".into()],
+                        index,
+                        expected_revision,
+                    },
+                    Command::QueueExternalPaths {
+                        paths: vec![],
+                        index,
+                        expected_revision,
+                    },
+                    Command::EnqueueSources {
+                        directories: vec![],
+                        track_ids: vec![],
+                        other_tracks,
+                    },
+                    Command::InsertQueueSources {
+                        directories: vec!["/music".into()],
+                        track_ids: vec![1, i64::MAX],
+                        other_tracks,
+                        index: index.unwrap_or(0),
+                        expected_revision: expected_revision.unwrap_or(0),
+                    },
+                    Command::AddPlaylistSources {
+                        playlist_id: i64::MAX,
+                        directories: vec![],
+                        track_ids: vec![],
+                        other_tracks,
+                    },
+                    Command::InsertPlaylistSources {
+                        playlist_id: i64::MAX,
+                        directories: vec![],
+                        track_ids: vec![],
+                        other_tracks,
+                        index: index.unwrap_or(0),
+                        expected_revision: expected_revision.unwrap_or(0),
+                    },
+                ] {
+                    let expected = serde_json::to_value(&command).unwrap();
+                    encode_request_frame_into(
+                        &WireRequest::Command(WireCommand::from(command)),
+                        &mut encoded,
+                    )
+                    .unwrap();
+                    let WireRequest::Command(wire) = decode_request_frame(&encoded[4..]).unwrap()
+                    else {
+                        panic!("expected command")
+                    };
+                    assert_eq!(
+                        serde_json::to_value(Command::try_from(wire).unwrap()).unwrap(),
+                        expected
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn other_tracks_wire_usize_boundaries_are_checked() {
+    use crate::model::LibrarySort;
+    for (offset, limit) in [(u64::MAX, 0), (0, u64::MAX)] {
+        let decoded = Query::try_from(WireQuery::OtherTracksPage {
+            query: None,
+            favorite: None,
+            missing: None,
+            sort: LibrarySort::Id,
+            offset,
+            limit,
+        });
+        assert_eq!(decoded.is_ok(), usize::try_from(u64::MAX).is_ok());
+    }
+    let decoded = Command::try_from(WireCommand::QueueExternalPaths {
+        paths: vec![],
+        index: Some(u64::MAX),
+        expected_revision: Some(u64::MAX),
+    });
+    assert_eq!(decoded.is_ok(), usize::try_from(u64::MAX).is_ok());
+}
+
+#[test]
 fn optional_search_queries_round_trip() {
     let mut encoded = Vec::new();
     for filter in [None, Some(""), Some("  MiXeD café / \"quoted\" %_  ")] {
@@ -189,6 +319,7 @@ fn playlist_group_requests_and_locations_round_trip_stable_identities() {
         Command::InsertQueueSources {
             directories: vec![PathBuf::from("/music")],
             track_ids: vec![3, 1],
+            other_tracks: false,
             index: 0,
             expected_revision: 19,
         },
@@ -202,6 +333,7 @@ fn playlist_group_requests_and_locations_round_trip_stable_identities() {
             playlist_id: 10,
             directories: vec![PathBuf::from("/music")],
             track_ids: vec![],
+            other_tracks: false,
             index: 0,
             expected_revision: 19,
         },
@@ -478,11 +610,14 @@ fn library_root_responses_wire_round_trip_preserves_projection_and_revisions() {
                 total: 0,
             },
         ]),
+        ViewResponse::OtherTracksCount(0),
+        ViewResponse::OtherTracksCount(usize::MAX),
         ViewResponse::LibraryRootCounts(Vec::new()),
         ViewResponse::LibraryPage(Page {
             total: 4,
             rows: vec![LibraryRow {
                 id: 42,
+                path: "/音楽/track.wav".into(),
                 title: "Été_100%".into(),
                 artist: "Artist".into(),
                 album: "Album".into(),
@@ -1216,6 +1351,35 @@ fn partial_state_wire_round_trip_omits_unrequested_sections() {
     assert!(state.playback.is_none());
     assert!(state.queue.is_none());
     assert!(state.system.is_none());
+}
+
+#[test]
+fn system_scan_task_identity_wire_round_trip_preserves_boundaries() {
+    for scan_task_id in [None, Some(0), Some(42), Some(u64::MAX)] {
+        let system = crate::model::SystemState {
+            scan_task_id,
+            scanning: scan_task_id.is_some(),
+            ..Default::default()
+        };
+        let mut encoded = Vec::new();
+        encode_response_frame_into(
+            &WireResponse::State(wire_state(StateResponse {
+                revisions: StateRevisions::default(),
+                playback: None,
+                queue: None,
+                library: None,
+                system: Some(system),
+            })),
+            &mut encoded,
+        )
+        .unwrap();
+        let WireResponse::State(state) = decode_response_frame(&encoded[4..]).unwrap() else {
+            panic!("expected state")
+        };
+        let system = state_response(state).system.unwrap();
+        assert_eq!(system.scan_task_id, scan_task_id);
+        assert_eq!(system.scanning, scan_task_id.is_some());
+    }
 }
 
 #[test]
@@ -2667,7 +2831,6 @@ fn processing_commands_and_configuration_use_current_positional_contract() {
     let bytes = postcard::to_allocvec(&wire).unwrap();
     let decoded: WireConfig = postcard::from_bytes(&bytes).unwrap();
     assert_eq!(crate::config::Config::from(decoded), config);
-    assert_eq!(PROTOCOL_VERSION, 8);
 }
 
 #[test]

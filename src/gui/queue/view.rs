@@ -11,13 +11,15 @@ use crate::{
         list_interaction::{ContentDrag, ContentMenuRequest, TrackSource},
         playlists::PlaylistDrag,
     },
-    model::Command,
+    model::{Command, ScanPhase},
 };
-use gpui::{AnyElement, Context, Div, EntityId, SharedString, Window, prelude::*, rgb};
+use gpui::{
+    AnyElement, Context, Div, EntityId, ExternalPaths, SharedString, Window, prelude::*, px, rgb,
+};
 use rivu_ui::{
     IconButton, IconButtonDensity, IconButtonGroup, IconButtonStyle, StatusKind, VirtualList,
-    button, caption, hover_actions, list_panel_header, list_viewport, panel_surface, row,
-    status_message,
+    button, caption, column, hover_actions, list_panel_header, list_viewport, panel_surface,
+    panel_toolbar, row, status_message,
 };
 use std::cell::RefCell;
 
@@ -130,6 +132,181 @@ impl Queue {
         );
     }
 
+    fn drop_external_paths(
+        &mut self,
+        paths: &ExternalPaths,
+        destination: DragDestination,
+        cx: &mut Context<Self>,
+    ) {
+        self.refresh(cx);
+        let (index, expected_revision) = match destination {
+            DragDestination::Queue => (None, None),
+            DragDestination::QueueAt { index, revision }
+                if self.model.query.is_none() && destination.current(&self.state) =>
+            {
+                (Some(index), Some(revision))
+            }
+            _ => return,
+        };
+        self.send(
+            Command::QueueExternalPaths {
+                paths: paths.paths().to_vec(),
+                index,
+                expected_revision,
+            },
+            cx,
+        );
+    }
+
+    fn queue_scan_status(&self, panel_id: u64, cx: &mut Context<Self>) -> Div {
+        let theme = rivu_ui::theme::palette(cx);
+        let system = &self.state.system;
+        let progress = system.scan_progress.as_ref();
+        let header_text = progress.map_or_else(
+            || self.context.i18n.text("gl-scanning").to_owned(),
+            |progress| {
+                let phase = self.context.i18n.text(match progress.phase {
+                    ScanPhase::Discovering => "gl-scan-discovering",
+                    ScanPhase::ReadingMetadata => "gl-scan-metadata",
+                    ScanPhase::Saving => "gl-scan-saving",
+                    ScanPhase::Completed => "gl-scan-completed",
+                    ScanPhase::Failed => "gl-scan-failed",
+                    ScanPhase::Cancelled => "gl-scan-cancelled",
+                });
+                match progress.total {
+                    Some(total) => self.context.i18n.format(
+                        "gl-scan-progress",
+                        &[
+                            ("phase", phase.into()),
+                            ("processed", progress.processed.into()),
+                            ("total", total.into()),
+                            ("errors", progress.errors.into()),
+                        ],
+                    ),
+                    None => self.context.i18n.format(
+                        "gl-scan-found",
+                        &[
+                            ("phase", phase.into()),
+                            ("processed", progress.processed.into()),
+                            ("errors", progress.errors.into()),
+                        ],
+                    ),
+                }
+            },
+        );
+        let failed = progress.is_some_and(|progress| progress.phase == ScanPhase::Failed);
+        let dismissible = !system.scanning
+            && progress.is_some_and(|progress| {
+                matches!(
+                    progress.phase,
+                    ScanPhase::Completed | ScanPhase::Failed | ScanPhase::Cancelled
+                )
+            });
+        let task_id = system.scan_task_id;
+        let cancellable = system.scanning
+            && task_id.is_some()
+            && !progress.is_some_and(|progress| progress.phase == ScanPhase::Saving);
+        let actions = gpui::div()
+            .min_w_8()
+            .min_h_8()
+            .flex_shrink_0()
+            .when(system.scanning, |slot| {
+                slot.child(
+                    IconButton::new(
+                        ("queue-cancel-scan", panel_id),
+                        "",
+                        self.tr("library-cancel-task"),
+                    )
+                    .enabled(cancellable)
+                    .build(
+                        IconButtonStyle::Quiet,
+                        IconButtonDensity::Regular,
+                        cx,
+                        move |this, _, cx| {
+                            if let Some(id) = task_id {
+                                this.send(Command::CancelScan { id }, cx);
+                            }
+                        },
+                    ),
+                )
+            })
+            .when(dismissible, |slot| {
+                slot.child(
+                    IconButton::new(
+                        ("queue-dismiss-scan", panel_id),
+                        "",
+                        self.tr("gl-dismiss-scan"),
+                    )
+                    .build(
+                        IconButtonStyle::Quiet,
+                        IconButtonDensity::Regular,
+                        cx,
+                        |this, _, cx| this.send(Command::DismissScanResult, cx),
+                    ),
+                )
+            });
+        let mut bar = gpui::div()
+            .w_full()
+            .h(px(3.))
+            .flex_shrink_0()
+            .bg(rgb(theme.border));
+        if let Some(progress) = progress
+            && let Some(total) = progress.total.filter(|total| *total > 0)
+        {
+            let fraction = (progress.processed as f32 / total as f32).clamp(0., 1.);
+            bar = bar.child(
+                gpui::div()
+                    .h_full()
+                    .w(gpui::relative(fraction))
+                    .bg(rgb(if failed { theme.error } else { theme.accent })),
+            );
+        }
+        let path: SharedString = progress
+            .and_then(|progress| progress.path.as_ref())
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default()
+            .into();
+        let message: SharedString = system.scan_message.clone().into();
+        column()
+            .gap_1()
+            .min_w_0()
+            .flex_shrink_0()
+            .child(
+                row()
+                    .min_h_8()
+                    .flex_shrink_0()
+                    .child(caption(theme, header_text).flex_1().min_w_0().truncate())
+                    .child(actions),
+            )
+            .child(bar)
+            .child(
+                caption(theme, path.clone())
+                    .id(("queue-scan-path", panel_id))
+                    .min_h_5()
+                    .flex_shrink_0()
+                    .min_w_0()
+                    .truncate()
+                    .tooltip(rivu_ui::text_tooltip(path)),
+            )
+            .child(
+                status_message(
+                    theme,
+                    message.clone(),
+                    if failed {
+                        StatusKind::Error
+                    } else {
+                        StatusKind::Info
+                    },
+                )
+                .id(("queue-scan-message", panel_id))
+                .min_h_5()
+                .flex_shrink_0()
+                .min_w_0()
+                .truncate()
+                .tooltip(rivu_ui::text_tooltip(message)),
+            )
+    }
+
     pub(in crate::gui) fn render_panel(
         &mut self,
         panel_id: u64,
@@ -230,6 +407,12 @@ impl Queue {
         let panel_drop_owner = cx.entity().downgrade();
         let list_drop_owner = panel_drop_owner.clone();
         panel_surface(("queue-panel", panel_id))
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                window.prevent_default();
+                cx.stop_propagation();
+                this.drop_external_paths(paths, DragDestination::Queue, cx);
+            }))
+            .drag_over::<ExternalPaths>(|style, _, _, _| style.border_color(rgb(theme.accent)))
             .on_drop(cx.listener(|this, drag: &QueueDrag, window, cx| {
                 window.prevent_default();
                 this.move_queue_entry(drag, None, cx);
@@ -240,6 +423,8 @@ impl Queue {
                     if let Some(drag) = value.downcast_ref::<QueueDrag>() {
                         this.queue_drop_index(drag, None, owner.entity_id())
                             .is_some()
+                    } else if value.is::<ExternalPaths>() {
+                        true
                     } else if let Some(drag) = value.downcast_ref::<LibraryDrag>() {
                         this.can_resolve_library_drag(drag)
                     } else {
@@ -299,6 +484,10 @@ impl Queue {
             .when(
                 self.model.busy || self.model.selection_error.is_some(),
                 |panel| panel.child(status),
+            )
+            .when(
+                self.state.system.scanning || self.state.system.scan_progress.is_some(),
+                |panel| panel.child(self.queue_scan_status(panel_id, cx)),
             )
             .child(list_viewport(
                 VirtualList::new(
@@ -575,6 +764,12 @@ impl Queue {
                     }),
                 )
                 .on_viewport_deferred(cx.weak_entity(), Self::ensure_queue_range)
+                .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    this.drop_external_paths(paths, DragDestination::Queue, cx);
+                }))
+                .drag_over::<ExternalPaths>(|style, _, _, _| style.border_color(rgb(theme.accent)))
                 .on_drop(cx.listener(|this, drag: &QueueDrag, window, cx| {
                     window.prevent_default();
                     this.move_queue_entry(drag, None, cx);
@@ -585,6 +780,8 @@ impl Queue {
                         if let Some(drag) = value.downcast_ref::<QueueDrag>() {
                             this.queue_drop_index(drag, None, owner.entity_id())
                                 .is_some()
+                        } else if value.is::<ExternalPaths>() {
+                            true
                         } else if let Some(drag) = value.downcast_ref::<LibraryDrag>() {
                             this.can_resolve_library_drag(drag)
                         } else {
@@ -631,6 +828,8 @@ impl Queue {
         if let Some(drag) = value.downcast_ref::<QueueDrag>() {
             self.queue_drop_index(drag, Some((target, after)), owner)
                 .is_some()
+        } else if value.is::<ExternalPaths>() {
+            true
         } else if let Some(drag) = value.downcast_ref::<LibraryDrag>() {
             self.can_resolve_library_drag(drag)
         } else {
@@ -687,7 +886,14 @@ impl Queue {
                 || value.is::<LibraryDrag>()
                 || value.is::<ContentDrag>()
                 || value.is::<PlaylistDrag>()
+                || value.is::<ExternalPaths>()
         })
+        .on_drop(cx.listener(move |this, paths: &ExternalPaths, window, cx| {
+            window.prevent_default();
+            cx.stop_propagation();
+            // Consume rejected positional drops instead of falling back to append.
+            this.drop_external_paths(paths, destination, cx);
+        }))
         .on_drop(cx.listener(move |this, drag: &QueueDrag, window, cx| {
             window.prevent_default();
             cx.stop_propagation();
@@ -723,6 +929,7 @@ impl Queue {
         let zone = indicator!(zone, QueueDrag);
         let zone = indicator!(zone, LibraryDrag);
         let zone = indicator!(zone, ContentDrag);
+        let zone = indicator!(zone, ExternalPaths);
         indicator!(zone, PlaylistDrag)
     }
 }

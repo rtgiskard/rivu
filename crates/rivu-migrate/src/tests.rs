@@ -180,7 +180,7 @@ fn unknown_future_and_invalid_configuration_fail_preflight() {
 fn unsupported_database_leaves_valid_unversioned_configuration_untouched() {
     for sql in [
         "UPDATE schema_meta SET value=99 WHERE key='version'",
-        "UPDATE schema_meta SET value=3 WHERE key='album_trigger_revision'",
+        "UPDATE schema_meta SET value=99 WHERE key='album_trigger_revision'",
         "DELETE FROM schema_meta WHERE key='version'",
         "DROP TABLE queue_entries",
     ] {
@@ -215,7 +215,7 @@ fn database_ownership_excludes_maintenance() {
     drop(owner);
     let report = execute(&options, Mode::Apply).unwrap();
     assert_eq!(report.backups.len(), 1);
-    assert_eq!(revision(&connection), 2);
+    assert!(!execute(&options, Mode::Check).unwrap().needs_changes);
     assert_eq!(fs::read_to_string(&options.config).unwrap(), "[playback]\n");
 }
 
@@ -232,20 +232,37 @@ fn sqlite_backup_includes_committed_wal_and_maintenance_preserves_user_state() {
     connection
         .pragma_update(None, "wal_autocheckpoint", 0)
         .unwrap();
-    connection.execute_batch("UPDATE schema_meta SET value=1 WHERE key='album_trigger_revision';
+    connection.execute_batch("UPDATE schema_meta SET value=2 WHERE key='album_trigger_revision';
         INSERT INTO playlists(name) VALUES('User playlist');
-        INSERT INTO albums(directory,title,artist,track_count) VALUES('/retained','Retain','Artist',1);").unwrap();
+        INSERT INTO albums(directory,title,artist,track_count) VALUES('/retained','Retain','Artist',1);
+        INSERT INTO tracks(id,path) VALUES(1,'/music/original.flac');
+        INSERT INTO queue_entries(id,track_id,position) VALUES(41,1,0),(42,1,1);
+        UPDATE queue_meta SET current_id=42,revision=9;
+        DROP TRIGGER queue_metadata;
+        CREATE TRIGGER queue_metadata AFTER UPDATE OF raw_title,raw_artist,raw_album,
+            title_override,artist_override,album_override,duration,favorite,missing,
+            play_count,codec,bitrate_bps,bitrate_exact ON tracks
+        WHEN (COALESCE(old.title_override,old.raw_title) IS NOT COALESCE(new.title_override,new.raw_title)
+            OR COALESCE(old.artist_override,old.raw_artist) IS NOT COALESCE(new.artist_override,new.raw_artist)
+            OR COALESCE(old.album_override,old.raw_album) IS NOT COALESCE(new.album_override,new.raw_album)
+            OR old.duration IS NOT new.duration
+            OR old.favorite IS NOT new.favorite OR old.missing IS NOT new.missing
+            OR old.play_count IS NOT new.play_count OR old.codec IS NOT new.codec
+            OR old.bitrate_bps IS NOT new.bitrate_bps OR old.bitrate_exact IS NOT new.bitrate_exact)
+            AND EXISTS(SELECT 1 FROM queue_entries WHERE track_id=new.id) BEGIN
+            UPDATE queue_meta SET revision=revision+1;
+        END;").unwrap();
     let checked = execute(&options, Mode::Check).unwrap();
     assert!(checked.needs_changes);
-    assert_eq!(revision(&connection), 1);
+    assert_eq!(revision(&connection), 2);
     let report = execute(&options, Mode::Apply).unwrap();
     assert_eq!(report.backups.len(), 1);
     assert_eq!(fs::read_to_string(&options.config).unwrap(), original);
     assert_eq!(fs::metadata(&options.config).unwrap().ino(), config_inode);
-    assert_eq!(revision(&connection), 2);
+    assert_eq!(revision(&connection), database::ALBUM_TRIGGER_REVISION);
     let backup =
         Connection::open_with_flags(&report.backups[0], OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
-    assert_eq!(revision(&backup), 1);
+    assert_eq!(revision(&backup), 2);
     for source in [&connection, &backup] {
         let name: String = source
             .query_row("SELECT name FROM playlists", [], |row| row.get(0))
@@ -259,7 +276,40 @@ fn sqlite_backup_includes_committed_wal_and_maintenance_preserves_user_state() {
             )
             .unwrap();
         assert_eq!(title, "Retain");
+        assert_eq!(
+            source
+                .query_row("SELECT current_id,revision FROM queue_meta", [], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+                })
+                .unwrap(),
+            (42, 9)
+        );
+        let entries = source
+            .prepare("SELECT id,track_id,position FROM queue_entries ORDER BY position,id")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<(i64, i64, i64)>>>()
+            .unwrap();
+        assert_eq!(entries, [(41, 1, 0), (42, 1, 1)]);
     }
+    connection
+        .execute(
+            "UPDATE tracks SET path='/music/renamed.flac' WHERE id=1",
+            [],
+        )
+        .unwrap();
+    let queue_revision: i64 = connection
+        .query_row("SELECT revision FROM queue_meta", [], |row| row.get(0))
+        .unwrap();
+    assert!(queue_revision > 9);
+    assert_eq!(
+        backup
+            .query_row("SELECT path FROM tracks WHERE id=1", [], |row| row
+                .get::<_, String>(0))
+            .unwrap(),
+        "/music/original.flac"
+    );
 }
 
 #[test]
@@ -282,7 +332,7 @@ fn maintenance_failure_rolls_back_and_reentry_keeps_distinct_backups() {
         .execute_batch("DROP TRIGGER reject_maintenance")
         .unwrap();
     let applied = execute(&options, Mode::Apply).unwrap();
-    assert_eq!(revision(&connection), 2);
+    assert_eq!(revision(&connection), database::ALBUM_TRIGGER_REVISION);
     assert_eq!(applied.backups.len(), 1);
     for earlier in &failed.backups {
         assert!(earlier.exists());

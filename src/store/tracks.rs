@@ -12,10 +12,11 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 const TRACK_SEARCH_FILTER: &str = "WHERE (?1 IS NULL OR instr(lower(COALESCE(tracks.title_override,tracks.raw_title) || ' ' || COALESCE(tracks.artist_override,tracks.raw_artist) || ' ' || tracks.path),?1)>0) AND (?2 IS NULL OR tracks.favorite=?2) AND (?3 IS NULL OR tracks.missing=?3)";
-pub(super) const SOURCE_FILTER: &str = "tracks.id IN (SELECT value FROM json_each(?2) UNION SELECT scoped.id FROM json_each(?1) AS directory CROSS JOIN tracks AS scoped INDEXED BY tracks_directory WHERE directory.value<>'' AND scoped.path>=directory.value AND scoped.path<(rtrim(directory.value,'/')||'0') UNION SELECT id FROM tracks WHERE EXISTS(SELECT 1 FROM json_each(?1) WHERE value=''))";
+pub(super) const SOURCE_FILTER: &str = "tracks.id IN (SELECT value FROM json_each(?2) UNION SELECT scoped.id FROM json_each(?1,'$.directories') AS directory CROSS JOIN tracks AS scoped INDEXED BY tracks_directory WHERE directory.value<>'' AND scoped.path>=directory.value AND scoped.path<(rtrim(directory.value,'/')||'0') UNION SELECT id FROM tracks WHERE EXISTS(SELECT 1 FROM json_each(?1,'$.directories') WHERE value='') UNION SELECT id FROM tracks WHERE json_type(?1,'$.roots')='array' AND NOT EXISTS(SELECT 1 FROM json_each(?1,'$.roots') AS root WHERE tracks.path>=root.value AND tracks.path<(rtrim(root.value,'/')||'0')))";
 // Normalized nonempty prefixes end in ASCII '/'; replacing that final byte with
 // '0' gives the exclusive BINARY upper bound, including every Unicode suffix.
 const DIRECTORY_SCOPE: &str = " AND tracks.path>=?4 AND tracks.path<(rtrim(?4,'/')||'0')";
+const OTHER_SCOPE: &str = " AND NOT EXISTS(SELECT 1 FROM json_each(?4) AS root WHERE tracks.path>=root.value AND tracks.path<(rtrim(root.value,'/')||'0'))";
 const DIRECTORY_CHILDREN: &str = "(SELECT 0 AS kind,CASE WHEN ?4='' AND instr(rest,'/')=1 THEN '/' ELSE ?4||substr(rest,1,instr(rest,'/')-1) END AS child,MIN(id) AS track_id FROM sources WHERE instr(rest,'/')>0 GROUP BY child UNION ALL SELECT 1,path,id FROM sources WHERE instr(rest,'/')=0)";
 
 /// SQL literal substring matching, shared by occurrence and album projections.
@@ -41,6 +42,16 @@ fn directory_prefix(path: &Path) -> Result<String> {
         .to_str()
         .context("Library directory path is not UTF-8")?;
     Ok(format!("{}/", path.trim_end_matches('/')))
+}
+
+fn other_root_prefixes(roots: &[PathBuf]) -> Result<Vec<String>> {
+    crate::library::normalize_roots(roots)?
+        .iter()
+        .map(|root| {
+            let root = root.to_str().context("Library root path is not UTF-8")?;
+            Ok(format!("{}/", root.trim_end_matches('/')))
+        })
+        .collect()
 }
 
 fn library_order(sort: crate::model::LibrarySort) -> &'static str {
@@ -104,6 +115,113 @@ pub(super) struct TrackCount {
 }
 
 impl Store {
+    pub(crate) fn other_tracks_sources(&self, roots: &[PathBuf]) -> Result<Vec<PathBuf>> {
+        let roots = serde_json::to_string(&other_root_prefixes(roots)?)?;
+        let mut statement = self.conn.prepare(&format!(
+            "SELECT DISTINCT path FROM tracks WHERE 1=1{} ORDER BY path",
+            OTHER_SCOPE.replace("?4", "?1")
+        ))?;
+        Ok(statement
+            .query_map([roots], |row| Ok(PathBuf::from(row.get::<_, String>(0)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub(crate) fn other_tracks_count(&self, roots: &[PathBuf]) -> Result<usize> {
+        let roots = serde_json::to_string(&other_root_prefixes(roots)?)?;
+        Ok(self.conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM tracks WHERE 1=1{}",
+                OTHER_SCOPE.replace("?4", "?1")
+            ),
+            [roots],
+            |row| row.get::<_, i64>(0),
+        )? as usize)
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "The Other projection composes the existing library filter and page contract"
+    )]
+    pub(crate) fn other_tracks_page(
+        &self,
+        roots: &[PathBuf],
+        query: Option<&str>,
+        favorite: Option<bool>,
+        missing: Option<bool>,
+        sort: crate::model::LibrarySort,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Page<crate::model::LibraryRow>> {
+        let roots = serde_json::to_string(&other_root_prefixes(roots)?)?;
+        let query = search_query(query);
+        let total = self.conn.query_row(
+            &format!("SELECT COUNT(*) FROM tracks {TRACK_SEARCH_FILTER}{OTHER_SCOPE}"),
+            params![query, favorite, missing, roots],
+            |row| row.get::<_, i64>(0),
+        )? as usize;
+        let mut rows = Vec::new();
+        if limit != 0 && offset < total {
+            let mut statement = self.conn.prepare(&format!(
+                "SELECT {LIBRARY_ROW_COLUMNS} FROM tracks {TRACK_SEARCH_FILTER}{OTHER_SCOPE} ORDER BY {} LIMIT ?5 OFFSET ?6",
+                library_order(sort)
+            ))?;
+            rows = statement
+                .query_map(
+                    params![
+                        query,
+                        favorite,
+                        missing,
+                        roots,
+                        limit.min(crate::model::MAX_QUERY_ROWS) as i64,
+                        offset.min(i64::MAX as usize) as i64
+                    ],
+                    library_row_from_row,
+                )?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+        }
+        Ok(Page { total, rows })
+    }
+
+    pub(crate) fn other_tracks_location(
+        &self,
+        roots: &[PathBuf],
+        track_id: i64,
+        query: Option<&str>,
+        favorite: Option<bool>,
+        missing: Option<bool>,
+        sort: crate::model::LibrarySort,
+    ) -> Result<crate::model::LibraryLocateResult> {
+        use crate::model::{LibraryLocateResult, LibraryLocation};
+        let roots = serde_json::to_string(&other_root_prefixes(roots)?)?;
+        let exists = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM tracks WHERE id=?1)",
+            [track_id],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if !exists {
+            return Ok(LibraryLocateResult::Unavailable);
+        }
+        let in_scope = self.conn.query_row(
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM tracks WHERE id=?1{})",
+                OTHER_SCOPE.replace("?4", "?2")
+            ),
+            params![track_id, roots],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if !in_scope {
+            return Ok(LibraryLocateResult::OutsideRoot);
+        }
+        let query = search_query(query);
+        let location = self.conn.query_row(&format!(
+            "WITH ranked AS (SELECT id,row_number() OVER (ORDER BY {})-1 AS position,COUNT(*) OVER () AS total FROM tracks {TRACK_SEARCH_FILTER}{OTHER_SCOPE}) SELECT position,total FROM ranked WHERE id=?5", library_order(sort)
+        ), params![query, favorite, missing, roots, track_id], |row| {
+            Ok(LibraryLocation { offset: row.get::<_, i64>(0)? as usize,
+                total: row.get::<_, i64>(1)? as usize, child: None })
+        }).optional()?;
+        Ok(location.map_or(LibraryLocateResult::Filtered, LibraryLocateResult::Located))
+    }
+
     pub(crate) fn playback_source(&self, track: &Track) -> Result<Option<PlaybackSource>> {
         if track.bitrate_bps.is_some() && track.bitrate_exact {
             return Ok(None);
@@ -637,13 +755,26 @@ impl Store {
         &self,
         directories: &[PathBuf],
         track_ids: &[i64],
+        other_roots: Option<&[PathBuf]>,
     ) -> Result<(String, String)> {
         let ids = self.validated_track_ids(track_ids)?;
         let prefixes = directories
             .iter()
             .map(|path| directory_prefix(path))
             .collect::<Result<Vec<_>>>()?;
-        Ok((serde_json::to_string(&prefixes)?, ids))
+        let roots = other_roots.map(other_root_prefixes).transpose()?;
+        #[derive(serde::Serialize)]
+        struct Scope {
+            directories: Vec<String>,
+            roots: Option<Vec<String>>,
+        }
+        Ok((
+            serde_json::to_string(&Scope {
+                directories: prefixes,
+                roots,
+            })?,
+            ids,
+        ))
     }
     pub(crate) fn prepare_track_removal<'a>(
         &self,
@@ -1283,7 +1414,7 @@ mod request_tests {
         for ids in [&[1, -1, 1][..], &[2, i64::MAX][..]] {
             assert!(store.set_favorite(ids, true).is_err());
             assert!(store.remove_tracks(ids).is_err());
-            assert!(store.source_parameters(&[], ids).is_err());
+            assert!(store.source_parameters(&[], ids, None).is_err());
         }
         assert_eq!(store.track_count()?, 2);
         let favorites: i64 =
@@ -1383,6 +1514,7 @@ mod request_tests {
             store.enqueue_sources(
                 &[path.to_path_buf(), path.to_path_buf()],
                 &[included, included],
+                None,
             )?;
             let queued = store.queue_page(None, queue_before, 10)?;
             assert_eq!(
@@ -1394,7 +1526,7 @@ mod request_tests {
                 [included]
             );
             let playlist = store.create_playlist(root)?;
-            store.add_playlist_sources(playlist, &[path.to_path_buf()], &[included])?;
+            store.add_playlist_sources(playlist, &[path.to_path_buf()], &[included], None)?;
             assert_eq!(store.playlist_track_ids(playlist, 10)?, [included]);
         }
         store.conn.execute(
@@ -1406,7 +1538,7 @@ mod request_tests {
             1
         );
         let playlist = store.create_playlist("All")?;
-        store.add_playlist_sources(playlist, &[PathBuf::new(), "/Upper".into()], &[1, 1])?;
+        store.add_playlist_sources(playlist, &[PathBuf::new(), "/Upper".into()], &[1, 1], None)?;
         assert_eq!(
             store.playlist_track_ids(playlist, 100)?,
             (1..=13).collect::<Vec<_>>()

@@ -4,8 +4,8 @@ mod processing;
 
 use self::{
     args::{
-        Action, Args, LibraryAction, PlaybackAction, PlaylistAction, QueueAction, Repeat, Switch,
-        localize_help, terminal_cli_error,
+        Action, Args, LibraryAction, OtherTracksAction, PlaybackAction, PlaylistAction,
+        QueueAction, Repeat, Switch, localize_help, terminal_cli_error,
     },
     output::{
         Terminal, command_ack, list_library, list_playlists, list_queue, show_ack, show_scan,
@@ -181,6 +181,37 @@ pub(super) fn run() -> Result<()> {
             favorites,
             missing,
         }) => list_library(&i18n, &data_dir, args.json, query, favorites, missing),
+        Action::Library(LibraryAction::Other(
+            action @ (OtherTracksAction::List { .. }
+            | OtherTracksAction::Count
+            | OtherTracksAction::Locate { .. }),
+        )) => {
+            let query = other_tracks_query(action)?;
+            let view = ipc::query(&data_dir, &query)?
+                .result
+                .map_err(anyhow::Error::from)?;
+            output::show_other_tracks(&i18n, view, args.json)
+        }
+        Action::Library(LibraryAction::ScanStatus { id }) => {
+            let view = ipc::query(&data_dir, &Query::ScanTask { id })?
+                .result
+                .map_err(anyhow::Error::from)?;
+            let ViewResponse::ScanTask(task) = view else {
+                bail!("Scan task query returned an unexpected response");
+            };
+            if task.id != id {
+                bail!("Scan task query returned a different task ID");
+            }
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&task)?);
+            } else {
+                show_scan(&i18n, &task.progress);
+                if let Some(error) = task.error {
+                    eprintln!("{}", Terminal(error));
+                }
+            }
+            Ok(())
+        }
         Action::Library(LibraryAction::Stats) => {
             let response = ipc::query(&data_dir, &Query::LibraryStats)?;
             let ViewResponse::LibraryStats(stats) = response.result.map_err(anyhow::Error::from)?
@@ -582,6 +613,32 @@ fn client_path(path: PathBuf) -> Result<PathBuf> {
     }
 }
 
+fn other_tracks_query(action: OtherTracksAction) -> Result<Query> {
+    Ok(match action {
+        OtherTracksAction::List {
+            filter,
+            offset,
+            limit,
+        } => Query::OtherTracksPage {
+            query: filter.query,
+            favorite: filter.favorite,
+            missing: filter.missing,
+            sort: filter.sort.into(),
+            offset,
+            limit,
+        },
+        OtherTracksAction::Count => Query::OtherTracksCount,
+        OtherTracksAction::Locate { track_id, filter } => Query::OtherTracksLocate {
+            track_id,
+            query: filter.query,
+            favorite: filter.favorite,
+            missing: filter.missing,
+            sort: filter.sort.into(),
+        },
+        OtherTracksAction::Check { .. } => bail!("File checks are commands, not queries"),
+    })
+}
+
 fn translate(action: Action) -> Result<(Command, bool)> {
     let mut wait = false;
     let command = match action {
@@ -597,6 +654,14 @@ fn translate(action: Action) -> Result<(Command, bool)> {
                 force,
             }
         }
+        Action::Library(LibraryAction::Other(OtherTracksAction::Check {
+            wait: should_wait,
+            force,
+        })) => {
+            wait = should_wait;
+            Command::CheckOtherTracks { force }
+        }
+        Action::Library(LibraryAction::CancelScan { id }) => Command::CancelScan { id },
         Action::Playback(PlaybackAction::Play { track_id }) => {
             track_id.map_or(Command::Resume, |track_id| Command::Play { track_id })
         }
@@ -626,6 +691,27 @@ fn translate(action: Action) -> Result<(Command, bool)> {
         },
         Action::Queue(action) => match action {
             QueueAction::Add { track_ids } => Command::Enqueue { track_ids },
+            QueueAction::AddOther => Command::EnqueueSources {
+                directories: Vec::new(),
+                track_ids: Vec::new(),
+                other_tracks: true,
+            },
+            QueueAction::AddPaths {
+                paths,
+                index,
+                expected_revision,
+                wait: should_wait,
+            } => {
+                if index.is_some() != expected_revision.is_some() {
+                    bail!("Queue insertion requires both an index and an expected revision");
+                }
+                wait = should_wait;
+                Command::QueueExternalPaths {
+                    paths: paths.into_iter().map(client_path).collect::<Result<_>>()?,
+                    index,
+                    expected_revision,
+                }
+            }
             QueueAction::Remove { queue_id } => Command::RemoveQueue { queue_id },
             QueueAction::Move { queue_id, index } => Command::MoveQueue { queue_id, index },
             QueueAction::Play { queue_id } => Command::PlayQueue { queue_id },
@@ -686,6 +772,8 @@ fn translate(action: Action) -> Result<(Command, bool)> {
         | Action::Processing(_)
         | Action::Library(
             LibraryAction::List { .. }
+            | LibraryAction::Other(_)
+            | LibraryAction::ScanStatus { .. }
             | LibraryAction::Edit { .. }
             | LibraryAction::Status
             | LibraryAction::Stats
@@ -761,5 +849,234 @@ mod tests {
         assert_eq!(name.as_deref(), Some("Imported"));
         assert!(wait);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod other_tracks_tests {
+    use super::{Action, Args, Command, LibraryAction, Query, other_tracks_query, translate};
+    use anyhow::Result;
+    use clap::Parser;
+    use rivu::model::LibrarySort;
+
+    fn action(arguments: &[&str]) -> Action {
+        Args::try_parse_from(std::iter::once("rivu").chain(arguments.iter().copied()))
+            .unwrap_or_else(|error| panic!("{error}"))
+            .action
+            .expect("explicit action")
+    }
+
+    fn query(arguments: &[&str]) -> Query {
+        let Action::Library(LibraryAction::Other(action)) = action(arguments) else {
+            panic!("expected Other action");
+        };
+        other_tracks_query(action).unwrap()
+    }
+
+    #[test]
+    fn other_page_preserves_filters_sort_and_bounds() {
+        let Query::OtherTracksPage {
+            query: text,
+            favorite,
+            missing,
+            sort,
+            offset,
+            limit,
+        } = query(&[
+            "library",
+            "other",
+            "list",
+            "--query",
+            "two words",
+            "--favorite",
+            "false",
+            "--missing",
+            "true",
+            "--sort",
+            "most-played",
+            "--offset",
+            "23",
+            "--limit",
+            "7",
+        ])
+        else {
+            panic!("expected Other page");
+        };
+        assert_eq!(text.as_deref(), Some("two words"));
+        assert_eq!(favorite, Some(false));
+        assert_eq!(missing, Some(true));
+        assert_eq!(sort, LibrarySort::MostPlayed);
+        assert_eq!((offset, limit), (23, 7));
+
+        let Query::OtherTracksPage {
+            query: text,
+            favorite,
+            missing,
+            sort,
+            offset,
+            limit,
+        } = query(&["library", "other", "list"])
+        else {
+            panic!("expected Other page");
+        };
+        assert_eq!(text, None);
+        assert_eq!(favorite, None);
+        assert_eq!(missing, None);
+        assert_eq!(sort, LibrarySort::Id);
+        assert_eq!((offset, limit), (0, 100));
+    }
+
+    #[test]
+    fn other_locate_uses_the_same_view_contract() {
+        let Query::OtherTracksLocate {
+            track_id,
+            query: text,
+            favorite,
+            missing,
+            sort,
+        } = query(&[
+            "library",
+            "other",
+            "locate",
+            "42",
+            "--query",
+            "album",
+            "--favorite",
+            "true",
+            "--missing",
+            "false",
+            "--sort",
+            "album",
+        ])
+        else {
+            panic!("expected Other locate");
+        };
+        assert_eq!(track_id, 42);
+        assert_eq!(text.as_deref(), Some("album"));
+        assert_eq!(favorite, Some(true));
+        assert_eq!(missing, Some(false));
+        assert_eq!(sort, LibrarySort::Album);
+        assert!(matches!(
+            query(&["library", "other", "count"]),
+            Query::OtherTracksCount
+        ));
+    }
+
+    #[test]
+    fn other_checks_reuse_scan_wait_and_cancellation_commands() -> Result<()> {
+        let (command, wait) = translate(action(&["library", "other", "check"]))?;
+        assert!(matches!(
+            command,
+            Command::CheckOtherTracks { force: false }
+        ));
+        assert!(!wait);
+        let (command, wait) =
+            translate(action(&["library", "other", "check", "--force", "--wait"]))?;
+        assert!(matches!(command, Command::CheckOtherTracks { force: true }));
+        assert!(wait);
+        let (command, wait) = translate(action(&["library", "cancel-scan", "17"]))?;
+        assert!(matches!(command, Command::CancelScan { id: 17 }));
+        assert!(!wait);
+        assert!(matches!(
+            action(&["library", "scan-status", "17"]),
+            Action::Library(LibraryAction::ScanStatus { id: 17 }),
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn external_queue_admission_anchors_paths_and_preserves_revision_contract() -> Result<()> {
+        let cwd = std::env::current_dir()?;
+        let (command, wait) = translate(action(&[
+            "queue",
+            "add-paths",
+            "music/../song.wav",
+            "~/disc.cue",
+        ]))?;
+        let Command::QueueExternalPaths {
+            paths,
+            index,
+            expected_revision,
+        } = command
+        else {
+            panic!("expected external queue admission");
+        };
+        assert_eq!(
+            paths,
+            [cwd.join("music/../song.wav"), cwd.join("~/disc.cue")]
+        );
+        assert_eq!((index, expected_revision), (None, None));
+        assert!(!wait);
+        let (command, wait) = translate(action(&["queue", "add-paths", "song.wav", "--wait"]))?;
+        assert!(matches!(
+            command,
+            Command::QueueExternalPaths {
+                index: None,
+                expected_revision: None,
+                ..
+            }
+        ));
+        assert!(wait);
+
+        for revision in [0, u64::MAX] {
+            let revision_text = revision.to_string();
+            let (command, wait) = translate(action(&[
+                "queue",
+                "add-paths",
+                "/music/track.wav",
+                "--index",
+                "0",
+                "--expected-revision",
+                &revision_text,
+                "--wait",
+            ]))?;
+            let Command::QueueExternalPaths {
+                paths,
+                index,
+                expected_revision,
+            } = command
+            else {
+                panic!("expected insertion");
+            };
+            assert_eq!(paths, [std::path::PathBuf::from("/music/track.wav")]);
+            assert_eq!((index, expected_revision), (Some(0), Some(revision)));
+            assert!(wait);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn queue_other_uses_explicit_source_membership() -> Result<()> {
+        let (command, wait) = translate(action(&["queue", "add-other"]))?;
+        let Command::EnqueueSources {
+            directories,
+            track_ids,
+            other_tracks,
+        } = command
+        else {
+            panic!("expected Other sources");
+        };
+        assert!(other_tracks);
+        assert!(directories.is_empty());
+        assert!(track_ids.is_empty());
+        assert!(!wait);
+        let (command, _) = translate(action(&["queue", "add", "3", "1"]))?;
+        assert!(matches!(command, Command::Enqueue { track_ids } if track_ids == [3, 1]));
+        Ok(())
+    }
+
+    #[test]
+    fn parser_rejects_incomplete_insertions_and_invalid_view_options() {
+        for arguments in [
+            vec!["queue", "add-paths"],
+            vec!["queue", "add-paths", "a.wav", "--index", "0"],
+            vec!["queue", "add-paths", "a.wav", "--expected-revision", "1"],
+            vec!["library", "other", "list", "--sort", "title"],
+            vec!["library", "other", "list", "--favorite", "yes"],
+            vec!["library", "other", "count", "--query", "x"],
+            vec!["library", "other", "check", "/not-a-root"],
+        ] {
+            assert!(Args::try_parse_from(std::iter::once("rivu").chain(arguments)).is_err());
+        }
     }
 }

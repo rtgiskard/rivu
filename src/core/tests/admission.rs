@@ -1,0 +1,336 @@
+use super::*;
+
+fn admission_fixture() -> (tempfile::TempDir, Core) {
+    fixture_with_database(Some(10.0), true)
+}
+
+fn next_admission_event(core: &mut Core) -> crate::core::admission::Event {
+    let executor = core.executor.clone();
+    wait_on(&executor, async {
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            core.active_external_admission
+                .as_mut()
+                .unwrap()
+                .next_event(),
+        )
+        .await
+        .unwrap()
+    })
+}
+
+fn finish_admission(core: &mut Core) {
+    while core.active_external_admission.is_some() {
+        let event = next_admission_event(core);
+        core.external_admission_event(event);
+    }
+}
+
+#[test]
+fn external_admission_appends_valid_subset_without_roots_autoplay_or_playlist_changes() {
+    let (directory, mut core) = admission_fixture();
+    let first = directory.path().join("external-first.wav");
+    let second = directory.path().join("external-second.wav");
+    write_pcm_frames(&first, 1);
+    write_pcm_frames(&second, 1);
+    Arc::make_mut(&mut core.state.system.config)
+        .library_roots
+        .clear();
+    Arc::make_mut(&mut core.state.system.config).scan_min_duration_secs = 60;
+    let config = Arc::clone(&core.state.system.config);
+    let before_queue = core.queue_ids.clone();
+    let before_playback = core.state.playback.clone();
+    let before_playlists = core.state.library.playlist_total;
+    let before_playlist_revision = core.state.library.playlist_revision;
+    let before_total = core.state.library.track_total;
+    let directory_input = directory.path().join("directory.wav");
+    std::fs::create_dir(&directory_input).unwrap();
+    write_pcm_frames(&directory_input.join("hidden.wav"), 1);
+    core.command(Command::QueueExternalPaths {
+        paths: vec![
+            second.clone(),
+            directory_input,
+            first.clone(),
+            second.clone(),
+            directory.path().join("missing.wav"),
+        ],
+        index: None,
+        expected_revision: None,
+    })
+    .unwrap();
+    let id = core.active_external_admission.as_ref().unwrap().status.id;
+    assert!(core.state.system.scanning);
+    assert_eq!(core.state.system.scan_task_id, Some(id));
+    assert_eq!(core.queue_ids, before_queue);
+    let ViewResponse::ScanTask(status) = core.view(&Query::ScanTask { id }).unwrap() else {
+        panic!("expected media task")
+    };
+    assert_eq!(status.id, id);
+    assert_eq!(status.progress.phase, ScanPhase::Discovering);
+    finish_admission(&mut core);
+    let added = core
+        .store
+        .queue_page(None, before_queue.len(), 10)
+        .unwrap()
+        .rows;
+    assert_eq!(added.len(), 3);
+    let paths: Vec<_> = added
+        .iter()
+        .map(|row| core.store.track(row.track_id).unwrap().unwrap().path)
+        .collect();
+    assert_eq!(paths, vec![second.clone(), first.clone(), second]);
+    assert_eq!(added[0].track_id, added[2].track_id);
+    assert_ne!(added[0].id, added[2].id);
+    assert_eq!(&core.queue_ids[..before_queue.len()], &before_queue);
+    assert_eq!(core.state.playback, before_playback);
+    assert_eq!(core.state.library.playlist_total, before_playlists);
+    assert_eq!(
+        core.state.library.playlist_revision,
+        before_playlist_revision
+    );
+    assert_eq!(core.state.library.track_total, before_total + 2);
+    assert!(Arc::ptr_eq(&core.state.system.config, &config));
+    let ViewResponse::ScanTask(status) = core.view(&Query::ScanTask { id }).unwrap() else {
+        panic!("expected retained media task")
+    };
+    assert!(status.library_committed);
+    assert!(status.message.contains("skipped 2 invalid paths"));
+    assert_eq!(status.progress.errors, 2);
+    assert!(!core.state.system.scanning);
+    assert_eq!(core.state.system.scan_task_id, Some(id));
+}
+
+#[test]
+fn revision_changed_during_probe_rejects_entire_batch_without_registration_or_append() {
+    let (directory, mut core) = admission_fixture();
+    let path = directory.path().join("external.wav");
+    write_pcm_frames(&path, 1);
+    let before_total = core.state.library.track_total;
+    let revision = core.state.queue.revision;
+    core.start_external_admission(vec![path.clone()], Some(1), Some(revision))
+        .unwrap();
+    let id = core.active_external_admission.as_ref().unwrap().status.id;
+    core.command(Command::Enqueue { track_ids: vec![1] })
+        .unwrap();
+    let queue = core.queue_ids.clone();
+    finish_admission(&mut core);
+    assert_eq!(core.queue_ids, queue);
+    assert_eq!(core.state.library.track_total, before_total);
+    assert_eq!(core.store.track_count().unwrap(), before_total);
+    assert!(
+        core.store
+            .track_id_for_source(&path, None)
+            .unwrap()
+            .is_none()
+    );
+    let ViewResponse::ScanTask(status) = core.view(&Query::ScanTask { id }).unwrap() else {
+        panic!("expected task")
+    };
+    assert!(!status.library_committed);
+    assert_eq!(status.progress.phase, ScanPhase::Failed);
+    assert!(
+        status
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("Queue revision changed")
+    );
+}
+
+#[test]
+fn cancel_scan_is_intent_until_preparation_joins_and_leaves_no_residue() {
+    let (directory, mut core) = admission_fixture();
+    let path = directory.path().join("external.wav");
+    write_pcm_frames(&path, 1);
+    let queue = core.queue_ids.clone();
+    let total = core.state.library.track_total;
+    core.start_external_admission(vec![path.clone()], None, None)
+        .unwrap();
+    let id = core.active_external_admission.as_ref().unwrap().status.id;
+    let held_lookup = loop {
+        let event = next_admission_event(&mut core);
+        if matches!(event, crate::core::admission::Event::KnownSources { .. }) {
+            break event;
+        }
+        core.external_admission_event(event);
+    };
+    core.command(Command::CancelScan { id }).unwrap();
+    assert!(core.active_external_admission.is_some());
+    assert!(core.state.system.scanning);
+    assert_eq!(core.state.system.scan_task_id, Some(id));
+    finish_admission(&mut core);
+    drop(held_lookup);
+    assert_eq!(core.queue_ids, queue);
+    assert_eq!(core.store.track_count().unwrap(), total);
+    assert!(
+        core.store
+            .track_id_for_source(&path, None)
+            .unwrap()
+            .is_none()
+    );
+    let ViewResponse::ScanTask(status) = core.view(&Query::ScanTask { id }).unwrap() else {
+        panic!("expected task")
+    };
+    assert_eq!(status.progress.phase, ScanPhase::Cancelled);
+    assert!(!status.library_committed);
+    assert!(!core.state.system.scanning);
+}
+
+#[test]
+fn admission_owns_media_slot_and_requires_versioned_positions() {
+    let (directory, mut core) = admission_fixture();
+    let path = directory.path().join("external.wav");
+    write_pcm_frames(&path, 1);
+    assert!(
+        core.start_external_admission(Vec::new(), None, None)
+            .is_err()
+    );
+    assert!(
+        core.start_external_admission(vec![path.clone()], Some(0), None)
+            .is_err()
+    );
+    core.start_external_admission(vec![path.clone()], None, None)
+        .unwrap();
+    assert!(
+        core.start_external_admission(vec![path.clone()], None, None)
+            .is_err()
+    );
+    assert!(
+        core.command(Command::Scan {
+            paths: vec![path.clone()],
+            force: false
+        })
+        .is_err()
+    );
+    assert!(
+        core.command(Command::CheckOtherTracks { force: false })
+            .is_err()
+    );
+    assert!(core.command(Command::OptimizeDatabase).is_err());
+    core.shutdown_external_admission();
+    assert!(
+        core.store
+            .track_id_for_source(&path, None)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        core.scan_results.back().unwrap().progress.phase,
+        ScanPhase::Cancelled
+    );
+}
+
+#[test]
+fn immediate_ack_exposes_task_id_before_background_saving_finishes() {
+    let (directory, core) = admission_fixture();
+    let path = directory.path().join("external.wav");
+    write_pcm_frames(&path, 1);
+    let lock = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+    lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let (handle, control, worker, _) = navigation_runtime(core);
+    let ack = handle.request_ack(Command::QueueExternalPaths {
+        paths: vec![path.clone()],
+        index: None,
+        expected_revision: None,
+    });
+    assert_eq!(ack.status, AckStatus::Succeeded);
+    let id = ack
+        .scan_id
+        .expect("admitted external files expose a media task identity");
+    let ViewResponse::ScanTask(status) = handle.query(Query::ScanTask { id }).result.unwrap()
+    else {
+        panic!("expected active task")
+    };
+    assert_eq!(status.id, id);
+    assert!(!status.library_committed);
+    lock.execute_batch("ROLLBACK").unwrap();
+    control.request_shutdown().unwrap();
+    let core = worker.join().unwrap();
+    // Shutdown may cancel preparation or join Saving, but the same retained task
+    // must truthfully distinguish those outcomes; the admission Ack is not a commit.
+    let ViewResponse::ScanTask(status) = core.view(&Query::ScanTask { id }).unwrap() else {
+        panic!("expected retained task")
+    };
+    assert_eq!(
+        core.store
+            .track_id_for_source(&path, None)
+            .unwrap()
+            .is_some(),
+        status.library_committed
+    );
+}
+
+#[test]
+fn saving_rejects_cancel_and_shutdown_joins_then_applies_committed_queue_facts() {
+    let (directory, mut core) = admission_fixture();
+    let path = directory.path().join("external.wav");
+    write_pcm_frames(&path, 1);
+    let total = core.state.library.track_total;
+    let queue_total = core.queue_ids.len();
+    let lock = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+    lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+    core.start_external_admission(vec![path.clone(), path.clone()], None, None)
+        .unwrap();
+    let id = core.active_external_admission.as_ref().unwrap().status.id;
+    while !core.active_external_admission.as_ref().unwrap().is_saving() {
+        let event = next_admission_event(&mut core);
+        core.external_admission_event(event);
+    }
+    assert!(core.database_maintenance_active());
+    assert!(core.command(Command::CancelScan { id }).is_err());
+    core.command(Command::Volume { value: 0.42 }).unwrap();
+    assert_eq!(core.state.playback.volume, 0.42);
+    assert!(
+        core.store
+            .track_id_for_source(&path, None)
+            .unwrap()
+            .is_none()
+    );
+    lock.execute_batch("ROLLBACK").unwrap();
+    core.shutdown_external_admission();
+    assert!(core.active_external_admission.is_none());
+    assert!(!core.database_maintenance_active());
+    assert_eq!(core.state.library.track_total, total + 1);
+    assert_eq!(core.queue_ids.len(), queue_total + 2);
+    assert_eq!(core.state.queue.total, queue_total + 2);
+    assert_eq!(core.store.queue_ids().unwrap(), core.queue_ids);
+    let ViewResponse::ScanTask(status) = core.view(&Query::ScanTask { id }).unwrap() else {
+        panic!("expected retained task")
+    };
+    assert!(status.library_committed);
+    assert_eq!(status.progress.phase, ScanPhase::Completed);
+    assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
+}
+
+#[test]
+fn committed_queue_and_task_facts_survive_current_track_projection_failure() {
+    let (directory, mut core) = admission_fixture();
+    let path = directory.path().join("1.wav");
+    write_pcm_frames(&path, 1);
+    core.store
+        .set_queue_current(Some(core.queue_ids[0]))
+        .unwrap();
+    core.refresh_queue_tracks().unwrap();
+    let before = core.queue_ids.len();
+    let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+    connection.execute_batch("CREATE TRIGGER corrupt_admission_projection AFTER UPDATE OF raw_title ON tracks WHEN NEW.id=1 BEGIN UPDATE tracks SET channels='unreadable' WHERE id=1; END;").unwrap();
+    core.start_external_admission(vec![path], None, None)
+        .unwrap();
+    let id = core.active_external_admission.as_ref().unwrap().status.id;
+    finish_admission(&mut core);
+    assert_eq!(core.queue_ids.len(), before + 1);
+    assert_eq!(core.state.queue.total, before + 1);
+    assert_eq!(core.store.queue_ids().unwrap(), core.queue_ids);
+    let ViewResponse::ScanTask(status) = core.view(&Query::ScanTask { id }).unwrap() else {
+        panic!("expected task")
+    };
+    assert!(status.library_committed);
+    assert_eq!(status.progress.phase, ScanPhase::Failed);
+    assert!(
+        status
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("Refreshing current track")
+    );
+}

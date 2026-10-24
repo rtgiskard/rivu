@@ -208,6 +208,13 @@ pub(super) enum LibraryAction {
         #[arg(long)]
         force: bool,
     },
+    /// Browse and check registered tracks not covered by current configured roots; with no roots, includes all registered tracks.
+    #[command(subcommand)]
+    Other(OtherTracksAction),
+    /// Read retained import or Other check status.
+    ScanStatus { id: u64 },
+    /// Cancel an active import or Other check by task ID.
+    CancelScan { id: u64 },
     /// List the library, optionally filtered by text.
     List {
         #[arg(short, long)]
@@ -284,6 +291,67 @@ pub(super) enum LibraryAction {
     /// Prevent this ordinary row from participating in future identity reuse.
     KeepIndependent { track_id: i64 },
 }
+
+#[derive(clap::Args)]
+pub(super) struct OtherTracksFilter {
+    #[arg(short, long)]
+    pub(super) query: Option<String>,
+    /// Match favorite or non-favorite tracks; omit to include both.
+    #[arg(long, action = clap::ArgAction::Set)]
+    pub(super) favorite: Option<bool>,
+    /// Match missing or present tracks; omit to include both.
+    #[arg(long, action = clap::ArgAction::Set)]
+    pub(super) missing: Option<bool>,
+    #[arg(long, value_enum, default_value = "id")]
+    pub(super) sort: LibraryOrder,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+pub(super) enum LibraryOrder {
+    Id,
+    Album,
+    MostPlayed,
+}
+
+impl From<LibraryOrder> for rivu::model::LibrarySort {
+    fn from(value: LibraryOrder) -> Self {
+        match value {
+            LibraryOrder::Id => Self::Id,
+            LibraryOrder::Album => Self::Album,
+            LibraryOrder::MostPlayed => Self::MostPlayed,
+        }
+    }
+}
+
+#[derive(Subcommand)]
+pub(super) enum OtherTracksAction {
+    /// Read one bounded page of tracks not covered by current configured roots; with no roots, includes all registered tracks.
+    List {
+        #[command(flatten)]
+        filter: OtherTracksFilter,
+        #[arg(long, default_value_t = 0)]
+        offset: usize,
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+    },
+    /// Count tracks not covered by current configured roots; with no roots, counts all registered tracks.
+    Count,
+    /// Locate a track outside current configured roots in the filtered and sorted Other view; with no roots, searches all registered tracks.
+    Locate {
+        track_id: i64,
+        #[command(flatten)]
+        filter: OtherTracksFilter,
+    },
+    /// Check registered files not covered by current configured roots; with no roots, checks all registered tracks.
+    Check {
+        #[arg(long)]
+        wait: bool,
+        /// Reread metadata even when file size and modification time are unchanged.
+        #[arg(long)]
+        force: bool,
+    },
+}
+
 #[derive(Clone, Copy, ValueEnum)]
 pub(super) enum Switch {
     On,
@@ -301,6 +369,22 @@ pub(super) enum QueueAction {
     Add {
         #[arg(required = true)]
         track_ids: Vec<i64>,
+    },
+    /// Append registered tracks not covered by current configured roots; with no roots, appends all registered tracks.
+    AddOther,
+    /// Admit ordinary local audio files to the queue without configuring roots.
+    AddPaths {
+        #[arg(required = true)]
+        paths: Vec<PathBuf>,
+        /// Insert before this queue index instead of appending.
+        #[arg(long, requires = "expected_revision")]
+        index: Option<usize>,
+        /// Queue revision observed when choosing the insertion index.
+        #[arg(long, requires = "index")]
+        expected_revision: Option<u64>,
+        /// Wait for admission to finish using the shared media task lifecycle.
+        #[arg(long)]
+        wait: bool,
     },
     Remove {
         queue_id: u64,

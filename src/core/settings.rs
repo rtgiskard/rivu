@@ -25,6 +25,10 @@ impl Core {
         }
         let mut config = self.effective_config();
         let still_mode = matches!(change, GuiConfigChange::ToggleStillMode);
+        let roots_changed = matches!(
+            change,
+            GuiConfigChange::AddLibraryRoot(_) | GuiConfigChange::RemoveLibraryRoot(_)
+        );
         match change {
             GuiConfigChange::ToggleStillMode => config.still_mode = !config.still_mode,
             GuiConfigChange::ToggleWaveformSeek => {
@@ -39,6 +43,7 @@ impl Core {
                 config.library_roots.push(path);
             }
             GuiConfigChange::RemoveLibraryRoot(path) => {
+                let path = library::logical_path(&path)?;
                 if !config.library_roots.contains(&path) {
                     return Ok(());
                 }
@@ -52,6 +57,10 @@ impl Core {
         }
         // Quick controls change desired memory state; Apply or shutdown persists it.
         self.state.system.config = Arc::new(config);
+        if roots_changed {
+            self.state.library.structure_revision =
+                self.state.library.structure_revision.wrapping_add(1);
+        }
         if still_mode {
             self.engine
                 .send(AudioCommand::StillMode(self.state.system.config.still_mode))
@@ -65,12 +74,9 @@ impl Core {
             "Processing graph changes require revision-checked ProcessingGraphEdit commands"
         );
         config.validate()?;
-        let roots = config
-            .library_roots
-            .iter()
-            .map(|root| library::logical_path(root))
-            .collect::<Result<_>>()?;
+        let roots = library::normalize_roots(&config.library_roots)?;
         Arc::make_mut(&mut config).library_roots = roots;
+        let roots_changed = config.library_roots != self.state.system.config.library_roots;
         // No other producer can consume these slots while Core persists.
         // Reject a busy batch before committing any desired settings.
         self.engine.ensure_command_capacity(7)?;
@@ -93,6 +99,10 @@ impl Core {
         self.state.playback.repeat = config.repeat;
         self.state.system.ffmpeg_status = ffmpeg_status;
         self.state.system.config = config;
+        if roots_changed {
+            self.state.library.structure_revision =
+                self.state.library.structure_revision.wrapping_add(1);
+        }
         tracing::info!("configuration_updated");
         let request = self.output_settings_request.wrapping_add(1);
         let config = &self.state.system.config;

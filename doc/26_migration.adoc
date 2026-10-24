@@ -107,19 +107,20 @@ writer locks, or replacement. `format_version` is not an alias. User-facing load
 saving and upgrade guidance is authoritative in
 link:01_config.adoc#_configuration_upgrades[Configuration upgrades].
 
-== Album triggers are derived-structure maintenance
+== Derived-trigger maintenance
 
 `albums` and `album_artists` are derived summaries maintained by SQLite triggers.
 Business consumers need correct maintenance, not knowledge of historical trigger
 versions. A trigger's existence or successful execution does not prove semantic
 correctness: it might omit a relevant update or maintain the wrong grouping rule.
 
-`album_trigger_revision` identifies a known installed set of current maintenance
-definitions. It is an internal maintenance marker, not a second database format
-version. The current implementation installs revision `2` when the marker is
-missing or older and preserves existing summary rows; an up-to-date marker skips
-installation. Offline preflight also requires the named current triggers when the
-marker is current, but does not compare their bodies.
+`album_trigger_revision` identifies the installed album and queue metadata
+maintenance definitions. It is an internal maintenance marker, not a second
+database format version. Revision `3` also invalidates queue display rows when a
+source path changes. Installation replaces older definitions transactionally,
+preserving summaries, queue occurrences, and current selection; schema version
+remains `1`. An up-to-date marker skips installation. Offline preflight requires
+the named current triggers when the marker is current, but does not compare bodies.
 
 A trigger implementation change with unchanged persistent semantics does not by
 itself require a database schema bump. A change to grouping meaning or persistent

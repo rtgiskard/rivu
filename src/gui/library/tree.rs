@@ -14,22 +14,60 @@ const MAX_CACHED_PAGES: usize = 16;
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(in crate::gui) struct TreeBranch {
     root: Option<usize>,
-    path: PathBuf,
+    path: Option<PathBuf>,
+    other_tracks: bool,
 }
 
 impl TreeBranch {
     pub(in crate::gui) fn path(&self) -> &Path {
-        &self.path
+        self.path
+            .as_deref()
+            .expect("only directory branches have a path")
     }
 
     pub(in crate::gui) fn is_forest(&self) -> bool {
-        self.root.is_none()
+        self.root.is_none() && !self.other_tracks
+    }
+
+    pub(in crate::gui) fn is_other_tracks(&self) -> bool {
+        self.other_tracks
+    }
+
+    fn child_row(&self, index: usize, row: &DirectoryRow) -> Option<Self> {
+        match row {
+            DirectoryRow::OtherTracks => Some(Self {
+                root: None,
+                path: None,
+                other_tracks: true,
+            }),
+            DirectoryRow::Directory { path } => Some(self.child(index, path)),
+            DirectoryRow::Track(_) => None,
+        }
+    }
+
+    fn row(&self) -> DirectoryRow {
+        if self.other_tracks {
+            DirectoryRow::OtherTracks
+        } else {
+            DirectoryRow::Directory {
+                path: self.path().to_path_buf(),
+            }
+        }
+    }
+
+    fn node(&self) -> super::LibraryNode {
+        if self.other_tracks {
+            super::LibraryNode::OtherTracks
+        } else {
+            super::LibraryNode::Directory(std::sync::Arc::from(self.path()))
+        }
     }
 
     fn child(&self, index: usize, path: &Path) -> Self {
         Self {
             root: Some(self.root.unwrap_or(index)),
-            path: path.to_path_buf(),
+            path: Some(path.to_path_buf()),
+            other_tracks: false,
         }
     }
 }
@@ -40,6 +78,7 @@ pub(in crate::gui) struct VisibleDirectoryRow {
     pub(in crate::gui) depth: usize,
     pub(in crate::gui) expanded: bool,
     pub(in crate::gui) status: BranchStatus,
+    pub(in crate::gui) other_tracks: bool,
     pub(in crate::gui) branch: Option<TreeBranch>,
 }
 
@@ -102,6 +141,7 @@ struct CachedPage {
 
 #[derive(PartialEq, Eq, Hash)]
 enum RowIdentity<'a> {
+    OtherTracks,
     Directory(&'a Path),
     Track(i64),
 }
@@ -109,6 +149,7 @@ enum RowIdentity<'a> {
 impl<'a> From<&'a DirectoryRow> for RowIdentity<'a> {
     fn from(row: &'a DirectoryRow) -> Self {
         match row {
+            DirectoryRow::OtherTracks => Self::OtherTracks,
             DirectoryRow::Directory { path } => Self::Directory(path),
             DirectoryRow::Track(track) => Self::Track(track.id),
         }
@@ -118,6 +159,7 @@ impl<'a> From<&'a DirectoryRow> for RowIdentity<'a> {
 impl<'a> From<&'a super::LibraryNode> for RowIdentity<'a> {
     fn from(node: &'a super::LibraryNode) -> Self {
         match node {
+            super::LibraryNode::OtherTracks => Self::OtherTracks,
             super::LibraryNode::Directory(path) => Self::Directory(path),
             super::LibraryNode::Track(id) => Self::Track(*id),
         }
@@ -296,8 +338,7 @@ impl DirectoryTree {
             if offset + index >= page.total {
                 break;
             }
-            if let DirectoryRow::Directory { path } = row {
-                let child = key.child(offset + index, path);
+            if let Some(child) = key.child_row(offset + index, row) {
                 if self.grouped && key.is_forest() && self.grouped_roots.insert(child.clone()) {
                     self.branches.entry(child.clone()).or_default().expanded = true;
                 }
@@ -445,17 +486,10 @@ impl DirectoryTree {
         self.projection_revision = self.projection_revision.wrapping_add(1);
         self.branches.entry(key.clone()).or_default().expanded = true;
         let location = self.pages.iter().find_map(|((parent, offset), page)| {
-            page.rows
-                .iter()
-                .enumerate()
-                .find_map(|(index, row)| match row {
-                    DirectoryRow::Directory { path }
-                        if parent.child(offset + index, path) == *key =>
-                    {
-                        Some((parent.clone(), offset + index))
-                    }
-                    _ => None,
-                })
+            page.rows.iter().enumerate().find_map(|(index, row)| {
+                (parent.child_row(offset + index, row).as_ref() == Some(key))
+                    .then(|| (parent.clone(), offset + index))
+            })
         });
         if let Some((parent, index)) = location {
             self.attach(&parent, index, key);
@@ -469,7 +503,12 @@ impl DirectoryTree {
             branch.expanded = false;
         }
         let in_subtree = |candidate: &TreeBranch| {
-            candidate.root == key.root && candidate.path.starts_with(&key.path)
+            candidate == key
+                || (candidate.root == key.root
+                    && match (&candidate.path, &key.path) {
+                        (Some(candidate), Some(key)) => candidate.starts_with(key),
+                        _ => false,
+                    })
         };
         for (candidate, branch) in &mut self.branches {
             if in_subtree(candidate) {
@@ -671,18 +710,10 @@ impl DirectoryTree {
                 if branch.stale_children.contains(&child_index) {
                     return None;
                 }
-                branch
-                    .children
-                    .get(&child_index)
-                    .map(|key| DirectoryRow::Directory {
-                        path: key.path.clone(),
-                    })
+                branch.children.get(&child_index).map(TreeBranch::row)
             });
         if let Some(row) = row {
-            let branch = match &row {
-                DirectoryRow::Directory { path } => Some(segment.branch.child(child_index, path)),
-                DirectoryRow::Track(_) => None,
-            };
+            let branch = segment.branch.child_row(child_index, &row);
             let (expanded, status) = branch
                 .as_ref()
                 .map(|key| (self.expanded(key), self.status(key)))
@@ -692,6 +723,7 @@ impl DirectoryTree {
                 depth: segment.depth,
                 expanded,
                 status,
+                other_tracks: segment.branch.is_other_tracks(),
                 branch,
             }))
         } else {
@@ -869,6 +901,7 @@ impl DirectoryTree {
         for ((key, offset), page) in &self.pages {
             for (index, row) in page.rows.iter().enumerate() {
                 let node = match row {
+                    DirectoryRow::OtherTracks => super::LibraryNode::OtherTracks,
                     DirectoryRow::Directory { path } => {
                         super::LibraryNode::Directory(std::sync::Arc::from(path.as_path()))
                     }
@@ -882,7 +915,7 @@ impl DirectoryTree {
         }
         for (parent, branch) in &self.branches {
             for (index, key) in &branch.children {
-                let node = super::LibraryNode::Directory(std::sync::Arc::from(key.path()));
+                let node = key.node();
                 if selected(&node) {
                     self.selected_locations
                         .insert((node, parent.clone()), *index);
@@ -899,12 +932,18 @@ impl DirectoryTree {
         roots: &[PathBuf],
         locations: &[crate::model::LibraryLocation],
     ) -> Option<(TreeBranch, usize)> {
-        let root = roots.get(root_index)?;
+        let row = if root_index == 0 {
+            DirectoryRow::OtherTracks
+        } else {
+            DirectoryRow::Directory {
+                path: roots.get(root_index - 1)?.clone(),
+            }
+        };
         let forest = TreeBranch::default();
         let entry = self.branches.entry(forest.clone()).or_default();
-        entry.total = Some(roots.len());
-        entry.layout_len = roots.len();
-        let mut branch = forest.child(root_index, root);
+        entry.total = Some(roots.len() + 1);
+        entry.layout_len = roots.len() + 1;
+        let mut branch = forest.child_row(root_index, &row)?;
         self.attach(&forest, root_index, &branch);
         for location in locations {
             let entry = self.branches.entry(branch.clone()).or_default();
@@ -1037,7 +1076,8 @@ mod tests {
                 } else {
                     0
                 }),
-                path: path.into(),
+                path: Some(path.into()),
+                other_tracks: false,
             }
         }
     }
@@ -1622,6 +1662,7 @@ mod tests {
                 rows: vec![
                     DirectoryRow::Track(crate::model::LibraryRow {
                         id: 7,
+                        path: Default::default(),
                         title: "Selected track".into(),
                         artist: String::new(),
                         album: String::new(),

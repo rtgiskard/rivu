@@ -32,6 +32,7 @@ fn display_changed(previous: &GuiSnapshot, next: &GuiSnapshot) -> bool {
             != next.current_track().map(|track| track.id)
         || previous.playback.status != next.playback.status
         || previous.system.scanning != next.system.scanning
+        || previous.system.scan_task_id != next.system.scan_task_id
         || previous.system.scan_message != next.system.scan_message
         || previous.system.scan_progress != next.system.scan_progress
         || previous.system.shutting_down != next.system.shutting_down
@@ -214,6 +215,7 @@ impl Library {
 
     pub(super) fn directory_row_selected(&self, row: &DirectoryRow) -> bool {
         match row {
+            DirectoryRow::OtherTracks => self.library.selected_nodes().contains(&LibraryNode::OtherTracks),
             DirectoryRow::Directory { path } => self.library.selected_nodes().iter().any(|node| {
                 matches!(node, LibraryNode::Directory(selected) if selected.as_ref() == path.as_path())
             }),

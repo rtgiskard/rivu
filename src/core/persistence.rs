@@ -8,6 +8,10 @@ impl Core {
                 .active_scan
                 .as_ref()
                 .is_some_and(|task| task.status.progress.phase == ScanPhase::Saving)
+            || self
+                .active_external_admission
+                .as_ref()
+                .is_some_and(|task| task.is_saving())
     }
 
     /// Maintenance never admits a command that can wait on its writer connection.

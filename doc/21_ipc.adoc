@@ -106,7 +106,7 @@ The frame header is six bytes. `body_length` excludes the four-byte length field
 and includes the version, message type, and serialized body.
 
 Bodies use Postcard serialization without COBS framing. The current protocol
-version is `8`; clients and servers must use matching wire schemas. The four-byte
+version is `9`; clients and servers must use matching wire schemas. The four-byte
 frame length remains little-endian; body integers follow Postcard's encoding.
 Restart clients and hosts together after upgrading: incompatible versions are
 rejected before decoding the body. There is no compatibility alias or schema
@@ -489,6 +489,15 @@ discard results when the captured filters, view, request generation, or library
 and structure revisions no longer match. Filtering display rows does not restrict
 directory source expansion: dragging a directory still adds its complete contents.
 
+`OtherTracksPage {query, favorite, missing, sort, offset, limit}` returns a flat
+`Page<LibraryRow>` for registered tracks outside current configured roots;
+`OtherTracksCount` returns its unfiltered total. With no roots, both include the
+whole library. `OtherTracksLocate {track_id, query, favorite, missing, sort}`
+returns the matching rank or a filtered/unavailable result. These queries depend
+on library content and root configuration; discard stale results when either
+changes. `DirectoryRow::OtherTracks` identifies the collection, not a filesystem path.
+Display track rows include their logical source `path`.
+
 `QueuePage`, `QueueBatch`, `QueueEntries`, `PlaylistSummaries`,
 `PlaylistSummaryBatch`, `PlaylistEntries`, `PlaylistEntryBatch`,
 `PlaylistEntryLocations`, and `AlbumTracks` accept an optional `query`.
@@ -618,6 +627,19 @@ no total queue cap. `CreatePlaylistFromQueue {name}` atomically saves the comple
 queue as a playlist on the server, keeping each track's first occurrence order.
 Explicit ID selections remain bounded by request-frame bytes, not total queue size.
 
+The source commands `EnqueueSources`, `InsertQueueSources`, `AddPlaylistSources`,
+and `InsertPlaylistSources` also accept `other_tracks`. When set, they include
+the complete Other collection using current roots at execution time, independently
+of display filters, with the same union ordering and deduplication as other sources.
+
+`QueueExternalPaths {paths, index, expected_revision}` admits ordinary local audio
+and inserts occurrences in input order, preserving duplicates. An absent `index`
+appends; insertion requires `expected_revision`. Registration and queue insertion
+commit atomically; stale revisions reject the whole commit without an append fallback.
+The accepted command returns `Ack.scan_id`; completion and cancellation use the
+shared media-task lifecycle below. User-visible file admission rules are in
+link:04_playback.adoc#_adding_local_files[Adding local files].
+
 `InsertQueue {track_ids, index, expected_revision}` and
 `InsertPlaylist {playlist_id, track_ids, index, expected_revision}` insert directly
 at an original-list boundary in `0..=total`. The corresponding
@@ -699,11 +721,18 @@ so they omit global fingerprint candidates while retaining exact input identitie
 Complete scans retain scope-external missing-source discovery. Fingerprints are
 validated before commit; these indexes are not persistent probe caches.
 
-Accepted scan and playlist-import commands return `Ack.scan_id` with their `u64`
-task ID. Acceptance is not completion. The CLI polls `Query::ScanTask { id }`
-and waits for that exact task's result: only `Completed` succeeds; `Failed` and
-`Cancelled` report the task's error or message. Global scanning state and
-`last_error` are presentation fields, not evidence that a particular task finished.
+`CheckOtherTracks {force}` checks only registered sources outside current roots,
+or all registered sources with no roots. It does not discover, relocate, or delete
+tracks; commit rechecks current scope. `force` bypasses metadata reuse. File checks
+and external queue admission share the scan task slot, saving boundary, cancellation,
+and shutdown joining contract.
+
+Accepted scan, playlist-import, file-check, and external-admission commands return
+`Ack.scan_id` with their `u64` task ID. Acceptance is not completion. The CLI polls
+`Query::ScanTask { id }` and waits for that exact task's result: only `Completed`
+succeeds; `Failed` and `Cancelled` report the task's error or message. Global
+scanning state and `last_error` are presentation fields, not evidence that a
+particular task finished.
 JSON completion output contains the task status rather than a global state snapshot.
 Startup and waiting share one connection; disconnection fails the wait rather
 than binding the same numeric task ID to a newly started instance.
@@ -712,10 +741,11 @@ than binding the same numeric task ID to a newly started instance.
 playlist_id, error}`. The phases are `Discovering`, `ReadingMetadata`, `Saving`,
 `Completed`, `Failed`, and `Cancelled`; the last three are terminal. The core
 retains the active task and latest 32 terminal results. Unknown/evicted IDs fail.
-`library_committed=true` confirms the scan merge; `playlist_id` confirms the
-subsequent playlist commit even if refresh failed. A failed task is not evidence
-of zero side effects; after an uncertain worker failure, absent confirmation is
-not proof that no commit happened. Retry only the missing step after inspection.
+`library_committed=true` confirms a library commit (and the atomic queue insertion
+for external admission); `playlist_id` confirms a subsequent playlist commit even
+if refresh failed. A failed task is not evidence of zero side effects; after an
+uncertain worker failure, absent confirmation is not proof that no commit happened.
+Retry only the missing step after inspection.
 `CancelScan` requests cancellation before Saving and is rejected during Saving;
 its Ack never proves worker retirement. Only the task terminal result resolves it.
 A failed wait never automatically replays startup.

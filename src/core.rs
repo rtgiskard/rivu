@@ -144,6 +144,7 @@ impl CoreState {
             system: system.scanning != old.scanning
                 || system.scan_message != old.scan_message
                 || system.scan_progress != old.scan_progress
+                || system.scan_task_id != old.scan_task_id
                 || system.relocation_task != old.relocation_task
                 || system.processing != old.processing
                 || system.last_error != old.last_error
@@ -721,6 +722,7 @@ impl Runtime {
             pending_bitrate: None,
             pending_navigation: None,
             active_export: None,
+            active_external_admission: None,
             active_optimization: None,
             processing: crate::processing::Service::new(data_dir.to_path_buf()),
             processing_results: VecDeque::new(),
@@ -816,6 +818,7 @@ struct ScanFinished {
     result: Result<ScanResult>,
     import: Option<(String, Vec<M3uItem>)>,
     progress: ScanProgress,
+    other_tracks_check: bool,
 }
 enum ScanEvent {
     Progress {
@@ -876,6 +879,7 @@ struct Core {
     pending_bitrate: Option<(u64, bool)>,
     pending_navigation: Option<PlaybackStatus>,
     active_export: Option<export::ExportTask>,
+    active_external_admission: Option<admission::ExternalAdmissionTask>,
     active_optimization: Option<maintenance::OptimizationTask>,
     processing: crate::processing::Service,
     processing_results: VecDeque<ProcessingTaskStatus>,
@@ -903,6 +907,7 @@ impl Drop for Core {
         // Runs on the dedicated Core owner (or a synchronous test owner),
         // including unwind. Cancellation is intent, never retirement.
         drop(self.active_export.take());
+        drop(self.active_external_admission.take());
         if let Some(task) = self.active_scan.take() {
             if task.status.progress.phase != ScanPhase::Saving {
                 task.cancellation.cancel();
@@ -946,6 +951,7 @@ impl Core {
         Ok(())
     }
 }
+mod admission;
 mod catalog;
 mod command;
 mod dispatch;

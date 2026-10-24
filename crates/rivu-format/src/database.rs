@@ -1,7 +1,8 @@
 use anyhow::{Context, Result, bail, ensure};
 use rusqlite::{Connection, OptionalExtension};
 
-pub const ALBUM_TRIGGER_REVISION: i64 = 2;
+// The persisted album_trigger_revision key also governs queue metadata triggers.
+pub const ALBUM_TRIGGER_REVISION: i64 = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DatabaseState {
@@ -295,12 +296,13 @@ const TRACK_INDEXES: &str = "
     CREATE INDEX tracks_most_played ON tracks(play_count DESC);";
 
 const QUEUE_METADATA_TRIGGER: &str = "
-    CREATE TRIGGER queue_metadata AFTER UPDATE OF raw_title,raw_artist,raw_album,
+    CREATE TRIGGER queue_metadata AFTER UPDATE OF path,raw_title,raw_artist,raw_album,
         title_override,artist_override,album_override,duration,favorite,missing,
         play_count,codec,bitrate_bps,bitrate_exact ON tracks
     WHEN (COALESCE(old.title_override,old.raw_title) IS NOT COALESCE(new.title_override,new.raw_title)
         OR COALESCE(old.artist_override,old.raw_artist) IS NOT COALESCE(new.artist_override,new.raw_artist)
         OR COALESCE(old.album_override,old.raw_album) IS NOT COALESCE(new.album_override,new.raw_album)
+        OR old.path IS NOT new.path
         OR old.duration IS NOT new.duration
         OR old.favorite IS NOT new.favorite OR old.missing IS NOT new.missing
         OR old.play_count IS NOT new.play_count OR old.codec IS NOT new.codec
@@ -471,7 +473,7 @@ fn install_summary_triggers(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Replace only outdated derived trigger definitions, preserving all summary rows.
+/// Replace outdated album summary and queue metadata triggers without rebuilding data.
 /// A future marker is rejected before any write, within the same transaction.
 pub fn ensure_summary_triggers(conn: &Connection) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
@@ -485,11 +487,13 @@ pub fn ensure_summary_triggers(conn: &Connection) -> Result<()> {
         tx.commit()?;
         return Ok(());
     }
-    // Only trigger definitions change; existing summary rows remain authoritative.
+    // Only trigger definitions change; existing summary rows and queue state stay intact.
     tx.execute_batch(
         "DROP TRIGGER IF EXISTS albums_insert; DROP TRIGGER IF EXISTS albums_delete;
-         DROP TRIGGER IF EXISTS albums_update; DROP TRIGGER IF EXISTS albums_artist_update;",
+         DROP TRIGGER IF EXISTS albums_update; DROP TRIGGER IF EXISTS albums_artist_update;
+         DROP TRIGGER IF EXISTS queue_metadata;",
     )?;
+    tx.execute_batch(QUEUE_METADATA_TRIGGER)?;
     install_summary_triggers(&tx)?;
     tx.commit()?;
     Ok(())
@@ -516,13 +520,30 @@ mod tests {
     }
 
     #[test]
-    fn trigger_maintenance_preserves_summaries_and_is_idempotent() -> Result<()> {
-        for revision in [None, Some(0), Some(1)] {
+    fn trigger_maintenance_preserves_summaries_and_queue_and_is_idempotent() -> Result<()> {
+        for revision in [None, Some(0), Some(1), Some(2)] {
             let conn = Connection::open_in_memory()?;
             create_current(&conn)?;
             conn.execute_batch(
-                "INSERT INTO tracks(path,raw_album,raw_artist) VALUES('/music/a.flac','Album','Artist');
-                 UPDATE albums SET artist='Preserved summary';",
+                "INSERT INTO tracks(id,path,raw_album,raw_artist) VALUES(1,'/music/a.flac','Album','Artist');
+                 INSERT INTO tracks(id,path) VALUES(2,'/other/unqueued.flac');
+                 UPDATE albums SET artist='Preserved summary';
+                 INSERT INTO queue_entries(id,track_id,position) VALUES(41,1,0),(42,1,1);
+                 UPDATE queue_meta SET current_id=42,revision=9;
+                 DROP TRIGGER queue_metadata;
+                 CREATE TRIGGER queue_metadata AFTER UPDATE OF raw_title,raw_artist,raw_album,
+                    title_override,artist_override,album_override,duration,favorite,missing,
+                    play_count,codec,bitrate_bps,bitrate_exact ON tracks
+                 WHEN (COALESCE(old.title_override,old.raw_title) IS NOT COALESCE(new.title_override,new.raw_title)
+                    OR COALESCE(old.artist_override,old.raw_artist) IS NOT COALESCE(new.artist_override,new.raw_artist)
+                    OR COALESCE(old.album_override,old.raw_album) IS NOT COALESCE(new.album_override,new.raw_album)
+                    OR old.duration IS NOT new.duration
+                    OR old.favorite IS NOT new.favorite OR old.missing IS NOT new.missing
+                    OR old.play_count IS NOT new.play_count OR old.codec IS NOT new.codec
+                    OR old.bitrate_bps IS NOT new.bitrate_bps OR old.bitrate_exact IS NOT new.bitrate_exact)
+                    AND EXISTS(SELECT 1 FROM queue_entries WHERE track_id=new.id) BEGIN
+                    UPDATE queue_meta SET revision=revision+1;
+                 END;",
             )?;
             if let Some(revision) = revision {
                 conn.execute(
@@ -542,6 +563,17 @@ mod tests {
                 })?;
             assert_eq!(summary, (1, "Preserved summary".into()));
             validate_structure(&conn)?;
+            assert_eq!(
+                conn.query_row("SELECT current_id,revision FROM queue_meta", [], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+                })?,
+                (42, 9)
+            );
+            let entries = conn
+                .prepare("SELECT id,track_id,position FROM queue_entries ORDER BY position,id")?
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                .collect::<rusqlite::Result<Vec<(i64, i64, i64)>>>()?;
+            assert_eq!(entries, [(41, 1, 0), (42, 1, 1)]);
             let schema: i64 = conn.query_row("PRAGMA schema_version", [], |row| row.get(0))?;
             let changes = conn.total_changes();
             ensure_summary_triggers(&conn)?;
@@ -550,6 +582,26 @@ mod tests {
                 conn.query_row("PRAGMA schema_version", [], |row| row.get::<_, i64>(0))?,
                 schema
             );
+            conn.execute("UPDATE tracks SET path=path WHERE id=1", [])?;
+            conn.execute(
+                "UPDATE tracks SET path='/other/renamed.flac' WHERE id=2",
+                [],
+            )?;
+            assert_eq!(
+                conn.query_row("SELECT revision FROM queue_meta", [], |row| row
+                    .get::<_, i64>(0))?,
+                9
+            );
+            conn.execute(
+                "UPDATE tracks SET path='/music/renamed.flac' WHERE id=1",
+                [],
+            )?;
+            let (current, revision): (i64, i64) =
+                conn.query_row("SELECT current_id,revision FROM queue_meta", [], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })?;
+            assert_eq!(current, 42);
+            assert!(revision > 9);
             conn.execute("UPDATE tracks SET raw_artist='New artist'", [])?;
             assert_eq!(
                 conn.query_row("SELECT artist FROM albums", [], |row| row
@@ -562,7 +614,11 @@ mod tests {
 
     #[test]
     fn unsupported_versions_are_rejected_before_any_schema_or_data_write() -> Result<()> {
-        for (version, revision) in [(0, 2), (2, 2), (1, 3)] {
+        for (version, revision) in [
+            (0, ALBUM_TRIGGER_REVISION),
+            (2, ALBUM_TRIGGER_REVISION),
+            (SCHEMA_VERSION, ALBUM_TRIGGER_REVISION + 1),
+        ] {
             let conn = Connection::open_in_memory()?;
             create_current(&conn)?;
             conn.execute(

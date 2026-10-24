@@ -204,6 +204,93 @@ impl ScanResult {
     }
 }
 
+/// Recheck only the supplied physical sources, without traversing directories or
+/// expanding playlists/CUE sheets. Roots record confirmed absence only; failed
+/// opens, probes and permission checks never authorize missing reconciliation.
+pub(crate) async fn recheck_sources<Fut>(
+    paths: &[PathBuf],
+    mut known_sources: impl FnMut(Vec<PathBuf>) -> Fut,
+    ffmpeg_enabled: bool,
+    cancellation: &ScanCancellation,
+    mut progress: impl FnMut(ScanPhase, usize, Option<usize>, usize, Option<&Path>),
+) -> Result<ScanResult>
+where
+    Fut: Future<Output = Result<Vec<Option<KnownFile>>>>,
+{
+    cancellation.check()?;
+    let mut paths = paths
+        .iter()
+        .map(|path| logical_path(path))
+        .collect::<Result<Vec<_>>>()?;
+    paths.sort();
+    paths.dedup();
+    let total = paths.len();
+    let mut result = ScanResult::default();
+    let mut scratch = Vec::new();
+    let mut processed = 0;
+    progress(ScanPhase::ReadingMetadata, 0, Some(total), 0, None);
+    for chunk in paths.chunks(SOURCE_BATCH_SIZE) {
+        cancellation.check()?;
+        let batch = chunk.to_vec();
+        let token = cancellation.clone();
+        let inspected = tokio::task::spawn_blocking(move || {
+            let mut inspected = Vec::with_capacity(batch.len());
+            for path in batch {
+                token.check()?;
+                path.to_str().context("Audio source path is not UTF-8")?;
+                let metadata = fs::metadata(&path);
+                inspected.push((path, metadata));
+            }
+            Ok::<_, anyhow::Error>(inspected)
+        })
+        .await
+        .context("Registered source inspection worker failed")??;
+        cancellation.check()?;
+        let mut present = Vec::with_capacity(inspected.len());
+        for (path, metadata) in inspected {
+            match metadata {
+                Ok(_) => present.push(path),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    result.roots.push(path);
+                }
+                Err(error) => result.push_error(|| format!("{}: {error}", path.display())),
+            }
+        }
+        if !present.is_empty() && scratch.is_empty() {
+            scratch.resize(HASH_CHUNK_BYTES, 0);
+        }
+        let mut sources = HashMap::new();
+        prepare_sources(
+            present,
+            &mut known_sources,
+            &mut sources,
+            ffmpeg_enabled,
+            cancellation,
+            &mut scratch,
+        )
+        .await?;
+        for path in chunk {
+            cancellation.check()?;
+            if let Some(source) = sources.remove(path) {
+                match source {
+                    Ok(record) => result.records.push(record),
+                    Err(error) => result.push_error(|| format!("{}: {error}", path.display())),
+                }
+            }
+            processed += 1;
+            progress(
+                ScanPhase::ReadingMetadata,
+                processed,
+                Some(total),
+                result.errors.len(),
+                Some(path),
+            );
+        }
+    }
+    cancellation.check()?;
+    Ok(result)
+}
+
 /// Scan directories, audio files and CUE sheets without touching audio output.
 /// CUE metadata is always reread; only unchanged full-source probe results may
 /// be reused. Failed sheets contribute no partial tracks or source suppression.
@@ -919,7 +1006,7 @@ impl PendingSource {
     }
 }
 
-async fn prepare_sources<Fut>(
+pub(super) async fn prepare_sources<Fut>(
     paths: Vec<PathBuf>,
     known_sources: &mut impl FnMut(Vec<PathBuf>) -> Fut,
     sources: &mut HashMap<PathBuf, std::result::Result<ScanRecord, String>>,
@@ -1059,4 +1146,142 @@ pub(super) fn hash_chunk(
     };
     hasher.update(&scratch[..count]);
     Ok(Some(count))
+}
+
+#[cfg(test)]
+mod recheck_tests {
+    use super::*;
+
+    fn cached(path: &Path) -> KnownFile {
+        let metadata = fs::metadata(path).unwrap();
+        KnownFile {
+            size: metadata.len(),
+            modified_ns: cache_modified_ns(metadata.modified().ok()),
+            fingerprint: Some(blake3::hash(b"cached source").to_hex().to_string()),
+            cue: None,
+            media: Some(MediaInfo {
+                title: "Cached".into(),
+                artist: String::new(),
+                album: String::new(),
+                duration: Some(1.0),
+                codec: "pcm".into(),
+                channels: 2,
+                sample_rate: 48000,
+                bitrate_bps: None,
+                bitrate_exact: false,
+                track_number: None,
+                disc_number: None,
+                bits_per_sample: None,
+                release_date: None,
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn exact_recheck_never_expands_inputs_and_only_confirms_absence() {
+        let directory = tempfile::tempdir().unwrap();
+        let nested = directory.path().join("nested");
+        fs::create_dir(&nested).unwrap();
+        fs::write(nested.join("unregistered.wav"), b"audio not requested").unwrap();
+        let sheet = directory.path().join("registered.cue");
+        fs::write(
+            &sheet,
+            b"FILE \"nested/unregistered.wav\" WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\n",
+        )
+        .unwrap();
+        let missing = directory.path().join("absent.wav");
+        let invalid = directory.path().join("invalid.wav");
+        fs::write(&invalid, b"not audio").unwrap();
+        let mut looked_up = Vec::new();
+        let result = recheck_sources(
+            &[
+                nested.clone(),
+                sheet.clone(),
+                missing.clone(),
+                invalid.clone(),
+            ],
+            |paths| {
+                looked_up.extend(paths.iter().cloned());
+                std::future::ready(Ok(vec![None; paths.len()]))
+            },
+            false,
+            &ScanCancellation::default(),
+            |_, _, _, _, _| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.roots, vec![missing]);
+        assert!(result.records.is_empty());
+        assert_eq!(result.errors.len(), 3);
+        assert!(
+            looked_up
+                .iter()
+                .all(|path| path == &sheet || path == &invalid)
+        );
+        assert!(!looked_up.contains(&nested.join("unregistered.wav")));
+    }
+
+    #[tokio::test]
+    async fn exact_recheck_reuses_cache_and_force_callback_bypasses_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("cached.wav");
+        fs::write(&path, b"intentionally unprobeable cached bytes").unwrap();
+        let known = cached(&path);
+        let result = recheck_sources(
+            &[path.clone(), path.clone()],
+            |paths| std::future::ready(Ok(vec![Some(known.clone()); paths.len()])),
+            false,
+            &ScanCancellation::default(),
+            |_, _, _, _, _| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.records.len(), 1);
+        assert_eq!(result.records[0].media.title, "Cached");
+        assert!(result.errors.is_empty());
+        let forced = recheck_sources(
+            &[path],
+            |paths| std::future::ready(Ok(vec![None; paths.len()])),
+            false,
+            &ScanCancellation::default(),
+            |_, _, _, _, _| {},
+        )
+        .await
+        .unwrap();
+        assert!(forced.records.is_empty());
+        assert_eq!(forced.errors.len(), 1);
+        assert!(forced.roots.is_empty());
+    }
+
+    #[tokio::test]
+    async fn exact_recheck_preserves_probe_failures_and_observes_cancellation_after_lookup() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("probe.wav");
+        fs::write(&path, b"unreadable probe").unwrap();
+        let failed = recheck_sources(
+            std::slice::from_ref(&path),
+            |_| std::future::ready(Err(anyhow!(std::io::ErrorKind::PermissionDenied))),
+            false,
+            &ScanCancellation::default(),
+            |_, _, _, _, _| {},
+        )
+        .await
+        .unwrap();
+        assert!(failed.records.is_empty());
+        assert!(failed.roots.is_empty());
+        assert_eq!(failed.errors.len(), 1);
+        let cancellation = ScanCancellation::default();
+        let cancelled = recheck_sources(
+            &[path],
+            |paths| {
+                cancellation.cancel();
+                std::future::ready(Ok(vec![None; paths.len()]))
+            },
+            false,
+            &cancellation,
+            |_, _, _, _, _| {},
+        )
+        .await;
+        assert!(cancelled.unwrap_err().to_string().contains("cancelled"));
+    }
 }

@@ -87,6 +87,7 @@ pub struct Track {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LibraryRow {
     pub id: i64,
+    pub path: PathBuf,
     pub title: String,
     pub artist: String,
     pub album: String,
@@ -148,6 +149,7 @@ pub enum AlbumSort {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum DirectoryRow {
+    OtherTracks,
     Directory { path: PathBuf },
     Track(LibraryRow),
 }
@@ -425,6 +427,7 @@ pub struct SystemState {
     pub scanning: bool,
     pub scan_message: String,
     pub scan_progress: Option<ScanProgress>,
+    pub scan_task_id: Option<u64>,
     pub last_error: Option<String>,
     pub devices: Arc<Vec<String>>,
     pub selected_device: Option<String>,
@@ -444,6 +447,7 @@ impl Default for SystemState {
             scanning: false,
             scan_message: String::new(),
             scan_progress: None,
+            scan_task_id: None,
             last_error: None,
             devices: Arc::new(Vec::new()),
             selected_device: None,
@@ -591,6 +595,9 @@ pub enum Command {
         paths: Vec<PathBuf>,
         force: bool,
     },
+    CheckOtherTracks {
+        force: bool,
+    },
     Play {
         track_id: i64,
     },
@@ -626,7 +633,14 @@ pub enum Command {
     Enqueue {
         track_ids: Vec<i64>,
     },
+    QueueExternalPaths {
+        paths: Vec<PathBuf>,
+        index: Option<usize>,
+        expected_revision: Option<u64>,
+    },
     EnqueueSources {
+        #[serde(default)]
+        other_tracks: bool,
         directories: Vec<PathBuf>,
         track_ids: Vec<i64>,
     },
@@ -636,6 +650,8 @@ pub enum Command {
         expected_revision: u64,
     },
     InsertQueueSources {
+        #[serde(default)]
+        other_tracks: bool,
         directories: Vec<PathBuf>,
         track_ids: Vec<i64>,
         index: usize,
@@ -688,6 +704,8 @@ pub enum Command {
         track_ids: Vec<i64>,
     },
     AddPlaylistSources {
+        #[serde(default)]
+        other_tracks: bool,
         playlist_id: i64,
         directories: Vec<PathBuf>,
         track_ids: Vec<i64>,
@@ -699,6 +717,8 @@ pub enum Command {
         expected_revision: u64,
     },
     InsertPlaylistSources {
+        #[serde(default)]
+        other_tracks: bool,
         playlist_id: i64,
         directories: Vec<PathBuf>,
         track_ids: Vec<i64>,

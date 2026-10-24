@@ -98,8 +98,8 @@ pub(super) fn track_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Track> {
     })
 }
 
-pub(super) const LIBRARY_ROW_COLUMNS: &str = "id,COALESCE(title_override,raw_title),COALESCE(artist_override,raw_artist),COALESCE(album_override,raw_album),duration,favorite,missing,play_count,codec,bitrate_bps,bitrate_exact";
-pub(super) const LIBRARY_ROW_COLUMNS_QUALIFIED: &str = "t.id,COALESCE(t.title_override,t.raw_title),COALESCE(t.artist_override,t.raw_artist),COALESCE(t.album_override,t.raw_album),t.duration,t.favorite,t.missing,t.play_count,t.codec,t.bitrate_bps,t.bitrate_exact";
+pub(super) const LIBRARY_ROW_COLUMNS: &str = "id,COALESCE(title_override,raw_title),COALESCE(artist_override,raw_artist),COALESCE(album_override,raw_album),duration,favorite,missing,play_count,codec,bitrate_bps,bitrate_exact,path";
+pub(super) const LIBRARY_ROW_COLUMNS_QUALIFIED: &str = "t.id,COALESCE(t.title_override,t.raw_title),COALESCE(t.artist_override,t.raw_artist),COALESCE(t.album_override,t.raw_album),t.duration,t.favorite,t.missing,t.play_count,t.codec,t.bitrate_bps,t.bitrate_exact,t.path";
 
 pub(super) fn library_row_at(
     row: &rusqlite::Row<'_>,
@@ -107,6 +107,7 @@ pub(super) fn library_row_at(
 ) -> rusqlite::Result<crate::model::LibraryRow> {
     Ok(crate::model::LibraryRow {
         id: row.get(offset)?,
+        path: PathBuf::from(row.get::<_, String>(offset + 11)?),
         title: row.get(offset + 1)?,
         artist: row.get(offset + 2)?,
         album: row.get(offset + 3)?,

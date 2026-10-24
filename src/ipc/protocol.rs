@@ -8,7 +8,7 @@ use rivu_audio::DecoderHint;
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-pub(super) const PROTOCOL_VERSION: u8 = 8;
+pub(super) const PROTOCOL_VERSION: u8 = 9;
 pub(super) const MAX_REQUEST: usize = 4 * 1024 * 1024;
 pub(super) const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 pub(super) const MAX_CLIENTS: usize = 16;
@@ -225,6 +225,22 @@ pub(super) enum WireQuery {
         fingerprint: String,
         track_ids: Vec<i64>,
     },
+    OtherTracksPage {
+        query: Option<String>,
+        favorite: Option<bool>,
+        missing: Option<bool>,
+        sort: crate::model::LibrarySort,
+        offset: u64,
+        limit: u64,
+    },
+    OtherTracksLocate {
+        track_id: i64,
+        query: Option<String>,
+        favorite: Option<bool>,
+        missing: Option<bool>,
+        sort: crate::model::LibrarySort,
+    },
+    OtherTracksCount,
 }
 
 /// Binary command wire format. Variant order belongs to the versioned wire schema.
@@ -272,6 +288,8 @@ pub(super) enum WireCommand {
     EnqueueSources {
         directories: Vec<PathBuf>,
         track_ids: Vec<i64>,
+        #[serde(default)]
+        other_tracks: bool,
     },
     InsertQueue {
         track_ids: Vec<i64>,
@@ -281,6 +299,8 @@ pub(super) enum WireCommand {
     InsertQueueSources {
         directories: Vec<PathBuf>,
         track_ids: Vec<i64>,
+        #[serde(default)]
+        other_tracks: bool,
         index: u64,
         expected_revision: u64,
     },
@@ -329,6 +349,8 @@ pub(super) enum WireCommand {
         playlist_id: i64,
         directories: Vec<PathBuf>,
         track_ids: Vec<i64>,
+        #[serde(default)]
+        other_tracks: bool,
     },
     InsertPlaylist {
         playlist_id: i64,
@@ -340,6 +362,8 @@ pub(super) enum WireCommand {
         playlist_id: i64,
         directories: Vec<PathBuf>,
         track_ids: Vec<i64>,
+        #[serde(default)]
+        other_tracks: bool,
         index: u64,
         expected_revision: u64,
     },
@@ -470,6 +494,14 @@ pub(super) enum WireCommand {
         node: crate::model::GraphPort,
         path: PathBuf,
     },
+    CheckOtherTracks {
+        force: bool,
+    },
+    QueueExternalPaths {
+        paths: Vec<PathBuf>,
+        index: Option<u64>,
+        expected_revision: Option<u64>,
+    },
 }
 
 pub(super) fn wire_usize(value: u64, field: &str) -> Result<usize> {
@@ -479,6 +511,35 @@ pub(super) fn wire_usize(value: u64, field: &str) -> Result<usize> {
 impl From<Query> for WireQuery {
     fn from(value: Query) -> Self {
         match value {
+            Query::OtherTracksPage {
+                query,
+                favorite,
+                missing,
+                sort,
+                offset,
+                limit,
+            } => Self::OtherTracksPage {
+                query,
+                favorite,
+                missing,
+                sort,
+                offset: offset as u64,
+                limit: limit as u64,
+            },
+            Query::OtherTracksLocate {
+                track_id,
+                query,
+                favorite,
+                missing,
+                sort,
+            } => Self::OtherTracksLocate {
+                track_id,
+                query,
+                favorite,
+                missing,
+                sort,
+            },
+            Query::OtherTracksCount => Self::OtherTracksCount,
             Query::Albums {
                 query,
                 sort,
@@ -703,6 +764,35 @@ impl TryFrom<WireQuery> for Query {
 
     fn try_from(value: WireQuery) -> Result<Self> {
         Ok(match value {
+            WireQuery::OtherTracksPage {
+                query,
+                favorite,
+                missing,
+                sort,
+                offset,
+                limit,
+            } => Self::OtherTracksPage {
+                query,
+                favorite,
+                missing,
+                sort,
+                offset: wire_usize(offset, "offset")?,
+                limit: wire_usize(limit, "limit")?,
+            },
+            WireQuery::OtherTracksLocate {
+                track_id,
+                query,
+                favorite,
+                missing,
+                sort,
+            } => Self::OtherTracksLocate {
+                track_id,
+                query,
+                favorite,
+                missing,
+                sort,
+            },
+            WireQuery::OtherTracksCount => Self::OtherTracksCount,
             WireQuery::Albums {
                 query,
                 sort,
@@ -946,6 +1036,16 @@ impl TryFrom<WireCommand> for AppCommand {
 impl From<Command> for WireCommand {
     fn from(value: Command) -> Self {
         match value {
+            Command::CheckOtherTracks { force } => Self::CheckOtherTracks { force },
+            Command::QueueExternalPaths {
+                paths,
+                index,
+                expected_revision,
+            } => Self::QueueExternalPaths {
+                paths,
+                index: index.map(|index| index as u64),
+                expected_revision,
+            },
             Command::PlayAlbum { key } => Self::PlayAlbum { key },
             Command::EnqueueAlbum { key } => Self::EnqueueAlbum { key },
             Command::OptimizeDatabase => Self::OptimizeDatabase,
@@ -979,9 +1079,11 @@ impl From<Command> for WireCommand {
             Command::EnqueueSources {
                 directories,
                 track_ids,
+                other_tracks,
             } => Self::EnqueueSources {
                 directories,
                 track_ids,
+                other_tracks,
             },
             Command::InsertQueue {
                 track_ids,
@@ -995,11 +1097,13 @@ impl From<Command> for WireCommand {
             Command::InsertQueueSources {
                 directories,
                 track_ids,
+                other_tracks,
                 index,
                 expected_revision,
             } => Self::InsertQueueSources {
                 directories,
                 track_ids,
+                other_tracks,
                 index: index as u64,
                 expected_revision,
             },
@@ -1037,10 +1141,12 @@ impl From<Command> for WireCommand {
                 playlist_id,
                 directories,
                 track_ids,
+                other_tracks,
             } => Self::AddPlaylistSources {
                 playlist_id,
                 directories,
                 track_ids,
+                other_tracks,
             },
             Command::InsertPlaylist {
                 playlist_id,
@@ -1057,12 +1163,14 @@ impl From<Command> for WireCommand {
                 playlist_id,
                 directories,
                 track_ids,
+                other_tracks,
                 index,
                 expected_revision,
             } => Self::InsertPlaylistSources {
                 playlist_id,
                 directories,
                 track_ids,
+                other_tracks,
                 index: index as u64,
                 expected_revision,
             },
@@ -1181,6 +1289,16 @@ impl TryFrom<WireCommand> for Command {
 
     fn try_from(value: WireCommand) -> Result<Self> {
         Ok(match value {
+            WireCommand::CheckOtherTracks { force } => Self::CheckOtherTracks { force },
+            WireCommand::QueueExternalPaths {
+                paths,
+                index,
+                expected_revision,
+            } => Self::QueueExternalPaths {
+                paths,
+                index: index.map(|index| wire_usize(index, "index")).transpose()?,
+                expected_revision,
+            },
             WireCommand::PlayAlbum { key } => Self::PlayAlbum { key },
             WireCommand::EnqueueAlbum { key } => Self::EnqueueAlbum { key },
             WireCommand::ShowWindow => bail!("ShowWindow is an application request"),
@@ -1215,9 +1333,11 @@ impl TryFrom<WireCommand> for Command {
             WireCommand::EnqueueSources {
                 directories,
                 track_ids,
+                other_tracks,
             } => Self::EnqueueSources {
                 directories,
                 track_ids,
+                other_tracks,
             },
             WireCommand::InsertQueue {
                 track_ids,
@@ -1231,11 +1351,13 @@ impl TryFrom<WireCommand> for Command {
             WireCommand::InsertQueueSources {
                 directories,
                 track_ids,
+                other_tracks,
                 index,
                 expected_revision,
             } => Self::InsertQueueSources {
                 directories,
                 track_ids,
+                other_tracks,
                 index: wire_usize(index, "index")?,
                 expected_revision,
             },
@@ -1273,10 +1395,12 @@ impl TryFrom<WireCommand> for Command {
                 playlist_id,
                 directories,
                 track_ids,
+                other_tracks,
             } => Self::AddPlaylistSources {
                 playlist_id,
                 directories,
                 track_ids,
+                other_tracks,
             },
             WireCommand::InsertPlaylist {
                 playlist_id,
@@ -1293,12 +1417,14 @@ impl TryFrom<WireCommand> for Command {
                 playlist_id,
                 directories,
                 track_ids,
+                other_tracks,
                 index,
                 expected_revision,
             } => Self::InsertPlaylistSources {
                 playlist_id,
                 directories,
                 track_ids,
+                other_tracks,
                 index: wire_usize(index, "index")?,
                 expected_revision,
             },
@@ -1752,6 +1878,7 @@ pub(super) struct WireSystemState {
     scanning: bool,
     scan_message: String,
     scan_progress: Option<ScanProgress>,
+    scan_task_id: Option<u64>,
     last_error: Option<String>,
     devices: Arc<Vec<String>>,
     selected_device: Option<String>,
@@ -1772,6 +1899,7 @@ impl From<SystemState> for WireSystemState {
             scanning: value.scanning,
             scan_message: value.scan_message,
             scan_progress: value.scan_progress,
+            scan_task_id: value.scan_task_id,
             last_error: value.last_error,
             devices: value.devices,
             selected_device: value.selected_device,
@@ -1794,6 +1922,7 @@ impl From<WireSystemState> for SystemState {
             scanning: value.scanning,
             scan_message: value.scan_message,
             scan_progress: value.scan_progress,
+            scan_task_id: value.scan_task_id,
             last_error: value.last_error,
             devices: value.devices,
             selected_device: value.selected_device,

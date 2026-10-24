@@ -35,6 +35,10 @@ impl Core {
             "Database optimization is already running"
         );
         ensure!(
+            self.active_external_admission.is_none(),
+            "Database optimization requires no active external file admission"
+        );
+        ensure!(
             self.state.playback.status == PlaybackStatus::Stopped
                 && self.active_scan.is_none()
                 && !self.state.system.scanning,

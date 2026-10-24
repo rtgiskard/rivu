@@ -71,6 +71,7 @@ fn shutdown_cancels_and_closes_an_async_scan_worker_before_retirement() {
             observed.cancelled().await;
             let disconnected = sender
                 .send(ScanEvent::Finished(ScanFinished {
+                    other_tracks_check: false,
                     id: 1,
                     result: Ok(ScanResult::default()),
                     import: None,

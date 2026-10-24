@@ -65,3 +65,7 @@ terminal-help-playback = Playback
 terminal-help-page = Current page
 terminal-help-exit = Help / exit
 terminal-help-footer = Esc: back · ↑↓ / PgUp/PgDn: scroll
+terminal-other-tracks-help = / search · Alt+f favorites · Alt+m missing · Alt+s sort · Alt+c check · Alt+Shift+c force reread · Alt+x cancel · e enqueue selection · Alt+e enqueue collection
+terminal-sort-id = Added order
+terminal-sort-album = Album
+terminal-sort-most-played = Most played

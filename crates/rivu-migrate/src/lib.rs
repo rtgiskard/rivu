@@ -165,13 +165,14 @@ pub fn run(options: &Options, mode: Mode, report: &mut Report) -> Result<()> {
     }
     match &database {
         Some(plan) => report.resources.push(format!(
-            "Database {}: schema 1; {}",
+            "Database {}: schema 1; {} (supported derived trigger revision {})",
             plan.path.display(),
             if plan.maintenance {
-                "derived trigger maintenance required (revision 2)"
+                "derived trigger maintenance required"
             } else {
                 "current, untouched"
-            }
+            },
+            database::ALBUM_TRIGGER_REVISION
         )),
         None => report.resources.push(format!(
             "Database {}: absent at default location; not created",
@@ -232,7 +233,7 @@ pub fn run(options: &Options, mode: Mode, report: &mut Report) -> Result<()> {
         report.database_status = "maintenance attempted; inspect database on failure";
         database::ensure_summary_triggers(&writer)
             .context("Applying transactional derived trigger maintenance")?;
-        report.database_status = "derived trigger revision 2 installed";
+        report.database_status = "current derived triggers installed";
     }
     if let Some(plan) = &database {
         database::validate_current(&plan.connection)?;

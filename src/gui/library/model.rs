@@ -21,7 +21,7 @@ pub(in crate::gui) fn merge_selection(
             LibraryNode::Track(id) => {
                 tracks.insert(id);
             }
-            LibraryNode::Directory(_) => {
+            LibraryNode::Directory(_) | LibraryNode::OtherTracks => {
                 nodes.insert(node);
             }
         }
@@ -56,6 +56,7 @@ struct SearchCounts {
     roots: Vec<std::path::PathBuf>,
     totals: Option<(usize, usize)>,
     root_counts: std::collections::HashMap<std::path::PathBuf, (usize, usize)>,
+    other_tracks: Option<(usize, usize)>,
 }
 
 #[derive(Clone)]
@@ -70,6 +71,7 @@ pub(super) struct SearchCountRequest {
 pub(super) struct SearchCountResult {
     pub(super) totals: (usize, usize),
     pub(super) roots: std::collections::HashMap<std::path::PathBuf, (usize, usize)>,
+    pub(super) other_tracks: (usize, usize),
 }
 
 #[derive(Default)]
@@ -148,6 +150,7 @@ impl LibraryBrowser {
             }
             counts.totals = None;
             counts.root_counts.clear();
+            counts.other_tracks = None;
             counts.failed = false;
         }
         if counts.totals.is_some() || counts.failed || counts.worker.is_some() {
@@ -223,6 +226,7 @@ impl LibraryBrowser {
         if let Some(result) = result {
             counts.totals = Some(result.totals);
             counts.root_counts = result.roots;
+            counts.other_tracks = Some(result.other_tracks);
         }
         true
     }
@@ -233,6 +237,30 @@ impl LibraryBrowser {
 
     pub(super) fn search_counts(&self) -> Option<(usize, usize)> {
         self.search_counts.totals
+    }
+
+    pub(super) fn other_tracks_empty(&self) -> bool {
+        matches!(self.search_counts.other_tracks, Some((_, 0)))
+    }
+
+    pub(super) fn other_count_failed(&self) -> bool {
+        self.search_counts.failed
+    }
+
+    pub(super) fn other_count_label(&self) -> String {
+        self.search_counts.other_tracks.map_or_else(
+            || "—".to_owned(),
+            |(matched, total)| {
+                if self.buffer.query.is_some()
+                    || self.buffer.favorite.is_some()
+                    || self.buffer.missing.is_some()
+                {
+                    format!("{matched} / {total}")
+                } else {
+                    total.to_string()
+                }
+            },
+        )
     }
 
     pub(super) fn projection_query(&self) -> Query {
@@ -546,6 +574,7 @@ impl LibraryBrowser {
         self.cancel_navigation();
         self.range_selection.target = Some(index);
         Some(match visible.row {
+            DirectoryRow::OtherTracks => LibraryNode::OtherTracks,
             DirectoryRow::Directory { path } => LibraryNode::Directory(std::sync::Arc::from(path)),
             DirectoryRow::Track(track) => LibraryNode::Track(track.id),
         })
@@ -560,7 +589,9 @@ impl LibraryBrowser {
     pub(super) fn drag_nodes(&self, source: &LibraryNode) -> Vec<LibraryNode> {
         let selected = match source {
             LibraryNode::Track(id) => self.selected.contains(id),
-            LibraryNode::Directory(_) => self.selected_nodes.contains(source),
+            LibraryNode::Directory(_) | LibraryNode::OtherTracks => {
+                self.selected_nodes.contains(source)
+            }
         };
         if !selected {
             return vec![source.clone()];
@@ -621,7 +652,7 @@ impl LibraryBrowser {
                     self.selected.insert(*id);
                 }
             }
-            LibraryNode::Directory(_) => {
+            LibraryNode::Directory(_) | LibraryNode::OtherTracks => {
                 if multi && !self.selected_nodes.insert(node.clone()) {
                     self.selected_nodes.remove(node);
                 } else if !multi {
@@ -711,6 +742,7 @@ mod tests {
         SearchCountResult {
             totals,
             roots: [(root.to_path_buf(), totals)].into_iter().collect(),
+            other_tracks: (0, 0),
         }
     }
 
@@ -872,6 +904,52 @@ mod tests {
     }
 
     #[test]
+    fn other_counts_failure_requires_explicit_retry_then_recovers_with_or_without_roots() {
+        for roots in [vec![], vec![std::path::PathBuf::from("/music")]] {
+            for filtered in [false, true] {
+                let mut library = LibraryBrowser::default();
+                let revisions = QueryRevisions::default();
+                if filtered {
+                    library.refresh_search("needle".into());
+                }
+                let (_, request) = library.prepare_search_counts(&roots, revisions);
+                assert!(library.accept_search_counts(request.unwrap(), &roots, revisions, None));
+                assert!(library.other_count_failed());
+                assert_eq!(library.other_count_label(), "—");
+                assert!(!library.search_counts_pending());
+                library.cancel_pending_reads();
+                assert!(library.prepare_search_counts(&roots, revisions).1.is_none());
+                assert!(library.other_count_failed());
+
+                library.retry_root_counts();
+                assert!(!library.other_count_failed());
+                let (_, request) = library.prepare_search_counts(&roots, revisions);
+                assert!(library.search_counts_pending());
+                library.retry_root_counts();
+                assert!(library.prepare_search_counts(&roots, revisions).1.is_none());
+                let other_tracks = if filtered { (2, 3) } else { (3, 3) };
+                assert!(library.accept_search_counts(
+                    request.unwrap(),
+                    &roots,
+                    revisions,
+                    Some(SearchCountResult {
+                        totals: other_tracks,
+                        roots: roots.iter().cloned().map(|root| (root, (0, 0))).collect(),
+                        other_tracks,
+                    }),
+                ));
+                assert!(!library.other_count_failed());
+                assert!(!library.search_counts_pending());
+                assert_eq!(
+                    library.other_count_label(),
+                    if filtered { "2 / 3" } else { "3" }
+                );
+                assert!(library.prepare_search_counts(&roots, revisions).1.is_none());
+            }
+        }
+    }
+
+    #[test]
     fn library_locate_expands_ancestry_without_changing_selected_identities() {
         use crate::model::LibraryLocation;
         let mut library = LibraryBrowser::default();
@@ -884,7 +962,7 @@ mod tests {
         let roots = vec!["/music".into(), "/music/Album".into()];
         let (branch, offset) = library
             .reveal_playing(
-                0,
+                1,
                 &roots,
                 &[
                     LibraryLocation {
@@ -902,7 +980,7 @@ mod tests {
             .unwrap();
         assert_eq!(offset, 79);
         assert_eq!(branch.path(), std::path::Path::new("/music/Album"));
-        assert_eq!(library.tree().location_index(&branch, offset), Some(85));
+        assert_eq!(library.tree().location_index(&branch, offset), Some(86));
         assert_eq!(library.selected(), &selected);
         assert_eq!(library.selected_nodes(), &nodes);
         library.clear_locate_filters();
@@ -923,6 +1001,7 @@ mod tests {
                 total: 1,
                 rows: vec![DirectoryRow::Track(crate::model::LibraryRow {
                     id: 41,
+                    path: Default::default(),
                     title: "selected".into(),
                     artist: String::new(),
                     album: String::new(),

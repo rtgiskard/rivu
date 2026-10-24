@@ -504,6 +504,8 @@ gl-empty = Empty
 
 gl-retry-root-counts = Retry scanned track counts for { $path }
 
+gl-retry-other-counts = Retry track counts for Other
+
 gl-rescan-path = Rescan { $path }
 
 gl-playlist-name-required = Enter a playlist name.

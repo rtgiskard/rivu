@@ -174,6 +174,7 @@ pub enum ViewResponse {
     PlaylistSummaryBatch(Batch<PlaylistSummary, i64>),
     PlaylistEntryBatch(Batch<PlaylistEntryRow, BatchContinuation<PlaylistEntryCursor>>),
     LibraryRootCounts(Vec<LibraryRootCount>),
+    OtherTracksCount(usize),
     LibraryLocate(crate::model::LibraryLocateResult),
     ScanTask(crate::model::ScanTaskStatus),
     QueuePage(Page<QueueRow>),
@@ -282,7 +283,7 @@ pub struct Ack {
     pub status: AckStatus,
     pub error: Option<String>,
     pub revision: u64,
-    /// Present only when this command accepted a new scan/import task.
+    /// Present when this command accepted a scan, import, recheck or external admission task.
     pub scan_id: Option<u64>,
     /// Present only when this command accepted a manual relocation task.
     pub relocation_id: Option<u64>,

@@ -174,6 +174,10 @@ impl Core {
 
     pub(in crate::core) fn relocate_track(&mut self, source_id: i64, target_id: i64) -> Result<()> {
         ensure!(
+            self.active_external_admission.is_none(),
+            "External audio admission is active; relocation was not started"
+        );
+        ensure!(
             self.active_relocation.is_none(),
             "A relocation verification is already running"
         );

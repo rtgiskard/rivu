@@ -8,6 +8,7 @@ pub(super) enum BusinessEvent {
     Relocation(RelocationFinished),
     Processing(crate::processing::Event),
     Export(Result<()>),
+    ExternalAdmission(admission::Event),
     Optimization(Result<DatabaseOptimization>),
     FfmpegStatus,
     Shutdown(RuntimeControl),
@@ -63,6 +64,7 @@ impl Core {
             scan_rx,
             relocation_rx,
             active_export,
+            active_external_admission,
             active_optimization,
             processing,
             ..
@@ -78,6 +80,12 @@ impl Core {
             scan = scan_rx.recv() => BusinessEvent::Scan(scan?),
             relocation = relocation_rx.recv() => BusinessEvent::Relocation(relocation?),
             event = processing.receiver.recv() => BusinessEvent::Processing(event?),
+            event = async {
+                match active_external_admission.as_mut() {
+                    Some(task) => task.next_event().await,
+                    None => std::future::pending().await,
+                }
+            } => BusinessEvent::ExternalAdmission(event),
             result = async {
                 match active_export.as_mut() {
                     Some(task) => (&mut task.finished).await,
@@ -127,6 +135,7 @@ impl Core {
                 self.resume_pending_scan();
             }
             BusinessEvent::Processing(event) => self.processing_event(event),
+            BusinessEvent::ExternalAdmission(event) => self.external_admission_event(event),
             BusinessEvent::Export(result) => {
                 let (reply, result) = self.finish_export(result);
                 self.complete_background(reply, result);
@@ -220,10 +229,13 @@ impl Core {
             Operation::Command(command) => {
                 let starts_scan = matches!(
                     &command,
-                    Command::Scan { .. } | Command::ImportPlaylist { .. }
+                    Command::Scan { .. }
+                        | Command::ImportPlaylist { .. }
+                        | Command::CheckOtherTracks { .. }
                 );
                 let starts_relocation = matches!(&command, Command::RelocateTrack { .. });
                 let starts_export = matches!(&command, Command::ExportPlaylist { .. });
+                let starts_external = matches!(&command, Command::QueueExternalPaths { .. });
                 let starts_optimization = matches!(&command, Command::OptimizeDatabase);
                 let starts_processing = matches!(
                     &command,
@@ -237,8 +249,16 @@ impl Core {
                     self.state.system.last_error = Some(format!("{error:#}"));
                 }
                 self.publish();
-                let scan_id = if result.is_ok() && starts_scan {
-                    self.active_scan.as_ref().map(|task| task.status.id)
+                let scan_id = if result.is_ok() {
+                    if starts_external {
+                        self.active_external_admission
+                            .as_ref()
+                            .map(|task| task.status.id)
+                    } else if starts_scan {
+                        self.active_scan.as_ref().map(|task| task.status.id)
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 };
@@ -307,6 +327,7 @@ impl Core {
         if let Some((reply, result)) = self.shutdown_export() {
             self.complete_background(reply, result);
         }
+        self.shutdown_external_admission();
         self.shutdown_scan();
         self.shutdown_relocation();
         self.processing.shutdown();
@@ -333,7 +354,7 @@ impl Core {
         self.publish();
     }
 
-    fn complete_background(
+    pub(in crate::core) fn complete_background(
         &mut self,
         reply: Option<oneshot::Sender<CoreResponse>>,
         result: Result<()>,
@@ -563,10 +584,50 @@ impl Core {
                     .as_ref()
                     .map(|task| &task.status)
                     .filter(|status| status.id == *id)
+                    .or_else(|| {
+                        self.active_external_admission
+                            .as_ref()
+                            .map(|task| &task.status)
+                            .filter(|status| status.id == *id)
+                    })
                     .or_else(|| self.scan_results.iter().find(|status| status.id == *id))
                     .cloned()
                     .context("Unknown or expired scan task")?,
             ),
+            Query::OtherTracksPage {
+                query,
+                favorite,
+                missing,
+                sort,
+                offset,
+                limit,
+            } => ViewResponse::LibraryPage(self.store.other_tracks_page(
+                &self.state.system.config.library_roots,
+                query.as_deref(),
+                *favorite,
+                *missing,
+                *sort,
+                *offset,
+                *limit,
+            )?),
+            Query::OtherTracksCount => ViewResponse::OtherTracksCount(
+                self.store
+                    .other_tracks_count(&self.state.system.config.library_roots)?,
+            ),
+            Query::OtherTracksLocate {
+                track_id,
+                query,
+                favorite,
+                missing,
+                sort,
+            } => ViewResponse::LibraryLocate(self.store.other_tracks_location(
+                &self.state.system.config.library_roots,
+                *track_id,
+                query.as_deref(),
+                *favorite,
+                *missing,
+                *sort,
+            )?),
             Query::LibraryPage {
                 query,
                 favorite,

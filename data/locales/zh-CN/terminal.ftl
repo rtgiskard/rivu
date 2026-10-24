@@ -62,3 +62,7 @@ terminal-help-playback = 播放
 terminal-help-page = 当前页面
 terminal-help-exit = 帮助／退出
 terminal-help-footer = Esc 返回 · ↑↓ / PgUp/PgDn 滚动
+terminal-other-tracks-help = / 搜索 · Alt+f 收藏 · Alt+m 缺失 · Alt+s 排序 · Alt+c 检查 · Alt+Shift+c 强制重读 · Alt+x 取消 · e 将所选加入队列 · Alt+e 将整个库加入队列
+terminal-sort-id = 添加顺序
+terminal-sort-album = 专辑
+terminal-sort-most-played = 播放次数

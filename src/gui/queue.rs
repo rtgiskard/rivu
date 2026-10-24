@@ -112,6 +112,10 @@ impl Queue {
         let page_size_changed = self.state.system.config.page_size != state.system.config.page_size;
         let current_changed = self.state.queue.current_id != state.queue.current_id
             || self.state.queue.current_position != state.queue.current_position;
+        let media_task_changed = self.state.system.scanning != state.system.scanning
+            || self.state.system.scan_task_id != state.system.scan_task_id
+            || self.state.system.scan_progress != state.system.scan_progress
+            || self.state.system.scan_message != state.system.scan_message;
         self.state = state;
         if projection_changed || total_changed {
             self.sync_queue(cx);
@@ -120,7 +124,12 @@ impl Queue {
         if (projection_changed || total_changed || page_size_changed) && self.visible {
             self.demand_visible_page(cx);
         }
-        if projection_changed || total_changed || page_size_changed || current_changed {
+        if projection_changed
+            || total_changed
+            || page_size_changed
+            || current_changed
+            || media_task_changed
+        {
             cx.notify();
         }
     }

@@ -148,6 +148,7 @@ impl Store {
         playlist_id: i64,
         directories: &[PathBuf],
         track_ids: &[i64],
+        other_roots: Option<&[PathBuf]>,
     ) -> Result<bool> {
         let tx = self.conn.unchecked_transaction()?;
         if !tx.query_row(
@@ -157,7 +158,7 @@ impl Store {
         )? {
             bail!("Playlist not found");
         }
-        let (directories, ids) = self.source_parameters(directories, track_ids)?;
+        let (directories, ids) = self.source_parameters(directories, track_ids, other_roots)?;
         // Assign positions in SQL; playlist size never determines Rust allocation.
         let inserted = tx.execute(&format!(
             "WITH selected AS (SELECT id FROM tracks WHERE ({SOURCE_FILTER}) AND NOT EXISTS (SELECT 1 FROM playlist_entries e WHERE e.playlist_id=?3 AND e.track_id=tracks.id)), ordered AS (SELECT id,row_number() OVER (ORDER BY id)-1 AS ordinal FROM selected) INSERT INTO playlist_entries(playlist_id,track_id,position) SELECT ?3,id,(SELECT COALESCE(MAX(position),-1)+1 FROM playlist_entries WHERE playlist_id=?3)+ordinal FROM ordered"
@@ -479,9 +480,10 @@ impl Store {
         playlist_id: i64,
         directories: &[PathBuf],
         tracks: &[i64],
+        other_roots: Option<&[PathBuf]>,
         index: usize,
     ) -> Result<bool> {
-        let (directories, ids) = self.source_parameters(directories, tracks)?;
+        let (directories, ids) = self.source_parameters(directories, tracks, other_roots)?;
         self.insert_playlist(playlist_id, &ids, Some(&directories), index)
     }
 
@@ -881,15 +883,23 @@ mod request_tests {
         let before = store.playlist_entries_page(id, None, 0, 10)?.rows;
         assert!(!store.add_playlist(id, &[])?);
         assert!(!store.add_playlist(id, &[2, 1, 2])?);
-        assert!(!store.add_playlist_sources(id, &[], &[])?);
-        assert!(!store.add_playlist_sources(id, &[], &[1, 2])?);
+        assert!(!store.add_playlist_sources(id, &[], &[], None)?);
+        assert!(!store.add_playlist_sources(id, &[], &[1, 2], None)?);
         assert!(store.add_playlist(i64::MAX, &[]).is_err());
-        assert!(store.add_playlist_sources(i64::MAX, &[], &[]).is_err());
+        assert!(
+            store
+                .add_playlist_sources(i64::MAX, &[], &[], None)
+                .is_err()
+        );
         assert!(store.add_playlist(id, &[1, i64::MAX]).is_err());
-        assert!(store.add_playlist_sources(id, &[], &[1, i64::MAX]).is_err());
+        assert!(
+            store
+                .add_playlist_sources(id, &[], &[1, i64::MAX], None)
+                .is_err()
+        );
         assert_eq!(store.playlist_entries_page(id, None, 0, 10)?.rows, before);
         assert!(store.add_playlist(id, &[2, 3, 3])?);
-        assert!(store.add_playlist_sources(id, &[], &[3, 4])?);
+        assert!(store.add_playlist_sources(id, &[], &[3, 4], None)?);
         assert_eq!(store.playlist_track_ids(id, 10)?, [1, 2, 3, 4]);
         Ok(())
     }
@@ -963,7 +973,7 @@ mod request_tests {
         assert!(store.add_playlist(id, &[4, i64::MAX, 4]).is_err());
         assert!(
             store
-                .add_playlist_sources(id, &[PathBuf::new()], &[i64::MAX])
+                .add_playlist_sources(id, &[PathBuf::new()], &[i64::MAX], None)
                 .is_err()
         );
         assert_eq!(store.playlist_track_ids(id, 10)?, vec![3, 1, 2]);
@@ -1257,7 +1267,7 @@ mod group_tests {
         assert!(store.insert_playlist_tracks(20, &[2, 3, 4], 0).is_err());
         assert!(
             store
-                .insert_playlist_sources(20, &["/music".into()], &[6, 2, 6], 0)
+                .insert_playlist_sources(20, &["/music".into()], &[6, 2, 6], None, 0)
                 .is_err()
         );
         assert_eq!(order(&store, 20)?, before);
@@ -1268,6 +1278,7 @@ mod group_tests {
             20,
             &["/music".into(), "/music".into()],
             &[6, 2, 6],
+            None,
             0
         )?);
         let entries = store.playlist_entry_locations(20, None, &order(&store, 20)?)?;
@@ -1278,9 +1289,17 @@ mod group_tests {
                 .collect::<Vec<_>>(),
             [2, 3, 4, 5, 6, 1]
         );
-        assert!(!store.insert_playlist_sources(20, &["/music".into()], &[], 6)?);
-        assert!(store.insert_playlist_sources(20, &[], &[], 7).is_err());
-        assert!(store.insert_playlist_sources(20, &[], &[999], 0).is_err());
+        assert!(!store.insert_playlist_sources(20, &["/music".into()], &[], None, 6)?);
+        assert!(
+            store
+                .insert_playlist_sources(20, &[], &[], None, 7)
+                .is_err()
+        );
+        assert!(
+            store
+                .insert_playlist_sources(20, &[], &[999], None, 0)
+                .is_err()
+        );
         assert_eq!(order(&store, 10)?, [100, 101, 102, 103, 104, 105]);
         Ok(())
     }

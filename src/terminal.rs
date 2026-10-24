@@ -448,9 +448,11 @@ impl View {
         match self {
             Self::Queue => Some(QueryKind::Queue),
             Self::Search(search) => Some(QueryKind::Search(search.applied_query.clone())),
+            Self::Tree(tree) if tree.other_tracks => Some(tree.other_query()),
             Self::Tree(tree) if !tree.directory.as_os_str().is_empty() => {
                 Some(QueryKind::Directory(tree.directory.clone()))
             }
+            Self::Tree(_) => Some(QueryKind::OtherTracksCount),
             Self::Playlists(_) => Some(QueryKind::Playlists),
             Self::PlaylistDetail { detail, .. } => Some(match detail.entry_anchor {
                 Some(entry_id) if selection => QueryKind::PlaylistSelection {
@@ -459,7 +461,6 @@ impl View {
                 },
                 _ => QueryKind::Playlist(detail.playlist_id),
             }),
-            _ => None,
         }
     }
 
@@ -515,7 +516,18 @@ impl View {
         if rows_changed || page_size_changed {
             match self {
                 Self::Search(search) => search.results.clear(),
-                Self::Tree(tree) => tree.entries.clear(),
+                Self::Tree(tree) => {
+                    tree.other_count = None;
+                    if tree.other_tracks {
+                        tree.anchor = tree.anchor.or_else(|| {
+                            tree.entries.selected().and_then(|entry| match entry {
+                                DirectoryRow::Track(track) => Some(track.id),
+                                _ => None,
+                            })
+                        });
+                    }
+                    tree.entries.clear();
+                }
                 Self::Playlists(playlists) => playlists.clear(),
                 Self::PlaylistDetail { detail, .. } => detail.entries.clear(),
                 Self::Queue => {}
@@ -525,7 +537,7 @@ impl View {
             && let Self::Tree(tree) = self
         {
             tree.roots = LibraryTree::roots(&next.system.library_roots);
-            if tree.directory.as_os_str().is_empty() {
+            if !tree.other_tracks && tree.directory.as_os_str().is_empty() {
                 tree.entries.clear();
             }
         }
@@ -587,21 +599,24 @@ impl UiState {
         let View::Tree(tree) = &mut self.view else {
             return false;
         };
-        if !tree.directory.as_os_str().is_empty() {
+        if tree.other_tracks || !tree.directory.as_os_str().is_empty() {
             return false;
         }
         let limit = state.system.page_size as usize;
         let mut changed = false;
         while let Some(offset) = tree.entries.next_offset(limit) {
-            let rows = tree
-                .roots
-                .iter()
+            let rows = std::iter::once(DirectoryRow::OtherTracks)
+                .chain(
+                    tree.roots
+                        .iter()
+                        .cloned()
+                        .map(|path| DirectoryRow::Directory { path }),
+                )
                 .skip(offset)
                 .take(limit)
-                .cloned()
-                .map(|path| DirectoryRow::Directory { path })
                 .collect();
-            tree.entries.insert(offset, limit, tree.roots.len(), rows);
+            tree.entries
+                .insert(offset, limit, tree.roots.len() + 1, rows);
             changed = true;
         }
         changed
@@ -645,6 +660,19 @@ impl UiState {
             View::Search(search) => {
                 let offset = search.results.next_offset(limit)?;
                 (QueryKind::Search(search.applied_query.clone()), offset)
+            }
+            View::Tree(tree) if tree.other_tracks => (
+                tree.other_query(),
+                if tree.anchor.is_some() {
+                    0
+                } else {
+                    tree.entries.next_offset(limit)?
+                },
+            ),
+            View::Tree(tree)
+                if tree.directory.as_os_str().is_empty() && tree.other_count.is_none() =>
+            {
+                (QueryKind::OtherTracksCount, 0)
             }
             View::Tree(tree) if !tree.directory.as_os_str().is_empty() => (
                 QueryKind::Directory(tree.directory.clone()),
@@ -764,6 +792,25 @@ impl UiState {
                     .results
                     .insert(request.offset, request.limit, page.total, page.rows);
             }
+            (View::Tree(tree), ViewResponse::LibraryPage(page)) if tree.other_tracks => {
+                tree.entries.insert(
+                    request.offset,
+                    request.limit,
+                    page.total,
+                    page.rows.into_iter().map(DirectoryRow::Track).collect(),
+                );
+            }
+            (View::Tree(tree), ViewResponse::OtherTracksCount(count)) => {
+                tree.other_count = Some(count)
+            }
+            (View::Tree(tree), ViewResponse::LibraryLocate(location)) if tree.other_tracks => {
+                tree.anchor = None;
+                if let crate::model::LibraryLocateResult::Located(location) = location {
+                    tree.entries.total = location.total;
+                    tree.entries.selection.select(Some(location.offset));
+                    tree.entries.set_viewport(tree.entries.viewport_rows);
+                }
+            }
             (View::Tree(tree), ViewResponse::DirectoryPage(page)) => {
                 tree.entries
                     .insert(request.offset, request.limit, page.total, page.rows);
@@ -843,6 +890,11 @@ impl UiState {
                     None,
                     "terminal-library",
                     Some(path.to_string_lossy().into_owned()),
+                ),
+                Some(DirectoryRow::OtherTracks) => (
+                    None,
+                    "library-other",
+                    Some(self.i18n.text("library-other").into()),
                 ),
                 None => (None, "terminal-library", None),
             },
@@ -1046,6 +1098,27 @@ impl UiState {
             self.mark_local_change();
             return KeyAction::Ignored;
         }
+        if key.modifiers == KeyModifiers::ALT && key.code == KeyCode::Char('x') {
+            return if state.system.scanning
+                && !state
+                    .system
+                    .scan_progress
+                    .as_ref()
+                    .is_some_and(|progress| progress.phase == crate::model::ScanPhase::Saving)
+                && let Some(id) = state.system.scan_task_id
+            {
+                KeyAction::Command(Command::CancelScan { id })
+            } else {
+                KeyAction::Ignored
+            };
+        }
+        if let View::Tree(tree) = &mut self.view
+            && let Some(result) = tree.other_key(key)
+        {
+            self.cancel_query();
+            self.mark_local_change();
+            return result;
+        }
         // The query editor owns all printable characters, including keys that
         // control playback elsewhere. Control/Alt/Super chords are never text.
         if context == KeyboardContext::TuiSearchQuery
@@ -1094,7 +1167,7 @@ impl UiState {
                     }
                     View::Tree(tree) => tree.entries.selected().and_then(|entry| match entry {
                         DirectoryRow::Track(track) => Some(track.id),
-                        DirectoryRow::Directory { .. } => None,
+                        DirectoryRow::Directory { .. } | DirectoryRow::OtherTracks => None,
                     }),
                     View::Playlists(_) => None,
                 };
@@ -1178,15 +1251,16 @@ impl UiState {
                     }
                     Action::Activate | Action::Expand => {
                         let directory = tree.directory.clone();
+                        let was_other = tree.other_tracks;
                         if action == Action::Activate
                             || matches!(
                                 tree.entries.selected(),
-                                Some(DirectoryRow::Directory { .. })
+                                Some(DirectoryRow::Directory { .. } | DirectoryRow::OtherTracks)
                             )
                         {
                             command = tree.activate();
                         }
-                        changed = tree.directory != directory;
+                        changed = tree.directory != directory || tree.other_tracks != was_other;
                         if changed {
                             self.cancel_query();
                         }
@@ -1533,9 +1607,124 @@ struct LibraryTree {
     roots: Vec<PathBuf>,
     ancestors: Vec<(PathBuf, ListState, usize)>,
     entries: PagedList<DirectoryRow>,
+    other_tracks: bool,
+    query: String,
+    editing_query: bool,
+    favorite: Option<bool>,
+    missing: Option<bool>,
+    sort: crate::model::LibrarySort,
+    anchor: Option<i64>,
+    other_count: Option<usize>,
 }
 
 impl LibraryTree {
+    fn other_query(&self) -> QueryKind {
+        QueryKind::OtherTracks {
+            query: self.query.clone(),
+            favorite: self.favorite,
+            missing: self.missing,
+            sort: self.sort,
+            anchor: self.anchor,
+        }
+    }
+    fn other_key(&mut self, key: KeyEvent) -> Option<KeyAction> {
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let target =
+            self.other_tracks || matches!(self.entries.selected(), Some(DirectoryRow::OtherTracks));
+        if target && alt {
+            match key.code {
+                KeyCode::Char('c' | 'C') => {
+                    return Some(KeyAction::Command(Command::CheckOtherTracks {
+                        force: key.modifiers.contains(KeyModifiers::SHIFT),
+                    }));
+                }
+                KeyCode::Char('e') => {
+                    return Some(KeyAction::Command(Command::EnqueueSources {
+                        directories: Vec::new(),
+                        track_ids: Vec::new(),
+                        other_tracks: true,
+                    }));
+                }
+                _ => {}
+            }
+        }
+        if !self.other_tracks {
+            return None;
+        }
+        let mut refresh = false;
+        if self.editing_query && !alt && !key.modifiers.contains(KeyModifiers::CONTROL) {
+            match key.code {
+                KeyCode::Enter | KeyCode::Esc => self.editing_query = false,
+                KeyCode::Backspace => refresh = self.query.pop().is_some(),
+                KeyCode::Char(character) => {
+                    self.query.push(character);
+                    refresh = true;
+                }
+                _ => return None,
+            }
+        } else {
+            match (alt, key.code) {
+                (false, KeyCode::Char('/')) => self.editing_query = true,
+                (true, KeyCode::Char('f')) => {
+                    self.favorite = if self.favorite.is_some() {
+                        None
+                    } else {
+                        Some(true)
+                    };
+                    refresh = true;
+                }
+                (true, KeyCode::Char('m')) => {
+                    self.missing = if self.missing.is_some() {
+                        None
+                    } else {
+                        Some(true)
+                    };
+                    refresh = true;
+                }
+                (true, KeyCode::Char('s')) => {
+                    self.sort = match self.sort {
+                        crate::model::LibrarySort::Id => crate::model::LibrarySort::Album,
+                        crate::model::LibrarySort::Album => crate::model::LibrarySort::MostPlayed,
+                        crate::model::LibrarySort::MostPlayed => crate::model::LibrarySort::Id,
+                    };
+                    refresh = true;
+                }
+                (false, KeyCode::Char('e')) => {
+                    return Some(
+                        self.entries
+                            .selected()
+                            .and_then(|entry| match entry {
+                                DirectoryRow::Track(track) => {
+                                    Some(KeyAction::Command(Command::Enqueue {
+                                        track_ids: vec![track.id],
+                                    }))
+                                }
+                                _ => None,
+                            })
+                            .unwrap_or(KeyAction::Ignored),
+                    );
+                }
+                _ => return None,
+            }
+        }
+        if refresh {
+            self.anchor = self.anchor.or_else(|| {
+                self.entries.selected().and_then(|entry| match entry {
+                    DirectoryRow::Track(track) => Some(track.id),
+                    _ => None,
+                })
+            });
+            let selection = std::mem::take(&mut self.entries.selection);
+            let viewport_rows = self.entries.viewport_rows;
+            self.entries = PagedList {
+                selection,
+                viewport_rows,
+                ..PagedList::default()
+            };
+        }
+        Some(KeyAction::Ignored)
+    }
+
     fn roots(configured: &[PathBuf]) -> Vec<PathBuf> {
         let mut roots: Vec<_> = configured
             .iter()
@@ -1556,6 +1745,16 @@ impl LibraryTree {
 
     fn activate(&mut self) -> Option<Command> {
         match self.entries.selected()? {
+            DirectoryRow::OtherTracks => {
+                self.other_tracks = true;
+                self.ancestors.push((
+                    PathBuf::new(),
+                    std::mem::take(&mut self.entries.selection),
+                    self.entries.viewport_rows,
+                ));
+                self.entries = PagedList::default();
+                None
+            }
             DirectoryRow::Directory { path } => {
                 let path = path.clone();
                 self.ancestors.push((
@@ -1575,6 +1774,8 @@ impl LibraryTree {
             return false;
         };
         self.directory = directory;
+        self.other_tracks = false;
+        self.editing_query = false;
         self.entries = PagedList {
             selection,
             viewport_rows,

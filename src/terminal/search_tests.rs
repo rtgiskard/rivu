@@ -35,6 +35,7 @@ fn apply_pending(ui: &mut UiState, now: Instant) -> bool {
 fn page(request: &QueryRequest, first_id: i64) -> QueryResult {
     let rows = (0..request.limit)
         .map(|index| LibraryRow {
+            path: Default::default(),
             id: first_id + index as i64,
             title: format!("track-{}", first_id + index as i64),
             artist: "artist".into(),

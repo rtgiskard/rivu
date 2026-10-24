@@ -418,6 +418,7 @@ fn empty_queue_changes_wait_for_occurrence_rows_before_actions() {
 
 pub(super) fn track(index: usize) -> LibraryRow {
     LibraryRow {
+        path: Default::default(),
         id: index as i64,
         title: format!("row-{index}"),
         artist: "artist".into(),
@@ -435,6 +436,7 @@ pub(super) fn track(index: usize) -> LibraryRow {
 pub(super) fn response(request: &QueryRequest, total: usize) -> QueryResult {
     let indices = request.offset..(request.offset + request.limit).min(total);
     let view = match &request.kind {
+        QueryKind::OtherTracksCount => ViewResponse::OtherTracksCount(total),
         QueryKind::Track(_) => panic!("track reads need explicit metadata"),
         QueryKind::Queue => ViewResponse::QueuePage(Page {
             total,
@@ -445,7 +447,7 @@ pub(super) fn response(request: &QueryRequest, total: usize) -> QueryResult {
         QueryKind::QueueSelection(_) => {
             panic!("selection lookups require an explicit position")
         }
-        QueryKind::Search(_) => ViewResponse::LibraryPage(Page {
+        QueryKind::Search(_) | QueryKind::OtherTracks { .. } => ViewResponse::LibraryPage(Page {
             total,
             rows: indices.map(track).collect(),
         }),
@@ -788,8 +790,27 @@ fn hidden_pages_follow_page_size_and_library_root_changes() {
         unreachable!()
     };
     assert_eq!(tree.roots, vec![PathBuf::from("/two")]);
+    assert_eq!(tree.entries.total, 2);
+    assert_eq!(tree.entries.selected(), Some(&DirectoryRow::OtherTracks));
+    tui.ui.key_action(KeyEvent::from(KeyCode::Enter), &next);
+    assert!(matches!(
+        tui.ui.query_request(&next).unwrap().kind,
+        QueryKind::OtherTracks { .. }
+    ));
+    tui.ui.key_action(KeyEvent::from(KeyCode::Left), &next);
+    load_visible(&mut tui.ui, &next);
+    tui.ui.key_action(KeyEvent::from(KeyCode::Down), &next);
+    load_visible(&mut tui.ui, &next);
+    let View::Tree(tree) = &tui.ui.view else {
+        unreachable!()
+    };
     assert!(
         matches!(tree.entries.selected(), Some(DirectoryRow::Directory { path }) if path == Path::new("/two"))
+    );
+    tui.ui.key_action(KeyEvent::from(KeyCode::Enter), &next);
+    assert_eq!(
+        tui.ui.query_request(&next).unwrap().kind,
+        QueryKind::Directory("/two".into())
     );
 }
 
@@ -1265,8 +1286,108 @@ fn viewport_navigation_and_retention_do_not_depend_on_batch_size() {
     }
 }
 
+fn other_tracks_pending_selection_regression(revisions: bool) {
+    let mut state = query_snapshot();
+    let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::new("en-US")));
+    let mut tree = LibraryTree {
+        other_tracks: true,
+        ..LibraryTree::default()
+    };
+    tree.entries.set_viewport(3);
+    tree.entries.insert(
+        0,
+        3,
+        3,
+        vec![41, 42, 43]
+            .into_iter()
+            .map(|id| DirectoryRow::Track(track(id)))
+            .collect(),
+    );
+    tree.entries.selection.select(Some(1));
+    tui.ui.view = View::Tree(tree);
+    if revisions {
+        state.library.revision += 1;
+        tui.apply_snapshot(state.clone());
+    } else {
+        tui.ui
+            .key_action(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::ALT), &state);
+    }
+    let old = tui.ui.query_request(&state).unwrap();
+    assert!(matches!(
+        old.kind,
+        QueryKind::OtherTracks {
+            anchor: Some(42),
+            ..
+        }
+    ));
+    if revisions {
+        state.library.revision += 1;
+        tui.apply_snapshot(state.clone());
+    } else {
+        tui.ui
+            .key_action(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::ALT), &state);
+    }
+    let fresh = tui.ui.query_request(&state).unwrap();
+    assert!(matches!(
+        fresh.kind,
+        QueryKind::OtherTracks {
+            anchor: Some(42),
+            ..
+        }
+    ));
+    assert_ne!(old, fresh);
+    let located = |offset| QueryResult {
+        revisions: state.query_revisions(None),
+        view: ViewResponse::LibraryLocate(crate::model::LibraryLocateResult::Located(
+            crate::model::LibraryLocation {
+                offset,
+                total: 3,
+                child: None,
+            },
+        )),
+    };
+    assert!(!tui.ui.apply_query(&state, &old, Ok(located(2))));
+    assert_eq!(tui.ui.query_request(&state), Some(fresh.clone()));
+    assert!(tui.ui.apply_query(&state, &fresh, Ok(located(0))));
+    let rows = tui.ui.query_request(&state).unwrap();
+    assert!(matches!(
+        rows.kind,
+        QueryKind::OtherTracks { anchor: None, .. }
+    ));
+    assert!(tui.ui.apply_query(
+        &state,
+        &rows,
+        Ok(QueryResult {
+            revisions: state.query_revisions(None),
+            view: ViewResponse::LibraryPage(Page {
+                total: 3,
+                rows: vec![track(42), track(43), track(41)],
+            }),
+        }),
+    ));
+    let View::Tree(tree) = &tui.ui.view else {
+        unreachable!()
+    };
+    assert_eq!(tree.entries.selection.selected(), Some(0));
+    assert_eq!(
+        tree.entries.selected(),
+        Some(&DirectoryRow::Track(track(42)))
+    );
+    assert!(!tui.ui.apply_query(&state, &old, Ok(located(2))));
+}
+
 #[test]
-fn tree_top_level_contains_only_configured_roots_and_restores_parent() {
+fn other_tracks_selection_survives_rapid_sort_and_filter_changes() {
+    other_tracks_pending_selection_regression(false);
+}
+
+#[test]
+fn other_tracks_selection_survives_consecutive_revisions_before_locate() {
+    other_tracks_pending_selection_regression(true);
+}
+
+#[test]
+fn tree_top_level_has_other_tracks_then_configured_roots_and_restores_parent() {
     let mut state = TuiSnapshot::default();
     state.system.page_size = 1;
     for roots in [
@@ -1292,28 +1413,43 @@ fn tree_top_level_contains_only_configured_roots_and_restores_parent() {
         let View::Tree(tree) = &ui.view else {
             unreachable!()
         };
-        assert_eq!(tree.entries.total, roots.len());
+        assert_eq!(tree.entries.total, roots.len() + 1);
         assert!(tree.entries.loaded);
-        if roots.is_empty() {
-            assert!(tree.entries.selection.selected().is_none());
-            continue;
-        }
-        let mut expected = roots.clone();
-        expected.sort();
-        for path in expected {
+        let mut ordered_roots = roots.clone();
+        ordered_roots.sort();
+        let expected = std::iter::once(DirectoryRow::OtherTracks).chain(
+            ordered_roots
+                .into_iter()
+                .map(|path| DirectoryRow::Directory { path }),
+        );
+        for (index, row) in expected.enumerate() {
             load_visible(&mut ui, &state);
             let View::Tree(tree) = &ui.view else {
                 unreachable!()
             };
-            assert_eq!(
-                tree.entries.selected(),
-                Some(&DirectoryRow::Directory { path: path.clone() })
-            );
+            assert_eq!(tree.entries.selection.selected(), Some(index));
+            assert_eq!(tree.entries.selected(), Some(&row));
             ui.key_action(KeyEvent::from(KeyCode::Enter), &state);
             let request = ui.query_request(&state).unwrap();
-            assert_eq!(request.kind, QueryKind::Directory(path));
+            match &row {
+                DirectoryRow::OtherTracks => {
+                    assert!(matches!(request.kind, QueryKind::OtherTracks { .. }));
+                }
+                DirectoryRow::Directory { path } => {
+                    assert_eq!(request.kind, QueryKind::Directory(path.clone()));
+                }
+                DirectoryRow::Track(_) => unreachable!(),
+            }
             ui.key_action(KeyEvent::from(KeyCode::Left), &state);
             load_visible(&mut ui, &state);
+            let View::Tree(tree) = &ui.view else {
+                unreachable!()
+            };
+            assert!(!tree.other_tracks);
+            assert!(tree.directory.as_os_str().is_empty());
+            assert_eq!(tree.entries.selection.selected(), Some(index));
+            assert_eq!(tree.entries.selected(), Some(&row));
+            assert!(ui.query_request(&state).is_none());
             ui.key_action(KeyEvent::from(KeyCode::Down), &state);
         }
     }

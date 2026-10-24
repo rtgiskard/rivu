@@ -825,6 +825,47 @@ fn draw_status(
                 .style(Style::default().fg(color)),
             columns[1],
         );
+    } else if state.system.scanning || state.system.scan_progress.is_some() {
+        let color = if state.system.scan_progress.as_ref().is_some_and(|progress| {
+            progress.phase == crate::model::ScanPhase::Failed || progress.errors != 0
+        }) {
+            colors.error
+        } else {
+            colors.secondary
+        };
+        let text = if let Some(progress) = &state.system.scan_progress {
+            let phase = ui.i18n.text(match progress.phase {
+                crate::model::ScanPhase::Discovering => "gl-scan-discovering",
+                crate::model::ScanPhase::ReadingMetadata => "gl-scan-metadata",
+                crate::model::ScanPhase::Saving => "gl-scan-saving",
+                crate::model::ScanPhase::Completed => "gl-scan-completed",
+                crate::model::ScanPhase::Failed => "gl-scan-failed",
+                crate::model::ScanPhase::Cancelled => "gl-scan-cancelled",
+            });
+            format!(
+                "{phase} · {}/{} · !{} · {}",
+                progress.processed,
+                progress
+                    .total
+                    .map(|total| total.to_string())
+                    .unwrap_or_else(|| "?".into()),
+                progress.errors,
+                state.system.scan_message
+            )
+        } else {
+            state.system.scan_message.clone()
+        };
+        frame.render_widget(
+            Paragraph::new(cell_text(&text, columns[1].width as usize, true))
+                .style(Style::default().fg(color)),
+            columns[1],
+        );
+    } else if let Some(error) = &state.system.last_error {
+        frame.render_widget(
+            Paragraph::new(cell_text(error, columns[1].width as usize, true))
+                .style(Style::default().fg(colors.error)),
+            columns[1],
+        );
     } else if matches!(ui.view, View::Queue) && ui.startup_hint_deadline.is_some() {
         frame.render_widget(
             Paragraph::new(cell_text(
@@ -1342,17 +1383,41 @@ fn draw_tree(
     i18n: &Localizer,
     colors: TerminalColors,
 ) {
-    let title = if tree.directory.as_os_str().is_empty() {
+    let title = if tree.other_tracks {
+        format!(
+            "{} · {}{}{} · /{}{} · {}",
+            i18n.text("library-other"),
+            i18n.text(match tree.sort {
+                crate::model::LibrarySort::Id => "terminal-sort-id",
+                crate::model::LibrarySort::Album => "terminal-sort-album",
+                crate::model::LibrarySort::MostPlayed => "terminal-sort-most-played",
+            }),
+            if tree.favorite.is_some() { " ♥" } else { "" },
+            if tree.missing.is_some() { " !" } else { "" },
+            tree.query,
+            if tree.editing_query { "▏" } else { "" },
+            i18n.text("terminal-other-tracks-help")
+        )
+    } else if tree.directory.as_os_str().is_empty() {
         i18n.text("terminal-library-tree").into()
     } else {
         tree.directory.to_string_lossy().into_owned()
     };
+    let other_tracks = tree.other_tracks;
+    let other_count = tree.other_count;
     draw_paged_list(
         frame,
         area,
         title,
         &mut tree.entries,
         |entry| match entry {
+            DirectoryRow::OtherTracks => RowContent::label(
+                match other_count {
+                    Some(count) => format!("{} ({count})", i18n.text("library-other")).into(),
+                    None => i18n.text("library-other").to_owned().into(),
+                },
+                "󰒟",
+            ),
             DirectoryRow::Directory { path } => RowContent::label(
                 path.file_name()
                     .unwrap_or(path.as_os_str())
@@ -1361,6 +1426,14 @@ fn draw_tree(
             ),
             DirectoryRow::Track(track) => {
                 let mut content = RowContent::track(track);
+                if other_tracks {
+                    content.title = format!(
+                        "{} · {}",
+                        track.title,
+                        track.path.parent().unwrap_or(&track.path).display()
+                    )
+                    .into();
+                }
                 content.file_icon = true;
                 content
             }
@@ -1371,6 +1444,26 @@ fn draw_tree(
             colors,
         },
     );
+    if other_tracks
+        && tree.entries.loaded
+        && tree.entries.total == 0
+        && tree.query.is_empty()
+        && tree.favorite.is_none()
+        && tree.missing.is_none()
+    {
+        let body = Rect::new(
+            area.x.saturating_add(1),
+            area.y.saturating_add(1),
+            area.width.saturating_sub(2),
+            area.height.saturating_sub(1),
+        );
+        frame.render_widget(
+            Paragraph::new(i18n.text("library-other-empty"))
+                .style(Style::default().fg(colors.secondary))
+                .wrap(ratatui::widgets::Wrap { trim: true }),
+            body,
+        );
+    }
 }
 
 pub(super) fn fmt_time(seconds: f64) -> String {

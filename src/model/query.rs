@@ -8,6 +8,22 @@ use std::path::PathBuf;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Query {
+    OtherTracksPage {
+        query: Option<String>,
+        favorite: Option<bool>,
+        missing: Option<bool>,
+        sort: LibrarySort,
+        offset: usize,
+        limit: usize,
+    },
+    OtherTracksLocate {
+        track_id: i64,
+        query: Option<String>,
+        favorite: Option<bool>,
+        missing: Option<bool>,
+        sort: LibrarySort,
+    },
+    OtherTracksCount,
     Albums {
         query: Option<String>,
         sort: AlbumSort,
@@ -183,6 +199,15 @@ impl QueryStamp {
 /// Borrowed projection identity: demand never allocates or changes the data key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum QueryIdentity<'a> {
+    OtherTracksPage(&'a Option<String>, Option<bool>, Option<bool>, LibrarySort),
+    OtherTracksLocate(
+        i64,
+        &'a Option<String>,
+        Option<bool>,
+        Option<bool>,
+        LibrarySort,
+    ),
+    OtherTracksCount,
     Albums(&'a Option<String>, AlbumSort),
     AlbumTracks(&'a AlbumKey, &'a Option<String>),
     LibraryPage(&'a Option<String>, Option<bool>, Option<bool>, LibrarySort),
@@ -248,12 +273,16 @@ impl Query {
             Self::Albums { .. }
             | Self::AlbumTracks { .. }
             | Self::DirectoryPage { .. }
+            | Self::OtherTracksPage { .. }
+            | Self::OtherTracksLocate { .. }
             | Self::LibraryRootPage { .. }
             | Self::LibraryLocate { .. } => {
                 stamp.library = revisions.library;
                 stamp.structure = revisions.structure;
             }
-            Self::LibraryRootCounts { .. } => stamp.structure = revisions.structure,
+            Self::LibraryRootCounts { .. } | Self::OtherTracksCount => {
+                stamp.structure = revisions.structure;
+            }
             Self::PlaylistSummaries { .. } | Self::PlaylistSummaryBatch { .. } => {
                 stamp.playlist = revisions.playlist;
             }
@@ -307,6 +336,21 @@ impl Query {
     /// Offsets, cursors, page sizes and expected baselines are demand, not identity.
     pub fn identity(&self) -> QueryIdentity<'_> {
         match self {
+            Self::OtherTracksPage {
+                query,
+                favorite,
+                missing,
+                sort,
+                ..
+            } => QueryIdentity::OtherTracksPage(query, *favorite, *missing, *sort),
+            Self::OtherTracksLocate {
+                track_id,
+                query,
+                favorite,
+                missing,
+                sort,
+            } => QueryIdentity::OtherTracksLocate(*track_id, query, *favorite, *missing, *sort),
+            Self::OtherTracksCount => QueryIdentity::OtherTracksCount,
             Self::Albums { query, sort, .. } => QueryIdentity::Albums(query, *sort),
             Self::AlbumTracks { key, query, .. } => QueryIdentity::AlbumTracks(key, query),
             Self::LibraryPage {
