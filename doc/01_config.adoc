@@ -128,7 +128,8 @@ the corresponding fade clears when that end is reached.
 Use `Tab` and `Shift+Tab` to move between controls; a border marks the focused
 control independently of its enabled or selected state. `Enter` or `Space`
 activates a focused button or switch.
-Unavailable controls cannot be activated and are skipped by keyboard navigation.
+Unavailable controls cannot be activated and are skipped by keyboard navigation;
+disabled text fields also reject pointer and accessibility focus.
 Panel tabs are also tab stops: activate a tab with `Enter`/`Space`, or press
 `Shift+F10` (the Menu key also works) to open its panel menu.
 Menus open without a focused action. Use `Up` or `Down` to enter and move between

@@ -275,7 +275,6 @@ impl Library {
     pub(super) fn track_favorite_toggle(
         &self,
         id: impl Into<gpui::ElementId>,
-        group: &'static str,
         track_id: i64,
         favorite: bool,
         cx: &mut Context<Self>,
@@ -296,8 +295,6 @@ impl Library {
                 )
             },
         )
-        .opacity(0.)
-        .group_hover(group, |style| style.opacity(1.))
     }
 
     pub(super) fn choose_library_root(&mut self, cx: &mut Context<Self>) {

@@ -153,19 +153,48 @@ pub fn two_line_text(
         .child(crate::layout::caption(theme, detail).truncate())
 }
 
+/// Isolate an action area's presses from row selection and drag handlers.
+/// The barrier belongs on an ancestor so native child focus and Click run first.
+pub fn row_action_region(id: impl Into<ElementId>) -> Stateful<Div> {
+    row()
+        .id(id)
+        .flex_shrink_0()
+        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+}
+
+/// Reveal child actions on row hover or descendant focus, without replacing their hover styles.
+pub fn hover_reveal(
+    id: impl Into<ElementId>,
+    group: &'static str,
+    content: impl IntoElement,
+) -> Stateful<Div> {
+    hover_reveal_surface(id, group).child(content)
+}
+
+fn hover_reveal_surface(id: impl Into<ElementId>, group: &'static str) -> Stateful<Div> {
+    row_action_region(id)
+        .tab_index(0)
+        .tab_stop(false)
+        .opacity(0.)
+        .group_hover(group, |style| style.opacity(1.))
+        .focus_within(|style| style.opacity(1.))
+}
+
 // Out-of-flow actions leave the full text width available until the row is hovered.
 pub fn hover_actions(
     theme: &'static crate::theme::Palette,
+    id: impl Into<ElementId>,
     group: &'static str,
     selected: bool,
-) -> Div {
-    row()
+) -> Stateful<Div> {
+    hover_reveal_surface(id, group)
         .absolute()
         .right_0()
         .top_0()
         .h_full()
         .gap_0()
-        .bg(row_background(theme, selected, true))
-        .invisible()
-        .group_hover(group, |style| style.visible())
+        .bg(row_background(theme, selected, false))
+        .group_hover(group, move |style| {
+            style.opacity(1.).bg(row_background(theme, selected, true))
+        })
 }

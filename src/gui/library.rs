@@ -749,16 +749,16 @@ impl Library {
                             .child(name_content)
                             .when_some(scan, |view, scan| {
                                 view.child(
-                                    row()
-                                        .id(gpui::ElementId::named_usize("library-scan-overlay", index))
-                                        .absolute()
-                                        .right_0()
-                                        .top_0()
-                                        .h_full()
+                                    rivu_ui::hover_actions(
+                                        theme,
+                                        gpui::ElementId::named_usize("library-scan-overlay", index),
+                                        "library-track-row",
+                                        selected,
+                                    )
                                         .bg(rivu_ui::row_background(theme, selected, false))
-                                        .when(!retry_counts, |view| view.invisible())
+                                        .when(retry_counts, |view| view.opacity(1.))
                                         .group_hover("library-track-row", move |style| {
-                                            style.visible().bg(rivu_ui::row_background(theme, selected, true))
+                                            style.bg(rivu_ui::row_background(theme, selected, true))
                                         })
                                         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                                         .on_click(|_, _, cx| cx.stop_propagation())
@@ -821,9 +821,8 @@ impl Library {
                                 },
                                 |view, (track_id, favorite)| {
                                     view.child(
-                                        rivu_ui::hover_actions(theme, "library-track-row", selected).child(this.track_favorite_toggle(
-                                            gpui::ElementId::named_usize("library-tree-favorite", index),
-                                            "library-track-row",
+                                        rivu_ui::hover_actions(theme, ("library-track-actions", track_id as u64), "library-track-row", selected).child(this.track_favorite_toggle(
+                                            gpui::ElementId::NamedInteger("library-tree-favorite".into(), track_id as u64),
                                             track_id,
                                             favorite,
                                             cx,

@@ -10,7 +10,7 @@ pub(super) use selection::EntryCommit;
 
 use super::{
     ListFocus,
-    components::track::{row_text, track_list_row},
+    components::track::{favorite_button, row_text, track_list_row},
     library::LibraryDrag,
 };
 use crate::{gui::queue::QueueDrag, model::Command};
@@ -1201,6 +1201,7 @@ impl Playlists {
                         .child(
                             hover_actions(
                                 theme,
+                                ("playlist-catalog-actions", id as u64),
                                 "playlist-catalog-row",
                                 this.browser.playlists().selected() == Some(id),
                             )
@@ -1450,6 +1451,7 @@ impl Playlists {
                             .child(
                                 hover_actions(
                                     theme,
+                                    ("playlist-track-actions", id as u64),
                                     "playlist-track-row",
                                     this.browser.playlists().track_selection.contains(id),
                                 )
@@ -1473,16 +1475,11 @@ impl Playlists {
                                         },
                                     )
                                     .button(
-                                        IconButton::new(
+                                        favorite_button(
                                             ("playlist-entry-favorite", id as u64),
-                                            if favorite { "󰓎" } else { "󰓐" },
-                                            this.tr(if favorite {
-                                                "gl-unfavorite"
-                                            } else {
-                                                "gl-favorite"
-                                            }),
-                                        )
-                                        .toggled(favorite),
+                                            favorite,
+                                            |key| this.tr(key),
+                                        ),
                                         cx,
                                         move |this, _, cx| {
                                             this.send(

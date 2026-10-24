@@ -1292,6 +1292,16 @@ pub trait InteractiveElement: Sized {
         self
     }
 
+    /// Apply styles while this element or one of its descendants is focused.
+    /// Requires a focusable element, as with [`InteractiveElement::focus`].
+    fn focus_within(mut self, f: impl FnOnce(StyleRefinement) -> StyleRefinement) -> Self
+    where
+        Self: Sized,
+    {
+        self.interactivity().focus_within_style = Some(Box::new(f(StyleRefinement::default())));
+        self
+    }
+
     /// Set the given styles to be applied when this element is focused via keyboard navigation.
     /// This is similar to CSS's `:focus-visible` pseudo-class - it only applies when the element
     /// is focused AND the user is navigating via keyboard (not mouse clicks).
@@ -2157,6 +2167,7 @@ pub struct Interactivity {
     pub base_style: Box<StyleRefinement>,
     pub(crate) focus_style: Option<Box<StyleRefinement>>,
     pub(crate) in_focus_style: Option<Box<StyleRefinement>>,
+    pub(crate) focus_within_style: Option<Box<StyleRefinement>>,
     pub(crate) focus_visible_style: Option<Box<StyleRefinement>>,
     pub(crate) hover_style: Option<Box<StyleRefinement>>,
     pub(crate) group_hover_style: Option<GroupStyle>,
@@ -3426,6 +3437,12 @@ impl Interactivity {
                 && focus_handle.within_focused(window, cx)
             {
                 style.refine(in_focus_style);
+            }
+
+            if let Some(focus_within_style) = self.focus_within_style.as_ref()
+                && focus_handle.contains_focused(window, cx)
+            {
+                style.refine(focus_within_style);
             }
 
             if let Some(focus_style) = self.focus_style.as_ref()

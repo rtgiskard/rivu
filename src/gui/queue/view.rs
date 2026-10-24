@@ -2,7 +2,10 @@ use super::{Queue, QueueEvent, QueueIdentity};
 use crate::{
     gui::{
         DragDestination,
-        components::{search::set_search_counts, track::track_list_row},
+        components::{
+            search::set_search_counts,
+            track::{favorite_button, track_list_row},
+        },
         format_time,
         library::{LibraryDrag, LibraryNode},
         list_interaction::{ContentDrag, ContentMenuRequest, TrackSource},
@@ -351,6 +354,7 @@ impl Queue {
                                 .child(
                                     hover_actions(
                                         theme,
+                                        ("queue-entry-actions", id),
                                         "queue-track-row",
                                         this.model.contains(&id),
                                     )
@@ -378,16 +382,11 @@ impl Queue {
                                             },
                                         )
                                         .button(
-                                            IconButton::new(
+                                            favorite_button(
                                                 ("queue-entry-favorite", id),
-                                                if favorite { "󰓎" } else { "󰓐" },
-                                                this.tr(if favorite {
-                                                    "gl-unfavorite"
-                                                } else {
-                                                    "gl-favorite"
-                                                }),
-                                            )
-                                            .toggled(favorite),
+                                                favorite,
+                                                |key| this.tr(key),
+                                            ),
                                             cx,
                                             move |this, _, cx| {
                                                 this.send(

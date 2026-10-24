@@ -76,7 +76,6 @@ impl History {
     pub(super) fn track_favorite_toggle(
         &self,
         id: impl Into<gpui::ElementId>,
-        group: &'static str,
         track_id: i64,
         favorite: bool,
         cx: &mut Context<Self>,
@@ -97,8 +96,6 @@ impl History {
                 );
             },
         )
-        .opacity(0.)
-        .group_hover(group, |style| style.opacity(1.))
     }
 
     fn history_sort_button(
@@ -373,13 +370,13 @@ impl History {
                                 .child(
                                     hover_actions(
                                         theme,
+                                        ("history-track-actions", id as u64),
                                         "history-track-row",
                                         selected,
                                     )
                                     .child(
                                         this.track_favorite_toggle(
                                             ("history-entry-favorite", id as u64),
-                                            "history-track-row",
                                             id,
                                             favorite,
                                             cx,

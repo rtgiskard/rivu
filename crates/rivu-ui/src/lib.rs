@@ -37,9 +37,9 @@ pub use overlay::{
     text_tooltip, tooltip_surface,
 };
 pub use row::{
-    DROPDOWN_ROW_REMS, LIST_ROW_REMS, dropdown_row, hover_actions, list_drop_target, list_row,
-    list_row_height, row_background, single_line_row_height, tree_row, tree_row_height,
-    two_line_text,
+    DROPDOWN_ROW_REMS, LIST_ROW_REMS, dropdown_row, hover_actions, hover_reveal, list_drop_target,
+    list_row, list_row_height, row_action_region, row_background, single_line_row_height, tree_row,
+    tree_row_height, two_line_text,
 };
 pub use scrollbar::scrollable_area;
 pub use slider::{ProgressBar, Slider, SliderInput, SliderKey};

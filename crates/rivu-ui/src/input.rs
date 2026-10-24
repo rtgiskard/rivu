@@ -187,7 +187,7 @@ impl Input {
         ]);
     }
 
-    /// Disabled inputs retain their entity and value but reject user editing.
+    /// Disabled inputs retain their entity and value but reject user focus and editing.
     pub fn set_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
         if self.enabled == enabled {
             return;
@@ -1077,18 +1077,18 @@ impl Render for Input {
                     node.remove_action(AccessibleAction::Focus);
                 }
             })
-            .on_a11y_action(AccessibleAction::Focus, {
-                let input = cx.entity().downgrade();
-                move |_, window, cx| {
-                    let _ = input.update(cx, |input, cx| {
-                        if input.enabled {
-                            input.focus_handle.focus(window, cx);
-                        }
-                    });
-                }
-            })
             .when(self.enabled, |view| {
-                view.on_a11y_action(AccessibleAction::SetValue, {
+                view.on_a11y_action(AccessibleAction::Focus, {
+                    let input = cx.entity().downgrade();
+                    move |_, window, cx| {
+                        let _ = input.update(cx, |input, cx| {
+                            if input.enabled {
+                                input.focus_handle.focus(window, cx);
+                            }
+                        });
+                    }
+                })
+                .on_a11y_action(AccessibleAction::SetValue, {
                     let input = cx.entity().downgrade();
                     move |data, window, cx| {
                         let _ = input.update(cx, |input, cx| {
@@ -1113,8 +1113,9 @@ impl Render for Input {
             })
             .flex()
             .key_context("Input")
-            .track_focus(&self.focus_handle(cx))
-            .tab_index(0)
+            .when(self.enabled, |view| {
+                view.track_focus(&self.focus_handle(cx)).tab_index(0)
+            })
             .cursor(if self.enabled {
                 CursorStyle::IBeam
             } else {
@@ -1317,6 +1318,64 @@ mod tests {
             window.dispatch_event(event.to_platform_input(), cx);
         })
         .unwrap();
+    }
+
+    #[test]
+    fn disabled_inputs_reject_pointer_tab_and_accessible_focus() {
+        let mut cx = gpui::TestAppContext::single();
+        cx.update(crate::theme::init_test);
+        let (input, other, handle) = selection_fixture(&mut cx);
+        cx.update_window(handle, |_, window, cx| {
+            input.update(cx, |input, cx| input.set_enabled(false, cx));
+            let focus = other.read(cx).focus_handle.clone();
+            focus.focus(window, cx);
+            window.draw(cx).clear(cx);
+        })
+        .unwrap();
+        let position = input.read_with(&cx, |input, _| input.last_bounds.unwrap().center());
+        dispatch_pointer(
+            &mut cx,
+            handle,
+            MouseDownEvent {
+                button: MouseButton::Left,
+                position,
+                ..Default::default()
+            },
+        );
+        dispatch_pointer(
+            &mut cx,
+            handle,
+            MouseUpEvent {
+                button: MouseButton::Left,
+                position,
+                ..Default::default()
+            },
+        );
+        cx.update_window(handle, |_, window, cx| {
+            assert!(!input.read(cx).is_focused(window));
+            let focus = other.read(cx).focus_handle.clone();
+            focus.focus(window, cx);
+            window.focus_next(cx);
+            assert!(other.read(cx).is_focused(window));
+            window.focus_prev(cx);
+            assert!(other.read(cx).is_focused(window));
+            window.draw(cx).clear(cx);
+            window.dispatch_keystroke(gpui::Keystroke::parse("x").unwrap(), cx);
+            input.update(cx, |input, cx| {
+                let element = input.render(window, cx).into_element();
+                let mut node = Node::new(Role::TextInput);
+                element.write_a11y_info(&mut node);
+                assert!(!node.supports_action(AccessibleAction::Focus));
+                assert!(!node.supports_action(AccessibleAction::SetValue));
+                drop(element);
+                assert_eq!(input.text(), "a中😀z");
+            });
+        })
+        .unwrap();
+        assert_eq!(
+            other.read_with(&cx, |input, _| input.text().to_owned()),
+            "untouchedx"
+        );
     }
 
     #[test]

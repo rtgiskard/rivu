@@ -707,9 +707,11 @@ impl AlbumBrowser {
             })
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(|_, _, cx| cx.stop_propagation())
-            .child(
+            .child(rivu_ui::hover_reveal(
+                ("album-action-reveal", index),
+                "album-card",
                 IconButtonGroup::new(IconButtonStyle::Bare, IconButtonDensity::Compact)
-                    .button_with(
+                    .button(
                         IconButton::new(("play-album", index), "", self.tr("gl-play-album")),
                         cx,
                         move |this, window, cx| {
@@ -718,14 +720,8 @@ impl AlbumBrowser {
                             window.blur(cx);
                             cx.emit(AlbumPlayRequest(play_key.clone()));
                         },
-                        |button| {
-                            button
-                                .opacity(0.)
-                                .group_hover("album-card", |style| style.opacity(1.))
-                                .focus(|style| style.opacity(1.))
-                        },
                     )
-                    .button_with(
+                    .button(
                         IconButton::new(("enqueue-album", index), "󰐕", self.tr("gl-enqueue-album")),
                         cx,
                         move |this, window, cx| {
@@ -739,15 +735,9 @@ impl AlbumBrowser {
                                 cx,
                             )
                         },
-                        |button| {
-                            button
-                                .opacity(0.)
-                                .group_hover("album-card", |style| style.opacity(1.))
-                                .focus(|style| style.opacity(1.))
-                        },
                     )
                     .into_div(),
-            );
+            ));
         column()
             .id(("album-card", index))
             .group("album-card")
@@ -1107,46 +1097,50 @@ impl Render for AlbumBrowser {
                                     .text_right(),
                                 )
                                 .child(
-                                    rivu_ui::hover_actions(theme, "album-track-row", false)
-                                        .id(("album-track-actions", id as u64))
-                                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                            cx.stop_propagation()
-                                        })
-                                        .on_click(|_, _, cx| cx.stop_propagation())
-                                        .child(
-                                            IconButtonGroup::new(
-                                                IconButtonStyle::Quiet,
-                                                IconButtonDensity::Compact,
-                                            )
-                                            .button(
-                                                IconButton::new(
-                                                    ("album-track-play", id as u64),
-                                                    "",
-                                                    this.tr("gl-play-track"),
-                                                ),
-                                                cx,
-                                                move |this, _, cx| {
-                                                    this.send(Command::Play { track_id: id }, cx)
-                                                },
-                                            )
-                                            .button(
-                                                IconButton::new(
-                                                    ("album-track-add", id as u64),
-                                                    "󰐕",
-                                                    this.tr("gl-enqueue-track"),
-                                                ),
-                                                cx,
-                                                move |this, _, cx| {
-                                                    this.send(
-                                                        Command::Enqueue {
-                                                            track_ids: vec![id],
-                                                        },
-                                                        cx,
-                                                    )
-                                                },
-                                            )
-                                            .into_div(),
-                                        ),
+                                    rivu_ui::hover_actions(
+                                        theme,
+                                        ("album-track-actions", id as u64),
+                                        "album-track-row",
+                                        false,
+                                    )
+                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation()
+                                    })
+                                    .on_click(|_, _, cx| cx.stop_propagation())
+                                    .child(
+                                        IconButtonGroup::new(
+                                            IconButtonStyle::Quiet,
+                                            IconButtonDensity::Compact,
+                                        )
+                                        .button(
+                                            IconButton::new(
+                                                ("album-track-play", id as u64),
+                                                "",
+                                                this.tr("gl-play-track"),
+                                            ),
+                                            cx,
+                                            move |this, _, cx| {
+                                                this.send(Command::Play { track_id: id }, cx)
+                                            },
+                                        )
+                                        .button(
+                                            IconButton::new(
+                                                ("album-track-add", id as u64),
+                                                "󰐕",
+                                                this.tr("gl-enqueue-track"),
+                                            ),
+                                            cx,
+                                            move |this, _, cx| {
+                                                this.send(
+                                                    Command::Enqueue {
+                                                        track_ids: vec![id],
+                                                    },
+                                                    cx,
+                                                )
+                                            },
+                                        )
+                                        .into_div(),
+                                    ),
                                 )
                                 .into_any_element()
                             })

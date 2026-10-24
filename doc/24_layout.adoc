@@ -454,10 +454,12 @@ Pointer focus and activation belong to semantic interaction regions, not every
 ancestor container. A list heading's focus action covers its passive title or
 count, not an embedded search field or action button. Passive row content still
 bubbles to its owning row; independent row actions isolate their press and click
-from row selection and drag initiation. Do not replace those boundaries with
-blanket suppression in shared inputs or buttons: GPUI runs custom mouse-down
-listeners before the same control's native focus listener. Composite editable
-controls may also intentionally observe child presses, as the font picker does.
+from row selection and drag initiation. Press isolation belongs on the ancestor
+action region, so child native focus and Click run first. Do not put a propagation
+barrier on the focusable control itself: GPUI runs custom mouse-down listeners
+before that control's native focus listener. Composite editable controls may also
+intentionally observe child presses, as the font picker does. Disabled inputs do
+not publish pointer, Tab or native accessibility focus targets.
 Capture-phase bookkeeping, outside dismissal, wheel/drop routing, and gesture
 move/release delivery retain their separate owners; stopping activation does not
 transfer or cancel a gesture's lifecycle.

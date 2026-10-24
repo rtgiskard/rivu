@@ -260,7 +260,9 @@ impl GuiApp {
                     );
                 } else {
                     let name = name.to_owned();
-                    choice = choice.child(
+                    choice = choice.child(rivu_ui::hover_reveal(
+                        ("layout-delete-reveal", index),
+                        "layout-choice-row",
                         IconButton::new(
                             ("layout-delete", index),
                             "󰆴",
@@ -277,17 +279,8 @@ impl GuiApp {
                                 this.begin_layout_action(Action::Delete(name.clone()), window, cx)
                             },
                         )
-                        .flex_shrink_0()
-                        .opacity(0.)
-                        .group_hover("layout-choice-row", |style| style.opacity(1.))
-                        .focus(|style| style.opacity(1.))
-                        .on_mouse_down(
-                            gpui::MouseButton::Left,
-                            |_, _, cx| {
-                                cx.stop_propagation();
-                            },
-                        ),
-                    );
+                        .flex_shrink_0(),
+                    ));
                 }
                 choices = choices.child(choice);
             }

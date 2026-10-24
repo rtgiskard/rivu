@@ -61,15 +61,12 @@ fn track_row_text(
     row_tooltip(view, title, detail)
 }
 
-/// Favorite action; the caller owns visibility, commands, and current state.
-pub(in crate::gui) fn track_favorite_toggle<T: 'static>(
+/// Favorite icon and selected accent without a selected background.
+pub(in crate::gui) fn favorite_button(
     id: impl Into<ElementId>,
     favorite: bool,
-    density: rivu_ui::IconButtonDensity,
     text: impl Fn(&str) -> SharedString,
-    cx: &mut gpui::Context<T>,
-    action: impl Fn(&mut T, &mut gpui::Window, &mut gpui::Context<T>) + 'static,
-) -> Stateful<Div> {
+) -> rivu_ui::IconButton {
     rivu_ui::IconButton::new(
         id,
         if favorite { "󰓎" } else { "󰓐" },
@@ -80,6 +77,23 @@ pub(in crate::gui) fn track_favorite_toggle<T: 'static>(
         }),
     )
     .toggled(favorite)
-    .build(rivu_ui::IconButtonStyle::Quiet, density, cx, action)
-    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+    .selected_fill(false)
+}
+
+/// Favorite action; the caller owns visibility, commands, and current state.
+pub(in crate::gui) fn track_favorite_toggle<T: 'static>(
+    id: impl Into<ElementId>,
+    favorite: bool,
+    density: rivu_ui::IconButtonDensity,
+    text: impl Fn(&str) -> SharedString,
+    cx: &mut gpui::Context<T>,
+    action: impl Fn(&mut T, &mut gpui::Window, &mut gpui::Context<T>) + 'static,
+) -> Stateful<Div> {
+    let id = id.into();
+    rivu_ui::row_action_region(id.clone()).child(favorite_button(id, favorite, text).build(
+        rivu_ui::IconButtonStyle::Quiet,
+        density,
+        cx,
+        action,
+    ))
 }
