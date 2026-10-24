@@ -503,6 +503,9 @@ impl GuiApp {
         destination: DragDestination,
         cx: &mut Context<Self>,
     ) {
+        if !destination.current(&self.state) {
+            return;
+        }
         match source {
             TrackSource::Tracks(ids) => self.send_content_tracks(ids, destination, cx),
             TrackSource::Album(key) => {
@@ -523,15 +526,13 @@ impl GuiApp {
                     limit: crate::model::MAX_QUERY_ROWS,
                 };
                 let stamp = query.stamp(self.state.query_revisions(None));
-                let target_revision = match destination {
-                    DragDestination::Playlist(id) => self
-                        .state
+                let target_revision = destination.playlist_id().and_then(|id| {
+                    self.state
                         .library
                         .playlist_entry_revisions
                         .get(&id)
-                        .copied(),
-                    _ => None,
-                };
+                        .copied()
+                });
                 let handle = self.handle.clone();
                 cx.spawn(async move |this, cx| {
                     let result = crate::gui::query::run(
@@ -547,14 +548,12 @@ impl GuiApp {
                         },
                         |response, cx| {
                             let _ = this.update(cx, |this, cx| {
-                                let target_current = match destination {
-                                    DragDestination::Playlist(id) => {
+                                let target_current = destination.current(&this.state)
+                                    && destination.playlist_id().is_none_or(|id| {
                                         target_revision.is_some()
                                             && this.state.library.playlist_entry_revisions.get(&id)
                                                 == target_revision.as_ref()
-                                    }
-                                    _ => true,
-                                };
+                                    });
                                 let current = guard.current(this) && target_current;
                                 this.timeout_content_resolution(&read, response, current, cx);
                             });
@@ -565,8 +564,8 @@ impl GuiApp {
                         if !this.finish_content_resolution(&read, cx) {
                             return;
                         }
-                        let target_current = match destination {
-                            DragDestination::Playlist(id) => {
+                        let target_current = destination.current(&this.state)
+                            && destination.playlist_id().is_none_or(|id| {
                                 target_revision.is_some()
                                     && this
                                         .state
@@ -575,9 +574,7 @@ impl GuiApp {
                                         .get(&id)
                                         .copied()
                                         == target_revision
-                            }
-                            _ => true,
-                        };
+                            });
                         match result {
                             Ok(ids) if guard.current(this) && target_current => {
                                 this.send_content_tracks(ids, destination, cx)
@@ -601,7 +598,7 @@ impl GuiApp {
         destination: DragDestination,
         cx: &mut Context<Self>,
     ) {
-        if track_ids.is_empty() {
+        if track_ids.is_empty() || !destination.current(&self.state) {
             return;
         }
         let command = match destination {
@@ -620,6 +617,21 @@ impl GuiApp {
                     track_ids,
                 }
             }
+            DragDestination::QueueAt { index, revision } => Command::InsertQueue {
+                track_ids,
+                index,
+                expected_revision: revision,
+            },
+            DragDestination::PlaylistAt {
+                playlist_id,
+                index,
+                revision,
+            } => Command::InsertPlaylist {
+                playlist_id,
+                track_ids,
+                index,
+                expected_revision: revision,
+            },
         };
         self.send(command, cx);
     }

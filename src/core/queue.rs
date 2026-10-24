@@ -69,6 +69,32 @@ impl Core {
         Ok(())
     }
 
+    pub(in crate::core) fn check_queue_insertion(
+        &self,
+        index: usize,
+        expected_revision: u64,
+    ) -> Result<()> {
+        ensure!(
+            self.state.queue.revision == expected_revision,
+            "Queue revision changed"
+        );
+        ensure!(
+            index <= self.queue_ids.len(),
+            "Queue insertion index out of range"
+        );
+        Ok(())
+    }
+
+    pub(in crate::core) fn insert_queue_ids(
+        &mut self,
+        index: usize,
+        inserted: Vec<u64>,
+    ) -> Result<()> {
+        self.queue_ids.splice(index..index, inserted);
+        self.state.queue = self.store.queue_projection(self.queue_ids.len())?;
+        Ok(())
+    }
+
     pub(in crate::core) fn remove_queue_entries(&mut self, queue_ids: &[u64]) -> Result<()> {
         if queue_ids.is_empty() {
             return Ok(());

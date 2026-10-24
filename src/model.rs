@@ -630,6 +630,17 @@ pub enum Command {
         directories: Vec<PathBuf>,
         track_ids: Vec<i64>,
     },
+    InsertQueue {
+        track_ids: Vec<i64>,
+        index: usize,
+        expected_revision: u64,
+    },
+    InsertQueueSources {
+        directories: Vec<PathBuf>,
+        track_ids: Vec<i64>,
+        index: usize,
+        expected_revision: u64,
+    },
     RemoveQueue {
         queue_id: u64,
     },
@@ -681,6 +692,19 @@ pub enum Command {
         directories: Vec<PathBuf>,
         track_ids: Vec<i64>,
     },
+    InsertPlaylist {
+        playlist_id: i64,
+        track_ids: Vec<i64>,
+        index: usize,
+        expected_revision: u64,
+    },
+    InsertPlaylistSources {
+        playlist_id: i64,
+        directories: Vec<PathBuf>,
+        track_ids: Vec<i64>,
+        index: usize,
+        expected_revision: u64,
+    },
     RemovePlaylistEntry {
         entry_id: i64,
     },
@@ -697,6 +721,7 @@ pub enum Command {
         playlist_id: i64,
         entry_ids: Vec<i64>,
         before_entry_id: Option<i64>,
+        after: bool,
         expected_revision: u64,
     },
     ImportPlaylist {

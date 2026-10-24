@@ -7,6 +7,70 @@ pub(super) enum PositionScope {
     Playlist(i64),
 }
 
+/// Stage only incoming tracks, then open a gap and insert within one transaction.
+/// Source selection keeps the existing union's stable ID order and deduplication.
+pub(super) fn insert_tracks(
+    tx: &Transaction<'_>,
+    scope: PositionScope,
+    index: usize,
+    ids: &str,
+    directories: Option<&str>,
+) -> Result<usize> {
+    let index = i64::try_from(index)?;
+    let total: i64 = match scope {
+        PositionScope::Queue => tx.query_row(
+            "SELECT COALESCE(MAX(position)+1,0) FROM queue_entries", [], |row| row.get(0),
+        )?,
+        PositionScope::Playlist(id) => tx.query_row(
+            "SELECT (SELECT COALESCE(MAX(position)+1,0) FROM playlist_entries WHERE playlist_id=?1) FROM playlists WHERE id=?1",
+            [id], |row| row.get(0),
+        )?,
+    };
+    anyhow::ensure!(index <= total, "Insertion index out of range");
+    tx.execute_batch("CREATE TEMP TABLE insertion_tracks(ordinal INTEGER PRIMARY KEY,track_id INTEGER NOT NULL);")?;
+    if let Some(directories) = directories {
+        tx.execute(&format!(
+            "INSERT INTO insertion_tracks SELECT row_number() OVER (ORDER BY tracks.id)-1,tracks.id FROM tracks WHERE {} ORDER BY tracks.id",
+            super::tracks::SOURCE_FILTER,
+        ), params![directories, ids])?;
+    } else {
+        tx.execute(
+            "INSERT INTO insertion_tracks SELECT CAST(key AS INTEGER),value FROM json_each(?1) ORDER BY CAST(key AS INTEGER)",
+            [ids],
+        )?;
+    }
+    if let PositionScope::Playlist(id) = scope {
+        tx.execute(
+            "DELETE FROM insertion_tracks WHERE track_id IN (SELECT track_id FROM playlist_entries WHERE playlist_id=?1) OR ordinal NOT IN (SELECT MIN(ordinal) FROM insertion_tracks GROUP BY track_id)",
+            [id],
+        )?;
+    }
+    let count: i64 = tx.query_row("SELECT COUNT(*) FROM insertion_tracks", [], |row| {
+        row.get(0)
+    })?;
+    anyhow::ensure!(
+        total.checked_add(count).is_some(),
+        "Insertion exceeds database positions"
+    );
+    if count != 0 {
+        match scope {
+            PositionScope::Queue => {
+                tx.execute(
+                    "UPDATE queue_entries SET position=position+?2 WHERE position>=?1",
+                    params![index, count],
+                )?;
+                tx.execute("INSERT INTO queue_entries(track_id,position) SELECT track_id,?1+ordinal FROM insertion_tracks ORDER BY ordinal", [index])?;
+            }
+            PositionScope::Playlist(id) => {
+                tx.execute("UPDATE playlist_entries SET position=position+?2 WHERE playlist_id=?3 AND position>=?1", params![index, count, id])?;
+                tx.execute("INSERT INTO playlist_entries(playlist_id,track_id,position) SELECT ?2,track_id,?1+row_number() OVER (ORDER BY ordinal)-1 FROM insertion_tracks ORDER BY ordinal", params![index, id])?;
+            }
+        }
+    }
+    tx.execute_batch("DROP TABLE insertion_tracks;")?;
+    Ok(usize::try_from(count)?)
+}
+
 /// Close deletion gaps using sorted, unique positions captured before deletion.
 /// Ascending, disjoint original intervals prevent shifting a survivor twice.
 pub(super) fn close_gaps(

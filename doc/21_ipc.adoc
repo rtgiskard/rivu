@@ -106,7 +106,7 @@ The frame header is six bytes. `body_length` excludes the four-byte length field
 and includes the version, message type, and serialized body.
 
 Bodies use Postcard serialization without COBS framing. The current protocol
-version is `6`; clients and servers must use matching wire schemas. The four-byte
+version is `7`; clients and servers must use matching wire schemas. The four-byte
 frame length remains little-endian; body integers follow Postcard's encoding.
 Restart clients and hosts together after upgrading: incompatible versions are
 rejected before decoding the body. There is no compatibility alias or schema
@@ -586,11 +586,12 @@ does not invalidate content or projections.
 
 `RemovePlaylistEntries {playlist_id, entry_ids, expected_revision}` removes a
 selection atomically and closes its position gaps. `MovePlaylistEntries
-{playlist_id, entry_ids, before_entry_id, expected_revision}` moves the selected
+{playlist_id, entry_ids, before_entry_id, after, expected_revision}` moves the selected
 entries together, preserving their original playlist order regardless of submitted
-ID order; `before_entry_id = None` appends the group. The target is a stable entry
-identity in the same playlist, not a row index. Moving onto a selected target or
-requesting an already-current order is a no-op.
+ID order. With `after = false`, the group goes before the target; `after = true`
+places it after the target. `before_entry_id = None` appends in either case.
+The target is a stable entry identity in the same playlist, not a row index.
+Moving onto a selected target or requesting an already-current order is a no-op.
 
 Playlist moves use the shared interval algorithm in
 <<_ordered_collections_and_transaction_ownership,Ordered collections and transaction
@@ -616,6 +617,20 @@ whole request without changes.
 no total queue cap. `CreatePlaylistFromQueue {name}` atomically saves the complete
 queue as a playlist on the server, keeping each track's first occurrence order.
 Explicit ID selections remain bounded by request-frame bytes, not total queue size.
+
+`InsertQueue {track_ids, index, expected_revision}` and
+`InsertPlaylist {playlist_id, track_ids, index, expected_revision}` insert directly
+at an original-list boundary in `0..=total`. The corresponding
+`InsertQueueSources` and `InsertPlaylistSources` also accept `directories` and
+use the existing stable track-ID union order for source expansion. The core
+checks the destination's order revision before mutation, including empty requests;
+stale revisions, invalid boundaries, or unknown tracks fail without partial writes.
+Queue insertion preserves supplied occurrence order and duplicates without
+changing the playing occurrence. Playlist insertion retains existing entries and
+inserts only the first occurrence of each previously absent track ID. Storage
+stages incoming identities, opens a position gap, and inserts in one transaction;
+there is no externally visible append-then-move phase or whole-list metadata load.
+
 The core retains only one private compact occurrence-ID vector (8 bytes per row,
 about 1.53 MiB for 200,000 occurrences); client state frames remain constant-size.
 

@@ -6,7 +6,7 @@ use crate::{
     model::{Command, Query},
     response::{Ack, QueryResponse, StateResponse, StateRevisions, StateSections},
 };
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 #[test]
 fn app_commands_route_over_ipc_without_changing_business_state() {
@@ -181,6 +181,37 @@ fn playlist_group_requests_and_locations_round_trip_stable_identities() {
         );
     }
     for command in [
+        Command::InsertQueue {
+            track_ids: vec![3, 1, 3],
+            index: usize::MAX,
+            expected_revision: u64::MAX,
+        },
+        Command::InsertQueueSources {
+            directories: vec![PathBuf::from("/music")],
+            track_ids: vec![3, 1],
+            index: 0,
+            expected_revision: 19,
+        },
+        Command::InsertPlaylist {
+            playlist_id: 10,
+            track_ids: vec![3, 1, 3],
+            index: 7,
+            expected_revision: 19,
+        },
+        Command::InsertPlaylistSources {
+            playlist_id: 10,
+            directories: vec![PathBuf::from("/music")],
+            track_ids: vec![],
+            index: 0,
+            expected_revision: 19,
+        },
+        Command::MovePlaylistEntries {
+            playlist_id: 10,
+            entry_ids: vec![42],
+            before_entry_id: Some(43),
+            after: true,
+            expected_revision: 19,
+        },
         Command::RemovePlaylistEntries {
             playlist_id: 10,
             entry_ids: vec![42, i64::MAX],
@@ -191,12 +222,14 @@ fn playlist_group_requests_and_locations_round_trip_stable_identities() {
             entry_ids: vec![42, 43],
             before_entry_id: Some(44),
             expected_revision: 17,
+            after: false,
         },
         Command::MovePlaylistEntries {
             playlist_id: 10,
             entry_ids: vec![],
             before_entry_id: None,
             expected_revision: 0,
+            after: false,
         },
     ] {
         let expected = serde_json::to_value(&command).unwrap();
@@ -701,6 +734,7 @@ fn playlist_content_lifetimes_and_batches_are_isolated_from_the_catalog() {
                 playlist_id: 10,
                 entry_ids: vec![101],
                 before_entry_id: None,
+                after: false,
                 expected_revision: first.revisions.playlist_entries.unwrap().revision,
             })
             .unwrap()
@@ -920,6 +954,7 @@ fn playlist_content_lifetimes_and_batches_are_isolated_from_the_catalog() {
                 playlist_id: 20,
                 entry_ids: vec![201],
                 before_entry_id: None,
+                after: false,
                 expected_revision: other.revisions.playlist_entries.unwrap().revision,
             })
             .unwrap()
@@ -970,6 +1005,7 @@ fn playlist_content_lifetimes_and_batches_are_isolated_from_the_catalog() {
                 playlist_id: 20,
                 entry_ids: vec![201],
                 before_entry_id: None,
+                after: false,
                 expected_revision: current.revisions.playlist_entries.unwrap().revision,
             })
             .unwrap()
@@ -1027,6 +1063,7 @@ fn playlist_content_lifetimes_and_batches_are_isolated_from_the_catalog() {
                     playlist_id,
                     entry_ids: vec![],
                     before_entry_id: None,
+                    after: false,
                     expected_revision: current.revisions.playlist_entries.unwrap().revision,
                 })
                 .unwrap()
@@ -2624,7 +2661,7 @@ fn processing_commands_and_configuration_use_current_positional_contract() {
     let bytes = postcard::to_allocvec(&wire).unwrap();
     let decoded: WireConfig = postcard::from_bytes(&bytes).unwrap();
     assert_eq!(crate::config::Config::from(decoded), config);
-    assert_eq!(PROTOCOL_VERSION, 6);
+    assert_eq!(PROTOCOL_VERSION, 7);
 }
 
 #[test]

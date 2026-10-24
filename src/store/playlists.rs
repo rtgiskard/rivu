@@ -463,6 +463,47 @@ impl Store {
         tx.commit()?;
         Ok(inserted != 0)
     }
+
+    pub(crate) fn insert_playlist_tracks(
+        &self,
+        playlist_id: i64,
+        tracks: &[i64],
+        index: usize,
+    ) -> Result<bool> {
+        let ids = self.validated_track_ids(tracks)?;
+        self.insert_playlist(playlist_id, &ids, None, index)
+    }
+
+    pub(crate) fn insert_playlist_sources(
+        &self,
+        playlist_id: i64,
+        directories: &[PathBuf],
+        tracks: &[i64],
+        index: usize,
+    ) -> Result<bool> {
+        let (directories, ids) = self.source_parameters(directories, tracks)?;
+        self.insert_playlist(playlist_id, &ids, Some(&directories), index)
+    }
+
+    fn insert_playlist(
+        &self,
+        playlist_id: i64,
+        ids: &str,
+        directories: Option<&str>,
+        index: usize,
+    ) -> Result<bool> {
+        let tx = self.conn.unchecked_transaction()?;
+        exists_playlist(&tx, playlist_id)?;
+        let count = super::positions::insert_tracks(
+            &tx,
+            PositionScope::Playlist(playlist_id),
+            index,
+            ids,
+            directories,
+        )?;
+        tx.commit()?;
+        Ok(count != 0)
+    }
     /// Returns the owning playlist only after the entry removal commits.
     pub fn remove_playlist_entry(&self, id: i64) -> Result<i64> {
         let tx = self.conn.unchecked_transaction()?;
@@ -533,6 +574,7 @@ impl Store {
         playlist_id: i64,
         entry_ids: &[i64],
         before_entry_id: Option<i64>,
+        after: bool,
     ) -> Result<bool> {
         let tx = self.conn.unchecked_transaction()?;
         let ids = serde_json::to_string(entry_ids)?;
@@ -568,8 +610,9 @@ impl Store {
         {
             return Ok(false);
         }
+        let boundary = target + i64::from(after && before_entry_id.is_some());
         let insertion =
-            target - selected.partition_point(|&(_, position)| position < target) as i64;
+            boundary - selected.partition_point(|&(_, position)| position < boundary) as i64;
         if !move_selection(
             &tx,
             PositionScope::Playlist(playlist_id),
@@ -1173,6 +1216,118 @@ mod group_tests {
     }
 
     #[test]
+    fn indexed_playlist_insertion_keeps_existing_occurrences_and_first_new_source_order()
+    -> Result<()> {
+        for index in 0..=1 {
+            let store = fixture()?;
+            assert!(store.insert_playlist_tracks(20, &[4, 1, 2, 4, 3], index)?);
+            let entries = store.playlist_entry_locations(20, None, &order(&store, 20)?)?;
+            let mut expected = vec![1];
+            expected.splice(index..index, [4, 2, 3]);
+            assert_eq!(
+                entries
+                    .iter()
+                    .map(|entry| entry.track_id)
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            assert_eq!(
+                store.playlist_entry(200)?.unwrap().position,
+                if index == 0 { 3 } else { 0 }
+            );
+            assert!(!store.insert_playlist_tracks(20, &[1, 4, 4], 0)?);
+            assert!(!store.insert_playlist_tracks(20, &[], 4)?);
+            assert!(store.insert_playlist_tracks(20, &[1], 5).is_err());
+            assert!(store.insert_playlist_tracks(20, &[], usize::MAX).is_err());
+            assert!(store.insert_playlist_tracks(999, &[], 0).is_err());
+            assert!(store.insert_playlist_tracks(20, &[6, 999], 0).is_err());
+            assert_eq!(order(&store, 10)?, [100, 101, 102, 103, 104, 105]);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn indexed_playlist_sources_use_union_order_and_roll_back_partial_writes() -> Result<()> {
+        let store = fixture()?;
+        store
+            .conn
+            .execute_batch("UPDATE tracks SET path='/music/'||id;")?;
+        let before = order(&store, 20)?;
+        store.conn.execute_batch("CREATE TRIGGER reject_playlist_insertion BEFORE INSERT ON playlist_entries WHEN NEW.playlist_id=20 AND NEW.track_id=3 BEGIN SELECT RAISE(ABORT,'reject insertion'); END;")?;
+        assert!(store.insert_playlist_tracks(20, &[2, 3, 4], 0).is_err());
+        assert!(
+            store
+                .insert_playlist_sources(20, &["/music".into()], &[6, 2, 6], 0)
+                .is_err()
+        );
+        assert_eq!(order(&store, 20)?, before);
+        store
+            .conn
+            .execute_batch("DROP TRIGGER reject_playlist_insertion;")?;
+        assert!(store.insert_playlist_sources(
+            20,
+            &["/music".into(), "/music".into()],
+            &[6, 2, 6],
+            0
+        )?);
+        let entries = store.playlist_entry_locations(20, None, &order(&store, 20)?)?;
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.track_id)
+                .collect::<Vec<_>>(),
+            [2, 3, 4, 5, 6, 1]
+        );
+        assert!(!store.insert_playlist_sources(20, &["/music".into()], &[], 6)?);
+        assert!(store.insert_playlist_sources(20, &[], &[], 7).is_err());
+        assert!(store.insert_playlist_sources(20, &[], &[999], 0).is_err());
+        assert_eq!(order(&store, 10)?, [100, 101, 102, 103, 104, 105]);
+        Ok(())
+    }
+
+    #[test]
+    fn all_after_selection_shapes_match_stable_remove_then_insert_order() -> Result<()> {
+        let original: Vec<i64> = (100..106).collect();
+        for mask in 0..64 {
+            let selected: Vec<_> = original
+                .iter()
+                .copied()
+                .enumerate()
+                .filter(|(index, _)| mask & (1 << index) != 0)
+                .map(|(_, id)| id)
+                .collect();
+            for target in original.iter().copied().map(Some).chain([None]) {
+                let store = fixture()?;
+                let mut expected = original.clone();
+                if !target.is_some_and(|id| selected.contains(&id)) {
+                    expected.retain(|id| !selected.contains(id));
+                    let insertion = target.map_or(expected.len(), |id| {
+                        expected.iter().position(|&entry| entry == id).unwrap() + 1
+                    });
+                    expected.splice(insertion..insertion, selected.iter().copied());
+                }
+                let submitted: Vec<_> = selected
+                    .iter()
+                    .rev()
+                    .copied()
+                    .chain(selected.iter().copied())
+                    .collect();
+                assert_eq!(
+                    store.move_playlist_entries(10, &submitted, target, true)?,
+                    expected != original
+                );
+                assert_eq!(
+                    order(&store, 10)?,
+                    expected,
+                    "mask={mask}, target={target:?}"
+                );
+                assert_eq!(order(&store, 20)?, [200]);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn all_selection_shapes_match_stable_remove_then_insert_order() -> Result<()> {
         let original: Vec<i64> = (100..106).collect();
         for mask in 0..64 {
@@ -1196,7 +1351,7 @@ mod group_tests {
                 let mut submitted: Vec<_> = selected.iter().rev().copied().collect();
                 submitted.extend_from_slice(&selected);
                 assert_eq!(
-                    store.move_playlist_entries(10, &submitted, target)?,
+                    store.move_playlist_entries(10, &submitted, target, false)?,
                     expected != original
                 );
                 assert_eq!(
@@ -1230,7 +1385,7 @@ mod group_tests {
             (vec![101, 103], Some(103)),
             (vec![100, 101, 102, 103, 104, 105], None),
         ] {
-            assert!(!store.move_playlist_entries(10, &ids, target)?);
+            assert!(!store.move_playlist_entries(10, &ids, target, false)?);
             assert_eq!(order(&store, 10)?, before);
         }
         assert!(!store.remove_playlist_entries(10, &[])?);
@@ -1241,7 +1396,11 @@ mod group_tests {
             (10, vec![], Some(999)),
             (10, vec![101], Some(200)),
         ] {
-            assert!(store.move_playlist_entries(playlist, &ids, target).is_err());
+            assert!(
+                store
+                    .move_playlist_entries(playlist, &ids, target, false)
+                    .is_err()
+            );
             assert_eq!(order(&store, 10)?, before);
             assert_eq!(order(&store, 20)?, [200]);
         }
@@ -1281,7 +1440,11 @@ mod group_tests {
             "CREATE TRIGGER reject_move BEFORE UPDATE OF position ON playlist_entries
              WHEN OLD.id=103 BEGIN SELECT RAISE(ABORT,'reject move'); END;",
         )?;
-        assert!(store.move_playlist_entries(10, &[101, 103], None).is_err());
+        assert!(
+            store
+                .move_playlist_entries(10, &[101, 103], None, false)
+                .is_err()
+        );
         assert_eq!(order(&store, 10)?, before);
         store.conn.execute_batch(
             "DROP TRIGGER reject_move;
@@ -1303,7 +1466,7 @@ mod group_tests {
         )?;
         assert!(
             store
-                .move_playlist_entries(10, &[100, 100], Some(103))
+                .move_playlist_entries(10, &[100, 100], Some(103), false)
                 .is_err()
         );
         assert_eq!(order(&store, 10)?, before);
@@ -1343,7 +1506,7 @@ mod group_tests {
                 .collect::<Vec<_>>(),
             [103]
         );
-        store.move_playlist_entries(10, &[103], Some(100))?;
+        store.move_playlist_entries(10, &[103], Some(100), false)?;
         let row = store.playlist_entry_locations(10, None, &[103])?.remove(0);
         assert_eq!(
             (row.id, row.track_id, row.position, row.total),

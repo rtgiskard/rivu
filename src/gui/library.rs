@@ -335,7 +335,7 @@ impl Library {
         destination: super::DragDestination,
         cx: &mut Context<Self>,
     ) {
-        if self.library_range_pending() || nodes.is_empty() {
+        if self.library_range_pending() || nodes.is_empty() || !destination.current(&self.state) {
             return;
         }
         let mut directories = nodes
@@ -361,6 +361,29 @@ impl Library {
                     playlist_id,
                     directories,
                     track_ids,
+                },
+                cx,
+            ),
+            super::DragDestination::QueueAt { index, revision } => self.send(
+                Command::InsertQueueSources {
+                    directories,
+                    track_ids,
+                    index,
+                    expected_revision: revision,
+                },
+                cx,
+            ),
+            super::DragDestination::PlaylistAt {
+                playlist_id,
+                index,
+                revision,
+            } => self.send(
+                Command::InsertPlaylistSources {
+                    playlist_id,
+                    directories,
+                    track_ids,
+                    index,
+                    expected_revision: revision,
                 },
                 cx,
             ),

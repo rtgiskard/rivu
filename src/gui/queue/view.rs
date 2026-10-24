@@ -32,7 +32,7 @@ impl QueueDrag {
         queue_revision: u64,
         destination: DragDestination,
     ) -> bool {
-        matches!(destination, DragDestination::Playlist(_))
+        destination.playlist_id().is_some()
             && self.revision == queue_revision
             && self.entries.get().is_some_and(|rows| !rows.is_empty())
     }
@@ -46,14 +46,20 @@ impl QueueDrag {
             .collect()
     }
 
-    fn insertion_index(&self, target: Option<QueueIdentity>, total: usize) -> Option<usize> {
+    fn insertion_index(
+        &self,
+        target: Option<(QueueIdentity, bool)>,
+        total: usize,
+    ) -> Option<usize> {
         let entries = self.entries.get()?;
         if entries.is_empty()
-            || target.is_some_and(|target| entries.iter().any(|row| row.id == target.id))
+            || target.is_some_and(|(target, _)| entries.iter().any(|row| row.id == target.id))
         {
             return None;
         }
-        let position = target.map_or(total, |target| target.position);
+        let position = target.map_or(total, |(target, after)| {
+            target.position + usize::from(after)
+        });
         position.checked_sub(entries.iter().filter(|row| row.position < position).count())
     }
 }
@@ -73,7 +79,7 @@ impl Queue {
     fn queue_drop_index(
         &self,
         drag: &QueueDrag,
-        target_id: Option<u64>,
+        target_id: Option<(u64, bool)>,
         owner: gpui::EntityId,
     ) -> Option<usize> {
         if self.model.query.is_some()
@@ -83,13 +89,14 @@ impl Queue {
             return None;
         }
         let target = match target_id {
-            Some(id) => Some(
+            Some((id, after)) => Some((
                 self.model
                     .rows
                     .iter()
                     .find(|row| row.id == id)
                     .map(QueueIdentity::from)?,
-            ),
+                after,
+            )),
             None => None,
         };
         drag.insertion_index(target, self.state.queue.total)
@@ -98,7 +105,7 @@ impl Queue {
     fn move_queue_entry(
         &mut self,
         drag: &QueueDrag,
-        target_id: Option<u64>,
+        target_id: Option<(u64, bool)>,
         cx: &mut Context<Self>,
     ) {
         self.refresh(cx);
@@ -312,7 +319,6 @@ impl Queue {
                                 let (title, detail) = this.panel_track_text(&entry.track);
                                 let playing = this.state.queue.current_id == Some(id);
                                 let drag_owner = cx.entity().downgrade();
-                                let drop_owner = drag_owner.clone();
                                 let drag_i18n = std::sync::Arc::clone(&this.context.i18n);
                                 let drag = QueueDrag {
                                     owner: cx.entity().entity_id(),
@@ -556,25 +562,15 @@ impl Queue {
                                         })
                                     },
                                 )
-                                .on_drop(cx.listener(move |this, drag: &QueueDrag, window, cx| {
-                                    window.prevent_default();
-                                    cx.stop_propagation();
-                                    this.move_queue_entry(drag, Some(id), cx);
+                                .children([false, true].map(|after| {
+                                    this.queue_row_drop_zone(
+                                        (id, position),
+                                        revision,
+                                        after,
+                                        theme,
+                                        cx,
+                                    )
                                 }))
-                                .can_drop(move |value, _, cx| {
-                                    let Some(drag) = value.downcast_ref::<QueueDrag>() else {
-                                        return false;
-                                    };
-                                    drop_owner.upgrade().is_some_and(|owner| {
-                                        owner
-                                            .read(cx)
-                                            .queue_drop_index(drag, Some(id), owner.entity_id())
-                                            .is_some()
-                                    })
-                                })
-                                .drag_over::<QueueDrag>(
-                                    |style, _, _, _| style.bg(rgb(theme.highlight)),
-                                )
                             })
                             .collect::<Vec<_>>()
                     }),
@@ -622,6 +618,114 @@ impl Queue {
             ))
             .into_any_element()
     }
+    fn queue_row_drop_valid(
+        &self,
+        value: &dyn std::any::Any,
+        target: u64,
+        after: bool,
+        destination: DragDestination,
+        owner: EntityId,
+    ) -> bool {
+        if self.model.query.is_some() || !destination.current(&self.state) {
+            return false;
+        }
+        if let Some(drag) = value.downcast_ref::<QueueDrag>() {
+            self.queue_drop_index(drag, Some((target, after)), owner)
+                .is_some()
+        } else if let Some(drag) = value.downcast_ref::<LibraryDrag>() {
+            self.can_resolve_library_drag(drag)
+        } else {
+            self.can_transfer_content(value, destination)
+        }
+    }
+
+    fn queue_row_drop_zone(
+        &self,
+        (id, position): (u64, usize),
+        revision: u64,
+        after: bool,
+        theme: &'static rivu_ui::theme::Palette,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<Div> {
+        let destination = DragDestination::QueueAt {
+            index: position + usize::from(after),
+            revision,
+        };
+        let owner = cx.weak_entity();
+        macro_rules! indicator {
+            ($zone:expr, $payload:ty) => {{
+                let owner = owner.clone();
+                $zone.drag_over::<$payload>(move |style, drag, _, cx| {
+                    if owner.upgrade().is_some_and(|owner| {
+                        owner.read(cx).queue_row_drop_valid(
+                            drag,
+                            id,
+                            after,
+                            destination,
+                            owner.entity_id(),
+                        )
+                    }) {
+                        style.border_color(rgb(theme.accent))
+                    } else {
+                        style
+                    }
+                })
+            }};
+        }
+        let zone = rivu_ui::list_drop_target(
+            (
+                if after {
+                    "queue-insert-after"
+                } else {
+                    "queue-insert-before"
+                },
+                id,
+            ),
+            after,
+        )
+        .can_drop(|value, _, _| {
+            value.is::<QueueDrag>()
+                || value.is::<LibraryDrag>()
+                || value.is::<ContentDrag>()
+                || value.is::<PlaylistDrag>()
+        })
+        .on_drop(cx.listener(move |this, drag: &QueueDrag, window, cx| {
+            window.prevent_default();
+            cx.stop_propagation();
+            this.refresh(cx);
+            if this.queue_row_drop_valid(drag, id, after, destination, cx.entity().entity_id()) {
+                this.move_queue_entry(drag, Some((id, after)), cx);
+            }
+        }))
+        .on_drop(cx.listener(move |this, drag: &LibraryDrag, window, cx| {
+            window.prevent_default();
+            cx.stop_propagation();
+            this.refresh(cx);
+            if this.queue_row_drop_valid(drag, id, after, destination, cx.entity().entity_id()) {
+                this.resolve_library_drag(drag.nodes(), destination, cx);
+            }
+        }))
+        .on_drop(cx.listener(move |this, drag: &ContentDrag, window, cx| {
+            window.prevent_default();
+            cx.stop_propagation();
+            this.refresh(cx);
+            if this.queue_row_drop_valid(drag, id, after, destination, cx.entity().entity_id()) {
+                this.drop_content(drag, destination, cx);
+            }
+        }))
+        .on_drop(cx.listener(move |this, drag: &PlaylistDrag, window, cx| {
+            window.prevent_default();
+            cx.stop_propagation();
+            this.refresh(cx);
+            if this.queue_row_drop_valid(drag, id, after, destination, cx.entity().entity_id()) {
+                this.transfer_playlist_drag(drag, destination, cx);
+            }
+        }));
+        let zone = indicator!(zone, QueueDrag);
+        let zone = indicator!(zone, LibraryDrag);
+        let zone = indicator!(zone, ContentDrag);
+        indicator!(zone, PlaylistDrag)
+    }
 }
 
 impl Queue {
@@ -634,6 +738,9 @@ impl Queue {
         value: &dyn std::any::Any,
         destination: DragDestination,
     ) -> bool {
+        if !destination.current(&self.state) {
+            return false;
+        }
         if let Some(drag) = value.downcast_ref::<ContentDrag>() {
             return match drag.source() {
                 Some(TrackSource::Tracks(ids)) => !ids.is_empty(),
@@ -649,11 +756,16 @@ impl Queue {
     pub(super) fn resolve_library_drag(
         &mut self,
         nodes: &[LibraryNode],
-        _destination: DragDestination,
+        destination: DragDestination,
         cx: &mut Context<Self>,
     ) {
-        if !self.library_selection_pending && !nodes.is_empty() {
-            cx.emit(QueueEvent::DropLibrary(RefCell::new(Some(nodes.to_vec()))));
+        self.refresh(cx);
+        if !self.library_selection_pending && !nodes.is_empty() && destination.current(&self.state)
+        {
+            cx.emit(QueueEvent::DropLibrary(
+                RefCell::new(Some(nodes.to_vec())),
+                destination,
+            ));
         }
     }
 
@@ -663,10 +775,14 @@ impl Queue {
         destination: DragDestination,
         cx: &mut Context<Self>,
     ) {
+        self.refresh(cx);
         if self.can_transfer_content(drag, destination)
             && let Some(source) = drag.source()
         {
-            cx.emit(QueueEvent::DropContent(RefCell::new(Some(source.clone()))));
+            cx.emit(QueueEvent::DropContent(
+                RefCell::new(Some(source.clone())),
+                destination,
+            ));
         }
     }
 
@@ -678,9 +794,10 @@ impl Queue {
     ) {
         self.refresh(cx);
         if drag.can_transfer(&self.state, destination) {
-            cx.emit(QueueEvent::DropPlaylist(RefCell::new(Some(
-                drag.track_ids(),
-            ))));
+            cx.emit(QueueEvent::DropPlaylist(
+                RefCell::new(Some(drag.track_ids())),
+                destination,
+            ));
         }
     }
 
@@ -756,7 +873,13 @@ mod queue_drag_tests {
     }
 
     fn reordered(drag: &QueueDrag, target: Option<usize>) -> Vec<u64> {
-        let index = drag.insertion_index(target.map(identity), 5).unwrap();
+        reordered_at(drag, target, false)
+    }
+
+    fn reordered_at(drag: &QueueDrag, target: Option<usize>, after: bool) -> Vec<u64> {
+        let index = drag
+            .insertion_index(target.map(|position| (identity(position), after)), 5)
+            .unwrap();
         let selected: Vec<_> = drag
             .entries
             .get()
@@ -804,7 +927,27 @@ mod queue_drag_tests {
         assert_eq!(reordered(&group, Some(4)), [10, 12, 11, 13, 14]);
         assert_eq!(reordered(&group, Some(0)), [11, 13, 10, 12, 14]);
         assert_eq!(reordered(&group, None), [10, 12, 14, 11, 13]);
-        assert_eq!(group.insertion_index(Some(identity(1)), 5), None);
-        assert_eq!(group.insertion_index(Some(identity(3)), 5), None);
+        assert_eq!(group.insertion_index(Some((identity(1), false)), 5), None);
+        assert_eq!(group.insertion_index(Some((identity(3), true)), 5), None);
+    }
+
+    #[test]
+    fn queue_drop_after_accounts_for_removed_occurrences() {
+        assert_eq!(
+            reordered_at(&drag(&[1]), Some(3), true),
+            [10, 12, 13, 11, 14]
+        );
+        assert_eq!(
+            reordered_at(&drag(&[3]), Some(0), true),
+            [10, 13, 11, 12, 14]
+        );
+        assert_eq!(
+            reordered_at(&drag(&[1, 3]), Some(2), true),
+            [10, 12, 11, 13, 14]
+        );
+        assert_eq!(
+            reordered_at(&drag(&[0, 1]), Some(4), true),
+            [12, 13, 14, 10, 11]
+        );
     }
 }

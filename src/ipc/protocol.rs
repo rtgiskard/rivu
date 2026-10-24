@@ -8,7 +8,7 @@ use rivu_audio::DecoderHint;
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-pub(super) const PROTOCOL_VERSION: u8 = 6;
+pub(super) const PROTOCOL_VERSION: u8 = 7;
 pub(super) const MAX_REQUEST: usize = 4 * 1024 * 1024;
 pub(super) const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 pub(super) const MAX_CLIENTS: usize = 16;
@@ -273,6 +273,17 @@ pub(super) enum WireCommand {
         directories: Vec<PathBuf>,
         track_ids: Vec<i64>,
     },
+    InsertQueue {
+        track_ids: Vec<i64>,
+        index: u64,
+        expected_revision: u64,
+    },
+    InsertQueueSources {
+        directories: Vec<PathBuf>,
+        track_ids: Vec<i64>,
+        index: u64,
+        expected_revision: u64,
+    },
     RemoveQueue {
         queue_id: u64,
     },
@@ -318,6 +329,19 @@ pub(super) enum WireCommand {
         playlist_id: i64,
         directories: Vec<PathBuf>,
         track_ids: Vec<i64>,
+    },
+    InsertPlaylist {
+        playlist_id: i64,
+        track_ids: Vec<i64>,
+        index: u64,
+        expected_revision: u64,
+    },
+    InsertPlaylistSources {
+        playlist_id: i64,
+        directories: Vec<PathBuf>,
+        track_ids: Vec<i64>,
+        index: u64,
+        expected_revision: u64,
     },
     RemovePlaylistEntry {
         entry_id: i64,
@@ -384,6 +408,7 @@ pub(super) enum WireCommand {
         playlist_id: i64,
         entry_ids: Vec<i64>,
         before_entry_id: Option<i64>,
+        after: bool,
         expected_revision: u64,
     },
     PlayAlbum {
@@ -958,6 +983,26 @@ impl From<Command> for WireCommand {
                 directories,
                 track_ids,
             },
+            Command::InsertQueue {
+                track_ids,
+                index,
+                expected_revision,
+            } => Self::InsertQueue {
+                track_ids,
+                index: index as u64,
+                expected_revision,
+            },
+            Command::InsertQueueSources {
+                directories,
+                track_ids,
+                index,
+                expected_revision,
+            } => Self::InsertQueueSources {
+                directories,
+                track_ids,
+                index: index as u64,
+                expected_revision,
+            },
             Command::RemoveQueue { queue_id } => Self::RemoveQueue { queue_id },
             Command::RemoveQueueEntries { queue_ids } => Self::RemoveQueueEntries { queue_ids },
             Command::MoveQueue { queue_id, index } => Self::MoveQueue {
@@ -997,6 +1042,30 @@ impl From<Command> for WireCommand {
                 directories,
                 track_ids,
             },
+            Command::InsertPlaylist {
+                playlist_id,
+                track_ids,
+                index,
+                expected_revision,
+            } => Self::InsertPlaylist {
+                playlist_id,
+                track_ids,
+                index: index as u64,
+                expected_revision,
+            },
+            Command::InsertPlaylistSources {
+                playlist_id,
+                directories,
+                track_ids,
+                index,
+                expected_revision,
+            } => Self::InsertPlaylistSources {
+                playlist_id,
+                directories,
+                track_ids,
+                index: index as u64,
+                expected_revision,
+            },
             Command::RemovePlaylistEntry { entry_id } => Self::RemovePlaylistEntry { entry_id },
             Command::MovePlaylistEntry { entry_id, index } => Self::MovePlaylistEntry {
                 entry_id,
@@ -1015,11 +1084,13 @@ impl From<Command> for WireCommand {
                 playlist_id,
                 entry_ids,
                 before_entry_id,
+                after,
                 expected_revision,
             } => Self::MovePlaylistEntries {
                 playlist_id,
                 entry_ids,
                 before_entry_id,
+                after,
                 expected_revision,
             },
             Command::ImportPlaylist { path, name } => Self::ImportPlaylist { path, name },
@@ -1148,6 +1219,26 @@ impl TryFrom<WireCommand> for Command {
                 directories,
                 track_ids,
             },
+            WireCommand::InsertQueue {
+                track_ids,
+                index,
+                expected_revision,
+            } => Self::InsertQueue {
+                track_ids,
+                index: wire_usize(index, "index")?,
+                expected_revision,
+            },
+            WireCommand::InsertQueueSources {
+                directories,
+                track_ids,
+                index,
+                expected_revision,
+            } => Self::InsertQueueSources {
+                directories,
+                track_ids,
+                index: wire_usize(index, "index")?,
+                expected_revision,
+            },
             WireCommand::RemoveQueue { queue_id } => Self::RemoveQueue { queue_id },
             WireCommand::RemoveQueueEntries { queue_ids } => Self::RemoveQueueEntries { queue_ids },
             WireCommand::MoveQueue { queue_id, index } => Self::MoveQueue {
@@ -1187,6 +1278,30 @@ impl TryFrom<WireCommand> for Command {
                 directories,
                 track_ids,
             },
+            WireCommand::InsertPlaylist {
+                playlist_id,
+                track_ids,
+                index,
+                expected_revision,
+            } => Self::InsertPlaylist {
+                playlist_id,
+                track_ids,
+                index: wire_usize(index, "index")?,
+                expected_revision,
+            },
+            WireCommand::InsertPlaylistSources {
+                playlist_id,
+                directories,
+                track_ids,
+                index,
+                expected_revision,
+            } => Self::InsertPlaylistSources {
+                playlist_id,
+                directories,
+                track_ids,
+                index: wire_usize(index, "index")?,
+                expected_revision,
+            },
             WireCommand::RemovePlaylistEntry { entry_id } => Self::RemovePlaylistEntry { entry_id },
             WireCommand::MovePlaylistEntry { entry_id, index } => Self::MovePlaylistEntry {
                 entry_id,
@@ -1205,11 +1320,13 @@ impl TryFrom<WireCommand> for Command {
                 playlist_id,
                 entry_ids,
                 before_entry_id,
+                after,
                 expected_revision,
             } => Self::MovePlaylistEntries {
                 playlist_id,
                 entry_ids,
                 before_entry_id,
+                after,
                 expected_revision,
             },
             WireCommand::ImportPlaylist { path, name } => Self::ImportPlaylist { path, name },

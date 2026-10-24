@@ -219,6 +219,40 @@ fn panel_list_focus(kind: &str, preferred: Option<BrowserFocus>) -> Option<ListF
 pub(super) enum DragDestination {
     Queue,
     Playlist(i64),
+    QueueAt {
+        index: usize,
+        revision: u64,
+    },
+    PlaylistAt {
+        playlist_id: i64,
+        index: usize,
+        revision: u64,
+    },
+}
+
+impl DragDestination {
+    fn playlist_id(self) -> Option<i64> {
+        match self {
+            Self::Playlist(id)
+            | Self::PlaylistAt {
+                playlist_id: id, ..
+            } => Some(id),
+            Self::Queue | Self::QueueAt { .. } => None,
+        }
+    }
+
+    fn current(self, state: &crate::projection::GuiSnapshot) -> bool {
+        match self {
+            Self::Queue => true,
+            Self::QueueAt { revision, .. } => state.queue.revision == revision,
+            Self::Playlist(id) => state.library.playlist_entry_revisions.contains_key(&id),
+            Self::PlaylistAt {
+                playlist_id,
+                revision,
+                ..
+            } => state.library.playlist_entry_revisions.get(&playlist_id) == Some(&revision),
+        }
+    }
 }
 #[derive(Default)]
 struct FullWaveformRequest {

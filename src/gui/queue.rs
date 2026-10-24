@@ -57,9 +57,9 @@ pub(in crate::gui) enum QueueEvent {
         revision: u64,
         remove: RefCell<Option<Command>>,
     },
-    DropLibrary(RefCell<Option<Vec<LibraryNode>>>),
-    DropContent(RefCell<Option<TrackSource>>),
-    DropPlaylist(RefCell<Option<Vec<i64>>>),
+    DropLibrary(RefCell<Option<Vec<LibraryNode>>>, super::DragDestination),
+    DropContent(RefCell<Option<TrackSource>>, super::DragDestination),
+    DropPlaylist(RefCell<Option<Vec<i64>>>, super::DragDestination),
     Error(String),
 }
 

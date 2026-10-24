@@ -115,14 +115,18 @@ Move-up is unavailable on the first row and move-down on the last. The toolbar
 offers removal for a multi-selection and saving the entire queue as a playlist.
 Dragging a selected row moves the selected group in its original queue order;
 dragging an unselected row moves only that occurrence. The group is fixed at
-drag start, even if selection changes during the gesture. Dropping on a row
-inserts before it; dropping below the rows appends. Dropping on a member of the
-dragged group or pressing Esc leaves queue order unchanged. A drag is rejected
-if queue contents change before it is dropped.
+drag start, even if selection changes during the gesture. Dropping on a row's
+upper half inserts before it; its lower half inserts after it. An accent line
+marks the insertion boundary. Dropping below the rows appends. Dropping on a
+member of the dragged group or pressing Esc leaves queue order unchanged. A drag
+is rejected if queue contents change before it is dropped.
 Dragging Library tracks or directories, album cards or tracks, recent tracks,
-or playlist tracks onto Queue appends the resolved tracks. Dragging queue
-occurrences to a named playlist catalog row copies their track IDs in queue
-order without removing occurrences; playlist deduplication still applies.
+or playlist tracks onto a Queue row uses the same before/after insertion line;
+blank space appends. Positional drops are unavailable while Queue is filtered.
+If the target queue changes during content resolution, the old position is
+rejected rather than falling back to append. Dragging queue occurrences to a
+playlist copies their track IDs in queue order without removing occurrences;
+playlist deduplication still applies.
 Removing the current occurrence stops playback; removing other occurrences does
 not. Queue controls remain available while the layout is locked.
 

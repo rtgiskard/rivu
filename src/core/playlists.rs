@@ -147,7 +147,11 @@ impl Core {
         Ok(())
     }
 
-    fn check_playlist_entry_revision(&self, playlist_id: i64, expected: u64) -> Result<()> {
+    pub(in crate::core) fn check_playlist_entry_revision(
+        &self,
+        playlist_id: i64,
+        expected: u64,
+    ) -> Result<()> {
         if self
             .state
             .library
@@ -178,12 +182,13 @@ impl Core {
         playlist_id: i64,
         entry_ids: &[i64],
         before_entry_id: Option<i64>,
+        after: bool,
         expected_revision: u64,
     ) -> Result<()> {
         self.check_playlist_entry_revision(playlist_id, expected_revision)?;
         if self
             .store
-            .move_playlist_entries(playlist_id, entry_ids, before_entry_id)?
+            .move_playlist_entries(playlist_id, entry_ids, before_entry_id, after)?
         {
             self.advance_playlist_entry_revision(playlist_id);
         }

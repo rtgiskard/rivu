@@ -303,6 +303,51 @@ impl Store {
         Ok(())
     }
 
+    pub(crate) fn insert_queue_tracks(
+        &self,
+        ids: &[i64],
+        index: usize,
+        expected_revision: u64,
+    ) -> Result<Vec<u64>> {
+        let ids = self.validated_track_ids(ids)?;
+        self.insert_queue(&ids, None, index, expected_revision)
+    }
+
+    pub(crate) fn insert_queue_sources(
+        &self,
+        directories: &[PathBuf],
+        ids: &[i64],
+        index: usize,
+        expected_revision: u64,
+    ) -> Result<Vec<u64>> {
+        let (directories, ids) = self.source_parameters(directories, ids)?;
+        self.insert_queue(&ids, Some(&directories), index, expected_revision)
+    }
+
+    fn insert_queue(
+        &self,
+        ids: &str,
+        directories: Option<&str>,
+        index: usize,
+        expected_revision: u64,
+    ) -> Result<Vec<u64>> {
+        let tx = self.conn.unchecked_transaction()?;
+        let revision: u64 = tx.query_row(
+            "SELECT revision FROM queue_meta WHERE singleton=1",
+            [],
+            |row| integer(row, 0),
+        )?;
+        ensure!(revision == expected_revision, "Queue revision changed");
+        let count =
+            super::positions::insert_tracks(&tx, PositionScope::Queue, index, ids, directories)?;
+        let inserted = tx.prepare("SELECT id FROM queue_entries WHERE position>=?1 AND position<?2 ORDER BY position,id")?
+            .query_map(params![i64::try_from(index)?, i64::try_from(index.checked_add(count).context("Queue insertion overflow")?)?], |row| integer(row, 0))?
+            .collect::<rusqlite::Result<Vec<u64>>>()?;
+        invalidate_structure(&tx, count != 0)?;
+        tx.commit()?;
+        Ok(inserted)
+    }
+
     pub(crate) fn replace_queue_from_playlist(&self, playlist: i64) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         let count: i64 = tx.query_row(
@@ -416,6 +461,133 @@ mod tests {
                 .all(|(index, row)| row.position == index)
         );
         Ok(state.revision)
+    }
+
+    #[test]
+    fn indexed_queue_insertion_preserves_order_duplicates_and_current_occurrence() -> Result<()> {
+        for index in 0..=3 {
+            let store = fixture()?;
+            store.enqueue_tracks(&[1, 2, 2])?;
+            let original = store.queue_ids()?;
+            store.set_queue_current(Some(original[2]))?;
+            let before = store.queue_state()?;
+            let inserted = store.insert_queue_tracks(&[3, 1, 3], index, before.revision)?;
+            assert_eq!(inserted.len(), 3);
+            let mut expected_ids = original.clone();
+            expected_ids.splice(index..index, inserted);
+            assert_eq!(store.queue_ids()?, expected_ids);
+            let mut expected_tracks = vec![1, 2, 2];
+            expected_tracks.splice(index..index, [3, 1, 3]);
+            let rows = store.queue_page(None, 0, MAX_QUERY_ROWS)?.rows;
+            assert_eq!(
+                rows.iter().map(|row| row.track_id).collect::<Vec<_>>(),
+                expected_tracks
+            );
+            assert!(
+                rows.iter()
+                    .enumerate()
+                    .all(|(position, row)| row.position == position)
+            );
+            let after = store.queue_state()?;
+            assert_eq!(after.current_id, Some(original[2]));
+            assert_eq!(
+                after.current_position,
+                Some(2 + if index <= 2 { 3 } else { 0 })
+            );
+            assert_eq!(after.revision, before.revision + 1);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn indexed_queue_sources_keep_union_order_and_reject_stale_or_invalid_boundaries() -> Result<()>
+    {
+        let store = fixture()?;
+        store.enqueue_tracks(&[4])?;
+        let before = store.queue_state()?;
+        store.insert_queue_sources(
+            &["/music".into(), "/music".into()],
+            &[3, 1, 3],
+            0,
+            before.revision,
+        )?;
+        let state = store.queue_state()?;
+        let order = store.queue_ids()?;
+        assert_eq!(
+            store
+                .queue_page(None, 0, 10)?
+                .rows
+                .iter()
+                .map(|row| row.track_id)
+                .collect::<Vec<_>>(),
+            [1, 2, 3, 4]
+        );
+        assert!(store.insert_queue_tracks(&[], 0, before.revision).is_err());
+        for index in [state.total + 1, usize::MAX] {
+            assert!(
+                store
+                    .insert_queue_tracks(&[], index, state.revision)
+                    .is_err()
+            );
+            assert!(
+                store
+                    .insert_queue_sources(&[], &[], index, state.revision)
+                    .is_err()
+            );
+        }
+        assert!(
+            store
+                .insert_queue_tracks(&[1, 999], 1, state.revision)
+                .is_err()
+        );
+        assert!(
+            store
+                .insert_queue_sources(&["/music".into()], &[999], 1, state.revision)
+                .is_err()
+        );
+        assert!(
+            store
+                .insert_queue_tracks(&[], state.total, state.revision)?
+                .is_empty()
+        );
+        assert!(
+            store
+                .insert_queue_sources(&["/absent".into()], &[], 0, state.revision)?
+                .is_empty()
+        );
+        assert_eq!(store.queue_state()?, state);
+        assert_eq!(store.queue_ids()?, order);
+        Ok(())
+    }
+
+    #[test]
+    fn indexed_queue_insertions_roll_back_gap_entries_revision_and_current() -> Result<()> {
+        let store = fixture()?;
+        store.enqueue_tracks(&[1, 2, 2])?;
+        let order = store.queue_ids()?;
+        store.set_queue_current(Some(order[2]))?;
+        let before = store.queue_state()?;
+        store.conn.execute_batch("CREATE TRIGGER reject_insertion_revision BEFORE UPDATE OF revision ON queue_meta BEGIN SELECT RAISE(ABORT,'reject revision'); END;")?;
+        assert!(
+            store
+                .insert_queue_tracks(&[3, 3], 1, before.revision)
+                .is_err()
+        );
+        assert!(
+            store
+                .insert_queue_sources(&["/music".into()], &[], 1, before.revision)
+                .is_err()
+        );
+        assert_eq!(store.queue_ids()?, order);
+        assert_eq!(store.queue_state()?, before);
+        store
+            .conn
+            .execute_batch("DROP TRIGGER reject_insertion_revision;")?;
+        assert_eq!(
+            store.insert_queue_tracks(&[3], 1, before.revision)?.len(),
+            1
+        );
+        Ok(())
     }
 
     #[test]

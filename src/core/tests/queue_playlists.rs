@@ -1,6 +1,266 @@
 use super::*;
 
 #[test]
+fn indexed_playlist_sources_and_after_moves_update_only_the_target_projection() {
+    let (_directory, mut core) = fixture();
+    for name in ["target", "other"] {
+        core.command(Command::CreatePlaylistWithTracks {
+            name: name.into(),
+            track_ids: vec![2],
+        })
+        .unwrap();
+    }
+    let other = core.state.playlist_query_revisions(2).playlist_entries;
+    let baseline = core.state.playlist_query_revisions(1);
+    core.command(Command::InsertPlaylistSources {
+        playlist_id: 1,
+        directories: vec![],
+        track_ids: vec![4, 1, 4, 3],
+        index: 1,
+        expected_revision: baseline.playlist_entries.unwrap().revision,
+    })
+    .unwrap();
+    let inserted = core.state.playlist_query_revisions(1);
+    assert_ne!(inserted.playlist_entries, baseline.playlist_entries);
+    assert_ne!(inserted.playlist, baseline.playlist);
+    assert_ne!(inserted.duplicate_members, baseline.duplicate_members);
+    assert_eq!(
+        core.state.playlist_query_revisions(2).playlist_entries,
+        other
+    );
+    let rows = core
+        .store
+        .playlist_entries_page(1, None, 0, 20)
+        .unwrap()
+        .rows;
+    assert_eq!(
+        rows.iter().map(|row| row.track_id).collect::<Vec<_>>(),
+        [2, 1, 3, 4]
+    );
+    core.command(Command::MovePlaylistEntries {
+        playlist_id: 1,
+        entry_ids: vec![rows[0].id],
+        before_entry_id: Some(rows[2].id),
+        after: true,
+        expected_revision: inserted.playlist_entries.unwrap().revision,
+    })
+    .unwrap();
+    let moved = core.state.playlist_query_revisions(1);
+    assert_ne!(moved.playlist_entries, inserted.playlist_entries);
+    assert_eq!(moved.playlist, inserted.playlist);
+    assert_eq!(moved.duplicate_members, inserted.duplicate_members);
+    assert_eq!(
+        core.state.playlist_query_revisions(2).playlist_entries,
+        other
+    );
+    assert_eq!(
+        core.store
+            .playlist_entries_page(1, None, 0, 20)
+            .unwrap()
+            .rows
+            .iter()
+            .map(|row| row.track_id)
+            .collect::<Vec<_>>(),
+        [1, 3, 2, 4]
+    );
+    assert!(
+        core.command(Command::MovePlaylistEntries {
+            playlist_id: 1,
+            entry_ids: vec![],
+            before_entry_id: None,
+            after: true,
+            expected_revision: inserted.playlist_entries.unwrap().revision,
+        })
+        .is_err()
+    );
+    core.command(Command::MovePlaylistEntries {
+        playlist_id: 1,
+        entry_ids: vec![rows[0].id],
+        before_entry_id: Some(rows[0].id),
+        after: true,
+        expected_revision: moved.playlist_entries.unwrap().revision,
+    })
+    .unwrap();
+    assert_eq!(core.state.playlist_query_revisions(1), moved);
+}
+
+#[test]
+fn indexed_queue_commands_preserve_playing_occurrence_and_reject_stale_empty_intents() {
+    let (_directory, mut core) = fixture();
+    pending(&mut core, 3);
+    core.record_queue_history(3);
+    let audio = recording_audio(&mut core);
+    let revision = core.state.queue.revision;
+    core.command(Command::InsertQueue {
+        track_ids: vec![4, 1, 4],
+        index: 1,
+        expected_revision: revision,
+    })
+    .unwrap();
+    assert_eq!(
+        queue_entries(&core)
+            .iter()
+            .map(|&(_, track)| track)
+            .collect::<Vec<_>>(),
+        [1, 4, 1, 4, 2, 2, 3, 4]
+    );
+    assert_eq!(core.state.queue.current_id, Some(3));
+    assert_eq!(core.state.queue.current_position, Some(5));
+    assert_eq!(core.state.current_track().unwrap().id, 2);
+    assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
+    assert_eq!(core.played, [3]);
+    assert_eq!(core.state.queue.revision, revision + 1);
+    let state = core.state.queue.clone();
+    let ids = core.queue_ids.clone();
+    for command in [
+        Command::InsertQueue {
+            track_ids: vec![],
+            index: 0,
+            expected_revision: revision,
+        },
+        Command::InsertQueueSources {
+            directories: vec![],
+            track_ids: vec![],
+            index: 0,
+            expected_revision: revision,
+        },
+        Command::InsertQueue {
+            track_ids: vec![],
+            index: state.total + 1,
+            expected_revision: state.revision,
+        },
+        Command::InsertQueueSources {
+            directories: vec![],
+            track_ids: vec![],
+            index: state.total + 1,
+            expected_revision: state.revision,
+        },
+        Command::InsertQueue {
+            track_ids: vec![1, 999],
+            index: 0,
+            expected_revision: state.revision,
+        },
+    ] {
+        assert!(core.command(command).is_err());
+        assert_eq!(core.queue_ids, ids);
+        assert_eq!(core.state.queue, state);
+    }
+    core.command(Command::InsertQueueSources {
+        directories: vec![],
+        track_ids: vec![4, 1, 4],
+        index: state.total,
+        expected_revision: state.revision,
+    })
+    .unwrap();
+    assert_eq!(
+        queue_entries(&core)[state.total..]
+            .iter()
+            .map(|&(_, track)| track)
+            .collect::<Vec<_>>(),
+        [1, 4]
+    );
+    assert_eq!(core.state.queue.current_id, Some(3));
+    assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
+    assert!(audio.try_iter().next().is_none());
+}
+
+#[test]
+fn indexed_playlist_commands_advance_only_changed_members_and_reject_stale_drops() {
+    let (_directory, mut core) = fixture();
+    core.command(Command::CreatePlaylistWithTracks {
+        name: "insert".into(),
+        track_ids: vec![1, 2],
+    })
+    .unwrap();
+    let baseline = core.state.playlist_query_revisions(1);
+    let token = baseline.playlist_entries.unwrap().revision;
+    let queue = core.queue_ids.clone();
+    core.command(Command::InsertPlaylist {
+        playlist_id: 1,
+        track_ids: vec![4, 2, 3, 4],
+        index: 1,
+        expected_revision: token,
+    })
+    .unwrap();
+    let after = core.state.playlist_query_revisions(1);
+    let next = after.playlist_entries.unwrap().revision;
+    assert_ne!(next, token);
+    assert_ne!(after.playlist, baseline.playlist);
+    assert_ne!(after.duplicate_members, baseline.duplicate_members);
+    assert_eq!(after.library, baseline.library);
+    assert_eq!(after.structure, baseline.structure);
+    let rows = core
+        .store
+        .playlist_entries_page(1, None, 0, 20)
+        .unwrap()
+        .rows;
+    assert_eq!(
+        rows.iter().map(|row| row.track_id).collect::<Vec<_>>(),
+        [1, 4, 3, 2]
+    );
+    for command in [
+        Command::InsertPlaylist {
+            playlist_id: 1,
+            track_ids: vec![],
+            index: 0,
+            expected_revision: token,
+        },
+        Command::InsertPlaylistSources {
+            playlist_id: 1,
+            directories: vec![],
+            track_ids: vec![1],
+            index: 0,
+            expected_revision: token,
+        },
+        Command::InsertPlaylist {
+            playlist_id: 1,
+            track_ids: vec![1],
+            index: 5,
+            expected_revision: next,
+        },
+        Command::InsertPlaylistSources {
+            playlist_id: 1,
+            directories: vec![],
+            track_ids: vec![],
+            index: 5,
+            expected_revision: next,
+        },
+        Command::InsertPlaylist {
+            playlist_id: 1,
+            track_ids: vec![1, 999],
+            index: 0,
+            expected_revision: next,
+        },
+        Command::InsertPlaylist {
+            playlist_id: 999,
+            track_ids: vec![],
+            index: 0,
+            expected_revision: next,
+        },
+    ] {
+        assert!(core.command(command).is_err());
+        assert_eq!(core.state.playlist_query_revisions(1), after);
+    }
+    core.command(Command::InsertPlaylist {
+        playlist_id: 1,
+        track_ids: vec![3, 1, 3],
+        index: 0,
+        expected_revision: next,
+    })
+    .unwrap();
+    core.command(Command::InsertPlaylistSources {
+        playlist_id: 1,
+        directories: vec![],
+        track_ids: vec![4, 2],
+        index: 4,
+        expected_revision: next,
+    })
+    .unwrap();
+    assert_eq!(core.state.playlist_query_revisions(1), after);
+    assert_eq!(core.queue_ids, queue);
+}
+
+#[test]
 fn playlist_creation_count_failure_keeps_the_committed_lifetime_registered() {
     let (directory, mut core) = fixture_with_database(Some(10.0), true);
     let before = core.state.query_revisions();
@@ -178,12 +438,14 @@ fn playlist_group_commands_reject_stale_intents_and_preserve_noop_revisions() {
             entry_ids: vec![ids[0], ids[1]],
             before_entry_id: Some(ids[2]),
             expected_revision: token,
+            after: false,
         },
         Command::MovePlaylistEntries {
             playlist_id: 1,
             entry_ids: vec![ids[0], ids[2]],
             before_entry_id: Some(ids[2]),
             expected_revision: token,
+            after: false,
         },
     ] {
         core.command(command).unwrap();
@@ -200,12 +462,14 @@ fn playlist_group_commands_reject_stale_intents_and_preserve_noop_revisions() {
             entry_ids: vec![ids[0]],
             before_entry_id: Some(i64::MAX),
             expected_revision: token,
+            after: false,
         },
         Command::MovePlaylistEntries {
             playlist_id: 999,
             entry_ids: vec![],
             before_entry_id: None,
             expected_revision: token,
+            after: false,
         },
     ] {
         assert!(core.command(command).is_err());
@@ -235,6 +499,7 @@ fn playlist_group_commands_reject_stale_intents_and_preserve_noop_revisions() {
         entry_ids: vec![ids[2], ids[0]],
         before_entry_id: None,
         expected_revision: token,
+        after: false,
     })
     .unwrap();
     let reordered = core.state.playlist_query_revisions(1);
@@ -254,6 +519,7 @@ fn playlist_group_commands_reject_stale_intents_and_preserve_noop_revisions() {
             entry_ids: vec![],
             before_entry_id: None,
             expected_revision: token,
+            after: false,
         },
     ] {
         assert!(core.command(command).is_err());
@@ -285,6 +551,7 @@ fn playlist_group_commands_reject_stale_intents_and_preserve_noop_revisions() {
             playlist_id: 1,
             entry_ids: vec![ids[1]],
             before_entry_id: None,
+            after: false,
             expected_revision: reordered.playlist_entries.unwrap().revision,
         })
         .is_err()
@@ -343,6 +610,7 @@ fn playlist_location_batches_publish_scoped_tokens_even_for_empty_results() {
             playlist_id: 1,
             entry_ids: vec![entry],
             before_entry_id: None,
+            after: false,
             expected_revision: before.revisions.playlist_entries.unwrap().revision,
         })
         .is_err()

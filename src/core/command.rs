@@ -163,6 +163,32 @@ impl Core {
                 self.store.enqueue_sources(&directories, &track_ids)?;
                 self.append_queue_ids()?;
             }
+            Command::InsertQueue {
+                track_ids,
+                index,
+                expected_revision,
+            } => {
+                self.check_queue_insertion(index, expected_revision)?;
+                let inserted =
+                    self.store
+                        .insert_queue_tracks(&track_ids, index, expected_revision)?;
+                self.insert_queue_ids(index, inserted)?;
+            }
+            Command::InsertQueueSources {
+                directories,
+                track_ids,
+                index,
+                expected_revision,
+            } => {
+                self.check_queue_insertion(index, expected_revision)?;
+                let inserted = self.store.insert_queue_sources(
+                    &directories,
+                    &track_ids,
+                    index,
+                    expected_revision,
+                )?;
+                self.insert_queue_ids(index, inserted)?;
+            }
             Command::RemoveQueue { queue_id } => self.remove_queue_entries(&[queue_id])?,
             Command::RemoveQueueEntries { queue_ids } => self.remove_queue_entries(&queue_ids)?,
             Command::MoveQueue { queue_id, index } => {
@@ -223,6 +249,37 @@ impl Core {
                     self.invalidate_playlist_members(&[playlist_id]);
                 }
             }
+            Command::InsertPlaylist {
+                playlist_id,
+                track_ids,
+                index,
+                expected_revision,
+            } => {
+                self.check_playlist_entry_revision(playlist_id, expected_revision)?;
+                if self
+                    .store
+                    .insert_playlist_tracks(playlist_id, &track_ids, index)?
+                {
+                    self.invalidate_playlist_members(&[playlist_id]);
+                }
+            }
+            Command::InsertPlaylistSources {
+                playlist_id,
+                directories,
+                track_ids,
+                index,
+                expected_revision,
+            } => {
+                self.check_playlist_entry_revision(playlist_id, expected_revision)?;
+                if self.store.insert_playlist_sources(
+                    playlist_id,
+                    &directories,
+                    &track_ids,
+                    index,
+                )? {
+                    self.invalidate_playlist_members(&[playlist_id]);
+                }
+            }
             Command::RemovePlaylistEntry { entry_id } => self.remove_playlist_entry(entry_id)?,
             Command::MovePlaylistEntry { entry_id, index } => {
                 self.move_playlist_entry(entry_id, index)?;
@@ -238,12 +295,14 @@ impl Core {
                 playlist_id,
                 entry_ids,
                 before_entry_id,
+                after,
                 expected_revision,
             } => {
                 self.move_playlist_entries(
                     playlist_id,
                     &entry_ids,
                     before_entry_id,
+                    after,
                     expected_revision,
                 )?;
             }

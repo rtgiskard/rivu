@@ -562,7 +562,9 @@ impl Playlists {
             return;
         }
         if drag.targets_source(destination) {
-            self.move_playlist_entries(drag, None, cx);
+            if matches!(destination, super::DragDestination::Playlist(_)) {
+                self.move_playlist_entries(drag, None, false, cx);
+            }
         } else {
             cx.emit(PlaylistEvent::Transfer(
                 RefCell::new(Some(TrackSource::Tracks(drag.track_ids()))),
@@ -575,7 +577,10 @@ impl Playlists {
         value: &dyn std::any::Any,
         destination: crate::gui::DragDestination,
     ) -> bool {
-        if let crate::gui::DragDestination::Playlist(id) = destination
+        if !destination.current(&self.state) {
+            return false;
+        }
+        if let Some(id) = destination.playlist_id()
             && !self
                 .state
                 .library
@@ -605,6 +610,49 @@ impl Playlists {
         }
         false
     }
+    fn can_drop_playlist_row(
+        &self,
+        value: &dyn std::any::Any,
+        destination: super::DragDestination,
+        anchor: i64,
+    ) -> bool {
+        self.browser.playlists().selected() == destination.playlist_id()
+            && self.browser.playlists().entries().playlist_id == destination.playlist_id()
+            && self.browser.playlists().entries().query.is_none()
+            && self.browser.playlists().track_selection.ready()
+            && self.can_transfer_content(value, destination)
+            && value.downcast_ref::<PlaylistDrag>().is_none_or(|drag| {
+                !drag.targets_source(destination)
+                    || self.can_drop_playlist_entries(drag, Some(anchor))
+            })
+    }
+
+    fn drop_playlist_row(
+        &mut self,
+        value: &dyn std::any::Any,
+        destination: super::DragDestination,
+        anchor: i64,
+        after: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.refresh(cx);
+        if !self.can_drop_playlist_row(value, destination, anchor) {
+            return;
+        }
+        if let Some(drag) = value.downcast_ref::<LibraryDrag>() {
+            self.resolve_library_drag(drag.nodes().to_vec(), destination, cx);
+        } else if let Some(drag) = value.downcast_ref::<super::ContentDrag>() {
+            self.drop_content(drag, destination, cx);
+        } else if let Some(drag) = value.downcast_ref::<QueueDrag>() {
+            self.transfer_queue_drag(drag, destination, cx);
+        } else if let Some(drag) = value.downcast_ref::<PlaylistDrag>() {
+            if drag.targets_source(destination) {
+                self.move_playlist_entries(drag, Some(anchor), after, cx);
+            } else {
+                self.transfer_playlist_drag(drag, destination, cx);
+            }
+        }
+    }
 }
 
 pub(super) struct PlaylistDrag {
@@ -621,7 +669,7 @@ pub(super) struct PlaylistDrag {
 
 impl PlaylistDrag {
     pub(super) fn targets_source(&self, destination: super::DragDestination) -> bool {
-        matches!(destination, super::DragDestination::Playlist(id) if id == self.playlist_id)
+        destination.playlist_id() == Some(self.playlist_id)
     }
 
     pub(super) fn can_transfer(
@@ -629,7 +677,8 @@ impl PlaylistDrag {
         state: &GuiSnapshot,
         destination: super::DragDestination,
     ) -> bool {
-        !self.targets_source(destination)
+        destination.current(state)
+            && !self.targets_source(destination)
             && state
                 .library
                 .playlist_entry_revisions
@@ -648,7 +697,7 @@ impl PlaylistDrag {
             .is_some_and(|ids| !ids.is_empty() && target.is_none_or(|id| !ids.contains(&id)))
     }
 
-    fn command(&self, target: Option<i64>) -> Option<Command> {
+    fn command(&self, target: Option<i64>, after: bool) -> Option<Command> {
         if !self.accepts(target) {
             return None;
         }
@@ -657,6 +706,7 @@ impl PlaylistDrag {
             playlist_id: self.playlist_id,
             entry_ids: entry_ids.clone(),
             before_entry_id: target,
+            after,
             expected_revision: self.revision,
         })
     }
@@ -693,13 +743,14 @@ impl Playlists {
         &mut self,
         drag: &PlaylistDrag,
         target_id: Option<i64>,
+        after: bool,
         cx: &mut Context<Self>,
     ) {
         self.refresh(cx);
         if !self.can_drop_playlist_entries(drag, target_id) {
             return;
         }
-        if let Some(command) = drag.command(target_id) {
+        if let Some(command) = drag.command(target_id, after) {
             self.send(command, cx);
         }
     }
@@ -1344,6 +1395,7 @@ impl Playlists {
                             };
                             let id = e.id;
                             let track_id = e.track_id;
+                            let position = e.position;
                             let title = e.title.clone();
                             let favorite = e.favorite;
                             let revision = this.playlist_revision(playlist_id);
@@ -1627,40 +1679,101 @@ impl Playlists {
                                     })
                                 },
                             )
-                            .on_drop(cx.listener(move |this, drag: &PlaylistDrag, window, cx| {
-                                window.prevent_default();
-                                cx.stop_propagation();
-                                if drag.playlist_id == playlist_id {
-                                    this.move_playlist_entries(drag, Some(id), cx);
-                                } else {
-                                    this.transfer_playlist_drag(
-                                        drag,
-                                        super::DragDestination::Playlist(playlist_id),
-                                        cx,
-                                    );
-                                }
-                            }))
-                            .can_drop({
+                            .children([false, true].into_iter().map(|after| {
+                                let destination = super::DragDestination::PlaylistAt {
+                                    playlist_id,
+                                    index: position + usize::from(after),
+                                    revision,
+                                };
                                 let owner = cx.weak_entity();
-                                move |value, _, cx| {
+                                let valid = move |value: &dyn std::any::Any, cx: &gpui::App| {
                                     owner.upgrade().is_some_and(|owner| {
-                                        value.downcast_ref::<PlaylistDrag>().is_some_and(|drag| {
-                                            let app = owner.read(cx);
-                                            if drag.playlist_id == playlist_id {
-                                                app.can_drop_playlist_entries(drag, Some(id))
-                                            } else {
-                                                app.can_transfer_content(
-                                                    drag,
-                                                    super::DragDestination::Playlist(playlist_id),
-                                                )
-                                            }
-                                        })
+                                        owner.read(cx).can_drop_playlist_row(value, destination, id)
                                     })
-                                }
-                            })
-                            .drag_over::<PlaylistDrag>(|style, _, _, _| {
-                                style.bg(rgb(theme.highlight))
-                            })
+                                };
+                                rivu_ui::list_drop_target(
+                                    (
+                                        if after {
+                                            "playlist-insert-after"
+                                        } else {
+                                            "playlist-insert-before"
+                                        },
+                                        id as u64,
+                                    ),
+                                    after,
+                                )
+                                .can_drop(|value, _, _| {
+                                    value.is::<LibraryDrag>()
+                                        || value.is::<super::ContentDrag>()
+                                        || value.is::<QueueDrag>()
+                                        || value.is::<PlaylistDrag>()
+                                })
+                                .on_drop(cx.listener(
+                                    move |this, drag: &LibraryDrag, window, cx| {
+                                        window.prevent_default();
+                                        cx.stop_propagation();
+                                        this.drop_playlist_row(drag, destination, id, after, cx);
+                                    },
+                                ))
+                                .on_drop(cx.listener(
+                                    move |this, drag: &super::ContentDrag, window, cx| {
+                                        window.prevent_default();
+                                        cx.stop_propagation();
+                                        this.drop_playlist_row(drag, destination, id, after, cx);
+                                    },
+                                ))
+                                .on_drop(cx.listener(move |this, drag: &QueueDrag, window, cx| {
+                                    window.prevent_default();
+                                    cx.stop_propagation();
+                                    this.drop_playlist_row(drag, destination, id, after, cx);
+                                }))
+                                .on_drop(cx.listener(
+                                    move |this, drag: &PlaylistDrag, window, cx| {
+                                        window.prevent_default();
+                                        cx.stop_propagation();
+                                        this.drop_playlist_row(drag, destination, id, after, cx);
+                                    },
+                                ))
+                                .drag_over::<LibraryDrag>({
+                                    let valid = valid.clone();
+                                    move |style, drag, _, cx| {
+                                        if valid(drag, cx) {
+                                            style.border_color(rgb(theme.accent))
+                                        } else {
+                                            style
+                                        }
+                                    }
+                                })
+                                .drag_over::<super::ContentDrag>({
+                                    let valid = valid.clone();
+                                    move |style, drag, _, cx| {
+                                        if valid(drag, cx) {
+                                            style.border_color(rgb(theme.accent))
+                                        } else {
+                                            style
+                                        }
+                                    }
+                                })
+                                .drag_over::<QueueDrag>({
+                                    let valid = valid.clone();
+                                    move |style, drag, _, cx| {
+                                        if valid(drag, cx) {
+                                            style.border_color(rgb(theme.accent))
+                                        } else {
+                                            style
+                                        }
+                                    }
+                                })
+                                .drag_over::<PlaylistDrag>(
+                                    move |style, drag, _, cx| {
+                                        if valid(drag, cx) {
+                                            style.border_color(rgb(theme.accent))
+                                        } else {
+                                            style
+                                        }
+                                    },
+                                )
+                            }))
                             .into_any_element()
                         })
                         .collect::<Vec<_>>()
@@ -1911,12 +2024,44 @@ mod playlist_drag_tests {
             selection_generation: 4,
         };
         for target in [7, 40, 2] {
-            assert!(drag.command(Some(target)).is_none());
+            assert!(drag.command(Some(target), false).is_none());
+            assert!(drag.command(Some(target), true).is_none());
         }
+        for after in [false, true] {
+            assert!(matches!(
+                drag.command(Some(99), after),
+                Some(crate::model::Command::MovePlaylistEntries {
+                    playlist_id: 8,
+                    entry_ids,
+                    before_entry_id: Some(99),
+                    after: actual_after,
+                    expected_revision: 19,
+                }) if entry_ids == [7, 40, 2] && actual_after == after
+            ));
+        }
+        assert!(drag.targets_source(crate::gui::DragDestination::Playlist(8)));
+        assert!(
+            drag.targets_source(crate::gui::DragDestination::PlaylistAt {
+                playlist_id: 8,
+                index: 2,
+                revision: 19,
+            })
+        );
+        assert!(
+            !drag.targets_source(crate::gui::DragDestination::PlaylistAt {
+                playlist_id: 9,
+                index: 2,
+                revision: 19,
+            })
+        );
+        assert!(!drag.targets_source(crate::gui::DragDestination::QueueAt {
+            index: 2,
+            revision: 19,
+        }));
         let empty = PlaylistDrag {
             entry_ids: Default::default(),
             ..drag
         };
-        assert!(empty.command(None).is_none());
+        assert!(empty.command(None, false).is_none());
     }
 }

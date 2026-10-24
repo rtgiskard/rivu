@@ -4,6 +4,21 @@ use gpui::{Div, ElementId, SharedString, Stateful, Window, div, prelude::*, rgb}
 pub const LIST_ROW_REMS: f32 = 2.625;
 pub const DROPDOWN_ROW_REMS: f32 = 2.0;
 
+/// A transparent half-row drop target with no ordinary pointer handlers.
+/// Keep it attached across drag starts; only valid drag-over styles reveal its border.
+pub fn list_drop_target(id: impl Into<ElementId>, after: bool) -> Stateful<Div> {
+    div()
+        .id(id)
+        .absolute()
+        .left_0()
+        .right_0()
+        .top(gpui::relative(if after { 0.5 } else { 0.0 }))
+        .h(gpui::relative(0.5))
+        .border_color(gpui::transparent_black())
+        .when(after, |zone| zone.border_b_2())
+        .when(!after, |zone| zone.border_t_2())
+}
+
 pub fn row_background(
     theme: &'static crate::theme::Palette,
     selected: bool,

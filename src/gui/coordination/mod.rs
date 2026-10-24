@@ -112,21 +112,21 @@ impl GuiApp {
                             );
                         }
                     }
-                    QueueEvent::DropLibrary(nodes) => {
+                    QueueEvent::DropLibrary(nodes, destination) => {
                         if let Some(nodes) = nodes.borrow_mut().take() {
                             this.library.update(cx, |owner, cx| {
-                                owner.resolve_library_drag(&nodes, DragDestination::Queue, cx)
+                                owner.resolve_library_drag(&nodes, *destination, cx)
                             });
                         }
                     }
-                    QueueEvent::DropContent(source) => {
+                    QueueEvent::DropContent(source, destination) => {
                         if let Some(source) = source.borrow_mut().take() {
-                            this.drop_content(source, DragDestination::Queue, cx);
+                            this.drop_content(source, *destination, cx);
                         }
                     }
-                    QueueEvent::DropPlaylist(ids) => {
+                    QueueEvent::DropPlaylist(ids, destination) => {
                         if let Some(ids) = ids.borrow_mut().take() {
-                            this.send_content_tracks(ids, DragDestination::Queue, cx);
+                            this.send_content_tracks(ids, *destination, cx);
                         }
                     }
                     QueueEvent::Error(error) => this.feature_error(error, cx),
