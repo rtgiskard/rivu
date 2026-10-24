@@ -4,504 +4,48 @@
 
 == Status and decision boundaries
 
-Design baseline, 2026-10-18. The fixed-schema rectangle, numerical-field,
-existing-path, independent-segment and numerical-waveform slices under <<_internal_led_vertical_slice>> are implemented.
-Density/Spatial now consume numerical fields; their authoritative behavior and
-ownership are described in link:23_visuals.adoc#_stereo_analysis_styles[Stereo analysis styles].
-Spectrum now consumes rectangle and Path publications; its palette sampling and
-ownership are described in link:23_visuals.adoc#_spectrum[Spectrum rendering].
-Fractal Beams/Flow publish shared segment endpoints with ordered stroke layers.
-Spectrogram publishes numerical column fields at their actual retained time intervals.
-Waveform publishes numerical stereo RMS/Peak columns with per-column gradient pairs.
-The general `Program` and generated-schema interfaces below remain proposals;
-the agreed safety and platform boundaries remain binding.
+The design baseline dates to 2026-10-18. The fixed-schema rectangle,
+numerical-field, existing-path, independent-segment and numerical-waveform slices
+under <<_internal_led_vertical_slice>> are implemented and used by Rivu.
+The general `Program`, `RenderState<Schema>`, `RenderData<T>`, `Field2D<T>` and
+`ColorRamp` APIs, generated schemas, and general update transactions are proposals,
+not available interfaces. The agreed safety and platform boundaries remain binding.
+
+Read the current implementation first, then the design and evidence:
+
+* <<_implemented_fixed_schema_slices>> defines the available closed-schema API,
+  consumer cutover, uploads, MSAA scratch and resource limits.
+* <<_proposed_general_rendering_model>> separates the target public API and its
+  constraints from shipped behavior; imperative wording there describes a design.
+* <<_verification_and_decision_gates>> states acceptance requirements, while
+  <<_recorded_measurements>> retains dated source/binary comparisons rather than
+  a benchmark of every subsequent revision.
+
+Current signal semantics and consumer ownership are authoritative in
+link:23_visuals.adoc[Visualization Rendering Design]; cache invalidation and
+retention are authoritative in
+link:22_cache.adoc[Caching and Resource Lifecycles].
 
 The application supplies compact parameters and meaningful numerical data. The
 GPU materials expand instances and shade fields and existing paths. GPUI owns
 the common drawing, upload, storage, composition, and retirement mechanisms.
 
-Three kinds of decisions have different stability:
-
-* *Design constraints:* the platform boundary, application/rendering ownership,
-  coherent state publication, safe GPU resource use, bounded work and storage,
-  and preservation of signal meaning.
-* *Proposed mechanisms:* API names and type boundaries, shader generation,
-  transaction implementation, data partitioning, pipeline preparation, and
-  upload paths. Refine these against real consumers rather than preserving a
-  sketch at the expense of simplicity or performance.
-* *Measurement decisions:* pool depth, block size, reclamation thresholds,
-  precision choices, and window resource budgets. No universal three-slot rule
-  or fixed 128 MiB CPU/GPU budget is adopted.
-
-Small visual differences, skipped intermediate display updates, and bounded
-latency are acceptable when they buy demonstrated efficiency without degrading
-perceived quality. This is not permission for invalid memory access, stale source
-identity, unbounded retention, or graphics work that blocks audio output.
-
-link:23_visuals.adoc[Visualization Rendering Design] and
-link:22_cache.adoc[Caching and Resource Lifecycles] describe the current
-implementation and its behavioral baseline. Existing internal ownership and
-cache choices can change through this design. Update their authoritative sections
-when a consumer actually migrates; do not describe a proposal as shipped behavior.
-
-== Scope
-
-Allowed changes are confined to:
-
-* `vendor/gpui`: drawing descriptions, state and resource handles, scene
-  integration, replay, and window-local logical resource management.
-* `vendor/gpui_wgpu`: shaders, pipeline preparation/cache, uploads, GPU allocation,
-  execution, device-generation handling, and reclamation.
-* Application visualization consumers, palette construction, and obsolete CPU
-  rendering intermediates.
-* Necessary ABI tooling, build integration, tests, and documentation.
-
-Keep `gpui_linux` on its existing pinned dependency: do not modify or vendor it.
-Do not add `PlatformWindow` methods. Preserve the existing transport:
-
-[source,text]
-----
-Rivu parameters and data
-  -> GPUI Scene
-  -> PlatformWindow::draw(&Scene)
-  -> WgpuRenderer
-----
-
-The pinned Wayland and X11 implementations forward the complete scene to the
-renderer; they do not decode each primitive. New drawing records therefore do
-not inherently require a Linux platform extension.
-
-Do not change native surfaces, presentation, platform frame callbacks, or window
-event mechanisms. Do not expose device, queue, or renderer handles to application
-consumers. Do not change audio playback, FFT, analysis publication, or the fractal
-simulation. Do not import gpui-fast retention, replace text/layout machinery, or
-introduce a second rendering engine as part of this work.
-
-A concrete requirement that cannot fit this boundary needs evidence and separate
-authorization before expanding the patch surface. In particular, do not invent a
-window-to-renderer asynchronous preparation API and then treat it as justification
-for a new platform method.
-
-== Ownership and data model
-
-[cols="1,2,2",options="header"]
-|===
-|Owner |Owns |Decides
-|Application model/panel owner
-|Signal history, envelopes, trajectories, coverage, source identity; logical render handles
-|What data means, what remains useful, which consumers share it, and when to update or release it
-|GPUI window resource manager
-|Published drawing state, scene references, encoded drawing data and retirement bookkeeping
-|How drawing data is captured, shared within the window, retained for replay, and released logically
-|WGPU renderer
-|Pipelines, physical buffers/textures, staging, execution references and reusable storage
-|How to allocate, upload, execute, reuse and reclaim physical storage
-|===
-
-Do not move every application `Vec` into a common pool. Retain algorithm state in
-the application, centralize drawing transport/storage, and eliminate intermediates
-that the GPU can derive from parameters.
-
-For example, replace LED rectangle meshes with bar parameters, and colored
-Density images with scalar fields. Moving those same meshes or pixel loops into
-a GPUI allocator would preserve the avoidable work.
-
-Logical resources are window-scoped. Immutable CPU definitions may be shared more
-widely, but GPU sharing must respect the actual device and lifetime. A global pool
-must not keep a removed panel's data alive merely because another window exists.
-
-== Application-facing interface
-
-The proposed public model uses:
-
-* `Program<Schema>`: a validated program description, not a promise that a device
-  pipeline already exists.
-* `RenderState<Schema>`: one complete published display state, including
-  parameters, resource bindings, and draw ranges.
-* `DrawRequest`: a temporary placement of a state in the scene.
-* `RenderData<T>` and `Field2D<T>`: bounded linear records and two-dimensional
-  numerical data. Their update/sampling contracts differ; neither is an
-  untyped byte buffer with loosely related flags.
-* `ColorRamp`: an immutable color definition with explicit sampled views.
-
-Illustrative usage, not a compilable interface commitment:
-
-[source,rust]
-----
-let mut state = RenderState::new(spectrum::SCHEMA, capacities)?;
-
-state.update(|edit| {
-    edit.replace(spectrum::BARS, &bars)?;
-    edit.set_params(params)?;
-    edit.bind(spectrum::PALETTE, palette_view)?;
-    edit.set_instances(0..bars.len() as u32)?;
-    Ok(())
-})?;
-cx.notify();
-
-window.paint_gpu(
-    spectrum::PROGRAM.draw(&state).bounds(plot),
-)?;
-----
-
-Binding identifiers and parameter types come from the schema rather than string
-lookups. The update publishes data, parameters, bindings and draw ranges together.
-In particular, the instance count must not be read from an unrelated mutable
-variable during painting.
-
-Bounds, current placement, clip and inherited opacity belong to drawing placement.
-Axes, source-dependent mappings, palette selection and data ranges belong to the
-published content state. Update does not implicitly schedule animation or refresh
-an unrelated business root. The application continues to invalidate the affected
-views through the existing notification paths.
-
-A window owns resources once attached to its rendering context. Cross-window use
-of an attached state must be rejected or explicitly imported, never silently
-borrow another renderer's allocation.
-
-== Fixed and dynamic scene state
-
-Use one drawing API with an explicit state policy, not independently mutable
-bindings that happen to be sampled at different times.
-
-=== Fixed content
-
-For palettes, fixed geometry and stable cached content, record immutable content
-revisions. Internally, `RecordedDraw` contains parameters, ranges and frozen
-bindings, not `RenderData<T>` handles that resolve to the latest version later.
-
-`Scene::replay` clones the recorded references. Recording A, publishing B, and
-replaying the old draw must still produce A. Revisions identify stable content and
-its backing, not merely a generation number followed by a lookup of current data.
-
-=== Dynamic content
-
-Real-time bars, segments and fields may use an explicit dynamic state slot.
-Resolve each slot *once per prepared frame*, and use that complete publication for
-parameters, instance ranges, axes and all resources. Multiple draws referencing
-the same slot in that frame share the resolution.
-
-A dynamic recorded draw retains the slot and content-independent placement/visible
-bounds. It does not retain stale content-dependent parameters alongside bindings
-that individually resolve to newer data. Intermediate publications that were never
-sampled may be skipped; they are not an upload backlog.
-
-The slot's schema, declared maximum resource/range envelope, and visible bounds
-remain stable. Changing those requires scene rerecording. Actual counts may vary
-inside the envelope as part of the atomic publication. Dynamic changes still need
-an existing frame request/notification; latest-wins does not create a polling clock.
-
-Once a dynamic slot has been resolved for execution, that resolved packet has the
-same immutability and GPU safety requirements as fixed content. Latest-wins relaxes
-which publication is selected, not whether submitted resources can be overwritten.
-
-== Shader composition and ABI
-
-=== Geometry and material
-
-A program combines geometry, a material, typed parameters/bindings, and a bounded
-set of pipeline properties. Support rectangular coverage, procedural instances,
-and adapters for existing paths/meshes through the same drawing model.
-
-Geometry produces local positions and declared interpolated values. Material
-functions evaluate color from those inputs, parameters and resources. Framework
-entry points apply window transforms, clip, inherited opacity, geometry coverage
-and the output color convention. Existing path adapters retain path coverage;
-reusing a material does not automatically remove CPU path tessellation.
-
-Custom varyings require producer/consumer layout agreement. Do not claim that
-arbitrary shader fragments compose without an ABI. Use explicit standard WGSL
-modules and validation; do not build a new shader language, runtime node editor,
-or arbitrary render-pass callback API.
-
-The same material should work with both a procedural bar and a compatible path.
-Styles such as LED, Spectrum or Fractal Flow remain application programs and
-parameters, not GPUI business enums.
-
-Shader code is trusted application content. Do not expose unrestricted user shader
-loading as part of this feature. Read-only drawing resources and framework-owned
-entry points keep graphics submission and composition under renderer control.
-
-=== Host/shader encoding
-
-WGSL declarations plus the program description form the authoritative schema.
-Use a Naga version matched to the repository's wgpu baseline to validate and
-produce Rust value types, binding identifiers, layout descriptions and encoders.
-
-The encoding contract includes:
-
-* scalar kind/width, field offset/alignment, and total structure size;
-* array and matrix stride, nested layout and runtime-array placement;
-* uniform versus storage address-space rules;
-* binding access/type and minimum size;
-* initialized padding and checked output bounds.
-
-`Copy`, `repr(C)`, or `Pod` alone does not establish WGSL compatibility. Encode
-fields into managed storage; direct byte copying is an optimization only for
-layouts proven identical. Compare actual shader layouts structurally with the
-schema; a type ID, hash or matching total size alone is insufficient.
-
-Do not upload native Rust references, pointers, `usize`/`isize`, container memory
-representations, or default bool/enum representations. Use explicit fixed-width
-encodings and validity masks. Zero-sized record types are not upload elements;
-an empty collection is still a legitimate value. Nonfinite floating-point policy
-belongs to the consumer's signal contract rather than a blanket ABI prohibition.
-
-The first vertical implementation may use a private fixed schema and encoder with
-layout checks. Generalize the tool only after different consumers exercise its
-requirements. This delays tooling, not encoding safety.
-
-=== Program preparation
-
-Build-time checks catch source and layout errors. The renderer creates and caches
-device pipelines through the existing scene transport. Pipeline keys include the
-program, binding layout, geometry adapter, relevant blend/sample/target state, and
-device generation; not changing per-frame uniform values.
-
-First-use preparation is a possible implementation, not a claim of zero startup
-cost. Measure its visible latency. Evaluate renderer initialization or preparation
-within the existing execution path before considering any platform-boundary change.
-Do not parse source or recreate pipelines on every repaint.
-
-Build-time shader generation does not eliminate driver compilation. No public API
-may imply successful device preparation merely because a CPU description validated.
-
-== Publication, storage and upload
-
-=== Update transaction
-
-Collect edits, validate their schema/ranges, reserve finite storage, encode the
-candidate, then publish one complete state. Failure or abandonment leaves the old
-publication unchanged. Do not mutate backing held by a published state as part of
-an operation that can still fail.
-
-The transaction performs no I/O, asynchronous wait, business notification or
-reentrant publication. Sharing and copy-on-write are internal choices, not a
-public historical snapshot service. Keep only content reachable from current
-owners, scene records, upload work or execution.
-
-For drawing-only instances, a managed writer can avoid an extra application
-scratch vector. Existing algorithm output may be copied or explicitly transferred.
-Do not pin analysis publication slots indefinitely in pursuit of zero-copy.
-
-=== Resource-specific storage
-
-Small parameters can be captured and packed centrally. Frequently replaced
-instance batches benefit from contiguous reusable preparation/upload regions.
-Static immutable content can reuse a device copy. Large locally changing fields
-may use chunked revisions or region updates with preserved old backing.
-
-Chunking introduces metadata and GPU addressing costs. A contiguous GPU replica
-may require copying unchanged regions when an old revision remains live. Account
-for that work explicitly; `write_region` must not conceal unmeasured whole-field
-copies. Choose the mechanism and granularity using actual update patterns.
-
-Deduplicate uploads by resource content revision and device generation, not panel
-identity or a whole-payload hash on every repaint. Different transforms of the same
-shared data should not upload the payload again.
-
-=== Upload side effects and failure isolation
-
-Do not require every panel to update in the same frame or make one visualizer's
-preparation failure cancel unrelated menus and controls. The isolation unit is a
-complete resolved drawing state, which can span several draws.
-
-Queue writes and explicit staging/copy commands are both candidates. Select by
-measured upload shape and cost, not a universal transaction requirement. Before
-writing, targets must be safe: a changed payload cannot overwrite storage still
-needed by an existing scene or execution.
-
-`Queue::write_buffer` and `write_texture` are not rollback operations. A scheduled
-write can execute on a later submission, including one from another window using
-the queue. If subsequent preparation fails, a candidate may incur wasted work,
-but cannot corrupt published content. Keep its storage/staging alive until the
-actual upload lifetime permits reuse. Explicit copy commands avoid this particular
-queued-write side effect when an unsubmitted command buffer is discarded.
-
-Do not advertise a state as executable until all of its required resources and
-bindings are ready. A recording success is not GPU execution success. Temporary
-pressure may defer that visualizer's update without queuing every missed update.
-The application can retain the newest valid model and a refresh-needed marker.
-A previous display may be reused only while its source and mapping remain valid;
-otherwise omit the invalid content or expose its failure instead of relabeling it.
-
-== Scene integration and lifecycle
-
-New records participate in GPUI's ordinary scene ordering, clipping, composition
-and replay. They are not an unconditional topmost overlay. Visible bounds must
-include stroke width, glow and procedural displacement. Compatible bindings and
-pipelines alone do not permit reordering overlapping translucent content.
-
-Keep scene/replay references separate from execution references. GPU completion
-alone does not make a resource safe to overwrite if a scene can submit it again.
-Likewise, releasing the last scene reference does not permit reusing staging that
-is still being read by an upload.
-
-The GPUI window manager owns logical retirement. The renderer reclaims physical
-storage when execution and reference conditions permit. This intentionally
-replaces application-specific retirement queues for migrated resources; it does
-not require retaining the old implementation's frame-count heuristics forever.
-Unmigrated image consumers retain their existing retirement mechanism until their
-complete call chains migrate.
-
-=== Hidden windows and shutdown
-
-There is no new platform service or guaranteed draw after hiding. Adopt deferred
-GPU reclamation rather than forcing a cleanup scene solely for reclamation.
-
-[cols="1,2,2",options="header"]
-|===
-|Event |Application/GPUI |Renderer
-|Hide
-|Stop display demand; release content that the consumer's policy discards; invalidate and detach corresponding cached scene references
-|May retain bounded GPU storage until its next execution opportunity or destruction
-|Show
-|Rebuild invalidated records from current valid state, without restoring discarded signal history
-|Reconcile live resources and reclaim/reuse obsolete storage during draw
-|Close
-|Revoke window ownership and scene references
-|Drop renderer-held resources; in-flight work remains subject to backend execution lifetime
-|===
-
-Dropping the model alone does not release CPU content still held by a cached scene.
-The hide path must remove those references for resources it promises to discard.
-This does not require discarding all static caches. Outstanding uploads may still
-retain necessary data, so do not promise immediate release of every CPU byte.
-
-Do not promise immediate VRAM reduction while no renderer callback runs. Idle GPU
-capacity remains charged. Hiding stops new display preparation/uploads; it does
-not launch a retry or cleanup-render loop. Reclamation on resume must account for
-resources omitted from the new scene, including an empty visualizer set.
-
-=== Device and surface changes
-
-Use the existing renderer lifecycle. An unconfigured surface is not necessarily
-a lost device. Device recovery invalidates device-local pipelines and allocations
-by generation. Rebuild only from still-owned valid CPU content; discarded hidden
-history must not reappear. Late preparation/errors from an old generation cannot
-install a new device's resources or overwrite its status.
-
-Keep frame scheduling, presentation and native recovery integration unchanged.
-If safe event-driven progress cannot be achieved with existing callbacks, report
-that concrete limitation rather than silently adding platform methods or polling.
-
-== Palette and image semantics
-
-`ColorRamp` represents color and alpha as a function of a normalized coordinate.
-Separate its definition (stops, curve, interpolation space) from sampled views
-(domain, resolution, filtering, clamping). Application-defined dB mapping,
-nonlinear compression and spatial mapping remain outside the ramp itself.
-
-CPU and GPU consumers use the same explicit definition/sampling rules. A domain
-view can share data where equivalent; preserving an existing discretized result
-may require a distinct bounded sampled representation. Do not assert that a
-coordinate remap always reproduces a separately sampled subdomain exactly.
-
-Numerical fields must not undergo color-space conversion. Color images and ramps
-have explicit color/alpha conventions; backend BGRA/RGBA handling belongs below
-the application API. Do not silently change interpolation to another color space
-or add/remove premultiplication during optimization.
-
-Preserve these distinct visual models:
-
-* Spectrum: the authored cubic ramp and its visible domain, mapped spatially
-  across the plot; Peak markers remain discrete.
-* Waveform: a separate endpoint color for each RMS column, dim/desaturated center,
-  color compression, and thin Peak markers. No replacement with one global gradient.
-* Spectrogram: the complete palette including its black floor, and blank missing
-  time rather than invented continuous history.
-* Density/Spatial: their own hue progression, fixed signal references and alpha
-  curves, including transparent empty cells.
-
-Interpolating scalar values before color mapping is not equivalent to interpolating
-already mapped colors. The implemented numerical-field material has one fixed
-order: map each of four neighboring source samples, quantize each palette index,
-then bilinearly interpolate straight RGBA colors. It has no scalar-first mode.
-Preserve source resolution, endpoint sampling and meaningful rounding unless an
-evaluated visual tradeoff explicitly changes them.
-
-== Consumer migration
-
-[cols="1,2,2,2",options="header"]
-|===
-|Consumer |Application retains |GPU receives/does |Work to remove
-|Spectrum Bars/Outline/LED
-|Frequency aggregation, envelope and Peak state
-|Compact bar/Peak data, spacing and style parameters; procedural geometry and palette sampling
-|Per-LED rectangles and their tessellation
-|Spectrum Line/Solid
-|Existing curve/geometry generation initially
-|Path geometry adapter with the shared material
-|Special palette-image plumbing, not necessarily path tessellation
-|Fractal Beams/Flow
-|Simulation, trajectories and accepted-audio-time advancement
-|Shared segment endpoints, intensity/color groups and layer parameters; instanced expansion
-|Repeated CPU path construction for light layers
-|Spectrogram
-|Bounded history, time-bucket max pooling, axis identity and discontinuities
-|Values, actual time intervals and sampling parameters; geometry and coloring
-|Per-column colored images and repeated CPU coloring
-|Density/Spatial
-|Statistics, decay and field semantics
-|Fixed-resolution values, ranges and color curves
-|Whole-field BGRA generation on changes
-|Waveform
-|Coverage, source identity and RMS/Peak aggregation
-|Numerical columns, validity and display mapping; per-column fills/markers
-|CPU gradient rasterization and derived image tiles where the replacement wins
-|===
-
-Paint and resize never advance simulations. Differently sized panels share common
-signal/segment data, not independent analysis. Spectrogram intervals cannot become
-an equal-width scroll that fills gaps. Glow must not silently become blur or
-additive overexposure. Verify segment intersection/cap behavior against the current
-path composition rather than assuming instancing is visually equivalent.
-
-A GPU Waveform may reduce image storage but increase fragment work during stable
-repaints. Compare against current tile reuse before selecting its retention policy.
-Keep the playback cursor independent so cursor movement does not upload unchanged
-waveform data.
-
-== Limits, pressure and acceptable approximation
-
-Every logical resource has a finite maximum extent/record count. Physical active,
-candidate, retired and pooled capacity, plus upload staging, all count toward
-finite limits. Admission happens before allocation; do not evict scene-live content
-to satisfy it. Device format/binding/texture limits are checked independently.
-
-Existing consumer bounds are inputs, not a universal allocation algorithm. The
-analysis-side Density three-slot publication pool remains its own contract; it
-does not prescribe GPU ring depth. Do not introduce an arbitrary frequency-row cap
-or shorten a supported history merely to simplify a shader.
-
-Prototype with explicit finite experimental limits and report when they bind.
-Measure live-version/region counts, payload versus allocated bytes, staging,
-execution delay and idle high water. Then choose per-resource policies and product
-budgets; experimental limits are not automatically shipping defaults. Measured
-peaks alone are not safety bounds: exercise delayed GPU work and rapid changes.
-
-Potentially worthwhile compromises include latest-wins updates, independent panel
-refreshes, modest sampling/antialiasing differences and lower display precision.
-Validate each against actual workload and perceived quality. Do not silently lower
-precision, truncate data, or switch effects to make a failed allocation succeed.
-
-Errors distinguish invalid schema/data, unsupported capability, temporary pressure,
-resource limit, window closure and device failure. Temporary pressure coalesces
-pending display work; it does not create an unlimited retry queue. No graphics
-failure blocks or issues commands to the audio callback.
-
-== Implementation slices
-
-=== Internal LED vertical slice
-
-Start with a private fixed program/schema through the existing Scene-to-renderer
-path. Validate real ordering, clip, inherited opacity, palette use, uploads,
-resource lifetime, multiple panels and resize. Do not place FFT or application
-style state into GPUI. Do not add a general generator or platform service merely
-to run this slice. Measure first-use pipeline latency as well as steady state.
-
-This is a vertical implementation, not the final public API. Its private special
-entry point must not become a permanent parallel convention.
+Platform isolation, coherent publication, bounded storage, GPU safety and signal
+meaning are constraints. Public API shapes, generated schemas and upload mechanisms
+remain design choices; pool depth, precision and budgets require workload evidence.
+No universal three-slot rule or fixed 128 MiB CPU/GPU budget is adopted. Bounded
+display latency or small visual differences may be accepted for demonstrated gains,
+not invalid memory access, stale source identity, unbounded retention or audio stalls.
+
+== Implemented fixed-schema slices
+
+[[_internal_led_vertical_slice]]
+=== Publication and drawing API
+
+Rivu uses a private fixed-schema model through the existing Scene-to-renderer path.
+FFT, analysis and simulation remain application-owned; no platform service, arbitrary
+shader composition or ABI generator is introduced. The original rectangle-only
+LED experiment is retained under <<_initial_comparative_measurements>>.
 
 The current vendor implementation exposes the deliberately experimental
 `GpuPalette`, `GpuFrame`, schema-stable `GpuState`, `GpuSource` and
@@ -512,9 +56,20 @@ Rectangle segmentation and bottom-to-top palette coordinates
 retain their initial behavior. Palette samples are straight-alpha sRGB values;
 their interpolation is in sRGB numerical space. Bounds, clip, scale and inherited
 opacity belong to each scene placement, independently of shared content.
-Density/Spatial, all Spectrum styles, Fractal Beams/Flow, Spectrogram and Waveform
-use this interface. The old rectangle-only publication API and specialized
-textured-path interface are removed.
+Density/Spatial use fields; Spectrum bodies use rectangles or Paths; Fractal
+Beams/Flow use segments; Spectrogram uses fields with independent column intervals;
+Waveform uses stereo numerical columns. Spectrum Peaks remain ordinary GPUI
+quads, and radial styles and artwork retain their independent rendering paths.
+
+The definitions live in link:../vendor/gpui/src/gpu.rs[`gpui::gpu`]; the
+device-local implementation is
+link:../vendor/gpui_wgpu/src/gpu_material.rs[`gpu_material`]. These publication
+handles contain CPU content, not device allocations or an attached-window
+identity. They can be recorded in different windows; each renderer independently
+uploads and budgets the content it uses. Attached-window state and explicit import
+belong to the <<_application_facing_interface,proposed public model>>, not these handles.
+
+==== Waveform columns
 
 `GpuFrame::waveform` takes ownership of a vector of four normalized f32 levels per
 column in left RMS, left Peak, right RMS, right Peak order. NaN denotes missing;
@@ -527,6 +82,8 @@ Columns use existing publication budgets, weak upload ownership, coherent dynami
 snapshots, scene replay and completion-aware retirement. Application aggregation
 and cache invalidation are authoritative in
 link:22_cache.adoc#_waveform[Waveform caching].
+
+==== Independent segments
 
 Segments use butt caps and ordinary source-over blending in the shared MSAA
 intermediate. Each immutable frame's endpoint array is uploaded once and reused
@@ -553,6 +110,8 @@ CPU geometry copies, allocations, uploads or draws; masks, butt caps and layer
 composition keep the same semantics.
 
 
+==== Spectrogram column fields
+
 Spectrogram packs at most 32 numerical columns and their independent x intervals
 into each immutable field tile. Intervals are relative to the tile's own earliest
 start and latest sample time, not the moving history window. Scrolling updates
@@ -577,6 +136,8 @@ the placement's right edge. The inherited content mask, not the placement bounds
 clips that extension. Scene culling and overlap ordering use a conservative
 footprint that includes it, independently of the unchanged mapping bounds.
 
+==== Publication and scene recording
+
 Frame construction validates geometry, palette, parameters and explicit caller
 capacities before copying payloads. A process-unique, checked monotonic frame ID
 keys device-local uploads; allocator addresses are not content identities.
@@ -594,6 +155,8 @@ concurrent snapshot readers are supported. `clear` is not cancellation of a
 concurrently preparing publication. These operations do not schedule frames.
 Placement and clip bounds are validated after scaling before a paint is recorded;
 non-finite coordinates, negative dimensions and overflowing extents are rejected.
+
+==== Encoding and uploads
 
 The fixed WGSL layout has explicit little-endian scalar encoders and zeroed
 padding, checked structurally with the matching Naga version. This is not the
@@ -615,6 +178,33 @@ the device's uniform-offset alignment. The final 16 bytes hold the raster
 target's window-physical origin and eight bytes of zeroed alignment padding,
 not a relocated mask or a second viewport scale.
 Admission reserves the complete slab together with any new immutable data and palette.
+
+=== Different consumers and interface extraction
+
+The vendor interface now covers numerical fields and existing path coloring,
+alongside rectangles, without introducing application analysis or style state.
+Fields use explicit linear or logarithmic scalar-to-palette mapping. Coordinates
+use `uv * extent - 0.5` and clamp neighboring indices; empty extents emit no draw,
+and one-cell dimensions repeat their only sample. Ordinary fields map nonfinite
+values to the first palette sample; logarithmic mapping treats nonpositive values
+likewise. Column fields instead use the opaque-black missing/floor rule described
+under <<_internal_led_vertical_slice>>.
+Each neighbor selects `floor(coordinate * (palette_length - 1) + 0.5)` before
+straight RGBA interpolation. Moving coloring into the shader does not eliminate
+its cost: enlarged or static draws still evaluate four mappings per output fragment.
+The field upload remains four bytes per source cell, just like the old BGRA image;
+the intended benefit is removing CPU recoloring, not automatically reducing bytes.
+
+Paths reuse existing tessellated vertices and coverage coordinates, not a filled
+bounding rectangle. Their original bounds map into the recorded placement bounds;
+the palette spans those full bounds, independently of clipping. Embedded path
+color, texture, order and content mask do not override the material or scene
+placement. Palette ownership is shared; path geometry remains immutable.
+These Paths share the local multisample scratch described below; they do not
+restore the old palette-image API or require a separate offscreen attachment.
+
+The migrated consumers' colored-image intermediates and application-specific
+image-retirement queues are removed. Artwork remains an image consumer.
 
 === Shared local multisample scratch
 
@@ -689,6 +279,8 @@ Image comparisons must cover clipping, translucent overlap, fractional coverage,
 native packed batches, nonzero raster origins, resize and resource recovery.
 
 
+=== Admission and retirement
+
 GPU buffers are initialized through WGPU's write-only mapped view, never by
 reinterpreting the Rust model or overwriting an older revision. Completion
 watermarks retain charges for both active and retired buffers. The owner of frame
@@ -730,7 +322,507 @@ including an empty scene; window/device destruction drops the renderer's ownersh
 Ordinary scenes with no extension resources do not perform extension-specific
 device polling. Native Metal remains explicitly unsupported.
 
-==== Shared local MSAA comparison (2026-10-23)
+=== Consumer integration boundary
+
+The migrated consumers retain their algorithm state, content identity and bounded
+immutable-publication caches. GPUI/WGPU own upload reuse and completion-aware
+physical retirement; applications still decide when content changes or becomes
+invalid. Artwork retains its independent image lifecycle.
+
+Transport/storage belongs with GPUI/WGPU; consumer mappings and palette definitions
+remain near visualization consumers, not in `rivu-ui` merely because they draw UI.
+
+=== Consumer cutover contracts
+
+The following contracts guided the completed fixed-schema migrations. They are
+not a list of consumers still waiting for the proposed generic API.
+
+[cols="1,2,2,2",options="header"]
+|===
+|Consumer |Application retains |GPU receives/does |Removed intermediate work
+|Spectrum Bars/Outline/LED
+|Frequency aggregation, envelope and Peak state
+|Compact body rectangles, spacing and style parameters; procedural geometry and palette sampling (Peaks remain separate ordinary quads)
+|Per-LED rectangles and their tessellation
+|Spectrum Line/Solid
+|Curve/geometry generation and CPU path tessellation
+|Path geometry adapter with the shared material
+|Special palette-image plumbing, not path tessellation
+|Fractal Beams/Flow
+|Simulation, trajectories and accepted-audio-time advancement
+|Shared segment endpoints, intensity/color groups and layer parameters; instanced expansion
+|Repeated CPU path construction for light layers
+|Spectrogram
+|Bounded history, time-bucket max pooling, axis identity and discontinuities
+|Values, actual time intervals and sampling parameters; geometry and coloring
+|Per-column colored images and repeated CPU coloring
+|Density/Spatial
+|Statistics, decay and field semantics
+|Fixed-resolution values, ranges and color curves
+|Whole-field BGRA generation on changes
+|Waveform
+|Coverage, source identity and RMS/Peak aggregation
+|Numerical columns, validity and display mapping; per-column fills/markers
+|Derived rectangle/image tiles and CPU gradient rasterization
+|===
+
+Paint and resize never advance simulations. Differently sized panels share common
+signal/segment data, not independent analysis. Spectrogram intervals cannot become
+an equal-width scroll that fills gaps. Glow must not silently become blur or
+additive overexposure. Verify segment intersection/cap behavior against the current
+path composition rather than assuming instancing is visually equivalent.
+
+A GPU Waveform removes derived image tiles but still incurs fragment work during
+stable repaints; the cutover alone does not establish a timing gain. Its playback
+cursor remains independent, so cursor movement does not upload unchanged waveform
+data.
+
+== Proposed general rendering model
+
+The following API and lifecycle design is not the closed-schema interface above.
+It records requirements and candidate mechanisms for future generalization;
+the fixed encoders and publication constructors remain the available path.
+
+=== Scope
+
+Allowed changes are confined to:
+
+* `vendor/gpui`: drawing descriptions, state and resource handles, scene
+  integration, replay, and window-local logical resource management.
+* `vendor/gpui_wgpu`: shaders, pipeline preparation/cache, uploads, GPU allocation,
+  execution, device-generation handling, and reclamation.
+* Application visualization consumers, palette construction, and obsolete CPU
+  rendering intermediates.
+* Necessary ABI tooling, build integration, tests, and documentation.
+
+Keep `gpui_linux` on its existing pinned dependency: do not modify or vendor it.
+Do not add `PlatformWindow` methods. Preserve the existing transport:
+
+[source,text]
+----
+Rivu parameters and data
+  -> GPUI Scene
+  -> PlatformWindow::draw(&Scene)
+  -> WgpuRenderer
+----
+
+The pinned Wayland and X11 implementations forward the complete scene to the
+renderer; they do not decode each primitive. New drawing records therefore do
+not inherently require a Linux platform extension.
+
+Do not change native surfaces, presentation, platform frame callbacks, or window
+event mechanisms. Do not expose device, queue, or renderer handles to application
+consumers. Do not change audio playback, FFT, analysis publication, or the fractal
+simulation. Do not import gpui-fast retention, replace text/layout machinery, or
+introduce a second rendering engine as part of this work.
+
+A concrete requirement that cannot fit this boundary needs evidence and separate
+authorization before expanding the patch surface. In particular, do not invent a
+window-to-renderer asynchronous preparation API and then treat it as justification
+for a new platform method.
+
+=== Ownership and data model
+
+[cols="1,2,2",options="header"]
+|===
+|Owner |Owns |Decides
+|Application model/panel owner
+|Signal history, envelopes, trajectories, coverage, source identity; logical render handles
+|What data means, what remains useful, which consumers share it, and when to update or release it
+|GPUI window resource manager
+|Published drawing state, scene references, encoded drawing data and retirement bookkeeping
+|How drawing data is captured, shared within the window, retained for replay, and released logically
+|WGPU renderer
+|Pipelines, physical buffers/textures, staging, execution references and reusable storage
+|How to allocate, upload, execute, reuse and reclaim physical storage
+|===
+
+Do not move every application `Vec` into a common pool. Retain algorithm state in
+the application, centralize drawing transport/storage, and eliminate intermediates
+that the GPU can derive from parameters.
+
+For example, replace LED rectangle meshes with bar parameters, and colored
+Density images with scalar fields. Moving those same meshes or pixel loops into
+a GPUI allocator would preserve the avoidable work.
+
+Logical resources are window-scoped. Immutable CPU definitions may be shared more
+widely, but GPU sharing must respect the actual device and lifetime. A global pool
+must not keep a removed panel's data alive merely because another window exists.
+
+=== Application-facing interface
+
+The proposed public model uses:
+
+* `Program<Schema>`: a validated program description, not a promise that a device
+  pipeline already exists.
+* `RenderState<Schema>`: one complete published display state, including
+  parameters, resource bindings, and draw ranges.
+* `DrawRequest`: a temporary placement of a state in the scene.
+* `RenderData<T>` and `Field2D<T>`: bounded linear records and two-dimensional
+  numerical data. Their update/sampling contracts differ; neither is an
+  untyped byte buffer with loosely related flags.
+* `ColorRamp`: an immutable color definition with explicit sampled views.
+
+Illustrative usage, not a compilable interface commitment:
+
+[source,rust]
+----
+let mut state = RenderState::new(spectrum::SCHEMA, capacities)?;
+
+state.update(|edit| {
+    edit.replace(spectrum::BARS, &bars)?;
+    edit.set_params(params)?;
+    edit.bind(spectrum::PALETTE, palette_view)?;
+    edit.set_instances(0..bars.len() as u32)?;
+    Ok(())
+})?;
+cx.notify();
+
+window.paint_gpu(
+    spectrum::PROGRAM.draw(&state).bounds(plot),
+)?;
+----
+
+Binding identifiers and parameter types come from the schema rather than string
+lookups. The update publishes data, parameters, bindings and draw ranges together.
+In particular, the instance count must not be read from an unrelated mutable
+variable during painting.
+
+Bounds, current placement, clip and inherited opacity belong to drawing placement.
+Axes, source-dependent mappings, palette selection and data ranges belong to the
+published content state. Update does not implicitly schedule animation or refresh
+an unrelated business root. The application continues to invalidate the affected
+views through the existing notification paths.
+
+A window owns resources once attached to its rendering context. Cross-window use
+of an attached state must be rejected or explicitly imported, never silently
+borrow another renderer's allocation.
+
+=== Fixed and dynamic scene state
+
+Use one drawing API with an explicit state policy, not independently mutable
+bindings that happen to be sampled at different times.
+
+==== Fixed content
+
+For palettes, fixed geometry and stable cached content, record immutable content
+revisions. Internally, `RecordedDraw` contains parameters, ranges and frozen
+bindings, not `RenderData<T>` handles that resolve to the latest version later.
+
+`Scene::replay` clones the recorded references. Recording A, publishing B, and
+replaying the old draw must still produce A. Revisions identify stable content and
+its backing, not merely a generation number followed by a lookup of current data.
+
+==== Dynamic content
+
+Real-time bars, segments and fields may use an explicit dynamic state slot.
+Resolve each slot *once per prepared frame*, and use that complete publication for
+parameters, instance ranges, axes and all resources. Multiple draws referencing
+the same slot in that frame share the resolution.
+
+A dynamic recorded draw retains the slot and content-independent placement/visible
+bounds. It does not retain stale content-dependent parameters alongside bindings
+that individually resolve to newer data. Intermediate publications that were never
+sampled may be skipped; they are not an upload backlog.
+
+The slot's schema, declared maximum resource/range envelope, and visible bounds
+remain stable. Changing those requires scene rerecording. Actual counts may vary
+inside the envelope as part of the atomic publication. Dynamic changes still need
+an existing frame request/notification; latest-wins does not create a polling clock.
+
+Once a dynamic slot has been resolved for execution, that resolved packet has the
+same immutability and GPU safety requirements as fixed content. Latest-wins relaxes
+which publication is selected, not whether submitted resources can be overwritten.
+
+=== Shader composition and ABI
+
+==== Geometry and material
+
+A program combines geometry, a material, typed parameters/bindings, and a bounded
+set of pipeline properties. Support rectangular coverage, procedural instances,
+and adapters for existing paths/meshes through the same drawing model.
+
+Geometry produces local positions and declared interpolated values. Material
+functions evaluate color from those inputs, parameters and resources. Framework
+entry points apply window transforms, clip, inherited opacity, geometry coverage
+and the output color convention. Existing path adapters retain path coverage;
+reusing a material does not automatically remove CPU path tessellation.
+
+Custom varyings require producer/consumer layout agreement. Do not claim that
+arbitrary shader fragments compose without an ABI. Use explicit standard WGSL
+modules and validation; do not build a new shader language, runtime node editor,
+or arbitrary render-pass callback API.
+
+The same material should work with both a procedural bar and a compatible path.
+Styles such as LED, Spectrum or Fractal Flow remain application programs and
+parameters, not GPUI business enums.
+
+Shader code is trusted application content. Do not expose unrestricted user shader
+loading as part of this feature. Read-only drawing resources and framework-owned
+entry points keep graphics submission and composition under renderer control.
+
+==== Host/shader encoding
+
+WGSL declarations plus the program description form the authoritative schema.
+Use a Naga version matched to the repository's wgpu baseline to validate and
+produce Rust value types, binding identifiers, layout descriptions and encoders.
+
+The encoding contract includes:
+
+* scalar kind/width, field offset/alignment, and total structure size;
+* array and matrix stride, nested layout and runtime-array placement;
+* uniform versus storage address-space rules;
+* binding access/type and minimum size;
+* initialized padding and checked output bounds.
+
+`Copy`, `repr(C)`, or `Pod` alone does not establish WGSL compatibility. Encode
+fields into managed storage; direct byte copying is an optimization only for
+layouts proven identical. Compare actual shader layouts structurally with the
+schema; a type ID, hash or matching total size alone is insufficient.
+
+Do not upload native Rust references, pointers, `usize`/`isize`, container memory
+representations, or default bool/enum representations. Use explicit fixed-width
+encodings and validity masks. Zero-sized record types are not upload elements;
+an empty collection is still a legitimate value. Nonfinite floating-point policy
+belongs to the consumer's signal contract rather than a blanket ABI prohibition.
+
+The current fixed schemas use explicit encoders and layout checks. Generalize tooling
+only when consumer requirements justify it; postponing generation does not postpone
+encoding safety. A future generator can be a small build dependency rather than
+linking the runtime renderer into build scripts. Generated output belongs in Cargo's
+`OUT_DIR`, with build artifacts under repository `.cache/`.
+
+==== Program preparation
+
+Build-time checks catch source and layout errors. The renderer creates and caches
+device pipelines through the existing scene transport. Pipeline keys include the
+program, binding layout, geometry adapter, relevant blend/sample/target state, and
+device generation; not changing per-frame uniform values.
+
+First-use preparation is a possible implementation, not a claim of zero startup
+cost. Measure its visible latency. Evaluate renderer initialization or preparation
+within the existing execution path before considering any platform-boundary change.
+Do not parse source or recreate pipelines on every repaint.
+
+Build-time shader generation does not eliminate driver compilation. No public API
+may imply successful device preparation merely because a CPU description validated.
+
+=== Publication, storage and upload
+
+==== Update transaction
+
+Collect edits, validate their schema/ranges, reserve finite storage, encode the
+candidate, then publish one complete state. Failure or abandonment leaves the old
+publication unchanged. Do not mutate backing held by a published state as part of
+an operation that can still fail.
+
+The transaction performs no I/O, asynchronous wait, business notification or
+reentrant publication. Sharing and copy-on-write are internal choices, not a
+public historical snapshot service. Keep only content reachable from current
+owners, scene records, upload work or execution.
+
+For drawing-only instances, a managed writer can avoid an extra application
+scratch vector. Existing algorithm output may be copied or explicitly transferred.
+Do not pin analysis publication slots indefinitely in pursuit of zero-copy.
+
+==== Resource-specific storage
+
+Small parameters can be captured and packed centrally. Frequently replaced
+instance batches benefit from contiguous reusable preparation/upload regions.
+Static immutable content can reuse a device copy. Large locally changing fields
+may use chunked revisions or region updates with preserved old backing.
+
+Chunking introduces metadata and GPU addressing costs. A contiguous GPU replica
+may require copying unchanged regions when an old revision remains live. Account
+for that work explicitly; `write_region` must not conceal unmeasured whole-field
+copies. Choose the mechanism and granularity using actual update patterns.
+
+Deduplicate uploads by resource content revision and device generation, not panel
+identity or a whole-payload hash on every repaint. Different transforms of the same
+shared data should not upload the payload again.
+
+==== Upload side effects and failure isolation
+
+Do not require every panel to update in the same frame or make one visualizer's
+preparation failure cancel unrelated menus and controls. The isolation unit is a
+complete resolved drawing state, which can span several draws.
+
+Queue writes and explicit staging/copy commands are both candidates. Select by
+measured upload shape and cost, not a universal transaction requirement. Before
+writing, targets must be safe: a changed payload cannot overwrite storage still
+needed by an existing scene or execution.
+
+`Queue::write_buffer` and `write_texture` are not rollback operations. A scheduled
+write can execute on a later submission, including one from another window using
+the queue. If subsequent preparation fails, a candidate may incur wasted work,
+but cannot corrupt published content. Keep its storage/staging alive until the
+actual upload lifetime permits reuse. Explicit copy commands avoid this particular
+queued-write side effect when an unsubmitted command buffer is discarded.
+
+Do not advertise a state as executable until all of its required resources and
+bindings are ready. A recording success is not GPU execution success. Temporary
+pressure may defer that visualizer's update without queuing every missed update.
+The application can retain the newest valid model and a refresh-needed marker.
+A previous display may be reused only while its source and mapping remain valid;
+otherwise omit the invalid content or expose its failure instead of relabeling it.
+
+=== Scene integration and lifecycle
+
+New records participate in GPUI's ordinary scene ordering, clipping, composition
+and replay. They are not an unconditional topmost overlay. Visible bounds must
+include stroke width, glow and procedural displacement. Compatible bindings and
+pipelines alone do not permit reordering overlapping translucent content.
+
+Keep scene/replay references separate from execution references. GPU completion
+alone does not make a resource safe to overwrite if a scene can submit it again.
+Likewise, releasing the last scene reference does not permit reusing staging that
+is still being read by an upload.
+
+Logical retirement belongs to GPUI and safe physical reclamation to WGPU. The current
+retention policy is authoritative in
+link:22_cache.adoc#_resource_boundaries[Resource boundaries]; generalization must
+preserve that ownership rather than recreate application-specific retirement queues.
+
+==== Hidden windows and shutdown
+
+Hiding provides no guaranteed draw or new platform service. Stop display demand and
+detach cached-scene references for content the consumer discards: dropping its model
+alone cannot release replay-held CPU content. Static caches may remain, and uploads
+retain data for their actual lifetime.
+
+GPU reclamation is deferred until a later draw or renderer destruction; idle capacity
+remains charged. Resume rebuilds from still-valid owned content and reconciles obsolete
+resources even when the new scene has no visualizers. Close revokes window and scene
+ownership without invalidating in-flight execution. No cleanup-render or polling loop
+is introduced, and discarded signal history must not reappear.
+
+==== Device and surface changes
+
+Use the existing renderer lifecycle. An unconfigured surface is not necessarily
+a lost device. Device recovery invalidates device-local pipelines and allocations
+by generation. Rebuild only from still-owned valid CPU content; discarded hidden
+history must not reappear. Late preparation/errors from an old generation cannot
+install a new device's resources or overwrite its status.
+
+Keep frame scheduling, presentation and native recovery integration unchanged.
+If safe event-driven progress cannot be achieved with existing callbacks, report
+that concrete limitation rather than silently adding platform methods or polling.
+
+=== Palette and image semantics
+
+`ColorRamp` represents color and alpha as a function of a normalized coordinate.
+Separate its definition (stops, curve, interpolation space) from sampled views
+(domain, resolution, filtering, clamping). Application-defined dB mapping,
+nonlinear compression and spatial mapping remain outside the ramp itself.
+
+CPU and GPU consumers use the same explicit definition/sampling rules. A domain
+view can share data where equivalent; preserving an existing discretized result
+may require a distinct bounded sampled representation. Do not assert that a
+coordinate remap always reproduces a separately sampled subdomain exactly.
+
+Numerical fields must not undergo color-space conversion. Color images and ramps
+have explicit color/alpha conventions; backend BGRA/RGBA handling belongs below
+the application API. Do not silently change interpolation to another color space
+or add/remove premultiplication during optimization.
+
+Generalization must preserve the distinct Spectrum, Waveform, Spectrogram and stereo
+field meanings described in link:23_visuals.adoc[Visualization Rendering Design],
+including per-column RMS endpoint colors, discrete Peaks and missing-time gaps.
+Scalar interpolation before color mapping is not equivalent to interpolation of
+mapped colors. The current field contract maps and quantizes each of four neighbors
+before interpolating straight RGBA; it has no scalar-first mode. Any changed source
+resolution, endpoint sampling or rounding requires an evaluated visual tradeoff.
+
+=== Limits, pressure and acceptable approximation
+
+Every logical resource has a finite maximum extent/record count. Physical active,
+candidate, retired and pooled capacity, plus upload staging, all count toward
+finite limits. Admission happens before allocation; do not evict scene-live content
+to satisfy it. Device format/binding/texture limits are checked independently.
+
+Existing consumer bounds are inputs, not a universal allocation algorithm. The
+analysis-side Density three-slot publication pool remains its own contract; it
+does not prescribe GPU ring depth. Do not introduce an arbitrary frequency-row cap
+or shorten a supported history merely to simplify a shader.
+
+Prototype with explicit finite experimental limits and report when they bind.
+Measure live-version/region counts, payload versus allocated bytes, staging,
+execution delay and idle high water. Then choose per-resource policies and product
+budgets; experimental limits are not automatically shipping defaults. Measured
+peaks alone are not safety bounds: exercise delayed GPU work and rapid changes.
+
+Potentially worthwhile compromises include latest-wins updates, independent panel
+refreshes, modest sampling/antialiasing differences and lower display precision.
+Validate each against actual workload and perceived quality. Do not silently lower
+precision, truncate data, or switch effects to make a failed allocation succeed.
+
+Errors distinguish invalid schema/data, unsupported capability, temporary pressure,
+resource limit, window closure and device failure. Temporary pressure coalesces
+pending display work; it does not create an unlimited retry queue. No graphics
+failure blocks or issues commands to the audio callback.
+
+== Verification and decision gates
+
+These are requirements for rendering changes, not claims that every historical
+experiment covers every row. ABI-generation and general transaction gates apply
+when introducing those proposals; current slices use fixed encoders and immutable
+publication constructors. Changed consumers require their own runtime evidence:
+compilation and reduced submission counts alone do not establish a performance gain.
+
+[cols="1,3",options="header"]
+|===
+|Area |Required evidence
+|ABI
+|Offsets/strides for vectors, matrices, arrays and nested structures; uniform/storage distinction; invalid schemas rejected; padding initialized
+|Fixed replay
+|Record A, publish B, replay A; draw A and B in one frame without aliasing their content
+|Dynamic consistency
+|Publish during frame preparation; each slot resolves one complete publication for every consumer in that frame; count/axis/resource mismatches cannot occur
+|Update failure
+|Fail allocation or encoding between related edits; no partially published state
+|Upload failure
+|Inject failure after a candidate write or copy encoding; published backing remains unchanged, another window's submit cannot corrupt it, and failed candidates eventually release their charge
+|Lifecycle
+|Multi-panel sharing, last-consumer removal, resize, hide with no further draw, resume, close and device generation change; bounded retention and no invalid reuse
+|Scene integration
+|Clipping, scaling, overlap, inherited opacity, menus/tooltips over custom content, cached replay and ordinary unaffected primitives
+|Visual quality
+|Palette transitions, dark detail, thin lines, glow intersections, transparency, missing data and history gaps at real sizes/scales in motion
+|Efficiency
+|CPU construction, allocation/copy counts, upload bytes, GPU time, peak/steady memory, startup and recovery costs for equivalent workloads
+|===
+
+Use repeated measurements with variability for timing comparisons. Include static
+repaints, changing data, dense LED scenes, multiple panels, resize and artificial
+GPU delay. Pixel differences help locate errors but are not the sole visual
+acceptance criterion. An imperceptible difference can be accepted for meaningful
+performance gains; reduced draw calls or fewer source lines alone prove neither.
+
+Follow repository checks for implemented changes: Rust changes require `make lint`
+and relevant behavior tests; build/configuration/dependency changes require checks
+and artifacts appropriate to the affected packages, features and linking behavior.
+Exercise actual GUI behavior and affected feature branches when those are part of
+the change. Documentation-only maintenance needs content, link and command checks,
+not a fresh GUI run or benchmark. Keep permanent tests for consumer-visible
+invariants and errors, not incidental API spelling or code
+layout. Keep throwaway profiling/prototype artifacts separate from product code.
+
+== Recorded measurements
+
+All results in this section describe historical source and binary identities
+recorded in link:25_gpu_rendering_benchmark.json[the benchmark record]. Current
+resource limits and record sizes are described above; later fixes and extensions
+do not inherit earlier timing, memory or image-comparison results automatically.
+No GUI or benchmark rerun is implied by maintaining this document.
+
+Paths inside the historical JSON retain their run-time spelling. In a checkout
+with the local experiment archive, use
+link:../.cache/experiments/README.adoc[the archive index] and its relocation manifest
+to locate moved bundles; do not rewrite measurement provenance or treat archived
+scripts as current build commands. Some recorded binaries or source trees were
+already unavailable or deliberately retired, as the archive index explains.
+
+=== Shared local MSAA comparison (2026-10-23)
 
 Compared separate release binaries against commit `9b49886b60ce8955c243440b5ca0992118556605`
 on Radeon 780M / RADV, Mesa 26.2.5. The baseline already has local Waveform
@@ -808,25 +900,19 @@ The deterministic cross-binary capture matrix compares 3960 images across
 Unorm/sRGB, integer/fractional origins, scales 1/1.5/2, opaque/transparent
 surfaces, mixed/interleaved/overlapping content, replay, resize, hide/show,
 in-flight use and alpha-pipeline rebuild. Every pixel passes the unchanged
-per-channel tolerance of three. Exact native packed-alpha baseline probes
-also establish the expected sprite multiplicity; named `green()` has half the
-green intensity of the explicit full-green fixture and is not its oracle.
-The renderer behavior suite passes 139 tests and `make lint` passes.
+per-channel tolerance of three. Exact native packed-alpha baseline probes also
+establish the expected sprite multiplicity. These results apply to that revision.
 
-==== Initial comparative measurements
-
-All comparisons below are specific to the source and binary identities recorded
-with their samples. Later correctness fixes do not inherit these timing or memory
-results without corresponding measurements.
+=== Initial comparative measurements
 
 The measurements in this subsection describe the rectangle-only predecessor and
 its recorded source hashes, not the subsequently unified field/path renderer.
 
 Measured on 2026-10-18 using Radeon 780M / RADV Vulkan, Rust 1.99.0 and an
-optimized release build with thin LTO. The baseline is the current LED drawing
-kernel: append each cell to a NonZero `PathBuilder`, tessellate, then render the
-textured path. Both paths ran in the same executable with identical input and
-palette samples. This is not an end-to-end player benchmark or a consumer cutover.
+optimized release build with thin LTO. The baseline was the then-current LED
+drawing kernel: append each cell to a NonZero `PathBuilder`, tessellate, then render
+the textured path. Both paths ran in the same executable with identical input and
+palette samples. This was not an end-to-end player benchmark or a consumer cutover.
 link:25_gpu_rendering_benchmark.json[Raw samples, workload, hashes and limitations]
 record the complete comparison.
 
@@ -860,7 +946,7 @@ excluded from both. Milliseconds below are median [minimum–maximum]:
 
 [cols="2,2,2",options="header"]
 |===
-|First-use phase |Current LED Path |Instances
+|First-use phase |Baseline LED Path |Instances
 |Device/renderer construction |38.372 [37.241–39.534] |38.703 [37.206–38.924]
 |Initial CPU preparation |4.002 [3.963–5.410] |0.0092 [0.0088–0.0109]
 |First render and readback |4.473 [4.237–4.634] |2.741 [2.713–2.862]
@@ -889,40 +975,7 @@ other visualizers, isolated GPU execution time and GPU memory still need their
 own measurements during consumer migration; do not extrapolate these kernel
 results to total player CPU usage or frame rate.
 
-=== Different consumers and interface extraction
-
-The vendor interface now covers numerical fields and existing path coloring,
-alongside rectangles, without introducing application analysis or style state.
-Fields use explicit linear or logarithmic scalar-to-palette mapping. Coordinates
-use `uv * extent - 0.5` and clamp neighboring indices; empty extents emit no draw,
-and one-cell dimensions repeat their only sample. Nonfinite values map to the
-first palette sample; logarithmic mapping treats nonpositive values likewise.
-Each neighbor selects `floor(coordinate * (palette_length - 1) + 0.5)` before
-straight RGBA interpolation. Moving coloring into the shader does not eliminate
-its cost: enlarged or static draws still evaluate four mappings per output fragment.
-The field upload remains four bytes per source cell, just like the old BGRA image;
-the intended benefit is removing CPU recoloring, not automatically reducing bytes.
-
-Paths reuse existing tessellated vertices and coverage coordinates, not a filled
-bounding rectangle. Their original bounds map into the recorded placement bounds;
-the palette spans those full bounds, independently of clipping. Embedded path
-color, texture, order and content mask do not override the material or scene
-placement. Palette ownership is shared; path geometry remains immutable.
-Adjacent multisampled rectangle or path draws within one scene GPU batch share
-a rasterization/resolve pass only when their clipped composite bounds are
-integer-pixel aligned and do not intersect the accumulated clipped union.
-Each draw retains its own bindings and scissor; the union is composited once.
-A field draw, missing prepared draw, overlap, fractional edge or actual scene
-batch boundary ends the run. Numeric order values alone do
-not break adjacency. This conservative linear scan preserves individually resolved
-MSAA overlap and backend-specific fractional edge coverage without quadratic tests.
-
-This extraction is a closed set of schemas, not arbitrary shader authoring or
-generated ABI tooling. Density/Spatial, Spectrum, Fractal Beams/Flow, Spectrogram
-and Waveform have migrated. Their former colored-image intermediates and
-application-specific image-retirement queues are removed.
-
-==== Unified field and path measurements
+=== Unified field and path measurements
 
 Measured on 2026-10-18 using Radeon 780M / RADV Vulkan and Rust 1.99.0,
 release with thin LTO. Fields compare retained BGRA8 coloring/image drawing against
@@ -951,9 +1004,9 @@ the result to CPU memory: it is not isolated GPU execution time.
 |Path, changing geometry |3.79 [3.76–4.18] |4.35 [4.34–4.37] |405.66 [400.07–577.22] |355.90 [355.18–356.74]
 |===
 
-CPU field recoloring is removed, but static enlargement and resize render/readback
-are slower. Keep this cost explicit when choosing consumer migrations; these
-measurements do not justify a second sampling mode or an unmeasured color cache.
+CPU field recoloring was removed, but static enlargement and resize render/readback
+were slower. These costs informed the later consumer migrations; the measurements
+do not justify a second sampling mode or an unmeasured color cache.
 Both field representations upload 262,144 bytes per changed source. The new
 256-sample palette adds 4,096 shared bytes, and each placement encodes 112 bytes.
 These are payload counts, not bus traffic or physical VRAM measurements. Existing
@@ -963,7 +1016,7 @@ Matched field outputs differ by at most 1/255 per channel. The path comparison
 has maximum difference 7/255, mean absolute difference 0.00338/255, with 58 of
 245,760 pixels exceeding 3/255. The continuous palette material is not bit-identical
 to existing BGRA texture sampling; consumer-specific palettes still need acceptance
-when migrated. No application visualizer changed in this slice.
+when migrated. No application visualizer changed in this historical vendor slice.
 
 The `unified_material_slice` entry in
 link:25_gpu_rendering_benchmark.json[the raw benchmark record] contains samples,
@@ -971,7 +1024,7 @@ workload definitions, source hashes and limits. Its in-process first-use phase
 observations do not reset device or driver caches and are not cold-start results.
 
 
-==== Demand-specific preparation and path batching
+=== Demand-specific preparation and path batching
 
 A separate comparison uses the pre-review compiled libraries as its baseline and
 identical probe source/compiler flags against the corrected libraries. It covers
@@ -1006,11 +1059,11 @@ allocation of 72 bytes during rejection, retaining the previous publication;
 validation-error allocation is not field payload copying. Probe-only headless
 entry points and font fixtures do not become production rendering dependencies.
 
-==== Density/Spatial consumer measurements
+=== Density/Spatial consumer measurements
 
 The actual application comparison uses two differently sized panels per style on
 an isolated 1280-by-800 Wayland surface, identical PCM input, config and library
-seed. After builds/checks finished, baseline/candidate process order was B–C–C–B–B–C.
+seed. Baseline/candidate process order was B–C–C–B–B–C.
 Each fresh process warmed up for four seconds, then recorded three two-second live
 intervals and three paused intervals. CPU is percent of one CPU from process ticks;
 the table reports mean and range of the three process means, not GPU timestamps.
@@ -1032,12 +1085,12 @@ performance and physical VRAM claims require separate evidence. Raw samples,
 binary/source identities and limitations are retained under `density_spatial_consumers`
 in link:25_gpu_rendering_benchmark.json[the benchmark record].
 
-==== Spectrum Bars/LED consumer measurements
+=== Spectrum Bars/LED consumer measurements
 
 The final comparison uses four unequal Spectrum panels, LED with 512 slots,
 labels and Peaks enabled, caching enabled, 30 Hz analysis and an 8192-point
-Blackman-Harris FFT. Three fresh processes per binary alternate baseline/candidate
-after builds finish; each CPU window lasts five seconds following the same seek
+Blackman-Harris FFT. Three fresh processes per binary alternate baseline/candidate;
+each CPU window lasts five seconds following the same seek
 and playback-position gate. The isolated Weston GL/niri surface uses AMD 780M
 with Mesa 26.2.4. CPU is a percentage of one core.
 
@@ -1055,61 +1108,6 @@ are not mixed into these results. Real-app frames were not synchronized, so
 cross-binary screenshots do not establish pixel equality. Source/binary identities,
 the exact configuration and raw samples are retained under `spectrum_bars_led_consumers`
 in link:25_gpu_rendering_benchmark.json[the benchmark record].
-
-=== Consumer integration boundary
-
-The migrated consumers retain their algorithm state, content identity and bounded
-immutable-publication caches. GPUI/WGPU own upload reuse and completion-aware
-physical retirement; applications still decide when content changes or becomes
-invalid. Artwork retains its independent image lifecycle.
-
-The slices divide integration risk, not final scope. Generic supporting modules
-belong with GPUI/WGPU; application programs and palette definitions belong near the
-visualization consumers. Do not move audio visualization business code into
-`rivu-ui` simply because it draws UI. Build-time tooling can be a separate small
-crate to avoid linking the runtime renderer into a build script. Generated output
-belongs in Cargo's `OUT_DIR`, with build artifacts under repository `.cache/`.
-
-== Verification and decision gates
-
-Measured outcomes above apply only to their recorded workloads and source versions.
-Future consumers and changed rendering paths require their own runtime evidence;
-compilation or reduced submission counts alone do not establish a performance gain.
-
-[cols="1,3",options="header"]
-|===
-|Area |Required evidence
-|ABI
-|Offsets/strides for vectors, matrices, arrays and nested structures; uniform/storage distinction; invalid schemas rejected; padding initialized
-|Fixed replay
-|Record A, publish B, replay A; draw A and B in one frame without aliasing their content
-|Dynamic consistency
-|Publish during frame preparation; each slot resolves one complete publication for every consumer in that frame; count/axis/resource mismatches cannot occur
-|Update failure
-|Fail allocation or encoding between related edits; no partially published state
-|Upload failure
-|Inject failure after a candidate write or copy encoding; published backing remains unchanged, another window's submit cannot corrupt it, and failed candidates eventually release their charge
-|Lifecycle
-|Multi-panel sharing, last-consumer removal, resize, hide with no further draw, resume, close and device generation change; bounded retention and no invalid reuse
-|Scene integration
-|Clipping, scaling, overlap, inherited opacity, menus/tooltips over custom content, cached replay and ordinary unaffected primitives
-|Visual quality
-|Palette transitions, dark detail, thin lines, glow intersections, transparency, missing data and history gaps at real sizes/scales in motion
-|Efficiency
-|CPU construction, allocation/copy counts, upload bytes, GPU time, peak/steady memory, startup and recovery costs for equivalent workloads
-|===
-
-Use repeated measurements with variability for timing comparisons. Include static
-repaints, changing data, dense LED scenes, multiple panels, resize and artificial
-GPU delay. Pixel differences help locate errors but are not the sole visual
-acceptance criterion. An imperceptible difference can be accepted for meaningful
-performance gains; reduced draw calls or fewer source lines alone prove neither.
-
-Follow repository checks for implemented changes: Rust changes require `make lint`
-and relevant behavior tests; build/tooling/link changes require `make build`.
-Exercise actual GUI behavior and affected feature branches. Keep permanent tests
-for consumer-visible invariants and errors, not incidental API spelling or code
-layout. Keep throwaway profiling/prototype artifacts separate from product code.
 
 == References and rationale
 

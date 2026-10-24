@@ -1,16 +1,15 @@
 = Library
+:toc:
+:toclevels: 2
 
-The library is stored in SQLite and is shared by the desktop GUI, CLI, and TUI.
-CLI scan paths are relative to the invoking client's working directory;
-absolute paths are accepted. Playlist management and exchange are described in
-link:03_playlist.adoc[Playlists].
+The library is shared by the desktop GUI, CLI, and TUI. Start by configuring a
+music folder and scanning it; then browse tracks, albums, or recent activity and
+send tracks to the queue or a link:03_playlist.adoc[playlist]. Scanning and edits
+change Rivu's database, not the audio files.
 
-For CLI listing completeness and failure handling, see <<_paged_views,Paged views>>.
-
-In the desktop Library, use the right-click menu to add selected tracks to the
-queue or remove them from the library. Removal requires confirmation and applies
-to the tracks selected when removal was requested; cancelling leaves them unchanged.
-Audio files are not deleted.
+CLI paths are relative to the invoking client's working directory; absolute paths
+are accepted. Except for the local `library probe` and independent migration tool,
+library commands address the running host for the selected data directory.
 
 == Roots and scanning
 
@@ -44,250 +43,14 @@ background without stopping playback; a second scan or playlist import is reject
 while one is active. Progress reports completion or failure. `--wait` waits for
 completion and reports scan errors even when readable tracks were saved.
 `--force` rereads unchanged audio metadata. CUE sheets are always reread.
+Requested paths must be inside a configured logical root. A failed scan may still
+save readable tracks; fix errors and rescan before cleaning missing records.
+See <<_scan_policies_and_recovery,Scan policies and recovery>> for depth and
+duration admission, source checks, and the point after which cancellation is refused.
 
 Cancelling a desktop file chooser leaves configuration, commands, and existing
 errors unchanged. This also applies to
 link:03_playlist.adoc#_import_and_export[playlist import and export] choosers.
-
-=== Scan boundaries
-
-Scan paths are normalized without resolving symlinks and must be at or below a
-configured root; a mixed inside/outside request is rejected before scanning.
-
-Symlinks are followed even when their targets are outside configured roots;
-logical aliases remain distinct library identities. Directory cycles are scan
-errors. CUE sheets and their sources must also lie within configured logical roots.
-
-`library.scan_max_depth` applies independently to each requested directory. The start
-directory is depth `0`; files in a directory at the limit are scanned, while
-directories beyond the limit are skipped and reported. Direct file and CUE
-requests are unaffected by this directory limit; `0` is invalid. An explicit
-nested scan has its own boundary, even when an enclosing walk skipped it.
-
-=== Minimum duration for new tracks
-
-`library.scan_min_duration_secs` is a new-track admission policy, not a constraint
-on library contents. It applies uniformly to every scan workflow, including
-directory, direct audio/CUE, forced scans, and playlist imports. `0` disables it;
-otherwise only new tracks with a known, finite, positive duration strictly less
-than the configured seconds are excluded. A duration equal to the threshold is
-accepted; unknown, unavailable, zero, or invalid duration is not treated as a
-short track. Existing tracks, including recognized relocations, are retained and
-their metadata is updated normally, even when short. `--force` rereads metadata
-but does not bypass this admission policy for new tracks.
-
-CUE tracks use each segment's duration, not the full source duration. Skipping
-segments never admits their source as a fallback full-file track. Existing probe
-failures remain scan errors; duration exclusions are counted separately from
-errors in the completion summary. Duration uses the normal bounded metadata
-probe/cache path, without decoding a complete source to measure its length.
-
-Each scan or playlist import captures the threshold at startup and keeps it for
-the entire task; saving a setting during a task affects only later tasks. The
-admission check runs while saving, after resolving existing track identities.
-Changing the setting neither starts a scan nor deletes or cleans existing tracks,
-and has no playback effect.
-
-=== Errors and partial results
-
-Depth exclusions and filesystem, traversal, audio-read/probe, or CUE errors
-protect the affected existing identities: they are neither newly marked missing
-nor used as relocation candidates. A failed sheet protects all tracks owned by
-that sheet, not just its readable sources. Successfully read tracks are still saved.
-CUE sheet identities must be UTF-8 paths; an unrepresentable sheet is reported
-as a local CUE error without suppressing its readable source audio or preventing
-other valid tracks from being saved.
-Audio source identities must also be UTF-8 paths. Unrepresentable audio paths
-are per-file errors, including during forced scans; valid tracks are still saved.
-Explicit requested scopes must also be UTF-8 after logical normalization. An
-unrepresentable scope is reported locally and excluded from reconciliation
-coverage, before any traversal or source lookup; valid scopes in the same request
-still save their results. A valid UTF-8 parent directory keeps its coverage when
-an unrepresentable child fails locally.
-A requested path whose initial metadata lookup reports `NotFound` is confirmed
-absent and can mark its tracks missing; a path disappearing during traversal or
-reading is uncertain until a later scan establishes absence. An explicit nested
-directory scan owns its own coverage, independently of enclosing exclusions.
-Diagnostic and uncertainty details are bounded; when details are omitted, missing
-detection and relocation are conservatively disabled for that scan. Fix reported
-errors and rescan before cleaning missing records.
-
-=== Rereading sources
-
-CUE sheets share the import/export reader: only ordinary files up to 1 MiB are
-accepted, with nonblocking opens and bounded reads. Oversized or nonordinary
-sheets are local CUE errors; their owned tracks remain protected while other
-readable audio is saved.
-Audio sources, including CUE references, must also be ordinary files. Playback,
-waveform loading, metadata probes, and fingerprint reads check the object actually
-opened with a nonblocking open; normal symlinks to ordinary files remain supported.
-FIFOs without writers are rejected rather than waiting for a producer. Discovery
-does not silently discard audio-named FIFOs, devices, or symlinks to such objects:
-both direct requests and directory scans report a local source error and protect
-that source's existing identities, without protecting unrelated deleted tracks.
-FFmpeg decodes the checked file object instead of reopening its original pathname,
-so replacing that name cannot bypass the check. Failed sources, including CUE
-references, are local scan errors: readable sources are still saved, the scan
-reaches completion, and later scans remain available.
-Fresh metadata probes and fingerprint reads for a scan use the same opened source
-object, even if its pathname is replaced or a symlink is retargeted. Changes to
-the opened object's size or modification/change timestamps during analysis cause
-a local source error instead of saving a mixed-version record.
-Ordinary scans reuse valid metadata and fingerprints when file size and modification
-time match; force scans reprobe and reread source content. Neither resets user edits.
-Representable pre-epoch modification times remain valid cache keys; unavailable or
-out-of-range times always bypass cache reuse.
-An unchanged result still completes its scan status and reports errors, but does
-not invalidate library, structure, playlist, or queue-content views. Playlist
-imports still create the requested playlist when the scanned tracks are unchanged.
-Cached source metadata is looked up in bounded batches as sources are encountered,
-including sources used by new or retargeted CUE sheets within configured roots. See
-link:21_ipc.adoc#_core_and_client_boundary[Scan lookup and merge design] for
-ownership, reuse rules, and costs.
-
-Scan filesystem work runs in joined, bounded synchronous stages on the shared
-four-thread Tokio blocking pool, not through a Tokio filesystem hop per metadata
-call or hash chunk. Directory discovery advances at most 64 entries or reader
-exhaustions per stage, with at most `scan_max_depth + 1` open directory readers;
-ancestry inode checks preserve cycle detection and logical aliases.
-Source admission opens and checks at most 32 ordinary files per batch, reusing
-that descriptor's metadata for cache validation. The async coordinator then awaits
-one Core lookup for the batch without retaining a blocking worker. Source stages
-perform at most 32 probe/read steps and hash at most 4 MiB before returning to the
-executor; cancellation is checked around each probe and each 128 KiB read.
-One 128 KiB hash scratch buffer is reused throughout the scan. The active source
-stays at the front of its work queue across incremental reads; its descriptor,
-metadata and hash state are borrowed in place rather than moved out and reinserted
-for every chunk. Completion or failure retires that source. Up to 32 CUE sheets
-are prepared together so their distinct sources can share lookup batches; shared
-source successes and failures remain cached for the scan. Each sheet retains the
-existing 1 MiB input limit, and failed sheets suppress no ordinary source.
-Progress is coalesced on a bounded event channel; lookup batches and completion
-facts are reliable. Probing and hashing use the same admitted source descriptor,
-rewound after probing, with a final descriptor-version check before recording.
-Every started blocking stage is joined before cancellation can retire preparation;
-CUE parsing and SQLite Saving remain separate bounded blocking work.
-
-Native probing skips oversized tags and embedded images before buffering their
-full payloads; otherwise decodable audio remains usable, but some metadata may
-be absent. See link:22_cache.adoc#_native_metadata_admission[Native metadata admission]
-for the resource limits and their scope.
-
-=== Cancellation
-
-Cancellation is cooperative: discovery, files, CUE read chunks, CUE parse lines
-and segments, and hash-read chunks check the scan owner's shared cancellation
-token. A blocking audio probe is checked
-before and after, but is not itself interruptible. A cancelled scan returns no result
-for merging, so even tracks read before cancellation are not saved.
-Once the task enters Saving, cancellation is refused: its atomic database merge
-and optional playlist creation finish in the background. State/task status and
-existing-playback controls remain responsive; database reads and edits report
-maintenance in progress instead of waiting. Shutdown waits for the actual saving
-result. A failed result can still contain committed library or playlist changes.
-Admission remains occupied until preparation or Saving has released its file
-and database resources and its supervised task has joined; cancellation only
-stops preparation and never replays an uncertain commit.
-
-== Desktop list search
-
-Use a list's Search button, or Ctrl+F with that list focused, to open and focus its
-search field. Once open, the Search button focuses the field without closing it.
-An empty search field folds automatically when it loses focus.
-Each list keeps its own search condition. A nonempty search stays visible; use
-the field's Clear search button to restore the complete list without closing the
-field. From list focus, Esc clears that list's search first and folds an empty
-field on the next press. Leaving a focused editor or dismissing an active popup
-or composition takes precedence. Ctrl+F retains the already focused search field,
-including when playlist names and playlist entries have different searches.
-While the search field is open, counts inside its right edge show matches and the
-unfiltered total; counts are hidden when it is folded. No matches is distinct from an empty
-collection. Searching changes the view, not the saved contents or playback order.
-
-Desktop and terminal text searches apply nonempty edits after 150 ms without
-further input. Until then, the previous query and its results remain active.
-Leading and trailing whitespace is ignored; clearing the text or leaving only
-whitespace restores the unfiltered query immediately. Enter does not bypass the
-delay.
-
-Library retains its combined text, favorite, and missing-file filters. Albums
-searches album titles and member artists. Playlist names search by name; playlist,
-queue, and album track lists search track title, artist, album, and file name.
-Recent tracks searches the displayed track titles. Track searches cover the whole
-collection, including unloaded pages, rather than just the rows on screen.
-
-Each Library root shows its recursive track total. While any text, favorite, or
-missing-file filter is active, it shows matching tracks / total tracks instead,
-including tracks in collapsed folders and unloaded pages. Roots with no matches
-remain visible with a zero matching count; a pending or failed count is shown as
-an em dash, not zero. Clear all filters to return to the total alone.
-
-Changing the search clears that list's selection. Select all operates on matching
-rows only. Queue and playlist drag reordering is unavailable while filtered; clear
-the search before dragging to reorder. Playing or appending a whole playlist still uses its
-complete saved contents, not its search results. If search hides the playing
-track, use the explicit clear-and-locate action to reveal it.
-
-
-== Same files and relocation
-
-Automatic relocation requires a unique missing old identity and a unique new
-destination with matching content. Exact identities take precedence and do not
-count as new destinations. Ordinary files match by fingerprint; CUE segments
-match by source fingerprint, track number, and exact start/end boundaries, and
-require the old sheet to be absent. Ambiguous copies on either side retain
-separate IDs and the missing identity's user state and playlist references;
-scan order never chooses a destination. Ambiguity is per CUE segment key, so it
-does not prevent other uniquely matched segments from relocating.
-
-Use Settings → Library → `Same files / Relocation candidates` to
-inspect paged ordinary-file groups. Closing the review returns to Settings
-without applying or discarding its unsaved edits. Historical cached BLAKE3 hashes
-identify candidates, not fresh proof. Rows show paths, current existence, scan
-state, metadata, favorites, overrides, history and playlist/queue reference counts.
-Choose a missing old identity and a present destination, then review and confirm.
-The close icon leaves undecided pairs unchanged. `Keep destination independent`
-persists a decision that excludes that row from automatic and manual relocation,
-including after rescanning. No audio files are deleted.
-
-While the review is open, Tab cycles through its controls rather than the
-Settings behind it. Esc closes the review without applying or discarding the
-Settings draft.
-
-Eligible rows offer `Use as old record` or `Use as destination`. A destination
-with user state or references shows a rejection warning; old records and
-ineligible rows retain that information as metadata. Group and file paging are
-independent, and paging files preserves the selected old identity and destination.
-During confirmation, group selection, role selection and both pagers are locked.
-Use Back to selection to revise the pair, Refresh to reset, or Close to leave
-undecided files unchanged.
-
-Confirmation starts one background full-file verification at a time. Rivu checks
-the destination's fresh hash and stable file identity, then revalidates database
-identities and source absence before committing atomically. The old ID, overrides,
-favorite, history and references survive at the destination; its redundant row
-is removed. Destinations with user state or references, active source/destination
-playback, changed files or database identities, and a reappearing source are
-rejected rather than merged. Correct the reported conflict before retrying.
-Verification reads at most the destination size validated at its start; later
-growth does not extend that read budget. File identity is still checked after
-hashing and again before commit, so changed destinations are rejected.
-
-Closing the review requests cancellation of its ongoing verification. Cancellation
-before commit leaves identities unchanged; it cannot undo a completed commit.
-CLI acceptance supplies a task ID, not proof of success. `--wait` reports the
-final outcome; otherwise query status or cancel using that ID. The running core
-retains the latest 32 task results, not persistent task history.
-
-[source,sh]
-----
-rivu library duplicates
-rivu library duplicates --fingerprint FULL_BLAKE3 --offset 0 --limit 100
-rivu library relocate OLD_ID DESTINATION_ID --wait
-rivu library relocation-status TASK_ID
-rivu library cancel-relocation TASK_ID
-rivu library keep-independent DESTINATION_ID
-----
 
 == CUE library tracks
 
@@ -309,217 +72,30 @@ during the scan are picked up by a subsequent scan.
 
 Supported formats and playlist exchange: link:03_playlist.adoc#_cue_import[CUE import].
 
-== Locate the playing track
-
-Use Library's `Locate playing track in Library` control to reveal the current
-track, including while paused. With no current track, the control is disabled.
-Tree view expands its configured root and parent directories; flat view uses the
-current sort within the configured root. The exact library identity is revealed,
-including separate CUE entries sharing a source file and logical symlink aliases.
-The row is scrolled into view and briefly emphasized without changing selection,
-playback, or unsaved Details edits. Track changes do not automatically follow.
-
-If search, favorites, or missing-only filters hide the track, Library offers
-`Clear filters and locate`; only that explicit action clears the filters.
-A track outside configured roots or no longer available in the library is
-reported rather than locating a different row. Location queries run in the
-background; changed tracks, views, roots, or library revisions discard stale results.
-
-== Metadata and favorites
-
-`rivu library probe PATH` reads audio metadata and decoder support without
-starting a core; it does not create or update a library row. Add `--enhanced`
-to explicitly load FFmpeg for this command, even when `playback.ffmpeg_enabled` is off.
-Missing libraries or a native-only build make an enhanced probe fail rather
-than silently use native recognition. JSON includes `probe_backend` and
-`decoder_backend` (`native` or `ffmpeg`); these may differ for ordinary PCM.
-Without `--enhanced`, a fresh probe process does not enhance native-supported
-WAVE recognition. Recognition and DTS-WAV limitations:
-link:04_playback.adoc#_optional_ffmpeg_decoder[Playback].
-
-GUI/TUI lists show compact display metadata. Track details and
-`library list --json` expose full technical metadata, paths, CUE boundaries,
-and statistics. Unknown values appear as `—` in human output or `null` for
-nullable JSON fields.
-
-In GUI Track details, hover a read-only field to reveal Copy value, or reach
-the action with keyboard focus. It copies the complete value even when the
-display is truncated; File path copies the original path even for a missing
-file. Empty, unknown, and unloaded values have no copy action.
-
-`bitrate_bps` describes the encoded audio stream, not decoded PCM or the entire
-container file. `bitrate_exact` marks a reliable fixed-encoding calculation or a
-complete-playback measured average, rather than a scan estimate. Human output
-prefixes scan estimates with `≈`. Existing stored values are estimates until
-confirmed. Scans use low-cost probe information and bounded headers, including
-MP3 summaries and Vorbis nominal targets; they do not traverse a whole stream
-solely to measure its bitrate. Unknown values remain unknown.
-PCM bitrate uses the actual encoded sample width. Measured compressed averages
-use selected audio packet bytes and represented sample duration, excluding
-container overhead, tags, artwork, and other streams. Decoder handling of overlap,
-delay, and padding can cause small differences between measured averages; the
-precision flag does not promise bit-for-bit agreement between decoder backends.
-An unchanged-source scan cannot downgrade a confirmed value; a changed source
-invalidates its previous precision. Playback upgrades are described in
-link:04_playback.adoc#_transport_and_timing[Playback].
-
-[source,sh]
-----
-rivu library probe album.wav --enhanced
-rivu --json library probe album.wav --enhanced
-----
-
-Title, artist, album, favorite, and decoder-hint edits change Rivu's database only;
-media files, tags, and CUE sheets are never rewritten. Rescans preserve matching IDs,
-overrides, favorites, decoder hints, counts, and last-played timestamps. `library remove` and
-`library clean-missing` remove records and their queue/playlist references only;
-they never delete media files. Missing rows remain visible in playlist views
-until removed or cleaned.
-
-Committed changes refresh the affected views without resetting unrelated
-collections. For transaction ownership and query invalidation rules, see
-link:21_ipc.adoc#_revisions_and_watching[IPC revisions].
-
-A refresh error explicitly reports that the change was committed, not rolled
-back. Some previous projections may remain visible until a later successful
-refresh; queries read the committed database state. Rivu does not automatically
-replay committed operations. Repeating an edit whose values match the committed
-database, or cleaning when no missing records remain, is a no-op, not another
-mutation or a projection retry.
-Failed writes leave saved data unchanged.
-
-Metadata edits override only fields you change. An omitted CLI option or an
-unchanged Track details field keeps its current value and continues to follow
-rescanned metadata if it has no previous override. Concurrent edits to different
-fields preserve both changes; edits to the same field use the last applied value.
-Passing an empty string explicitly clears that field's displayed text.
-
-In Track details, a background refresh preserves unsaved title, artist, album,
-and decoder-hint edits. Save commits changed fields together; edits made while
-saving remain unsaved. A successful acknowledgement advances only the submitted
-draft's saved baseline, never overwrites accepted track data, and requests a fresh
-read for manually selected details. It cannot replace later edits or affect details
-that were closed, switched, or reopened in the meantime. A failed write preserves
-the draft for correction or retry; a committed-change refresh error does not mean
-the edit was rolled back.
-When a successful save leaves no unsaved edits, details also adopts newer values
-already loaded, including later edits to the same fields. This includes saves that
-make no database change because another client has already saved the same values.
-The displayed values become the next edit's baseline, so clearing a newly displayed value still
-explicitly clears that field. Later edits and unavailable records stay protected.
-Only one track's draft is retained at a time. Playback continues normally when
-the playing track changes; unsaved or saving details stay on the original track
-instead of following playback. Saving resolves that draft; to abandon it, select
-another track, clear the selection, or reload and confirm Discard. Track details
-has no standalone Discard button. Edits made during a save remain protected.
-In playback-follow mode, manually restoring all edited fields and the decoder
-hint to their saved values also resumes follow once no save or manual action is
-pending. Explicitly selected tracks do not switch to playback automatically.
-Selecting a different track or clearing selection asks for Discard or Cancel;
-Cancel retains the draft and previous selection. Escape first leaves a focused
-input; Escape from the layout requests selection clearing with the same protection.
-Hiding details or changing its panel tab does not discard the draft. Changing or
-deleting a playlist, or removing one of its entries, does not discard it either.
-If the requested selection's list changes while confirmation is open, the stale
-operation is rejected without discarding the draft; select the target again.
-For a selection from Recent tracks, a library structure change during confirmation
-also rejects the pending action and keeps the draft. Metadata-only updates and
-Recent tracks sorting do not invalidate that target.
-The latest manual selection, clear, reload, window-close, or quit request takes
-precedence over earlier pending navigation in Library, Playlists, Queue, and Recent tracks.
-Late results cannot replace that request or reopen a cancelled confirmation.
-Range selection keeps the previous selection and details until the complete
-range is ready and any draft confirmation is resolved; a failed range changes
-neither. Cancel retains the original selection and draft.
-
-User-initiated window closing and GUI quitting ask before discarding a draft.
-Drafts are not persisted across restarts: external shutdown commands, termination
-signals, and crashes cannot offer this confirmation.
-
-Track details keeps its header, groups, fields, and actions visible with no track
-selected or while another selection loads. Unloaded details show `Not loaded`;
-the reserved status line distinguishes no selection, loading, query failure,
-and an unavailable library record from unknown metadata on a loaded track (`—`).
-Fields, Save, favorite, and decoder-hint actions are disabled until the current
-track is ready. Switching tracks clears the old values and artwork immediately;
-late responses from the previous selection cannot replace the current details.
-A same-track background refresh retains ready details and drafts, including after
-a query failure. The Track details reload action exits manual track selection and
-reloads the current Playback track without changing list selections. Unsaved or
-saving drafts require Discard or Cancel first; after confirmation the action uses
-the then-current Playback track. Without a current track, details are cleared.
-A record confirmed unavailable disables saving; an existing draft remains available
-to inspect or discard. Starting or failing a reload does not restore saving.
-An earlier save acknowledgement confirms its submitted baseline without changing
-that unavailable state. A successful save refreshes selected details even if no
-change notification arrives. Cached playback details cannot restore saving either; only a reload
-that finds the record enables it again. If there are no unsaved changes or pending
-save when the record is confirmed unavailable, details are cleared. Otherwise,
-the retained fields remain available to inspect, copy, or edit. Restoring those
-fields to their original values does not itself clear them or enable Save.
-
-Decoder hints use the same Save and draft-discard workflow as tags. Routing and
-DTS-WAV safety: link:04_playback.adoc#_optional_ffmpeg_decoder[Playback].
-
-[source,sh]
-----
-rivu library list --favorites
-rivu library list --missing
-rivu library favorite 12 34 --set on
-rivu library edit 12 --title "New title" --artist "Artist" --album "Album"
-rivu library clean-missing
-----
-
 == Desktop selection and directory tree
 
-Hover a track to access its favorite toggle in the rightmost column. Toggling a
-favorite does not change the selection or start playback; double-click a track to play it.
-Hover a directory or root header to reveal its right-edge rescan button. The
-button overlays the row without reserving text width; rescanning does not change
-the selection or expand the directory.
+Use tree view to browse directories, or the flat list to browse recursive tracks
+grouped by configured roots in configuration order. Empty roots remain visible.
+Click a directory or root header to expand or collapse it; the two views retain
+their expansion choices independently. Search, favorites, and missing-only filters
+combine in either view; the tree keeps matching tracks and their ancestors.
 
-The Library toolbar shows the current entry or selection count. Its append and
-remove actions become available when tracks are selected; selecting only folders
-does not enable these track actions.
+Double-click a track to play it. Hover it for its favorite toggle, which does
+not change selection or start playback. Hover a directory or root for Rescan;
+rescanning does not change selection or expansion. The toolbar's Append and Remove
+actions require selected tracks, not just folders.
 
-The desktop flat list is grouped by configured library roots, in configuration
-order, including roots with no matching tracks. Each folder header expands or
-collapses independently; its contents are recursive, sorted flat tracks rather
-than subdirectory rows. Track text uses one level of indentation below the root,
-independent of the track's actual directory depth. Tree tracks retain their
-directory-level indentation. Both views use single-line rows. Right-click the
-Library panel and open `Track information` to choose Artist, Album, Duration,
-Codec, and Bitrate columns. Duration and Codec are enabled initially. Columns appear
-in that fixed order, with compact content-dependent widths independent of tree
-depth. Long Artist and Album values are truncated; hover the row for full details.
-Disabling every column leaves the name without reserved track-information space. The selection
-is shared by both views and saved across restarts.
+Right-click the Library panel and open `Track information` to choose Artist,
+Album, Duration, Codec, and Bitrate columns. Duration and Codec start enabled;
+the choice applies to both views and survives restart. Hover truncated rows for
+full metadata or paths, even when their information columns are hidden. Directory
+loading, empty, and unavailable states remain visible independently of the columns.
 
-Directory loading, empty, and unavailable status remains visible independently
-of track-information columns. Narrow rows truncate text with `..`; hover a name
-or its information to read the full title or directory path above the full
-track information or directory status. Tooltip text wraps rather than truncates;
-directories with no status omit the second part. Tooltips retain artist, album,
-duration, codec, bitrate, and missing-file warnings even when those columns are
-disabled. Missing values appear as `-`.
-
-Root headers in both views include missing files in their recursive totals.
-For matching / total counts while filters are active, see
-<<_desktop_list_search,Desktop list search>>. If a root's count query fails, its
-directory action stays available without hovering and retries failed counts
-instead of rescanning. The failure state clears when the retry starts and returns
-if it fails again; once recovered, the action resumes normal rescanning.
-Unfiltered totals refresh after structural library changes such as scans,
-removals, or path relocation; editing tags, favorites, or playback statistics
-does not reload those totals. Filtered counts also follow changes to matching tracks.
-
-Search, favorites, and the missing filter apply to both the flat list and directory
-tree without switching views, and can be combined. Tree filtering shows only
-tracks matching every active filter and their ancestor directories. Configured
-roots remain visible even when they have no matches. Changing or clearing a filter
-refreshes the current view; tree and flat-list switching remains available while
-filters are active. Changing a track's favorite or missing state refreshes the
-filtered tree.
+Root totals include missing files and recursively count unloaded or collapsed
+tracks. Active filters show matching / total counts, as described in
+<<_desktop_list_search,Desktop list search>>. If a count fails, the directory action
+stays visible and retries the count instead of rescanning; after recovery it
+returns to Rescan.
 
 Dragging a directory adds its full contents, not only tracks matching the
 display filter. To add only matching, favorite, or missing tracks, select and drag the track rows.
@@ -548,44 +124,79 @@ without adding tracks to its destination.
 
 For root removal and its retained data, see <<_roots_and_scanning,Roots and scanning>>.
 
-Configured roots are identified by their paths. Click a directory or group
-header to expand or collapse it. Tree and grouped-list expansion choices are
-kept separately when switching views; changing or clearing search preserves
+Configured roots are identified by path. Changing or clearing search preserves
 unrelated expansion choices.
 Shift selection in the grouped list includes root headers as well as tracks,
 including ranges that cross groups or unloaded pages. Selected root headers
 support directory rescanning and dragging with the same recursive semantics
 as tree directories; actions deduplicate overlapping track identities.
 
-After a scan changes effective library rows or directory identities, affected
-views refresh on demand, including previously empty expanded folders, even if
-some files failed to import. Root counts change only for identity/path changes;
-size/mtime-only changes refresh duplicate verification facts without reloading
-library rows, playlist summaries, or unrelated collections. Unchanged scans
-preserve query validity. Collapsed folders load current contents when reopened.
+Scans refresh affected views, including previously empty expanded folders;
+collapsed folders load current contents when reopened. Unchanged scans preserve
+existing views. Query and refresh ownership is described in
+link:21_ipc.adoc#_query_results_and_pagination[IPC query results].
 The scan status row offers a close button after completion or failure. Closing
 it hides the result and progress bar without changing imported tracks or the
 separate error message. A new scan shows progress again.
 
-== Recent tracks
+== Desktop list search
 
-Recent tracks keeps its own selection, independent of Library, using the
-link:02_library.adoc#_desktop_selection_and_directory_tree[shared selection rules].
-Ctrl+A selects all matching recent tracks when this panel has focus. Sorting
-preserves selected track identities; refreshes discard selections that no longer exist.
+Use a list's Search button, or Ctrl+F with that list focused, to open and focus its
+search field. Once open, the Search button focuses the field without closing it.
+An empty search field folds automatically when it loses focus.
+Each list keeps its own search condition. A nonempty search stays visible; use
+the field's Clear search button to restore the complete list without closing the
+field. From list focus, Esc clears that list's search first and folds an empty
+field on the next press. Leaving a focused editor or dismissing an active popup
+or composition takes precedence. Ctrl+F retains the already focused search field,
+including when playlist names and playlist entries have different searches.
+While the search field is open, counts inside its right edge show matches and the
+unfiltered total; counts are hidden when it is folded. No matches is distinct from an empty
+collection. Searching changes the view, not the saved contents or playback order.
 
-Right-click a track for the shared track actions, including batch Favorite and
-Unfavorite. Drag selected tracks to Queue or a named playlist catalog row to
-append them in their displayed order; dragging an unselected track carries only
-that track. These transfers do not remove history entries or change Library
-selection. Double-click plays the clicked track. Columns remain sortable and
-shrink to fit; hovering a row exposes its individual favorite toggle.
+Desktop and terminal text searches apply nonempty edits after 150 ms without
+further input. Until then, the previous query and its results remain active.
+Leading and trailing whitespace is ignored; clearing the text or leaving only
+whitespace restores the unfiltered query immediately. Enter does not bypass the
+delay.
 
-The loaded playback track shows only `Playing`, `Paused`, or `Stopped` in the
-Last played column, even before playback has confirmed any audio was heard.
-This follows the playback track, not the Recent tracks selection. Other rows
-show their stored last-played timestamps. Loading a track does not add a history
-entry; only tracks already present in history appear here.
+Library searches title, artist, and the full source path, combined with its
+favorite and missing-file filters; it does not search album metadata. Albums
+searches album titles and member artists. Playlist names search by name; playlist,
+queue, and album track lists search track title, artist, album, and file name.
+Recent tracks searches the displayed track titles. Searches are case-insensitive
+literal substring matches, not wildcard patterns: `%` and `_` match themselves.
+Track searches cover the whole collection, including unloaded pages, rather
+than just the rows on screen.
+
+Each Library root shows its recursive track total. While any text, favorite, or
+missing-file filter is active, it shows matching tracks / total tracks instead,
+including tracks in collapsed folders and unloaded pages. Roots with no matches
+remain visible with a zero matching count; a pending or failed count is shown as
+an em dash, not zero. Clear all filters to return to the total alone.
+
+Changing the search clears that list's selection. Select all operates on matching
+rows only. Queue and playlist drag reordering is unavailable while filtered; clear
+the search before dragging to reorder. Playing or appending a whole playlist still uses its
+complete saved contents, not its search results. If search hides the playing
+track, use the explicit clear-and-locate action to reveal it.
+
+
+== Locate the playing track
+
+Use Library's `Locate playing track in Library` control to reveal the current
+track, including while paused. With no current track, the control is disabled.
+Tree view expands its configured root and parent directories; flat view uses the
+current sort within the configured root. The exact library identity is revealed,
+including separate CUE entries sharing a source file and logical symlink aliases.
+The row is scrolled into view and briefly emphasized without changing selection,
+playback, or unsaved Details edits. Track changes do not automatically follow.
+
+If search, favorites, or missing-only filters hide the track, Library offers
+`Clear filters and locate`; only that explicit action clears the filters.
+A track outside configured roots or no longer available in the library is
+reported rather than locating a different row. Location queries run in the
+background; changed tracks, views, roots, or library revisions discard stale results.
 
 == Albums
 
@@ -649,6 +260,53 @@ for its display, see above. Albums with multiple distinct nonempty artists show
 `Various artists`. Members are ordered by disc number, track number (unknown
 numbers last), title, then library ID. Metadata overrides affect grouping.
 
+== Recent tracks
+
+Recent tracks keeps its own selection, independent of Library, using the
+link:02_library.adoc#_desktop_selection_and_directory_tree[shared selection rules].
+Ctrl+A selects all matching recent tracks when this panel has focus. Sorting
+preserves selected track identities; refreshes discard selections that no longer exist.
+
+Right-click a track for the shared track actions, including batch Favorite and
+Unfavorite. Drag selected tracks to Queue or a named playlist catalog row to
+append them in their displayed order; dragging an unselected track carries only
+that track. These transfers do not remove history entries or change Library
+selection. Double-click plays the clicked track. Columns remain sortable and
+shrink to fit; hovering a row exposes its individual favorite toggle.
+
+The loaded playback track shows only `Playing`, `Paused`, or `Stopped` in the
+Last played column, even before playback has confirmed any audio was heard.
+This follows the playback track, not the Recent tracks selection. Other rows
+show their stored last-played timestamps. Loading a track does not add a history
+entry; only tracks already present in history appear here.
+
+== Play counts and recent tracks
+
+A playback increments its play count once when confirmed heard time *strictly
+exceeds* `playback.play_count_threshold_percent` of the track duration (20% by default).
+Exactly reaching the threshold does not count. Pause/resume and seeks do not
+reset count state or create additional counts; skipped or unconfirmed output
+time is not heard time. When duration is unknown, counting waits for a natural
+EOF to supply a positive duration from the final backend position; without one,
+no count is added.
+
+A successful playback start creates or updates one recent entry per track,
+ordered newest first. Paused time and failed loads do not advance activity.
+History records the last playback activity, not necessarily a counted play;
+it is not a per-play log. Timestamps are Unix seconds in JSON.
+Recent entries reflect edited titles and current play counts without reopening
+the view. Crossing the counting threshold refreshes the recent entry while
+playback continues; editing its title does not change its activity timestamp or
+recency order.
+In the GUI, Last played sorting uses the same live playback timestamp shown for
+the current playing or paused track. Equal-second timestamps place the current
+track first when sorting newest first; title and play-count sorting are unaffected.
+The retained snapshot contains up to 256 recent tracks both after startup and
+after subsequent activity or catalog refreshes.
+
+`rivu library history --limit N` prints up to N retained rows in human mode.
+For the JSON history shape and `--limit` behavior, see <<_cli_output,CLI output>>.
+
 == Paged views
 
 GUI/TUI library and playlist views, and the GUI Albums panel, load results
@@ -697,7 +355,393 @@ retry. GUI/TUI refresh stale query results automatically.
 
 Query limits, revisions, and batch contracts: link:21_ipc.adoc[IPC].
 
+== Metadata and favorites
+
+=== Database edits
+
+Title, artist, album, favorite, and decoder-hint edits change Rivu's database only;
+media files, tags, and CUE sheets are never rewritten. Rescans preserve matching IDs,
+overrides, favorites, decoder hints, counts, and last-played timestamps. `library remove` and
+`library clean-missing` remove records and their queue/playlist references only;
+they never delete media files. Missing rows remain visible in playlist views
+until removed or cleaned.
+
+Failed writes leave saved data unchanged. A refresh error after a committed edit
+does not roll it back: older rows may remain visible until refresh succeeds, and
+Rivu does not replay the edit automatically. Repeating an already-saved override
+or cleaning an already-clean library is not a refresh retry. Transaction ownership
+and invalidation are defined in link:21_ipc.adoc#_revisions_and_watching[IPC revisions].
+
+Metadata edits override only fields you change. An omitted CLI option or an
+unchanged Track details field keeps its current value and continues to follow
+rescanned metadata if it has no previous override. Concurrent edits to different
+fields preserve both changes; edits to the same field use the last applied value.
+Passing an empty string explicitly clears that field's displayed text.
+An explicitly supplied CLI field records an override even when its value equals
+the current scanned metadata; that field then stays fixed across rescans.
+
+[source,sh]
+----
+rivu library list --favorites
+rivu library list --missing
+rivu library favorite 12 34 --set on
+rivu library edit 12 --title "New title" --artist "Artist" --album "Album"
+rivu library clean-missing
+----
+
+=== Track details drafts
+
+Edit title, artist, album, and Decoder hint in Track details, then Save to commit
+the changed fields together. Background refreshes preserve the draft. Edits made
+during a save remain unsaved; failure preserves them for correction or retry.
+A successful save advances the submitted baseline and adopts newer loaded values
+only when no later edits remain. It cannot overwrite a newer draft or a different
+track's details.
+
+Only one track's draft is retained. Unsaved or saving details stay on that track
+instead of following playback. To abandon the draft, select another track, clear
+selection, or reload and confirm Discard; there is no standalone Discard button.
+Cancel keeps the previous selection and draft. Hiding the panel, switching its tab,
+or deleting a playlist or entry does not discard it. In playback-follow mode,
+restoring every edited field to its saved value resumes follow once no save or
+manual action is pending; an explicitly selected track does not follow playback.
+
+Escape first leaves a focused input; from the layout it requests selection
+clearing with the same draft protection. The latest selection, clear, reload,
+window-close, or quit request takes precedence over pending navigation. A range
+selection waits for all its rows and any confirmation before replacing the old
+selection. Failed loads or Cancel change neither selection nor draft. If the
+target collection changes during confirmation, select the target again; Recent
+tracks also rejects a target after a library structure change, but not after
+metadata edits or sorting.
+
+User-initiated window closing and GUI quitting ask before discarding a draft.
+Drafts are not persisted across restarts: external shutdown commands, termination
+signals, and crashes cannot offer this confirmation.
+
+=== Loading and unavailable records
+
+Details distinguishes no selection, loading (`Not loaded`), query failure, an
+unavailable record, and unknown metadata on a loaded track (`—`). Editing and
+actions are disabled until the selected track is ready. Switching tracks clears
+old values and artwork; same-track refreshes retain ready details and drafts,
+including after query failure.
+
+Reload exits manual selection and follows the then-current Playback track without
+changing list selections; Discard or Cancel protects an unsaved or saving draft.
+Without a current track, it clears details. A confirmed unavailable record disables
+Save and clears details only when there is no draft or pending save. Otherwise,
+the fields remain inspectable, copyable, and editable. Only a successful reload
+that finds the record enables Save again: resetting fields, cached playback data,
+or an earlier save acknowledgement cannot do so.
+
+Decoder hints use the same Save and draft-discard workflow as tags. Routing and
+DTS-WAV safety: link:04_playback.adoc#_optional_ffmpeg_decoder[Playback].
+
+=== Read-only probing and displayed metadata
+
+`rivu library probe PATH` reads audio metadata and decoder support without
+starting a core; it does not create or update a library row. Add `--enhanced`
+to explicitly load FFmpeg for this command, even when `playback.ffmpeg_enabled` is off.
+Missing libraries or a native-only build make an enhanced probe fail rather
+than silently use native recognition. JSON includes `probe_backend` and
+`decoder_backend` (`native` or `ffmpeg`); these may differ for ordinary PCM.
+Without `--enhanced`, a fresh probe process does not enhance native-supported
+WAVE recognition. Recognition and DTS-WAV limitations:
+link:04_playback.adoc#_optional_ffmpeg_decoder[Playback].
+
+GUI/TUI lists show compact display metadata. Track details and
+`library list --json` expose full technical metadata, paths, CUE boundaries,
+and statistics. Unknown values appear as `—` in human output or `null` for
+nullable JSON fields.
+
+In GUI Track details, hover a read-only field to reveal Copy value, or reach
+the action with keyboard focus. It copies the complete value even when the
+display is truncated; File path copies the original path even for a missing
+file. Empty, unknown, and unloaded values have no copy action.
+
+`bitrate_bps` describes the encoded audio stream, not decoded PCM or the entire
+container file. `bitrate_exact` marks a reliable fixed-encoding calculation or a
+complete-playback measured average, rather than a scan estimate. Human output
+prefixes scan estimates with `≈`. Existing stored values are estimates until
+confirmed. Scans use low-cost probe information and bounded headers, including
+MP3 summaries and Vorbis nominal targets; they do not traverse a whole stream
+solely to measure its bitrate. Unknown values remain unknown.
+PCM bitrate uses the actual encoded sample width. Measured compressed averages
+use selected audio packet bytes and represented sample duration, excluding
+container overhead, tags, artwork, and other streams. Decoder handling of overlap,
+delay, and padding can cause small differences between measured averages; the
+precision flag does not promise bit-for-bit agreement between decoder backends.
+An unchanged-source scan cannot downgrade a confirmed value; a changed source
+invalidates its previous precision. Playback upgrades are described in
+link:04_playback.adoc#_playback_metadata_updates[Playback metadata updates].
+
+[source,sh]
+----
+rivu library probe album.wav --enhanced
+rivu --json library probe album.wav --enhanced
+----
+
+== Scan policies and recovery
+
+=== Scan boundaries
+
+Scan paths are normalized without resolving symlinks and must be at or below a
+configured root; a mixed inside/outside request is rejected before scanning.
+
+Symlinks are followed even when their targets are outside configured roots;
+logical aliases remain distinct library identities. Directory cycles are scan
+errors. CUE sheets and their sources must also lie within configured logical roots.
+
+`library.scan_max_depth` applies independently to each requested directory. The start
+directory is depth `0`; files in a directory at the limit are scanned, while
+directories beyond the limit are skipped and reported. Direct file and CUE
+requests are unaffected by this directory limit; `0` is invalid. An explicit
+nested scan has its own boundary, even when an enclosing walk skipped it.
+
+=== Minimum duration for new tracks
+
+`library.scan_min_duration_secs` is a new-track admission policy, not a constraint
+on library contents. It applies uniformly to every scan workflow, including
+directory, direct audio/CUE, forced scans, and playlist imports. `0` disables it;
+otherwise only new tracks with a known, finite, positive duration strictly less
+than the configured seconds are excluded. A duration equal to the threshold is
+accepted; unknown, unavailable, zero, or invalid duration is not treated as a
+short track. Existing tracks, including recognized relocations, are retained and
+their metadata is updated normally, even when short. `--force` rereads metadata
+but does not bypass this admission policy for new tracks.
+
+CUE tracks use each segment's duration, not the full source duration. Skipping
+segments never admits their source as a fallback full-file track. Existing probe
+failures remain scan errors; duration exclusions are counted separately from
+errors in the completion summary.
+
+Each scan or playlist import captures the threshold at startup and keeps it for
+the entire task; saving a setting during a task affects only later tasks.
+Changing the setting neither starts a scan nor deletes or cleans existing tracks,
+and has no playback effect.
+
+=== Errors and partial results
+
+Readable tracks are saved even when other paths fail. Depth exclusions and
+filesystem, traversal, probe, or CUE errors protect affected existing tracks:
+they are not newly marked missing or considered relocation candidates. A failed
+sheet protects all its owned tracks, while readable whole sources may still be
+imported. Invalid UTF-8 audio or CUE paths are local errors, not a reason to reject
+unrelated readable tracks.
+
+Requested scopes must also be UTF-8 after normalization. An invalid scope has no
+reconciliation coverage; valid scopes in the same request still run. A failing
+child does not remove its valid parent's coverage, and an explicitly requested
+nested directory has its own coverage despite an enclosing exclusion.
+
+A requested path initially reported `NotFound` is confirmed absent and can mark
+its tracks missing. Disappearance during traversal or reading is uncertain until
+a later scan establishes absence. If bounded diagnostics omit uncertainty details,
+missing detection and relocation are disabled for that scan. Fix reported errors
+and rescan before cleaning missing records.
+
+=== Rereading sources
+
+==== Source validation
+
+CUE sheets must be ordinary files no larger than 1 MiB. Audio sources, including
+CUE references, must also be ordinary files; normal symlinks to such files work.
+FIFOs, devices, oversized sheets, and unreadable sources report local errors
+without waiting for a producer or blocking unrelated imports.
+
+Probing and fingerprinting analyze the same opened source, not a pathname that
+can be replaced midway. If that source changes during analysis, the scan reports
+a local error rather than saving a mixed-version record. Playback and waveform
+loading use the same ordinary-file admission boundary. The descriptor and bounded
+execution contract is in
+link:21_ipc.adoc#_scanning_and_metadata_ownership[Scanning and metadata ownership].
+
+==== Metadata reuse
+Ordinary scans reuse valid full-source metadata and fingerprints when file size
+and modification time match. Metadata also requires the current probe version;
+CUE segment metadata cannot substitute for a full-source probe. Force scans
+reprobe and reread source content. Neither resets user edits.
+An unchanged scan still completes and reports errors, but leaves existing views
+valid. Playlist import still creates its requested playlist when all sources are
+unchanged. The lookup and merge rules belong to
+link:21_ipc.adoc#_scanning_and_metadata_ownership[Scanning and metadata ownership].
+
+==== Bounded execution
+
+Scanning uses bounded background stages so discovery, probing and hashing do not
+occupy the interactive database owner. Started work is joined before a cancelled
+task releases its admission slot. Worker, batch and lookup contracts are described
+in link:21_ipc.adoc#_scanning_and_metadata_ownership[Scanning and metadata ownership].
+
+Native probing skips oversized tags and embedded images before buffering their
+full payloads; otherwise decodable audio remains usable, but some metadata may
+be absent. See link:22_cache.adoc#_native_metadata_admission[Native metadata admission]
+for the resource limits and their scope.
+
+=== Cancellation
+
+Cancel a scan during preparation to discard its results, including tracks already
+read. Cancellation is cooperative; an active audio probe must return before the
+task can retire.
+
+Once the task enters Saving, cancellation is refused. The atomic database merge
+and optional playlist creation finish in the background; published status and
+existing-playback controls remain available, while database reads and edits report
+maintenance in progress. Shutdown waits for the actual result. A failed task may
+still report committed library or playlist changes: inspect its result before
+retrying. A new scan or import is admitted only after the previous task has
+released its resources, not merely after cancellation was requested.
+
+== Same files and relocation
+
+Automatic relocation requires a unique missing old identity and a unique new
+destination with matching content. Exact identities take precedence and do not
+count as new destinations. Ordinary files match by fingerprint; CUE segments
+match by source fingerprint, track number, and exact start/end boundaries, and
+require the old sheet to be absent. Ambiguous copies on either side retain
+separate IDs and the missing identity's user state and playlist references;
+scan order never chooses a destination. Ambiguity is per CUE segment key, so it
+does not prevent other uniquely matched segments from relocating.
+
+Use Settings → Library → `Same files / Relocation candidates` to
+inspect paged ordinary-file groups. Closing the review returns to Settings
+without applying or discarding its unsaved edits. Historical cached BLAKE3 hashes
+identify candidates, not fresh proof. Rows show paths, current existence, scan
+state, metadata, favorites, overrides, history and playlist/queue reference counts.
+Choose a missing old identity and a present destination, then review and confirm.
+The close icon leaves undecided pairs unchanged. `Keep destination independent`
+persists a decision that excludes that row from automatic and manual relocation,
+including after rescanning. No audio files are deleted.
+
+While the review is open, Tab cycles through its controls rather than the
+Settings behind it. Esc closes the review without applying or discarding the
+Settings draft.
+
+Eligible rows offer `Use as old record` or `Use as destination`. A destination
+with user state or references shows a rejection warning; old records and
+ineligible rows retain that information as metadata. Group and file paging are
+independent, and paging files preserves the selected old identity and destination.
+During confirmation, group selection, role selection and both pagers are locked.
+Use Back to selection to revise the pair, Refresh to reset, or Close to leave
+undecided files unchanged.
+
+Confirmation starts one background full-file verification at a time. Rivu checks
+the destination's fresh hash and stable file identity, then revalidates database
+identities and source absence before committing atomically. The old ID, overrides,
+favorite, history and references survive at the destination; its redundant row
+is removed. Destinations with user state or references, active source/destination
+playback, changed files or database identities, and a reappearing source are
+rejected rather than merged. Correct the reported conflict before retrying.
+Verification reads at most the destination size validated at its start; later
+growth does not extend that read budget. File identity is still checked after
+hashing and again before commit, so changed destinations are rejected.
+
+Closing the review requests cancellation of its ongoing verification. Cancellation
+before commit leaves identities unchanged; it cannot undo a completed commit.
+CLI acceptance supplies a task ID, not proof of success. `--wait` reports the
+final outcome; otherwise query status or cancel using that ID. The running core
+retains the latest 32 task results, not persistent task history.
+
+[source,sh]
+----
+rivu library duplicates
+rivu library duplicates --fingerprint FULL_BLAKE3 --offset 0 --limit 100
+rivu library relocate OLD_ID DESTINATION_ID --wait
+rivu library relocation-status TASK_ID
+rivu library cancel-relocation TASK_ID
+rivu library keep-independent DESTINATION_ID
+----
+
+== SQLite maintenance
+
+Rivu opens current version 1 databases only; unsupported or populated unversioned
+databases are rejected without resetting or deleting user data. Album-summary
+trigger maintenance within that schema is automatic, but does not rebuild or
+validate historical summaries. Version authorities and the current maintenance
+revision are defined in link:26_migration.adoc[Database and configuration migration].
+
+=== Independent migration tool
+
+Run `rivu-migrate check` to inspect existing resources without modifying user data
+or configuration; SQLite may update reader-coordination sidecars. Stop the host
+and external database writers before `apply`. The application does not invoke the
+tool automatically. Its current upgrade is album-trigger maintenance in a version
+1 database, not historical schema conversion; configuration is validated, not
+rewritten. Missing resources are not created, and an explicitly selected missing
+database is an error.
+
+`check` exits with `0` when current, `1` when supported changes are needed, and `2`
+on error. `apply` exits with `0` on success and `2` on error, reporting resource
+status and any backup paths already created.
+
+Use the same data directory and configuration path that select the intended host.
+For an explicitly selected existing library, for example:
+
+[source,sh]
+----
+rivu-migrate --data-dir /path/to/rivu-data --config /path/to/config.toml check
+rivu-migrate --data-dir /path/to/rivu-data --config /path/to/config.toml apply
+----
+
+`--config` alone does not select the database directory. `check` does not reserve
+the resources: `apply` reinspects them under the application's directory-identity
+ownership, including aliases. Before changing the database it creates and reports
+a non-overwriting SQLite backup beside it, including committed WAL contents;
+copying a live `.db` alone is not equivalent. A failed maintenance transaction
+rolls back without changing configuration.
+
+After failure, inspect the reported state and explicitly rerun with the same
+target paths. Already-current resources are skipped and backups are not
+overwritten. Keep those backups for manual restoration: there is no automatic
+downgrade or paired restore. Successful apply does not start Rivu. Backup naming,
+ownership and reentry design are documented in
+link:26_migration.adoc#_apply_protocol[the migration protocol].
+
+=== Database operations
+
+If you choose to rebuild, stop the core and retain a separate backup of
+`library.db` and any `-wal`/`-shm` sidecars before using a fresh database and
+rescanning the music files. Do not overwrite or delete the original database.
+A fresh library does not retain playlists, saved queue, favorites, metadata
+overrides, decoder hints, or playback statistics. Audio files, `config.toml`, and
+`layout.json` are independent.
+
+Graceful core shutdown (`rivu quit`, `SIGINT`, or `SIGTERM`) closes its database
+connection. SQLite normally checkpoints and removes the WAL/SHM sidecars when
+the last connection closes; external connections can defer that cleanup.
+After an abrupt exit such as `SIGKILL`, keep any remaining WAL with the database
+so SQLite can recover committed transactions on the next open.
+
+Rivu uses SQLite WAL mode with `synchronous=NORMAL`. Committed transactions survive
+an application crash, but a power failure or operating-system crash can roll back
+recent commits. This trades power-loss durability for fewer commit-time disk
+syncs; it does not make playlists, favorites, overrides, or playback statistics
+reconstructible by scanning. Keep backups of user state. See
+https://sqlite.org/pragma.html#pragma_synchronous[SQLite synchronous modes].
+
+To reclaim database/WAL space and refresh SQLite query statistics, ensure
+playback is stopped and no scan is active, then run:
+
+[source,sh]
+----
+rivu library optimize
+----
+
+Optimization requires stopped playback and no active scan, relocation or export.
+It runs in a single background worker; the command waits for its final size report.
+While it runs, database operations are refused promptly, but published state,
+volume and shutdown requests remain available. A waiting timeout does not stop
+the worker or permit a second optimization. Shutdown waits for physical retirement
+without a hard deadline. VACUUM may already have changed the database if a later
+optimization/checkpoint step fails; failure is not a rollback guarantee. Inspect
+the result, close blocking readers, and explicitly retry only when appropriate.
+
 == CLI output
+
+`library list --query TEXT` filters by the Library search fields described above;
+`--favorites` and `--missing` combine with it. For machine-readable records, use
+`rivu --json library list --query "Artist"`.
 
 Human-readable CLI output escapes terminal control characters in metadata,
 names, paths, device information, and error details. Embedded tabs and line
@@ -747,127 +791,3 @@ History state responses contain the requested Library section; read `library.his
 History's `--limit` affects human output only. Protocol and query contracts are
 described in link:21_ipc.adoc[IPC].
 
-== Play counts and recent tracks
-
-A playback increments its play count once when confirmed heard time *strictly
-exceeds* `playback.play_count_threshold_percent` of the track duration (20% by default).
-Exactly reaching the threshold does not count. Pause/resume and seeks do not
-reset count state or create additional counts; skipped or unconfirmed output
-time is not heard time. When duration is unknown, counting waits for a natural
-EOF to supply a positive duration from the final backend position; without one,
-no count is added.
-
-A successful playback start creates or updates one recent entry per track,
-ordered newest first. Paused time and failed loads do not advance activity.
-History records the last playback activity, not necessarily a counted play;
-it is not a per-play log. Timestamps are Unix seconds in JSON.
-Recent entries reflect edited titles and current play counts without reopening
-the view. Crossing the counting threshold refreshes the recent entry while
-playback continues; editing its title does not change its activity timestamp or
-recency order.
-In the GUI, Last played sorting uses the same live playback timestamp shown for
-the current playing or paused track. Equal-second timestamps place the current
-track first when sorting newest first; title and play-count sorting are unaffected.
-The retained snapshot contains up to 256 recent tracks both after startup and
-after subsequent activity or catalog refreshes.
-
-`rivu library history --limit N` prints up to N retained rows in human mode.
-For the JSON history shape and `--limit` behavior, see <<_cli_output,CLI output>>.
-
-== SQLite maintenance
-
-Rivu creates and opens only schema version 1 library databases. Other versions
-and unversioned databases are rejected without changing the schema or user data.
-There is no automatic schema-version migration, reset, or deletion. The schema
-version identifies the persistent structure and semantics, not the application release.
-Within that schema, Rivu maintains its current album-summary triggers transactionally.
-`album_trigger_revision` is an internal derived-structure maintenance marker, not a
-second database schema version. Installing triggers does not by itself repair
-historical summary data. Up-to-date definitions are not reinstalled; future
-maintenance revisions are rejected rather than downgraded.
-
-=== Independent migration tool
-
-`rivu-migrate check` opens the database read-only without modifying user data or
-configuration; SQLite may create or update WAL shared-memory sidecars for reader
-coordination. `rivu-migrate apply` performs supported upgrades while the host is
-stopped. Both accept `--data-dir` and `--config` with the same defaults as Rivu.
-The application does not invoke the tool automatically.
-The tool supports the current version 1 database contract. Configuration is strictly
-validated against the current schema; omitting `schema_version` means current, not
-an upgrade request. The tool never rewrites or backs up configuration, and does not
-create a configuration lock. Unknown database structures, unsupported explicit
-versions, and invalid configurations are errors, not instructions to discard data.
-No historical database conversion is inferred from a missing version number.
-Missing resources are not created; an explicitly selected missing library database
-is an error.
-`check` exits with `0` when no changes are needed, `1` when supported changes are
-needed, and `2` on error. `apply` exits with `0` on success and `2` on error;
-errors include the resource status and any backup paths already created.
-
-Apply acquires the same directory identity ownership as the application, including
-directory aliases. Stop external database writers before applying. Configuration
-is read-only in the tool. Normal application configuration saves use atomic
-replacement without a configuration writer lock.
-
-Before modifying the database, the tool creates a non-overwriting backup and reports
-its location. SQLite backups include committed WAL contents through SQLite's backup
-API; copying only a live `.db` file is not equivalent. Database updates use
-transactions; a failed maintenance transaction rolls back without changing the
-configuration.
-Backups reside beside the database, named `library.db.YYYYMMDD-HHMMSS.bak`
-using the system local time without a timezone suffix. Name collisions append
-`.1`, `.2`, and so on before `.bak`; existing backups are never renamed or overwritten.
-
-On failure, inspect the reported state and explicitly rerun with the same target
-paths: already-current resources are skipped. Backups are not overwritten on retry.
-There is no automatic downgrade, paired restore, or recovery-state database. Keep
-the original backups if you need to restore manually. A successful apply means the
-selected existing resources satisfy the current contracts; it does not start the
-application.
-The dependency, version authority, derived-structure maintenance, and ownership
-contracts are defined in link:26_migration.adoc[Database and configuration migration].
-
-
-=== Database operations
-
-Unchanged playback timestamps, queue positions during deduplication, and derived
-album artists are not rewritten. Actual listening statistics, queue changes, and
-album membership changes still commit normally; writes are not deferred.
-
-If you choose to rebuild, stop the core and retain a separate backup of
-`library.db` and any `-wal`/`-shm` sidecars before using a fresh database and
-rescanning the music files. Do not overwrite or delete the original database.
-A fresh library does not retain playlists, saved queue, favorites, metadata
-overrides, decoder hints, or playback statistics. Audio files, `config.toml`, and
-`layout.json` are independent.
-
-Graceful core shutdown (`rivu quit`, `SIGINT`, or `SIGTERM`) closes its database
-connection. SQLite normally checkpoints and removes the WAL/SHM sidecars when
-the last connection closes; external connections can defer that cleanup.
-After an abrupt exit such as `SIGKILL`, keep any remaining WAL with the database
-so SQLite can recover committed transactions on the next open.
-
-Rivu uses SQLite WAL mode with `synchronous=NORMAL`. Committed transactions survive
-an application crash, but a power failure or operating-system crash can roll back
-recent commits. This trades power-loss durability for fewer commit-time disk
-syncs; it does not make playlists, favorites, overrides, or playback statistics
-reconstructible by scanning. Keep backups of user state. See
-https://sqlite.org/pragma.html#pragma_synchronous[SQLite synchronous modes].
-
-To reclaim database/WAL space and refresh SQLite query statistics, ensure
-playback is stopped and no scan is active, then run:
-
-[source,sh]
-----
-rivu library optimize
-----
-
-Optimization requires stopped playback and no active scan, relocation or export.
-It runs in a single background worker; the command waits for its final size report.
-While it runs, database operations are refused promptly, but published state,
-volume and shutdown requests remain available. A waiting timeout does not stop
-the worker or permit a second optimization. Shutdown waits for physical retirement
-without a hard deadline. VACUUM may already have changed the database if a later
-optimization/checkpoint step fails; failure is not a rollback guarantee. Inspect
-the result, close blocking readers, and explicitly retry only when appropriate.

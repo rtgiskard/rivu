@@ -1,4 +1,6 @@
 = Playlists
+:toc:
+:toclevels: 2
 
 Playlists are ordered collections of library tracks. Each track ID appears at
 most once; adding it again leaves the existing entry unchanged. Imports and
@@ -7,80 +9,72 @@ link:04_playback.adoc#_queue[playback queue].
 
 == Management
 
-Use `rivu playlist` to create, rename, delete, add, remove, move, or play.
-Playlist IDs identify collections; entry IDs identify items for removal or
-movement. Move indices start at zero. `playlist list` shows both kinds of ID.
-Adding no new tracks or moving an entry to its current index leaves the playlist
-unchanged. These requests still validate the playlist, track IDs, entry ID, and
-move bounds; invalid requests do not change any entries.
+Create a playlist with New playlist in the desktop Playlists panel, or import an
+M3U/M3U8 or CUE file with Import. To collect tracks already in Rivu, use a track
+menu's Add to playlist action; to keep the current listening order, use Queue →
+Save queue as playlist. These operations do not change the source collection.
 
-Creating a playlist from a queue commits the name and entries together. If an
-entry cannot be saved, no empty playlist is left behind.
+Names must contain a non-whitespace character and no control characters. Creating,
+renaming, saving a queue, and importing reject an existing name. Comparison is
+exact, including case and whitespace: CLI/API names retain outer whitespace,
+while the desktop name dialog trims it. Existing duplicate names remain usable
+by ID; rename or delete them explicitly.
 
-Playlist names must contain a non-whitespace character and must not contain
-control characters. Creating, renaming, saving a queue, and importing reject a
-name already used by another playlist. Names are compared exactly, including
-case and whitespace; CLI/API names retain leading and trailing whitespace, while
-the desktop name dialog trims it before submission. Renaming to the playlist's
-current name leaves it unchanged. Existing duplicate
-names remain accessible by ID and can be resolved by renaming or deleting;
-they are not automatically changed.
+Use `rivu playlist` for command-line management. Playlist IDs identify collections;
+entry IDs identify items for removal or movement. `playlist list` shows both.
+Move indices start at zero.
 
 [source,sh]
 ----
 rivu playlist new "Mix"
+rivu playlist import mix.m3u8 --name "Imported mix" --wait
 rivu playlist list
 rivu playlist add PLAYLIST_ID TRACK_ID...
 rivu playlist move ENTRY_ID 0
+rivu playlist remove ENTRY_ID
 rivu playlist play PLAYLIST_ID
 ----
 
-Playing a non-empty playlist replaces the queue, with no playlist or queue-size cap.
-An empty or unknown playlist leaves the existing queue unchanged.
-See link:04_playback.adoc#_queue[Playback queue].
+Adding an existing track, moving an entry to its current position, or renaming
+to the current name leaves contents unchanged, but still validates IDs and move
+bounds. Creating a playlist from a queue saves its name and entries atomically;
+a failed entry save does not leave an empty playlist.
 
 == Desktop UI
 
-The Playlists panel keeps New playlist, Import, and Export together at the top.
-The catalog and selected playlist's tracks have independent optional searches;
-see link:02_library.adoc#_desktop_list_search[Desktop list search]. Filtering does
-not restrict whole-playlist Play, Append, or Export actions.
-Export stays in place and is unavailable until a playlist is selected. New playlist
-opens a blank name dialog. Hover a catalog row to reveal its Play and actions
-buttons; these target that row without changing the selected playlist. The actions
-menu offers Play / replace queue, Append to queue, Add current track (unavailable
-without a current playback track), Rename, and Delete. Append copies the complete
-playlist in its saved order without changing playback. Add current track uses the
-playback track, not any Library selection. Rename opens the current name; Enter submits, and Cancel or
-Esc discards the draft. Empty names are rejected. Saving runs in the background
-and prevents repeat submissions; failures keep the dialog and draft available
-for correction. A submitted save cannot be cancelled, including by closing the window.
-Successful saves refresh the catalog without reopening the panel, including when
-creating the first playlist. Active catalog searches still filter the result.
+=== Catalog and naming
 
-Playing a non-empty playlist starts immediately when the queue is empty. Otherwise,
-with the default `interface.confirm_queue_replace = true`, a confirmation names
-the playlist and offers Cancel or Replace and play. The Playback & Audio settings
-toggle controls this confirmation for both playlists and albums in the GUI.
-Cancel or Esc leaves the queue and playback untouched. An empty playlist cannot replace
-the queue. Deletion also requires confirmation naming the target playlist; it
-removes only the playlist, never music files.
+Select a playlist in the catalog to browse its tracks. The catalog and track list
+have independent link:02_library.adoc#_desktop_list_search[searches]; filtering
+does not restrict whole-playlist Play, Append, or Export.
 
-Selecting a playlist shows its tracks below the catalog. The catalog fits its
-content up to about one third of the available list area, leaving the remainder
-for tracks; a short track list can also shrink. With no selection, the catalog
-uses the remaining panel space. Track rows use the Queue's numbering and text
-layout. Use the
-link:02_library.adoc#_desktop_selection_and_directory_tree[shared selection rules]
-for clicks and ranges, including unloaded pages. The track count
-shows the selection size. Use Delete to remove selected entries together.
-Hover controls for Play, Favorite, and Remove target only that row, never the group.
-Double-click or Enter plays the
-active track individually. With playlist tracks focused, arrows move the active
-track, Home/End selects the first/last matching entry, Shift+arrows extend a range,
-Ctrl+A selects every matching entry, and Delete removes the selection.
-These keys do not target the playlist catalog or steal focus from inputs,
-dialogs, or another panel.
+Hover a catalog row for Play and its actions menu. These actions target that row,
+not the selected playlist. Play replaces the queue with the complete saved order
+and starts playback; Append copies it without changing current playback. There
+is no playlist or queue-size cap. Empty or unknown playlists leave the queue
+unchanged.
+
+When the queue is nonempty, the GUI asks before replacing it by default. Cancel
+or Esc keeps queue and playback untouched. Settings → Playback & Audio controls
+this with `interface.confirm_queue_replace`, also used for albums.
+
+The row menu also offers Add current track, Rename, and Delete. Add current track
+uses the playback track, not Library selection, and is unavailable without one.
+Rename opens the current name; Enter submits, while Cancel or Esc discards the
+draft. Saving runs in the background and prevents repeated submissions. Failure
+keeps the draft for correction; a submitted save cannot be cancelled by closing
+the window. Success refreshes the catalog under its current search. Delete asks
+for confirmation and removes only the playlist, never music files.
+
+=== Track selection and ordering
+
+Use the link:02_library.adoc#_desktop_selection_and_directory_tree[shared selection rules]
+to select tracks and ranges, including unloaded pages. The count shows selection
+size. With the track list focused, arrows navigate, Home/End selects the first/last
+matching entry, Shift+arrows extends a range, Ctrl+A selects all matches, and Delete
+removes selected entries. These keys do not operate the catalog, an editor, or
+another panel. Double-click or Enter plays the active track individually. Hover
+Play, Favorite, and Remove controls act only on their own row.
 
 Once loading completes, an empty playlist shows its empty state. Drag a selected
 track to move the selected group in its original playlist order; dragging an
@@ -92,6 +86,8 @@ This saves playlist order without changing the queue. A drag is rejected if that
 playlist's membership or order changes, it is deleted, or the selection switches
 before dropping, including switching away and back. Renaming a playlist or editing
 another playlist does not cancel the drag.
+
+=== Transfers and queue saving
 
 Dragging playlist tracks to Queue or another playlist copies their track IDs in
 playlist order without removing source entries. A named catalog row is an
@@ -106,65 +102,50 @@ tracks without changing the source collection. This selector also works when
 the Playlists panel is not visible. Track menus follow the
 link:02_library.adoc#_desktop_selection_and_directory_tree[shared selection rules].
 
-Use the Queue panel context menu's Save queue as playlist action to save a
-non-empty queue. The shared playlist name dialog starts with a date-and-time
-name that can be edited; duplicate queue occurrences become one playlist entry.
-Saving runs in the background and prevents repeat submissions. Failures retain
-the dialog and draft for correction and retry. Closing the window does not
-cancel a save already submitted to the core. Queue selection status appears
-only while loading or after an error; Retry remains available after an error.
+Use Queue → Save queue as playlist for a nonempty queue. The name dialog suggests
+a date-and-time name; duplicate occurrences become one entry, retaining the first
+occurrence's order. Saving does not change the queue. The dialog uses the same
+background-save and failure-retry behavior as New playlist and Rename. Loading
+or failed queue selection shows status; Retry remains available after failure.
 
-link:02_library.adoc#_recent_tracks[Recent tracks] supports independent multiselect,
-batch favorites, and transfers to Queue or playlists.
+=== Loading and selection recovery
 
-Playlist catalogs, entries, and track-menu playlist selectors
-load rows automatically while scrolling. Entry numbering and drag reordering use
-absolute playlist positions. Filtering Queue or playlist entries keeps their
-original position numbers rather than renumbering the matching rows. Scrolling
-away preserves selected entry identities, not their metadata pages.
-See link:02_library.adoc#_paged_views[Library] for
-scrolling and query failure behavior. Switching playlists clears track selection.
-Deleting the selected playlist from another client clears its selection on
-refresh. Empty playlists and unloaded pages do not imply deletion.
+Catalogs, entries, and track-menu playlist selectors load while scrolling. Entry
+numbers and drag positions remain absolute, including when search hides rows.
+Switching playlists clears track selection; deleting the selected playlist from
+another client clears it on refresh. Empty playlists and unloaded pages do not
+imply deletion. See link:02_library.adoc#_paged_views[Paged views] for loading,
+timeouts, and CLI incomplete-output recovery.
 
-Range selection waits for the complete range and any Details draft confirmation.
-A failed range leaves the previous selection and Details unchanged. Refreshes
-retain selected entries that still exist and discard removed entries; old query
-results cannot overwrite a newer selection. Pending or failed selection loads
-disable group actions and show status with Retry; loaded row controls stay row-local.
-Group removal is atomic; a failed command leaves selection intact until refresh.
-
-Selection query failures, including an unavailable core, stop loading and preserve
-the previous selection without automatic retries. Retry reconciles that selection;
-it does not replay the failed range or key command. With no previous selection,
-Retry restores an empty selection so another click or navigation command can proceed.
-While keyboard navigation loads, repeated arrows retain only the latest target;
-superseded targets never replace the active track. Repeating an arrow at a list
-boundary does not start another navigation load.
+A range is selected only after all its rows load and any Details draft confirmation
+is resolved. Failure preserves the previous selection and draft. Refresh keeps
+entries that still exist and discards removed ones. Pending or failed selection
+loads disable group actions and offer Retry; loaded row controls remain row-local.
+Retry reconciles the previous selection rather than replaying a failed range or
+key command. With no previous selection it restores an empty selection so you
+can navigate again. Failed group removal does not partially remove entries.
 
 === Playlist query validity
 
-Reordering refreshes only that playlist's entries and selected positions, including
-moves made by another client. Renaming preserves its tracks and selection; changing
-another playlist does not reload the selected playlist's contents. Track metadata
-edits update displayed information without changing entry identities or positions.
-Empty playlists remain valid collections, not deleted or unloaded playlists.
-
-If membership or order changes during a listing, restart the traversal;
-renaming or changing another playlist does not interrupt it. Export instead uses
-one consistent database snapshot, independent of edits made while writing.
-Stale group operations are rejected without partial changes. See
-link:02_library.adoc#_paged_views[Paged views] for incomplete CLI output and retries,
-link:21_ipc.adoc#_revisions_and_watching[IPC revisions] and
-link:21_ipc.adoc#_query_results_and_pagination[query validity] for the internal
-contract, and link:22_cache.adoc#_query_projection_retention[Query projection retention]
-for cached views.
+Changes to this playlist's membership or order invalidate an in-progress listing;
+restart it. Rename and changes to other playlists do not interrupt it. Metadata
+edits update text without changing entry identity or position. Stale group edits
+are rejected rather than partially applied. Export uses one consistent snapshot,
+so concurrent edits do not alter the file being written. Query validity belongs to
+link:21_ipc.adoc#_query_results_and_pagination[IPC]; retained view lifetimes belong
+to link:22_cache.adoc#_query_projection_retention[Caching].
 
 == Import and export
 
+Use Import at the top of the Playlists panel to read a file. Select a playlist
+before using Export; it stays unavailable without a selection. The CLI equivalents
+below support the same exchange formats and whole-playlist semantics.
+
+=== Import workflow
+
 CLI paths are relative to the invoking client's working directory. Referenced
 media and CUE sheets must lie within configured logical roots; see
-link:02_library.adoc#_roots_and_scanning[Library scan boundaries and errors].
+link:02_library.adoc#_scan_policies_and_recovery[Library scan boundaries and errors].
 Imports scan referenced sources before creating the playlist and may create
 partial playlists: `--wait` reports scan errors even when readable tracks were
 saved. Only identities successfully read or validly reused by that import's scan
@@ -183,6 +164,8 @@ and shutdown cancel preparation without saving results or creating a playlist.
 Once Saving begins, the link:02_library.adoc#_cancellation[scan maintenance and cancellation rules]
 apply instead.
 
+=== Input limits and cancellation
+
 Import inputs must be ordinary files, including CUE sheets referenced by M3U;
 directories, devices, and FIFOs are rejected without waiting for a writer. M3U
 input is limited to 16 MiB, each CUE sheet to 1 MiB, and aggregate input to 64 MiB
@@ -193,18 +176,18 @@ storage. These limits allow large collections while bounding repeated-sheet
 expansion and long-metadata costs; the aggregate and expansion limits apply to
 imports, not playlist sizes for other operations. Input errors identify
 preparation/read/decode/parse stages and occur before any scan or playlist commit.
-Parsed import CUE sheets are reused by metadata scanning, preserving the sheet
-version and track order read during preparation. Ordinary library scans and CUE
-exports share the ordinary-file-only, nonblocking, 1 MiB CUE reader. Input reads
-move the admitted descriptor and retained byte buffer through blocking stages of
-at most 256 KiB; cancellation is checked before and after each read, including
-EOF, and during CUE parsing. Reading does not reopen an admitted path.
+Prepared CUE data is reused by scanning so the import keeps the sheet version and
+track order it read. Cancellation is checked during reads and parsing; the reader
+does not reopen an admitted path. Internal scheduling and ownership are described
+in link:21_ipc.adoc#_core_and_client_boundary[Core and client boundary].
 
-Scan saving, playlist creation, and playlist refresh are separate stages. A
-failure to save the scan does not create a playlist. Once the scan has been
-saved, a later library refresh or playlist creation failure does not roll back
-the saved tracks; once the playlist has been created, a playlist refresh failure
-does not delete it. Task results retain `library_committed` and `playlist_id` for
+=== Commit and export lifecycle
+
+Scan saving and playlist creation commit separately; view refreshes do not undo
+either commit. A failure to save the scan does not create a playlist. Once the
+scan has been saved, a playlist-creation or later refresh failure does not roll
+back the saved tracks; once the playlist has been created, a refresh failure does
+not delete it. Task results retain `library_committed` and `playlist_id` for
 confirmed commits, including failures of later steps. The import is not replayed
 automatically; inspect the result before retrying a missing step.
 
@@ -215,14 +198,12 @@ reply reports final output, not startup. Concurrent edits do not alter its snaps
 Failure or shutdown cancellation before replacement preserves the old target;
 a response timeout does not cancel the worker or prove that replacement failed.
 
-Export formats at most 256 rows before a cooperative yield, counting CUE
-continuations even when they produce no output. File writes reuse one 256 KiB
-buffer and submit at most that many bytes per blocking stage; database pages
-remain bounded and retain the same read snapshot. Neither stage occupies a
-blocking worker while waiting for the other. Errors, panics, and cancellation
-await submitted file work and retire the temporary file and database snapshot
-before admitting another export. The final same-directory replacement is one
-joined atomic stage; cancellation after its last check cannot undo replacement.
+Export writes a same-directory temporary file and atomically replaces the target
+only after successful output. Cancellation cannot undo replacement after the
+commit point. A new export is admitted only after the previous worker releases
+its file and snapshot resources; timeout is not permission to start a duplicate.
+The bounded worker contract is described in
+link:21_ipc.adoc#_core_and_client_boundary[Core and client boundary].
 
 [source,sh]
 ----
@@ -233,12 +214,16 @@ rivu playlist export PLAYLIST_ID exported/mix.m3u8
 
 === M3U/M3U8
 
-Import accepts UTF-8, including BOM, and resolves entries relative to the playlist
-file. Ordinary audio and complete CUE sheets may be mixed. Export writes standard
-UTF-8 M3U with paths relative to the destination directory; that directory must
-already exist. Export replaces the destination only after all entries have been
-written successfully to a temporary file in that directory. Invalid paths, CUE
-validation failures, and write errors leave an existing destination untouched.
+Import accepts UTF-8, including BOM, and resolves entries as local filesystem
+paths relative to the playlist file. Blank lines and lines beginning with `#`
+are ignored, including `#EXTINF`: imported metadata comes from the audio/CUE scan,
+not those directives. Paths are not shell input, URLs, or recursively imported
+M3U files. Ordinary audio and complete CUE sheets may be mixed.
+
+Export writes UTF-8 M3U regardless of the destination extension, with paths relative
+to the destination directory; that directory must already exist. Invalid paths,
+CUE validation failures, and write errors preserve an existing target under the
+atomic replacement rules above.
 Paths that cannot be represented as UTF-8 or contain CR/LF line breaks are
 rejected. CR/LF in title or artist metadata is replaced with spaces so it cannot
 introduce additional M3U lines. Relative paths beginning with `#` are prefixed
@@ -251,6 +236,12 @@ Single-file and multi-file audio sheets are supported, using UTF-8 (with or
 without BOM) or BOM-marked UTF-16. `FILE` paths are relative to the sheet;
 Windows separators are accepted. Sources must be supported audio with readable,
 finite positive duration; data tracks are unsupported.
+Track numbers must increase within `01..99`, and every track requires `INDEX 01`.
+Times use 75 frames per second. A segment ends at the next `INDEX 01` within its
+`FILE`, or at the source duration for the last segment. `INDEX 00` pregaps therefore
+remain at the end of the preceding segment; `PREGAP` and `POSTGAP` do not synthesize
+silence. Invalid syntax, unsupported directives, source failures, or invalid
+segment bounds reject the whole sheet rather than importing a partial sheet.
 
 CUE library identities and directory scanning: link:02_library.adoc#_cue_library_tracks[Library].
 Subtrack playback: link:04_playback.adoc#_transport_and_timing[Playback].

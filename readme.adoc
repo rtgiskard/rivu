@@ -13,9 +13,9 @@ terminal, and headless modes that share one playback instance.
 * Optional MPRIS and system tray integration
 * Named desktop layouts with dockable panels and configurable appearance
 * Waveform, spectrum, spectrogram, audio visualizers, and album artwork
-* Live parametric EQ, offline restoration, MossFormer2 speech enhancement and
-  Kim vocal/accompaniment separation; explicit local model preparation and
-  link:doc/27_audio_processing.adoc[usage, measured evidence and acceptance limits]
+* Live parametric EQ and node-based audio processing with offline rendering,
+  restoration, speech enhancement and vocal/accompaniment separation;
+  link:doc/27_audio_processing.adoc[usage, explicit model preparation and quality limits]
 
 Rivu plays local files; it does not fetch network media or cover art.
 The desktop requires Wayland; audio output requires a running PipeWire 1.2 or newer server.
@@ -104,15 +104,17 @@ IPC access and upgrade constraints are described in link:doc/21_ipc.adoc[IPC].
 ** link:doc/02_library.adoc[Library, metadata, history, and database maintenance]
 ** link:doc/03_playlist.adoc[Playlists and import/export]
 ** link:doc/04_playback.adoc[Playback, audio output, queue, TUI, and desktop integration]
+** link:doc/27_audio_processing.adoc#_practical_workflow[Audio processing, graph execution, audition and export]
 * Design notes
 ** link:doc/21_ipc.adoc[Core and client boundaries, IPC protocol]
 ** link:doc/22_cache.adoc[Caching and resource lifecycles]
 ** link:doc/23_visuals.adoc[Audio analysis and visualization rendering]
 ** link:doc/24_layout.adoc[Desktop layout and docking]
+** link:doc/25_gpu_rendering.adoc[Parameter-driven GPU rendering: implemented slices, proposal and measurements]
 ** link:doc/26_migration.adoc[Database and configuration migration boundaries]
-** link:doc/27_audio_processing.adoc[Audio processing usage, design and quality acceptance]
+** link:doc/27_audio_processing.adoc#_ownership_and_invariants[Audio processing ownership, quality acceptance and evidence]
 * Project status
-** link:doc/90_open_issues.adoc[Open issues and deferred investigations]
+** link:doc/90_open_issues.adoc[Open issues, deferred investigations and resolution records]
 * Agent development skills
 ** https://github.com/rtgiskard/gskd-craft[gskd-craft]: reusable agent development skills
 
@@ -138,9 +140,10 @@ make install PREFIX="$HOME/.local"
 ----
 
 Use the repository's Rust toolchain and `Cargo.lock` when building.
-The install command builds the default variant and installs `rivu`, `rivu-migrate`,
+The install command builds the workspace and installs `rivu`, `rivu-migrate`,
 the desktop entry, and icons. Ensure `~/.local/bin` is on `PATH`.
-Use `make build` to build without installing, or `cargo build --release` directly.
+Use `make build` to build without installing, or `cargo build --workspace --release`
+directly. Plain `cargo build --release` builds only the application and its dependencies.
 Build outputs default to `.cache/target/`; `CARGO_TARGET_DIR` overrides that path.
 
 Linux builds prefer `mold` when available and otherwise use the toolchain's
@@ -164,12 +167,15 @@ To build without FFmpeg support, omit the FFmpeg package and disable default fea
 
 [source,sh]
 ----
-cargo build --release --no-default-features
+cargo build --workspace --release --no-default-features
 ----
 
-Install the resulting `.cache/target/release/rivu` into a directory on `PATH`
-(or use the corresponding path under `CARGO_TARGET_DIR`). Do not run `make install`
-for this variant: it rebuilds with default features, including FFmpeg.
+Install the resulting `.cache/target/release/rivu` and
+`.cache/target/release/rivu-migrate` into a directory on `PATH` (or use the
+corresponding paths under `CARGO_TARGET_DIR`). The desktop entry and icons are
+the same as in the default build; see the `install` target in `Makefile` for their
+destinations. Do not run `make install` for this variant: it rebuilds with default
+features, including FFmpeg.
 
 === Font embedding
 

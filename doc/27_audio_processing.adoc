@@ -1,53 +1,16 @@
 = Audio processing: usage, design and acceptance
+:toc:
+:toclevels: 2
 
 == Scope and status
 
-The accepted implementation scope is a flexible parametric equalizer,
-multi-mode music and speech denoising, and vocal/accompaniment separation.
-Speech enhancement and music source separation are separate processing targets;
-neither substitutes for the other. This document records the implementation
-contract and acceptance targets, not a claim that unmeasured quality has passed.
-
-The application remains a local music player. Processing never rewrites source
-media. Algorithm selection prioritizes measured quality, latency and resource
-cost; unresolved licensing does not exclude research candidates. Preparation
-retains provenance and actual code/weight notices without inventing grants.
-A code license does not establish permission to redistribute pretrained weights.
-No model download occurs implicitly during playback or a build.
-
-== Ownership and invariants
-
-* Core commits configuration; UI submits edits, not stale replacement snapshots.
-* Prepared DSP owns its coefficients, history, rate and channel layout. The device
-  callback performs no model loading, FFT planning, file I/O or unbounded work.
-* Disabled processing preserves the original signal path. Protection, resampling,
-  gain compensation and latency are explicit, not silent quality fallbacks.
-* Every task result is bound to source identity, processing configuration and model
-  identity. Cancellation or supersession prevents publication, not necessarily
-  physical completion. Source files and existing results are never overwritten.
-* Seeking, changing a source and incompatible format changes reset history. Pause
-  does not invent audio time. Tail flushing and trimming preserve source alignment.
-* Allocation, channel count, block work, retained results and scratch storage have
-  explicit finite bounds. Long processing stays outside the device callback.
-
-`rivu-dsp::equalizer` groups shared parameters and implementation selection in
-`config`, the recursive processor in `iir::Equalizer`, and the linear-phase
-processor in `fir::FirEqualizer`. Both implementations consume the same
-`config::EqualizerConfig`; `config::EqImplementation` selects between them.
-There is no separate top-level `fir_eq` module or legacy path alias.
-
-Configuration and validation remain available without execution support. The
-default feature set is empty; the optional `execution` feature enables `iir`,
-`fir`, response sampling, denoising implementations and the `rustfft` dependency.
-Execution APIs are absent when disabled, not replaced by no-ops. Serialization,
-defaults and validation semantics remain unchanged.
-
-The desktop application and `rivu-audio` explicitly enable `execution` with
-default features disabled. `rivu-format` uses only the resident contracts with
-default features disabled and does not request execution. Cargo feature
-unification can still enable execution when these crates share a dependency
-graph with an execution consumer. The `equalizer_benchmark` and `denoise_render`
-examples require `--features execution`.
+Rivu provides live Monitor EQ, source-preserving restoration and neural speech
+enhancement/separation, and a node graph for combining them. Monitor EQ changes
+playback; graph nodes and offline jobs use independent settings. Processing never
+rewrites source media, and no model download occurs during playback or a build.
+The usage sections describe available behavior; <<_equalizer_acceptance,quality
+acceptance>> and <<_recorded_local_evidence_and_remaining_limits,recorded evidence>>
+separately describe evaluation requirements and their remaining limits.
 
 == Practical workflow
 
@@ -58,14 +21,40 @@ have independent settings. The source selector and monitor-EQ bypass state stay
 visible above the working area. Restoration and neural jobs retain separate
 results. Processing never edits library media. Keep headroom when boosting or
 remixing: there is no implicit loudness matching or limiter.
+
+. Choose the source: Current track or Selected track.
+. For live tonal adjustment, use Monitor EQ. For restoration or neural processing,
+  configure that operation; neural backends need explicit preparation below.
+. For a combined chain, connect graph ports, apply field drafts, then Preview a
+  node output or Run an Output node with the chosen execution mode.
+. Follow the task summary to completion; use the selected-audio line to confirm
+  what is actually being auditioned, then compare with Original at fixed levels.
+. To keep a graph output, Export WAV to a new file. Retained audition results
+  alone do not survive session retirement.
+
 The selected-audio line is Core's admitted source, not a guess from the latest
 task: it identifies the retained run, exact graph port and live/hybrid/cached path,
-with Playing, Paused or Stopped reported separately. Completing an offline job
-does not select it. Return to original addresses the currently selected audition,
-even when the latest task belongs to a different run. Invalid node/port requests
-leave the prior selection unchanged; playback retirement clears it.
+with Playing, Paused or Stopped reported separately. Explicit Offline runs do
+not select their results. Auto, Realtime and Hybrid runs request audition when
+ready, provided the playback generation has not changed in the meantime.
+Return to original addresses the currently selected audition, even when the latest
+task belongs to a different run. Invalid node/port requests leave the prior
+selection unchanged; playback retirement clears it.
 
 === Node graph desktop workflow
+
+Choose Current track or Selected track, then an execution mode. Preview executes
+the selected node output's ancestors; Run executes an Output node. Algorithm and
+model settings belong to each node, so separate nodes can use different prepared
+backends. A completed task reports its frozen graph revision separately from
+later edits. Audition and export operate on that retained snapshot.
+Requested execution mode and selected output are editing choices, not proof of
+the current audio path. The persistent task summary reports captured settings,
+actual execution mode, progress and cancellation independently of the editor.
+Results & export contains retained outputs and destination controls. Running never
+applies field drafts implicitly; unapplied fields are reported at the execution bar.
+The desktop Export WAV path must be absolute and name a new file in an existing
+directory; relative destinations are supported by the CLI, not this field.
 
 Add nodes from the graph library, then select a node to inspect its own algorithm
 and parameters. Wide panels place the canvas and independently scrolling inspector
@@ -105,105 +94,16 @@ keyboard shortcuts as well as buttons. Keyboard viewport changes cancel active
 pointer gestures before changing pan or zoom.
 Monitor EQ and EQ nodes use the same curve, band and precision editor with
 independent explicit targets; presets and playback A/B remain monitor-owned.
+Monitor EQ uses recursive IIR filters. An EQ graph node can instead select
+linear-phase FIR with an odd tap count from 3 to 16,385. FIR changes phase,
+preparation cost and latency; graph execution aligns branches and compensates
+published audio back to the source timeline. It is not a quality label for IIR.
 
-Choose Current track or Selected track, then an execution mode. Preview executes
-the selected node output's ancestors; Run executes an Output node. Algorithm and
-model settings belong to each node, so separate nodes can use different prepared
-backends. A completed task reports its frozen graph revision separately from
-later edits. Audition and export operate on that retained snapshot.
-Requested execution mode and selected output are editing choices, not proof of
-the current audio path. The persistent task summary reports captured settings,
-actual execution mode, progress and cancellation independently of the editor.
-Results & export contains retained outputs and destination controls. Running never
-applies field drafts implicitly; unapplied fields are reported at the execution bar.
-The desktop Export WAV path must be absolute and name a new file in an existing
-directory; relative destinations are supported by the CLI, not this field.
+Accepted graph and processing-setting edits are saved to `config.toml`
+immediately, independently of Settings Apply. Field drafts, the canvas viewport
+and retained audio results are not configuration commits. See
+link:01_config.adoc#_saving_configuration[Saving configuration] for all save triggers.
 
-=== Node graph CLI
-
-`processing graph show` prints `graph`, the core-owned persisted graph including
-its `revision`, nodes, positions and explicit port-to-port edges, and
-`latest_task`, the latest processing task (or null). The latest task may belong
-to an older graph revision or a legacy operation; it is not the current graph's
-execution state. `processing show` also includes the graph alongside the separate
-playback EQ and legacy task settings. Node-local graph processing does not replace
-the playback EQ controls.
-
-Every `graph edit` takes one externally tagged `GraphEdit` JSON value and a
-required `--revision` matching the graph currently held by Core. Refresh after
-each accepted edit or concurrent change; a stale revision is rejected rather
-than overwriting another client's edits. Edits include `Add`, `Remove`, `Replace`,
-`Move`, `Connect`, `Disconnect`, `Duplicate` and `ReplaceGraph`. Node kinds use
-snake_case JSON names, and ports are zero-based. Quote the complete JSON argument
-so negative gains and positions reach the parser unchanged.
-
-For a fresh default graph (Source node 1, Output node 2, revision 0), this example
-adds an explicit two-input mix, fans the source into both inputs, and connects the
-mix to Output. Existing graphs may have different IDs or revisions: inspect them
-first instead of replaying these edits blindly.
-
-[source,shell]
-----
-rivu processing graph show
-rivu processing graph edit --revision 0 '{"Add":{"kind":{"mix":{"gains_db":[-6.0,-12.5],"muted":[false,false],"solo":[false,false]}},"position":[200.0,120.0]}}'
-rivu processing graph edit --revision 1 '{"Connect":{"from":{"node":1,"port":0},"to":{"node":3,"port":0}}}'
-rivu processing graph edit --revision 2 '{"Connect":{"from":{"node":1,"port":0},"to":{"node":3,"port":1}}}'
-rivu processing graph edit --revision 3 '{"Disconnect":{"to":{"node":2,"port":0}}}'
-rivu processing graph edit --revision 4 '{"Connect":{"from":{"node":3,"port":0},"to":{"node":2,"port":0}}}'
-rivu --json processing graph run 42 2 --port 0 --mode offline --wait
-----
-
-`graph run TRACK_ID NODE_ID` snapshots the current graph and processes only the
-selected output port's ancestor closure. `--port` defaults to 0; `--mode` accepts
-`auto` (default), `offline`, `realtime` or `hybrid`. Auto first attempts an exact
-native realtime plan, then a useful precomputed-prefix/live-suffix hybrid, then
-offline rendering. It never changes algorithms. `settings.graph_mode` records
-the actual selected mode; `settings.graph_boundary` identifies a hybrid boundary.
-Explicit modes reject unsupported plans instead of silently changing modes.
-Planning and FFT preparation run on the processing worker, not Core dispatch or
-the device callback. `--wait` uses
-the existing task progress/result reporting and returns failure for failed or
-cancelled jobs; without it, an accepted acknowledgement is not proof of completion.
-Use `processing status RUN_ID` and `processing cancel RUN_ID` for the same task.
-
-A realtime task reaching `Complete` means its immutable snapshot was admitted
-for live playback, not that an offline file was rendered: `graph_outputs` is
-empty. Offline and hybrid tasks can retain rendered node outputs separately from
-later graph edits. Cached node/port audition is immediate; uncached snapshot
-audition prepares a new run and returns its own task ID.
-To render a selected output from any retained graph snapshot, including realtime,
-use `graph export` with the actual run ID and node/port from that snapshot:
-
-[source,shell]
-----
-rivu processing status 7
-rivu processing graph audition 7 3 --port 0
-rivu processing graph export 7 3 'rendered outputs/mix -6 dB.wav' --port 0 --wait
-----
-
-Audition uses the retained snapshot, not subsequently edited settings. Export
-starts a new, explicit offline
-render from the retained run's immutable graph and source, never the subsequently
-edited graph. Its acknowledgement supplies a new `processing_id`; `--wait`
-tracks that export task through the existing progress/result flow. Without
-`--wait`, query the new task ID, not the original run, to determine completion.
-`settings.graph_export_path` records the requested destination;
-`graph_exported_path` is populated only after the completed export is published.
-Export accepts a real filesystem path, including spaces; relative destinations
-are anchored to the invoking client's working directory, not the core's. Source
-files are not modified. Retained temporary outputs remain session-owned; an
-exported file is the durable result.
-
-Graph execution retains full causal intermediate context: FIR ringing, denoiser
-startup delay and branch-alignment delays are not trimmed before downstream nodes.
-Only published node audio is compensated and restricted to the original source
-timeline. A retained `graph_outputs[].context`, when present, names guarded PCM
-and its signed source-relative `start_frame`; hybrid suffixes consume that context
-rather than the trimmed audition/export file. At EOF each denoiser finishes at
-its actual upstream end, before its output and FIR tails propagate downstream;
-padding is never treated as new source input. Graph audition checks the opened
-decoder descriptor against the admitted source identity (or guarded cache identity),
-so replacing a pathname with same-format media cannot substitute another source.
 
 === Equalizer
 
@@ -242,8 +142,9 @@ channels. Frequencies are bounded below Nyquist (0.499 × sample rate).
 Channel targets are `all` or zero-based channel indices (GUI: comma-separated;
 JSON: `{"selected":[0,1]}`). Solo is global: any enabled solo band excludes
 enabled non-solo bands, even when their channel targets differ. Disable a band
-to exclude it, or disable EQ for global bypass. Live edits and bypass transitions
-crossfade complete filter banks over 10 ms; settled bypass preserves samples.
+to exclude it, or disable EQ for global bypass. Monitor EQ edits and bypass
+transitions crossfade complete filter banks over 10 ms; settled bypass preserves
+samples. Graph node edits affect future snapshots, not an already admitted run.
 Save/load/delete named presets, or import/export an EqualizerConfig JSON file
 (maximum 64 KiB on import). A/B swaps the current configuration with the saved
 alternate; the first swap uses a disabled empty alternate. Save a named preset
@@ -309,24 +210,41 @@ prepared manifest, interpreter and worker. Install explicitly with `uv` already
 available. From the repository root, create separate pinned environments
 (do not combine their differing PyTorch requirements):
 
+The installer requires at least 10 GiB free before each invocation. The original
+two-environment estimate was approximately 5–8 GiB including checkpoints but
+excluding corpora/results; additional backends and download caches need more space.
+Preparation requires a new output directory with an existing parent and at least
+2 GiB free. `--weights` selects local weights; preparation can still need network
+access for pinned code/license evidence. Installation and preparation are explicit
+network operations; neither playback, build nor worker inference downloads models.
+CPU is the default; CUDA requires an explicitly compatible prepared environment,
+not an automatic fallback. Use at most four threads for the documented local
+evaluation workflow.
+
 [source,shell]
 ----
 python3 tools/audio_processing/install.py moss
 python3 tools/audio_processing/install.py separate
 python3 tools/audio_processing/prepare.py moss --download --directory .cache/neural/moss --interpreter "$PWD/.cache/neural/moss-venv/bin/python"
 python3 tools/audio_processing/prepare.py separate --download --directory .cache/neural/kim --interpreter "$PWD/.cache/neural/separate-venv/bin/python"
+----
+
+The primary example prepares MossFormer2 and Kim. Add only the optional
+backends you intend to compare; HTDemucs shares the separation environment,
+while DeepFilterNet3 needs its own pinned environment:
+
+[source,shell]
+----
 python3 tools/audio_processing/prepare.py htdemucs --download --directory .cache/neural/htdemucs --interpreter "$PWD/.cache/neural/separate-venv/bin/python"
 python3 tools/audio_processing/install.py df3
 python3 tools/audio_processing/prepare.py df3 --download --directory .cache/neural/df3 --interpreter "$PWD/.cache/neural/df3-venv/bin/python"
 ----
 
-Reserve at least 10 GiB before installing (approximately 5–8 GiB for the two CPU
-environments and checkpoints, excluding corpora/results). Preparation requires
-new output directories. `--weights` selects local weights; preparation can still
-need network access for pinned code/license evidence. Only preparation downloads;
-neither playback, build nor worker inference downloads models. CPU is the default;
-CUDA requires an explicitly compatible prepared environment, not an automatic
-fallback. Use at most four threads for the documented local evaluation workflow.
+For the optional NSNet2 baseline, use `install.py speech`, then
+`prepare.py nsnet2` with `.cache/neural/speech-venv/bin/python`. Installation
+names the environment by operation; preparation names the actual model. Run
+only the backend setup steps you need; the example does not require all models.
+
 
 Preparation prints absolute `worker`, `interpreter` and `model_manifest` paths.
 Configure *all three*, not only the manifest, and preserve the venv executable
@@ -375,23 +293,32 @@ downmix or duplicated mono separation is offered.
 
 === Tasks, retention and audition
 
-Only one processing task runs at a time. Status moves through `queued`, `rendering`,
-`processing`, then `complete`, `failed` or `cancelled`. Start acceptance is not
-completion; `--wait` waits for that task and fails on cancellation/error. Use
-`processing status ID` and `processing cancel ID` for an asynchronous start.
-Cancellation invalidates publication, terminates/reaps neural workers and retires
-partial scratch; it does not publish a partial result. Source identity and job
-settings are captured and source changes invalidate stale results.
+Only one processing task runs at a time. `queued`, `rendering` and `processing`
+describe preparation/work; `complete`, `failed` and `cancelled` are terminal
+task states. Not every task visits every work phase: realtime preparation need
+not render a file. Start acceptance is not completion; `--wait` waits for that
+task and fails on cancellation/error. Use `processing status ID` and
+`processing cancel ID` for an asynchronous start. A cancellation acknowledgement
+accepts the request, not proof that the worker has already retired. Cancellation
+invalidates publication, terminates/reaps neural workers and retires partial
+scratch; it does not publish a partial result. Source identity and job settings
+are captured and source changes invalidate stale results.
 
-Scratch is under a temporary `processing-*` directory in the data directory.
-Up to four successful results are retained, protecting the selected audition from
-eviction; terminal status history is bounded to 32 entries. These are session
-results, not durable exports: retirement/shutdown removes owned temporary files.
-Original library media and existing external files are never overwritten. Input
-files are bounded to 8 GiB; rendering has the float WAV RIFF limit (under 4 GiB).
-Neural jobs additionally require nonempty input of at most four hours and total
-stem output at most 8 GiB. These independent bounds are not a disk reservation;
-leave space for rendered input, stems and an optional remix.
+Scratch lives in session-owned `processing-*` directories under the data
+directory. Up to four retained results share 4 GiB; the selected audition stays
+protected, so a result too large to coexist with it fails. Old task status does
+not guarantee that its audio remains available. See
+link:22_cache.adoc#_processing_output_retention[Processing output retention]
+for eviction and status-history lifetimes. Export a graph output to keep a durable
+WAV; shutdown removes temporary results, never original media or exported files.
+
+Input files are bounded to 8 GiB; source rendering has the float WAV RIFF limit
+(under 4 GiB). Offline/hybrid graph execution additionally limits its per-run PCM
+cache to 2 GiB, including intermediate outputs and causal guards. Neural jobs
+require nonempty input of at most four hours and total stem output at most 8 GiB;
+the worker also checks free space for its predicted outputs plus 256 MiB. These
+checks do not reserve disk space or supersede the retained-cache limit. Leave
+room for rendered input, stems, graph intermediates and an optional remix.
 
 [source,shell]
 ----
@@ -416,7 +343,134 @@ Configuration tables and IPC integration are described in
 link:01_config.adoc[Configuration], link:04_playback.adoc[Playback],
 link:21_ipc.adoc[IPC] and link:24_layout.adoc[Layouts].
 
-== Equalizer acceptance
+=== Node graph CLI
+
+`processing graph show` prints `graph`, the core-owned persisted graph including
+its `revision`, nodes, positions and explicit port-to-port edges, and
+`latest_task`, the latest processing task (or null). The latest task may belong
+to an older graph revision or a legacy operation; it is not the current graph's
+execution state. `processing show` also includes the graph alongside the separate
+playback EQ and legacy task settings. Node-local graph processing does not replace
+the playback EQ controls.
+
+Every `graph edit` takes one externally tagged `GraphEdit` JSON value and a
+required `--revision` matching the graph currently held by Core. Refresh after
+each accepted edit or concurrent change; a stale revision is rejected rather
+than overwriting another client's edits. Edits include `Add`, `Remove`, `Replace`,
+`Move`, `Connect`, `Disconnect`, `Duplicate` and `ReplaceGraph`. Node kinds use
+snake_case JSON names, and ports are zero-based. Quote the complete JSON argument
+so negative gains and positions reach the parser unchanged.
+
+For a fresh default graph (Source node 1, Output node 2, revision 0), this example
+adds an explicit two-input mix, fans the source into both inputs, and connects the
+mix to Output. Existing graphs may have different IDs or revisions: inspect them
+first instead of replaying these edits blindly.
+
+[source,shell]
+----
+rivu processing graph show
+rivu processing graph edit --revision 0 '{"Add":{"kind":{"mix":{"gains_db":[-6.0,-12.5],"muted":[false,false],"solo":[false,false]}},"position":[200.0,120.0]}}'
+rivu processing graph edit --revision 1 '{"Connect":{"from":{"node":1,"port":0},"to":{"node":3,"port":0}}}'
+rivu processing graph edit --revision 2 '{"Connect":{"from":{"node":1,"port":0},"to":{"node":3,"port":1}}}'
+rivu processing graph edit --revision 3 '{"Disconnect":{"to":{"node":2,"port":0}}}'
+rivu processing graph edit --revision 4 '{"Connect":{"from":{"node":3,"port":0},"to":{"node":2,"port":0}}}'
+rivu --json processing graph run 42 2 --port 0 --mode offline --wait
+----
+
+`graph run TRACK_ID NODE_ID` snapshots the current graph and processes only the
+selected output port's ancestor closure. `--port` defaults to 0; `--mode` accepts
+`auto` (default), `offline`, `realtime` or `hybrid`. Auto first attempts an exact
+native realtime plan, then a useful precomputed-prefix/live-suffix hybrid, then
+offline rendering. It never changes algorithms. `settings.graph_mode` records
+the actual selected mode; `settings.graph_boundary` identifies a hybrid boundary.
+Explicit modes reject unsupported plans instead of silently changing modes.
+Planning and FFT preparation run on the processing worker, not Core dispatch or
+the device callback. `--wait` uses
+the existing task progress/result reporting and returns failure for failed or
+cancelled jobs; without it, an accepted acknowledgement is not proof of completion.
+Use `processing status RUN_ID` and `processing cancel RUN_ID` for the same task.
+
+A realtime task reaching `Complete` means its immutable snapshot was admitted
+for live playback, not that an offline file was rendered: `graph_outputs` is
+empty. Offline and hybrid tasks can retain rendered node outputs separately from
+later graph edits. Cached node/port audition is immediate; uncached snapshot
+audition prepares a new run and returns its own task ID.
+To render a selected output from any retained graph snapshot, including realtime,
+use `graph export` with the actual run ID and node/port from that snapshot:
+
+[source,shell]
+----
+rivu processing status 7
+rivu processing graph audition 7 3 --port 0
+rivu processing graph export 7 3 'rendered outputs/mix -6 dB.wav' --port 0 --wait
+----
+
+Audition uses the retained snapshot, not subsequently edited settings. Export
+starts a new task: it copies an already cached node output when available,
+otherwise it renders the requested output offline from the retained graph and
+source. Neither path uses the subsequently edited graph. The acknowledgement
+supplies a new `processing_id`; `--wait` tracks that export task through the
+existing progress/result flow. Without `--wait`, query the new task ID, not the
+original run, to determine completion.
+`settings.graph_export_path` records the requested destination;
+`graph_exported_path` is populated only after the completed export is published.
+Export accepts a real filesystem path, including spaces; relative destinations
+are anchored to the invoking client's working directory, not the core's. Choose
+a new file in an existing directory; existing destinations are never overwritten.
+Retained temporary outputs remain session-owned; an exported file is the durable
+result. Source files are not modified.
+
+== Ownership and invariants
+
+* Core commits configuration; UI submits edits, not stale replacement snapshots.
+* Prepared DSP owns its coefficients, history, rate and channel layout. The device
+  callback performs no model loading, FFT planning, file I/O or unbounded work.
+* Disabled processing preserves the original signal path. Protection, resampling,
+  gain compensation and latency are explicit, not silent quality fallbacks.
+* Every task result is bound to source identity, processing configuration and model
+  identity. Cancellation or supersession prevents publication, not necessarily
+  physical completion. Source files and existing results are never overwritten.
+* Seeking, changing a source and incompatible format changes reset history. Pause
+  does not invent audio time. Tail flushing and trimming preserve source alignment.
+* Allocation, channel count, block work, retained results and scratch storage have
+  explicit finite bounds. Long processing stays outside the device callback.
+
+=== Timeline and source identity
+
+Graph execution retains full causal intermediate context: FIR ringing, denoiser
+startup delay and branch-alignment delays are not trimmed before downstream nodes.
+Only published node audio is compensated and restricted to the original source
+timeline. A retained `graph_outputs[].context`, when present, names guarded PCM
+and its signed source-relative `start_frame`; hybrid suffixes consume that context
+rather than the trimmed audition/export file. At EOF each denoiser finishes at
+its actual upstream end, before its output and FIR tails propagate downstream;
+padding is never treated as new source input. Graph audition checks the opened
+decoder descriptor against the admitted source identity (or guarded cache identity),
+so replacing a pathname with same-format media cannot substitute another source.
+
+=== DSP crate features
+
+`rivu-dsp::equalizer` groups shared parameters and implementation selection in
+`config`, the recursive processor in `iir::Equalizer`, and the linear-phase
+processor in `fir::FirEqualizer`. Both implementations consume the same
+`config::EqualizerConfig`; `config::EqImplementation` selects between them.
+
+Configuration and validation remain available without execution support. The
+default feature set is empty; the optional `execution` feature enables `iir`,
+`fir`, response sampling, denoising implementations and the `rustfft` dependency.
+Execution APIs are absent when disabled, not replaced by no-ops. Serialization,
+defaults and validation semantics remain unchanged.
+
+The desktop application and `rivu-audio` explicitly enable `execution` with
+default features disabled. `rivu-format` uses only the resident contracts with
+default features disabled and does not request execution. Cargo feature
+unification can still enable execution when these crates share a dependency
+graph with an execution consumer. The `equalizer_benchmark` and `denoise_render`
+examples require `--features execution`.
+
+== Quality acceptance
+
+=== Equalizer acceptance
 
 The equalizer provides editable bands, peak/shelf/pass/bandpass/notch filters,
 frequency/gain/Q controls, applicable slope choices, enable/solo, channel targets,
@@ -438,7 +492,7 @@ processed signals, not source-text or copied-value tests:
 * The displayed response represents actual cascaded coefficients at the current
   sample rate. Frequencies beyond that rate's usable range are explicit.
 
-== Denoising acceptance
+=== Denoising acceptance
 
 Required modes cover stationary noise, a captured noise profile, adaptive noise,
 speech-targeted enhancement, hum and impulse suppression. Controls must affect
@@ -456,7 +510,7 @@ Ported neural inference must be compared against the selected upstream reference
 using the same weights and parameters. An optimization may not silently replace
 the model, alter rate handling or claim equal quality from throughput alone.
 
-== Separation acceptance
+=== Separation acceptance
 
 Evaluate both vocals and accompaniment against reference stems. Include backing
 vocals, reverb, dense instrumentation, transients and stereo mixtures. Measure
@@ -471,7 +525,7 @@ speed. Synthetic independent components establish alignment/invariants, not
 real-world vocal-separation quality. Multi-instrument stems and exporting stems
 are not automatically added to the accepted scope.
 
-== Evidence and performance
+=== Evidence and performance
 
 Each result records source revision, dirty changes, executable/model hashes,
 configuration, corpus provenance/license, exact commands, device and thread
@@ -495,6 +549,26 @@ These are local measured observations, not universal performance guarantees or
 professional listening approval. Reports are task artifacts under `.cache/`, not
 files installed with Rivu. The accepted criteria above remain in force.
 
+Human listening, quiet-content and stereo-artifact approval, broad lossless
+fullband music evaluation, and device-specific underrun/deadline evidence remain
+explicit gaps. Neither reference parity, scalar improvement nor reconstruction
+closes them. Additional evidence must identify its corpus, settings and limits;
+it must not be described as listening that did not occur.
+
+=== Historical quality and integration observations
+
+The following quality, GUI and graph-runner figures are retained reports from
+earlier work, not reruns of the current source. Several cited bundles (including
+`eq-candidate.json`, `audio-quality-corpus/`, `neural/acceptance-evidence/` and
+`audio-graph-evidence/`) are absent from the current local archive. Their names
+identify the original records, not guaranteed available files. The observations
+remain historical context; unavailable artifacts cannot independently establish
+current acceptance. The implementation-cost audit below names separately retained
+evidence and its narrower numerical scope.
+
+.Historical measurements and application interaction records
+[%collapsible]
+====
 * EQ: `.cache/eq-candidate.json` records warm process-call measurements, excluding
   input copying, preparation, file I/O and device output. The nine-repeat handoff
   reported zero process allocations and zero allocated bytes for every workload.
@@ -624,9 +698,14 @@ files installed with Rivu. The accepted criteria above remain in force.
   Actual GUI Run and opposite-panel Output export produced 299880 stereo frames
   at 44.1 kHz; the -12 dB gain check had maximum sample error 1.49e-8. Relative
   GUI export was rejected; correcting to an absolute destination succeeded.
+====
+
 
 === Node graph measurements
 
+.Graph runner and backend comparison records
+[%collapsible]
+====
 The release graph runner was measured on stereo 48/96 kHz input, 64/256/1024
 frame calls, and three workloads: parallel 4097-tap FIR/10-band IIR into an
 aligned mix; stationary denoise/10-band IIR into an aligned mix; and a cached
@@ -663,14 +742,13 @@ residual peaks were 2.98e-8, which proves the mixture-minus-vocals contract, not
 separation quality. This lossy short excerpt is not fullband acceptance, a
 full-corpus ranking, or a listening review. Hashes, parameters and output metrics
 are retained in `.cache/neural/graph-backend-evidence/comparison.json`.
+====
 
-Human listening, quiet-content and stereo-artifact approval, broad lossless
-fullband music evaluation, and device-specific underrun/deadline evidence remain
-explicit gaps. Neither reference parity, scalar improvement nor reconstruction
-closes them. Additional evidence must identify its corpus, settings and limits;
-it must not be described as listening that did not occur.
+
 
 === Implementation cost audit
+
+==== Classical restoration
 
 The denoiser prepares fixed impulse thresholds and spectral gain coefficients
 once. Full-wet processing no longer retains or copies a dry lookahead queue;
@@ -684,7 +762,9 @@ preallocated processing/finish measurement. These are allocation counts and
 cumulative requested bytes, not application RSS or callback-deadline claims.
 Seven timing repetitions did not show a uniform speedup: some spectral modes
 were slightly slower. Raw observations and workload/source identities are in
-`.cache/classical-audit/results.json`.
+`.cache/experiments/audio/classical-audit/results.json`.
+
+==== NSNet2 numerical processing
 
 The first NSNet2 cost pass reused spectral-feature and overlap-add temporaries
 without changing its window, hop, masks or gain floor. Comparisons covered 13 lengths and
@@ -719,6 +799,8 @@ The real FFT/synthesis consumer and raw measurements with source identities are
 retained under `.cache/audio-review-next/`. This does not measure model execution
 or whole-process RSS.
 
+==== Shared worker storage
+
 The shared neural worker accumulates RMS energy in float64 without full-block
 float64 conversion/square arrays and releases block views before the next
 inference. On 24 seconds of 192 kHz stereo data, seven energy-reduction repetitions
@@ -729,14 +811,15 @@ not immediate OS memory reclamation or a measured Torch/ORT peak-RSS reduction.
 Kim/HTDemucs inference, overlap, context, resampling and source-minus-vocals
 semantics remain unchanged, as does DF3 inference.
 
+==== MossFormer2 numerical processing
+
 MossFormer2 now scales an owned padded waveform, clamps its private CPU mask,
 multiplies the spectrum and rescales synthesized samples in place. Kaldi/delta
 scratch ends before model inference; features end before synthesis and waveform
 and mask views end before the next channel. Padding still reaches the same full
-frame, with the same per-channel dither seed. The initially unexecuted candidate
-was adopted only after offline restoration of pinned Torch/torchaudio 2.11.0 CPU
-and NumPy 2.2.6 enabled real numerical execution. Across 99 length/layout/floor
-combinations, features and synthesis matched the previous expressions exactly
+frame, with the same per-channel dither seed. Across 99 length/layout/floor
+combinations under pinned Torch/torchaudio 2.11.0 CPU and NumPy 2.2.6,
+features and synthesis matched the previous expressions exactly
 and read-only caller input was preserved. The real final-ReLU/two-speaker mask
 view was checked; the source and other speaker remained unchanged.
 
@@ -758,4 +841,4 @@ listening quality or fixed-environment throughput. Real-weight regression tests
 require explicitly prepared manifests and their matching interpreters; skipped
 tests are not passes. Model-environment installation/download failures must be
 reported separately from the numerical and classical-render checks above.
-Worker evidence is under `.cache/audio-implementation-audit/`.
+Worker evidence is under `.cache/experiments/audio/audio-implementation-audit/`.

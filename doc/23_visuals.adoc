@@ -1,4 +1,6 @@
 = Visualization Rendering Design
+:toc:
+:toclevels: 2
 
 == Goals
 
@@ -12,119 +14,10 @@ defaults, and display behavior are documented in
 link:01_config.adoc[Configuration and layout]. Cache ownership, invalidation,
 and resource lifetime are covered by link:22_cache.adoc[Caching and Resource Lifecycles].
 
-The next rendering interface, implemented vendor prototype and migration plan are
-documented in link:25_gpu_rendering.adoc[Parameter-Driven GPU Rendering Design].
-That design distinguishes agreed constraints from mechanisms to refine during
-implementation; the visualizer behavior described below remains unchanged.
-
-== Pinned GPU extensions
-
-`Cargo.toml` overrides `gpui` and `gpui_wgpu` with `vendor/gpui` and
-`vendor/gpui_wgpu`, derived from
-https://github.com/zed-industries/zed/tree/df48a139ce9c292738b523252c12f044697e673f[Zed revision df48a139ce9c292738b523252c12f044697e673f]
-under the upstream Apache-2.0 license. The remaining GPUI platform crates and
-standalone manifests retain that pinned dependency baseline. This is a
-maintained rendering capability patch, not a framework replacement or upgrade.
-The extensions add centered image transforms and shared GPU materials on
-Rivu's Linux/WGPU rendering path. Existing untransformed images and ordinary
-path backgrounds retain their existing behavior.
-The vendor patch also contains experimental fixed-schema rectangle, numerical-field,
-existing-path, independent-segment and numerical-waveform drawing through one shared publication and
-recording interface; see the
-link:25_gpu_rendering.adoc#_internal_led_vertical_slice[GPU rendering slice].
-Stereo Density, Spatial Spectrum and Spectrogram use numerical fields; Spectrum
-uses rectangle and Path publications; Fractal Beams/Flow use shared segments;
-Waveform uses numerical stereo columns. Radial Bars/Rings styles retain their existing
-rendering paths. The general `Program` and generated-schema interfaces remain
-proposals, not implemented APIs.
-
-Run `cargo test --manifest-path vendor/gpui_wgpu/Cargo.toml --lib` to exercise
-the patched shader and headless GPU regressions in their isolated test workspace.
-The companion GPUI workspace runs publication/replay regressions with
-`cargo test --manifest-path vendor/gpui/Cargo.toml --lib gpu::tests --no-default-features`
-and existing scene regressions with
-`cargo test --manifest-path vendor/gpui/Cargo.toml --lib scene::reclamation_tests --no-default-features`.
-Run `cargo test --manifest-path vendor/gpui/Cargo.toml --lib elements::img::`
-for source-animation cursor and frame-request ownership regressions. Automatic
-frame requests are exercised beneath a rendered entity, matching real image views.
-Compilation also requires the pinned upstream `assets/fonts/lilex` and
-`assets/fonts/ibm-plex-sans` fixtures, placed under this repository's
-`tests/fixtures/fonts/` with their original subdirectory names.
-Upstream test-only font and image fixtures retain their original licenses.
-The isolated regression-test workspace keeps copied upstream crates outside
-Rivu's workspace lint targets, without suppressing upstream warnings or mixing
-framework cleanup into this rendering patch.
-
-GPUI also captures entity dependencies independently for each cached-view scope,
-including entities already accessed by a caller or enclosing cached view. On
-scope exit, local dependencies are merged back into the caller's set; cache
-reuse must retain them for later notifications. This keeps children created
-during render and nested cached consumers live after parent-only redraws,
-without refreshing the whole window or rerendering unrelated cached siblings.
-Run `cargo test --test gpui_cached_dependencies` from the repository root for
-these notification and cache-reuse regressions.
-
-=== Why the patch is needed
-
-Album artwork reuses its decoded image and atlas texture while the GPU transforms
-the already-cropped sprite. Rounded clipping follows image-local coordinates;
-the surrounding content mask remains in screen coordinates. No rotated pixel
-buffers or angle-indexed image cache are created. `Img` forwards its existing
-transformation matrix through image painting to the WGPU sprite shader.
-Edge coverage uses the analytic local edge normal projected through screen-to-local
-coordinate derivatives, so scaling and rotation do not widen the antialiasing ramp
-in screen pixels. No additional sprite fields or transformed textures are needed.
-
-Spectrum fills its geometry with the shared GPU palette material. Its full
-authored cubic palette is retained rather than approximated by two stops or
-repeated masked submissions; see <<_spectrum,Spectrum>>.
-
-Rust scene records, WGPU pipelines, and shader layouts change together. Spectrum
-no longer uses a gradient image, atlas tile or specialized textured-Path API.
-Ordinary fills and transformed image sprites retain their independent paths.
-
-Color images clamp linear texture sampling to their atlas tile's first and last
-texel centers. This prevents neighboring images from bleeding into magnified
-edges without adding atlas padding or disabling interpolation.
-
-Artwork styles change composition, not acquisition or signal analysis. Card
-rotates the full square cover, rounded frame, and shadow together, reserving
-diagonal margin rather than cropping the source composition. Metal's sheen and
-Duotone's blue/purple glow remain fixed over or behind the rotating circular
-cover; neither requires extracted colors or audio data. Real and generated
-default covers share animation, interaction, and lifecycle rules. Style and
-frame-pacing changes preserve the rotation angle. Style controls, per-panel
-persistence, defaults, and the frame-rate range are documented in
-link:01_config.adoc#_album_artwork[Album artwork].
-
-Zero frame-rate cap follows display callbacks without a timer throttle; positive
-values cap animation requests per second independently of the analysis rate.
-Rotation and animated source covers share one frame/timer gate across artwork
-panels; individual images do not create a second animation loop. Lower caps drop
-displayed source frames rather than slowing the source timeline. Cursor catch-up
-is bounded by frame count even after a long delay; all-zero-delay sources advance
-one frame per redraw. Each element retains its own cursor over shared decoded data.
-Pausing or static mode stops rotation, but a visible animated source can continue.
-Hiding, window deactivation, or reduced motion cancels pending animation work.
-Resuming rotation does not replay suspended time. Still Mode affects only audio
-visualizations, not artwork. Styles introduce neither per-frame CPU geometry
-rotation nor a new application cache system.
-
-=== Maintenance boundary and removal criteria
-
-The implemented rendering backend is WGPU. Native Metal rejects these new
-painting operations rather than silently substituting a different result;
-Linux/Vulkan runtime evidence does not establish Metal or browser support.
-The extra fields also increase shared vertex/sprite record sizes, so this
-patch is not a universal rendering or memory improvement.
-
-When updating GPUI, compare these extensions against their pinned baseline,
-keep Rust and shader record layouts synchronized, and preserve transformed
-image clipping, path texture mapping, atlas lifetime, and drawing order.
-Revalidate ordinary untransformed images and plain paths as well as the two
-new consumers. Drop the local overrides and obsolete vendor code only when
-the selected upstream revision supplies the required behavior and all Rivu
-callers have migrated; a newer dependency version alone is not sufficient.
+The implemented fixed-schema GPU materials, their recorded measurements, and the
+proposed general rendering API are documented separately in
+link:25_gpu_rendering.adoc[Parameter-Driven GPU Rendering Design]. The current
+consumer behavior is described here; a proposal there does not change it.
 
 == Analysis boundary
 
@@ -227,7 +120,7 @@ Settings, source identity, playback timeline, and accounting survive. Mode
 transitions invalidate queued samples and publications even across quick on/off
 switches. Sample-rate, FFT-size, or window changes rebuild the analyzer;
 resumption waits for a new complete audio window. Already submitted graphics
-follow link:22_cache.adoc#_resource_boundaries[frame-boundary retirement],
+follow link:22_cache.adoc#_resource_boundaries[completion-aware renderer retirement],
 independently of suspended analysis.
 The application-menu toggle changes only Still Mode in the core's serialized
 request path; pending playback and device settings are preserved rather than
@@ -237,20 +130,13 @@ Waveform coverage is also discarded: prior samples cannot count toward a
 complete envelope, and EOF cannot make a skipped or discarded interval complete.
 Only fresh decoded PCM allocates and fills bins. There is no automatic backfill
 or full-track rescan; an uninterrupted fresh traversal from zero can complete
-the envelope. Explicit full-waveform scans are cancelled by the audio worker on
-entry, without waiting for GUI refresh; quick on/off transitions cannot miss the
-cancellation. Native and FFmpeg decode loops observe the cancellation flag
-between packets, including unrelated-stream skips, discarded seek packets and
-codec preroll, even when no PCM is returned to the scan. Priming and segment
-seeking use the same signal. Blocking file/container/codec calls are not
-interruptible; cancellation takes effect when control returns. The
-cancellation flag and a shared suspension generation reject late completions,
-including requests registered before the worker has processed resumption, so
-old scans cannot restore discarded data or report an intentional cancellation
-as a waveform-load failure.
-An installed full preview is checked against the same suspension generation as
-an in-flight result, including while the window is hidden. Returning from Still
-Mode cannot restore that preview or automatically start another full scan.
+the envelope. The audio worker cancels explicit full-waveform scans on entry,
+without waiting for GUI refresh. Native and FFmpeg decode loops observe cancellation
+between packets, including packets that return no PCM. Blocking file/container/codec
+calls cannot be interrupted; cancellation takes effect when control returns. A shared suspension generation
+rejects late results and installed previews, even across quick on/off transitions
+or while hidden. Resumption neither restores discarded previews nor starts another
+scan, and intentional cancellation is not reported as a waveform-load failure.
 
 == Waveform
 
@@ -386,23 +272,19 @@ body. They are not connected into a curve, and the body cache does not own their
 geometry. This preserves their transient-marker meaning while keeping body
 reuse separate from Peak rendering.
 
-The shared `PaletteLut` lazily owns one 1024-entry floating-point GPU palette,
-reused across Spectrum panels and repaints, including when geometry caching is
-disabled. Range, dimensions, and style changes alter geometry or plot mapping,
-not the palette. Samples span the visible authored palette domain directly.
-The retained CPU color payload is 16,384 bytes per active palette, plus
-renderer-owned backing when used. Minor sampling differences from the old
-texture are accepted; its half-texel knots are not reconstructed.
-No Spectrum gradient image or image-atlas retirement remains.
-Rectangles use the renderer's existing MSAA intermediate;
-coverage is evaluated per sample, so adjacent zero-gap columns do not darken
-one another through overlapping alpha edge ramps. This includes an intermediate
-draw and resolve rather than assuming a direct single-sample draw is equivalent.
-GPU publications own their palette references; replaced publications remain
-valid for captured frames and renderer resources retire on demand without
-application image-atlas cleanup.
-Upload or paint failures follow the existing visualization error reporting path,
-without substituting a different fill.
+Spectrum shares one 1024-entry RGBA palette across panels and repaints, even when
+geometry caching is disabled. Authored cubic colors are quantized to 8-bit channels
+before conversion to f32, unlike Waveform's floating-point endpoint pairs. Range,
+dimensions and style change geometry or mapping, not palette identity. Minor sampling
+differences from the old texture are accepted; its half-texel knots are not reconstructed.
+
+Rectangles use per-sample coverage in the shared MSAA intermediate so adjacent
+zero-gap columns do not darken one another through overlapping alpha ramps. A
+direct single-sample draw is not equivalent. The closed GPU API and palette encoding
+are described in link:25_gpu_rendering.adoc#_implemented_fixed_schema_slices[Implemented fixed-schema slices];
+publication retention and completion-aware retirement belong to
+link:22_cache.adoc#_resource_boundaries[Resource boundaries]. Upload or paint failure
+reports an error rather than substituting a different fill.
 
 More display slots still increase aggregation, rectangle construction, and
 fragment work. Increasing LED segments does not increase CPU body geometry.
@@ -422,9 +304,10 @@ link:22_cache.adoc[Caching and Resource Lifecycles].
 
 === Radial styles
 
-The radial presentation adapts Noctalia Shell v5's
-https://github.com/noctalia-dev/noctalia-shell/blob/e56a9db5/Widgets/AudioSpectrum/NMirroredSpectrum.qml[`NMirroredSpectrum.qml`]
-concept and parameter model, not its rendering implementation or pixel output.
+The radial presentation follows Noctalia Shell v5's concept and parameter model;
+see the pinned
+https://github.com/noctalia-dev/noctalia/blob/f95e95cafde8c23f1d3a62b969e2b5717c96d741/src/ui/visuals/fancy_audio_visualizer.h[`FancyAudioVisualizer` interface (v5.0.1)].
+It does not reuse Noctalia's rendering implementation or promise its pixel output.
 GPUI-native paths use a bounded display of at most 32 logarithmic bands.
 Each accepted spectrum maps its levels to retained target bands once. Native
 display ticks smooth toward those targets and advance rotation using the bounded
@@ -527,6 +410,31 @@ accepted audio, preserving the paused geometry and publication. Beams constructi
 and reset initialize state without building geometry that the first accepted frame
 would immediately replace.
 
+== Artwork composition and animation
+
+Artwork styles change composition, not acquisition or signal analysis. Card
+rotates the full square cover, rounded frame, and shadow together, reserving
+diagonal margin rather than cropping the source composition. Metal's sheen and
+Duotone's blue/purple glow remain fixed over or behind the rotating circular
+cover; neither requires extracted colors or audio data. Real and generated
+default covers share animation, interaction, and lifecycle rules. Style and
+frame-pacing changes preserve the rotation angle. Style controls, per-panel
+persistence, defaults, and the frame-rate range are documented in
+link:01_config.adoc#_album_artwork[Album artwork].
+
+Zero frame-rate cap follows display callbacks without a timer throttle; positive
+values cap animation requests per second independently of the analysis rate.
+Rotation and animated source covers share one frame/timer gate across artwork
+panels; individual images do not create a second animation loop. Lower caps drop
+displayed source frames rather than slowing the source timeline. Cursor catch-up
+is bounded by frame count even after a long delay; all-zero-delay sources advance
+one frame per redraw. Each element retains its own cursor over shared decoded data.
+Pausing or static mode stops rotation, but a visible animated source can continue.
+Hiding, window deactivation, or reduced motion cancels pending animation work.
+Resuming rotation does not replay suspended time. Still Mode affects only audio
+visualizations, not artwork. Styles introduce neither per-frame CPU geometry
+rotation nor a new application cache system.
+
 == Failure boundaries
 
 Views without accepted data do not invent signal history. Analysis frames with
@@ -562,3 +470,95 @@ Include first draws, stable repaints, changing data, and dense Spectrum styles;
 measure the actual renderer as well as CPU and memory use. Renderer-level
 changes should be justified by those workloads rather than historical CPU
 percentages from a different implementation.
+
+== Pinned GPU extensions
+
+`Cargo.toml` overrides `gpui` and `gpui_wgpu` with `vendor/gpui` and
+`vendor/gpui_wgpu`, derived from
+https://github.com/zed-industries/zed/tree/df48a139ce9c292738b523252c12f044697e673f[Zed revision df48a139ce9c292738b523252c12f044697e673f]
+under the upstream Apache-2.0 license. The remaining GPUI platform crates and
+standalone manifests retain that pinned dependency baseline. This is a
+maintained rendering capability patch, not a framework replacement or upgrade.
+The extensions add centered image transforms and shared GPU materials on
+Rivu's Linux/WGPU rendering path. Existing untransformed images and ordinary
+path backgrounds retain their existing behavior.
+The fixed-schema materials cover rectangles, numerical fields, existing paths,
+independent segments and numerical waveform columns through one publication and
+recording interface. See
+link:25_gpu_rendering.adoc#_internal_led_vertical_slice[the implemented GPU interface]
+for its closed schemas and limits; the general `Program` and generated-schema
+interfaces remain proposals. Radial Bars, Rings and Bars + Rings retain ordinary
+GPUI paths rather than these materials.
+
+GPUI also captures entity dependencies independently for each cached-view scope,
+including entities already accessed by a caller or enclosing cached view. On
+scope exit, local dependencies are merged back into the caller's set; cache
+reuse must retain them for later notifications. This keeps children created
+during render and nested cached consumers live after parent-only redraws,
+without refreshing the whole window or rerendering unrelated cached siblings.
+Its notification and cache-reuse regressions are included under
+<<_vendor_regression_checks,Vendor regression checks>>.
+
+=== Why the patch is needed
+
+Album artwork reuses its decoded image and atlas texture while the GPU transforms
+the already-cropped sprite. Rounded clipping follows image-local coordinates;
+the surrounding content mask remains in screen coordinates. No rotated pixel
+buffers or angle-indexed image cache are created. `Img` forwards its existing
+transformation matrix through image painting to the WGPU sprite shader.
+Edge coverage uses the analytic local edge normal projected through screen-to-local
+coordinate derivatives, so scaling and rotation do not widen the antialiasing ramp
+in screen pixels. No additional sprite fields or transformed textures are needed.
+
+Spectrum fills its geometry with the shared GPU palette material. Its full
+authored cubic palette is retained rather than approximated by two stops or
+repeated masked submissions; see <<_spectrum,Spectrum>>.
+
+Rust scene records, WGPU pipelines, and shader layouts change together. Spectrum
+no longer uses a gradient image, atlas tile or specialized textured-Path API.
+Ordinary fills and transformed image sprites retain their independent paths.
+
+Color images clamp linear texture sampling to their atlas tile's first and last
+texel centers. This prevents neighboring images from bleeding into magnified
+edges without adding atlas padding or disabling interpolation.
+
+=== Maintenance boundary and removal criteria
+
+The implemented rendering backend is WGPU. Native Metal rejects these new
+painting operations rather than silently substituting a different result;
+Linux/Vulkan runtime evidence does not establish Metal or browser support.
+The extra fields also increase shared vertex/sprite record sizes, so this
+patch is not a universal rendering or memory improvement.
+
+When updating GPUI, compare these extensions against their pinned baseline,
+keep Rust and shader record layouts synchronized, and preserve transformed
+image clipping, palette Path mapping, atlas lifetime, and drawing order.
+Revalidate ordinary untransformed images and plain paths as well as all migrated
+consumers. Drop the local overrides and obsolete vendor code only when
+the selected upstream revision supplies the required behavior and all Rivu
+callers have migrated; a newer dependency version alone is not sufficient.
+
+=== Vendor regression checks
+
+Run the following commands from the repository root. The standalone vendor
+workspaces keep copied upstream crates outside Rivu's workspace lint targets;
+they are not substitutes for application behavior tests. Headless WGPU checks
+need an available WGPU adapter and do not establish native-window behavior.
+
+Run `cargo test --manifest-path vendor/gpui_wgpu/Cargo.toml --lib` to exercise
+the patched shader and headless GPU regressions in their isolated test workspace.
+The companion GPUI workspace runs publication/replay regressions with
+`cargo test --manifest-path vendor/gpui/Cargo.toml --lib gpu::tests --no-default-features`
+and existing scene regressions with
+`cargo test --manifest-path vendor/gpui/Cargo.toml --lib scene::reclamation_tests --no-default-features`.
+Run `cargo test --manifest-path vendor/gpui/Cargo.toml --lib elements::img:: --no-default-features`
+for source-animation cursor and frame-request ownership regressions. Automatic
+frame requests are exercised beneath a rendered entity, matching real image views.
+Compilation also requires the pinned upstream `assets/fonts/lilex` and
+`assets/fonts/ibm-plex-sans` fixtures, placed under this repository's
+`tests/fixtures/fonts/` with their original subdirectory names.
+Upstream test-only font and image fixtures retain their original licenses.
+
+Run `cargo test --test gpui_cached_dependencies` for the application-side
+cached-view notification and replay regressions.
+

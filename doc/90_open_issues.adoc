@@ -1,6 +1,12 @@
-= Open issues
+= Open issues and resolution records
 
-== Portal file chooser cache warning
+Each entry records its investigation or resolution date. Resolved entries retain
+the original problem and evidence boundary; they are not new verification runs.
+Current behavior belongs in the linked user guides and design documents.
+
+== Open and deferred
+
+=== Portal file chooser cache warning
 
 Status: deferred, 2026-10-12. Keep the published `ashpd` 0.13.13 dependency;
 no vendor backport, upstream Git replacement, or log filtering.
@@ -26,10 +32,10 @@ at the time of investigation. Revisit when a compatible published release
 includes it; verify successful selection, cancellation, and absence of this
 warning without suppressing other logs.
 
-== Queue feedback while waiting for a query worker
+=== Queue feedback while waiting for a query worker
 
-Status: deferred, 2026-10-18. Do not change waiting-feedback policy as part of
-the current keyboard-accessibility and stale-loading-presentation fixes.
+Status: deferred, 2026-10-18. The open policy question is whether loading
+feedback should include time waiting for an obsolete physical worker to retire.
 
 Queue loading text starts its 150 ms delay when a page query is submitted.
 After a search replacement or a window hide/reopen, current demand may wait
@@ -52,19 +58,7 @@ Verify a hide/reopen and search replacement with an outstanding query longer
 than 150 ms, and retain explicit retry for failed pages. Existing ownership is
 documented in link:22_cache.adoc#_query_projection_retention[Query projection retention].
 
-== Query timeout and physical worker retirement
-
-Status: resolved in implementation, 2026-10-19.
-
-The 12-second GUI waiting deadline now delivers a logical error independently
-of the submitted reader's lifetime. Feature-local loading settles without
-releasing its physical worker slot. The original reply or disconnection retires
-that slot; late data and obsolete timeout feedback cannot publish, and only the
-latest retained demand may then start. Non-GUI query and command deadlines are
-unchanged. The ownership contract is documented in
-link:22_cache.adoc#_query_projection_retention[Query projection retention].
-
-== Small visualization canvas feedback
+=== Small visualization canvas feedback
 
 Status: open, 2026-10-18; established by code inspection, not a live GUI reproduction.
 
@@ -77,7 +71,21 @@ Extend the same 64px-width/40px-height rule to the remaining consumers, includin
 tooltip and scrolling access. Verify small saved layouts, separator resizing and
 interface scale 2 without changing saved proportions.
 
-== Drag-only panel catalog insertion
+== Resolved investigations
+
+=== Query timeout and physical worker retirement
+
+Status: resolved in implementation, 2026-10-19.
+
+The 12-second GUI waiting deadline now delivers a logical error independently
+of the submitted reader's lifetime. Feature-local loading settles without
+releasing its physical worker slot. The original reply or disconnection retires
+that slot; late data and obsolete timeout feedback cannot publish, and only the
+latest retained demand may then start. Non-GUI query and command deadlines are
+unchanged. The ownership contract is documented in
+link:22_cache.adoc#_query_projection_retention[Query projection retention].
+
+=== Drag-only panel catalog insertion
 
 Status: resolved in implementation, 2026-10-21.
 

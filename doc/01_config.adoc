@@ -1,4 +1,6 @@
 = Configuration and layout
+:toc:
+:toclevels: 2
 
 Rivu reads `~/.config/rivu/config.toml` by default (or the XDG configuration
 directory); path overrides are described in link:../readme.adoc[the README].
@@ -8,20 +10,11 @@ Omitted setting groups and fields use their defaults. Unreadable files, malforme
 TOML, unknown keys, misplaced fields, unsupported explicit schema versions, and
 invalid values are errors, not a reason to fall back to defaults.
 Paths are literal: `~` and environment variables are not expanded.
-The configuration file path must be valid UTF-8, including a path derived from
-`--data-dir`. A new host rejects an unrepresentable path before reading or saving
-configuration or starting background services. A client controlling an existing
-instance does not validate a configuration path that the instance will not use.
-Configuration symlinks are followed when saving, including relative chains and
-missing targets; saving atomically replaces the target file, not the links.
-Link loops and inaccessible targets are reported as errors without replacing the links.
-Configuration saves do not create a lock file. GUI and TUI changes share the same
-host core; data-directory ownership prevents a second host for that directory.
-Separate hosts sharing one configuration file, or external editors, are not
-coordinated: the last save wins, without merging external changes. Exit Rivu before
-editing the file manually, then restart to load the changes. Legacy
-`.config.toml.rivu-lock` files are ignored and not automatically removed; remove
-them only after all older Rivu instances using that configuration have exited.
+
+Use Settings to change the running instance, then Apply to save. To edit TOML
+directly, exit Rivu first, edit the file, and restart; the core does not watch
+external edits. Configuration controls application-wide defaults. Panel trees
+and instance preferences are saved separately in <<_layout,`layout.json`>>.
 
 Configuration is organized into `[library]`, `[playback]`,
 `[interface]`, `[logging]`, and `[visualizations]`. Audio visualization settings
@@ -30,42 +23,6 @@ live in `[visualizations.spectrum]`, `[visualizations.spectrogram]`,
 Album artwork settings live in `[interface.album_artwork]`.
 Desktop integration belongs to Interface; output and decoding belong to Playback;
 shared analysis belongs to Visualizations. Dotted names below identify file paths.
-Audio processing additionally uses top-level `[equalizer]`, `[denoise]`, and
-`[neural]` tables, `[[equalizer.bands]]`, named `[[equalizer_presets]]`, and an
-optional `[equalizer_ab]`. These are core settings, not layout preferences.
-
-[source,toml]
-----
-[equalizer]
-enabled = true
-preamp_db = -3.0
-output_gain_db = 0.0
-
-[[equalizer.bands]]
-kind = "peak"
-frequency_hz = 1200.0
-gain_db = 3.0
-q = 0.8
-
-[denoise]
-mode = "adaptive"
-strength = 1.0
-wet = 0.8
-
-[neural]
-worker = "/absolute/model-bundle/runtime/worker.py"
-speech_interpreter = "/absolute/moss-venv/bin/python"
-speech_manifest = "/absolute/moss-bundle/manifest.json"
-separation_interpreter = "/absolute/separate-venv/bin/python"
-separation_manifest = "/absolute/kim-bundle/manifest.json"
-device = "cpu"
-threads = 4
-----
-
-Replace paths with preparation output; no shell expansion occurs. Missing
-manifests leave neural operations unavailable, not automatically downloaded.
-See link:27_audio_processing.adoc[Audio processing] for filter semantics,
-profile capture, separate environments, licensing, CLI examples and bounds.
 
 A minimal example (all omitted settings retain their defaults):
 
@@ -89,25 +46,53 @@ level = "warning"
 still_mode = false
 ----
 
-== Configuration upgrades
 
-The application reads only the current configuration schema. A valid unversioned
-file needs no migration and is not rewritten merely to add a version. Normal
-application saves include the current `schema_version`.
+== Saving configuration
 
-When an unversioned file fails current parsing or validation, the error retains
-the specific cause and explains the current-schema assumption. If it is an older
-configuration, declare its original top-level `schema_version` explicitly before
-using a compatible migration tool; do not label old content with the current
-version to bypass validation. Malformed TOML must first be corrected so its
-version can be read. File-access errors are not version errors.
+Rivu writes `config.toml` on desktop Settings Apply, an explicit IPC Configure
+command, accepted processing-configuration edits (graph, Monitor EQ, presets/A/B,
+restoration or neural settings), or an orderly application exit. Processing edits
+save immediately; they do not wait for the desktop Settings editor or layout sync.
+A save is skipped when the effective configuration matches the last successful
+save or the configuration loaded at startup. Starting Rivu does not rewrite an
+existing file; a missing file is created on the first such save or orderly exit.
 
-Explicit noncurrent versions are rejected without trying historical decoders.
-The current `rivu-migrate` validates configuration but does not convert or rewrite
-it. See link:02_library.adoc#_sqlite_maintenance[SQLite maintenance] for the tool's
-commands, supported inputs, backups, and retry guarantees. Configuration and
-database schemas evolve independently; neither is an application release number.
-Layout files are outside this migration scope.
+Playback controls and desktop shortcuts, including output selection, Still Mode,
+Library columns, and library-folder changes, take effect in memory without
+writing the configuration file. A later configuration save includes these current
+values together with its explicit edits. Closing the desktop window is not application
+exit: the core keeps running. A crash or forced termination can lose changes
+since the last successful save. Database and layout persistence are independent.
+
+Apply rejects a candidate that cannot be saved and retains the settings draft;
+earlier runtime changes remain active. Saving errors are logged and exposed in
+library status and the desktop error notice. A successful retry clears its own
+error, not an unrelated error reported later. Exit makes one final save attempt;
+a failure is reported but does not prevent exit. Writes atomically replace the
+file without forcing a storage flush, so success is not a power-loss guarantee.
+
+After Apply saves successfully, an audio-command delivery failure does not roll
+back the committed configuration. Resolve the audio failure before retrying or
+restarting.
+
+=== File access and external editors
+
+The configuration file path must be valid UTF-8, including a path derived from
+`--data-dir`. A new host rejects an unrepresentable path before reading or saving
+configuration or starting background services. A client controlling an existing
+instance does not validate a configuration path that the instance will not use.
+Configuration symlinks are followed when saving, including relative chains and
+missing targets; saving atomically replaces the target file, not the links.
+Link loops and inaccessible targets are reported as errors without replacing the links.
+Configuration saves do not create a lock file. GUI and TUI changes share the same
+host core; data-directory ownership prevents a second host for that directory.
+Separate hosts sharing one configuration file, or external editors, are not
+coordinated: the last save wins, without merging external changes. Exit Rivu before
+editing the file manually, then restart to load the changes. Legacy
+`.config.toml.rivu-lock` files are ignored and not automatically removed; remove
+them only after all older Rivu instances using that configuration have exited.
+Saves serialize current settings rather than patching the original TOML; comments
+and formatting are not retained, and omitted default-valued fields can be written explicitly.
 
 == Parameters
 
@@ -238,31 +223,6 @@ actions that replace a non-empty queue ask for confirmation. Disable it in deskt
 settings under Playback & Audio → Playback to replace the queue without prompting.
 This preference does not change TUI, CLI, or IPC behavior.
 
-=== Saving configuration
-
-Rivu writes `config.toml` only on desktop Settings Apply (or an explicit IPC
-Configure command), or during an orderly application exit. A save is
-skipped when the effective configuration matches the last successful save or
-the configuration loaded at startup. Starting Rivu does not rewrite an existing
-file; a missing file is created on the first Apply or orderly exit.
-
-Playback controls and desktop shortcuts, including output selection, Still Mode,
-Library columns, and library-folder changes, take effect in memory without
-writing the configuration file. Apply saves these current values together with
-the explicitly edited settings. Closing the desktop window is not application
-exit: the core keeps running. A crash or forced termination can lose changes
-since the last successful save. Database and layout persistence are independent.
-
-Apply rejects a candidate that cannot be saved and retains the settings draft;
-earlier runtime changes remain active. Saving errors are logged and exposed in
-library status and the desktop error notice. A successful retry clears its own
-error, not an unrelated error reported later. Exit makes one final save attempt;
-a failure is reported but does not prevent exit. Writes atomically replace the
-file without forcing a storage flush, so success is not a power-loss guarantee.
-
-After Apply saves successfully, an audio-command delivery failure does not roll
-back the committed configuration. Resolve the audio failure before retrying or
-restarting.
 
 === Output and desktop integration
 
@@ -293,6 +253,52 @@ Color settings use quoted `"#RRGGBB"` values. The file schema is defined in
 link:../crates/rivu-format/src/config/file.rs[the grouped file adapter]; current defaults
 and validation live in link:../crates/rivu-format/src/config.rs[`Config`].
 
+=== Audio processing defaults
+
+Audio processing additionally uses top-level `[equalizer]`, `[denoise]`, and
+`[neural]` tables, `[[equalizer.bands]]`, named `[[equalizer_presets]]`, and an
+optional `[equalizer_ab]`. The processing DAG, including node-local parameters,
+connections and canvas positions, lives in `[processing_graph]` and its nested
+arrays. These are core settings in `config.toml`, not preferences in `layout.json`.
+The default graph connects Source directly to Output; the top-level Monitor EQ
+and restoration/neural defaults do not implicitly insert graph nodes.
+
+For example, the following sets Monitor EQ and restoration/neural defaults; it
+does not construct a processing graph:
+
+[source,toml]
+----
+[equalizer]
+enabled = true
+preamp_db = -3.0
+output_gain_db = 0.0
+
+[[equalizer.bands]]
+kind = "peak"
+frequency_hz = 1200.0
+gain_db = 3.0
+q = 0.8
+
+[denoise]
+mode = "adaptive"
+strength = 1.0
+wet = 0.8
+
+[neural]
+worker = "/absolute/model-bundle/runtime/worker.py"
+speech_interpreter = "/absolute/moss-venv/bin/python"
+speech_manifest = "/absolute/moss-bundle/manifest.json"
+separation_interpreter = "/absolute/separate-venv/bin/python"
+separation_manifest = "/absolute/kim-bundle/manifest.json"
+device = "cpu"
+threads = 4
+----
+
+Replace paths with preparation output; no shell expansion occurs. Missing
+manifests leave neural operations unavailable, not automatically downloaded.
+See link:27_audio_processing.adoc[Audio processing] for graph editing, filter
+semantics, profile capture, separate environments, licensing, CLI examples and bounds.
+
 == Desktop settings
 
 Add library folders from the Library view. In Settings, folders are listed
@@ -319,22 +325,17 @@ restarting playback. The application menu also offers a Visualizations toggle be
 Layouts; On enables visualizations and Off pauses them without writing `config.toml`.
 Both controls use `visualizations.still_mode`; neither affects artwork or animation.
 
-Settings keeps an independent draft based on the configuration at opening or the
-most recent successful Apply. Apply submits only fields whose values differ from
-that baseline. Core merges those edits into its latest configuration when the
-request executes, not when it is queued. Unedited changes from playback controls,
-CLI clients, or other desktop controls—including volume, output device, library
-roots, Still Mode, Shuffle, Repeat, and Library columns—are preserved. An explicitly
-changed field takes the draft value even if another control changed it meanwhile;
-editing the folders list replaces the whole roots list.
+Settings edits a draft. Apply merges only fields changed since opening or the
+last successful Apply into the latest configuration, preserving unrelated
+changes from playback controls and other clients. An edited field wins over a
+concurrent change to that same field; editing folders replaces the entire roots
+list. See <<_saving_configuration,Saving configuration>> for save failures and
+the saved-but-audio-failed case.
 
-After successful Apply, the baseline and untouched controls reflect the committed
-configuration. Edits made while Apply was pending remain in the draft, including
-partially typed or invalid text, for the next Apply. Failed Apply retains the draft
-and its previous baseline for correction or retry; the saved-but-audio-failed
-contract above still applies. Discard closes the editor and drops unsubmitted
-edits, but does not cancel an Apply already sent to Core. Its later completion
-cannot replace the draft or feedback of a reopened editor.
+Edits made while Apply is pending remain for the next Apply. Failed Apply keeps
+the draft for correction. Discard closes the editor and drops unsubmitted edits;
+it does not cancel an Apply already sent, and that completion cannot replace a
+newly opened editor's draft or feedback.
 
 Interface → Layout includes Layout snapping and Layout grid spacing. These save
 `interface.layout_snap_enabled` (default `true`) and `interface.layout_snap_grid_px` (default `16`,
@@ -360,45 +361,6 @@ Single-line desktop text fields scroll horizontally to keep the caret visible.
 Use Left/Right to navigate long values or Home/End to reach either end.
 Shift+Left/Right extends a selection beyond the visible text; Shift+Home/End
 selects to the beginning/end while preserving the selection anchor.
-
-Shared visualization settings apply as follows:
-
-* `visualizations.signal` selects one shared signal for all audio-data views:
-  `"before"` is before the active realtime processing chain; `"after"` (default)
-  includes the active chain and monitor EQ. Both are before master volume.
-  Change it under Visualizations → General → Processing / cache. Analysis runs
-  asynchronously; strict audio/visual synchronization is not guaranteed.
-  Changing the signal resets realtime analysis history, but does not clear the
-  rolling waveform or automatically start a full waveform scan. Equalizer changes
-  preserve realtime history; newly visited waveform intervals replace their old data.
-  An explicit full waveform scan snapshots the selected signal and processing when
-  requested, keeping the displayed waveform until results are available.
-
-* `visualizations.background` sets the background for all views; `visualizations.palette` is
-  shared by Spectrum, Spectrogram, and Waveform. Audio Visualizer has independent
-  primary and secondary colors.
-* `visualizations.db_range` supplies the display span for Spectrum, Spectrogram,
-  and Audio Visualizer unless a view overrides it. It does not affect Waveform
-  gain or volume.
-* `visualizations.analysis_fft_size`, `visualizations.analysis_window`, and `visualizations.analysis_fps` apply to Spectrum,
-  Spectrogram, and Audio Visualizer, not Waveform. FFT size accepts powers of two
-  from `512` to `32768` and defaults to `8192`. Window accepts `hann`,
-  `blackman_harris` (default), or `none`. Changing size or window clears
-  visualization history.
-  `visualizations.analysis_fps` is the maximum analysis rate; actual updates follow window
-  frames and can be slower when the compositor throttles presentation.
-* Still Mode stops visualization processing and discards results; see
-  <<_still_mode,Still Mode>>. `visualizations.cache` controls rendering reuse,
-  separately from media read buffering; see link:22_cache.adoc[Caching and Resource Lifecycles].
-
-Each frequency view has a range override; leave it empty to inherit General,
-or clear an explicit value to restore inheritance. See
-<<_visualization_db_ranges,Visualization dB ranges>> for the configuration contract.
-
-Audio Visualizer style, reference lines, and labels are defaults for new
-instances, while effect parameters are shared by all instances. See
-<<_audio_visualizer,Audio Visualizer>> for instance settings and style-specific
-effects. Inactive Spectrum style-dependent settings retain their values.
 
 Interface → Album artwork edits the defaults for new panels: style, mode,
 seconds per circle, and direction. Animation frame rate remains shared.
@@ -447,8 +409,10 @@ other applications.
 
 `interface.font_size` accepts integer point sizes from `8` to `18`, default `12`
 (16 logical pixels before interface scaling). Apply to update open windows.
-It preserves title/secondary text hierarchy without resizing icons or chart
-annotations, and does not affect terminal text or replace `interface.scale`.
+It preserves title/secondary text hierarchy; shared icon-button glyphs also follow
+the configured text size, while their padding and minimum hit areas follow interface
+scale. Plot annotations retain their own sizing. This does not affect terminal
+text or replace `interface.scale`.
 
 `interface.scale` accepts finite values from `0.75` to `2.0` (default `1.0`) and
 adjusts desktop controls and list density independently of the desktop's display scaling. Menus and editor dialogs
@@ -491,9 +455,11 @@ Apply validates and saves the settings draft across all four sidebar groups toge
 navigation preserves the draft and each page's scroll position. Discard drops unapplied changes and closes
 settings. Invalid input or a save failure is reported in settings. Saving an
 unavailable output target succeeds; applying it stops playback and reports an
-audio error while retaining the saved selection. Settings opened for one Audio Visualizer instance instead
-apply only that instance's style, reference lines, and labels to `layout.json`;
-applying fails if the instance no longer exists.
+audio error while retaining the saved selection. Instance settings instead apply
+only the selected panel's options to the in-memory layout: style, reference lines
+and labels for Audio Visualizer; style, mode, period and direction for artwork.
+They do not request a `layout.json` write; use layout sync or orderly exit to
+persist them. Applying fails if the instance no longer exists.
 Inactive Spectrum fields retain their values and are still validated by Apply.
 If a retained value is invalid, open Visualizations → Spectrum: choose a Style
 other than Solid to edit bar count, width, or gap, or enable Peak markers to
@@ -611,8 +577,8 @@ start locked and use the same global configuration.
 
 Existing layout collections are loaded unchanged. To make another layout,
 duplicate an existing layout and edit the copy. Renaming or deleting an initial
-layout does not cause it to be restored on restart. For initial proportions, see
-link:24_layout.adoc#_scope_and_ownership[Layout design].
+layout does not cause it to be restored on restart. The built-in proportions are
+initial templates, not constraints on later edits.
 
 The layout list places `Default` first when present, followed by other names in
 name order. This does not change the active layout.
@@ -702,7 +668,8 @@ If `layout.json` cannot be read or validated at session startup, Rivu reports th
 load error and opens the default collection. Invalid layout names or operations
 leave the UI unchanged. Explicit sync requests use one background worker and
 coalesce pending requests, not ordinary edits. Each request captures the current
-collection; later edits cannot change that write or suppress its feedback. A
+collection; later edits cannot change that write or suppress its feedback, though
+a newer sync request supersedes older feedback. A
 failed write preserves the old file and all session edits. Retry with manual
 sync, not another layout edit or instance-settings Apply. Orderly application
 exit writes the latest dirty collection, waits for completion, and reports a
@@ -713,6 +680,8 @@ action; these actions remain visible without hovering. Drag the empty footer are
 with the left mouse button to move the window using the window manager's native
 move operation. Notification text and controls do not start a window move.
 Menus and dialogs suppress footer dragging.
+Exit Rivu before editing `layout.json` manually: it is loaded once per GUI session,
+and later saves replace it rather than merging external changes.
 
 See link:24_layout.adoc[Desktop Layout Design] for geometry, ownership, and
 editing invariants.
@@ -767,8 +736,112 @@ defaults when that layout is opened. Once initialized, all three choices are
 saved explicitly. Unknown fields, invalid structures, and out-of-range indices
 are errors.
 
+The catalog's `kind` values are `transport` (Playback), `library`, `albums`,
+`queue`, `playlists`, `history` (Recent tracks), `metadata` (Track details),
+`album_artwork`, `spectrum`, `spectrogram`, `waveform`, `audio_visualizer`, and
+`audio_processing`. Unknown kind strings are retained and show an unknown-panel
+message; they do not create a custom panel implementation.
 
-== Visualization dB ranges
+An Album artwork panel can additionally contain an `album_artwork` object with
+all four keys: `style`, `mode`, `period_seconds`, and `direction`. For example:
+
+[source,json]
+----
+{"kind": "album_artwork", "show_tab_bar": false, "album_artwork": {
+  "style": "halo", "mode": "rotating", "period_seconds": 20.0,
+  "direction": "clockwise"
+}}
+----
+
+The values use the same enums and positive finite period as
+<<_album_artwork,Album artwork>>. Omit the whole object to initialize from global
+defaults when that layout is opened; partial objects and `null` are invalid.
+The object belongs only to `album_artwork` panels, just as the three visualizer
+fields belong only to `audio_visualizer` panels. Animation FPS remains global.
+
+
+== Visualizations
+
+Live FFT analysis runs during playback only when Still Mode is off, the
+application window is visible, and a Spectrum, Spectrogram, or Audio Visualizer
+panel is visible.
+`visualizations.analysis_fps` accepts `5`–`60` and defaults to `20`; it limits FFT
+analysis, not display animation. Spectrum release, Spectrogram scrolling, radial
+motion, and generative light follow native window frames between accepted audio
+updates. Display time never advances beyond received audio; pause, hidden windows,
+and Still Mode stop both clocks. Stereo Density and Spatial Spectrum retain
+their measured analysis-update cadence.
+`visualizations.palette` accepts `tokyo_night` or `deadbeef` (default `deadbeef`).
+`visualizations.cache` defaults to `true`; disabling it preserves the displayed
+results but rebuilds derived graphics on repaint. It does not affect Radial
+Spectrum. Rendering reuse and resource budgets are described in
+link:22_cache.adoc#_visualization_caching[Visualization caching]; signal and
+rendering design in link:23_visuals.adoc[Visualization Rendering Design].
+
+Before audio data is available, visualization panels show no waiting message;
+their backgrounds and any applicable reference guides remain. Loading, failure,
+Still Mode, and unavailable frequency-data messages remain distinct from this
+normal initial state.
+
+Shared visualization settings apply as follows:
+
+* `visualizations.signal` selects one shared signal for all audio-data views:
+  `"before"` is before the active realtime processing chain; `"after"` (default)
+  includes the active chain and monitor EQ. Both are before master volume.
+  Change it under Visualizations → General → Processing / cache. Analysis runs
+  asynchronously; strict audio/visual synchronization is not guaranteed.
+  Changing the signal resets realtime analysis history, but does not clear the
+  rolling waveform or automatically start a full waveform scan. Equalizer changes
+  preserve realtime history; newly visited waveform intervals replace their old data.
+  An explicit full waveform scan snapshots the selected signal and processing when
+  requested, keeping the displayed waveform until results are available.
+
+* `visualizations.background` sets the background for all views (default
+  `"#08090C"`); `visualizations.palette` is shared by Spectrum, Spectrogram, and
+  Waveform. Audio Visualizer has independent primary and secondary colors.
+* `visualizations.db_range` supplies the display span for Spectrum, Spectrogram,
+  and Audio Visualizer unless a view overrides it. It does not affect Waveform
+  gain or volume.
+* `visualizations.analysis_fft_size`, `visualizations.analysis_window`, and `visualizations.analysis_fps` apply to Spectrum,
+  Spectrogram, and Audio Visualizer, not Waveform. FFT size accepts powers of two
+  from `512` to `32768` and defaults to `8192`. Window accepts `hann`,
+  `blackman_harris` (default), or `none`. Changing size or window clears
+  visualization history.
+  `visualizations.analysis_fps` is the maximum analysis rate; actual updates follow window
+  frames and can be slower when the compositor throttles presentation.
+* Still Mode stops processing and discards results; see <<_still_mode,Still Mode>>.
+  This is independent of rendering reuse and media read buffering.
+
+Each frequency view has a range override; leave it empty to inherit General,
+or clear an explicit value to restore inheritance. See
+<<_visualization_db_ranges,Visualization dB ranges>> for the configuration contract.
+
+Audio Visualizer style, reference lines, and labels are defaults for new
+instances, while effect parameters are shared by all instances. See
+<<_audio_visualizer,Audio Visualizer>> for instance settings and style-specific
+effects. Inactive Spectrum style-dependent settings retain their values.
+
+=== Still Mode
+
+`visualizations.still_mode` defaults to `false`. Enabling it replaces all four visualization
+views with a static status, stops analysis sampling and FFT work, and discards
+all visualization results. Progressive waveform collection stops; any running
+full-waveform request is cancelled, and new requests are unavailable.
+
+Playback, seeking through the playback slider, ordinary interface effects,
+library operations, covers and their animation, IPC, MPRIS, and the tray are unchanged.
+Layout and visualization settings are preserved, including `visualizations.cache`.
+
+Disabling Still Mode starts the visible views fresh, without reopening audio
+output or the decoder. Views rebuild from new audio; leaving the mode while
+paused does not restore an old picture. Waveform starts
+accumulating from subsequently decoded PCM, with discarded and skipped intervals
+left blank. An interrupted traversal is not marked complete. Full-waveform
+requests do not restart automatically; request one explicitly after leaving the
+mode if needed. Ordinary playback pause remains different: it freezes the current
+visualizations without discarding their results.
+
+=== Visualization dB ranges
 
 `visualizations.db_range` defaults to `70` dB. The optional `visualizations.spectrum.db_range`,
 `visualizations.spectrogram.db_range`, and `visualizations.audio_visualizer.db_range` override it only for their
@@ -798,50 +871,6 @@ playback volume, or Waveform's RMS/Peak gains. Spectrogram recolors retained
 history without discarding it. Changing an unused shared default or setting an
 override equal to the current resolved value leaves the display unchanged.
 
-== Visualizations
-
-Live FFT analysis runs during playback only when Still Mode is off, the
-application window is visible, and a Spectrum, Spectrogram, or Audio Visualizer
-panel is visible.
-`visualizations.analysis_fps` accepts `5`–`60` and defaults to `20`; it limits FFT
-analysis, not display animation. Spectrum release, Spectrogram scrolling, radial
-motion, and generative light follow native window frames between accepted audio
-updates. Display time never advances beyond received audio; pause, hidden windows,
-and Still Mode stop both clocks. Stereo Density and Spatial Spectrum retain
-their measured analysis-update cadence.
-`visualizations.palette` accepts `tokyo_night` or `deadbeef` (default `deadbeef`) and is
-shared by Spectrum, Spectrogram, and Waveform. See
-link:../src/config.rs[`Config`] for the full setting ranges and defaults.
-`visualizations.cache` defaults to `true`; disabling it preserves the displayed
-results but rebuilds derived graphics on repaint. It does not affect Radial
-Spectrum. See link:22_cache.adoc[Caching and Resource Lifecycles] for scope and trade-offs,
-and link:23_visuals.adoc[Visualization Rendering Design] for rendering choices.
-
-Before audio data is available, visualization panels show no waiting message;
-their backgrounds and any applicable reference guides remain. Loading, failure,
-Still Mode, and unavailable frequency-data messages remain distinct from this
-normal initial state.
-
-=== Still Mode
-
-`visualizations.still_mode` defaults to `false`. Enabling it replaces all four visualization
-views with a static status, stops analysis sampling and FFT work, and discards
-all visualization results. Progressive waveform collection stops; any running
-full-waveform request is cancelled, and new requests are unavailable.
-
-Playback, seeking through the playback slider, ordinary interface effects,
-library operations, covers and their animation, IPC, MPRIS, and the tray are unchanged.
-Layout and visualization settings are preserved, including `visualizations.cache`.
-
-Disabling Still Mode starts the visible views fresh, without reopening audio
-output or the decoder. Views rebuild from new audio; leaving the mode while
-paused does not restore an old picture. Waveform starts
-accumulating from subsequently decoded PCM, with discarded and skipped intervals
-left blank. An interrupted traversal is not marked complete. Full-waveform
-requests do not restart automatically; request one explicitly after leaving the
-mode if needed. Ordinary playback pause remains different: it freezes the current
-visualizations without discarding their results.
-
 === Waveform
 
 Waveform shows a whole-track timeline, relative to the subtrack for CUE. Left is
@@ -866,8 +895,9 @@ RMS uses a center-to-edge palette gradient; Peak uses the palette color at its
 level. Known silence remains visible as a minimum-height RMS fill; unknown
 intervals stay blank.
 
-Waveform labels (`visualizations.waveform.labels`) default to `false`;
-`cursor_color` and `glow` control the cursor and glow. Amplitude settings are:
+Waveform labels (`visualizations.waveform.labels`) default to `false`.
+`cursor_color` defaults to `"#73DACA"`; `glow` accepts `0`–`2`, default `1.0`.
+Amplitude settings are:
 
 [cols="2,1,1",options="header"]
 |===
@@ -883,13 +913,27 @@ rendering only, not playback volume or decoded preview data.
 === Spectrum and Spectrogram
 
 Spectrum shows current frequency energy. `visualizations.spectrum.style` accepts `bars`,
-`outline`, `led`, `line`, or `solid` (default `solid`). The remaining `visualizations.spectrum.*`
-settings control band density, spacing, bar and peak hold, release motion,
-smoothing, reference lines, labels, and display range. `visualizations.spectrum.bars = 0`
-(default) chooses the band count automatically; explicit counts accept `1`–`512`.
-Motion freezes while paused.
-The default bar falling acceleration (`visualizations.spectrum.bar_gravity`) is
-`200` dB/s². Labels and reference lines both default to off.
+`outline`, `led`, `line`, or `solid` (default `solid`). Motion freezes while paused.
+The remaining `visualizations.spectrum.*` settings are:
+
+[cols="2,2,1",options="header"]
+|===
+|Key |Range or meaning |Default
+|`bars` |`0` (automatic) or `1`–`512` |`0`
+|`bar_width` |`1`–`20` pixels; automatic band sizing |`3.0`
+|`gap` |`0`–`8` pixels |`1.0`
+|`peaks` |Show discrete peak markers |`true`
+|`peak_hold_ms` |`0`–`2000` ms |`400`
+|`peak_gravity` |`0`–`500` dB/s² |`50.0`
+|`bar_hold_ms` |`0`–`2000` ms |`0`
+|`bar_gravity` |`0`–`500` dB/s² |`200.0`
+|`smoothing_ms` |`0`–`1000` ms |`80`
+|`grid`, `labels` |Reference lines and labels |Both `false`
+|===
+
+Zero gravity snaps to the current level after hold; it does not hold peaks forever.
+An explicit `bars` count overrides automatic sizing by `bar_width`.
+Display range inheritance is described in <<_visualization_db_ranges,Visualization dB ranges>>.
 
 `visualizations.spectrum.interpolate` defaults to `false` and controls frequency interpolation and whether `solid` has a
 continuous or stepped boundary. `line` always connects valid body points
@@ -900,10 +944,11 @@ Spectrogram shows recent frequency history; unavailable history stays blank.
 Its `visualizations.spectrogram.*` settings include:
 
 * `labels`: default `false`.
+* `interpolate`: default `true`; controls interpolation between source rows.
 * `history_seconds`: `1`–`60`, default `20`; retained history also depends on panel
   width and analysis rate.
-* `sampling_points_scale`: `0.4`–`1.4`, choosing source frequency rows relative to
-  visible panel height.
+* `sampling_points_scale`: `0.4`–`1.4`, default `0.5`, choosing source frequency
+  rows relative to visible panel height.
 * `interpolation_points` (Maximum frequency rows): `64`–`4096`, default `1024`.
   This limits rendering rows with or without interpolation; it does not change
   FFT size or add measured frequency detail.
@@ -930,8 +975,9 @@ choose a style; `Back` returns without changing it. The main menu's `Display`
 group independently toggles `Reference lines` and `Labels`; a checkmark means
 enabled. Choosing a style or toggling an overlay closes the menu. Visualizer
 settings lets you apply these choices together to that instance.
-Moving panels and restarting preserve their choices. Different styles can run
-simultaneously. Global `visualizations.audio_visualizer.style`, `visualizations.audio_visualizer.grid`, and
+Moving panels preserves their choices; layout sync or orderly exit persists them
+across restarts. Different styles can run simultaneously. Global
+`visualizations.audio_visualizer.style`, `visualizations.audio_visualizer.grid`, and
 `visualizations.audio_visualizer.labels` seed new instances only. Style defaults to `bars_rings`;
 both overlay defaults are `false`.
 
@@ -975,4 +1021,43 @@ and decay follow accepted audio time: silence extinguishes the light, while
 pause freezes it. Seeking, signal gaps, hiding the view, and style/FFT changes
 reset the scene. See link:23_visuals.adoc[Visualization Rendering Design] for
 analysis continuity, scene resource boundaries, and rendering trade-offs.
+
+The shared `visualizations.audio_visualizer.*` effect parameters accept finite
+values in these ranges (integer for `bar_glow_layers`):
+
+[cols="2,1,1",options="header"]
+|===
+|Key |Range |Default
+|`sensitivity` |0–5 |1.5
+|`rotation_speed` |0–10 |0.5
+|`bar_width` |0–2 |0.6
+|`bar_glow_layers` |0–4 |2
+|`ring_opacity` |0–1 |0.8
+|`bloom_intensity` |0–2 |0.5
+|`inner_diameter` |0–2 |0.7
+|===
+
+`fade_when_idle` defaults to `false`. `primary_color` and `secondary_color`
+default to `"#7AA2F7"` and `"#BB9AF7"`. These parameters remain saved even when the
+selected instance style does not use them.
+
+== Configuration upgrades
+
+The application reads only the current configuration schema. A valid unversioned
+file needs no migration and is not rewritten merely to add a version. Normal
+application saves include the current `schema_version`.
+
+When an unversioned file fails current parsing or validation, the error retains
+the specific cause and explains the current-schema assumption. If it is an older
+configuration, declare its original top-level `schema_version` explicitly before
+using a compatible migration tool; do not label old content with the current
+version to bypass validation. Malformed TOML must first be corrected so its
+version can be read. File-access errors are not version errors.
+
+Explicit noncurrent versions are rejected without trying historical decoders.
+The current `rivu-migrate` validates configuration but does not convert or rewrite
+it. See link:02_library.adoc#_sqlite_maintenance[SQLite maintenance] for the tool's
+commands, supported inputs, backups, and retry guarantees. Configuration and
+database schemas evolve independently; neither is an application release number.
+Layout files are outside this migration scope.
 

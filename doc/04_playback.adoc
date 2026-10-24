@@ -1,21 +1,10 @@
 = Playback
+:toc:
+:toclevels: 2
 
-Selecting a missing source manually leaves the current track running and reports
-an error. If the next entry cannot be opened at natural end, playback stops.
-
-== Equalizer and processed audition
-
-The link:27_audio_processing.adoc[Audio processing panel and CLI] provide live
-parametric EQ and offline restoration, speech enhancement and separation. EQ
-settings persist independently of the selected track; format/seek/source changes
-reset DSP history. Disabled settled EQ preserves the original sample path.
-Processing jobs never replace source media. Audition selects a retained aligned
-result and starts its original queue source when necessary; Original returns to
-source playback. Stem remix uses independent vocal/accompaniment gains, without
-implicit normalization or clipping protection. Results are session-owned temporary
-files, not a durable library export. Keep EQ and playback level fixed when
-comparing original/processed audio.
-
+Playback follows queue occurrences, with shared controls in the GUI, TUI, CLI
+and optional MPRIS service. Output uses native PipeWire; decoder selection and
+processing are independent of the output device.
 
 == Transport and timing
 
@@ -38,12 +27,12 @@ Seek-slider Home/End and terminal Ctrl+Home/End seek to zero or that occurrence'
 known duration. Slider pointer dragging remains an absolute target, as do CLI
 seek and volume commands.
 
-The desktop Playback panel shows the current title, artist and album, playback
-progress, transport controls, and volume. Transport controls and volume stay on
-one row with horizontal scrolling in narrow panels. Use Album artwork for covers.
-When a track is loaded, the always-visible favorite button before the artist and
-album toggles that track's library favorite status. No favorite button is shown
-without a current track.
+Selecting a missing source manually leaves the current track running and reports
+an error. If the next entry cannot be opened at natural end, playback stops.
+
+The desktop Playback panel shows title, artist, album, progress, transport, and
+volume. Its favorite button changes the current track's library favorite, not
+the browsing selection. Use the separate Album artwork panel for covers.
 The crosshair beside its title (*Locate playing entry in Queue*) reveals the
 Queue tab and locates the current occurrence, subject to layout locking;
 see <<_queue,Queue>>.
@@ -65,26 +54,6 @@ synthesize silence absent from the source.
 Ordinary audio plays to actual decoder EOF; an estimated metadata duration is
 not a playback cutoff. An explicit CUE subtrack end remains a hard playback bound.
 
-Successful playback fills or improves bitrate information in the library without
-rewriting media files. Reliable fixed-encoding opening metadata can upgrade an estimate.
-Otherwise, complete playback from the beginning to actual source EOF measures
-the selected encoded audio stream during normal decoding; there is no additional
-full-file analysis pass. Seeking, restricted CUE playback, early stop, and decode
-errors cannot produce a complete-playback measured average. Missing packet durations,
-known incomplete streams, or unsupported statistics leave the value estimated or
-unknown. Native MPEG playback checks available authoritative frame counts at completion;
-estimated metadata durations are not completeness evidence. Without reliable
-counts, measurement does not certify file integrity. Late results and
-source replacements cannot update another track or a changed file.
-Native VBRI MP3 can remain estimated because the demuxer consumes its first audio
-frame as metadata while the declared frame count still includes it.
-Pausing alone does not invalidate complete-stream measurement. Confirmed
-values are not replaced by estimates. CUE records use whole-source opening
-metadata, never source byte counts divided by a subtrack's duration.
-Bitrate measurement does not load FFmpeg or change decoder selection. It only
-reuses the decoder selected by the existing enable setting, Decoder hint, and
-Auto fallback rules.
-
 Seek targets must be finite and non-negative. Ordinary file seeks are not clamped
 by estimated metadata duration; completion requires actual decoder EOF. Only an
 explicit CUE end bounds the seek target. Seeking while paused keeps playback
@@ -97,104 +66,6 @@ Listening statistics use confirmed heard time; see link:02_library.adoc[Library]
 
 Pausing lets already submitted audio finish, then makes the output stream inactive.
 Unread audio is retained for resume; paused wall time does not advance playback.
-
-== Output devices and speaker layouts
-
-`playback.output_device` is an exact name from `rivu playback devices`, which lists native
-PipeWire sinks only. Omit the setting for the default PipeWire sink, or use
-`PipeWire: <node.name>` for a named sink. PipeWire must be running; there is no
-direct ALSA output or fallback to a different backend.
-
-PipeWire handles device-rate conversion. Playback stays bound to its selected
-sink; invalid or disappearing routes fail explicitly instead of silently
-rerouting. Select an available sink and start playback again to recover.
-Changing to an invalid or unavailable sink stops playback and keeps the newly
-requested setting. Subsequent playback attempts still target that sink; neither
-the previous selection nor the default sink is substituted automatically.
-Device-application failures are reported while stopped as well as during
-playback. If playback is already stopped, a failure reports a configuration error
-for the latest output request. Reapplying unchanged settings while stopped
-validates them again. If applying settings actually terminates active playback,
-that playback remains stopped regardless of a later device selection. Events
-from an older playback cannot stop a newer playback.
-Changing the sink or remixing setting rebuilds the output at the current
-position and preserves paused state. The existing decoder is retained; these
-changes do not apply a newly saved Decoder hint or media read-buffer size.
-
-Multichannel output preserves speaker identities. `playback.pipewire_auto_mix` is enabled
-by default and permits PipeWire remixing with channel-level normalization to prevent
-gain from summed channels. Downmixing may therefore reduce the level. Disable it to
-require a compatible sink layout without remixing. Both modes validate the actual
-selected sink and its negotiated speaker layout, including changes to links while
-playing. Unsupported routes report an error rather than using an unrelated compatible sink.
-
-Rivu sends 32-bit float audio at the decoded sample rate and suggests that rate to
-PipeWire without forcing the shared graph. Actual graph and device rates depend on
-system policy and device support; source-rate output alone is not a bit-perfect
-guarantee. Floating-point peaks above full scale are preserved before device
-conversion, not clipped by Rivu. Downstream gain and integer device conversion can
-still cause clipping; Rivu does not add a limiter or dither to its float output.
-Non-finite decoded samples, including overflow during conversion to 32-bit float,
-are replaced with silence before waveform generation, analysis and playback.
-This does not limit extreme finite amplitudes or provide protection against clipping.
-
-Desktop audio mixers receive the current library/CUE title, artist and album,
-including edits made while playing or paused. The application identity remains
-Rivu. Mixer volume and mute are independent of Rivu's own software volume and
-remain effective with remixing disabled.
-
-The decoded PCM output queue retains a quarter second of audio, with a minimum of
-2048 frames, and is limited to 16 MiB of interleaved 32-bit float samples. Rates
-and channel counts must fit that combined budget; for example, 768 kHz with 16
-channels and 192 kHz with 32 channels fit. The callback's 256-frame scratch buffer
-uses at most another 2 MiB. Invalid formats, capacity arithmetic overflow, formats
-above the queue limit, and PCM or scratch allocation failures report playback
-errors instead of requesting an unbounded buffer or changing the output route.
-
-== Optional FFmpeg decoder
-
-Native decoding is the default. Enable `playback.ffmpeg_enabled` for additional formats,
-including audio in MKV/MP4. In Auto mode, FFmpeg loads when a native decoder cannot
-support a source, not during startup or status queries. Opening a track whose
-decoder hint is FFmpeg also loads the extension directly. Decoder status shows
-`not loaded` until a load is attempted; missing or incompatible libraries are
-reported when needed, and the load result is retained until restart.
-Native support is checked through the first packet decode: an unsupported
-format at that point also permits Auto fallback. Corrupt input and cancellation
-do not trigger a decoder fallback.
-
-Track details provides a *Decoder hint* selection. Use *Save* to commit it together
-with tag edits; an unsaved selection does not affect playback or waveform decoding:
-
-* *Auto* preserves automatic native-first selection and FFmpeg fallback.
-* *Native* uses only the native decoder, without FFmpeg recognition or fallback.
-* *FFmpeg* loads and uses FFmpeg directly. The global setting must be enabled;
-  disabling it, missing libraries, or a native-only build reports an error rather
-  than falling back to native decoding.
-
-The saved choice survives rescans and restart, is independent for each CUE subtrack,
-and applies to the next track open or explicit full-waveform request. Saving it
-does not reopen current playback. Saving a changed hint cancels an in-flight
-full-waveform request and discards its completed preview, without restarting it;
-this also applies while the window is hidden. Explicit loading reads the latest
-saved hint and replaces any pending request. The scan owns its decoder; its
-result updates the rolling waveform without overwriting newer playback updates.
-
-In Auto mode, once FFmpeg is loaded and enabled, future WAVE opens use its format
-recognition; ordinary PCM still uses the native decoder. Recognition is not proof
-that a file has been fully validated. In Native mode, or Auto mode with FFmpeg
-disabled or not loaded, DTS inside a PCM-labelled WAVE may be treated as PCM,
-including incorrect metadata and noise on playback. For DTS-WAV, select FFmpeg
-and enable the extension; no prior load is required. An explicit enhanced probe
-runs in a separate process and does not load FFmpeg in a running playback instance.
-
-Library rows are not automatically reprobed after FFmpeg loads; use a forced
-rescan to refresh stored metadata. Probe commands and recognition provenance:
-link:02_library.adoc#_metadata_and_favorites[Library].
-
-Build prerequisites and ABI compatibility: link:../readme.adoc[README].
-Enablement, disabling an active decoder, and build-feature restrictions:
-link:01_config.adoc[Configuration].
 
 == Queue
 
@@ -297,135 +168,183 @@ Application shortcuts and text editing use Ctrl, not Cmd/Super aliases.
 In the TUI, F1 opens context-sensitive help even from the search query editor;
 `?` opens it outside that editor. In the GUI, help opens only through *Shortcuts*
 in the application menu.
-Equivalent keys and paired operations share a help row; paired descriptions follow
-the displayed key order. Help can be scrolled with Up/Down, PageUp/PageDown and
-Home/End. Escape closes GUI help; F1, `?` or Escape closes TUI help, without
-operating the list underneath.
-Editors retain their text and editing keys, including spaces, `R` and `?`.
-In the GUI, a focused button owns Enter/Space instead of also controlling playback.
-The GUI seek and volume sliders are reachable with Tab/Shift+Tab and show a
-focus border. On a focused slider, unmodified Left/Down decrease and Right/Up
-increase the value: five seconds for seek, five percentage points for volume.
-Home/End choose the minimum/maximum. Seeking requires a current queue entry and
-a known positive duration; volume remains adjustable independently. These local
-keys do not extend the scope of the layout's playback shortcuts. A slider key
-ends any active pointer drag before applying its command, so a later pointer
-release cannot commit an obsolete seek preview.
-Escape cancels only the innermost interaction or leaves the focused editor before
-returning from its containing view. See
+Help scrolls with arrows, PageUp/PageDown, and Home/End. Escape closes GUI help;
+F1, `?`, or Escape closes TUI help without acting on the list beneath. Editors
+retain their text-editing keys. A focused GUI button owns Enter/Space instead of
+also controlling playback.
+
+Reach seek and volume sliders with Tab/Shift+Tab. Arrow keys change seek by five
+seconds or volume by five percentage points; Home/End chooses the minimum/maximum.
+Seek requires a current occurrence and known positive duration; volume does not.
+A slider key ends an active pointer drag so release cannot commit an old preview.
+Escape cancels the innermost interaction or leaves the editor first; see
 link:01_config.adoc#_desktop_keyboard_navigation[desktop control navigation].
+
+== Output devices and speaker layouts
+
+`playback.output_device` is an exact name from `rivu playback devices`, which lists native
+PipeWire sinks only. Omit the setting for the default PipeWire sink, or use
+`PipeWire: <node.name>` for a named sink. PipeWire must be running; there is no
+direct ALSA output or fallback to a different backend.
+
+PipeWire handles device-rate conversion. Playback stays bound to its selected
+sink; invalid or disappearing routes fail explicitly instead of silently
+rerouting. Select an available sink and start playback again to recover.
+Changing to an invalid or unavailable sink stops playback and keeps the newly
+requested setting. Subsequent playback attempts still target that sink; neither
+the previous selection nor the default sink is substituted automatically.
+Device-application failures are reported while stopped as well as during
+playback. If playback is already stopped, a failure reports a configuration error
+for the latest output request. Reapplying unchanged settings while stopped
+validates them again. If applying settings actually terminates active playback,
+that playback remains stopped regardless of a later device selection. Events
+from an older playback cannot stop a newer playback.
+Changing the sink or remixing setting rebuilds the output at the current
+position and preserves paused state. The existing decoder is retained; these
+changes do not apply a newly saved Decoder hint or media read-buffer size.
+
+Multichannel output preserves speaker identities. `playback.pipewire_auto_mix` is enabled
+by default and permits PipeWire remixing with channel-level normalization to prevent
+gain from summed channels. Downmixing may therefore reduce the level. Disable it to
+require a compatible sink layout without remixing. Both modes validate the actual
+selected sink and its negotiated speaker layout, including changes to links while
+playing. Unsupported routes report an error rather than using an unrelated compatible sink.
+
+Rivu sends 32-bit float audio at the decoded sample rate and suggests that rate to
+PipeWire without forcing the shared graph. Actual graph and device rates depend on
+system policy and device support; source-rate output alone is not a bit-perfect
+guarantee. Floating-point peaks above full scale are preserved before device
+conversion, not clipped by Rivu. Downstream gain and integer device conversion can
+still cause clipping; Rivu does not add a limiter or dither to its float output.
+Non-finite decoded samples, including overflow during conversion to 32-bit float,
+are replaced with silence before waveform generation, analysis and playback.
+This does not limit extreme finite amplitudes or provide protection against clipping.
+
+Desktop audio mixers receive the current library/CUE title, artist and album,
+including edits made while playing or paused. The application identity remains
+Rivu. Mixer volume and mute are independent of Rivu's own software volume and
+remain effective with remixing disabled.
+
+The decoded output queue holds a quarter second of audio (at least 2048 frames),
+bounded to 16 MiB of interleaved float samples, plus at most 2 MiB of callback
+scratch space. Unsupported rate/channel combinations or allocation failure report
+a playback error rather than allocating without bound or changing the output route.
+
+== Optional FFmpeg decoder
+
+Native decoding is the default. Enable `playback.ffmpeg_enabled` for additional formats,
+including audio in MKV/MP4. In Auto mode, FFmpeg loads when a native decoder cannot
+support a source, not during startup or status queries. Opening a track whose
+decoder hint is FFmpeg also loads the extension directly. Decoder status shows
+`not loaded` until a load is attempted; missing or incompatible libraries are
+reported when needed, and the load result is retained until restart.
+Native support is checked through the first packet decode: an unsupported
+format at that point also permits Auto fallback. Corrupt input and cancellation
+do not trigger a decoder fallback.
+
+Track details provides a *Decoder hint* selection. Use *Save* to commit it together
+with tag edits; an unsaved selection does not affect playback or waveform decoding:
+
+* *Auto* preserves automatic native-first selection and FFmpeg fallback.
+* *Native* uses only the native decoder, without FFmpeg recognition or fallback.
+* *FFmpeg* loads and uses FFmpeg directly. The global setting must be enabled;
+  disabling it, missing libraries, or a native-only build reports an error rather
+  than falling back to native decoding.
+
+The saved choice survives rescans and restart, is independent for each CUE subtrack,
+and applies to the next track open or explicit full-waveform request. Saving it
+does not reopen current playback. Saving a changed hint cancels an in-flight
+full-waveform request and discards its completed preview, without restarting it;
+this also applies while the window is hidden. Explicit loading reads the latest
+saved hint and replaces any pending request. The scan owns its decoder; its
+result updates the rolling waveform without overwriting newer playback updates.
+
+In Auto mode, once FFmpeg is loaded and enabled, future WAVE opens use its format
+recognition; ordinary PCM still uses the native decoder. Recognition is not proof
+that a file has been fully validated. In Native mode, or Auto mode with FFmpeg
+disabled or not loaded, DTS inside a PCM-labelled WAVE may be treated as PCM,
+including incorrect metadata and noise on playback. For DTS-WAV, select FFmpeg
+and enable the extension; no prior load is required. An explicit enhanced probe
+runs in a separate process and does not load FFmpeg in a running playback instance.
+
+Library rows are not automatically reprobed after FFmpeg loads; use a forced
+rescan to refresh stored metadata. Probe commands and recognition provenance:
+link:02_library.adoc#_metadata_and_favorites[Library].
+
+Build prerequisites and ABI compatibility: link:../readme.adoc[README].
+Enablement, disabling an active decoder, and build-feature restrictions:
+link:01_config.adoc[Configuration].
+
+== Playback metadata updates
+
+Successful playback fills or improves bitrate information in the library without
+rewriting media files. Reliable fixed-encoding opening metadata can upgrade an estimate.
+Otherwise, complete playback from the beginning to actual source EOF measures
+the selected encoded audio stream during normal decoding; there is no additional
+full-file analysis pass. Seeking, restricted CUE playback, early stop, and decode
+errors cannot produce a complete-playback measured average. Missing packet durations,
+known incomplete streams, or unsupported statistics leave the value estimated or
+unknown. Native MPEG playback checks available authoritative frame counts at completion;
+estimated metadata durations are not completeness evidence. Without reliable
+counts, measurement does not certify file integrity. Late results and
+source replacements cannot update another track or a changed file.
+Native VBRI MP3 can remain estimated because the demuxer consumes its first audio
+frame as metadata while the declared frame count still includes it.
+Pausing alone does not invalidate complete-stream measurement. Confirmed
+values are not replaced by estimates. CUE records use whole-source opening
+metadata, never source byte counts divided by a subtrack's duration.
+Bitrate measurement does not load FFmpeg or change decoder selection. It only
+reuses the decoder selected by the existing enable setting, Decoder hint, and
+Auto fallback rules.
+
 
 == Terminal client
 
-When the terminal client receives shutdown state, it exits normally and restores
-the terminal, including while the first snapshot is loading. A Watch connection
-ending without a shutdown snapshot is an error and also restores the terminal.
-Exiting the client locally does not stop the core or playback.
+The TUI controls the running core. Leaving it does not stop playback. `Tab` cycles
+Queue → Playlists → Library; `Shift+Tab` reverses direction, retaining each page's
+selection and scroll position. `Right` opens a playlist; Enter plays the selected
+playlist, track, or queue occurrence. In playlist details, `a` enqueues the selected
+track. Selecting a row alone does not change playback.
 
-`Tab` cycles Queue → Playlists → Library → Queue; `Shift+Tab` reverses the order.
-The current top tab is highlighted and bold. Switching retains each page's
-selection and scroll position, including an open playlist or library directory.
-Help and track-details overlays keep navigation inside the overlay.
-Help groups the canonical current-context bindings under Navigation, Playback,
-Current page, and Help / exit, omitting empty groups. Bold group headings are
-unindented; binding rows have a two-cell indent. Key/description columns align
-by terminal display cells; narrow screens stack descriptions with a hanging
-indent. Help is read-only with no selected-row highlight: scrolling accounts for
-headings and wrapped lines. Its fixed title identifies the current context.
-Details and Keys use a plain title row followed by the same structural separator
-as the main page, without nested boxes or cards.
-`/` opens Library search. Navigation, playback, removal, and help keys:
-<<keyboard-controls,Keyboard controls>>.
+Use `/` to open Library search. Tab/Shift+Tab switches between query and results;
+Enter from the query focuses results, and Enter on a result plays it. Esc from
+results returns to the query; Esc from the query returns to Queue. The query owns
+printable characters, including playback shortcuts and `?`; F1 still opens help.
+Text edits use the shared
+link:02_library.adoc#_desktop_list_search[delayed application and immediate clearing].
 
-In Search, `Tab`/`Shift+Tab` switches between the query and results. `Enter` from
-the query focuses results; on a result it plays the track. `Esc` from results
-returns to the query; from the query it returns to Queue. Typing appends to the
-query, and Backspace removes its last character. The visible text follows the
-query's end when it exceeds the available width. The query owns printable
-characters, including `?`; F1 still opens help. Playback keys apply after
-focusing results.
-Text edits use the same
-link:02_library.adoc#_desktop_list_search[delayed application and immediate clearing]
-as desktop list searches.
+Outside the query editor, `m` toggles the selected track's favorite in Queue,
+Library, Search, or playlist entries. It never changes a whole directory or
+playlist. Track lists prioritize titles as the terminal narrows and keep compact
+metadata, favorite, playback-state, and missing-file indicators where space permits.
+Truncation does not change stored metadata.
 
-`Right` opens playlist entries; `Enter` plays a selected playlist, track, or queue
-occurrence. In playlist details, `a` enqueues the selected track. Moving selection
-does not change the playing occurrence; its marker distinguishes playing, paused,
-and stopped states.
+Press `i` outside the query editor for read-only details of the selected track,
+directory, or playlist. Playback changes do not replace that target. Track details
+includes tags, technical audio metadata, source path, Decoder hint, and playback
+history. Missing-file paths remain available; unknowns use `—`, zero counts `0`,
+and estimated bitrates `≈`. Loading, query failure, removal, and no selection are
+distinct states. This is not a tag editor or decoder control.
 
-Press `m` (mark) to toggle the selected track's favorite state in Queue, Library, Search
-results, or playlist entries. It affects only that track, not a directory or an
-entire playlist. In the search query editor, `m` remains text input.
+Scroll details with arrows, PageUp/PageDown, or Home/End; Esc closes it and restores
+the source selection and scroll position. Help and details keep navigation inside
+the overlay, preventing playback, activation, tab switching, or removal from
+operating the underlying list. Details is an overlay, not a fourth top-level tab.
 
-Track lists show titles with compact artist, album, codec, and duration information.
-Artist and album widths adapt to loaded content within bounded widths; secondary
-information hides as the terminal narrows, and titles take priority. Codecs are
-shown in lowercase and unknown durations as `–:––`. Long values are shortened with
-an ellipsis without changing metadata. These automatic widths are independent of
-the desktop Library column settings.
-Playback status, favorites, and missing-file warnings occupy compact fixed slots
-at the right edge, after the duration, rather than before track titles. Directory
-and playlist type icons precede their names. Library directory-view files likewise
-show the desktop file icon before their titles. Each type prefix reserves a
-two-cell icon slot followed by one empty cell; other track lists do not reserve
-type-icon slots. Status slots hide below 14 columns.
-Playback, favorite, missing-file, directory, and search symbols match their desktop
-counterparts. Unfavorited tracks leave the favorite slot blank.
-Queue, Library, Playlists, and search result lists leave one character cell empty
-on each side. Playlist-detail tracks have one additional cell of left indentation
-relative to their list header. These insets reduce the width available for columns;
-narrow windows still clip content to fit. Entering Library directories does not
-add indentation or tree branches.
+The bottom area keeps position, duration, volume, shuffle, and repeat available
+while browsing. Notifications distinguish warnings and errors; ordinary playback
+updates do not replace a still-visible failure. Queue briefly shows an `F1 / ?`
+help hint on first entry; open help for the current context's bindings.
 
-Outside the query editor, `i` opens read-only details for the corresponding
-selected item. A real track is read in full from Queue, Library, Search results,
-or playlist tracks; playback changes never replace this target. Folders and
-playlist containers show their full path/name without pretending to be tracks.
-With no selected track or container, details explain where to select one.
-`Esc` closes details and preserves the source selection and scroll position.
-There are exactly three top-level tabs; Details is not a fourth tab.
+Left/Backspace goes to a parent directory; Left/Esc leaves playlist details.
+Esc returns from Search, Library tree, or playlist catalog to Queue. `q` closes
+the client outside Search and also works during initial connection. Ctrl-C exits
+from every view, including editors, overlays, and connection setup. `SIGINT` and
+`SIGTERM` also close only the client. All these exits restore terminal mode,
+screen, and cursor, leaving the core running.
 
-The summary shows the full title once, source and ID, favorite, and availability.
-One scrollable body presents Tags (artist, album, disc/track numbers and release),
-Audio (codec, sample rate, channels, duration, bitrate and source bit depth), File
-(path and decoder hint), and Playback history (play count and last played).
-Paths remain visible even for missing files. Unknown values use `—`, zero play
-counts remain `0`, and estimated bitrates use `≈`. Loading, failed reads, removed
-tracks, and no target have distinct states. Full text wraps by grapheme cell width;
-Short fields use columns of at most 36 cells, including a two-cell label indent
-and four-cell value/continuation indent. Two columns have a two-cell gap and
-require at least 74 body cells; narrower bodies stack fields. Group headings
-remain unindented, and paths retain the full body width.
-Labels and unknowns are secondary, values normal, headings/favorites accent,
-missing files warning, and failures error-colored using the current theme.
-Up/Down, PageUp/PageDown, and Home/End scroll Details. Playback, activation,
-tab-switching and removal keys do not operate the underlying list while the
-overlay is open. There is no tag editor, decoder toggle, artwork, or additional
-playback progress. Closing the overlay restores the unchanged main playback area.
-
-Without a current track, the playback line shows only an idle message; with a
-current track, it retains the playing, paused, or stopped symbol and track title.
-
-The bottom area keeps playback position, duration, volume, and playback modes
-available while browsing. Shuffle and repeat use dim icons when disabled and
-highlighted icons when enabled; single-track repeat has its own icon. The volume
-icon and percentage use the same enabled color while nonzero and are dimmed when
-muted. Notifications retain explanatory text: warnings and failures have distinct
-symbols, and ordinary
-playback updates do not replace a still-visible failure. At startup, Queue shows a
-brief `F1 / ?` help hint for about five seconds. Notices, opening help or details,
-or leaving the initial view dismiss it; returning to Queue does not show it again.
-Open help to view the current bindings.
-
-Left/Backspace goes to the parent directory; Left/Esc leaves playlist details.
-Esc returns from search, the tree, or the playlist catalog to Queue.
-`Close client` (`q`) exits outside Search without stopping the core.
-Ctrl-C exits from every terminal view, including the query editor, help, details,
-and initial connection screen, without stopping the core. While initially connecting,
-`q` also exits the loading screen. `SIGINT` and `SIGTERM` close only the terminal
-client, including during connection setup. Connection errors, normal exits, and
-these signals restore the terminal's input mode, screen, and cursor; the core keeps
-running.
+A shutdown snapshot exits normally, even during first load. A Watch connection
+ending without shutdown state is an error, but still restores the terminal.
 
 == Desktop tray and window lifecycle
 
@@ -501,18 +420,21 @@ loads it paused. CLI, TUI, and GUI Next/Previous retain their normal play-starti
 behavior when navigating to another occurrence.
 `SetPosition` for an occurrence other than the current one is ignored.
 
+== Equalizer and processed audition
+
+Use the link:27_audio_processing.adoc[Audio processing workflow] for Monitor EQ,
+restoration, speech enhancement, separation, and graph audition. Processing never
+replaces source media. Original returns from audition to source playback; Monitor
+EQ remains in both paths, so keep EQ and level fixed for comparisons. Export a
+retained graph output explicitly for a durable WAV; audition results are temporary.
+
+
 == Audio runtime crate
 
-`crates/rivu-audio` owns decoding and probing, PipeWire output, playback workers,
-processed graph rendering, waveform capture and audio analysis. It also owns
-`DecoderHint` and `MediaInfo`; consumers use `rivu_audio` directly. Queue and
-library identity, configuration persistence and processing-job orchestration stay
-in the application. The audio crate has no dependency on application, GUI or
-database code.
-
-Shared regular-file admission lives in `rivu_format::input`, preserving opened
-descriptor checks and nonblocking FIFO rejection for audio and metadata readers.
-FFmpeg bindings and PipeWire prerequisites are built by `rivu-audio`; the
-application's `ffmpeg` feature forwards to that crate. Native-only builds continue
-to use `--no-default-features`.
+Decoding, probing, PipeWire output, and playback workers belong to `rivu-audio`;
+the application owns library/queue identities, configuration, and job orchestration.
+Shared ordinary-file admission prevents audio readers from waiting on FIFOs.
+Application ownership is described in link:21_ipc.adoc#_core_and_client_boundary[IPC];
+native-only builds and FFmpeg/PipeWire prerequisites are in
+link:../readme.adoc[README].
 
