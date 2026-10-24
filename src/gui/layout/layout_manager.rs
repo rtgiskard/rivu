@@ -116,7 +116,7 @@ impl GuiApp {
                     self.finish_layout_switch(cancellation, window, cx);
                 } else {
                     self.workspace.submit_save();
-                    self.focus_layout(window, cx);
+                    self.focus_keyboard_surface(window, cx);
                 }
             }
             Err(error) => {
@@ -201,7 +201,7 @@ impl GuiApp {
                             cx,
                             |this, window, cx| {
                                 this.layout_action = None;
-                                this.focus_layout(window, cx);
+                                this.focus_keyboard_surface(window, cx);
                                 cx.notify();
                             },
                         ),

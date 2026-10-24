@@ -153,7 +153,8 @@ closes the dropdown and moves focus.
 
 Editors and input methods retain their own keys. `Escape` cancels preedit, closes
 an open dropdown, leaves the focused editor, then closes the dialog on successive
-presses. Closing a dialog restores its invoking control if present, otherwise the
+presses. Leaving an editor keeps focus within a still-open dialog. Closing a dialog
+restores its invoking control if present in the surviving layout, otherwise the
 layout receives focus. Playback shortcuts apply to the layout, not focused
 editors or buttons.
 Text selection started inside an editor follows the pointer outside its bounds

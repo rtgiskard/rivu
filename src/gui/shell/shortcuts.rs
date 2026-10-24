@@ -93,7 +93,11 @@ impl GuiApp {
             return;
         }
         if rivu_ui::tab_key(event) {
-            if modifiers.shift {
+            if self.current_keyboard_surface(cx).is_some()
+                && self.current_keyboard_surface(cx) != Some(shell::KeyboardSurface::Settings)
+            {
+                self.shell.scope().advance(modifiers.shift, window, cx);
+            } else if modifiers.shift {
                 window.focus_prev(cx);
             } else {
                 window.focus_next(cx);
@@ -103,7 +107,7 @@ impl GuiApp {
         }
         // Leaving an editor is one operation; dismissing its containing surface is another.
         if cancel && self.input_focused(window, cx) {
-            self.focus_layout(window, cx);
+            self.focus_keyboard_surface(window, cx);
             cx.stop_propagation();
             return;
         }
@@ -160,7 +164,7 @@ impl GuiApp {
                 } else {
                     self.shell.dismiss(shell::Surface::Layouts);
                 }
-                self.focus_layout(window, cx);
+                self.focus_keyboard_surface(window, cx);
                 cx.notify();
                 cx.stop_propagation();
             }

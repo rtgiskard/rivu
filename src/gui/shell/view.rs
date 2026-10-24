@@ -56,6 +56,21 @@ impl Render for GuiApp {
                 if this.current_keyboard_surface(cx).is_none() {
                     this.shell.capture_origin(window, cx);
                 }
+                if let Some(surface) = this.current_keyboard_surface(cx) {
+                    let within_surface = match surface {
+                        KeyboardSurface::Settings => this
+                            .settings
+                            .read(cx)
+                            .focus_handle(cx)
+                            .contains_focused(window, cx),
+                        _ => this.shell.scope().handle().contains_focused(window, cx),
+                    };
+                    if !within_surface {
+                        this.focus_keyboard_surface(window, cx);
+                        cx.stop_propagation();
+                        return;
+                    }
+                }
                 if event.keystroke.key == "escape"
                     && event.keystroke.modifiers == gpui::Modifiers::default()
                     && (this.workspace.interaction.docking().is_some()

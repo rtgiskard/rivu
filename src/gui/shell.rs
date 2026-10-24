@@ -157,24 +157,23 @@ impl WindowShell {
         match surface {
             Some(KeyboardSurface::Settings) => None,
             Some(_) => Some(self.focus_epoch),
-            None => {
-                if let Some(origin) = self.restore.take() {
-                    if self.layout_focus.contains(&origin, window) {
-                        origin.focus(window, cx);
-                    } else {
-                        self.layout_focus.focus(window, cx);
-                    }
-                }
-                None
-            }
+            // Validate the origin after layout edits have reached the rendered tree.
+            None => Some(self.focus_epoch),
         }
     }
 
-    fn focus_surface(&self, epoch: u64, window: &mut Window, cx: &mut App) {
+    fn focus_surface(&mut self, epoch: u64, window: &mut Window, cx: &mut App) {
         if self.focus_epoch != epoch {
             return;
         }
         let Some(surface) = self.keyboard_surface else {
+            let origin = self.restore.take();
+            if let Some(origin) = origin.filter(|origin| self.layout_focus.contains(origin, window))
+            {
+                origin.focus(window, cx);
+            } else {
+                self.layout_focus.focus(window, cx);
+            }
             return;
         };
         let menu = matches!(surface, KeyboardSurface::Menu(..));
@@ -211,6 +210,17 @@ impl GuiApp {
             surface
         } else {
             self.shell.scope().surface(surface)
+        }
+    }
+
+    /// Leaving an editor must not leave the surface that still owns the keyboard.
+    pub(super) fn focus_keyboard_surface(&self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.current_keyboard_surface(cx) {
+            Some(KeyboardSurface::Settings) => {
+                self.settings.read(cx).focus_handle(cx).focus(window, cx);
+            }
+            Some(_) => self.shell.scope().handle().focus(window, cx),
+            None => self.focus_layout(window, cx),
         }
     }
 
@@ -299,6 +309,7 @@ impl GuiApp {
         let Some(epoch) = focus_ticket else {
             return;
         };
+        let focus_before_restore = window.focused(cx);
         let entity = cx.weak_entity();
         window.on_next_frame(move |window, cx| {
             let _ = entity.update(cx, |this, cx| {
@@ -308,6 +319,14 @@ impl GuiApp {
                     this.current_keyboard_surface(cx),
                 ) && this.manual_confirmation_id() == confirmation
                 {
+                    if surface.is_none()
+                        && window.focused(cx) != focus_before_restore
+                        && this.shell.layout_focus().contains_focused(window, cx)
+                    {
+                        // A newer workspace choice supersedes restoration.
+                        this.shell.restore = None;
+                        return;
+                    }
                     this.shell.focus_surface(epoch, window, cx);
                 }
             });
@@ -384,5 +403,104 @@ mod tests {
             );
         })
         .unwrap();
+    }
+
+    struct FocusRestoreSurface {
+        layout: FocusHandle,
+        origin: FocusHandle,
+        scope: rivu_ui::FocusScope,
+        show_origin: bool,
+        show_dialog: bool,
+    }
+
+    impl Render for FocusRestoreSurface {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .id("restore-layout")
+                .track_focus(&self.layout)
+                .when(self.show_origin, |view| {
+                    view.child(div().id("origin").track_focus(&self.origin))
+                })
+                .when(self.show_dialog, |view| {
+                    view.child(self.scope.surface(div().id("dialog")))
+                })
+        }
+    }
+
+    #[gpui::test]
+    fn surface_exit_restores_only_an_origin_in_the_surviving_layout(cx: &mut gpui::TestAppContext) {
+        for keep_origin in [true, false] {
+            let mut shell = cx.update(WindowShell::new);
+            let origin = cx.update(|cx| cx.focus_handle());
+            let layout = shell.layout_focus().clone();
+            let scope = shell.scope().clone();
+            let window = cx.add_window({
+                let origin = origin.clone();
+                let layout = layout.clone();
+                move |_, _| FocusRestoreSurface {
+                    layout,
+                    origin,
+                    scope,
+                    show_origin: true,
+                    show_dialog: false,
+                }
+            });
+            let handle = window.into();
+            cx.update_window(handle, |_, window, cx| {
+                window.draw(cx).clear(cx);
+                origin.focus(window, cx);
+                shell.synchronize(
+                    Some(KeyboardSurface::Dialog(DialogSurface::LayoutManager)),
+                    window,
+                    cx,
+                );
+            })
+            .unwrap();
+            window
+                .update(cx, |view, _, cx| {
+                    view.show_dialog = true;
+                    cx.notify();
+                })
+                .unwrap();
+            cx.update_window(handle, |_, window, cx| {
+                window.draw(cx).clear(cx);
+                shell.focus_surface(shell.focus_epoch, window, cx);
+            })
+            .unwrap();
+            let ticket = cx
+                .update_window(handle, |_, window, cx| {
+                    shell.synchronize(None, window, cx).unwrap()
+                })
+                .unwrap();
+            window
+                .update(cx, |view, _, cx| {
+                    view.show_origin = keep_origin;
+                    view.show_dialog = false;
+                    cx.notify();
+                })
+                .unwrap();
+            cx.update_window(handle, |_, window, cx| {
+                window.draw(cx).clear(cx);
+                shell.focus_surface(ticket, window, cx);
+                assert_eq!(
+                    window.focused(cx),
+                    Some(if keep_origin {
+                        origin.clone()
+                    } else {
+                        layout.clone()
+                    })
+                );
+                // A delayed close cannot reclaim focus after a replacement opens.
+                shell.synchronize(
+                    Some(KeyboardSurface::Dialog(DialogSurface::About)),
+                    window,
+                    cx,
+                );
+                let newer = window.focused(cx);
+                shell.focus_surface(ticket, window, cx);
+                assert_eq!(window.focused(cx), newer);
+            })
+            .unwrap();
+        }
     }
 }

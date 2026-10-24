@@ -73,9 +73,32 @@ impl GuiApp {
         let cancellation = self.workspace.interaction.cancel();
         self.apply_interaction_cancellation(cancellation, cx);
         let sizes = self.layout_edit_sizes(panel, None);
+        let group = self
+            .workspace
+            .layouts
+            .current()
+            .root
+            .as_ref()
+            .and_then(|root| root.panel_group(panel))
+            .map(Node::id);
         if self.workspace.layouts.current_mut().remove(panel) {
             self.reconcile_layout_sizes(&sizes);
             self.layout_changed(cx);
+            self.search_panel = self
+                .workspace
+                .layouts
+                .current()
+                .root
+                .as_ref()
+                .and_then(|root| {
+                    match group
+                        .and_then(|group| root.find(group))
+                        .or_else(|| root.find(root.first_tabs()))
+                    {
+                        Some(Node::Tabs { active, .. }) => Some(*active),
+                        _ => None,
+                    }
+                });
             self.persist_layout(cx);
         }
     }
@@ -405,41 +428,63 @@ impl GuiApp {
                             .child(div().min_w_0().truncate().child(title))
                             .child(self.measurement(Measured::Tab(panel_id)))
                             .when(!self.workspace.layouts.current().locked, |view| {
-                                view.child(rivu_ui::activate_control(
-                                    div()
-                                        .id(("close", panel_id))
-                                        .role(Role::Button)
-                                        .aria_label(self.tr("shell-remove-panel"))
-                                        .tab_index(0)
-                                        .flex_shrink_0()
-                                        .size(rems(1.))
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .rounded_sm()
-                                        .cursor_pointer()
-                                        .hover(|style| style.bg(rgb(theme.highlight)))
-                                        .focus(|style| style.bg(rgb(theme.highlight)))
-                                        .tooltip(rivu_ui::text_tooltip(
-                                            self.tr("shell-remove-panel"),
-                                        ))
-                                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                            cx.stop_propagation()
-                                        })
-                                        .child(
+                                let close_focus = window
+                                    .use_keyed_state(("close-focus", panel_id), cx, |_, cx| {
+                                        cx.focus_handle()
+                                    })
+                                    .read(cx)
+                                    .clone();
+                                view.child(
+                                    rivu_ui::row_action_region(("close-region", panel_id)).child(
+                                        rivu_ui::activate_control(
                                             div()
-                                                .font_family(rivu_ui::theme::icon_family(cx))
-                                                .font_size_scale(1.)
-                                                .line_height(relative(1.))
-                                                .child(""),
+                                                .id(("close", panel_id))
+                                                .role(Role::Button)
+                                                .aria_label(self.tr("shell-remove-panel"))
+                                                .tab_index(0)
+                                                .track_focus(&close_focus)
+                                                .tab_stop(true)
+                                                .flex_shrink_0()
+                                                .size(rems(1.))
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .rounded_sm()
+                                                .cursor_pointer()
+                                                .hover(|style| style.bg(rgb(theme.highlight)))
+                                                .focus(|style| style.bg(rgb(theme.highlight)))
+                                                .tooltip(rivu_ui::text_tooltip(
+                                                    self.tr("shell-remove-panel"),
+                                                ))
+                                                .child(
+                                                    div()
+                                                        .font_family(rivu_ui::theme::icon_family(
+                                                            cx,
+                                                        ))
+                                                        .font_size_scale(1.)
+                                                        .line_height(relative(1.))
+                                                        .child(""),
+                                                ),
+                                            cx,
+                                            move |this, window, cx| {
+                                                if !this.workspace.layouts.current().locked {
+                                                    let was_focused =
+                                                        close_focus.is_focused(window);
+                                                    this.remove_layout_panel(panel_id, cx);
+                                                    if was_focused
+                                                        && !this
+                                                            .workspace
+                                                            .layouts
+                                                            .current()
+                                                            .contains_panel(panel_id)
+                                                    {
+                                                        this.focus_layout(window, cx);
+                                                    }
+                                                }
+                                            },
                                         ),
-                                    cx,
-                                    move |this, _, cx| {
-                                        if !this.workspace.layouts.current().locked {
-                                            this.remove_layout_panel(panel_id, cx);
-                                        }
-                                    },
-                                ))
+                                    ),
+                                )
                             }),
                     );
                 }

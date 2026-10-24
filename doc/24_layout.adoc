@@ -450,6 +450,15 @@ focus a replacement surface. Workspace activation validates the target before
 cancelling an interaction and rolls back a live split against the outgoing tree,
 never against reused IDs in the incoming tree.
 
+GPUI owns actual control focus and key dispatch; the shell coordinates surface
+scopes and restoration, while each feature keeps selection and keyboard targets
+consistent. Leaving an editor focuses its still-open surface, not the workspace
+behind it. The root rejects background key dispatch while a surface owns the
+keyboard. Closing a surface validates its invoking control against the next drawn
+tree; a missing origin falls back to the layout, and a newer workspace focus
+choice supersedes deferred restoration. Panel removal hands focus back when its
+removed control owned it and routes panel commands to a surviving active panel.
+
 Pointer focus and activation belong to semantic interaction regions, not every
 ancestor container. A list heading's focus action covers its passive title or
 count, not an embedded search field or action button. Passive row content still
