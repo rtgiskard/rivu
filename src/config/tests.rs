@@ -412,6 +412,123 @@ fn grouped_file_defaults_partial_tables_and_font_normalization() {
 }
 
 #[test]
+fn spectrogram_flow_defaults_nested_round_trip_and_boundaries() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    write_current_config(
+        &path,
+        "[visualizations.spectrogram]\nhistory_seconds = 30\n",
+    )
+    .unwrap();
+    let old = Config::load(&path).unwrap();
+    assert_eq!(old.spectrogram_flow_speed, 0.75);
+    assert_eq!(old.spectrogram_accumulation, 75);
+    assert_eq!(old.spectrogram_history_seconds, 30);
+
+    for (speed, accumulation) in [(0.1, 10), (0.75, 75), (2.0, 95)] {
+        write_current_config(
+            &path,
+            format!("[visualizations.spectrogram]\nflow_speed = {speed}\naccumulation = {accumulation}\n"),
+        )
+        .unwrap();
+        let config = Config::load(&path).unwrap();
+        assert_eq!(config.spectrogram_flow_speed, speed);
+        assert_eq!(config.spectrogram_accumulation, accumulation);
+        config.save(&path).unwrap();
+        assert_eq!(Config::load(&path).unwrap(), config);
+        let saved = fs::read_to_string(&path).unwrap();
+        let table: toml::Value = toml::from_str(&saved).unwrap();
+        let nested = &table["visualizations"]["spectrogram"];
+        assert_eq!(nested["flow_speed"].as_float().unwrap() as f32, speed);
+        assert_eq!(
+            nested["accumulation"].as_integer(),
+            Some(i64::from(accumulation))
+        );
+        assert!(table.get("spectrogram_flow_speed").is_none());
+        assert!(table.get("spectrogram_accumulation").is_none());
+
+        for speed in [
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            0.0,
+            0.099,
+            2.001,
+        ] {
+            let invalid = Config {
+                spectrogram_flow_speed: speed,
+                ..config.clone()
+            };
+            let error = invalid.save(&path).unwrap_err();
+            assert!(format!("{error:#}").contains("visualizations.spectrogram.flow_speed"));
+            assert_eq!(fs::read_to_string(&path).unwrap(), saved);
+        }
+        for accumulation in [0, 9, 96, u32::MAX] {
+            let invalid = Config {
+                spectrogram_accumulation: accumulation,
+                ..config.clone()
+            };
+            let error = invalid.save(&path).unwrap_err();
+            assert!(format!("{error:#}").contains("visualizations.spectrogram.accumulation"));
+            assert_eq!(fs::read_to_string(&path).unwrap(), saved);
+        }
+    }
+
+    for invalid in [
+        "flow_speed = nan",
+        "flow_speed = inf",
+        "flow_speed = -inf",
+        "flow_speed = 0.099",
+        "flow_speed = 2.001",
+        "flow_speed = '0.75'",
+        "accumulation = 9",
+        "accumulation = 96",
+        "accumulation = -1",
+        "accumulation = 75.5",
+        "accumulation = '75'",
+    ] {
+        write_current_config(&path, format!("[visualizations.spectrogram]\n{invalid}\n")).unwrap();
+        assert!(Config::load(&path).is_err(), "accepted {invalid}");
+    }
+}
+
+#[test]
+fn spectrogram_flow_patch_preserves_unedited_and_concurrent_values() {
+    let baseline = Config::default();
+    let draft = Config {
+        spectrogram_flow_speed: 1.5,
+        ..baseline.clone()
+    };
+    let mut latest = Config {
+        spectrogram_flow_speed: 0.5,
+        spectrogram_accumulation: 90,
+        spectrogram_history_seconds: 40,
+        ..baseline.clone()
+    };
+    let expected = Config {
+        spectrogram_flow_speed: 1.5,
+        ..latest.clone()
+    };
+    ConfigPatch::between(&baseline, &draft).apply_to(&mut latest);
+    assert_eq!(latest, expected);
+
+    let accumulation_draft = Config {
+        spectrogram_accumulation: 10,
+        ..draft.clone()
+    };
+    latest.spectrogram_flow_speed = 2.0;
+    ConfigPatch::between(&draft, &accumulation_draft).apply_to(&mut latest);
+    assert_eq!(latest.spectrogram_flow_speed, 2.0);
+    assert_eq!(latest.spectrogram_accumulation, 10);
+    ConfigPatch::between(&accumulation_draft, &baseline).apply_to(&mut latest);
+    assert_eq!(latest.spectrogram_flow_speed, 0.75);
+    assert_eq!(latest.spectrogram_accumulation, 75);
+    assert_eq!(latest.spectrogram_history_seconds, 40);
+    ConfigPatch::between(&baseline, &baseline).apply_to(&mut latest);
+    assert_eq!(latest.spectrogram_history_seconds, 40);
+}
+
+#[test]
 fn volume_accepts_numeric_percent() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");
@@ -634,6 +751,8 @@ fn save_reload_replaces_file_and_leaves_no_temporary_files() {
         spectrogram_sampling_points_scale: 1.0,
         spectrogram_db_range: Some(100.0),
         spectrogram_history_seconds: 30,
+        spectrogram_flow_speed: 1.25,
+        spectrogram_accumulation: 85,
         waveform_labels: false,
         waveform_seek_enabled: false,
         waveform_cursor_color: "#eeaa66".parse().unwrap(),

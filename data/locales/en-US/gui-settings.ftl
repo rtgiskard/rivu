@@ -74,6 +74,10 @@ settings-spectrum-bar-count-hint = 1–512; 0 = automatic, using bar width and g
 settings-spectrum-bar-gravity-hint = 0–500; 0 snaps after hold without smoothing; rise is immediate
 settings-spectrum-smoothing-hint = 0–1000; bypassed at gravity 0; rise is immediate
 settings-spectrogram-history-hint = 1–60; limited by panel width and analysis rate
+settings-spectrogram-flow-speed = Flow speed
+settings-spectrogram-flow-speed-hint = 0.1–2 panel-widths/s; default 0.75; limits initial spreading speed; steady scrolling follows audio time
+settings-spectrogram-accumulation = Outflow threshold (%)
+settings-spectrogram-accumulation-hint = 10–95%; default 75%; outflow is allowed after at least this fraction of effective history has accumulated; higher values delay release
 settings-spectrogram-source-scale-hint = 0.4–1.4; relative to the tallest visible panel
 settings-spectrogram-frequency-rows-hint = 64–4096; with or without interpolation; adds no FFT detail
 settings-waveform-glow-hint = 0–2; 0 = off

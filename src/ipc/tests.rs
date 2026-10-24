@@ -1241,6 +1241,8 @@ fn system_config_wire_adapter_preserves_optional_fields_and_library_columns() {
     ] {
         let config = Arc::new(crate::config::Config {
             scan_min_duration_secs: if output_device.is_some() { u32::MAX } else { 0 },
+            spectrogram_flow_speed: if output_device.is_some() { 2.0 } else { 0.1 },
+            spectrogram_accumulation: if output_device.is_some() { 95 } else { 10 },
             output_device,
             library_columns,
             ui_theme: crate::theme::Theme::TokyoNight,
@@ -1359,6 +1361,8 @@ fn configure_request_round_trip_preserves_optional_config_field_and_library_colu
             audio_visualizer_grid: output_device.is_some(),
             audio_visualizer_labels: output_device.is_none(),
             scan_min_duration_secs: if output_device.is_some() { u32::MAX } else { 0 },
+            spectrogram_flow_speed: if output_device.is_some() { 2.0 } else { 0.1 },
+            spectrogram_accumulation: if output_device.is_some() { 95 } else { 10 },
             output_device,
             library_columns,
             ui_theme: crate::theme::Theme::TokyoNightDay,
@@ -2657,11 +2661,13 @@ fn processing_commands_and_configuration_use_current_positional_contract() {
         .push(rivu_dsp::equalizer::config::EqBand::default());
     config.neural.speech_manifest = Some("/models/speech.json".into());
     config.neural.separation_overlap = 0.5;
+    config.spectrogram_flow_speed = 1.25;
+    config.spectrogram_accumulation = 85;
     let wire = WireConfig::from(&config);
     let bytes = postcard::to_allocvec(&wire).unwrap();
     let decoded: WireConfig = postcard::from_bytes(&bytes).unwrap();
     assert_eq!(crate::config::Config::from(decoded), config);
-    assert_eq!(PROTOCOL_VERSION, 7);
+    assert_eq!(PROTOCOL_VERSION, 8);
 }
 
 #[test]

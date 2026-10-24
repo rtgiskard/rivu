@@ -366,6 +366,27 @@ Only accepted analysis frames write or pool history. Native display ticks move
 the time cursor and tile placements without rebuilding unchanged numerical
 publications; portions newer than the display cursor remain clipped.
 
+Flow is a display transform, not a second audio queue. A viewport-relative
+quintic fill progressively stretches history from the right toward the left.
+At the far edge it stops expanding; continued input compacts the same retained
+columns. Once the accumulation threshold is reached, an integrated quintic
+gradually opens the outflow and converges to the existing history time span.
+This preserves chronological order and gaps, with no reverse motion or added
+steady-state delay. Very short histories may fill their retention capacity
+during the initial reveal and proceed directly to audio-time scrolling.
+
+Flow speed bounds the transient filling front in panel-widths per second;
+steady scrolling remains one second of audio per second. The accumulation
+threshold is a fraction of the effective history capacity, subject to the
+filling and speed limits. Editing controls does not clear history; a release
+already in progress keeps its threshold to avoid pulling outgoing content back.
+All panels project the same normalized motion into their own viewport sizes.
+Only scalar display state is added: unchanged GPU tiles and pooled audio
+columns remain reusable. Paused or stalled display time freezes the motion;
+changes to the effective history window still reproject retained columns
+immediately, without advancing fill or release progress. Clearing or releasing
+history also resets the flow.
+
 History width and sampling resolution bound retained resources. Increasing display
 resolution does not create additional FFT information. Multiple panels share
 history rather than maintaining competing copies; the cache document describes

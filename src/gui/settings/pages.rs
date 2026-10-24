@@ -1242,6 +1242,11 @@ impl Settings {
                     column()
                         .gap_2()
                         .child(settings.pair(Field::SpectrogramDb, Field::SpectrogramHistory, cx))
+                        .child(settings.pair(
+                            Field::SpectrogramFlowSpeed,
+                            Field::SpectrogramAccumulation,
+                            cx,
+                        ))
                         .child(row().child(visual_switch(
                             &self.i18n,
                             "spectrogram-labels",

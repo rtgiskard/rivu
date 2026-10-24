@@ -452,6 +452,10 @@ macro_rules! config_fields {
         pub audio_visualizer_db_range: Option<f32>,
         /// Maximum continuous audio history shown by Spectrogram.
         pub spectrogram_history_seconds: u32,
+        /// Transient flow speed in panel-widths per second; audio-time scroll is unchanged.
+        pub spectrogram_flow_speed: f32,
+        /// Percentage of effective history accumulated before outflow begins.
+        pub spectrogram_accumulation: u32,
         pub waveform_cursor_color: RgbColor,
         pub waveform_glow: f32,
         pub waveform_rms_gain: f32,
@@ -563,6 +567,8 @@ impl Default for Config {
             spectrogram_db_range: None,
             audio_visualizer_db_range: None,
             spectrogram_history_seconds: 20,
+            spectrogram_flow_speed: 0.75,
+            spectrogram_accumulation: 75,
             waveform_cursor_color: RgbColor(0x73daca),
             waveform_glow: 1.0,
             waveform_rms_gain: 0.94,
@@ -832,6 +838,15 @@ impl Config {
         ensure!(
             (1..=60).contains(&self.spectrogram_history_seconds),
             "visualizations.spectrogram.history_seconds must be between 1 and 60 seconds"
+        );
+        ensure!(
+            self.spectrogram_flow_speed.is_finite()
+                && (0.1..=2.0).contains(&self.spectrogram_flow_speed),
+            "visualizations.spectrogram.flow_speed must be finite and between 0.1 and 2.0 panel-widths/s"
+        );
+        ensure!(
+            (10..=95).contains(&self.spectrogram_accumulation),
+            "visualizations.spectrogram.accumulation must be between 10 and 95 percent"
         );
         ensure!(
             (64..=4096).contains(&self.spectrogram_interpolation_points),

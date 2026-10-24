@@ -8,7 +8,7 @@ use rivu_audio::DecoderHint;
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-pub(super) const PROTOCOL_VERSION: u8 = 7;
+pub(super) const PROTOCOL_VERSION: u8 = 8;
 pub(super) const MAX_REQUEST: usize = 4 * 1024 * 1024;
 pub(super) const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 pub(super) const MAX_CLIENTS: usize = 16;
@@ -1520,6 +1520,8 @@ pub(super) struct WireConfig {
     spectrogram_db_range: Option<f32>,
     audio_visualizer_db_range: Option<f32>,
     spectrogram_history_seconds: u32,
+    spectrogram_flow_speed: f32,
+    spectrogram_accumulation: u32,
     waveform_cursor_color: crate::config::RgbColor,
     waveform_glow: f32,
     waveform_rms_gain: f32,
@@ -1620,6 +1622,8 @@ impl From<&crate::config::Config> for WireConfig {
             spectrogram_db_range: value.spectrogram_db_range,
             audio_visualizer_db_range: value.audio_visualizer_db_range,
             spectrogram_history_seconds: value.spectrogram_history_seconds,
+            spectrogram_flow_speed: value.spectrogram_flow_speed,
+            spectrogram_accumulation: value.spectrogram_accumulation,
             waveform_cursor_color: value.waveform_cursor_color,
             waveform_glow: value.waveform_glow,
             waveform_rms_gain: value.waveform_rms_gain,
@@ -1722,6 +1726,8 @@ impl From<WireConfig> for crate::config::Config {
             spectrogram_db_range: value.spectrogram_db_range,
             audio_visualizer_db_range: value.audio_visualizer_db_range,
             spectrogram_history_seconds: value.spectrogram_history_seconds,
+            spectrogram_flow_speed: value.spectrogram_flow_speed,
+            spectrogram_accumulation: value.spectrogram_accumulation,
             waveform_cursor_color: value.waveform_cursor_color,
             waveform_glow: value.waveform_glow,
             waveform_rms_gain: value.waveform_rms_gain,

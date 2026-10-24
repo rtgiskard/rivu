@@ -132,6 +132,8 @@ enum Field {
     SpectrumSmoothing,
     SpectrogramDb,
     SpectrogramHistory,
+    SpectrogramFlowSpeed,
+    SpectrogramAccumulation,
     SpectrogramSamplingPointsScale,
     SpectrogramInterpolationPoints,
     CursorColor,
@@ -180,6 +182,8 @@ impl Field {
             Self::SpectrumBarGravity => "settings-bar-gravity-db-s",
             Self::SpectrumSmoothing => "settings-release-smoothing-ms",
             Self::SpectrogramHistory => "settings-history-limit-s",
+            Self::SpectrogramFlowSpeed => "settings-spectrogram-flow-speed",
+            Self::SpectrogramAccumulation => "settings-spectrogram-accumulation",
             Self::SpectrogramSamplingPointsScale => "settings-source-row-scale",
             Self::SpectrogramInterpolationPoints => "settings-maximum-frequency-rows",
             Self::CursorColor => "settings-waterline-color",
@@ -255,6 +259,8 @@ impl Field {
             Self::SpectrumBarGravity => settings.tr("settings-spectrum-bar-gravity-hint"),
             Self::SpectrumSmoothing => settings.tr("settings-spectrum-smoothing-hint"),
             Self::SpectrogramHistory => settings.tr("settings-spectrogram-history-hint"),
+            Self::SpectrogramFlowSpeed => settings.tr("settings-spectrogram-flow-speed-hint"),
+            Self::SpectrogramAccumulation => settings.tr("settings-spectrogram-accumulation-hint"),
             Self::SpectrogramSamplingPointsScale => {
                 settings.tr("settings-spectrogram-source-scale-hint")
             }
@@ -705,6 +711,8 @@ impl Settings {
             Field::SpectrumSmoothing,
             Field::SpectrogramDb,
             Field::SpectrogramHistory,
+            Field::SpectrogramFlowSpeed,
+            Field::SpectrogramAccumulation,
             Field::SpectrogramSamplingPointsScale,
             Field::SpectrogramInterpolationPoints,
             Field::CursorColor,
@@ -1149,6 +1157,18 @@ impl Settings {
             cx,
         );
         self.set_value(
+            Field::SpectrogramFlowSpeed,
+            self.model.draft.spectrogram_flow_speed.to_string(),
+            unchanged,
+            cx,
+        );
+        self.set_value(
+            Field::SpectrogramAccumulation,
+            self.model.draft.spectrogram_accumulation.to_string(),
+            unchanged,
+            cx,
+        );
+        self.set_value(
             Field::SpectrogramSamplingPointsScale,
             self.model
                 .draft
@@ -1274,6 +1294,8 @@ impl Settings {
         config.spectrum_bars = self.number(Field::SpectrumBars, cx)?;
         config.spectrogram_db_range = self.optional_number(Field::SpectrogramDb, cx)?;
         config.spectrogram_history_seconds = self.number(Field::SpectrogramHistory, cx)?;
+        config.spectrogram_flow_speed = self.number(Field::SpectrogramFlowSpeed, cx)?;
+        config.spectrogram_accumulation = self.number(Field::SpectrogramAccumulation, cx)?;
         config.spectrogram_sampling_points_scale =
             self.number(Field::SpectrogramSamplingPointsScale, cx)?;
         config.spectrogram_interpolation_points =

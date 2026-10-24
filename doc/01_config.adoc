@@ -949,11 +949,28 @@ Its `visualizations.spectrogram.*` settings include:
 * `interpolate`: default `true`; controls interpolation between source rows.
 * `history_seconds`: `1`–`60`, default `20`; retained history also depends on panel
   width and analysis rate.
+* `flow_speed` (Flow speed): `0.1`–`2.0` panel-widths per second, default `0.75`;
+  limits the transient filling front, not steady scrolling, which follows audio time.
+* `accumulation` (Outflow threshold): `10`–`95` percent, default `75`; the minimum
+  effective-history fraction before outflow. Filling and speed limits can delay
+  release further; changing the threshold does not restart a release already underway.
 * `sampling_points_scale`: `0.4`–`1.4`, default `0.5`, choosing source frequency
   rows relative to visible panel height.
 * `interpolation_points` (Maximum frequency rows): `64`–`4096`, default `1024`.
   This limits rendering rows with or without interpolation; it does not change
   FFT size or add measured frequency detail.
+
+These two flow controls apply globally to Spectrogram panels. Changing them
+preserves retained history; Settings uses the usual Apply / Discard workflow.
+Motion smoothing is fixed, with no separate setting.
+
+[source,toml]
+----
+[visualizations.spectrogram]
+history_seconds = 20
+flow_speed = 0.75
+accumulation = 75
+----
 
 The startup-only `interface.gpu_material_budget_mb` setting accepts `16`–`1024`
 MiB and defaults to `64`. Restart the GUI to apply a change. It limits the shared

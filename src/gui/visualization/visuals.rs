@@ -28,6 +28,7 @@ use std::{
     time::Duration,
 };
 
+use super::spectrogram_flow::SpectrogramFlow;
 use crate::config::{
     AnalysisWindow, Config, SpectrumStyle, VisualizationPalette, VisualizationSignal,
 };
@@ -200,14 +201,6 @@ struct HeatSample {
     fraction: f32,
 }
 
-fn history_fraction(time: Duration, latest: Duration, history: Duration) -> f32 {
-    if history.is_zero() {
-        return 1.0;
-    }
-    // Tiles can straddle the visible window; clipping must not stretch their gaps.
-    (1.0 + (time.as_secs_f64() - latest.as_secs_f64()) / history.as_secs_f64()) as f32
-}
-
 fn history_column_count(history_seconds: u32, analysis_fps: u32) -> usize {
     usize::try_from(history_seconds)
         .unwrap_or(usize::MAX)
@@ -364,6 +357,9 @@ struct VisualData {
     spectrogram_interpolation_points: u32,
     spectrogram_sampling_points_scale: f32,
     spectrogram_history_seconds: u32,
+    spectrogram_flow_speed: f32,
+    spectrogram_accumulation: u32,
+    spectrogram_flow: SpectrogramFlow,
     history_limit_seconds: f64,
     analysis_fps: u32,
     history_columns: usize,
@@ -448,6 +444,9 @@ impl Visuals {
                 spectrogram_interpolation_points: 1024,
                 spectrogram_sampling_points_scale: 0.5,
                 spectrogram_history_seconds: 20,
+                spectrogram_flow_speed: 0.75,
+                spectrogram_accumulation: 75,
+                spectrogram_flow: SpectrogramFlow::default(),
                 history_limit_seconds: 20.0,
                 analysis_fps: 20,
                 history_columns: 0,
@@ -537,6 +536,8 @@ impl Visuals {
             || data.spectrogram_interpolation_points != config.spectrogram_interpolation_points
             || data.spectrogram_sampling_points_scale != config.spectrogram_sampling_points_scale
             || data.spectrogram_history_seconds != config.spectrogram_history_seconds
+            || data.spectrogram_flow_speed != config.spectrogram_flow_speed
+            || data.spectrogram_accumulation != config.spectrogram_accumulation
             || data.analysis_fps != config.analysis_fps
             || cache_changed;
         if !changed {
@@ -574,6 +575,8 @@ impl Visuals {
         data.spectrogram_interpolate = config.spectrogram_interpolate;
         data.spectrogram_interpolation_points = config.spectrogram_interpolation_points;
         data.spectrogram_sampling_points_scale = config.spectrogram_sampling_points_scale;
+        data.spectrogram_flow_speed = config.spectrogram_flow_speed;
+        data.spectrogram_accumulation = config.spectrogram_accumulation;
         data.analysis_fft_size = config.analysis_fft_size;
         data.analysis_window = config.analysis_window;
         data.visualization_signal = config.visualization_signal;
@@ -681,6 +684,7 @@ impl Visuals {
         data.last_analysis_sequence = Some(frame.sequence);
         data.latest_sample_time = Some(frame.sample_time);
         data.display_time = Some(presentation_time);
+        data.advance_spectrogram(now);
         if !data.spectrum_visible {
             return;
         }
@@ -753,6 +757,7 @@ impl Visuals {
             return false;
         }
         data.display_time = Some(now);
+        data.advance_spectrogram(now);
         let mut changed = data.spectrogram_visible && data.len > 0;
         if !data.spectrum_visible || !data.envelope_initialized {
             return changed;
@@ -982,6 +987,22 @@ impl Visuals {
 }
 
 impl VisualData {
+    fn advance_spectrogram(&mut self, now: Duration) {
+        if !self.spectrogram_visible {
+            return;
+        }
+        let Some(latest) = self.latest else {
+            return;
+        };
+        self.spectrogram_flow.advance(
+            now,
+            self.columns[latest].interval_start,
+            self.history_limit_seconds,
+            self.spectrogram_flow_speed,
+            self.spectrogram_accumulation,
+        );
+    }
+
     fn prepaint_panel(
         &mut self,
         panel_id: u64,
@@ -1117,8 +1138,12 @@ impl VisualData {
     }
     fn resize_history(&mut self, requested_columns: usize) {
         let new_columns = requested_columns.max(2);
-        self.history_limit_seconds = (new_columns as f64 / self.analysis_fps.max(1) as f64)
+        let limit = (new_columns as f64 / self.analysis_fps.max(1) as f64)
             .min(self.spectrogram_history_seconds as f64);
+        if self.history_limit_seconds != limit {
+            self.history_limit_seconds = limit;
+            self.spectrogram_flow.remap(limit);
+        }
         if new_columns == self.history_columns {
             return;
         }
@@ -1177,6 +1202,7 @@ impl VisualData {
         self.latest = None;
         self.latest_sample_time = None;
         self.display_time = None;
+        self.spectrogram_flow = SpectrogramFlow::default();
         self.spectrogram_sample_height = 0;
         self.heat_samples.clear();
         self.heat_sample_generation = 0;
@@ -1190,20 +1216,6 @@ impl VisualData {
         self.heat_samples = Vec::new();
         self.spectrogram_tiles = Vec::new();
         self.tile_values = Vec::new();
-    }
-
-    fn history_window(&self, latest: Duration) -> Duration {
-        let limit = Duration::from_secs_f64(self.history_limit_seconds);
-        let available = self
-            .columns
-            .iter()
-            .filter_map(|column| column.sample_time)
-            .min()
-            .map(|oldest| latest.saturating_sub(oldest));
-        available
-            .filter(|duration| !duration.is_zero())
-            .unwrap_or(limit)
-            .min(limit)
     }
 
     fn visible_range(&self) -> Option<(usize, usize, f32, f32)> {
@@ -1729,8 +1741,11 @@ impl VisualData {
         let Some((first, last, low, high)) = self.visible_range() else {
             return Ok(());
         };
-        let history = self.history_window(self.latest_sample_time.unwrap_or(latest_time));
-        let start_time = latest_time.saturating_sub(history);
+        let mapping = self.spectrogram_flow.mapping();
+        if mapping.scale() <= 0.0 {
+            return Ok(());
+        }
+        let start_time = mapping.visible_start(latest_time);
         let source_rows = last.saturating_sub(first) + 1;
         let height = spectrogram_source_height(
             self.spectrogram_panel_height,
@@ -1835,9 +1850,9 @@ impl VisualData {
             if tile.end < start_time || tile.start > latest_time {
                 continue;
             }
-            let span = history.as_secs_f64();
-            let left = history_fraction(tile.start, latest_time, history);
-            let width = (tile.end.saturating_sub(tile.start).as_secs_f64() / span) as f32;
+            let left = mapping.position(tile.start, latest_time);
+            let width =
+                (tile.end.saturating_sub(tile.start).as_secs_f64() * mapping.scale()) as f32;
             let bounds = Bounds::new(
                 point(plot.left() + plot.size.width * left, plot.top()),
                 size(plot.size.width * width, plot.size.height),
@@ -2400,11 +2415,10 @@ mod tests {
                 &publication
             ));
             assert!(
-                history_fraction(
-                    start,
-                    data.display_time.unwrap(),
-                    data.history_window(sample_time.unwrap())
-                ) < 1.0
+                data.spectrogram_flow
+                    .mapping()
+                    .position(start, data.display_time.unwrap())
+                    < 1.0
             );
         }
         visuals.set_spectrum_visible(false);
@@ -2451,6 +2465,8 @@ mod tests {
         config.visual_background = "#202020".parse().unwrap();
         config.spectrum_grid = !config.spectrum_grid;
         config.spectrogram_db_range = Some(100.0);
+        config.spectrogram_flow_speed = 1.25;
+        config.spectrogram_accumulation = 90;
         visuals.configure(&config);
         assert!(Arc::ptr_eq(
             &body,
@@ -3096,10 +3112,6 @@ mod tests {
             let newest = data.latest_sample_time.unwrap();
             assert!(newest - oldest >= Duration::from_secs(59));
             assert!(newest - oldest <= Duration::from_secs(60));
-            assert_eq!(
-                history_fraction(newest, newest, Duration::from_secs(60)),
-                1.0
-            );
         }
     }
 
@@ -3325,33 +3337,6 @@ mod tests {
     }
 
     #[test]
-    fn history_window_grows_with_continuous_audio_until_limit() {
-        let mut visuals = configured_visuals();
-        visuals.update(&frame(1.0, -30.0), Duration::from_secs_f64(1.0));
-        visuals.update(&frame(1.5, -30.0), Duration::from_secs_f64(1.5));
-        assert_eq!(
-            visuals
-                .data
-                .borrow()
-                .history_window(Duration::from_secs_f64(1.5)),
-            Duration::from_millis(500)
-        );
-        for step in 4..=62 {
-            visuals.update(
-                &frame(step as f64 * 0.5, -30.0),
-                Duration::from_secs_f64(step as f64 * 0.5),
-            );
-        }
-        assert_eq!(
-            visuals
-                .data
-                .borrow()
-                .history_window(Duration::from_secs(31)),
-            Duration::from_secs(20)
-        );
-    }
-
-    #[test]
     fn buckets_preserve_transients_without_contaminating_latest_spectrum() {
         let mut visuals = Visuals::new();
         visuals.retain_spectrogram_panels(&[1]);
@@ -3372,15 +3357,6 @@ mod tests {
         );
         assert_eq!(data.latest_levels, vec![-50.0; 4]);
         assert_eq!(data.top_db, 0.0);
-        assert!(
-            (history_fraction(
-                Duration::ZERO,
-                Duration::from_secs(1),
-                Duration::from_secs(60)
-            ) - 59.0 / 60.0)
-                .abs()
-                < 0.00001
-        );
     }
 
     #[test]
@@ -3761,6 +3737,73 @@ mod tests {
             assert_eq!(data.columns[0].sample_time, Some(Duration::from_secs(4)));
             assert_eq!(data.columns[1].sample_time, Some(Duration::from_secs(5)));
             assert_eq!(data.columns[2].sample_time, Some(Duration::from_secs(6)));
+        }
+    }
+
+    #[test]
+    fn paused_history_window_changes_reproject_without_advancing_audio() {
+        for change in ["config", "resize", "retire"] {
+            let mut visuals = configured_visuals();
+            visuals.retain_spectrogram_panels(&[1, 2]);
+            visuals
+                .data
+                .borrow_mut()
+                .spectrogram_panel_sizes
+                .extend([(1, (400, 100)), (2, (200, 100))]);
+            visuals.finish_prepaint();
+            for tick in 0..=800 {
+                let time = tick as f64 / 20.0;
+                visuals.update(&frame(time, -30.0), Duration::from_secs_f64(time));
+            }
+            let now = Duration::from_secs(40);
+            let retained_start = Duration::from_secs(30);
+            assert_eq!(
+                visuals
+                    .data
+                    .borrow()
+                    .spectrogram_flow
+                    .mapping()
+                    .position(retained_start, now),
+                0.5
+            );
+            match change {
+                "config" => {
+                    visuals.configure(&Config {
+                        spectrogram_history_seconds: 10,
+                        ..Config::default()
+                    });
+                }
+                "resize" => {
+                    visuals
+                        .data
+                        .borrow_mut()
+                        .spectrogram_panel_sizes
+                        .insert(1, (200, 100));
+                    visuals.finish_prepaint();
+                }
+                "retire" => {
+                    visuals.retain_spectrogram_panels(&[2]);
+                    visuals.finish_prepaint();
+                }
+                _ => unreachable!(),
+            }
+            assert!(!visuals.animate(now));
+            let data = visuals.data.borrow();
+            assert_eq!(data.display_time, Some(now));
+            assert_eq!(data.latest_sample_time, Some(now));
+            assert_eq!(
+                data.spectrogram_flow.mapping().visible_start(now),
+                retained_start,
+                "{change}"
+            );
+            assert!(
+                data.spectrogram_flow
+                    .mapping()
+                    .position(retained_start, now)
+                    .abs()
+                    < 1e-6,
+                "{change}"
+            );
         }
     }
 

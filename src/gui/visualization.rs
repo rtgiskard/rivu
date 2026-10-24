@@ -3,6 +3,7 @@ mod audio_visualizer;
 mod fractal_beams;
 mod fractal_flow;
 mod fractal_visualizer;
+mod spectrogram_flow;
 mod visuals;
 mod waveform;
 

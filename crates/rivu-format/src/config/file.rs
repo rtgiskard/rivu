@@ -179,6 +179,8 @@ file_group!(Spectrogram, SpectrogramView {
     #[serde(skip_serializing_if = "Option::is_none")]
     db_range => spectrogram_db_range: Option<f32>,
     history_seconds => spectrogram_history_seconds: u32,
+    flow_speed => spectrogram_flow_speed: f32,
+    accumulation => spectrogram_accumulation: u32,
 });
 
 file_group!(AudioVisualizer, AudioVisualizerView {
