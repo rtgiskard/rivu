@@ -9,7 +9,7 @@ use crate::{
     model::{Command, PlaybackState, PlaybackStatus, RepeatMode},
     projection::GuiSnapshot,
 };
-use gpui::{AnyElement, Context, EventEmitter, Pixels, Point, Window, div, prelude::*, rgb};
+use gpui::{AnyElement, Context, EventEmitter, Pixels, Point, Window, div, prelude::*, rems, rgb};
 use rivu_ui::{
     IconButton, IconButtonDensity, IconButtonGroup, IconButtonStyle, Slider, SliderInput,
     SliderKey, caption, column, row,
@@ -251,84 +251,117 @@ impl Playback {
                     ),
             ))
         });
-        let controls = row().gap_1().flex_shrink_0().justify_center().child(
-            IconButtonGroup::new(IconButtonStyle::Quiet, IconButtonDensity::Regular)
-                .button_with(
-                    IconButton::new(
-                        ("shuffle", panel_id),
-                        "󰒟",
-                        self.context.tr(if self.state.playback.shuffle {
-                            "gl-shuffle-on"
-                        } else {
-                            "gl-shuffle-off"
-                        }),
-                    )
-                    .toggled(self.state.playback.shuffle),
+        let controls = row()
+            .gap_2()
+            .flex_shrink_0()
+            .justify_center()
+            .child(
+                IconButton::new(
+                    ("shuffle", panel_id),
+                    "󰒟",
+                    self.context.tr(if self.state.playback.shuffle {
+                        "gl-shuffle-on"
+                    } else {
+                        "gl-shuffle-off"
+                    }),
+                )
+                .toggled(self.state.playback.shuffle)
+                .build(
+                    IconButtonStyle::Quiet,
+                    IconButtonDensity::Regular,
                     cx,
                     |this, _, cx| this.send(Command::ToggleShuffle, cx),
-                    |button| button.aspect_square().rounded_full().text_lg(),
                 )
-                .button_with(
-                    IconButton::new(
-                        ("previous", panel_id),
-                        "󰒮",
-                        self.context.tr("gl-previous-track"),
-                    ),
-                    cx,
-                    |this, _, cx| this.send(Command::Previous, cx),
-                    |button| button.aspect_square().rounded_full().text_lg(),
-                )
-                .button_with(
-                    IconButton::new(
-                        ("toggle", panel_id),
-                        if self.state.playback.status == PlaybackStatus::Playing {
-                            "󰏤"
-                        } else {
-                            ""
-                        },
-                        self.context
-                            .tr(if self.state.playback.status == PlaybackStatus::Playing {
-                                "gl-pause"
-                            } else {
-                                "gl-play"
-                            }),
-                    ),
-                    cx,
-                    |this, _, cx| this.send(Command::Toggle, cx),
-                    |button| {
-                        button
-                            .bg(rgb(theme.control))
-                            .text_color(rgb(theme.text))
-                            .aspect_square()
-                            .rounded_full()
-                            .text_xl()
-                    },
-                )
-                .button_with(
-                    IconButton::new(("next", panel_id), "󰒭", self.context.tr("gl-next-track")),
-                    cx,
-                    |this, _, cx| this.send(Command::Next, cx),
-                    |button| button.aspect_square().rounded_full().text_lg(),
-                )
-                .button_with(
-                    IconButton::new(
-                        ("repeat", panel_id),
-                        if self.state.playback.repeat == RepeatMode::One {
-                            "󰑘"
-                        } else {
-                            "󰑖"
-                        },
-                        match self.state.playback.repeat {
-                            RepeatMode::Off => self.context.tr("gl-repeat-off"),
-                            RepeatMode::All => self.context.tr("gl-repeat-all"),
-                            RepeatMode::One => self.context.tr("gl-repeat-one"),
+                .aspect_square()
+                .rounded_full(),
+            )
+            .child(
+                IconButtonGroup::new(IconButtonStyle::Quiet, IconButtonDensity::Regular)
+                    .button_with(
+                        IconButton::new(
+                            ("previous", panel_id),
+                            "󰒮",
+                            self.context.tr("gl-previous-track"),
+                        ),
+                        cx,
+                        |this, _, cx| this.send(Command::Previous, cx),
+                        |button| {
+                            button
+                                .min_w(rems(2.))
+                                .min_h(rems(2.))
+                                .text_lg()
+                                .aspect_square()
+                                .rounded_full()
                         },
                     )
-                    .selected(self.state.playback.repeat != RepeatMode::Off),
+                    .button_with(
+                        IconButton::new(
+                            ("toggle", panel_id),
+                            if self.state.playback.status == PlaybackStatus::Playing {
+                                "󰏤"
+                            } else {
+                                ""
+                            },
+                            self.context.tr(
+                                if self.state.playback.status == PlaybackStatus::Playing {
+                                    "gl-pause"
+                                } else {
+                                    "gl-play"
+                                },
+                            ),
+                        ),
+                        cx,
+                        |this, _, cx| this.send(Command::Toggle, cx),
+                        |button| {
+                            button
+                                .min_w(rems(2.5))
+                                .min_h(rems(2.5))
+                                .text_xl()
+                                .bg(rgb(theme.accent))
+                                .text_color(rgb(theme.on_accent))
+                                .group_hover("control", |style| style.bg(rgb(theme.accent_hover)))
+                                .focus(|style| style.border_color(rgb(theme.text)))
+                                .aspect_square()
+                                .rounded_full()
+                        },
+                    )
+                    .button_with(
+                        IconButton::new(("next", panel_id), "󰒭", self.context.tr("gl-next-track")),
+                        cx,
+                        |this, _, cx| this.send(Command::Next, cx),
+                        |button| {
+                            button
+                                .min_w(rems(2.))
+                                .min_h(rems(2.))
+                                .text_lg()
+                                .aspect_square()
+                                .rounded_full()
+                        },
+                    )
+                    .into_div(),
+            )
+            .child(
+                IconButton::new(
+                    ("repeat", panel_id),
+                    if self.state.playback.repeat == RepeatMode::One {
+                        "󰑘"
+                    } else {
+                        "󰑖"
+                    },
+                    match self.state.playback.repeat {
+                        RepeatMode::Off => self.context.tr("gl-repeat-off"),
+                        RepeatMode::All => self.context.tr("gl-repeat-all"),
+                        RepeatMode::One => self.context.tr("gl-repeat-one"),
+                    },
+                )
+                .selected(self.state.playback.repeat != RepeatMode::Off)
+                .build_with(
+                    IconButtonStyle::Quiet,
+                    IconButtonDensity::Regular,
                     cx,
                     |this, _, cx| this.send(Command::CycleRepeat, cx),
                     |button| {
-                        button.aspect_square().rounded_full().text_lg().aria_value(
+                        button.aspect_square().rounded_full().aria_value(
                             match self.state.playback.repeat {
                                 RepeatMode::Off => self.context.tr("gl-repeat-off"),
                                 RepeatMode::All => self.context.tr("gl-repeat-all"),
@@ -336,9 +369,8 @@ impl Playback {
                             },
                         )
                     },
-                )
-                .into_div(),
-        );
+                ),
+            );
         let volume_control = row()
             .id(("volume-control", panel_id))
             .gap_1()
@@ -372,7 +404,7 @@ impl Playback {
             .size_full()
             .min_w_0()
             .min_h_0()
-            .gap_2()
+            .gap_1()
             .overflow_y_scroll()
             .track_scroll(&scroll)
             .child(
