@@ -392,6 +392,9 @@ not committed again. Cleanup also covers a waveform drag whose Preview did not
 acquire a workspace interaction session.
 
 Input owns text, selection, IME conversion, focus and pointer-selection capture.
+Text replacement, including IME preedit, invalidates its shaped-text hit-test
+cache. Pointer events arriving before the next paint cannot use offsets from
+the previous text; fresh geometry is published when the new text is painted.
 Editable combo inputs can use the select-trigger surface without changing input
 geometry or editing behavior; ordinary standalone inputs keep their input surface.
 Disabling an input keeps its draft while rejecting edits and removing its Tab

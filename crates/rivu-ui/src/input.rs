@@ -527,6 +527,8 @@ impl Input {
         self.selected_range = range.start + new_text.len()..range.start + new_text.len();
         self.selection_reversed = false;
         self.marked_range = None;
+        self.last_layout = None;
+        self.last_bounds = None;
         cx.emit(InputEvent::Changed { user: true });
         cx.notify();
     }
@@ -731,6 +733,8 @@ impl EntityInputHandler for Input {
             range.start,
         );
         self.selection_reversed = false;
+        self.last_layout = None;
+        self.last_bounds = None;
         cx.emit(InputEvent::Changed { user: true });
         cx.notify();
     }
@@ -1313,6 +1317,96 @@ mod tests {
             window.dispatch_event(event.to_platform_input(), cx);
         })
         .unwrap();
+    }
+
+    #[test]
+    fn replacements_discard_stale_pointer_geometry_until_next_draw() {
+        for marked in [false, true] {
+            let mut cx = gpui::TestAppContext::single();
+            cx.update(crate::theme::init_test);
+            let (input, _, handle) = selection_fixture(&mut cx);
+            cx.update_window(handle, |_, window, cx| {
+                input.update(cx, |input, cx| input.set_text("abcdef", cx));
+                window.draw(cx).clear(cx);
+                let position = {
+                    let field = input.read(cx);
+                    let bounds = field.last_bounds.unwrap();
+                    point(bounds.right() - px(1.), bounds.center().y)
+                };
+                input.update(cx, |input, cx| {
+                    if marked {
+                        input.replace_and_mark_text_in_range(
+                            Some(0..6),
+                            "中",
+                            Some(1..1),
+                            window,
+                            cx,
+                        );
+                    } else {
+                        input.replace_selection(Some(0..6), "中", window, cx);
+                    }
+                    assert_eq!(input.content.as_ref(), "中");
+                });
+                // Keep the old painted hitboxes: dispatch_pointer would draw first.
+                window.dispatch_event(
+                    MouseDownEvent {
+                        button: MouseButton::Left,
+                        position,
+                        ..Default::default()
+                    }
+                    .to_platform_input(),
+                    cx,
+                );
+                window.dispatch_event(
+                    MouseUpEvent {
+                        button: MouseButton::Left,
+                        position,
+                        ..Default::default()
+                    }
+                    .to_platform_input(),
+                    cx,
+                );
+                input.update(cx, |input, cx| {
+                    assert_eq!(input.selected_range, 0..0);
+                    input.replace_selection(None, "x", window, cx);
+                    assert_eq!(input.content.as_ref(), if marked { "x" } else { "x中" });
+                    assert_eq!(input.selected_range, 1..1);
+                });
+                window.draw(cx).clear(cx);
+                let position = {
+                    let field = input.read(cx);
+                    let bounds = field.last_bounds.unwrap();
+                    point(bounds.right() - px(1.), bounds.center().y)
+                };
+                window.dispatch_event(
+                    MouseDownEvent {
+                        button: MouseButton::Left,
+                        position,
+                        ..Default::default()
+                    }
+                    .to_platform_input(),
+                    cx,
+                );
+                window.dispatch_event(
+                    MouseUpEvent {
+                        button: MouseButton::Left,
+                        position,
+                        ..Default::default()
+                    }
+                    .to_platform_input(),
+                    cx,
+                );
+                input.update(cx, |input, cx| {
+                    let end = input.content.len();
+                    assert_eq!(input.selected_range, end..end);
+                    input.replace_selection(None, "!", window, cx);
+                    assert_eq!(input.content.as_ref(), if marked { "x!" } else { "x中!" });
+                    let end = input.content.len();
+                    assert_eq!(input.selected_range, end..end);
+                });
+            })
+            .unwrap();
+        }
     }
 
     #[test]
