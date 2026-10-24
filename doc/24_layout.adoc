@@ -570,10 +570,13 @@ Button composition uses the base surface, then a visual variant, selected stylin
 and finally disabled state. These style decorators are not commutative.
 `active_control` is visual only: the semantic role and checked/selected/value state
 must match the actual operation. `input_aligned_control` opts text buttons and
-select triggers into form geometry; ordinary icon buttons retain natural content
-sizing. Independent `toggle_button` switches use a centered square glyph slot,
-Regular padding and minimum hit area, and start alignment rather than stretching
-to a parent column. The square grows with configured typography and UI scale.
+select triggers into form geometry. Icon buttons and independent `toggle_button`
+switches use the same centered square glyph slot, growing with configured
+typography and UI scale. Padding and minimum hit areas remain density-specific;
+glyph and state changes do not change a button's width. Standalone controls and
+groups align to their content rather than stretching across a parent column.
+Text buttons retain content width up to the parent's available width; overlong
+labels truncate on one line and expose their full text in a tooltip.
 Within each icon-button density, Quiet and Bare retain the Surface hit area.
 Uniform tree rows reserve enough height for inline icon actions; two-line text
 gap and line height remain separate from outer row spacing.
@@ -584,6 +587,11 @@ Quiet reveals it on hover, and Bare emphasizes the glyph without a hover fill.
 Regular keeps the standard icon-button geometry and group gap; Compact reduces
 horizontal padding and minimum width, retains vertical padding and minimum
 height, and has no group gap. Both follow configured icon typography.
+Groups remain single-line and non-shrinking by default. `wrap()` bounds the group
+to its parent's width and allows reflow without compressing individual buttons.
+Callers own overflow policy: toolbars can wrap, inline list actions stay on one
+line, and playback retains its outer horizontal scroller. Playlist catalog hover
+actions overlay the row, leaving its full text width available while hidden.
 Disabled items reject activation and leave the Tab order while preserving their
 selected appearance; Quiet and Bare do not acquire a disabled border.
 Tab suppression belongs to the rendered disabled item, not its owner's focus

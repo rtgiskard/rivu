@@ -1138,6 +1138,7 @@ impl Playlists {
                             |row| row.border_color(rgb(theme.accent)),
                         )
                         .group("playlist-catalog-row")
+                        .relative()
                         .gap_0()
                         .child(row_text(
                             theme,
@@ -1147,9 +1148,11 @@ impl Playlists {
                                 .format("gl-track-count", &[("count", (p.entry_count).into())]),
                         ))
                         .child(
-                            row()
-                                .opacity(0.)
-                                .group_hover("playlist-catalog-row", |style| style.opacity(1.))
+                            hover_actions(
+                                theme,
+                                "playlist-catalog-row",
+                                this.browser.playlists().selected() == Some(id),
+                            )
                                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                                 .child(
                                     IconButtonGroup::new(IconButtonStyle::Quiet, IconButtonDensity::Compact)

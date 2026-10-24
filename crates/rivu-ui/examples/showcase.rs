@@ -472,6 +472,7 @@ impl Render for Showcase {
                 .child(disabled_control(colors, button("action", "Action", cx, |this,_,cx| { this.clicks += 1; cx.notify(); }), !self.enabled))
                 .child(input_aligned_control(button("aligned", "Input-aligned", cx, |this,_,cx| { this.clicks += 1; cx.notify(); }), cx))
                 .child(format!("Activations: {}",self.clicks)))
+            .child(column().w_64().max_w_full().child(button("long-action", "保存更改 / Save changes with a deliberately long action label", cx, |this,_,cx| { this.clicks += 1; cx.notify(); })))
             .child(icon_groups)
             .child(checkbox("enabled", "Enable action and editor", self.enabled, true, cx, |this,next,cx| {
                 this.enabled = next; this.input.update(cx,|input,cx| input.set_enabled(next,cx));

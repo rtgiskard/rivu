@@ -66,7 +66,10 @@ pub fn button_style(
         .role(Role::Button)
         .aria_label(label.clone())
         .justify_center()
-        .child(label)
+        .self_start()
+        .max_w_full()
+        .tooltip(text_tooltip(label.clone()))
+        .child(div().min_w_0().truncate().child(label))
 }
 
 /// Text button with shared application event handling.
@@ -147,36 +150,28 @@ pub(crate) fn icon_button_height(window: &Window, cx: &gpui::App) -> gpui::Pixel
     (rem * 2.).max((rem * crate::theme::font_size_scale(cx)).round() + rem + gpui::px(2.))
 }
 
-enum IconButtonSizing {
-    Natural,
-    Square,
-}
-
 fn icon_button_surface(
     theme: &'static crate::theme::Palette,
     id: impl Into<ElementId>,
     icon: impl Into<SharedString>,
     hint: impl Into<SharedString>,
     cx: &gpui::App,
-    sizing: IconButtonSizing,
 ) -> Stateful<Div> {
     let hint = hint.into();
     let font_scale = crate::theme::font_size_scale(cx);
-    let glyph = self::icon(icon, cx).font_size_scale(font_scale);
-    let glyph = match sizing {
-        IconButtonSizing::Natural => glyph,
-        IconButtonSizing::Square => glyph
-            .size(gpui::rems(font_scale))
-            .flex()
-            .items_center()
-            .justify_center(),
-    };
+    let glyph = self::icon(icon, cx)
+        .font_size_scale(font_scale)
+        .size(gpui::rems(font_scale))
+        .flex()
+        .items_center()
+        .justify_center();
     control_surface(theme, id)
         .role(Role::Button)
         .aria_label(hint.clone())
         .child(glyph)
         .w_auto()
         .h_auto()
+        .self_start()
         .min_w_8()
         .min_h_8()
         .text_size(gpui::rems(1.))
@@ -283,14 +278,7 @@ impl IconButton {
         customize: impl FnOnce(Stateful<Div>) -> Stateful<Div>,
     ) -> Stateful<Div> {
         let theme = crate::theme::palette(cx);
-        let mut control = icon_button_surface(
-            theme,
-            self.id,
-            self.icon,
-            self.hint,
-            cx,
-            IconButtonSizing::Natural,
-        );
+        let mut control = icon_button_surface(theme, self.id, self.icon, self.hint, cx);
         if density == IconButtonDensity::Compact {
             control = control.px_1().py_2().min_w_6().min_h_8();
         }
@@ -361,6 +349,7 @@ impl IconButtonGroup {
             surface: div()
                 .flex()
                 .items_center()
+                .self_start()
                 .min_w_0()
                 .gap_0()
                 .flex_shrink_0()
@@ -370,8 +359,9 @@ impl IconButtonGroup {
         }
     }
 
+    /// Wrap within the parent's width without shrinking individual hit areas.
     pub fn wrap(mut self) -> Self {
-        self.surface = self.surface.flex_wrap();
+        self.surface = self.surface.flex_wrap().max_w_full().flex_shrink(1.);
         self
     }
 
@@ -477,14 +467,13 @@ pub fn toggle_button<T: 'static>(
     active_control(
         theme,
         activate_control(
-            icon_button_surface(theme, id, icon, hint, cx, IconButtonSizing::Square),
+            icon_button_surface(theme, id, icon, hint, cx),
             cx,
             move |this, _, cx| {
                 action(this, cx);
                 cx.notify();
             },
         )
-        .self_start()
         .role(Role::Switch)
         .aria_toggled(if enabled {
             Toggled::True
@@ -1055,5 +1044,225 @@ mod tests {
                 assert!(node.supports_action(gpui::AccessibleAction::Click));
             }
         });
+    }
+
+    type MeasuredBounds = std::rc::Rc<std::cell::Cell<[gpui::Bounds<gpui::Pixels>; 4]>>;
+
+    fn measure_width(
+        control: Stateful<Div>,
+        index: usize,
+        bounds: MeasuredBounds,
+    ) -> Stateful<Div> {
+        control.relative().child(
+            gpui::canvas(
+                move |value, _, _| {
+                    let mut measured = bounds.get();
+                    // Absolute children cover the padding box, excluding the 1px border.
+                    measured[index] = gpui::Bounds::new(
+                        value.origin - gpui::point(gpui::px(1.), gpui::px(1.)),
+                        gpui::size(
+                            value.size.width + gpui::px(2.),
+                            value.size.height + gpui::px(2.),
+                        ),
+                    );
+                    bounds.set(measured);
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .size_full(),
+        )
+    }
+
+    struct IconWidths {
+        bounds: MeasuredBounds,
+        density: IconButtonDensity,
+        style: IconButtonStyle,
+        alternate: bool,
+        wrap: bool,
+        width: f32,
+    }
+
+    impl Render for IconWidths {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let mut group = IconButtonGroup::new(self.style, self.density);
+            if self.wrap {
+                group = group.wrap();
+            }
+            for (index, glyph) in if self.alternate {
+                ["󰏤", "󰑘", "−"]
+            } else {
+                ["", "󰑖", "♥"]
+            }
+            .into_iter()
+            .enumerate()
+            {
+                let bounds = self.bounds.clone();
+                group = group.button_with(
+                    IconButton::new(("width-action", index), glyph, "Action")
+                        .toggled(self.alternate)
+                        .enabled(index != 2 || self.alternate),
+                    cx,
+                    |_, _, _| {},
+                    move |control| measure_width(control, index, bounds),
+                );
+            }
+            let bounds = self.bounds.clone();
+            crate::column().w(gpui::px(self.width)).child(
+                group.into_div().relative().child(
+                    gpui::canvas(
+                        move |value, _, _| {
+                            let mut measured = bounds.get();
+                            measured[3] = value;
+                            bounds.set(measured);
+                        },
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .size_full(),
+                ),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn icon_group_geometry_survives_glyph_and_state_changes(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init_test);
+        let bounds = MeasuredBounds::default();
+        let window = cx.add_window({
+            let bounds = bounds.clone();
+            move |_, _| IconWidths {
+                bounds,
+                density: IconButtonDensity::Regular,
+                style: IconButtonStyle::Surface,
+                alternate: false,
+                wrap: false,
+                width: 400.,
+            }
+        });
+        for scale in [0.75, 1.5] {
+            for font_size in [8, 18] {
+                cx.update(|cx| {
+                    crate::theme::set_typography(
+                        gpui::font("sans-serif"),
+                        "sans-serif",
+                        font_size,
+                        cx,
+                    );
+                });
+                for density in [IconButtonDensity::Regular, IconButtonDensity::Compact] {
+                    for style in [
+                        IconButtonStyle::Surface,
+                        IconButtonStyle::Quiet,
+                        IconButtonStyle::Bare,
+                    ] {
+                        let mut original = None;
+                        for alternate in [false, true] {
+                            window
+                                .update(cx, |this, window, cx| {
+                                    this.density = density;
+                                    this.style = style;
+                                    this.alternate = alternate;
+                                    window.set_rem_size(gpui::px(16. * scale));
+                                    cx.notify();
+                                })
+                                .unwrap();
+                            cx.update_window(window.into(), |_, window, cx| {
+                                window.draw(cx).clear(cx);
+                            })
+                            .unwrap();
+                            let measured = bounds.get();
+                            for item in &measured[..3] {
+                                assert_eq!(item.size, measured[0].size);
+                            }
+                            assert!(measured[0].size.width >= gpui::px(24. * scale));
+                            assert!(measured[0].size.height >= gpui::px(32. * scale));
+                            assert_eq!(measured[3].right(), measured[2].right());
+                            if let Some(original) = original {
+                                assert_eq!(measured, original);
+                            }
+                            original = Some(measured);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn wrapping_group_reflows_without_compressing_buttons(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init_test);
+        let bounds = MeasuredBounds::default();
+        let window = cx.add_window({
+            let bounds = bounds.clone();
+            move |_, _| IconWidths {
+                bounds,
+                density: IconButtonDensity::Regular,
+                style: IconButtonStyle::Surface,
+                alternate: false,
+                wrap: true,
+                width: 400.,
+            }
+        });
+        let mut original = None;
+        for width in [400., 80., 400.] {
+            window
+                .update(cx, |this, _, cx| {
+                    this.width = width;
+                    cx.notify();
+                })
+                .unwrap();
+            cx.update_window(window.into(), |_, window, cx| {
+                window.draw(cx).clear(cx);
+            })
+            .unwrap();
+            let measured = bounds.get();
+            assert!(measured[3].size.width <= gpui::px(width));
+            assert_eq!(measured[0].origin.y == measured[2].origin.y, width == 400.);
+            if let Some(original) = original {
+                for item in &measured[..3] {
+                    assert_eq!(item.size, original);
+                }
+            }
+            original = Some(measured[0].size);
+        }
+    }
+
+    #[gpui::test]
+    fn text_buttons_keep_content_width_and_bound_long_labels(cx: &mut TestAppContext) {
+        struct TextWidths(MeasuredBounds);
+        impl Render for TextWidths {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                crate::column().w(gpui::px(120.)).children(
+                    [
+                        "Go",
+                        "保存更改 / Save changes with a deliberately long action label",
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, label)| {
+                        measure_width(
+                            button(("text-width", index), label, cx, |_, _, _| {}),
+                            index,
+                            self.0.clone(),
+                        )
+                    }),
+                )
+            }
+        }
+        cx.update(crate::theme::init_test);
+        let bounds = MeasuredBounds::default();
+        let window = cx.add_window({
+            let bounds = bounds.clone();
+            move |_, _| TextWidths(bounds)
+        });
+        cx.update_window(window.into(), |_, window, cx| {
+            window.draw(cx).clear(cx);
+        })
+        .unwrap();
+        let [short, long, ..] = bounds.get();
+        assert!(short.size.width < long.size.width);
+        assert_eq!(long.size.width, gpui::px(120.));
+        assert_eq!(short.size.height, long.size.height);
     }
 }
