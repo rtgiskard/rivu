@@ -4537,3 +4537,61 @@ fn library_locate_matches_tree_and_flat_projection_without_identity_fallback() {
         LibraryLocateResult::Unavailable
     );
 }
+
+#[test]
+fn all_catalog_locate_matches_empty_root_pages_for_absolute_and_relative_paths() {
+    use crate::model::{DirectoryRow, LibraryLocateResult, LibrarySort};
+    let store = Store::open(Path::new(":memory:")).unwrap();
+    store.conn.execute_batch(
+        "INSERT INTO tracks(id,path,raw_title,favorite,missing,cue_sheet,cue_number,cue_start_frame) VALUES
+         (1,'/music/shared.wav','Needle B',1,0,'/music/album.cue',1,0),
+         (2,'/music/shared.wav','Needle A',0,1,'/music/album.cue',2,75),
+         (3,'relative/one.wav','Relative',1,0,NULL,NULL,NULL),
+         (4,'standalone.wav','Standalone',0,1,NULL,NULL,NULL);",
+    ).unwrap();
+    let root = Path::new("");
+    for sort in [LibrarySort::Id, LibrarySort::Album, LibrarySort::MostPlayed] {
+        for (query, favorite, missing) in [
+            (None, None, None),
+            (Some("needle"), None, None),
+            (None, Some(true), None),
+            (None, None, Some(true)),
+        ] {
+            let flat = store
+                .library_root_page(root, query, favorite, missing, sort, 0, 20)
+                .unwrap();
+            let tree = store
+                .directory_page(root, query, favorite, missing, 0, 20)
+                .unwrap();
+            for (index, row) in flat.rows.iter().enumerate() {
+                let LibraryLocateResult::Located(location) = store
+                    .library_location(row.id, root, false, query, favorite, missing, sort)
+                    .unwrap()
+                else {
+                    panic!("expected exact all-catalog flat identity");
+                };
+                assert_eq!(
+                    (location.offset, location.total, location.child),
+                    (index, flat.total, None)
+                );
+                let LibraryLocateResult::Located(location) = store
+                    .library_location(row.id, root, true, query, favorite, missing, sort)
+                    .unwrap()
+                else {
+                    panic!("expected all-catalog tree ancestry");
+                };
+                assert_eq!(location.total, tree.total);
+                match (&tree.rows[location.offset], location.child) {
+                    (DirectoryRow::Directory { path }, Some(child)) => {
+                        assert_eq!(*path, child);
+                        if row.path.is_absolute() {
+                            assert_eq!(child, Path::new("/"));
+                        }
+                    }
+                    (DirectoryRow::Track(track), None) => assert_eq!(track.id, row.id),
+                    _ => panic!("locate must identify the displayed tree child"),
+                }
+            }
+        }
+    }
+}

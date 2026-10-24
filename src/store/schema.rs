@@ -126,6 +126,34 @@ mod tests {
     }
 
     #[test]
+    fn foreign_sqlite_named_tables_are_rejected_before_changing_database_mode() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("foreign.db");
+        let connection = Connection::open(&path)?;
+        connection.execute_batch(
+            "CREATE TABLE sqlitex_data(value BLOB); INSERT INTO sqlitex_data VALUES(X'01FE');",
+        )?;
+        let schema: i64 = connection.query_row("PRAGMA schema_version", [], |row| row.get(0))?;
+        let journal: String = connection.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
+        assert!(Store::open(&path).is_err());
+        assert_eq!(
+            connection.query_row("PRAGMA schema_version", [], |row| row.get::<_, i64>(0))?,
+            schema
+        );
+        assert_eq!(
+            connection.query_row("PRAGMA journal_mode", [], |row| row.get::<_, String>(0))?,
+            journal
+        );
+        assert_eq!(
+            connection.query_row("SELECT value FROM sqlitex_data", [], |row| {
+                row.get::<_, Vec<u8>>(0)
+            })?,
+            [1, 254]
+        );
+        Ok(())
+    }
+
+    #[test]
     fn incompatible_databases_are_rejected_without_changing_schema_or_data() -> Result<()> {
         for version in [None, Some(0), Some(2)] {
             let directory = tempfile::tempdir()?;

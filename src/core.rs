@@ -91,6 +91,7 @@ pub(crate) struct CoreState {
     pub(crate) playback: PlaybackState,
     pub(crate) processing_audition: Option<crate::model::ProcessingAudition>,
     pub(crate) system: SystemState,
+    pub(crate) scan_owner: Option<crate::projection::MediaTaskOwner>,
     pub(crate) revisions: StateRevisions,
     pub(crate) playlist_content_sequence: u64,
 }
@@ -145,6 +146,7 @@ impl CoreState {
                 || system.scan_message != old.scan_message
                 || system.scan_progress != old.scan_progress
                 || system.scan_task_id != old.scan_task_id
+                || self.scan_owner != previous.scan_owner
                 || system.relocation_task != old.relocation_task
                 || system.processing != old.processing
                 || system.last_error != old.last_error
@@ -836,6 +838,7 @@ enum ScanEvent {
 const MAX_RETAINED_SCAN_RESULTS: usize = 32;
 struct ScanTask {
     status: ScanTaskStatus,
+    owner: crate::projection::MediaTaskOwner,
     cancellation: library::ScanCancellation,
     worker: tokio::task::JoinHandle<()>,
     pending_save: Option<ScanFinished>,

@@ -233,6 +233,10 @@ impl Core {
                         | Command::ImportPlaylist { .. }
                         | Command::CheckOtherTracks { .. }
                 );
+                let library_owned = matches!(
+                    &command,
+                    Command::Scan { .. } | Command::CheckOtherTracks { .. }
+                );
                 let starts_relocation = matches!(&command, Command::RelocateTrack { .. });
                 let starts_export = matches!(&command, Command::ExportPlaylist { .. });
                 let starts_external = matches!(&command, Command::QueueExternalPaths { .. });
@@ -245,7 +249,9 @@ impl Core {
                         | Command::ProcessingGraphAudition { .. }
                 );
                 let result = self.command(command);
-                if let Err(error) = &result {
+                if let Err(error) = &result
+                    && (!library_owned || request.reply.is_none())
+                {
                     self.state.system.last_error = Some(format!("{error:#}"));
                 }
                 self.publish();
@@ -402,6 +408,7 @@ impl Core {
             }
             if changed.system {
                 shared.system = self.state.system.clone();
+                shared.scan_owner = self.state.scan_owner;
             } else {
                 // The in-process wakeup sequence advances even without a System change.
                 shared.system.revision = self.state.system.revision;

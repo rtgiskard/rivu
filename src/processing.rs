@@ -408,7 +408,7 @@ fn run(
         .graph_mode
         .filter(|mode| *mode != GraphExecutionMode::Offline)
     {
-        let native = audio::probe(&track.path, config.ffmpeg_enabled)?;
+        let native = audio::probe_with_cancel(&track.path, config.ffmpeg_enabled, cancel)?;
         check_cancel(cancel)?;
         ensure!(
             SourceStamp::read(&track.path)? == stamp,
@@ -1056,7 +1056,7 @@ pub(crate) fn mix(
         .prefix("mix-")
         .suffix(".wav")
         .tempfile_in(result.directory.path())?;
-    let (file, path) = file.keep().map_err(|e| e.error)?;
+    let path = file.path().to_path_buf();
     let cancelled = Arc::new(AtomicBool::new(false));
     let cancel = cancelled.clone();
     let tx = service.sender.clone();
@@ -1064,6 +1064,7 @@ pub(crate) fn mix(
         .name("rivu-stem-mix".into())
         .spawn(move || {
             let outcome = (|| -> Result<PathBuf> {
+                let (file, _) = file.keep().map_err(|e| e.error)?;
                 let mut vocals = hound::WavReader::open(vocals)?;
                 let mut accompaniment = hound::WavReader::open(accompaniment)?;
                 ensure!(

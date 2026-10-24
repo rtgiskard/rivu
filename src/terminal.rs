@@ -519,12 +519,15 @@ impl View {
                 Self::Tree(tree) => {
                     tree.other_count = None;
                     if tree.other_tracks {
-                        tree.anchor = tree.anchor.or_else(|| {
-                            tree.entries.selected().and_then(|entry| match entry {
-                                DirectoryRow::Track(track) => Some(track.id),
-                                _ => None,
+                        tree.anchor = tree
+                            .anchor
+                            .or_else(|| {
+                                tree.entries.selected().and_then(|entry| match entry {
+                                    DirectoryRow::Track(track) => Some(track.id),
+                                    _ => None,
+                                })
                             })
-                        });
+                            .or(tree.selected_track_id);
                     }
                     tree.entries.clear();
                 }
@@ -799,13 +802,19 @@ impl UiState {
                     page.total,
                     page.rows.into_iter().map(DirectoryRow::Track).collect(),
                 );
+                tree.selected_track_id = tree.entries.selected().and_then(|entry| match entry {
+                    DirectoryRow::Track(track) => Some(track.id),
+                    _ => None,
+                });
             }
             (View::Tree(tree), ViewResponse::OtherTracksCount(count)) => {
                 tree.other_count = Some(count)
             }
             (View::Tree(tree), ViewResponse::LibraryLocate(location)) if tree.other_tracks => {
-                tree.anchor = None;
+                let anchor = tree.anchor.take();
+                tree.selected_track_id = None;
                 if let crate::model::LibraryLocateResult::Located(location) = location {
+                    tree.selected_track_id = anchor;
                     tree.entries.total = location.total;
                     tree.entries.selection.select(Some(location.offset));
                     tree.entries.set_viewport(tree.entries.viewport_rows);
@@ -1265,7 +1274,17 @@ impl UiState {
                             self.cancel_query();
                         }
                     }
-                    _ => changed = tree.entries.navigate_action(action, page_size),
+                    _ => {
+                        changed = tree.entries.navigate_action(action, page_size);
+                        if changed && tree.other_tracks {
+                            tree.anchor = None;
+                            tree.selected_track_id =
+                                tree.entries.selected().and_then(|entry| match entry {
+                                    DirectoryRow::Track(track) => Some(track.id),
+                                    _ => None,
+                                });
+                        }
+                    }
                 }
                 self.view = if close {
                     self.cached_library = Some(View::Tree(tree));
@@ -1614,6 +1633,7 @@ struct LibraryTree {
     missing: Option<bool>,
     sort: crate::model::LibrarySort,
     anchor: Option<i64>,
+    selected_track_id: Option<i64>,
     other_count: Option<usize>,
 }
 
@@ -1708,12 +1728,15 @@ impl LibraryTree {
             }
         }
         if refresh {
-            self.anchor = self.anchor.or_else(|| {
-                self.entries.selected().and_then(|entry| match entry {
-                    DirectoryRow::Track(track) => Some(track.id),
-                    _ => None,
+            self.anchor = self
+                .anchor
+                .or_else(|| {
+                    self.entries.selected().and_then(|entry| match entry {
+                        DirectoryRow::Track(track) => Some(track.id),
+                        _ => None,
+                    })
                 })
-            });
+                .or(self.selected_track_id);
             let selection = std::mem::take(&mut self.entries.selection);
             let viewport_rows = self.entries.viewport_rows;
             self.entries = PagedList {
@@ -1776,6 +1799,8 @@ impl LibraryTree {
         self.directory = directory;
         self.other_tracks = false;
         self.editing_query = false;
+        self.anchor = None;
+        self.selected_track_id = None;
         self.entries = PagedList {
             selection,
             viewport_rows,

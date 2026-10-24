@@ -17,7 +17,7 @@ pub enum DatabaseState {
 /// Inspect metadata without creating, upgrading, or modifying the database.
 pub fn inspect(conn: &Connection) -> Result<DatabaseState> {
     let populated: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%')",
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name NOT GLOB 'sqlite_*')",
         [],
         |row| row.get(0),
     )?;
@@ -515,6 +515,37 @@ mod tests {
                 album_trigger_revision: Some(ALBUM_TRIGGER_REVISION),
             }
         );
+        validate_structure(&conn)?;
+        Ok(())
+    }
+
+    #[test]
+    fn sqlite_named_user_tables_are_not_treated_as_an_empty_database() -> Result<()> {
+        for name in ["sqlitex_data", "SQLiteX_data"] {
+            let conn = Connection::open_in_memory()?;
+            conn.execute_batch(&format!(
+                "CREATE TABLE {name}(value BLOB); INSERT INTO {name} VALUES(X'0102FF');"
+            ))?;
+            let schema: i64 = conn.query_row("PRAGMA schema_version", [], |row| row.get(0))?;
+            assert_eq!(inspect(&conn)?, DatabaseState::Unversioned);
+            assert!(ensure_current(&conn).is_err());
+            assert_eq!(
+                conn.query_row("PRAGMA schema_version", [], |row| row.get::<_, i64>(0))?,
+                schema
+            );
+            assert_eq!(
+                conn.query_row(&format!("SELECT value FROM {name}"), [], |row| {
+                    row.get::<_, Vec<u8>>(0)
+                })?,
+                [1, 2, 255]
+            );
+        }
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch(
+            "CREATE TABLE transient(id INTEGER PRIMARY KEY AUTOINCREMENT); DROP TABLE transient;",
+        )?;
+        assert_eq!(inspect(&conn)?, DatabaseState::Empty);
+        ensure_current(&conn)?;
         validate_structure(&conn)?;
         Ok(())
     }

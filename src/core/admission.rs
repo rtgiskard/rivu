@@ -331,7 +331,7 @@ impl Core {
     }
 
     fn retain_external(&mut self, status: ScanTaskStatus) {
-        self.retain_scan_outcome(status);
+        self.retain_scan_outcome(status, crate::projection::MediaTaskOwner::Queue);
         self.project_scan();
         self.publish();
     }

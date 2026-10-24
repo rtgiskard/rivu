@@ -61,6 +61,18 @@ fn external_admission_appends_valid_subset_without_roots_autoplay_or_playlist_ch
     let id = core.active_external_admission.as_ref().unwrap().status.id;
     assert!(core.state.system.scanning);
     assert_eq!(core.state.system.scan_task_id, Some(id));
+    core.publish();
+    let snapshot = crate::projection::GuiSnapshot::from_core(&core.shared.read());
+    assert!(
+        snapshot
+            .system
+            .scan_visible(crate::projection::MediaTaskOwner::Queue)
+    );
+    assert!(
+        !snapshot
+            .system
+            .scan_visible(crate::projection::MediaTaskOwner::Library)
+    );
     assert_eq!(core.queue_ids, before_queue);
     let ViewResponse::ScanTask(status) = core.view(&Query::ScanTask { id }).unwrap() else {
         panic!("expected media task")
@@ -68,6 +80,19 @@ fn external_admission_appends_valid_subset_without_roots_autoplay_or_playlist_ch
     assert_eq!(status.id, id);
     assert_eq!(status.progress.phase, ScanPhase::Discovering);
     finish_admission(&mut core);
+    core.publish();
+    let snapshot = crate::projection::GuiSnapshot::from_core(&core.shared.read());
+    assert!(
+        snapshot
+            .system
+            .scan_visible(crate::projection::MediaTaskOwner::Queue)
+    );
+    assert!(
+        !snapshot
+            .system
+            .scan_visible(crate::projection::MediaTaskOwner::Library)
+    );
+    assert!(snapshot.system.last_error.is_some());
     let added = core
         .store
         .queue_page(None, before_queue.len(), 10)
@@ -98,6 +123,18 @@ fn external_admission_appends_valid_subset_without_roots_autoplay_or_playlist_ch
     assert_eq!(status.progress.errors, 2);
     assert!(!core.state.system.scanning);
     assert_eq!(core.state.system.scan_task_id, Some(id));
+    let revisions = core.state.revisions;
+    core.publish();
+    assert_eq!(core.state.revisions, revisions);
+    core.command(Command::DismissScanResult).unwrap();
+    core.publish();
+    let snapshot = crate::projection::GuiSnapshot::from_core(&core.shared.read());
+    assert!(
+        !snapshot
+            .system
+            .scan_visible(crate::projection::MediaTaskOwner::Queue)
+    );
+    assert!(snapshot.system.scan_task_id.is_none());
 }
 
 #[test]

@@ -481,23 +481,33 @@ impl Store {
         if !matches {
             return Ok(LibraryLocateResult::Filtered);
         }
+        let scope = if prefix.is_empty() {
+            ""
+        } else {
+            DIRECTORY_SCOPE
+        };
         let child = if tree {
-            rest.find('/')
-                .map(|separator| PathBuf::from(format!("{}{}", prefix, &rest[..separator])))
+            rest.find('/').map(|separator| {
+                if prefix.is_empty() && separator == 0 {
+                    PathBuf::from("/")
+                } else {
+                    PathBuf::from(format!("{}{}", prefix, &rest[..separator]))
+                }
+            })
         } else {
             None
         };
         let (sql, target) = if tree {
             (
                 format!(
-                    "WITH sources AS (SELECT id,path,substr(path,length(?4)+1) AS rest FROM tracks {TRACK_SEARCH_FILTER}{DIRECTORY_SCOPE}), children AS {DIRECTORY_CHILDREN}, ranked AS (SELECT kind,child,track_id,row_number() OVER (ORDER BY kind,child,track_id)-1 AS position,COUNT(*) OVER () AS total FROM children) SELECT position,total FROM ranked WHERE (?5 IS NOT NULL AND kind=0 AND child=?5) OR (?5 IS NULL AND kind=1 AND track_id=?6)"
+                    "WITH sources AS (SELECT id,path,substr(path,length(?4)+1) AS rest FROM tracks {TRACK_SEARCH_FILTER}{scope}), children AS {DIRECTORY_CHILDREN}, ranked AS (SELECT kind,child,track_id,row_number() OVER (ORDER BY kind,child,track_id)-1 AS position,COUNT(*) OVER () AS total FROM children) SELECT position,total FROM ranked WHERE (?5 IS NOT NULL AND kind=0 AND child=?5) OR (?5 IS NULL AND kind=1 AND track_id=?6)"
                 ),
                 child.as_deref().and_then(Path::to_str),
             )
         } else {
             (
                 format!(
-                    "WITH ranked AS (SELECT id,row_number() OVER (ORDER BY {})-1 AS position,COUNT(*) OVER () AS total FROM tracks {TRACK_SEARCH_FILTER}{DIRECTORY_SCOPE}) SELECT position,total FROM ranked WHERE id=?6 AND ?5 IS NULL",
+                    "WITH ranked AS (SELECT id,row_number() OVER (ORDER BY {})-1 AS position,COUNT(*) OVER () AS total FROM tracks {TRACK_SEARCH_FILTER}{scope}) SELECT position,total FROM ranked WHERE id=?6 AND ?5 IS NULL",
                     library_order(sort)
                 ),
                 None,

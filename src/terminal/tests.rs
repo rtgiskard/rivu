@@ -1387,6 +1387,84 @@ fn other_tracks_selection_survives_consecutive_revisions_before_locate() {
 }
 
 #[test]
+fn other_tracks_selection_survives_changes_between_locate_and_page() {
+    for revision_change in [false, true] {
+        let mut state = query_snapshot();
+        let mut tui = TuiState::new(state.clone(), Arc::new(Localizer::new("en-US")));
+        let mut tree = LibraryTree {
+            other_tracks: true,
+            ..LibraryTree::default()
+        };
+        tree.entries.insert(
+            0,
+            3,
+            3,
+            vec![41, 42, 43]
+                .into_iter()
+                .map(|id| DirectoryRow::Track(track(id)))
+                .collect(),
+        );
+        tree.entries.selection.select(Some(1));
+        tui.ui.view = View::Tree(tree);
+        tui.ui
+            .key_action(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::ALT), &state);
+        let locate = tui.ui.query_request(&state).unwrap();
+        let located = |request: &QueryRequest, offset| QueryResult {
+            revisions: request.stamp.revisions(),
+            view: ViewResponse::LibraryLocate(crate::model::LibraryLocateResult::Located(
+                crate::model::LibraryLocation {
+                    offset,
+                    total: 3,
+                    child: None,
+                },
+            )),
+        };
+        assert!(tui.ui.apply_query(&state, &locate, Ok(located(&locate, 0))));
+        let old_page = tui.ui.query_request(&state).unwrap();
+        if revision_change {
+            state.library.revision += 1;
+            tui.apply_snapshot(state.clone());
+        } else {
+            tui.ui
+                .key_action(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::ALT), &state);
+        }
+        let fresh = tui.ui.query_request(&state).unwrap();
+        assert!(matches!(
+            fresh.kind,
+            QueryKind::OtherTracks {
+                anchor: Some(42),
+                ..
+            }
+        ));
+        let page = |request: &QueryRequest| QueryResult {
+            revisions: request.stamp.revisions(),
+            view: ViewResponse::LibraryPage(Page {
+                total: 3,
+                rows: vec![track(41), track(43), track(42)],
+            }),
+        };
+        assert!(!tui.ui.apply_query(&state, &old_page, Ok(page(&old_page))));
+        assert!(tui.ui.apply_query(&state, &fresh, Ok(located(&fresh, 2))));
+        let rows = tui.ui.query_request(&state).unwrap();
+        assert!(tui.ui.apply_query(&state, &rows, Ok(page(&rows))));
+        assert!(matches!(
+            tui.ui.key_action(KeyEvent::from(KeyCode::Enter), &state),
+            KeyAction::Command(Command::Play { track_id: 42 })
+        ));
+        tui.ui.key_action(KeyEvent::from(KeyCode::Up), &state);
+        tui.ui
+            .key_action(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::ALT), &state);
+        assert!(matches!(
+            tui.ui.query_request(&state).unwrap().kind,
+            QueryKind::OtherTracks {
+                anchor: Some(43),
+                ..
+            }
+        ));
+    }
+}
+
+#[test]
 fn tree_top_level_has_other_tracks_then_configured_roots_and_restores_parent() {
     let mut state = TuiSnapshot::default();
     state.system.page_size = 1;

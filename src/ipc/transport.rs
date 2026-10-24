@@ -11,7 +11,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::time::timeout;
 
 const BRIDGE_ALLOWANCE: Duration = Duration::from_secs(1);
-const RESPONSE_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+const FRAME_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const TRANSPORT_ALLOWANCE: Duration = Duration::from_secs(1);
 
 pub(super) fn bridge_timeout(operation_timeout: Duration) -> Duration {
@@ -19,7 +19,7 @@ pub(super) fn bridge_timeout(operation_timeout: Duration) -> Duration {
 }
 
 pub(super) fn response_timeout(operation_timeout: Duration) -> Duration {
-    bridge_timeout(operation_timeout) + RESPONSE_WRITE_TIMEOUT + TRANSPORT_ALLOWANCE
+    bridge_timeout(operation_timeout) + FRAME_WRITE_TIMEOUT + TRANSPORT_ALLOWANCE
 }
 
 fn decode_message_header(bytes: &[u8], limit: usize) -> Result<(u8, &[u8])> {
@@ -281,7 +281,7 @@ pub(super) async fn write_frame_buffered<S: AsyncWrite + Unpin>(
     encode_response_frame_into(value, buffer)?;
     // Finish accepted replies, including shutdown acknowledgements, but never
     // let a nonreading peer hold a session (or server teardown) indefinitely.
-    let result = timeout(RESPONSE_WRITE_TIMEOUT, async {
+    let result = timeout(FRAME_WRITE_TIMEOUT, async {
         stream
             .write_all(buffer)
             .await
@@ -312,13 +312,17 @@ pub(super) async fn write_request_frame_buffered<S: AsyncWrite + Unpin>(
     encode_request_frame_into(request, buffer)?;
     // Encoding failure is known not sent; any attempted socket write is unknown.
     *write_started = true;
-    stream
-        .write_all(buffer)
-        .await
-        .context("Writing IPC frame")?;
-    stream.flush().await.context("Flushing IPC frame")?;
+    let result = timeout(FRAME_WRITE_TIMEOUT, async {
+        stream
+            .write_all(buffer)
+            .await
+            .context("Writing IPC frame")?;
+        stream.flush().await.context("Flushing IPC frame")
+    })
+    .await
+    .context("IPC request write timed out");
     release_large_buffer(buffer);
-    Ok(())
+    result?
 }
 
 pub(super) async fn read_response_frame<S: AsyncRead + Unpin>(
@@ -577,5 +581,52 @@ mod tests {
                 .downcast_ref::<tokio::time::error::Elapsed>()
                 .is_some()
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stalled_request_write_is_unknown_and_releases_bulk_buffer() {
+        let (mut stream, mut peer) = tokio::io::duplex(8);
+        let request = WireRequest::Command(super::super::protocol::WireCommand::CreatePlaylist {
+            name: "X".repeat(1024 * 1024),
+        });
+        let mut buffer = Vec::new();
+        let mut write_started = false;
+        let error =
+            write_request_frame_buffered(&mut stream, &request, &mut buffer, &mut write_started)
+                .await
+                .unwrap_err();
+        assert!(
+            error
+                .downcast_ref::<tokio::time::error::Elapsed>()
+                .is_some()
+        );
+        assert!(write_started);
+        assert!(buffer.capacity() <= RETAINED_BUFFER_LIMIT);
+        drop(stream);
+        let mut received = Vec::new();
+        peer.read_to_end(&mut received).await.unwrap();
+        assert!(!received.is_empty());
+        assert!(
+            received.len() < 4 + u32::from_le_bytes(received[..4].try_into().unwrap()) as usize
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn request_write_deadline_includes_flush() {
+        let mut write_started = false;
+        let error = write_request_frame_buffered(
+            &mut PendingFlush,
+            &WireRequest::State(crate::response::StateSections::ALL),
+            &mut Vec::new(),
+            &mut write_started,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error
+                .downcast_ref::<tokio::time::error::Elapsed>()
+                .is_some()
+        );
+        assert!(write_started);
     }
 }

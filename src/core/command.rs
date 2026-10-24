@@ -377,6 +377,7 @@ impl Core {
             }
             Command::DismissScanResult => {
                 if !self.state.system.scanning {
+                    self.state.scan_owner = None;
                     self.state.system.scan_progress = None;
                     self.state.system.scan_task_id = None;
                     self.state.system.scan_message.clear();

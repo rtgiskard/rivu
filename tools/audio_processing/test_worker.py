@@ -3,6 +3,7 @@
 Set RIVU_SPEECH_MANIFEST, RIVU_KIM_MANIFEST and/or RIVU_HTDEMUCS_MANIFEST.
 Run with the corresponding prepared interpreter: python -m unittest discover -s tools/audio_processing -p 'test_*.py'
 """
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -100,6 +101,51 @@ class SignalTests(unittest.TestCase):
                 self.assertEqual(int(np.argmax(output[:,0])),rate)
                 self.assertEqual(int(np.argmax(output[:,1])),rate//2)
                 self.assertTrue(np.isfinite(output).all())
+
+@unittest.skipUnless(importlib.util.find_spec("numpy") and importlib.util.find_spec("soundfile"),
+                     "NumPy and soundfile required for real WAV container behavior")
+class OutputContainerTests(unittest.TestCase):
+    def test_separation_uses_riff_when_each_stem_fits_even_if_total_exceeds_four_gib(self):
+        import numpy as np
+        import soundfile as sf
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        class InspectedOutputs(Exception):
+            pass
+
+        scratch = ROOT / ".cache/neural/tests"
+        scratch.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=scratch) as directory:
+            base = Path(directory)
+            source = base / "input.wav"
+            sf.write(source, np.zeros((32 * 48000, 2), dtype="float32"), 48000, subtype="FLOAT")
+            evidence = base / "weight-license.txt"
+            evidence.write_text("Container-format fixture; inference is not exercised.")
+            manifest = base / "manifest.json"
+            manifest.write_text(json.dumps({"version":1,"operation":"separate","id":"htdemucs",
+                "files":{"weight-license.txt":digest(evidence)},"license_evidence":"weight-license.txt","packages":{}}))
+            destination = base / "result"
+            request = {"version":1,"task_id":"riff-stems","operation":"separate","input_path":str(source),
+                       "output_dir":str(destination),"model_manifest":str(manifest)}
+
+            def inspect_outputs(_audio):
+                for stem in ("vocals", "accompaniment"):
+                    with (destination / (stem + ".wav")).open("rb") as stream:
+                        self.assertEqual(stream.read(4), b"RIFF")
+                raise InspectedOutputs
+
+            # Exercise real output writers before inference. Advertise a long
+            # source only at admission, avoiding multi-GiB fixtures/model loads.
+            info = SimpleNamespace(format="WAV", subtype="FLOAT", samplerate=48000, channels=2,
+                                   frames=2**28 + 1)
+            with patch("worker.build_engine", return_value=(48000, inspect_outputs)), \
+                 patch("worker.deny_network"), patch.dict(os.environ), \
+                 patch.object(sf, "info", return_value=info), \
+                 patch("worker.shutil.disk_usage", return_value=SimpleNamespace(free=16 * 1024**3)):
+                with self.assertRaises(InspectedOutputs):
+                    process(request, lambda *args, **kwargs: None)
+            self.assertFalse(destination.exists())
 
 @unittest.skipUnless(os.environ.get("RIVU_SPEECH_MANIFEST"),"explicit prepared real speech model required")
 class RealSpeechTests(unittest.TestCase):

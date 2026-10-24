@@ -147,6 +147,64 @@ fn retained_output_directories_and_statuses_are_bounded() {
     );
 }
 #[test]
+fn equalizer_preset_import_bounds_bytes_and_rejects_non_regular_inputs() {
+    let (directory, mut core) = fixture();
+    let path = directory.path().join("preset.json");
+    let preset = rivu_dsp::equalizer::config::EqualizerConfig {
+        preamp_db: -3.0,
+        ..Default::default()
+    };
+    let mut bytes = serde_json::to_vec(&preset).unwrap();
+    bytes.resize(65536, b' ');
+    std::fs::write(&path, &bytes).unwrap();
+    core.equalizer_edit(EqualizerEdit::ImportPreset {
+        path: path.clone(),
+        name: "bounded".into(),
+    })
+    .unwrap();
+    let imported = core
+        .state
+        .system
+        .config
+        .equalizer_presets
+        .iter()
+        .find(|preset| preset.name == "bounded")
+        .unwrap();
+    assert_eq!(imported.config, preset);
+    let accepted = core.state.system.config.clone();
+    bytes.push(b' ');
+    std::fs::write(&path, bytes).unwrap();
+    let error = core
+        .equalizer_edit(EqualizerEdit::ImportPreset {
+            path: path.clone(),
+            name: "oversized".into(),
+        })
+        .unwrap_err();
+    assert!(error.to_string().contains("Preset exceeds 64 KiB"));
+    assert_eq!(core.state.system.config, accepted);
+
+    std::fs::remove_file(&path).unwrap();
+    let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+    // SAFETY: name is a live NUL-terminated path; mkfifo retains no pointer.
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+    let (completed, receive) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let result = core.equalizer_edit(EqualizerEdit::ImportPreset {
+            path,
+            name: "pipe".into(),
+        });
+        completed
+            .send((core.state.system.config.clone(), result))
+            .unwrap();
+    });
+    // Do not join on timeout: a regression must fail rather than hang the suite.
+    let (config, result) = receive.recv_timeout(Duration::from_secs(2)).unwrap();
+    worker.join().unwrap();
+    assert!(format!("{:#}", result.unwrap_err()).contains("not an ordinary file"));
+    assert_eq!(config, accepted);
+}
+
+#[test]
 fn equalizer_and_denoise_edits_merge_on_the_core_owner() {
     let (_directory, mut core) = fixture();
     let _commands = recording_audio(&mut core);
@@ -493,6 +551,90 @@ fn audition_starts_original_queue_identity_without_creating_processed_tracks() {
             ..
         }
     ));
+}
+
+#[test]
+fn decoder_hint_change_rejects_retained_auditions_before_starting_playback() {
+    let (directory, mut core) = fixture();
+    source(directory.path());
+    core.edit_track(1, None, None, None, Some(DecoderHint::Auto))
+        .unwrap();
+    core.start_processing(1, ProcessingOperation::Denoise, None)
+        .unwrap();
+    complete(&mut core);
+    core.command(Command::EditTrack {
+        track_id: 1,
+        title: None,
+        artist: None,
+        album: None,
+        decoder_hint: Some(DecoderHint::Native),
+    })
+    .unwrap();
+    let generation = core.generation;
+    let current = core.state.queue.current_id;
+    for mode in [
+        AuditionMode::Original,
+        AuditionMode::Denoised,
+        AuditionMode::Mix,
+    ] {
+        let error = core.audition_processing(1, mode, 0.0, 0.0).unwrap_err();
+        assert!(error.to_string().contains("Processing result is stale"));
+        assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
+        assert_eq!(core.state.queue.current_id, current);
+        assert_eq!(core.generation, generation);
+        assert!(core.processing.active.is_none());
+    }
+}
+
+#[test]
+fn decoder_hint_change_before_mix_handoff_discards_the_rendered_mix() {
+    let (directory, mut core) = fixture();
+    source(directory.path());
+    core.edit_track(1, None, None, None, Some(DecoderHint::Auto))
+        .unwrap();
+    core.start_processing(1, ProcessingOperation::Denoise, None)
+        .unwrap();
+    complete(&mut core);
+    let result = &mut core.processing.results[0];
+    let stem = result
+        .status
+        .outputs
+        .as_ref()
+        .unwrap()
+        .denoised
+        .clone()
+        .unwrap();
+    result.status.outputs.as_mut().unwrap().vocals = Some(stem.clone());
+    result.status.outputs.as_mut().unwrap().accompaniment = Some(stem);
+    let _commands = recording_audio(&mut core);
+    core.audition_processing(1, AuditionMode::Mix, 0.0, 0.0)
+        .unwrap();
+    let event = next_processing_event(&mut core, Duration::from_secs(10)).unwrap();
+    let crate::processing::Event::MixFinished {
+        result: Ok(path), ..
+    } = &event
+    else {
+        panic!("expected a completed mix");
+    };
+    let path = path.clone();
+    core.command(Command::EditTrack {
+        track_id: 1,
+        title: None,
+        artist: None,
+        album: None,
+        decoder_hint: Some(DecoderHint::Native),
+    })
+    .unwrap();
+    let generation = core.generation;
+    core.processing_event(event);
+    assert_eq!(
+        core.processing_status(1).unwrap().phase,
+        ProcessingPhase::Failed
+    );
+    assert!(core.processing.results[0].mix.is_none());
+    assert!(core.processing.audition.is_none());
+    assert_eq!(core.generation, generation);
+    assert!(!path.exists());
 }
 
 #[test]

@@ -342,10 +342,14 @@ impl Core {
                     config.equalizer_presets.retain(|p| p.name != name);
                 }
                 ImportPreset { path, name } => {
-                    let metadata = std::fs::metadata(&path)?;
-                    ensure!(metadata.len() <= 65536, "Preset exceeds 64 KiB");
+                    use std::io::Read;
+                    let file = rivu_format::input::open_regular_file(&path)?;
+                    ensure!(file.metadata()?.len() <= 65536, "Preset exceeds 64 KiB");
+                    let mut bytes = Vec::new();
+                    file.take(65537).read_to_end(&mut bytes)?;
+                    ensure!(bytes.len() <= 65536, "Preset exceeds 64 KiB");
                     let value: rivu_dsp::equalizer::config::EqualizerConfig =
-                        serde_json::from_slice(&std::fs::read(path)?)?;
+                        serde_json::from_slice(&bytes)?;
                     value.validate()?;
                     if let Some(preset) =
                         config.equalizer_presets.iter_mut().find(|p| p.name == name)
@@ -737,6 +741,7 @@ impl Core {
         ensure!(
             track.path == result.track.path
                 && track.cue == result.track.cue
+                && track.decoder_hint == result.track.decoder_hint
                 && track.fingerprint == result.track.fingerprint
                 && crate::processing::SourceStamp::read(&track.path)? == result.stamp,
             "Processing result is stale"
@@ -856,6 +861,12 @@ impl Core {
         ensure!(
             track.path == status.source_path
                 && track.cue == status.source_cue
+                && self
+                    .processing
+                    .results
+                    .iter()
+                    .find(|result| result.status.id == id)
+                    .is_none_or(|result| track.decoder_hint == result.track.decoder_hint)
                 && format!("{admitted_source:?}") == status.source_version,
             "Processing result is stale"
         );

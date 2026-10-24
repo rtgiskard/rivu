@@ -66,6 +66,7 @@ fn shutdown_cancels_and_closes_an_async_scan_worker_before_retirement() {
             playlist_id: None,
             error: None,
         },
+        owner: crate::projection::MediaTaskOwner::Library,
         cancellation,
         worker: core.executor.spawn(async move {
             observed.cancelled().await;
@@ -313,6 +314,7 @@ fn preparation_panic_publishes_a_terminal_failure_and_releases_scan_admission() 
             playlist_id: None,
             error: None,
         },
+        owner: crate::projection::MediaTaskOwner::Library,
         cancellation: library::ScanCancellation::default(),
         worker,
         pending_save: None,
@@ -355,6 +357,7 @@ fn owner_failure_retires_background_work_without_blocking_tokio() {
                 playlist_id: None,
                 error: None,
             },
+            owner: crate::projection::MediaTaskOwner::Library,
             cancellation,
             worker: scan,
             pending_save: None,

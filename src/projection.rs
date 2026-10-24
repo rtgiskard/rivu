@@ -32,12 +32,21 @@ pub struct GuiLibrarySnapshot {
     pub history: Arc<Vec<HistoryEntry>>,
 }
 
+/// GUI routing for the shared scan/import/admission progress projection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MediaTaskOwner {
+    Library,
+    Playlist,
+    Queue,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct GuiSystemSnapshot {
     pub scanning: bool,
     pub scan_message: String,
     pub scan_progress: Option<crate::model::ScanProgress>,
     pub scan_task_id: Option<u64>,
+    pub scan_owner: Option<MediaTaskOwner>,
     pub last_error: Option<String>,
     pub devices: Arc<Vec<String>>,
     pub selected_device: Option<String>,
@@ -50,6 +59,12 @@ pub struct GuiSystemSnapshot {
     pub relocation_task: Option<crate::model::RelocationTaskStatus>,
     pub processing: Option<crate::model::ProcessingTaskStatus>,
     pub processing_audition: Option<crate::model::ProcessingAudition>,
+}
+
+impl GuiSystemSnapshot {
+    pub(crate) fn scan_visible(&self, owner: MediaTaskOwner) -> bool {
+        self.scan_owner == Some(owner) && (self.scanning || self.scan_progress.is_some())
+    }
 }
 
 impl GuiSnapshot {
@@ -76,6 +91,7 @@ impl GuiSnapshot {
                 scan_message: state.system.scan_message.clone(),
                 scan_progress: state.system.scan_progress.clone(),
                 scan_task_id: state.system.scan_task_id,
+                scan_owner: state.scan_owner,
                 last_error: state.system.last_error.clone(),
                 devices: Arc::clone(&state.system.devices),
                 selected_device: state.system.selected_device.clone(),

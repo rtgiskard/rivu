@@ -792,6 +792,11 @@ fn save_prepared_scan(core: &mut Core, scan: ScanFinished) -> ScanTaskStatus {
             playlist_id: None,
             error: None,
         },
+        owner: if scan.import.is_some() {
+            crate::projection::MediaTaskOwner::Playlist
+        } else {
+            crate::projection::MediaTaskOwner::Library
+        },
         cancellation: library::ScanCancellation::default(),
         worker: core.executor.spawn_blocking(|| {}),
         pending_save: None,
@@ -1004,6 +1009,89 @@ fn scan_start_ack_binds_the_accepted_task() {
         panic!("Expected task");
     };
     assert_eq!(task.id, id);
+}
+
+#[test]
+fn rejected_library_scan_ack_preserves_unrelated_global_errors() {
+    let (_directory, mut core) = fixture();
+    core.state.system.last_error = Some("Unrelated audio failure".into());
+    let (requests, receiver) = mpsc::channel(1);
+    let (reply, ack) = oneshot::channel();
+    requests
+        .blocking_send(Request {
+            operation: Operation::Command(Command::Scan {
+                paths: Vec::new(),
+                force: false,
+            }),
+            reply: Some(reply),
+        })
+        .unwrap();
+    drop(requests);
+    core = run_until_disconnected(core, receiver);
+    let CoreResponse::Ack(ack) = ack.blocking_recv().unwrap() else {
+        panic!("Expected ack");
+    };
+    assert!(!ack.is_success());
+    assert!(
+        ack.error
+            .unwrap()
+            .contains("No files or directories supplied")
+    );
+    assert!(ack.scan_id.is_none());
+    assert!(core.scan_results.is_empty());
+    assert_eq!(
+        core.state.system.last_error.as_deref(),
+        Some("Unrelated audio failure")
+    );
+}
+
+#[test]
+fn library_scan_failures_stay_in_their_result_while_import_errors_remain_global() {
+    use crate::projection::{GuiSnapshot, MediaTaskOwner};
+    for import in [false, true] {
+        let (_directory, mut core) = fixture();
+        core.state.system.last_error = Some("Unrelated audio failure".into());
+        let status = save_prepared_scan(
+            &mut core,
+            ScanFinished {
+                other_tracks_check: false,
+                id: 1,
+                result: Err(anyhow::anyhow!("Unreadable scan source")),
+                import: import.then(|| ("Import".into(), Vec::new())),
+                progress: ScanProgress {
+                    phase: ScanPhase::Discovering,
+                    processed: 0,
+                    total: None,
+                    errors: 0,
+                    path: None,
+                },
+            },
+        );
+        assert_eq!(status.progress.phase, ScanPhase::Failed);
+        assert_eq!(status.error.as_deref(), Some("Unreadable scan source"));
+        core.publish();
+        let snapshot = GuiSnapshot::from_core(&core.shared.read());
+        assert_eq!(
+            snapshot.system.scan_visible(MediaTaskOwner::Library),
+            !import
+        );
+        assert_eq!(
+            snapshot.system.scan_visible(MediaTaskOwner::Playlist),
+            import
+        );
+        assert!(!snapshot.system.scan_visible(MediaTaskOwner::Queue));
+        assert_eq!(
+            snapshot.system.last_error.as_deref(),
+            Some(if import {
+                "Unreadable scan source"
+            } else {
+                "Unrelated audio failure"
+            })
+        );
+        if !import {
+            assert_eq!(snapshot.system.scan_message, "Unreadable scan source");
+        }
+    }
 }
 
 #[test]
@@ -1341,9 +1429,10 @@ fn lowering_scan_depth_preserves_excluded_tracks_until_they_are_scanned() {
     .unwrap();
     assert!(!settle_scan(&mut core));
     assert!(
-        core.state
-            .system
-            .last_error
+        core.scan_results
+            .back()
+            .unwrap()
+            .error
             .as_ref()
             .unwrap()
             .contains(excluded.to_str().unwrap())
@@ -1588,7 +1677,8 @@ fn missing_and_broken_requests_do_not_prevent_other_roots_from_scanning() {
     })
     .unwrap();
     assert!(!settle_scan(&mut core));
-    assert!(core.state.system.last_error.is_some());
+    assert!(core.scan_results.back().unwrap().error.is_some());
+    assert!(core.state.system.last_error.is_none());
     let track = core.track(1).unwrap();
     assert_eq!(track.path, source);
     assert!(!track.missing);

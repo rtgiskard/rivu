@@ -203,6 +203,8 @@ def process(request, emit):
     stems = ("vocals", "accompaniment") if request["operation"] == "separate" else ("speech",)
     output_bytes = info.frames * info.channels * 4 * len(stems) + 8192
     require(output_bytes <= MAX_OUTPUT_BYTES, "output_capacity", "result exceeds 8 GiB output limit")
+    # RIFF's length applies to each file, not the combined separation outputs.
+    output_format = "RF64" if info.frames * info.channels * 4 + 1024 >= 2**32 else "WAV"
     require(shutil.disk_usage(destination.parent).free > output_bytes + 256 * 1024**2, "disk_capacity", "insufficient output disk reserve")
     # Bind the input contents before/after inference; publication is denied if they change.
     source_hash = digest(source)
@@ -227,7 +229,7 @@ def process(request, emit):
         with ExitStack() as stack:
             reader = stack.enter_context(sf.SoundFile(source))
             writers = {stem: stack.enter_context(sf.SoundFile(path, mode="w", samplerate=info.samplerate,
-                       channels=info.channels, format="RF64" if output_bytes >= 2**32 else "WAV", subtype="FLOAT"))
+                       channels=info.channels, format=output_format, subtype="FLOAT"))
                        for stem, path in outputs.items()}
             step = core_seconds * info.samplerate
             context = context_seconds * info.samplerate
