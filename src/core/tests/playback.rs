@@ -1,4 +1,297 @@
 use super::*;
+use crate::core::dispatch::BusinessEvent;
+
+#[test]
+fn audio_progress_publishes_album_token_only_when_statistics_change() {
+    let (_directory, mut core) = fixture();
+    playing(&mut core, 1);
+    core.publish();
+    let before = core.shared.read().clone();
+    let generation = core.generation;
+    for (heard, count) in [(1.0, 0), (3.0, 1), (4.0, 1)] {
+        let previous = core.shared.read().clone();
+        assert!(
+            core.business_event(BusinessEvent::Audio(AudioEvent::Progress {
+                generation,
+                position_seconds: heard,
+                listened_seconds: heard,
+            }))
+        );
+        let state = core.shared.read();
+        assert_eq!(state.playback.position, heard);
+        assert_eq!(state.current_track().unwrap().play_count, count);
+        assert_eq!(state.library.history[0].play_count, count);
+        assert_eq!(
+            state.library.album_revision,
+            core.store.album_revision().unwrap()
+        );
+        assert_eq!(
+            state.system.revision,
+            previous.system.revision.wrapping_add(1)
+        );
+        if heard == 3.0 {
+            assert_ne!(state.library.album_revision, before.library.album_revision);
+        } else {
+            assert_eq!(
+                state.library.album_revision,
+                previous.library.album_revision
+            );
+        }
+    }
+    assert!(
+        core.business_event(BusinessEvent::Audio(AudioEvent::Progress {
+            generation: generation.wrapping_sub(1),
+            position_seconds: 9.0,
+            listened_seconds: 9.0,
+        }))
+    );
+    assert_eq!(core.shared.read().playback.position, 4.0);
+    assert_eq!(play_count(&core, 1), 1);
+}
+
+#[test]
+fn audio_progress_projection_failure_publishes_committed_statistics_and_album_token() {
+    let (directory, mut core) = fixture_with_database(Some(10.0), true);
+    playing(&mut core, 1);
+    core.publish();
+    let before = core.shared.read().clone();
+    let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER fail_stats_refresh AFTER UPDATE OF revision ON queue_meta
+             WHEN typeof(NEW.revision)='integer'
+             BEGIN UPDATE queue_meta SET revision='unreadable' WHERE singleton=1; END;",
+        )
+        .unwrap();
+    let generation = core.generation;
+    for heard in [3.0, 4.0] {
+        assert!(
+            core.business_event(BusinessEvent::Audio(AudioEvent::Progress {
+                generation,
+                position_seconds: heard,
+                listened_seconds: heard,
+            }))
+        );
+        let state = core.shared.read();
+        assert_eq!(state.playback.status, PlaybackStatus::Playing);
+        assert_eq!(state.current_track().unwrap().play_count, 1);
+        assert_eq!(state.library.history[0].play_count, 1);
+        assert_eq!(
+            state.library.revision,
+            before.library.revision.wrapping_add(1)
+        );
+        assert_ne!(state.library.album_revision, before.library.album_revision);
+        assert_eq!(
+            state.library.album_revision,
+            core.store.album_revision().unwrap()
+        );
+        assert_eq!(state.queue.revision, before.queue.revision);
+        assert!(
+            state
+                .system
+                .last_error
+                .as_ref()
+                .unwrap()
+                .contains("Playback statistics committed")
+        );
+        assert_eq!(play_count(&core, 1), 1);
+    }
+}
+
+#[test]
+fn audio_bitrate_projection_failure_still_publishes_committed_album_token() {
+    for eof in [false, true] {
+        let (directory, mut core) = fixture_with_database(Some(10.0), true);
+        precision_pending(&mut core);
+        if eof {
+            started(&mut core, Some(10.0)).unwrap();
+        }
+        core.publish();
+        let before = core.shared.read().library.album_revision;
+        let queue_before = core.shared.read().queue.revision;
+        let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER fail_bitrate_refresh AFTER UPDATE OF revision ON queue_meta
+                 WHEN typeof(NEW.revision)='integer'
+                 BEGIN UPDATE queue_meta SET revision='unreadable' WHERE singleton=1; END;",
+            )
+            .unwrap();
+        let generation = core.generation;
+        let event = if eof {
+            AudioEvent::Ended {
+                generation,
+                bitrate_bps: Some(192_000),
+            }
+        } else {
+            let mut event = started_event(&core, Some(10.0));
+            if let AudioEvent::Started { info, .. } = &mut event {
+                info.bitrate_bps = Some(192_000);
+                info.bitrate_exact = true;
+            }
+            event
+        };
+        assert!(core.business_event(BusinessEvent::Audio(event)));
+        let stored = core.store.track(1).unwrap().unwrap();
+        let state = core.shared.read();
+        assert_eq!(stored.bitrate_bps, Some(192_000));
+        assert!(stored.bitrate_exact);
+        assert_eq!(
+            state.current_track().unwrap().bitrate_bps,
+            stored.bitrate_bps
+        );
+        assert!(state.current_track().unwrap().bitrate_exact);
+        assert_ne!(state.library.album_revision, before);
+        assert_eq!(
+            state.library.album_revision,
+            core.store.album_revision().unwrap()
+        );
+        assert_eq!(state.queue.revision, queue_before);
+        let error = state.system.last_error.as_ref().unwrap();
+        assert!(error.contains(if eof {
+            "Bitrate update committed"
+        } else {
+            "Playback statistics committed"
+        }));
+        if !eof {
+            assert_ne!(core.generation, generation);
+            assert_eq!(state.playback.status, PlaybackStatus::Stopped);
+        }
+    }
+}
+
+#[test]
+fn terminal_audio_events_publish_metadata_committed_by_retiring_started() {
+    for failed in [false, true] {
+        let (_directory, mut core) = fixture();
+        precision_pending(&mut core);
+        core.publish();
+        let before = core.shared.read().library.album_revision;
+        let generation = core.generation;
+        let mut event = started_event(&core, Some(10.0));
+        if let AudioEvent::Started { info, .. } = &mut event {
+            info.bitrate_bps = Some(192_000);
+            info.bitrate_exact = true;
+        }
+        let (sender, events) = mpsc::channel(1);
+        core.engine.events = Some(events);
+        sender.try_send(event).unwrap();
+        let terminal = if failed {
+            AudioEvent::Failed {
+                generation,
+                message: "Decoder failed".into(),
+            }
+        } else {
+            AudioEvent::DecoderStopped { generation }
+        };
+        assert!(core.business_event(BusinessEvent::Audio(terminal)));
+        let state = core.shared.read();
+        assert_ne!(core.generation, generation);
+        assert_eq!(state.playback.status, PlaybackStatus::Stopped);
+        assert!(state.current_track().unwrap().bitrate_exact);
+        assert_ne!(state.library.album_revision, before);
+        assert_eq!(
+            state.library.album_revision,
+            core.store.album_revision().unwrap()
+        );
+        if failed {
+            assert_eq!(state.system.last_error.as_deref(), Some("Decoder failed"));
+        }
+    }
+}
+
+#[test]
+fn deferred_bitrate_flush_after_audio_publication_refreshes_album_token() {
+    let (_directory, mut core) = fixture();
+    precision_pending(&mut core);
+    started(&mut core, Some(10.0)).unwrap();
+    core.publish();
+    let before = core.shared.read().library.album_revision;
+    core.pending_bitrate = Some((192_000, true));
+    core.playback_write_deferred = true;
+    let event = AudioEvent::Progress {
+        generation: core.generation,
+        position_seconds: 1.0,
+        listened_seconds: 1.0,
+    };
+    assert!(core.business_event(BusinessEvent::Audio(event)));
+    let state = core.shared.read();
+    assert!(state.current_track().unwrap().bitrate_exact);
+    assert_eq!(state.current_track().unwrap().bitrate_bps, Some(192_000));
+    assert_ne!(state.library.album_revision, before);
+    assert_eq!(
+        state.library.album_revision,
+        core.store.album_revision().unwrap()
+    );
+    assert!(!core.playback_write_deferred);
+}
+
+#[test]
+fn audio_eof_resolved_duration_publishes_final_count_and_album_token() {
+    let (_directory, mut core) = fixture_with_duration(None);
+    pending(&mut core, 1);
+    started(&mut core, None).unwrap();
+    progress(&mut core, 3.0, 3.0);
+    core.publish();
+    let before = core.shared.read().library.album_revision;
+    assert_eq!(play_count(&core, 1), 0);
+    let event = AudioEvent::Ended {
+        generation: core.generation,
+        bitrate_bps: None,
+    };
+    assert!(core.business_event(BusinessEvent::Audio(event)));
+    let state = core.shared.read();
+    assert_eq!(state.playback.duration, Some(3.0));
+    assert_eq!(state.playback.status, PlaybackStatus::Stopped);
+    assert_eq!(state.current_track().unwrap().play_count, 1);
+    assert_eq!(play_count(&core, 1), 1);
+    assert_ne!(state.library.album_revision, before);
+    assert_eq!(
+        state.library.album_revision,
+        core.store.album_revision().unwrap()
+    );
+}
+
+#[test]
+fn rejected_audio_progress_count_preserves_statistics_and_album_token() {
+    let (directory, mut core) = fixture_with_database(Some(10.0), true);
+    playing(&mut core, 1);
+    core.publish();
+    let before = core.shared.read().clone();
+    let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER reject_count BEFORE UPDATE OF play_count ON tracks
+             BEGIN SELECT RAISE(ABORT,'count rejected'); END;",
+        )
+        .unwrap();
+    let event = AudioEvent::Progress {
+        generation: core.generation,
+        position_seconds: 3.0,
+        listened_seconds: 3.0,
+    };
+    assert!(core.business_event(BusinessEvent::Audio(event)));
+    let state = core.shared.read();
+    assert_eq!(state.playback.position, 3.0);
+    assert_eq!(state.playback.status, PlaybackStatus::Playing);
+    assert_eq!(state.current_track().unwrap().play_count, 0);
+    assert_eq!(play_count(&core, 1), 0);
+    assert!(!core.playback.as_ref().unwrap().counted);
+    assert_eq!(state.library.revision, before.library.revision);
+    assert_eq!(state.library.album_revision, before.library.album_revision);
+    assert_eq!(
+        state.library.album_revision,
+        core.store.album_revision().unwrap()
+    );
+    assert!(
+        state
+            .system
+            .last_error
+            .as_ref()
+            .unwrap()
+            .contains("count rejected")
+    );
+}
 
 #[test]
 fn committed_play_count_invalidates_and_is_not_replayed_after_projection_failure() {

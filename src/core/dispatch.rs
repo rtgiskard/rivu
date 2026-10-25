@@ -122,14 +122,24 @@ impl Core {
 impl Core {
     /// Synchronous SQLite work and its state transition share one owner.
     /// Traversal/export/hash/probe/scan-save/VACUUM remain independent jobs.
-    fn business_event(&mut self, event: BusinessEvent) -> bool {
+    pub(super) fn business_event(&mut self, event: BusinessEvent) -> bool {
         match event {
             BusinessEvent::Request(request) => self.dispatch_request(request),
             BusinessEvent::Audio(event) => {
-                if let Err(error) = self.audio_event(event) {
+                let library_revision = self.state.library.revision;
+                let result = self.audio_event(event);
+                // Playback commits invalidate metadata before reading projections.
+                // Errors may follow a commit, so still refresh their durable token.
+                let refresh_album =
+                    result.is_err() || self.state.library.revision != library_revision;
+                if let Err(error) = result {
                     self.state.system.last_error = Some(format!("{error:#}"));
                 }
-                self.publish();
+                if refresh_album {
+                    self.publish();
+                } else {
+                    self.publish_snapshot();
+                }
             }
             BusinessEvent::AudioStopped => {
                 self.state.system.last_error = Some("Audio worker stopped unexpectedly".into());

@@ -234,10 +234,10 @@ fn scan(records: Vec<ScanRecord>) -> ScanResult {
         uncertainties: Vec::new(),
     }
 }
-fn db(name: &str) -> (PathBuf, Store) {
-    let p = std::env::temp_dir().join(format!("rivu-{name}-{}.db", std::process::id()));
-    let _ = fs::remove_file(&p);
-    (p.clone(), Store::open(&p).unwrap())
+fn db() -> (tempfile::TempDir, Store) {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(&directory.path().join("library.db")).unwrap();
+    (directory, store)
 }
 
 fn search_store() -> (tempfile::TempDir, Store) {
@@ -1881,7 +1881,8 @@ fn failed_track_batch_rollback_exposes_no_uncommitted_values() {
 }
 #[test]
 fn playlist_deduplicates_additions_and_preserves_first_order() {
-    let (p, s) = db("playlist");
+    let (directory, s) = db();
+    let p = directory.path().join("library.db");
     s.apply_scan(&scan(vec![
         rec("/music/a.mp3", "a", "A", 100.),
         rec("/music/b.mp3", "b", "B", 100.),
@@ -1912,11 +1913,11 @@ fn playlist_deduplicates_additions_and_preserves_first_order() {
             .collect::<Vec<_>>(),
         vec![ids[2], ids[1]]
     );
-    let _ = fs::remove_file(p);
 }
 #[test]
 fn recent_tracks_merge_replays_without_losing_counts() {
-    let (p, s) = db("recent");
+    let (directory, s) = db();
+    let p = directory.path().join("library.db");
     s.apply_scan(&scan(vec![
         rec("/music/a.mp3", "a", "A", 600.),
         rec("/music/b.mp3", "b", "B", 100.),
@@ -1950,7 +1951,6 @@ fn recent_tracks_merge_replays_without_losing_counts() {
             .collect::<Vec<_>>(),
         vec![b]
     );
-    let _ = fs::remove_file(p);
 }
 #[test]
 fn title_patch_keeps_unedited_metadata_live_across_rescans() {
@@ -1987,7 +1987,7 @@ fn title_patch_keeps_unedited_metadata_live_across_rescans() {
 
 #[test]
 fn moved_id_preserves_override_and_delete_does_not_reuse() {
-    let (p, s) = db("identity");
+    let (_directory, s) = db();
     s.apply_scan(&scan(vec![rec("/music/a.mp3", "same", "Raw", 100.)]))
         .unwrap();
     let id = all_tracks(&s)[0].id;
@@ -2008,11 +2008,10 @@ fn moved_id_preserves_override_and_delete_does_not_reuse() {
     s.apply_scan(&scan(vec![rec("/music/c.mp3", "new", "New", 100.)]))
         .unwrap();
     assert_ne!(all_tracks(&s)[0].id, id);
-    let _ = fs::remove_file(p);
 }
 #[test]
 fn deleting_tracks_keeps_playlist_reordering_contiguous() {
-    let (path, store) = db("compact");
+    let (_directory, store) = db();
     store
         .apply_scan(&scan(vec![
             rec("/music/a.wav", "a", "A", 100.0),
@@ -2047,8 +2046,6 @@ fn deleting_tracks_keeps_playlist_reordering_contiguous() {
             .collect::<Vec<_>>(),
         vec![before[2].id, before[1].id]
     );
-    drop(store);
-    let _ = fs::remove_file(path);
 }
 
 #[test]

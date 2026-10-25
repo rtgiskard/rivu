@@ -980,15 +980,10 @@ impl Waveform {
 
     pub(in crate::gui) fn retain_panels(
         &mut self,
-        panels: &[&super::super::layout::Panel],
+        keep: impl Fn(u64) -> bool,
         cx: &mut Context<Self>,
     ) {
-        let keep = |id| {
-            panels
-                .iter()
-                .any(|panel| panel.id == id && panel.kind == "waveform")
-        };
-        self.plot.borrow_mut().retain_panels(keep);
+        self.plot.borrow_mut().retain_panels(&keep);
         if let Some(generation) = self.retain_interaction_panels(keep) {
             cx.emit(WaveformEvent::Cancelled { generation });
         }
@@ -3272,18 +3267,17 @@ mod tests {
             })
         });
         let track = track("track.flac", DecoderHint::Auto);
-        let panel = crate::gui::layout::Panel {
-            id: 1,
-            kind: "waveform".into(),
-            show_tab_bar: true,
-            audio_visualizer: None,
-            album_artwork: None,
+        let empty_layout = crate::gui::layout::Layout {
+            root: None,
+            next_id: 1,
+            locked: false,
         };
+        let mut layout = empty_layout.clone();
+        layout.add("waveform", None);
         window.update(|_window, cx| {
-            let panels = [&panel];
             let state = |visible, has_panel| PresentationState {
                 config: Arc::clone(&config),
-                panels: if has_panel { &panels } else { &[] },
+                layout: if has_panel { &layout } else { &empty_layout },
                 status: rivu_protocol::model::PlaybackStatus::Paused,
                 visible,
                 shutting_down: false,

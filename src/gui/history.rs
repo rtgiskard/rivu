@@ -63,9 +63,8 @@ pub(super) struct History {
 impl EventEmitter<HistoryEvent> for History {}
 
 impl History {
-    pub(super) fn new(context: FeatureContext, cx: &mut Context<Self>) -> Self {
+    pub(super) fn new(context: FeatureContext, ui_font: Font, cx: &mut Context<Self>) -> Self {
         let state = context.snapshot();
-        let ui_font = super::appearance::fonts::resolve(&state.system.config.ui_font, cx);
         let search = cx.new(|cx| new_search(&context.i18n, SearchScope::Recent, cx));
         let subscription = cx.subscribe(&search, |this, _, event, cx| {
             let SearchEvent::Changed(query) = event;

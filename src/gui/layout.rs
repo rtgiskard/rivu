@@ -812,6 +812,15 @@ impl Node {
         }
     }
 
+    pub(super) fn find_panel(&self, predicate: &impl Fn(&Panel) -> bool) -> Option<&Panel> {
+        match self {
+            Self::Tabs { panels, .. } => panels.iter().find(|panel| predicate(panel)),
+            Self::Split { children, .. } => children
+                .iter()
+                .find_map(|child| child.find_panel(predicate)),
+        }
+    }
+
     fn first_tabs(&self) -> u64 {
         match self {
             Self::Tabs { id, .. } => *id,
@@ -819,16 +828,18 @@ impl Node {
         }
     }
 
-    fn collect_panels<'a>(&'a self, output: &mut Vec<&'a Panel>, active_only: bool) {
+    pub(super) fn visit_panels<'a>(&'a self, active_only: bool, visit: &mut impl FnMut(&'a Panel)) {
         match self {
-            Self::Tabs { panels, active, .. } => output.extend(
-                panels
-                    .iter()
-                    .filter(|panel| !active_only || panel.id == *active),
-            ),
+            Self::Tabs { panels, active, .. } => {
+                for panel in panels {
+                    if !active_only || panel.id == *active {
+                        visit(panel);
+                    }
+                }
+            }
             Self::Split { children, .. } => {
                 for child in children {
-                    child.collect_panels(output, active_only);
+                    child.visit_panels(active_only, visit);
                 }
             }
         }
@@ -1452,7 +1463,7 @@ impl Layout {
     pub fn active_panels(&self) -> Vec<&Panel> {
         let mut panels = Vec::new();
         if let Some(root) = &self.root {
-            root.collect_panels(&mut panels, true);
+            root.visit_panels(true, &mut |panel| panels.push(panel));
         }
         panels
     }
@@ -1460,7 +1471,7 @@ impl Layout {
     pub fn panels(&self) -> Vec<&Panel> {
         let mut panels = Vec::new();
         if let Some(root) = &self.root {
-            root.collect_panels(&mut panels, false);
+            root.visit_panels(false, &mut |panel| panels.push(panel));
         }
         panels
     }
@@ -2065,6 +2076,41 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn panel_queries_preserve_tree_order_and_active_tab_visibility() {
+        let mut layout = empty();
+        let albums = layout.add("albums", None);
+        let library = layout.add("library", None);
+        let queue = layout.add("queue", None);
+        assert!(layout.move_panel(queue, group(&layout, albums), Edge::Right, None));
+        let root = layout.root.as_ref().unwrap();
+        assert_eq!(
+            root.find_panel(&|panel| panel.kind == "albums")
+                .map(|panel| panel.id),
+            Some(albums)
+        );
+        assert!(!layout.is_panel_active(albums));
+        let mut active = Vec::new();
+        root.visit_panels(true, &mut |panel| active.push(panel.id));
+        assert_eq!(active, vec![library, queue]);
+        let mut all = Vec::new();
+        root.visit_panels(false, &mut |panel| all.push(panel.id));
+        assert_eq!(all, vec![albums, library, queue]);
+
+        assert!(layout.activate(albums));
+        assert!(layout.is_panel_active(albums));
+        assert!(layout.remove(albums));
+        assert!(
+            layout
+                .root
+                .as_ref()
+                .unwrap()
+                .find_panel(&|panel| panel.kind == "albums")
+                .is_none()
+        );
+        assert!(!layout.is_panel_active(albums));
     }
 
     #[test]

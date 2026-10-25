@@ -87,13 +87,13 @@ impl EventEmitter<SavedHintChanged> for Metadata {}
 impl Metadata {
     pub(in crate::gui) fn new(
         context: FeatureContext,
+        ui_font: Font,
         artwork_manager: Arc<ArtworkManager>,
         artwork_images: ArtworkImages,
         default_album: Entity<Artwork>,
         cx: &mut Context<Self>,
     ) -> Self {
         let state = context.snapshot();
-        let ui_font = super::appearance::fonts::resolve(&state.system.config.ui_font, cx);
         let mut inputs = HashMap::new();
         let mut subscriptions = Vec::new();
         for (field, placeholder) in [
@@ -153,9 +153,6 @@ impl Metadata {
             || !Arc::ptr_eq(&self.state.system.config, &state.system.config)
             || self.state.playback.status != state.playback.status
             || self.state.playback.last_heard_at != state.playback.last_heard_at;
-        if self.state.system.config.ui_font != state.system.config.ui_font {
-            self.ui_font = super::appearance::fonts::resolve(&state.system.config.ui_font, cx);
-        }
         self.state = state;
         if query_changed {
             self.sync_metadata_query();
@@ -171,6 +168,13 @@ impl Metadata {
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
         self.reconcile(self.context.snapshot(), cx);
+    }
+
+    pub(in crate::gui) fn set_ui_font(&mut self, font: Font, cx: &mut Context<Self>) {
+        if self.ui_font != font {
+            self.ui_font = font;
+            cx.notify();
+        }
     }
 
     /// Panel demand is separate from editor identity and window-hide cancellation.

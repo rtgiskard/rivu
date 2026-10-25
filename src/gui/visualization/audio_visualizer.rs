@@ -5,7 +5,6 @@
 //! fractal styles are delegated to their respective rendering backends.
 use crate::i18n::Localizer;
 
-use super::super::layout;
 use super::{analysis_visualizer::AnalysisVisualizer, fractal_visualizer::FractalVisualizer};
 use crate::config::{AudioVisualizerOptions, AudioVisualizerStyle, Config};
 use gpui::{
@@ -185,18 +184,14 @@ impl AudioVisualizer {
     pub(in crate::gui) fn sync(
         &mut self,
         config: &Config,
-        panels: &[&layout::Panel],
+        options: impl IntoIterator<Item = AudioVisualizerOptions>,
         window_visible: bool,
     ) -> bool {
         let mut radial_visible = false;
         let mut analysis_visible = [false; 2];
         let mut fractal_visible = [false; 2];
         if window_visible {
-            for panel in panels {
-                if panel.kind != "audio_visualizer" {
-                    continue;
-                }
-                let options = panel.audio_visualizer.unwrap_or_else(|| config.into());
+            for options in options {
                 match options.style {
                     AudioVisualizerStyle::Bars
                     | AudioVisualizerStyle::Rings

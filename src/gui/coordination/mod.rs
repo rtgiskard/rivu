@@ -428,8 +428,10 @@ impl GuiApp {
             owner.reconcile(Rc::clone(&self.state), cx);
             owner.set_ui_font(self.ui_font.clone(), cx);
         });
-        self.metadata
-            .update(cx, |owner, cx| owner.reconcile(Rc::clone(&self.state), cx));
+        self.metadata.update(cx, |owner, cx| {
+            owner.reconcile(Rc::clone(&self.state), cx);
+            owner.set_ui_font(self.ui_font.clone(), cx);
+        });
         self.duplicates
             .update(cx, |owner, cx| owner.reconcile(Rc::clone(&self.state), cx));
         self.playback
@@ -449,9 +451,10 @@ impl GuiApp {
                 .workspace
                 .layouts
                 .current()
-                .panels()
-                .iter()
-                .any(|panel| panel.kind == "library");
+                .root
+                .as_ref()
+                .and_then(|root| root.find_panel(&|panel| panel.kind == "library"))
+                .is_some();
         self.library.update(cx, |owner, cx| {
             owner.set_available(available);
             owner.set_visible(library_visible, cx);

@@ -64,6 +64,7 @@ fn fixture(cx: &mut TestAppContext) -> (tempfile::TempDir, Runtime, Entity<Metad
     let metadata = cx.new(|cx| {
         Metadata::new(
             context,
+            gpui::font("sans-serif"),
             Arc::new(ArtworkManager::new(directory.path())),
             ArtworkImages::default(),
             default_album,
@@ -128,6 +129,29 @@ fn ack(ok: bool) -> Ack {
         relocation_id: None,
         processing_id: None,
     }
+}
+
+#[gpui::test]
+fn typography_uses_the_root_font_across_snapshot_and_size_changes(cx: &mut TestAppContext) {
+    let (_directory, _runtime, metadata) = fixture(cx);
+    metadata.update(cx, |this, cx| {
+        let initial_font = gpui::font("sans-serif");
+        assert_eq!(this.ui_font, initial_font);
+        let mut state = (*this.state).clone();
+        Arc::make_mut(&mut state.system.config).ui_font = "unresolved-font-name".into();
+        this.reconcile(Rc::new(state), cx);
+        assert_eq!(this.ui_font, initial_font);
+
+        let root_font = gpui::font("serif");
+        this.set_ui_font(root_font.clone(), cx);
+        assert_eq!(this.ui_font, root_font);
+        let mut state = (*this.state).clone();
+        Arc::make_mut(&mut state.system.config).ui_font_size += 1;
+        this.reconcile(Rc::new(state), cx);
+        assert_eq!(this.ui_font, root_font);
+        this.set_ui_font(root_font.clone(), cx);
+        assert_eq!(this.ui_font, root_font);
+    });
 }
 
 #[gpui::test]

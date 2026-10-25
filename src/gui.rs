@@ -571,9 +571,9 @@ impl GuiApp {
             .workspace
             .layouts
             .current()
-            .panels()
-            .into_iter()
-            .find(|panel| panel.kind == "library")
+            .root
+            .as_ref()
+            .and_then(|root| root.find_panel(&|panel| panel.kind == "library"))
             .map(|panel| panel.id)
         {
             self.workspace.layouts.current_mut().activate(panel_id);
@@ -613,9 +613,9 @@ impl GuiApp {
             .workspace
             .layouts
             .current()
-            .panels()
-            .into_iter()
-            .find(|panel| panel.kind == "queue")
+            .root
+            .as_ref()
+            .and_then(|root| root.find_panel(&|panel| panel.kind == "queue"))
             .map(|panel| panel.id);
         let panel_id = if let Some(panel) = panel {
             self.workspace.layouts.current_mut().activate(panel);
@@ -979,10 +979,12 @@ impl GuiApp {
             library: cx.new(|cx| library::Library::new(feature_context.clone(), cx)),
             queue: cx.new(|cx| queue::Queue::new(feature_context.clone(), cx)),
             playlists: cx.new(|cx| playlists::Playlists::new(feature_context.clone(), cx)),
-            history: cx.new(|cx| history::History::new(feature_context.clone(), cx)),
+            history: cx
+                .new(|cx| history::History::new(feature_context.clone(), ui_font.clone(), cx)),
             metadata: cx.new(|cx| {
                 metadata::Metadata::new(
                     feature_context.clone(),
+                    ui_font.clone(),
                     Arc::clone(&artwork_manager),
                     artwork_images.clone(),
                     default_album.clone(),
@@ -1280,18 +1282,24 @@ impl GuiApp {
     }
 
     fn sync_album_browser(&mut self, cx: &mut Context<Self>) {
-        let panels = self.workspace.layouts.current().panels();
-        let active = self.workspace.layouts.current().active_panels();
+        if self.album_browsers.is_empty() {
+            return;
+        }
+        let layout = self.workspace.layouts.current();
         let visible = self.window_visible && !self.state.system.shutting_down;
         let revisions = self.state.query_revisions(None);
         let page_size = self.state.system.config.page_size as usize;
         let current_track = self.state.current_track().map(|track| track.id);
         let playback_status = self.state.playback.status;
         self.album_browsers.retain(|id, albums| {
-            let exists = panels
-                .iter()
-                .any(|panel| panel.id == *id && panel.kind == "albums");
-            let shown = visible && active.iter().any(|panel| panel.id == *id);
+            let exists = layout
+                .root
+                .as_ref()
+                .and_then(|root| {
+                    root.find_panel(&|panel| panel.id == *id && panel.kind == "albums")
+                })
+                .is_some();
+            let shown = visible && layout.is_panel_active(*id);
             albums.update(cx, |albums, cx| {
                 albums.sync(
                     shown,
@@ -1361,12 +1369,11 @@ impl GuiApp {
             None
         }
         .or_else(|| track.and_then(|track| track.duration));
-        let panels = self.workspace.layouts.current().active_panels();
         self.presentation.update(cx, |presentation, cx| {
             presentation.sync(
                 presentation::PresentationState {
                     config: Arc::clone(&self.state.system.config),
-                    panels: &panels,
+                    layout: self.workspace.layouts.current(),
                     status: self.state.playback.status,
                     visible: self.window_visible,
                     shutting_down: self.state.system.shutting_down,
