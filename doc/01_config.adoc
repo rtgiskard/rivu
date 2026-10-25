@@ -338,6 +338,15 @@ Dropdown keys: <<_desktop_keyboard_navigation,Desktop keyboard navigation>>.
 Empty inputs show inheritance, format, or special-value cues where relevant;
 hover for complete ranges and application timing. Clearing a field does not apply
 its placeholder: settings still require Apply and their usual validation.
+
+Settings displays volume as a whole percentage; play-count threshold, visualization
+dB ranges, and Spectrum peak/bar gravity use at most one decimal place. Other
+fractional Settings fields use at most two, without trailing zeroes. This affects
+display only, not runtime values or TOML precision: applying an untouched field,
+including when another field changes, preserves its original numeric value.
+Inputs accept more decimal places within their usual ranges and are not rounded
+while typing. Clearing an optional numeric override restores inheritance on Apply.
+
 The system tray switch takes effect after restarting the graphical host, not
 merely reopening its window. Media read buffering applies to future source opens,
 including full waveform scans; it does not reopen the current track.

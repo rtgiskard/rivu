@@ -145,6 +145,36 @@ enum Field {
     AlbumArtworkFps,
 }
 impl Field {
+    fn precision(self) -> Option<usize> {
+        match self {
+            Self::Volume => Some(0),
+            Self::PlayCountThreshold
+            | Self::VisualizationDb
+            | Self::AudioVisualizerDb
+            | Self::SpectrumDb
+            | Self::SpectrogramDb
+            | Self::SpectrumGravity
+            | Self::SpectrumBarGravity => Some(1),
+            Self::Scale
+            | Self::AudioVisualizerSensitivity
+            | Self::AudioVisualizerRotationSpeed
+            | Self::AudioVisualizerBarWidth
+            | Self::AudioVisualizerRingOpacity
+            | Self::AudioVisualizerBloomIntensity
+            | Self::AudioVisualizerInnerDiameter
+            | Self::SpectrumBarWidth
+            | Self::SpectrumGap
+            | Self::SpectrogramFlowSpeed
+            | Self::SpectrogramSamplingPointsScale
+            | Self::Glow
+            | Self::WaveformRmsGain
+            | Self::WaveformPeakGain
+            | Self::WaveformPeakGamma
+            | Self::AlbumArtworkPeriod => Some(2),
+            _ => None,
+        }
+    }
+
     fn label_id(self) -> &'static str {
         match self {
             Self::ScanMaxDepth => "settings-maximum-scan-depth",
@@ -478,9 +508,22 @@ pub(super) enum SettingsEvent {
 
 impl EventEmitter<SettingsEvent> for Settings {}
 
+#[derive(Default)]
+struct NumericInput {
+    // Only genuine edits detach the displayed text from the precise draft.
+    displayed: SharedString,
+    edited: bool,
+    revision: u64,
+}
+
+struct SubmittedInput {
+    text: String,
+    revision: u64,
+}
+
 struct SettingsSubmission {
     model: Submission,
-    inputs: HashMap<Field, String>,
+    inputs: HashMap<Field, SubmittedInput>,
 }
 
 /// Unsaved preferences stay independent from live playback snapshots.
@@ -507,6 +550,7 @@ pub(super) struct Settings {
     _subscriptions: Vec<Subscription>,
     model: SettingsModel,
     inputs: HashMap<Field, Entity<Input>>,
+    numeric_inputs: HashMap<Field, NumericInput>,
     initialized: bool,
     dropdown: ChoiceState<SettingChoice>,
     font_options: Vec<FontOption>,
@@ -581,6 +625,7 @@ impl Settings {
             _subscriptions: vec![artwork_cache_subscription],
             model: SettingsModel::new(&config),
             inputs: HashMap::new(),
+            numeric_inputs: HashMap::new(),
             initialized: false,
             dropdown: ChoiceState::default(),
             font_options: Vec::new(),
@@ -877,6 +922,76 @@ impl Settings {
         self.inputs[&field].read(cx).text().to_owned()
     }
 
+    fn numeric_revision(&self, field: Field) -> u64 {
+        self.numeric_inputs
+            .get(&field)
+            .map_or(0, |input| input.revision)
+    }
+
+    fn numeric_untouched(&self, field: Field, cx: &App) -> bool {
+        // Rounding belongs only to presentation. Parsing an untouched editor
+        // must not feed that lossy presentation back into the config.
+        self.numeric_inputs.get(&field).is_some_and(|state| {
+            !state.edited && self.inputs[&field].read(cx).text() == &*state.displayed
+        })
+    }
+
+    fn float<T: FromStr>(&self, field: Field, original: T, cx: &App) -> Result<T>
+    where
+        T::Err: std::fmt::Display,
+    {
+        if self.numeric_untouched(field, cx) {
+            Ok(original)
+        } else {
+            self.number(field, cx)
+        }
+    }
+
+    fn optional_float<T: FromStr>(
+        &self,
+        field: Field,
+        original: Option<T>,
+        cx: &App,
+    ) -> Result<Option<T>>
+    where
+        T::Err: std::fmt::Display,
+    {
+        if self.numeric_untouched(field, cx) {
+            Ok(original)
+        } else {
+            self.optional_number(field, cx)
+        }
+    }
+
+    fn set_float<T: Into<f64>>(
+        &mut self,
+        field: Field,
+        value: Option<T>,
+        unchanged: Option<&HashMap<Field, SubmittedInput>>,
+        cx: &mut App,
+    ) {
+        let text: SharedString = value
+            .map_or_else(String::new, |value| {
+                let value: f64 = value.into();
+                let precision = field.precision().expect("floating Settings field");
+                let mut text = format!("{value:.precision$}");
+                if precision > 0 {
+                    let trimmed = text.trim_end_matches('0').trim_end_matches('.').len();
+                    text.truncate(trimmed);
+                }
+                if text == "-0" {
+                    text.remove(0);
+                }
+                text
+            })
+            .into();
+        if self.set_value(field, text.clone(), unchanged, cx) {
+            let state = self.numeric_inputs.entry(field).or_default();
+            state.displayed = text;
+            state.edited = false;
+        }
+    }
+
     fn number<T: FromStr>(&self, field: Field, cx: &App) -> Result<T>
     where
         T::Err: std::fmt::Display,
@@ -907,17 +1022,19 @@ impl Settings {
         &mut self,
         field: Field,
         value: impl Into<SharedString>,
-        unchanged: Option<&HashMap<Field, String>>,
+        unchanged: Option<&HashMap<Field, SubmittedInput>>,
         cx: &mut App,
-    ) {
+    ) -> bool {
         if unchanged.is_some_and(|inputs| {
-            inputs
-                .get(&field)
-                .is_none_or(|submitted| self.inputs[&field].read(cx).text() != submitted)
+            inputs.get(&field).is_none_or(|submitted| {
+                self.inputs[&field].read(cx).text() != submitted.text
+                    || self.numeric_revision(field) != submitted.revision
+            })
         }) {
-            return;
+            return false;
         }
         self.inputs[&field].update(cx, |input, cx| input.set_text(value.into(), cx));
+        true
     }
 
     fn reset(&mut self, config: &Arc<Config>, cx: &mut App) {
@@ -931,7 +1048,7 @@ impl Settings {
         self.fill_unchanged(None, cx);
     }
 
-    fn fill_unchanged(&mut self, unchanged: Option<&HashMap<Field, String>>, cx: &mut App) {
+    fn fill_unchanged(&mut self, unchanged: Option<&HashMap<Field, SubmittedInput>>, cx: &mut App) {
         self.set_value(
             Field::ScanMaxDepth,
             self.model.draft.scan_max_depth.to_string(),
@@ -944,15 +1061,15 @@ impl Settings {
             unchanged,
             cx,
         );
-        self.set_value(
+        self.set_float(
             Field::Volume,
-            (self.model.draft.volume * 100.).to_string(),
+            Some(self.model.draft.volume * 100.),
             unchanged,
             cx,
         );
-        self.set_value(
+        self.set_float(
             Field::PlayCountThreshold,
-            self.model.draft.play_count_threshold_percent.to_string(),
+            Some(self.model.draft.play_count_threshold_percent),
             unchanged,
             cx,
         );
@@ -988,12 +1105,7 @@ impl Settings {
             unchanged,
             cx,
         );
-        self.set_value(
-            Field::Scale,
-            self.model.draft.ui_scale.to_string(),
-            unchanged,
-            cx,
-        );
+        self.set_float(Field::Scale, Some(self.model.draft.ui_scale), unchanged, cx);
         self.set_value(
             Field::LayoutSnapGrid,
             self.model.draft.layout_snap_grid_px.to_string(),
@@ -1012,27 +1124,27 @@ impl Settings {
             unchanged,
             cx,
         );
-        self.set_value(
+        self.set_float(
             Field::VisualizationDb,
-            self.model.draft.visualization_db_range.to_string(),
+            Some(self.model.draft.visualization_db_range),
             unchanged,
             cx,
         );
-        self.set_value(
+        self.set_float(
             Field::AudioVisualizerSensitivity,
-            self.model.draft.audio_visualizer_sensitivity.to_string(),
+            Some(self.model.draft.audio_visualizer_sensitivity),
             unchanged,
             cx,
         );
-        self.set_value(
+        self.set_float(
             Field::AudioVisualizerRotationSpeed,
-            self.model.draft.audio_visualizer_rotation_speed.to_string(),
+            Some(self.model.draft.audio_visualizer_rotation_speed),
             unchanged,
             cx,
         );
-        self.set_value(
+        self.set_float(
             Field::AudioVisualizerBarWidth,
-            self.model.draft.audio_visualizer_bar_width.to_string(),
+            Some(self.model.draft.audio_visualizer_bar_width),
             unchanged,
             cx,
         );
@@ -1045,24 +1157,21 @@ impl Settings {
             unchanged,
             cx,
         );
-        self.set_value(
+        self.set_float(
             Field::AudioVisualizerRingOpacity,
-            self.model.draft.audio_visualizer_ring_opacity.to_string(),
+            Some(self.model.draft.audio_visualizer_ring_opacity),
             unchanged,
             cx,
         );
-        self.set_value(
+        self.set_float(
             Field::AudioVisualizerBloomIntensity,
-            self.model
-                .draft
-                .audio_visualizer_bloom_intensity
-                .to_string(),
+            Some(self.model.draft.audio_visualizer_bloom_intensity),
             unchanged,
             cx,
         );
-        self.set_value(
+        self.set_float(
             Field::AudioVisualizerInnerDiameter,
-            self.model.draft.audio_visualizer_inner_diameter.to_string(),
+            Some(self.model.draft.audio_visualizer_inner_diameter),
             unchanged,
             cx,
         );
@@ -1081,29 +1190,21 @@ impl Settings {
             unchanged,
             cx,
         );
-        self.set_value(
+        self.set_float(
             Field::AudioVisualizerDb,
-            self.model
-                .draft
-                .audio_visualizer_db_range
-                .map(|range| range.to_string())
-                .unwrap_or_default(),
+            self.model.draft.audio_visualizer_db_range,
             unchanged,
             cx,
         );
-        self.set_value(
+        self.set_float(
             Field::SpectrumDb,
-            self.model
-                .draft
-                .spectrum_db_range
-                .map(|range| range.to_string())
-                .unwrap_or_default(),
+            self.model.draft.spectrum_db_range,
             unchanged,
             cx,
         );
-        self.set_value(
+        self.set_float(
             Field::SpectrumGap,
-            self.model.draft.spectrum_gap.to_string(),
+            Some(self.model.draft.spectrum_gap),
             unchanged,
             cx,
         );
@@ -1113,9 +1214,9 @@ impl Settings {
             unchanged,
             cx,
         );
-        self.set_value(
+        self.set_float(
             Field::SpectrumGravity,
-            self.model.draft.spectrum_peak_gravity.to_string(),
+            Some(self.model.draft.spectrum_peak_gravity),
             unchanged,
             cx,
         );
@@ -1125,9 +1226,9 @@ impl Settings {
             unchanged,
             cx,
         );
-        self.set_value(
+        self.set_float(
             Field::SpectrumBarGravity,
-            self.model.draft.spectrum_bar_gravity.to_string(),
+            Some(self.model.draft.spectrum_bar_gravity),
             unchanged,
             cx,
         );
@@ -1137,9 +1238,9 @@ impl Settings {
             unchanged,
             cx,
         );
-        self.set_value(
+        self.set_float(
             Field::SpectrumBarWidth,
-            self.model.draft.spectrum_bar_width.to_string(),
+            Some(self.model.draft.spectrum_bar_width),
             unchanged,
             cx,
         );
@@ -1149,13 +1250,9 @@ impl Settings {
             unchanged,
             cx,
         );
-        self.set_value(
+        self.set_float(
             Field::SpectrogramDb,
-            self.model
-                .draft
-                .spectrogram_db_range
-                .map(|range| range.to_string())
-                .unwrap_or_default(),
+            self.model.draft.spectrogram_db_range,
             unchanged,
             cx,
         );
@@ -1165,9 +1262,9 @@ impl Settings {
             unchanged,
             cx,
         );
-        self.set_value(
+        self.set_float(
             Field::SpectrogramFlowSpeed,
-            self.model.draft.spectrogram_flow_speed.to_string(),
+            Some(self.model.draft.spectrogram_flow_speed),
             unchanged,
             cx,
         );
@@ -1177,12 +1274,9 @@ impl Settings {
             unchanged,
             cx,
         );
-        self.set_value(
+        self.set_float(
             Field::SpectrogramSamplingPointsScale,
-            self.model
-                .draft
-                .spectrogram_sampling_points_scale
-                .to_string(),
+            Some(self.model.draft.spectrogram_sampling_points_scale),
             unchanged,
             cx,
         );
@@ -1201,33 +1295,33 @@ impl Settings {
             unchanged,
             cx,
         );
-        self.set_value(
+        self.set_float(
             Field::Glow,
-            self.model.draft.waveform_glow.to_string(),
+            Some(self.model.draft.waveform_glow),
             unchanged,
             cx,
         );
-        self.set_value(
+        self.set_float(
             Field::WaveformRmsGain,
-            self.model.draft.waveform_rms_gain.to_string(),
+            Some(self.model.draft.waveform_rms_gain),
             unchanged,
             cx,
         );
-        self.set_value(
+        self.set_float(
             Field::WaveformPeakGain,
-            self.model.draft.waveform_peak_gain.to_string(),
+            Some(self.model.draft.waveform_peak_gain),
             unchanged,
             cx,
         );
-        self.set_value(
+        self.set_float(
             Field::WaveformPeakGamma,
-            self.model.draft.waveform_peak_gamma.to_string(),
+            Some(self.model.draft.waveform_peak_gamma),
             unchanged,
             cx,
         );
-        self.set_value(
+        self.set_float(
             Field::AlbumArtworkPeriod,
-            self.model.draft.album_artwork_period_seconds.to_string(),
+            Some(self.model.draft.album_artwork_period_seconds),
             unchanged,
             cx,
         );
@@ -1244,13 +1338,14 @@ impl Settings {
         let mut config = self.model.draft.clone();
         config.scan_max_depth = self.number(Field::ScanMaxDepth, cx)?;
         config.scan_min_duration_secs = self.number(Field::ScanMinDuration, cx)?;
-        let volume_percent = self.number::<f32>(Field::Volume, cx)?;
-        // Preserve the exact level when the displayed percentage is unchanged:
-        // multiplying and dividing by 100 can otherwise lose f32 precision.
-        if volume_percent != self.model.draft.volume * 100. {
-            config.volume = volume_percent / 100.;
+        if !self.numeric_untouched(Field::Volume, cx) {
+            config.volume = self.number::<f32>(Field::Volume, cx)? / 100.;
         }
-        config.play_count_threshold_percent = self.number(Field::PlayCountThreshold, cx)?;
+        config.play_count_threshold_percent = self.float(
+            Field::PlayCountThreshold,
+            self.model.draft.play_count_threshold_percent,
+            cx,
+        )?;
         config.log_retention_weeks = self.number(Field::LogRetentionWeeks, cx)?;
         config.media_read_buffer_mb = self.number(Field::MediaReadBuffer, cx)?;
         config.artwork_decode_budget_mb = self.number(Field::ArtworkDecodeBudget, cx)?;
@@ -1260,27 +1355,51 @@ impl Settings {
             config.ui_font = "monospace".to_owned();
         }
         config.ui_font_size = self.number(Field::FontSize, cx)?;
-        config.ui_scale = self.number(Field::Scale, cx)?;
+        config.ui_scale = self.float(Field::Scale, self.model.draft.ui_scale, cx)?;
         config.layout_snap_grid_px = self.number(Field::LayoutSnapGrid, cx)?;
         config.analysis_fps = self.number(Field::Fps, cx)?;
-        config.visualization_db_range = self.number(Field::VisualizationDb, cx)?;
+        config.visualization_db_range = self.float(
+            Field::VisualizationDb,
+            self.model.draft.visualization_db_range,
+            cx,
+        )?;
         config.visual_background = self
             .value(Field::Background, cx)
             .trim()
             .parse::<RgbColor>()
             .context(self.tr("settings-visualization-background"))?;
-        config.audio_visualizer_sensitivity = self.number(Field::AudioVisualizerSensitivity, cx)?;
-        config.audio_visualizer_rotation_speed =
-            self.number(Field::AudioVisualizerRotationSpeed, cx)?;
-        config.audio_visualizer_bar_width = self.number(Field::AudioVisualizerBarWidth, cx)?;
+        config.audio_visualizer_sensitivity = self.float(
+            Field::AudioVisualizerSensitivity,
+            self.model.draft.audio_visualizer_sensitivity,
+            cx,
+        )?;
+        config.audio_visualizer_rotation_speed = self.float(
+            Field::AudioVisualizerRotationSpeed,
+            self.model.draft.audio_visualizer_rotation_speed,
+            cx,
+        )?;
+        config.audio_visualizer_bar_width = self.float(
+            Field::AudioVisualizerBarWidth,
+            self.model.draft.audio_visualizer_bar_width,
+            cx,
+        )?;
         config.audio_visualizer_bar_glow_layers =
             self.number(Field::AudioVisualizerBarGlowLayers, cx)?;
-        config.audio_visualizer_ring_opacity =
-            self.number(Field::AudioVisualizerRingOpacity, cx)?;
-        config.audio_visualizer_bloom_intensity =
-            self.number(Field::AudioVisualizerBloomIntensity, cx)?;
-        config.audio_visualizer_inner_diameter =
-            self.number(Field::AudioVisualizerInnerDiameter, cx)?;
+        config.audio_visualizer_ring_opacity = self.float(
+            Field::AudioVisualizerRingOpacity,
+            self.model.draft.audio_visualizer_ring_opacity,
+            cx,
+        )?;
+        config.audio_visualizer_bloom_intensity = self.float(
+            Field::AudioVisualizerBloomIntensity,
+            self.model.draft.audio_visualizer_bloom_intensity,
+            cx,
+        )?;
+        config.audio_visualizer_inner_diameter = self.float(
+            Field::AudioVisualizerInnerDiameter,
+            self.model.draft.audio_visualizer_inner_diameter,
+            cx,
+        )?;
         config.audio_visualizer_primary_color = self
             .value(Field::AudioVisualizerPrimaryColor, cx)
             .trim()
@@ -1291,22 +1410,50 @@ impl Settings {
             .trim()
             .parse::<RgbColor>()
             .context(self.tr("settings-audio-visualizer-secondary-color"))?;
-        config.audio_visualizer_db_range = self.optional_number(Field::AudioVisualizerDb, cx)?;
-        config.spectrum_db_range = self.optional_number(Field::SpectrumDb, cx)?;
-        config.spectrum_gap = self.number(Field::SpectrumGap, cx)?;
+        config.audio_visualizer_db_range = self.optional_float(
+            Field::AudioVisualizerDb,
+            self.model.draft.audio_visualizer_db_range,
+            cx,
+        )?;
+        config.spectrum_db_range =
+            self.optional_float(Field::SpectrumDb, self.model.draft.spectrum_db_range, cx)?;
+        config.spectrum_gap = self.float(Field::SpectrumGap, self.model.draft.spectrum_gap, cx)?;
         config.spectrum_peak_hold_ms = self.number(Field::SpectrumHold, cx)?;
-        config.spectrum_peak_gravity = self.number(Field::SpectrumGravity, cx)?;
+        config.spectrum_peak_gravity = self.float(
+            Field::SpectrumGravity,
+            self.model.draft.spectrum_peak_gravity,
+            cx,
+        )?;
         config.spectrum_bar_hold_ms = self.number(Field::SpectrumBarHold, cx)?;
-        config.spectrum_bar_gravity = self.number(Field::SpectrumBarGravity, cx)?;
+        config.spectrum_bar_gravity = self.float(
+            Field::SpectrumBarGravity,
+            self.model.draft.spectrum_bar_gravity,
+            cx,
+        )?;
         config.spectrum_smoothing_ms = self.number(Field::SpectrumSmoothing, cx)?;
-        config.spectrum_bar_width = self.number(Field::SpectrumBarWidth, cx)?;
+        config.spectrum_bar_width = self.float(
+            Field::SpectrumBarWidth,
+            self.model.draft.spectrum_bar_width,
+            cx,
+        )?;
         config.spectrum_bars = self.number(Field::SpectrumBars, cx)?;
-        config.spectrogram_db_range = self.optional_number(Field::SpectrogramDb, cx)?;
+        config.spectrogram_db_range = self.optional_float(
+            Field::SpectrogramDb,
+            self.model.draft.spectrogram_db_range,
+            cx,
+        )?;
         config.spectrogram_history_seconds = self.number(Field::SpectrogramHistory, cx)?;
-        config.spectrogram_flow_speed = self.number(Field::SpectrogramFlowSpeed, cx)?;
+        config.spectrogram_flow_speed = self.float(
+            Field::SpectrogramFlowSpeed,
+            self.model.draft.spectrogram_flow_speed,
+            cx,
+        )?;
         config.spectrogram_accumulation = self.number(Field::SpectrogramAccumulation, cx)?;
-        config.spectrogram_sampling_points_scale =
-            self.number(Field::SpectrogramSamplingPointsScale, cx)?;
+        config.spectrogram_sampling_points_scale = self.float(
+            Field::SpectrogramSamplingPointsScale,
+            self.model.draft.spectrogram_sampling_points_scale,
+            cx,
+        )?;
         config.spectrogram_interpolation_points =
             self.number(Field::SpectrogramInterpolationPoints, cx)?;
         config.waveform_cursor_color = self
@@ -1314,11 +1461,27 @@ impl Settings {
             .trim()
             .parse::<RgbColor>()
             .context(self.tr("settings-waveform-waterline-color"))?;
-        config.waveform_glow = self.number(Field::Glow, cx)?;
-        config.waveform_rms_gain = self.number(Field::WaveformRmsGain, cx)?;
-        config.waveform_peak_gain = self.number(Field::WaveformPeakGain, cx)?;
-        config.waveform_peak_gamma = self.number(Field::WaveformPeakGamma, cx)?;
-        config.album_artwork_period_seconds = self.number(Field::AlbumArtworkPeriod, cx)?;
+        config.waveform_glow = self.float(Field::Glow, self.model.draft.waveform_glow, cx)?;
+        config.waveform_rms_gain = self.float(
+            Field::WaveformRmsGain,
+            self.model.draft.waveform_rms_gain,
+            cx,
+        )?;
+        config.waveform_peak_gain = self.float(
+            Field::WaveformPeakGain,
+            self.model.draft.waveform_peak_gain,
+            cx,
+        )?;
+        config.waveform_peak_gamma = self.float(
+            Field::WaveformPeakGamma,
+            self.model.draft.waveform_peak_gamma,
+            cx,
+        )?;
+        config.album_artwork_period_seconds = self.float(
+            Field::AlbumArtworkPeriod,
+            self.model.draft.album_artwork_period_seconds,
+            cx,
+        )?;
         config.album_artwork_fps = self.number(Field::AlbumArtworkFps, cx)?;
         config.validate()?;
         Ok(config)
@@ -1380,6 +1543,22 @@ impl Settings {
             return;
         }
         self.initialize(cx);
+        for (&field, input) in &self.inputs {
+            if field.precision().is_some() {
+                self._subscriptions
+                    .push(cx.subscribe(input, move |this, _, event, _| {
+                        // set_text emits Changed too; its user:false event must not
+                        // turn a programmatic rebase/reset into an explicit edit.
+                        if matches!(event, InputEvent::Changed { user: true, .. }) {
+                            let state = this.numeric_inputs.entry(field).or_default();
+                            state.edited = true;
+                            // A same-text replacement is still intentional, and must
+                            // also survive completion of an in-flight Apply.
+                            state.revision = state.revision.wrapping_add(1);
+                        }
+                    }));
+            }
+        }
         self._subscriptions.push(
             cx.subscribe(&self.inputs[&Field::Font], |this, _, event, cx| {
                 if matches!(event, InputEvent::Submit) {
@@ -1549,9 +1728,12 @@ impl Settings {
         }
         if self.model.target() != Target::Global {
             let period = if matches!(self.model.target(), Target::Artwork(_)) {
-                self.value(Field::AlbumArtworkPeriod, cx)
-                    .parse::<f32>()
-                    .ok()
+                self.float(
+                    Field::AlbumArtworkPeriod,
+                    self.model.draft.album_artwork_period_seconds,
+                    cx,
+                )
+                .ok()
             } else {
                 None
             };
@@ -1634,7 +1816,15 @@ impl Settings {
             inputs: self
                 .inputs
                 .iter()
-                .map(|(&field, input)| (field, input.read(cx).text().to_owned()))
+                .map(|(&field, input)| {
+                    (
+                        field,
+                        SubmittedInput {
+                            text: input.read(cx).text().to_owned(),
+                            revision: self.numeric_revision(field),
+                        },
+                    )
+                })
                 .collect(),
         };
         Some((patch, submission))
@@ -2259,6 +2449,408 @@ mod tests {
         .unwrap();
     }
 
+    fn precise_config(base: &Config) -> Config {
+        Config {
+            spectrum_style: SpectrumStyle::Bars,
+            volume: 0.1234567,
+            play_count_threshold_percent: 23.456789123456,
+            ui_scale: 1.234567,
+            visualization_db_range: 81.23456,
+            audio_visualizer_sensitivity: 1.234567,
+            audio_visualizer_rotation_speed: 0.456789,
+            audio_visualizer_bar_width: 0.678912,
+            audio_visualizer_ring_opacity: 0.789123,
+            audio_visualizer_bloom_intensity: 0.456789,
+            audio_visualizer_inner_diameter: 0.789123,
+            audio_visualizer_db_range: Some(82.34567),
+            spectrum_db_range: Some(83.45678),
+            spectrum_gap: 2.345678,
+            spectrum_peak_gravity: 81.23456,
+            spectrum_bar_gravity: 41.23456,
+            spectrum_bar_width: 4.567891,
+            spectrogram_db_range: Some(84.56789),
+            spectrogram_flow_speed: 0.456789,
+            spectrogram_sampling_points_scale: 0.789123,
+            waveform_glow: 0.456789,
+            waveform_rms_gain: 1.234567,
+            waveform_peak_gain: 1.234567,
+            waveform_peak_gamma: 1.234567,
+            album_artwork_period_seconds: 23.45678,
+            ..base.clone()
+        }
+    }
+
+    fn numeric_bits(config: &Config) -> Vec<u64> {
+        vec![
+            u64::from(config.volume.to_bits()),
+            config.play_count_threshold_percent.to_bits(),
+            u64::from(config.ui_scale.to_bits()),
+            u64::from(config.visualization_db_range.to_bits()),
+            u64::from(config.audio_visualizer_sensitivity.to_bits()),
+            u64::from(config.audio_visualizer_rotation_speed.to_bits()),
+            u64::from(config.audio_visualizer_bar_width.to_bits()),
+            u64::from(config.audio_visualizer_ring_opacity.to_bits()),
+            u64::from(config.audio_visualizer_bloom_intensity.to_bits()),
+            u64::from(config.audio_visualizer_inner_diameter.to_bits()),
+            u64::from(config.audio_visualizer_db_range.map_or(0, f32::to_bits)),
+            u64::from(config.spectrum_db_range.map_or(0, f32::to_bits)),
+            u64::from(config.spectrum_gap.to_bits()),
+            u64::from(config.spectrum_peak_gravity.to_bits()),
+            u64::from(config.spectrum_bar_gravity.to_bits()),
+            u64::from(config.spectrum_bar_width.to_bits()),
+            u64::from(config.spectrogram_db_range.map_or(0, f32::to_bits)),
+            u64::from(config.spectrogram_flow_speed.to_bits()),
+            u64::from(config.spectrogram_sampling_points_scale.to_bits()),
+            u64::from(config.waveform_glow.to_bits()),
+            u64::from(config.waveform_rms_gain.to_bits()),
+            u64::from(config.waveform_peak_gain.to_bits()),
+            u64::from(config.waveform_peak_gamma.to_bits()),
+            u64::from(config.album_artwork_period_seconds.to_bits()),
+        ]
+    }
+
+    fn numeric_texts(config: &Config) -> Vec<(Field, String)> {
+        vec![
+            (Field::Volume, (config.volume * 100.).to_string()),
+            (
+                Field::PlayCountThreshold,
+                config.play_count_threshold_percent.to_string(),
+            ),
+            (Field::Scale, config.ui_scale.to_string()),
+            (
+                Field::VisualizationDb,
+                config.visualization_db_range.to_string(),
+            ),
+            (
+                Field::AudioVisualizerSensitivity,
+                config.audio_visualizer_sensitivity.to_string(),
+            ),
+            (
+                Field::AudioVisualizerRotationSpeed,
+                config.audio_visualizer_rotation_speed.to_string(),
+            ),
+            (
+                Field::AudioVisualizerBarWidth,
+                config.audio_visualizer_bar_width.to_string(),
+            ),
+            (
+                Field::AudioVisualizerRingOpacity,
+                config.audio_visualizer_ring_opacity.to_string(),
+            ),
+            (
+                Field::AudioVisualizerBloomIntensity,
+                config.audio_visualizer_bloom_intensity.to_string(),
+            ),
+            (
+                Field::AudioVisualizerInnerDiameter,
+                config.audio_visualizer_inner_diameter.to_string(),
+            ),
+            (
+                Field::AudioVisualizerDb,
+                config.audio_visualizer_db_range.unwrap().to_string(),
+            ),
+            (
+                Field::SpectrumDb,
+                config.spectrum_db_range.unwrap().to_string(),
+            ),
+            (Field::SpectrumGap, config.spectrum_gap.to_string()),
+            (
+                Field::SpectrumGravity,
+                config.spectrum_peak_gravity.to_string(),
+            ),
+            (
+                Field::SpectrumBarGravity,
+                config.spectrum_bar_gravity.to_string(),
+            ),
+            (
+                Field::SpectrumBarWidth,
+                config.spectrum_bar_width.to_string(),
+            ),
+            (
+                Field::SpectrogramDb,
+                config.spectrogram_db_range.unwrap().to_string(),
+            ),
+            (
+                Field::SpectrogramFlowSpeed,
+                config.spectrogram_flow_speed.to_string(),
+            ),
+            (
+                Field::SpectrogramSamplingPointsScale,
+                config.spectrogram_sampling_points_scale.to_string(),
+            ),
+            (Field::Glow, config.waveform_glow.to_string()),
+            (Field::WaveformRmsGain, config.waveform_rms_gain.to_string()),
+            (
+                Field::WaveformPeakGain,
+                config.waveform_peak_gain.to_string(),
+            ),
+            (
+                Field::WaveformPeakGamma,
+                config.waveform_peak_gamma.to_string(),
+            ),
+            (
+                Field::AlbumArtworkPeriod,
+                config.album_artwork_period_seconds.to_string(),
+            ),
+        ]
+    }
+
+    fn edit_input(
+        settings: &Entity<Settings>,
+        window: WindowHandle<SettingsWindow>,
+        field: Field,
+        text: &str,
+        cx: &mut TestAppContext,
+    ) {
+        cx.update_window(window.into(), |_, window, cx| {
+            let input = settings.read(cx).inputs[&field].clone();
+            input.update(cx, |input, cx| {
+                let end = input.text().encode_utf16().count();
+                input.replace_text_in_range(Some(0..end), text, window, cx);
+            });
+        })
+        .unwrap();
+    }
+
+    #[gpui::test]
+    fn rounded_float_displays_preserve_every_original_bit_across_apply_and_unrelated_edits(
+        cx: &mut TestAppContext,
+    ) {
+        let (_directory, runtime, settings) = fixture(cx);
+        let window = cx.add_window({
+            let settings = settings.clone();
+            move |_, _| SettingsWindow(settings)
+        });
+        let original = runtime.handle.config_snapshot();
+        let precise = precise_config(&original);
+        let (committed, result) = execute(&runtime, ConfigPatch::between(&original, &precise));
+        assert!(result.is_ok());
+        settings.update(cx, |this, cx| {
+            this.reset(&committed, cx);
+            assert_eq!(this.value(Field::Volume, cx), "12");
+            assert_eq!(this.value(Field::PlayCountThreshold, cx), "23.5");
+            assert_eq!(this.value(Field::Scale, cx), "1.23");
+            assert_eq!(this.value(Field::SpectrumDb, cx), "83.5");
+            assert_eq!(this.value(Field::SpectrumGravity, cx), "81.2");
+            assert_eq!(
+                numeric_bits(&this.parse(cx).unwrap()),
+                numeric_bits(&precise)
+            );
+        });
+        for unrelated_edit in [false, true] {
+            if unrelated_edit {
+                edit_input(&settings, window, Field::ScanMaxDepth, "7", cx);
+            }
+            let (patch, submission) = submit(&settings, cx);
+            let (committed, result) = execute(&runtime, patch);
+            assert!(result.is_ok());
+            assert_eq!(numeric_bits(&committed), numeric_bits(&precise));
+            settings.update(cx, |this, cx| {
+                this.complete_settings_apply(submission, committed, result, cx);
+                assert_eq!(
+                    numeric_bits(&this.parse(cx).unwrap()),
+                    numeric_bits(&precise)
+                );
+            });
+        }
+    }
+
+    #[gpui::test]
+    fn genuine_float_edits_accept_high_precision_without_formatting_while_typing(
+        cx: &mut TestAppContext,
+    ) {
+        let (_directory, runtime, settings) = fixture(cx);
+        let window = cx.add_window({
+            let settings = settings.clone();
+            move |_, _| SettingsWindow(settings)
+        });
+        let mut expected = precise_config(&runtime.handle.config_snapshot());
+        settings.update(cx, |this, cx| {
+            this.model.draft.spectrum_style = SpectrumStyle::Bars;
+            this.sync_field_enabled(cx);
+        });
+        for (field, text) in numeric_texts(&expected) {
+            edit_input(&settings, window, field, &text, cx);
+            settings.update(cx, |this, cx| {
+                assert_eq!(this.value(field, cx), text);
+            });
+        }
+        // Volume's explicit percentage is converted exactly as entered, not
+        // substituted with the original fractional config value.
+        expected.volume = (expected.volume * 100.) / 100.;
+        settings.update(cx, |this, cx| {
+            assert_eq!(
+                numeric_bits(&this.parse(cx).unwrap()),
+                numeric_bits(&expected)
+            );
+        });
+        let (patch, submission) = submit(&settings, cx);
+        let (committed, result) = execute(&runtime, patch);
+        assert!(result.is_ok());
+        assert_eq!(numeric_bits(&committed), numeric_bits(&expected));
+        settings.update(cx, |this, cx| {
+            this.complete_settings_apply(submission, committed, result, cx);
+            assert_eq!(
+                numeric_bits(&this.parse(cx).unwrap()),
+                numeric_bits(&expected)
+            );
+            assert_eq!(this.value(Field::Scale, cx), "1.23");
+        });
+    }
+
+    #[gpui::test]
+    fn retyping_rounded_values_is_explicit_and_optional_clear_stays_inherited(
+        cx: &mut TestAppContext,
+    ) {
+        let (_directory, runtime, settings) = fixture(cx);
+        let window = cx.add_window({
+            let settings = settings.clone();
+            move |_, _| SettingsWindow(settings)
+        });
+        let original = runtime.handle.config_snapshot();
+        let precise = Arc::new(precise_config(&original));
+        let (committed, result) = execute(&runtime, ConfigPatch::between(&original, &precise));
+        assert!(result.is_ok());
+        settings.update(cx, |this, cx| this.reset(&committed, cx));
+        edit_input(&settings, window, Field::Scale, "1.23", cx);
+        edit_input(&settings, window, Field::Volume, "12", cx);
+        for field in [
+            Field::AudioVisualizerDb,
+            Field::SpectrumDb,
+            Field::SpectrogramDb,
+        ] {
+            edit_input(&settings, window, field, "", cx);
+        }
+        settings.update(cx, |this, cx| {
+            let parsed = this.parse(cx).unwrap();
+            assert_eq!(parsed.ui_scale.to_bits(), 1.23_f32.to_bits());
+            assert_eq!(parsed.volume.to_bits(), 0.12_f32.to_bits());
+            assert_eq!(parsed.audio_visualizer_db_range, None);
+            assert_eq!(parsed.spectrum_db_range, None);
+            assert_eq!(parsed.spectrogram_db_range, None);
+        });
+        let (patch, submission) = submit(&settings, cx);
+        let (committed, result) = execute(&runtime, patch);
+        assert!(result.is_ok());
+        assert_eq!(committed.audio_visualizer_db_range, None);
+        assert_eq!(committed.spectrum_db_range, None);
+        assert_eq!(committed.spectrogram_db_range, None);
+        settings.update(cx, |this, cx| {
+            this.complete_settings_apply(submission, committed, result, cx);
+            assert!(this.value(Field::SpectrumDb, cx).is_empty());
+            assert_eq!(this.parse(cx).unwrap().spectrum_db_range, None);
+            // Programmatic fills are not edits, even after earlier user input.
+            this.reset(&precise, cx);
+        });
+        settings.update(cx, |this, cx| {
+            assert_eq!(
+                numeric_bits(&this.parse(cx).unwrap()),
+                numeric_bits(&precise)
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn numeric_edits_during_apply_survive_completion_including_same_text_replacement(
+        cx: &mut TestAppContext,
+    ) {
+        let (_directory, runtime, settings) = fixture(cx);
+        let window = cx.add_window({
+            let settings = settings.clone();
+            move |_, _| SettingsWindow(settings)
+        });
+        let original = runtime.handle.config_snapshot();
+        let precise = precise_config(&original);
+        let (committed, result) = execute(&runtime, ConfigPatch::between(&original, &precise));
+        assert!(result.is_ok());
+        settings.update(cx, |this, cx| this.reset(&committed, cx));
+        let (patch, submission) = submit(&settings, cx);
+        let (committed, result) = execute(&runtime, patch);
+        assert!(result.is_ok());
+        edit_input(&settings, window, Field::Scale, "1.23", cx);
+        edit_input(&settings, window, Field::WaveformPeakGamma, "1e", cx);
+        edit_input(&settings, window, Field::SpectrumDb, "", cx);
+        settings.update(cx, |this, cx| {
+            this.complete_settings_apply(submission, committed, result, cx);
+            assert_eq!(this.value(Field::Scale, cx), "1.23");
+            assert_eq!(this.value(Field::WaveformPeakGamma, cx), "1e");
+            assert!(this.value(Field::SpectrumDb, cx).is_empty());
+            assert!(this.parse(cx).is_err());
+        });
+        edit_input(&settings, window, Field::WaveformPeakGamma, "1.876543", cx);
+        let (patch, submission) = submit(&settings, cx);
+        let (committed, result) = execute(&runtime, patch);
+        assert!(result.is_ok());
+        assert_eq!(committed.ui_scale.to_bits(), 1.23_f32.to_bits());
+        assert_eq!(
+            committed.waveform_peak_gamma.to_bits(),
+            1.876543_f32.to_bits()
+        );
+        assert_eq!(committed.spectrum_db_range, None);
+        settings.update(cx, |this, cx| {
+            this.complete_settings_apply(submission, committed, result, cx);
+            assert_eq!(this.parse(cx).unwrap(), *this.model.baseline());
+        });
+    }
+
+    #[gpui::test]
+    fn numeric_display_trims_zeroes_and_negative_zero_without_changing_the_draft(
+        cx: &mut TestAppContext,
+    ) {
+        let (_directory, _runtime, settings) = fixture(cx);
+        settings.update(cx, |this, cx| {
+            this.model.draft.audio_visualizer_rotation_speed = -0.0;
+            this.model.draft.audio_visualizer_sensitivity = 1.5;
+            this.model.draft.visualization_db_range = 80.0;
+            this.fill(cx);
+            assert_eq!(this.value(Field::AudioVisualizerRotationSpeed, cx), "0");
+            assert_eq!(this.value(Field::AudioVisualizerSensitivity, cx), "1.5");
+            assert_eq!(this.value(Field::VisualizationDb, cx), "80");
+            assert_eq!(
+                this.parse(cx)
+                    .unwrap()
+                    .audio_visualizer_rotation_speed
+                    .to_bits(),
+                (-0.0_f32).to_bits()
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn artwork_panel_apply_preserves_untouched_period_and_accepts_explicit_rounded_value(
+        cx: &mut TestAppContext,
+    ) {
+        let (_directory, runtime, settings) = fixture(cx);
+        let window = cx.add_window({
+            let settings = settings.clone();
+            move |_, _| SettingsWindow(settings)
+        });
+        let periods = Rc::new(RefCell::new(Vec::new()));
+        let _subscription = cx.update(|cx| {
+            let periods = periods.clone();
+            cx.subscribe(&settings, move |_, event, _| {
+                if let SettingsEvent::ApplyArtwork { options, .. } = event {
+                    periods.borrow_mut().push(options.period_seconds.to_bits());
+                }
+            })
+        });
+        let mut options = AlbumArtworkOptions::from(runtime.handle.config_snapshot().as_ref());
+        options.mode = AlbumArtworkMode::Rotating;
+        options.period_seconds = 23.45678;
+        cx.update_window(window.into(), |_, window, cx| {
+            settings.update(cx, |this, cx| this.open_artwork(42, options, window, cx));
+        })
+        .unwrap();
+        settings.update(cx, |this, cx| this.apply_settings(cx));
+        assert_eq!(*periods.borrow(), vec![options.period_seconds.to_bits()]);
+        settings.update(cx, |this, cx| {
+            this.complete_panel_apply(this.model.session(), Ok(()), cx);
+        });
+        edit_input(&settings, window, Field::AlbumArtworkPeriod, "23.46", cx);
+        settings.update(cx, |this, cx| this.apply_settings(cx));
+        assert_eq!(periods.borrow()[1], 23.46_f32.to_bits());
+    }
+
     #[gpui::test]
     fn unchanged_volume_text_preserves_exact_config_precision(cx: &mut TestAppContext) {
         let (_directory, runtime, settings) = fixture(cx);
@@ -2415,6 +3007,10 @@ mod tests {
     #[gpui::test]
     fn failed_settings_apply_retains_edits_and_baseline_for_retry(cx: &mut TestAppContext) {
         let (directory, runtime, settings) = fixture(cx);
+        let window = cx.add_window({
+            let settings = settings.clone();
+            move |_, _| SettingsWindow(settings)
+        });
         let baseline_theme = runtime.handle.config_snapshot().ui_theme;
         let path = directory.path().join("config.toml");
         std::fs::remove_file(&path).unwrap();
@@ -2423,9 +3019,11 @@ mod tests {
             this.model.draft.ui_theme = Theme::TokyoNightDay;
             this.set_value(Field::ScanMaxDepth, "7", None, cx);
         });
+        edit_input(&settings, window, Field::Scale, "1.345678", cx);
         let (patch, submission) = submit(&settings, cx);
         let (committed, result) = execute(&runtime, patch);
         assert!(result.is_err());
+        edit_input(&settings, window, Field::Scale, "1.456789", cx);
         settings.update(cx, |this, cx| {
             this.set_value(Field::ScanMaxDepth, "9", None, cx);
             this.model.draft.still_mode = true;
@@ -2440,6 +3038,10 @@ mod tests {
             assert_eq!(this.model.draft.ui_theme, Theme::TokyoNightDay);
             assert!(!this.model.applying());
             assert!(matches!(this.model.feedback(), Some(Err(_))));
+            assert_eq!(
+                this.parse(cx).unwrap().ui_scale.to_bits(),
+                1.456789_f32.to_bits()
+            );
         });
         std::fs::remove_dir(&path).unwrap();
         assert!(
@@ -2454,6 +3056,10 @@ mod tests {
         settings.update(cx, |this, cx| {
             this.complete_settings_apply(submission, committed, result, cx);
             assert_eq!(this.model.baseline().scan_max_depth, 9);
+            assert_eq!(
+                this.model.baseline().ui_scale.to_bits(),
+                1.456789_f32.to_bits()
+            );
             assert_eq!(this.model.baseline().volume, 0.2);
             assert!(this.model.baseline().still_mode);
             assert_eq!(this.model.baseline().ui_theme, Theme::TokyoNightDay);
