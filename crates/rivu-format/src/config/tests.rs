@@ -1,6 +1,103 @@
 use super::*;
 
 #[test]
+fn file_and_direct_configuration_inputs_share_the_byte_budget() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    let link = directory.path().join("linked.toml");
+    std::os::unix::fs::symlink(&path, &link).unwrap();
+    for size in [0, MAX_CONFIG_BYTES, MAX_CONFIG_BYTES + 1] {
+        let text = " ".repeat(size);
+        std::fs::write(&path, &text).unwrap();
+        if size <= MAX_CONFIG_BYTES {
+            assert_eq!(read_toml(&link).unwrap(), text);
+            assert_eq!(from_toml(&text).unwrap(), Config::default());
+        } else {
+            let file_error = read_toml(&link).unwrap_err();
+            let direct_error = from_toml(&text).unwrap_err();
+            assert_eq!(file_error.kind(), io::ErrorKind::InvalidData);
+            assert_eq!(file_error.to_string(), direct_error.to_string());
+        }
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), size as u64);
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+    std::fs::write(&path, [0xff]).unwrap();
+    assert_eq!(
+        read_toml(&path).unwrap_err().kind(),
+        io::ErrorKind::InvalidData
+    );
+}
+
+#[test]
+fn serialized_configuration_enforces_the_exact_byte_budget() {
+    let mut config = Config {
+        output_device: Some(String::new()),
+        ..Config::default()
+    };
+    let overhead = to_toml(&config).unwrap().len();
+    for size in [MAX_CONFIG_BYTES - 1, MAX_CONFIG_BYTES, MAX_CONFIG_BYTES + 1] {
+        config.output_device = Some("x".repeat(size - overhead));
+        let result = to_toml(&config);
+        if size <= MAX_CONFIG_BYTES {
+            let saved = result.unwrap();
+            assert_eq!(saved.len(), size);
+            assert_eq!(from_toml(&saved).unwrap(), config);
+        } else {
+            let Err(error) = result else {
+                panic!("oversized serialization was accepted");
+            };
+            assert_eq!(
+                error.downcast_ref::<io::Error>().unwrap().kind(),
+                io::ErrorKind::InvalidData
+            );
+        }
+    }
+}
+
+#[test]
+fn compact_configuration_cannot_expand_past_the_output_budget() {
+    let prefix = "[playback]\noutput_device = '";
+    let suffix = "'\n";
+    let input = format!(
+        "{prefix}{}{suffix}",
+        "x".repeat(MAX_CONFIG_BYTES - prefix.len() - suffix.len())
+    );
+    assert_eq!(input.len(), MAX_CONFIG_BYTES);
+    let config = from_toml(&input).unwrap();
+    let Err(error) = to_toml(&config) else {
+        panic!("oversized serialization was accepted");
+    };
+    assert_eq!(
+        error.to_string(),
+        check_config_size((MAX_CONFIG_BYTES + 1) as u64)
+            .unwrap_err()
+            .to_string()
+    );
+}
+
+#[test]
+fn escaped_configuration_cannot_expand_past_the_output_budget() {
+    let config = Config {
+        output_device: Some("\0".repeat(MAX_CONFIG_BYTES / 6 + 1)),
+        ..Config::default()
+    };
+    config.validate().unwrap();
+    assert!(config.output_device.as_ref().unwrap().len() < MAX_CONFIG_BYTES);
+    let Err(error) = to_toml(&config) else {
+        panic!("oversized serialization was accepted");
+    };
+    assert_eq!(
+        error.downcast_ref::<io::Error>().unwrap().kind(),
+        io::ErrorKind::InvalidData
+    );
+}
+
+#[test]
 fn current_toml_contract_rejects_explicit_noncurrent_versions_and_invalid_values() {
     for input in [
         "schema_version = 0\n",

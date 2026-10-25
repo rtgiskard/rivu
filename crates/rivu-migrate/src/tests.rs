@@ -122,6 +122,28 @@ fn valid_configuration_is_read_only_with_or_without_version_and_through_symlinks
 }
 
 #[test]
+fn configuration_byte_budget_matches_direct_format_validation_without_changes() {
+    let (_directory, options) = fixture();
+    for size in [0, config::MAX_CONFIG_BYTES, config::MAX_CONFIG_BYTES + 1] {
+        let text = " ".repeat(size);
+        fs::write(&options.config, &text).unwrap();
+        let mut report = Report::default();
+        let result = run(&options, Mode::Apply, &mut report);
+        if size <= config::MAX_CONFIG_BYTES {
+            result.unwrap();
+        } else {
+            let expected = config::from_toml(&text).unwrap_err();
+            assert_eq!(
+                result.unwrap_err().root_cause().to_string(),
+                expected.to_string()
+            );
+        }
+        assert!(report.backups.is_empty());
+        assert_eq!(fs::read_to_string(&options.config).unwrap(), text);
+    }
+}
+
+#[test]
 fn missing_configuration_and_default_resources_are_not_created() {
     let (directory, options) = fixture();
     execute(&options, Mode::Apply).unwrap();
@@ -282,8 +304,18 @@ fn sqlite_backup_includes_committed_wal_and_maintenance_preserves_user_state() {
     assert_eq!(fs::read_to_string(&options.config).unwrap(), original);
     assert_eq!(fs::metadata(&options.config).unwrap().ino(), config_inode);
     assert_eq!(revision(&connection), database::ALBUM_TRIGGER_REVISION);
+    assert_eq!(report.backups[0].status, BackupStatus::Complete);
+    assert_eq!(report.backups[0].path.extension().unwrap(), "bak");
+    assert!(fs::read_dir(&options.data_dir).unwrap().all(|entry| {
+        !entry
+            .unwrap()
+            .file_name()
+            .as_encoded_bytes()
+            .ends_with(b".partial")
+    }));
     let backup =
-        Connection::open_with_flags(&report.backups[0], OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        Connection::open_with_flags(&report.backups[0].path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
     assert_eq!(revision(&backup), 2);
     for source in [&connection, &backup] {
         let name: String = source
@@ -345,6 +377,7 @@ fn maintenance_failure_rolls_back_and_reentry_keeps_distinct_backups() {
     let mut failed = Report::default();
     assert!(run(&options, Mode::Apply, &mut failed).is_err());
     assert_eq!(failed.backups.len(), 1);
+    assert_eq!(failed.backups[0].status, BackupStatus::Complete);
     assert_eq!(revision(&connection), 1);
     assert_eq!(
         fs::read_to_string(&options.config).unwrap(),
@@ -357,8 +390,13 @@ fn maintenance_failure_rolls_back_and_reentry_keeps_distinct_backups() {
     assert_eq!(revision(&connection), database::ALBUM_TRIGGER_REVISION);
     assert_eq!(applied.backups.len(), 1);
     for earlier in &failed.backups {
-        assert!(earlier.exists());
-        assert!(!applied.backups.contains(earlier));
+        assert!(earlier.path.exists());
+        assert!(
+            !applied
+                .backups
+                .iter()
+                .any(|backup| backup.path == earlier.path)
+        );
     }
     assert_eq!(
         fs::read_to_string(&options.config).unwrap(),

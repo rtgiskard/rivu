@@ -7,7 +7,7 @@ use rusqlite::{
 };
 use std::{
     fs::{self, File, OpenOptions},
-    io::{ErrorKind, Read},
+    io::ErrorKind,
     os::unix::{fs::OpenOptionsExt, net::UnixListener},
     path::{Path, PathBuf},
 };
@@ -37,9 +37,38 @@ impl Options {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BackupStatus {
+    /// Private partial artifact; copying, closing, syncing, or publication failed.
+    Unpublished,
+    /// Published without replacing another file; directory durability is uncertain.
+    PublishedSyncUncertain,
+    /// SQLite closed and both file data and the published directory entry synced.
+    Complete,
+}
+
+impl BackupStatus {
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Unpublished => "unpublished; may be incomplete",
+            Self::PublishedSyncUncertain => "published; directory sync uncertain",
+            Self::Complete => "complete; file and directory synced",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BackupReport {
+    /// Actual artifact location, updated immediately after successful publication.
+    pub path: PathBuf,
+    pub status: BackupStatus,
+    /// Existing complete-content alias left at the original partial path.
+    pub retained_partial: Option<PathBuf>,
+}
+
 pub struct Report {
     pub resources: Vec<String>,
-    pub backups: Vec<PathBuf>,
+    pub backups: Vec<BackupReport>,
     pub needs_changes: bool,
     pub config_status: &'static str,
     pub database_status: &'static str,
@@ -64,19 +93,15 @@ struct DatabasePlan {
 }
 
 fn validate_config(path: &Path) -> Result<Option<PathBuf>> {
-    let mut file = match rivu_format::input::open_regular_file(path) {
-        Ok(file) => file,
+    let text = match config::read_toml(path) {
+        Ok(text) => text,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
         Err(error) => {
             return Err(error).with_context(|| format!("Reading configuration {}", path.display()));
         }
     };
-    let mut original = Vec::new();
-    file.read_to_end(&mut original)
-        .with_context(|| format!("Reading configuration {}", path.display()))?;
     let target = fs::canonicalize(path).context("Resolving existing configuration target")?;
-    let text = std::str::from_utf8(&original).context("Configuration is not UTF-8")?;
-    config::validate_toml(text).context("Validating current configuration")?;
+    config::validate_toml(&text).context("Validating current configuration")?;
     Ok(Some(target))
 }
 
@@ -176,11 +201,15 @@ pub fn run(options: &Options, mode: Mode, report: &mut Report) -> Result<()> {
 
     // Back up the complete database before attempting transactional maintenance.
     if let Some(plan) = database.as_ref().filter(|p| p.maintenance) {
-        let (path, file) = reserve_backup(&plan.path)?;
-        report.backups.push(path.clone());
-        drop(file);
+        let (path, published, file) = reserve_backup(&plan.path)?;
+        report.backups.push(BackupReport {
+            path,
+            status: BackupStatus::Unpublished,
+            retained_partial: None,
+        });
+        let artifact = report.backups.last_mut().expect("just recorded backup");
         let mut destination =
-            Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+            Connection::open_with_flags(&artifact.path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
         {
             let backup = Backup::new(&plan.connection, &mut destination)?;
             loop {
@@ -192,11 +221,11 @@ pub fn run(options: &Options, mode: Mode, report: &mut Report) -> Result<()> {
                     StepResult::More => {}
                     StepResult::Busy | StepResult::Locked => bail!(
                         "SQLite backup is busy; backup {} may be incomplete",
-                        path.display()
+                        artifact.path.display()
                     ),
                     _ => bail!(
                         "Unexpected SQLite backup state; backup {} may be incomplete",
-                        path.display()
+                        artifact.path.display()
                     ),
                 }
             }
@@ -205,10 +234,34 @@ pub fn run(options: &Options, mode: Mode, report: &mut Report) -> Result<()> {
             .close()
             .map_err(|(_, error)| error)
             .context("Closing SQLite backup")?;
-        File::open(&path)?
-            .sync_all()
-            .context("Syncing SQLite backup")?;
-        sync_parent(&path)?;
+        file.sync_all().context("Syncing SQLite backup")?;
+        let mut partial = tempfile::TempPath::try_from_path(&artifact.path)?;
+        // Every failure artifact is evidence, not a disposable temporary file.
+        partial.disable_cleanup(true);
+        partial
+            .persist_noclobber(&published)
+            .map_err(|error| error.error)
+            .context("Publishing SQLite backup without replacement")?;
+        // Publication already happened even if the following directory sync
+        // fails. Keep the real path and never misreport this as a partial file.
+        let partial_path = std::mem::replace(&mut artifact.path, published);
+        artifact.status = BackupStatus::PublishedSyncUncertain;
+        // The no-replace link/unlink fallback can leave a complete-content
+        // alias behind. Report only aliases that actually remain.
+        match fs::symlink_metadata(&partial_path) {
+            Ok(_) => artifact.retained_partial = Some(partial_path),
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "Inspecting retained backup alias {}",
+                        partial_path.display()
+                    )
+                });
+            }
+        }
+        sync_parent(&artifact.path)?;
+        artifact.status = BackupStatus::Complete;
     }
 
     if let Some(plan) = &database
@@ -294,7 +347,7 @@ fn ensure_storage_capacity(target: &Path, required: u64, available: u64) -> Resu
     Ok(())
 }
 
-fn reserve_backup(target: &Path) -> Result<(PathBuf, File)> {
+fn reserve_backup(target: &Path) -> Result<(PathBuf, PathBuf, File)> {
     let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
     for attempt in 0..100 {
         let mut name = target
@@ -307,6 +360,13 @@ fn reserve_backup(target: &Path) -> Result<(PathBuf, File)> {
             name.push(format!(".{attempt}"));
         }
         name.push(".bak");
+        let published = target.with_file_name(&name);
+        match fs::symlink_metadata(&published) {
+            Ok(_) => continue,
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("Inspecting backup publication path"),
+        }
+        name.push(".partial");
         let path = target.with_file_name(name);
         match OpenOptions::new()
             .write(true)
@@ -314,7 +374,7 @@ fn reserve_backup(target: &Path) -> Result<(PathBuf, File)> {
             .mode(0o600)
             .open(&path)
         {
-            Ok(file) => return Ok((path, file)),
+            Ok(file) => return Ok((path, published, file)),
             Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
             Err(error) => {
                 return Err(error).with_context(|| format!("Creating backup {}", path.display()));

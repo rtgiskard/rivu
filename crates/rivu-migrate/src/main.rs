@@ -39,8 +39,18 @@ fn main() -> ExitCode {
     for line in &report.resources {
         println!("{}", Terminal(line));
     }
-    for path in &report.backups {
-        println!("Backup: {}", Terminal(path.display()));
+    for backup in &report.backups {
+        println!(
+            "Backup: {} ({})",
+            Terminal(backup.path.display()),
+            backup.status.description()
+        );
+        if let Some(partial) = &backup.retained_partial {
+            println!(
+                "Retained complete backup alias: {}",
+                Terminal(partial.display())
+            );
+        }
     }
     if let Err(error) = result {
         eprintln!("Migration failed: {:#}", Terminal(error));

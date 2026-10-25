@@ -186,18 +186,20 @@ Normal save destinations, symlink handling and last-writer-wins behavior belong 
 link:01_config.adoc[Configuration and layout]. A check reserves neither database
 ownership nor configuration against later edits.
 
-Configuration preflight uses the same ordinary-file admission as the application,
-including symlinks, and rejects FIFOs without waiting for a writer. Human-readable
-reports escape control characters in paths and error chains; those escapes do not
-change the literal filesystem paths used by the operation.
+Configuration preflight uses the same ordinary-file admission and 4 MiB UTF-8
+TOML limit as the application, including symlinks, and rejects FIFOs without
+waiting for a writer. Human-readable reports escape control characters in paths
+and error chains; those escapes do not change the literal filesystem paths.
 
 == Apply protocol
 
 . Acquire data-directory ownership and select the fixed targets.
 . Reinspect versions, database structure, and readability; strictly validate existing
   configuration before mutating the database.
-. Before changing the database, create a uniquely named, non-overwriting backup and
-  report its location. Do not back up a resource that will not be changed.
+. Before changing the database, copy it into a unique `.bak.partial` file, close
+  SQLite and sync the file, publish the final `.bak` name without overwriting an
+  existing file, then sync its parent directory. Report the actual location and
+  completion state. Do not back up a resource that will not be changed.
 . Replace outdated trigger definitions and their maintenance marker in one SQLite
   transaction. This preserves existing summary rows; it is not schema conversion
   or a summary rebuild.
@@ -208,6 +210,14 @@ A SQLite backup uses SQLite's backup API so committed WAL contents are included.
 Copying only a live database file is not a consistent backup. Backup completion
 and database transaction durability require their own handling; no configuration
 write or cross-resource commit protocol is involved.
+An `unpublished; may be incomplete` report identifies the retained partial file;
+it is not a completed restore point. `published; directory sync uncertain` means
+the final name was published but its directory durability is not established.
+Only `complete; file and directory synced` permits database maintenance to start.
+Failures preserve the actual artifact path, including a complete-content partial
+alias if a no-overwrite publication fallback leaves one. They do not delete
+evidence or trigger automatic rollback.
+
 
 Current maintenance does not scan the music library, access the network, probe
 decoders or infer missing user intent. Its costs include the database backup,

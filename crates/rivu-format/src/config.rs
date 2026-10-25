@@ -10,7 +10,10 @@
 
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
-use std::path::{Component, Path, PathBuf};
+use std::{
+    io::{self, Read},
+    path::{Component, Path, PathBuf},
+};
 
 mod file;
 pub mod paths;
@@ -961,8 +964,40 @@ pub fn logical_path(path: &Path) -> Result<PathBuf> {
     Ok(normalized)
 }
 
+/// Maximum UTF-8 TOML size accepted by readers, parsers, and serializers (4 MiB).
+/// Settings and node-local graphs fit comfortably within this budget; media and
+/// model contents belong in external files, not inline configuration.
+pub const MAX_CONFIG_BYTES: usize = 4 * 1024 * 1024;
+
+fn check_config_size(bytes: u64) -> io::Result<()> {
+    if bytes > MAX_CONFIG_BYTES as u64 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("configuration exceeds {MAX_CONFIG_BYTES} byte limit"),
+        ));
+    }
+    Ok(())
+}
+
+/// Read bounded UTF-8 TOML from an opened regular file, following symbolic links.
+/// Missing files remain `NotFound` so callers can select defaults. Check both
+/// descriptor metadata and up to limit + 1 bytes: a growing file cannot bypass
+/// admission or cause an unbounded read. Parsing is left to [`from_toml`].
+pub fn read_toml(path: &Path) -> io::Result<String> {
+    let file = crate::input::open_regular_file(path)?;
+    check_config_size(file.metadata()?.len())?;
+    let mut bytes = Vec::new();
+    file.take((MAX_CONFIG_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    check_config_size(bytes.len() as u64)?;
+    String::from_utf8(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
 /// Parse and validate only the current grouped TOML contract. No file is read or written.
+/// Rejects inputs above [`MAX_CONFIG_BYTES`] before parsing. The caller owns the
+/// input allocation; use [`read_toml`] to bound filesystem reads as well.
 pub fn from_toml(contents: &str) -> Result<Config> {
+    check_config_size(contents.len() as u64)?;
     // Read the version before current fields: a future format may use field
     // names or types that this decoder cannot interpret.
     #[derive(Deserialize)]
@@ -1006,8 +1041,11 @@ pub fn validate_toml(contents: &str) -> Result<()> {
 }
 
 /// Validate and serialize the current grouped TOML contract, including its version.
+/// Rejects output above [`MAX_CONFIG_BYTES`] after serialization, before persistence.
 pub fn to_toml(config: &Config) -> Result<String> {
     config.validate()?;
-    toml::to_string_pretty(&file::FileConfigView::from(config))
-        .context("cannot serialize configuration")
+    let contents = toml::to_string_pretty(&file::FileConfigView::from(config))
+        .context("cannot serialize configuration")?;
+    check_config_size(contents.len() as u64)?;
+    Ok(contents)
 }

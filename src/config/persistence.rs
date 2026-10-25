@@ -8,7 +8,7 @@ use anyhow::{Context, Result, ensure};
 use std::{
     borrow::Cow,
     fs,
-    io::{ErrorKind, Read, Write},
+    io::{ErrorKind, Write},
     path::Path,
 };
 
@@ -21,17 +21,14 @@ impl ConfigPersistence for Config {
     /// Read settings without creating files or directories. Only a missing file
     /// selects defaults; unreadable, malformed, and invalid files are errors.
     fn load(path: &Path) -> Result<Self> {
-        let mut file = match rivu_format::input::open_regular_file(path) {
-            Ok(file) => file,
+        let contents = match rivu_format::config::read_toml(path) {
+            Ok(contents) => contents,
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Self::default()),
             Err(error) => {
                 return Err(error)
                     .with_context(|| format!("cannot read configuration {}", path.display()));
             }
         };
-        let mut contents = String::new();
-        file.read_to_string(&mut contents)
-            .with_context(|| format!("cannot read configuration {}", path.display()))?;
         rivu_format::config::from_toml(&contents)
             .with_context(|| format!("invalid configuration {}", path.display()))
     }
@@ -133,6 +130,56 @@ fn configuration_destination(path: &Path) -> Result<Cow<'_, Path>> {
 mod tests {
     use super::*;
     use std::os::unix::fs::symlink;
+
+    #[test]
+    fn load_shares_the_format_byte_budget_and_preserves_input() {
+        use rivu_format::config::{MAX_CONFIG_BYTES, from_toml};
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        for size in [0, MAX_CONFIG_BYTES, MAX_CONFIG_BYTES + 1] {
+            let text = " ".repeat(size);
+            fs::write(&path, &text).unwrap();
+            let result = Config::load(&path);
+            if size <= MAX_CONFIG_BYTES {
+                assert_eq!(result.unwrap(), Config::default());
+            } else {
+                let expected = from_toml(&text).unwrap_err();
+                assert_eq!(
+                    result.unwrap_err().root_cause().to_string(),
+                    expected.to_string()
+                );
+            }
+            assert_eq!(fs::read_to_string(&path).unwrap(), text);
+        }
+    }
+
+    #[test]
+    fn oversized_save_preserves_previous_file_and_missing_destinations() {
+        use rivu_format::config::MAX_CONFIG_BYTES;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let previous = "# preserve original bytes\n[playback]\nvolume_percent = 25\n";
+        fs::write(&path, previous).unwrap();
+        let config = Config {
+            output_device: Some("\0".repeat(MAX_CONFIG_BYTES / 6 + 1)),
+            ..Config::default()
+        };
+        config.validate().unwrap();
+        let Err(expected) = rivu_format::config::to_toml(&config) else {
+            panic!("oversized serialization was accepted");
+        };
+        let error = config.save(&path).unwrap_err();
+        assert_eq!(error.root_cause().to_string(), expected.to_string());
+        assert_eq!(fs::read_to_string(&path).unwrap(), previous);
+        assert_eq!(Config::load(&path).unwrap().volume, 0.25);
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+
+        let missing = directory.path().join("missing/config.toml");
+        assert!(config.save(&missing).is_err());
+        assert!(!missing.parent().unwrap().exists());
+    }
 
     #[test]
     fn destination_preserves_directory_aliases_and_missing_relative_targets() {

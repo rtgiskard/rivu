@@ -83,7 +83,15 @@ configuration or starting background services. A client controlling an existing
 instance does not validate a configuration path that the instance will not use.
 Existing configuration inputs must be ordinary files; symlinks to ordinary files
 are accepted. FIFOs, devices, sockets and directories are rejected before reading,
-so a FIFO does not wait for a writer.
+so a FIFO does not wait for a writer. Configuration input is limited to 4 MiB of
+UTF-8 TOML, including comments. The application, offline migration tool and direct
+format parser enforce the same limit before parsing; file reads check the opened
+descriptor and read at most the limit plus one byte, including files that grow.
+Saving checks the serialized UTF-8 TOML against the same 4 MiB limit, including
+emitted defaults, formatting and string escapes. A configuration that fits when
+read can therefore be too large to save. An oversized save fails before creating
+directories or temporary files and leaves the existing file untouched; Settings
+Apply retains its draft under the usual save-failure rules.
 Configuration symlinks are followed when saving, including relative chains and
 missing targets; saving atomically replaces the target file, not the links.
 Link loops and inaccessible targets are reported as errors without replacing the links.
