@@ -336,9 +336,12 @@ impl AudioProcessing {
             }
             return;
         }
-        let placeholder = self
-            .path_placeholder(key)
-            .unwrap_or_else(|| label.to_owned().into());
+        let placeholder = if key.ends_with("/channels") {
+            self.tr("processing-channels-placeholder")
+        } else {
+            self.path_placeholder(key)
+                .unwrap_or_else(|| label.to_owned().into())
+        };
         let input = cx.new(|cx| Input::new(label.to_owned(), value.clone(), placeholder, cx));
         let subscription = self.subscribe_field(&input, key.to_owned(), cx);
         self.fields.insert(

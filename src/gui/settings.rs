@@ -726,17 +726,26 @@ impl Settings {
         .into_iter()
         .map(|field| {
             let input = cx.new(|cx| {
+                let placeholder = self.tr(match field {
+                    Field::Font => "settings-font-search-placeholder",
+                    Field::SpectrumDb | Field::SpectrogramDb | Field::AudioVisualizerDb => {
+                        "settings-inherit-placeholder"
+                    }
+                    Field::Background
+                    | Field::AudioVisualizerPrimaryColor
+                    | Field::AudioVisualizerSecondaryColor
+                    | Field::CursorColor => "settings-color-placeholder",
+                    Field::MediaReadBuffer => "settings-buffer-placeholder",
+                    Field::SpectrumBars => "settings-auto-zero-placeholder",
+                    Field::AlbumArtworkFps => "settings-display-fps-placeholder",
+                    Field::ScanMinDuration => "settings-duration-placeholder",
+                    _ => field.label_id(),
+                });
+                let input = Input::new(self.tr(field.label_id()), "", placeholder, cx);
                 if field == Field::Font {
-                    Input::new(
-                        self.tr(field.label_id()),
-                        "",
-                        self.tr("settings-font-search-placeholder"),
-                        cx,
-                    )
-                    .with_trailing_space(px(28.))
-                    .with_control_surface()
+                    input.with_trailing_space(px(28.)).with_control_surface()
                 } else {
-                    Input::new(self.tr(field.label_id()), "", self.tr(field.label_id()), cx)
+                    input
                 }
             });
             (field, input)

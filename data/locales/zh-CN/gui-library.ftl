@@ -74,6 +74,14 @@ gl-scan-cancelled = 扫描已取消
 
 gl-dismiss-scan = 关闭扫描结果
 
+gl-importing = 正在导入播放列表…
+gl-import-discovering = 正在读取播放列表
+gl-import-saving = 正在保存播放列表
+gl-import-completed = 导入完成
+gl-import-failed = 导入失败
+gl-import-cancelled = 导入已取消
+gl-dismiss-import = 关闭导入结果
+
 gl-unfavorite = 取消收藏
 
 gl-favorite = 收藏

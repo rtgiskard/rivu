@@ -321,6 +321,9 @@ Logging is application-wide, including headless operation, and remains in `[logg
 Visualizations contains General and the four audio-data views.
 Long sidebar labels are shortened to one line; hover over a category to read its full name.
 Dropdown keys: <<_desktop_keyboard_navigation,Desktop keyboard navigation>>.
+Empty inputs show inheritance, format, or special-value cues where relevant;
+hover for complete ranges and application timing. Clearing a field does not apply
+its placeholder: settings still require Apply and their usual validation.
 The system tray switch takes effect after restarting the graphical host, not
 merely reopening its window. Media read buffering applies to future source opens,
 including full waveform scans; it does not reopen the current track.

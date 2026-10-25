@@ -167,8 +167,10 @@ queue additions; another request is rejected while one is active.
 An accepted import returns a scan task ID; acceptance is not proof of completion.
 Use `--wait` to observe input, scan, or playlist-creation errors. Playlist reads,
 decoding, CUE expansion, and metadata scanning run in the background. In the
-desktop, task feedback belongs to the Playlists panel; a rejected request reports
-an error without replacing an accepted task's progress or result. Shared status
+desktop, task feedback belongs to the Playlists panel and identifies import
+progress, completion, failure, and cancellation separately from library scanning.
+A rejected request reports an error without replacing an accepted task's progress
+or result. Shared status
 queries, result dismissal, cancellation and shutdown are documented under
 link:02_library.adoc#_cancellation[Library cancellation]. Preparation can be
 cancelled without saving results or creating a playlist; once Saving begins,

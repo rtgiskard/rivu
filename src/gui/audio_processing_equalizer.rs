@@ -398,7 +398,12 @@ impl EqualizerEditor {
         {
             return;
         }
-        let input = cx.new(|cx| Input::new(label.to_owned(), value.clone(), label.to_owned(), cx));
+        let placeholder = if key.ends_with(".channels") {
+            self.tr("processing-channels-placeholder")
+        } else {
+            label.to_owned().into()
+        };
+        let input = cx.new(|cx| Input::new(label.to_owned(), value.clone(), placeholder, cx));
         let enabled = !self.config_locked();
         input.update(cx, |input, cx| input.set_enabled(enabled, cx));
         let subscription = self.subscribe_field(&input, key.to_owned(), cx);

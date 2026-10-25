@@ -117,6 +117,7 @@ processing-q = Q
 processing-shelf-slope = Shelf slope S (0.1…1)
 processing-stages = Cascaded stages (1…4)
 processing-channels = Channel target
+processing-channels-placeholder = all or 1,2
 processing-channel-help = Enter all, or comma-separated channel numbers starting at 1 (for example: 1,2). Channels must exist in the playback stream.
 processing-stage-help = Pass/notch filters cascade identical sections, not a Butterworth alignment. Pass slopes are 12 dB/octave per stage; band-pass is 6 dB/octave per side. Changing filter type resets stages to 1.
 processing-presets = EQ presets

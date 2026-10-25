@@ -2,7 +2,7 @@
 use crate::{
     i18n::Localizer,
     model::{Command, ScanPhase},
-    projection::GuiSystemSnapshot,
+    projection::{GuiSystemSnapshot, MediaTaskOwner},
 };
 use gpui::{Context, Div, SharedString, div, prelude::*, px, relative, rgb};
 use rivu_ui::{
@@ -19,16 +19,35 @@ pub(in crate::gui) fn media_task_status<T: 'static>(
 ) -> Div {
     let theme = rivu_ui::theme::palette(cx);
     let progress = system.scan_progress.as_ref();
+    let importing = system.scan_owner == Some(MediaTaskOwner::Playlist);
     let heading = progress.map_or_else(
-        || i18n.text("gl-scanning").to_owned(),
+        || {
+            i18n.text(if importing {
+                "gl-importing"
+            } else {
+                "gl-scanning"
+            })
+            .to_owned()
+        },
         |progress| {
-            let phase = i18n.text(match progress.phase {
-                ScanPhase::Discovering => "gl-scan-discovering",
-                ScanPhase::ReadingMetadata => "gl-scan-metadata",
-                ScanPhase::Saving => "gl-scan-saving",
-                ScanPhase::Completed => "gl-scan-completed",
-                ScanPhase::Failed => "gl-scan-failed",
-                ScanPhase::Cancelled => "gl-scan-cancelled",
+            let phase = i18n.text(if importing {
+                match progress.phase {
+                    ScanPhase::Discovering => "gl-import-discovering",
+                    ScanPhase::ReadingMetadata => "gl-scan-metadata",
+                    ScanPhase::Saving => "gl-import-saving",
+                    ScanPhase::Completed => "gl-import-completed",
+                    ScanPhase::Failed => "gl-import-failed",
+                    ScanPhase::Cancelled => "gl-import-cancelled",
+                }
+            } else {
+                match progress.phase {
+                    ScanPhase::Discovering => "gl-scan-discovering",
+                    ScanPhase::ReadingMetadata => "gl-scan-metadata",
+                    ScanPhase::Saving => "gl-scan-saving",
+                    ScanPhase::Completed => "gl-scan-completed",
+                    ScanPhase::Failed => "gl-scan-failed",
+                    ScanPhase::Cancelled => "gl-scan-cancelled",
+                }
             });
             match progress.total {
                 Some(total) => i18n.format(
@@ -91,7 +110,12 @@ pub(in crate::gui) fn media_task_status<T: 'static>(
                 IconButton::new(
                     ("media-task-dismiss", panel_id),
                     "",
-                    i18n.text("gl-dismiss-scan").to_owned(),
+                    i18n.text(if importing {
+                        "gl-dismiss-import"
+                    } else {
+                        "gl-dismiss-scan"
+                    })
+                    .to_owned(),
                 )
                 .build(
                     IconButtonStyle::Quiet,

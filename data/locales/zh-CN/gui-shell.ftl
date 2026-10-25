@@ -117,6 +117,7 @@ processing-q = Q 值
 processing-shelf-slope = 搁架斜率 S（0.1…1）
 processing-stages = 级联节数（1…4）
 processing-channels = 目标声道
+processing-channels-placeholder = all 或 1,2
 processing-channel-help = 输入 all 或用逗号分隔的声道编号（从 1 开始，例如 1,2）。声道必须存在于播放流中。
 processing-stage-help = 通带／陷波采用相同二阶节级联，并非巴特沃斯校准。通带每节 12 dB/倍频程，带通每侧每节 6 dB/倍频程。更改滤波器类型会将节数重置为 1。
 processing-presets = 均衡器预设

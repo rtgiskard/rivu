@@ -74,6 +74,14 @@ gl-scan-cancelled = Scan cancelled
 
 gl-dismiss-scan = Dismiss scan result
 
+gl-importing = Importing playlist…
+gl-import-discovering = Reading playlist
+gl-import-saving = Saving playlist
+gl-import-completed = Import completed
+gl-import-failed = Import failed
+gl-import-cancelled = Import cancelled
+gl-dismiss-import = Dismiss import result
+
 gl-unfavorite = Remove from favorites
 
 gl-favorite = Add to favorites
