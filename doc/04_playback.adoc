@@ -439,8 +439,10 @@ panel catalog. Unlike Track details, browsing or selecting a different library
 track does not change this panel.
 
 Use the panel's right-click Style or Rotation actions for immediate changes, or
-Artwork settings to edit its options with Apply and Discard. These choices are
-saved with the layout and survive docking, layout duplication, and reload.
+Artwork settings to edit its options with Apply and Discard. These choices belong
+to the panel instance and survive docking and layout duplication in memory.
+Use layout sync or quit the application normally to persist them across restarts;
+instance Apply and closing the desktop window do not write `layout.json`.
 Settings → Interface → Album artwork changes defaults for new panels without
 overwriting existing panels. See
 link:01_config.adoc#_album_artwork[Album artwork configuration] for styles,

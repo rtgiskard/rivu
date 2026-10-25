@@ -274,16 +274,19 @@ Spectrogram retains frequency history and numerical GPU field tiles of at most
 32 columns. Changed buckets rebuild their tile; scrolling changes placement.
 Palette, range, frequency mapping, and sampling-size changes rebuild affected
 publications without discarding compatible history. FFT-size/window changes
-discard history because its analysis meaning changed. History duration/rate
-changes resize retention and start a new pooling interval; appearance changes
-and unrelated Spectrum settings do not rebucket audio. Pooling semantics are
-defined in link:23_visuals.adoc#_spectrogram[Spectrogram].
+discard history because its analysis meaning changed; changing the Before/After
+signal selection also discards incompatible history. History duration/rate changes
+resize retention and start a new pooling interval; appearance changes and unrelated
+Spectrum settings do not rebucket audio. Pooling semantics are defined in
+link:23_visuals.adoc#_spectrogram[Spectrogram].
 
 Drawable panels share one history sized for the largest requested plot width,
 capped by history seconds times analysis FPS, with at least two columns.
-Sampling height follows the largest drawable panel, capped by configured rows
-and the startup shared GPU budget. Resizing preserves newest chronological
-columns; narrow/wide panels do not fight to resize shared history while painting.
+Sampling height uses the largest drawable panel's height times the configured
+sampling scale, with a floor at the visible source-frequency count, then caps it
+by configured rows and the startup shared GPU budget. Resizing preserves newest
+chronological columns; narrow/wide panels do not fight to resize shared history
+while painting.
 
 Prepaint retains panel measurements until bounds/visibility changes. A too-small
 panel retires only its own drawable-size request, leaving drawable siblings

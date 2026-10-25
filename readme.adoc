@@ -94,10 +94,11 @@ typical Linux installation: `~/.local/share/rivu`) and
 The data directory contains `library.db` (library and playback state),
 `layout.json` (desktop layouts), the `artwork/` cache, and optional `logs/`.
 Stop the core before operating on `library.db`. The application rejects incompatible
-formats rather than migrating or resetting them. Use the independent `rivu-migrate`
-tool to check and apply supported upgrades; it is installed alongside `rivu`.
-See link:doc/02_library.adoc#_sqlite_maintenance[SQLite maintenance] for the supported
-schema, backups, and what rescanning cannot restore.
+formats rather than migrating or resetting them. The independent `rivu-migrate`
+tool, installed alongside `rivu`, validates current formats and backs up and
+applies derived database maintenance; it does not convert historical formats.
+See link:doc/02_library.adoc#_sqlite_maintenance[SQLite maintenance] for commands,
+backups, and what rescanning cannot restore.
 IPC access and upgrade constraints are described in link:doc/21_ipc.adoc[IPC].
 
 

@@ -492,8 +492,8 @@ instead of rebuilding 27 CPU light paths. Flow limits each integration step to
 respawn retain those substeps, but render segments are rebuilt only from the
 final state. An accepted-audio gap longer than half a second resets the scene
 instead of attempting unbounded catch-up.
-FFT/window changes revoke the scene until compatible audio arrives. Color or Bloom
-changes republish material over the accepted geometry without advancing simulation;
+FFT/window or Before/After signal changes revoke the scene until compatible audio
+arrives. Color or Bloom changes republish material over the accepted geometry without advancing simulation;
 background changes only repaint. Sensitivity and display-range changes affect future
 accepted audio, preserving the paused geometry and publication. Beams construction
 and reset initialize state without building geometry that the first accepted frame

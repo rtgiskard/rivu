@@ -43,8 +43,8 @@ rivu library other check --wait
 rivu library other check --force --wait
 ----
 
-`library other list` returns one page (100 rows by default); use `--offset` and
-`--limit` to read more. List and locate accept `--query`, `--favorite true|false`,
+`library other list` returns one page (100 rows by default, at most 256); use
+`--offset` and `--limit` to read more. List and locate accept `--query`, `--favorite true|false`,
 `--missing true|false`, and `--sort id|album|most-played`. Omit a boolean filter to
 include both states. Count always returns the unfiltered collection total.
 `rivu queue add-other` appends the complete collection without starting playback,
@@ -731,20 +731,22 @@ rivu library keep-independent DESTINATION_ID
 == SQLite maintenance
 
 Rivu opens current version 1 databases only; unsupported or populated unversioned
-databases are rejected without resetting or deleting user data. Album-summary
-trigger maintenance within that schema is automatic, but does not rebuild or
-validate historical summaries. Version authorities and the current maintenance
-revision are defined in link:26_migration.adoc[Database and configuration migration].
+databases are rejected without resetting or deleting user data. Derived maintenance
+within that schema is automatic: it updates album-summary and queue-metadata
+triggers and installs or maintains durable collection-version authority. It does
+not rebuild or validate historical album summaries. Version authorities and the
+current maintenance revision are defined in
+link:26_migration.adoc[Database and configuration migration].
 
 === Independent migration tool
 
 Run `rivu-migrate check` to inspect existing resources without modifying user data
 or configuration; SQLite may update reader-coordination sidecars. Stop the host
 and external database writers before `apply`. The application does not invoke the
-tool automatically. Its current upgrade is album-trigger maintenance in a version
-1 database, not historical schema conversion; configuration is validated, not
-rewritten. Missing resources are not created, and an explicitly selected missing
-database is an error.
+tool automatically. Its current maintenance covers derived triggers and collection
+version authority in a version 1 database, not historical schema conversion;
+configuration is validated, not rewritten. Missing resources are not created, and
+an explicitly selected missing database is an error.
 
 `check` exits with `0` when current, `1` when supported changes are needed, and `2`
 on error. `apply` exits with `0` on success and `2` on error, reporting resource
@@ -835,9 +837,9 @@ values or JSON data.
   requests only `library`; `library optimize` requests only `system`.
   Unrequested sections are `null`, not empty data.
 * Ordinary command acknowledgements contain `status`, `error`, `revision`,
-  `scan_id`, and `relocation_id`. Status is `Succeeded`, `Failed`, `NotAdmitted`,
-  or `Unknown`; `Failed` does not guarantee rollback, and `Unknown` must not be
-  automatically retried. `scan_id` is present only for accepted media-task startup
+  `scan_id`, `relocation_id`, and `processing_id`. Status is `Succeeded`, `Failed`,
+  `NotAdmitted`, or `Unknown`; `Failed` does not guarantee rollback, and `Unknown`
+  must not be automatically retried. `scan_id` is present only for accepted media-task startup
   (scan, Other check, playlist import, or external-file queue addition);
   `relocation_id` identifies relocation startup. Export replies after writing,
   not at worker startup.

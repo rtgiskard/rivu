@@ -139,10 +139,12 @@ can navigate again. Failed group removal does not partially remove entries.
 === Playlist query validity
 
 Changes to this playlist's membership or order invalidate an in-progress listing;
-restart it. Rename and changes to other playlists do not interrupt it. Metadata
-edits update text without changing entry identity or position. Stale group edits
-are rejected rather than partially applied. Export uses one consistent snapshot,
-so concurrent edits do not alter the file being written. Query validity belongs to
+restart it. Rename and changes to other playlists' membership or order do not
+interrupt it. Metadata edits preserve entry identity and position, but changes to
+displayed fields can invalidate an entry listing, including search results.
+Stale group edits are rejected rather than partially applied. Export uses one
+consistent snapshot, so concurrent edits do not alter the file being written.
+Query validity belongs to
 link:21_ipc.adoc#_query_results_and_pagination[IPC]; retained view lifetimes belong
 to link:22_cache.adoc#_query_projection_retention[Caching].
 

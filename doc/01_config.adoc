@@ -16,11 +16,12 @@ directly, exit Rivu first, edit the file, and restart; the core does not watch
 external edits. Configuration controls application-wide defaults. Panel trees
 and instance preferences are saved separately in <<_layout,`layout.json`>>.
 
-Configuration is organized into `[library]`, `[playback]`,
+Configuration groups application settings into `[library]`, `[playback]`,
 `[interface]`, `[logging]`, and `[visualizations]`. Audio visualization settings
 live in `[visualizations.spectrum]`, `[visualizations.spectrogram]`,
 `[visualizations.audio_visualizer]`, and `[visualizations.waveform]`.
-Album artwork settings live in `[interface.album_artwork]`.
+Album artwork settings live in `[interface.album_artwork]`; audio processing uses
+the additional tables described under <<_audio_processing_defaults,Audio processing defaults>>.
 Desktop integration belongs to Interface; output and decoding belong to Playback;
 shared analysis belongs to Visualizations. Dotted names below identify file paths.
 
@@ -190,9 +191,10 @@ encoding and modifier suffixes. English and Simplified Chinese are supported;
 unavailable languages, including Traditional Chinese, fall back to English.
 Explicit configuration values are `auto`, `en-US`, or `zh-CN` (case-insensitive;
 underscores are accepted and normalized to hyphens); other values are errors.
-Configuration language changes take effect when the graphical host restarts.
-Closing and reopening a desktop window keeps the host's startup language; quit
-and restart Rivu to apply a saved language change.
+Choose Language in Settings → Interface → Appearance & layout, then Apply to save.
+The change takes effect when the graphical host restarts. Closing and reopening
+a desktop window keeps the host's startup language; quit and restart Rivu to
+apply a saved language change.
 CLI output, TUI, command-line help, and localized diagnostics always use automatic
 selection from the process environment, independently of `interface.language`.
 They do not read configuration for localization. Starting a host or probing media

@@ -131,7 +131,7 @@ The frame header is six bytes. `body_length` excludes the four-byte length field
 and includes the version, message type, and serialized body.
 
 Bodies use Postcard serialization without COBS framing. The current protocol
-version is `11`; clients and servers must use matching wire schemas. The four-byte
+version is `7`; clients and servers must use matching wire schemas. The four-byte
 frame length remains little-endian; body integers follow Postcard's encoding.
 Restart clients and hosts together after upgrading: incompatible versions are
 rejected before decoding the body. There is no compatibility alias or schema
@@ -591,8 +591,9 @@ titles and member artists. Artist matches include the whole album. Null/empty
 queries match all; sort is `title` (default: title, directory) or `artist` (summary
 artist, title, directory), with binary ordering. Members and representatives use
 disc number, track number (nulls last), effective title, then ID. Summary artist
-is the sole nonempty effective artist, `Various artists` for multiple, or
-`Unknown artist` for none. Count/page filters are identical but do not constrain
+is the sole nonempty effective artist, `Various artists` for multiple, or an empty
+string for none; artist sorting uses `Unknown artist` for that missing value.
+Count/page filters are identical but do not constrain
 whole-album actions. Indexed membership and persistent summary costs are covered
 under <<_transactional_inputs_and_bounded_storage_queries,storage ownership>>;
 browsing behavior is in link:02_library.adoc[Library].
@@ -733,8 +734,8 @@ must not collect paged track IDs to perform album actions.
 
 `TransferCollection {source, destination}` copies a version-pinned whole Album
 or Playlist without collecting paged track payloads in the client. Album sources
-carry their key and Library/structure revisions; Playlist sources carry their
-ID and entry-content revision. Queue insertion carries an index and queue
+carry their key and durable `album` collection revision; Playlist sources carry
+their ID and entry-content revision. Queue insertion carries an index and queue
 revision; Playlist destinations carry their ID, entry revision and optional
 index. Omitted positions append. Core validates these versions after Store has
 acquired its write transaction, then source staging and insertion use that same
