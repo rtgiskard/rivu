@@ -3,7 +3,7 @@
 use super::*;
 use rivu_ui::{
     ChoiceAction, ChoiceMode, ChoicePopup, DropdownItem, IconButton, IconButtonDensity,
-    IconButtonStyle, activate_control, dropdown_trigger,
+    IconButtonStyle, Slider, SliderInput, SliderKey, activate_control, dropdown_trigger,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -24,6 +24,8 @@ pub(super) struct WorkbenchPanel {
     inspector_open: bool,
     inspector_width: f32,
     resize: Option<(Pixels, f32, DockGeometry)>,
+    zoom_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    zoom_drag: Option<DockGeometry>,
     connections: bool,
     menu_bounds: Rc<Cell<[Option<Bounds<Pixels>>; 2]>>,
     pub(super) canvas_focus: Option<FocusHandle>,
@@ -38,6 +40,8 @@ impl Default for WorkbenchPanel {
             inspector_width: 25.,
             resize: None,
             connections: false,
+            zoom_bounds: Rc::new(Cell::new(None)),
+            zoom_drag: None,
             menu_bounds: Rc::new(Cell::new([None; 2])),
             canvas_focus: None,
         }
@@ -254,7 +258,6 @@ impl AudioProcessing {
             .max_w_full()
             .flex_wrap()
             .gap_1()
-            .child(caption(theme, self.tr("processing-workspace-edit")).whitespace_nowrap())
             .child(disabled_control(
                 theme,
                 self.workbench_dropdown(
@@ -289,32 +292,12 @@ impl AudioProcessing {
                 ),
             );
         }
-        let mut navigation = row()
+        let navigation = row()
             .flex_shrink_0()
             .max_w_full()
             .flex_wrap()
             .gap_1()
-            .child(caption(theme, self.tr("processing-workspace-view")).whitespace_nowrap());
-        for (factor, glyph, label) in [
-            (1. / 1.2, "󰍴", "processing-workspace-zoom-out"),
-            (1.2, "󰐕", "processing-workspace-zoom-in"),
-        ] {
-            navigation = navigation.child(
-                IconButton::new(
-                    SharedString::from(format!("zoom-{panel}-{label}")),
-                    glyph,
-                    self.tr(label),
-                )
-                .build(
-                    IconButtonStyle::Quiet,
-                    IconButtonDensity::Compact,
-                    cx,
-                    move |this, _, cx| this.graph_zoom(factor, [250., 160.], cx),
-                ),
-            );
-        }
-        navigation = navigation
-            .child(caption(theme, format!("{:.0}%", self.graph_ui.zoom * 100.)))
+            .child(self.graph_zoom_slider(panel, cx))
             .child(
                 IconButton::new(
                     ("fit-graph", panel),
@@ -378,7 +361,6 @@ impl AudioProcessing {
             .max_w_full()
             .flex_wrap()
             .gap_1()
-            .child(caption(theme, self.tr("processing-workspace-inspect")).whitespace_nowrap())
             .child(
                 IconButton::new(
                     ("workbench-connections", panel),
@@ -645,6 +627,7 @@ impl AudioProcessing {
     pub(in crate::gui) fn cancel_workbench_resize(&mut self) {
         for state in self.graph_ui.workbenches.values_mut() {
             state.resize = None;
+            state.zoom_drag = None;
         }
     }
 
@@ -652,7 +635,7 @@ impl AudioProcessing {
         self.graph_ui
             .workbenches
             .values()
-            .any(|state| state.resize.is_some())
+            .any(|state| state.resize.is_some() || state.zoom_drag.is_some())
     }
 
     pub(in crate::gui) fn retain_workbench_controls(
@@ -663,6 +646,7 @@ impl AudioProcessing {
         for (panel, state) in &mut self.graph_ui.workbenches {
             if !visible || !layout.is_panel_active(*panel) {
                 state.resize = None;
+                state.zoom_drag = None;
             }
         }
         if self
@@ -918,6 +902,25 @@ impl AudioProcessing {
                 return;
             }
             let _ = moved.update(cx, |this, cx| {
+                let zoom_drag = this.graph_ui.workbenches[&panel].zoom_drag;
+                if let Some(geometry) = zoom_drag {
+                    if event.pressed_button != Some(MouseButton::Left)
+                        || !window.is_window_active()
+                        || geometry
+                            != DockGeometry::current(window, this.state.system.config.ui_scale)
+                    {
+                        this.graph_ui.workbenches.get_mut(&panel).unwrap().zoom_drag = None;
+                    } else if let Some(value) = this.graph_ui.workbenches[&panel]
+                        .zoom_bounds
+                        .get()
+                        .and_then(|b| Slider::value_at(b, event.position))
+                    {
+                        this.graph_zoom_to(0.35 + value * 1.65, [250., 160.], cx);
+                    }
+                    window.prevent_default();
+                    cx.notify();
+                    return;
+                }
                 let state = this.graph_ui.workbenches.entry(panel).or_default();
                 let Some((start, width, geometry)) = state.resize else {
                     return;
@@ -939,18 +942,75 @@ impl AudioProcessing {
         let released = owner.clone();
         window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
             if phase == DispatchPhase::Capture {
-                let _ = released.update(cx, |this, _| {
-                    this.graph_ui.workbenches.entry(panel).or_default().resize = None;
+                let _ = released.update(cx, |this, cx| {
+                    let state = this.graph_ui.workbenches.entry(panel).or_default();
+                    let active = state.resize.take().is_some() | state.zoom_drag.take().is_some();
+                    if active {
+                        cx.notify();
+                    }
                 });
             }
         });
         window.on_mouse_event(move |_: &MouseExitEvent, phase, _, cx| {
             if phase == DispatchPhase::Capture {
-                let _ = owner.update(cx, |this, _| {
-                    this.graph_ui.workbenches.entry(panel).or_default().resize = None;
+                let _ = owner.update(cx, |this, cx| {
+                    let state = this.graph_ui.workbenches.entry(panel).or_default();
+                    let active = state.resize.take().is_some() | state.zoom_drag.take().is_some();
+                    if active {
+                        cx.notify();
+                    }
                 });
             }
         });
+    }
+
+    fn graph_zoom_slider(&self, panel: u64, cx: &mut Context<Self>) -> Stateful<Div> {
+        let state = &self.graph_ui.workbenches[&panel];
+        let bounds = state.zoom_bounds.clone();
+        let measured = bounds.clone();
+        Slider::new(
+            ("graph-zoom", panel),
+            (self.graph_ui.zoom - 0.35) / 1.65,
+            self.tr("processing-workspace-zoom"),
+        )
+        .dragging(state.zoom_drag.is_some())
+        .render(cx, move |this, input, window, cx| {
+            this.cancel_pointer(cx);
+            let zoom = match input {
+                SliderInput::PointerDown { position, .. } => {
+                    let Some(value) = bounds.get().and_then(|b| Slider::value_at(b, position))
+                    else {
+                        return;
+                    };
+                    this.graph_ui.workbenches.get_mut(&panel).unwrap().zoom_drag = Some(
+                        DockGeometry::current(window, this.state.system.config.ui_scale),
+                    );
+                    0.35 + value * 1.65
+                }
+                SliderInput::Key(key) => match key {
+                    SliderKey::Start => 0.35,
+                    SliderKey::End => 2.,
+                    SliderKey::Decrease => this.graph_ui.zoom - 0.05,
+                    SliderKey::Increase => this.graph_ui.zoom + 0.05,
+                },
+            };
+            this.graph_zoom_to(zoom, [250., 160.], cx);
+            cx.stop_propagation();
+        })
+        .w_24()
+        .flex_shrink_0()
+        .tooltip(rivu_ui::text_tooltip(format!(
+            "{:.0}%",
+            self.graph_ui.zoom * 100.
+        )))
+        .child(
+            canvas(
+                move |bounds, _, _| measured.set(Some(bounds)),
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .size_full(),
+        )
     }
 
     fn graph_fit(&mut self, panel: u64, nodes: Option<(u64, u64)>, cx: &mut Context<Self>) {

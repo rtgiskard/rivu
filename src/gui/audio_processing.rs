@@ -1886,18 +1886,44 @@ impl AudioProcessing {
                     .whitespace_nowrap(),
             );
         }
+        let bypassed = !self.state.system.config.equalizer.enabled
+            && self.state.system.processing_audition.is_none();
         selected_audio = selected_audio.child(monitor_status).child(
             IconButton::new(
                 ("processing-bypass", panel),
                 "󰓅",
-                self.tr("processing-workspace-bypass"),
+                self.tr(if bypassed {
+                    "processing-workspace-enable-monitor"
+                } else {
+                    "processing-workspace-bypass"
+                }),
             )
+            .toggled(bypassed)
+            .selected_fill(false)
             .build(
                 IconButtonStyle::Quiet,
                 IconButtonDensity::Compact,
                 cx,
-                |this, _, cx| this.send(Command::ProcessingBypass, cx),
-            ),
+                |this, _, cx| {
+                    if !this.state.system.config.equalizer.enabled
+                        && this.state.system.processing_audition.is_none()
+                    {
+                        this.send(
+                            Command::EqualizerEdit {
+                                edit: EqualizerEdit::Enabled(true),
+                            },
+                            cx,
+                        );
+                    } else {
+                        this.send(Command::ProcessingBypass, cx);
+                    }
+                },
+            )
+            .text_color(rgb(if bypassed {
+                theme.warning
+            } else {
+                theme.accent
+            })),
         );
         if self.page != Page::Graph {
             self.deactivate_graph_inputs(panel, window, cx);

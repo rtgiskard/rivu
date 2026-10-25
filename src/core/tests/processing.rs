@@ -404,6 +404,56 @@ fn equalizer_batches_fill_largest_log_gaps_without_rewriting_edited_bands() {
 }
 
 #[test]
+fn resizing_equalizer_preserves_prefix_and_rejects_invalid_counts_atomically() {
+    use rivu_dsp::equalizer::config::{EqBand, MAX_BANDS};
+    let (_directory, mut core) = fixture();
+    let (commands, receive) = async_channel::bounded(64);
+    let _idle_commands = core.engine.replace_commands(commands);
+    let first = EqBand {
+        frequency_hz: 731.25,
+        gain_db: -3.5,
+        ..Default::default()
+    };
+    core.equalizer_edit(EqualizerEdit::AddBand {
+        band: first.clone(),
+    })
+    .unwrap();
+    receive.try_recv().unwrap();
+    for count in [3, 1, MAX_BANDS, 0] {
+        core.equalizer_edit(EqualizerEdit::ResizeBands { count })
+            .unwrap();
+        let eq = &core.state.system.config.equalizer;
+        assert_eq!(eq.bands.len(), count);
+        if count > 0 {
+            assert_eq!(eq.bands[0], first);
+        }
+        assert!(matches!(
+            receive.try_recv().unwrap(),
+            AudioCommand::Equalizer(_)
+        ));
+        assert!(receive.try_recv().is_err());
+        let saved: toml::Value =
+            toml::from_str(&std::fs::read_to_string(&core.state.system.config_path).unwrap())
+                .unwrap();
+        assert_eq!(saved["equalizer"]["bands"].as_array().unwrap().len(), count);
+    }
+    let baseline = core.state.system.config.clone();
+    let saved = std::fs::read(&core.state.system.config_path).unwrap();
+    for count in [MAX_BANDS + 1, usize::MAX] {
+        assert!(
+            core.equalizer_edit(EqualizerEdit::ResizeBands { count })
+                .is_err()
+        );
+        assert_eq!(core.state.system.config, baseline);
+        assert_eq!(
+            std::fs::read(&core.state.system.config_path).unwrap(),
+            saved
+        );
+        assert!(receive.try_recv().is_err());
+    }
+}
+
+#[test]
 fn invalid_equalizer_batch_counts_preserve_memory_disk_and_audio_atomically() {
     use rivu_dsp::equalizer::config::MAX_BANDS;
     let (_directory, mut core) = fixture();

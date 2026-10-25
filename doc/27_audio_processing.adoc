@@ -79,7 +79,7 @@ directory; relative destinations are supported by the CLI, not this field.
 
 Choose Add node from the graph toolbar, then select a node to inspect its algorithm
 and parameters. The toolbar groups history, viewport navigation and inspector
-controls. Reset view is directly available with zoom, fit and locate; it restores
+controls without group labels. Reset view is directly available with zoom, fit and locate; it restores
 pan and zoom without changing graph nodes or settings. The adjacent info icon
 shows editor and shortcut help on hover. Execution mode uses a dropdown. Wide panels
 place the canvas and independently scrolling, collapsible inspector side by side.
@@ -100,7 +100,9 @@ commands leave focus on the canvas: Undo/Redo remain available after a card disa
 and the next edit targets the current selection rather than a previously focused node.
 
 Middle-drag or wheel over the canvas pans its viewport. Ctrl+wheel zooms around
-the pointer; zoom buttons and Reset view provide alternatives. Fit graph includes
+the pointer; the zoom slider supports clicking, dragging and keyboard adjustment
+from 35% to 200%, with the current percentage shown on hover. Reset view provides
+an alternative. Fit graph includes
 all nodes, including those outside the current viewport; Locate selected centers
 the selected node. The Connections toggle exposes explicit source/destination
 pairs; selecting one locates its endpoints and highlights that wire. Disconnect
@@ -151,35 +153,38 @@ IME preedit remains a draft even when it parses as a valid gain. Unmarking or
 committing submits the completed value once; Escape cancels composition without
 applying the preedit.
 Band numeric step icons stage drafts; Enter or the check icon commits a band field.
-The response-channel selector belongs to the curve, not to the band target editor.
-It is hidden for mono, follows the available stream channels and scrolls horizontally;
-changing it only changes the displayed response, never the channels a band processes.
-The overall toolbar groups the EQ power switch and monitor presets, band count
-and batch addition, and reset/A-B/help actions. Groups wrap together in narrow panels.
+The compact response-channel dropdown shares a wrapping row with input/output gain
+controls. It is hidden for mono and follows the available stream channels;
+changing it only changes the displayed response, never the channels a band
+processes. The overall toolbar groups monitor presets, total band count and
+reset/A-B/help actions. Groups wrap together in narrow panels.
 The preset dropdown loads a preset; its management popover exposes naming, save,
 delete, copy and file actions without expanding the toolbar.
 
-Use the power icon switch to enable or bypass EQ. While EQ is off, its desktop
+The bottom-right bypass button bypasses all playback effects. When fully bypassed,
+click it again to enable monitor EQ; it does not restore a previous graph audition.
+The button uses the accent color while effects are active and the warning color
+while fully bypassed. While EQ is off, its desktop
 configuration controls are locked: input/output gain, band properties and curve
-edits, batch addition, reset, A/B and preset actions are unavailable. The curve
+edits, band-count changes, reset, A/B and preset actions are unavailable. The curve
 still supports band selection and overlap cycling, and the selected band's values
 remain visible. Switching EQ off preserves existing field drafts and band
 selection; switching it back on makes those drafts editable again without
 committing them automatically.
 
-With EQ enabled, set the quantity with the minus/plus controls (initially 1, up to
-the remaining capacity), then choose Add. Add appends
-the whole batch atomically: new bands are enabled peak filters at 0 dB, with
-default Q and all channels selected. The first new band becomes selected in the
-linked property editor. Adding bands never changes existing bands, preamp,
-output gain or the EQ enable state. An empty bank uses logarithmically uniform
+With EQ enabled, enter the total band count (0–32) and press Enter. Hover the
+count field for its range and commit behavior. Increasing the count appends new
+enabled peak filters at 0 dB, with default Q and all channels selected; the first
+new band becomes selected in the linked property editor. Decreasing the count
+removes bands from the end, preserving all remaining band parameters. The change
+is atomic and leaves preamp, output gain and the EQ enable state unchanged.
+An empty bank uses logarithmically uniform
 cell centers from 20 Hz to the lower of 20 kHz and 0.499 × the known current
 track sample rate; an unknown rate uses 20 kHz. With existing bands, each new
 band bisects the largest remaining logarithmic frequency gap, including the
 range edges. Existing bands outside this range keep their original frequencies.
-Zero quantities or batches exceeding the 32-band capacity are rejected without
-changing the configuration. Add is unavailable when full or while a processing
-command is awaiting acknowledgement.
+Invalid counts are rejected without changing the configuration. The count field
+is unavailable while a processing command is awaiting acknowledgement.
 
 Numbered nodes on the EQ curve select the band shown in the linked property
 editor, whose heading identifies the band number and filter kind. Disabled bands
@@ -197,7 +202,8 @@ focus to that member; Tab or accessibility focus also selects its corresponding
 band. Selection alone does not edit the EQ configuration. Numerical fields provide
 exact frequency, gain, Q, shelf slope, stages and channel selection. Focused nodes
 support Left/Right in semitone steps and Up/Down in 0.5 dB steps for gain-bearing
-filters. Enter/Space selects the node. Removing bands or replacing the bank retires
+filters. Enter/Space selects the node; Delete removes the focused band while EQ
+is enabled. Delete in a parameter input edits text, not bands. Removing bands or replacing the bank retires
 obsolete node focus; selecting a surviving node establishes the new keyboard target.
 The curve shows the configured IIR magnitude at the current stream rate. For a
 linear-phase graph node this is the design target, not a measurement of the

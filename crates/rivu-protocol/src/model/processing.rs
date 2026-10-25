@@ -49,6 +49,7 @@ pub enum EqualizerEdit {
     ImportPreset { path: PathBuf, name: String },
     ExportPreset { path: PathBuf, name: String },
     SwapAb,
+    ResizeBands { count: usize },
 }
 
 impl EqualizerEdit {
@@ -185,6 +186,20 @@ impl EqualizerEdit {
                         length += 1;
                     }
                 }
+            }
+            ResizeBands { count } => {
+                use rivu_dsp::equalizer::config::MAX_BANDS;
+                ensure!(
+                    count <= MAX_BANDS,
+                    "Equalizer supports at most {MAX_BANDS} bands"
+                );
+                if count > config.bands.len() {
+                    return AddBands {
+                        count: count - config.bands.len(),
+                    }
+                    .apply_config(config, sample_rate);
+                }
+                config.bands.truncate(count);
             }
             RemoveBand { index } => {
                 ensure!(

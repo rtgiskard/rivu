@@ -908,8 +908,12 @@ impl AudioProcessing {
 
     fn graph_zoom(&mut self, factor: f32, anchor: [f32; 2], cx: &mut Context<Self>) {
         self.cancel_pointer(cx);
+        self.graph_zoom_to(self.graph_ui.zoom * factor, anchor, cx);
+    }
+
+    fn graph_zoom_to(&mut self, zoom: f32, anchor: [f32; 2], cx: &mut Context<Self>) {
         let old = self.graph_ui.zoom;
-        let next = (old * factor).clamp(0.35, 2.);
+        let next = zoom.clamp(0.35, 2.);
         for (i, coordinate) in anchor.into_iter().enumerate() {
             self.graph_ui.pan[i] = coordinate - (coordinate - self.graph_ui.pan[i]) * next / old;
         }
