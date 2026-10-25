@@ -5,15 +5,16 @@
 //! from the core subscription, never a library polling loop.
 
 use crate::{
-    app::{AppCommand, AppHandle},
+    app::AppHandle,
     artwork::{Artwork, ArtworkIdentity, ArtworkManager},
     core::{CoreHandle, Navigation},
-    model::{Command, PlaybackStatus, RepeatMode},
     projection::MprisSnapshot,
 };
 use anyhow::{Context, Result};
 use crossbeam_channel::{Receiver, Sender, bounded, select_biased};
 use futures::{FutureExt, channel::oneshot};
+use rivu_protocol::AppCommand;
+use rivu_protocol::model::{Command, PlaybackStatus, RepeatMode};
 use std::{
     collections::HashMap,
     sync::Arc,
@@ -681,7 +682,7 @@ fn request(handle: &CoreHandle, command: Command) -> fdo::Result<()> {
     acknowledge(handle.request_ack(command))
 }
 
-fn acknowledge(response: crate::response::Ack) -> fdo::Result<()> {
+fn acknowledge(response: rivu_protocol::response::Ack) -> fdo::Result<()> {
     if response.is_success() {
         Ok(())
     } else {
@@ -1036,10 +1037,8 @@ async fn publish_changes(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        config::ConfigPersistence,
-        model::{PlaybackState, QueueState, Track},
-    };
+    use crate::config::ConfigPersistence;
+    use rivu_protocol::model::{PlaybackState, QueueState, Track};
     use std::{
         io::{BufRead, BufReader},
         path::PathBuf,

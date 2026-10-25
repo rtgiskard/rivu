@@ -4,11 +4,11 @@
 //! The feature owns selection jobs; the window coordinates manual confirmation.
 use super::{PlaylistEvent, PlaylistSelectionRequest, Playlists};
 use crate::gui::coordination::manual_actions::ManualIntentId;
-use crate::{
+use gpui::Context;
+use rivu_protocol::{
     model::{Command, Page, PlaylistEntryLocation, PlaylistEntryRow, Query},
     response::{PlaylistEntryRevision, QueryRevisions, ViewResponse},
 };
-use gpui::Context;
 use std::collections::HashMap;
 
 pub(in crate::gui) struct EntryCommit {
@@ -553,7 +553,7 @@ impl EntrySelection {
         unexpected_response: &str,
         job: EntryNavigationJob,
         scope: Option<EntryNavigationScope>,
-        response: crate::response::QueryResponse,
+        response: rivu_protocol::response::QueryResponse,
     ) -> EntryNavigationEffect {
         if self.navigation_in_flight != Some(job) {
             return EntryNavigationEffect::None;
@@ -642,7 +642,7 @@ impl EntryRangePages {
         (self.offset < self.end).then(|| {
             (
                 self.offset,
-                (self.end - self.offset).min(crate::model::MAX_QUERY_ROWS),
+                (self.end - self.offset).min(rivu_protocol::model::MAX_QUERY_ROWS),
             )
         })
     }
@@ -674,12 +674,12 @@ impl EntryRangePages {
 
 /// Transport failures have no playlist scope; only successful payloads can be revision-checked.
 fn entry_query_result(
-    response: crate::response::QueryResponse,
+    response: rivu_protocol::response::QueryResponse,
     playlist_id: i64,
     revision: u64,
     metadata: u64,
     filter: Option<String>,
-) -> Result<Option<ViewResponse>, crate::response::QueryError> {
+) -> Result<Option<ViewResponse>, rivu_protocol::response::QueryError> {
     let result = response.result?;
     let query = match &result {
         ViewResponse::PlaylistEntryLocations(_) => Query::PlaylistEntryLocations {
@@ -812,7 +812,7 @@ impl Playlists {
     pub(in crate::gui) fn playlist_occurrence_stamp(
         &self,
         playlist_id: i64,
-    ) -> crate::model::QueryStamp {
+    ) -> rivu_protocol::model::QueryStamp {
         Query::PlaylistEntryLocations {
             query: None,
             playlist_id,
@@ -892,7 +892,7 @@ impl Playlists {
         generation: u64,
         revision: u64,
         metadata: u64,
-        response: crate::response::QueryResponse,
+        response: rivu_protocol::response::QueryResponse,
         cx: &mut Context<Self>,
     ) -> bool {
         self.refresh(cx);
@@ -940,7 +940,7 @@ impl Playlists {
         cx.spawn(async move |this, cx| {
             async {
                 let mut identities = Vec::with_capacity(ids.len());
-                for chunk in ids.chunks(crate::model::MAX_QUERY_ROWS) {
+                for chunk in ids.chunks(rivu_protocol::model::MAX_QUERY_ROWS) {
                     if !this
                         .update(cx, |this, cx| {
                             this.refresh(cx);
@@ -1397,7 +1397,7 @@ mod tests {
         EntryNavigationScope, EntryRangePages, EntrySelection, EntryTarget,
         PlaylistSelectionRequest,
     };
-    use crate::{
+    use rivu_protocol::{
         model::{MAX_QUERY_ROWS, Page, PlaylistEntryRow},
         response::{QueryError, QueryResponse, QueryRevisions, ViewResponse},
     };
@@ -2523,7 +2523,7 @@ mod tests {
 
     #[test]
     fn transport_failure_keeps_selection_until_explicit_retry() {
-        use crate::response::{QueryError, QueryResponse, QueryRevisions};
+        use rivu_protocol::response::{QueryError, QueryResponse, QueryRevisions};
         let mut selection = EntrySelection::default();
         selection.select(identity(7, 20), false);
         selection.busy = true;
@@ -2546,7 +2546,9 @@ mod tests {
 
     #[test]
     fn full_rows_require_scoped_metadata_and_occurrences_not_catalog() {
-        use crate::response::{PlaylistEntryRevision, QueryResponse, QueryRevisions, ViewResponse};
+        use rivu_protocol::response::{
+            PlaylistEntryRevision, QueryResponse, QueryRevisions, ViewResponse,
+        };
         let current = QueryRevisions {
             library: 6,
             playlist: 8,

@@ -180,7 +180,7 @@ fn non_gui_timeout_does_not_wait_for_physical_retirement_or_notify_gui() {
 
 #[test]
 fn directory_missing_query_composes_filters_ancestors_and_exact_pages() {
-    use crate::model::DirectoryRow;
+    use rivu_protocol::model::DirectoryRow;
     let (directory, core) = fixture_with_database(Some(10.0), true);
     let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
     connection

@@ -1,7 +1,7 @@
 use super::Store;
 use super::cache::TrackCache;
-use crate::model::DatabaseOptimization;
 use anyhow::{Context, Result, bail};
+use rivu_protocol::model::DatabaseOptimization;
 use rusqlite::Connection;
 use std::cell::RefCell;
 use std::collections::HashMap;

@@ -1,7 +1,6 @@
 use anyhow::{Context, Result, bail};
-use rivu::{
-    i18n::Localizer,
-    ipc,
+use rivu::i18n::Localizer;
+use rivu_protocol::{
     model::{MAX_QUERY_ROWS, PlaybackStatus, Query},
     response::{QueryError, StateResponse, StateSections, ViewResponse},
 };
@@ -59,7 +58,7 @@ pub(super) fn terminal_text(value: &str) -> std::borrow::Cow<'_, str> {
 }
 
 pub(super) fn list_queue(i18n: &Localizer, data_dir: &Path, json: bool) -> Result<()> {
-    let mut session = ipc::client_session(data_dir)?;
+    let mut session = rivu_client::client_session(data_dir)?;
     let state = session.get_state(StateSections {
         queue: true,
         ..StateSections::default()
@@ -129,7 +128,7 @@ pub(super) fn list_library(
     favorites: bool,
     missing: bool,
 ) -> Result<()> {
-    let mut session = ipc::client_session(data_dir)?;
+    let mut session = rivu_client::client_session(data_dir)?;
     let _ = session.get_state(StateSections::default())?;
     let mut after = None;
     let mut expected = None;
@@ -242,7 +241,7 @@ pub(super) fn show_other_tracks(i18n: &Localizer, view: ViewResponse, json: bool
             if json {
                 println!("{}", serde_json::to_string_pretty(&location)?);
             } else {
-                use rivu::model::LibraryLocateResult;
+                use rivu_protocol::model::LibraryLocateResult;
                 match location {
                     LibraryLocateResult::Located(location) => {
                         println!("located\t{}\t{}", location.offset, location.total);
@@ -259,7 +258,7 @@ pub(super) fn show_other_tracks(i18n: &Localizer, view: ViewResponse, json: bool
 }
 
 pub(super) fn list_playlists(i18n: &Localizer, data_dir: &Path, json: bool) -> Result<()> {
-    let mut session = ipc::client_session(data_dir)?;
+    let mut session = rivu_client::client_session(data_dir)?;
     let _ = session.get_state(StateSections::default())?;
     let mut expected = None;
     let mut after = None;
@@ -379,12 +378,12 @@ fn listing_result<T>(i18n: &Localizer, result: std::result::Result<T, QueryError
 }
 
 pub(super) fn command_ack(
-    result: Result<rivu::response::Ack>,
+    result: Result<rivu_protocol::response::Ack>,
     json: bool,
-) -> Result<rivu::response::Ack> {
+) -> Result<rivu_protocol::response::Ack> {
     if json
         && let Err(error) = &result
-        && let Some(failure) = error.downcast_ref::<rivu::ipc::CommandFailure>()
+        && let Some(failure) = error.downcast_ref::<rivu_client::CommandFailure>()
     {
         // Transport evidence has no authoritative Core revision or task IDs.
         println!(
@@ -398,7 +397,11 @@ pub(super) fn command_ack(
     result
 }
 
-pub(super) fn show_ack(i18n: &Localizer, ack: &rivu::response::Ack, json: bool) -> Result<()> {
+pub(super) fn show_ack(
+    i18n: &Localizer,
+    ack: &rivu_protocol::response::Ack,
+    json: bool,
+) -> Result<()> {
     if json {
         println!("{}", serde_json::to_string_pretty(ack)?);
     }
@@ -499,14 +502,14 @@ pub(super) fn show_state(i18n: &Localizer, response: &StateResponse, json: bool)
     }
     Ok(())
 }
-pub(super) fn show_scan(i18n: &Localizer, progress: &rivu::model::ScanProgress) {
+pub(super) fn show_scan(i18n: &Localizer, progress: &rivu_protocol::model::ScanProgress) {
     let phase = i18n.text(match progress.phase {
-        rivu::model::ScanPhase::Discovering => "core-discovering",
-        rivu::model::ScanPhase::ReadingMetadata => "core-reading-metadata",
-        rivu::model::ScanPhase::Saving => "core-saving",
-        rivu::model::ScanPhase::Completed => "core-completed",
-        rivu::model::ScanPhase::Failed => "core-failed",
-        rivu::model::ScanPhase::Cancelled => "core-cancelled",
+        rivu_protocol::model::ScanPhase::Discovering => "core-discovering",
+        rivu_protocol::model::ScanPhase::ReadingMetadata => "core-reading-metadata",
+        rivu_protocol::model::ScanPhase::Saving => "core-saving",
+        rivu_protocol::model::ScanPhase::Completed => "core-completed",
+        rivu_protocol::model::ScanPhase::Failed => "core-failed",
+        rivu_protocol::model::ScanPhase::Cancelled => "core-cancelled",
     });
     println!(
         "{}",

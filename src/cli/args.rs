@@ -315,7 +315,7 @@ pub(super) enum LibraryOrder {
     MostPlayed,
 }
 
-impl From<LibraryOrder> for rivu::model::LibrarySort {
+impl From<LibraryOrder> for rivu_protocol::model::LibrarySort {
     fn from(value: LibraryOrder) -> Self {
         match value {
             LibraryOrder::Id => Self::Id,

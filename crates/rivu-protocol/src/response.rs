@@ -91,7 +91,7 @@ pub struct QueryRevisions {
 
 impl QueryRevisions {
     /// Assemble the common library domains for model and consumer projections.
-    pub(crate) fn from_library(
+    pub fn from_library(
         library: u64,
         structure: u64,
         playlist: u64,
@@ -112,7 +112,7 @@ impl QueryRevisions {
 
     /// Playlist presence is authoritative in the content/lifetime map; metadata
     /// alone must never revive a deleted playlist's scope.
-    pub(crate) fn with_playlist_scope(
+    pub fn with_playlist_scope(
         mut self,
         playlist_id: Option<i64>,
         entries: &std::collections::BTreeMap<i64, u64>,
@@ -134,7 +134,7 @@ impl QueryRevisions {
     }
 
     /// Select data scopes without changing query identity or stamp semantics.
-    pub(crate) fn for_query(
+    pub fn for_query(
         self,
         query: &crate::model::Query,
         entries: &std::collections::BTreeMap<i64, u64>,

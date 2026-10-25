@@ -1,5 +1,3 @@
-use serde::{Deserialize, Serialize};
-
 /// Decoded file metadata shared by scanning, persistence, and playback.
 ///
 /// This value contains no decoder or audio-output state; probing supplies it and
@@ -25,14 +23,4 @@ pub struct MediaInfo {
     pub codec: String,
     pub channels: u16,
     pub sample_rate: u32,
-}
-
-/// User-selected decoder routing, applied when opening a track for playback.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DecoderHint {
-    #[default]
-    Auto,
-    Native,
-    Ffmpeg,
 }

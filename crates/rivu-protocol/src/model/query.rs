@@ -173,11 +173,7 @@ impl QueryStamp {
         self.0
     }
 
-    pub(crate) fn continuation_scope(
-        self,
-        query: Option<&str>,
-        playlist_id: Option<i64>,
-    ) -> [u8; 32] {
+    pub fn continuation_scope(self, query: Option<&str>, playlist_id: Option<i64>) -> [u8; 32] {
         let mut hash = blake3::Hasher::new();
         hash.update(b"rivu occurrence continuation v1");
         hash.update(&[u8::from(playlist_id.is_some())]);

@@ -1,5 +1,5 @@
-use crate::model::{CueSegment, Track};
-use rivu_audio::DecoderHint;
+use rivu_format::media::DecoderHint;
+use rivu_protocol::model::{CueSegment, Track};
 use std::path::PathBuf;
 
 pub(super) fn fingerprint_from_row(
@@ -104,8 +104,8 @@ pub(super) const LIBRARY_ROW_COLUMNS_QUALIFIED: &str = "t.id,COALESCE(t.title_ov
 pub(super) fn library_row_at(
     row: &rusqlite::Row<'_>,
     offset: usize,
-) -> rusqlite::Result<crate::model::LibraryRow> {
-    Ok(crate::model::LibraryRow {
+) -> rusqlite::Result<rivu_protocol::model::LibraryRow> {
+    Ok(rivu_protocol::model::LibraryRow {
         id: row.get(offset)?,
         path: PathBuf::from(row.get::<_, String>(offset + 11)?),
         title: row.get(offset + 1)?,
@@ -125,7 +125,7 @@ pub(super) fn library_row_at(
 
 pub(super) fn library_row_from_row(
     row: &rusqlite::Row<'_>,
-) -> rusqlite::Result<crate::model::LibraryRow> {
+) -> rusqlite::Result<rivu_protocol::model::LibraryRow> {
     library_row_at(row, 0)
 }
 

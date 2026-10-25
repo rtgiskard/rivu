@@ -1,4 +1,4 @@
-use crate::model::Page;
+use rivu_protocol::model::Page;
 use std::{collections::BTreeMap, ops::Range};
 
 const MAX_PAGES: usize = 8;

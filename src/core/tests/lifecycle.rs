@@ -256,7 +256,7 @@ fn async_replies_and_admission_do_not_need_a_blocking_pool_slot() {
             );
             assert!(matches!(
                 handle.query_async(Query::Track { track_id: 1 }).await.result,
-                Ok(crate::response::ViewResponse::Track(Some(track))) if track.id == 1
+                Ok(rivu_protocol::response::ViewResponse::Track(Some(track))) if track.id == 1
             ));
         }
     });

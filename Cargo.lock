@@ -5062,8 +5062,10 @@ dependencies = [
  "ratatui",
  "ringbuf",
  "rivu-audio",
+ "rivu-client",
  "rivu-dsp",
  "rivu-format",
+ "rivu-protocol",
  "rivu-ui",
  "rusqlite",
  "serde",
@@ -5113,6 +5115,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rivu-client"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "rivu-protocol",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "rivu-dsp"
 version = "0.1.0"
 dependencies = [
@@ -5149,6 +5162,22 @@ dependencies = [
  "rivu-format",
  "rusqlite",
  "tempfile",
+]
+
+[[package]]
+name = "rivu-protocol"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "bytes",
+ "libc",
+ "postcard",
+ "rivu-dsp",
+ "rivu-format",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

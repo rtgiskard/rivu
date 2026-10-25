@@ -5,8 +5,8 @@
 //! erase unavailability or cancel a newer read. Identity epochs invalidate callbacks
 //! after leaving and reopening the same track or discarding it.
 
-use crate::model::{Command, Track};
-use rivu_audio::DecoderHint;
+use rivu_format::media::DecoderHint;
+use rivu_protocol::model::{Command, Track};
 use std::sync::Arc;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -527,7 +527,7 @@ mod tests {
         let baseline = load(&mut session, 1, "original");
         let mut original = track(1, "original");
         original.path = "album.flac".into();
-        original.cue = Some(crate::model::CueSegment {
+        original.cue = Some(rivu_protocol::model::CueSegment {
             sheet: "album.cue".into(),
             number: 1,
             start_frame: 75,
@@ -640,7 +640,7 @@ mod tests {
     fn saved_hint_invalidates_only_the_matching_path_and_cue_range() {
         let mut original = track(1, "original");
         original.path = "album.flac".into();
-        original.cue = Some(crate::model::CueSegment {
+        original.cue = Some(rivu_protocol::model::CueSegment {
             sheet: "album.cue".into(),
             number: 1,
             start_frame: 75,

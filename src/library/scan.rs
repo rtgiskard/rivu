@@ -1,8 +1,8 @@
 use super::paths::{is_audio_path, is_cue_path, logical_path};
-use crate::model::{CueSegment, ScanPhase};
 use anyhow::{Context, Result, anyhow, bail};
 use rivu_audio::{MediaInfo, SourceIdentity, probe_file};
 use rivu_format::input::open_regular_file;
+use rivu_protocol::model::{CueSegment, ScanPhase};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{Read, Seek};

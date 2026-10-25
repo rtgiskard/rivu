@@ -9,13 +9,13 @@ use crate::{
     config::{AudioVisualizerOptions, AudioVisualizerStyle, Config},
     core::CoreHandle,
     i18n::Localizer,
-    model::{PlaybackStatus, Track},
 };
 use gpui::{
     AnyElement, Context, Entity, Render, Subscription, Task, WeakEntity, Window, div, prelude::*,
     rgb,
 };
 use rivu_audio::analysis::{AnalysisFrame, DisplayDemand, VisualizerDemand};
+use rivu_protocol::model::{PlaybackStatus, Track};
 use std::{
     collections::HashMap,
     sync::Arc,

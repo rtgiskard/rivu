@@ -1,8 +1,9 @@
 //! Metadata artwork uses the existing per-window image registry and one physical loader.
 
 use super::Metadata;
-use crate::{artwork::ArtworkIdentity, model::Track};
+use crate::artwork::ArtworkIdentity;
 use gpui::Context;
+use rivu_protocol::model::Track;
 use std::sync::Arc;
 
 impl Metadata {

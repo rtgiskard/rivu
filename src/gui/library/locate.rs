@@ -1,10 +1,10 @@
 use super::{Library, LibraryEvent, TreeBranch, tree::TreeItem};
-use crate::{
+use crate::projection::QueryProjection;
+use gpui::{Context, ScrollStrategy, Window};
+use rivu_protocol::{
     model::{DirectoryRow, LibraryLocateResult, Query},
-    projection::QueryProjection,
     response::{QueryRevisions, ViewResponse},
 };
-use gpui::{Context, ScrollStrategy, Window};
 use std::time::{Duration, Instant};
 
 #[derive(Default)]
@@ -372,7 +372,7 @@ impl Library {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::LibrarySort;
+    use rivu_protocol::model::LibrarySort;
 
     fn query() -> Query {
         Query::LibraryLocate {

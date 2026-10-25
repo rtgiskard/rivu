@@ -4,9 +4,9 @@ use super::{
     PlaybackRange, SourceIdentity,
     source::{DECODE_WORK_BUDGET, DecodeStep, Source, check_cancelled},
 };
-use crate::DecoderHint;
 use anyhow::{Context, Result, bail};
 use rivu_format::input::open_regular_file;
+use rivu_format::media::DecoderHint;
 use std::{fs::OpenOptions, io::BufWriter, path::Path, sync::atomic::AtomicBool};
 
 // RIFF uses 32-bit lengths. Leave room for all WAV headers; reject rather than

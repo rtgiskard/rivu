@@ -13,8 +13,9 @@ use super::{
     components::track::{favorite_button, row_text, track_list_row},
     library::LibraryDrag,
 };
-use crate::{gui::queue::QueueDrag, model::Command};
+use crate::gui::queue::QueueDrag;
 use gpui::{AnyElement, Context, Div, SharedString, Window, div, prelude::*, px, rgb};
+use rivu_protocol::model::Command;
 
 use crate::gui::list_interaction::TrackSource;
 use crate::gui::{
@@ -480,7 +481,7 @@ impl Playlists {
     pub(in crate::gui) fn catalog_row(
         &self,
         index: usize,
-    ) -> Option<&crate::model::PlaylistSummary> {
+    ) -> Option<&rivu_protocol::model::PlaylistSummary> {
         self.browser.playlists().summaries().rows.get(index)
     }
     pub(in crate::gui) fn catalog_loading_row(
@@ -668,7 +669,7 @@ pub(super) struct PlaylistDrag {
     entry_ids: std::cell::OnceCell<Vec<i64>>,
     track_ids: std::cell::OnceCell<Vec<i64>>,
     revision: u64,
-    stamp: crate::model::QueryStamp,
+    stamp: rivu_protocol::model::QueryStamp,
     selection_generation: u64,
 }
 
@@ -2032,7 +2033,7 @@ mod playlist_drag_tests {
         for after in [false, true] {
             assert!(matches!(
                 drag.command(Some(99), after),
-                Some(crate::model::Command::MovePlaylistEntries {
+                Some(rivu_protocol::model::Command::MovePlaylistEntries {
                     playlist_id: 8,
                     entry_ids,
                     before_entry_id: Some(99),

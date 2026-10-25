@@ -1,5 +1,5 @@
 use super::*;
-use crate::model::{LibraryLocateResult, LibrarySort};
+use rivu_protocol::model::{LibraryLocateResult, LibrarySort};
 use std::path::{Path, PathBuf};
 
 fn fixture() -> Store {

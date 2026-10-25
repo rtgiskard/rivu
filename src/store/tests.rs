@@ -1,6 +1,7 @@
 use super::Store;
-use crate::model::{AlbumSort, CueSegment, PlaylistEntryRow, QueryStamp, Track};
-use rivu_audio::{DecoderHint, MediaInfo};
+use rivu_audio::MediaInfo;
+use rivu_format::media::DecoderHint;
+use rivu_protocol::model::{AlbumSort, CueSegment, PlaylistEntryRow, QueryStamp, Track};
 use rusqlite::{Connection, params};
 use std::collections::HashSet;
 use std::fs;
@@ -160,7 +161,13 @@ fn all_tracks(store: &Store) -> Vec<Track> {
     let mut after = None;
     loop {
         let batch = store
-            .track_batch(None, None, None, after, crate::model::MAX_QUERY_ROWS)
+            .track_batch(
+                None,
+                None,
+                None,
+                after,
+                rivu_protocol::model::MAX_QUERY_ROWS,
+            )
             .unwrap();
         after = batch.next;
         tracks.extend(batch.rows);
@@ -178,7 +185,7 @@ fn playlist_entries(store: &Store, playlist_id: i64) -> Vec<PlaylistEntryRow> {
                 playlist_id,
                 None,
                 after,
-                crate::model::MAX_QUERY_ROWS,
+                rivu_protocol::model::MAX_QUERY_ROWS,
                 QueryStamp::default(),
             )
             .unwrap();
@@ -498,7 +505,7 @@ fn new_list_search_matches_effective_metadata_filename_and_literal_substrings() 
         0
     );
     assert_eq!(store.queue_page(Some("OVERRIDE"), 0, 0).unwrap().total, 3);
-    let key = crate::model::AlbumKey {
+    let key = rivu_protocol::model::AlbumKey {
         directory: "/music/directory-only".into(),
         title: "Shared".into(),
     };
@@ -529,7 +536,7 @@ fn new_list_search_matches_effective_metadata_filename_and_literal_substrings() 
 
 #[test]
 fn albums_are_directory_scoped_compilations_with_ordered_whole_queue_actions() {
-    use crate::model::{AlbumKey, MAX_QUERY_ROWS};
+    use rivu_protocol::model::{AlbumKey, MAX_QUERY_ROWS};
     let directory = tempfile::tempdir().unwrap();
     let store = Store::open(&directory.path().join("albums.db")).unwrap();
     let mut records = Vec::new();
@@ -660,7 +667,7 @@ fn albums_are_directory_scoped_compilations_with_ordered_whole_queue_actions() {
 
 #[test]
 fn album_eligibility_matches_unicode_trim_without_normalizing_identity_or_dropping_tracks() {
-    use crate::model::AlbumKey;
+    use rivu_protocol::model::AlbumKey;
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("album-eligibility.db");
     let store = Store::open(&path).unwrap();
@@ -1468,7 +1475,14 @@ fn playback_precision_upgrade_is_source_conditional_and_idempotent() {
     );
     assert!(
         store
-            .library_view_page(None, None, None, crate::model::LibrarySort::Id, 0, 10)
+            .library_view_page(
+                None,
+                None,
+                None,
+                rivu_protocol::model::LibrarySort::Id,
+                0,
+                10
+            )
             .unwrap()
             .rows[0]
             .bitrate_exact
@@ -2892,7 +2906,7 @@ fn invalid_cue_database_range_leaves_entire_scan_unchanged() {
 }
 #[test]
 fn library_audio_metadata_survives_all_display_projections() {
-    use crate::model::{DirectoryRow, LibrarySort};
+    use rivu_protocol::model::{DirectoryRow, LibrarySort};
     let store = Store::open(Path::new(":memory:")).unwrap();
     let mut known = rec("/music/known.flac", "known", "Known", 123.5);
     known.media.codec = "flac".into();
@@ -3108,7 +3122,7 @@ fn paged_totals_follow_local_writes_external_commits_and_rollback() {
                 Some("needle"),
                 None,
                 None,
-                crate::model::LibrarySort::Id,
+                rivu_protocol::model::LibrarySort::Id,
                 0,
                 10,
             )
@@ -3137,7 +3151,7 @@ fn paged_totals_follow_local_writes_external_commits_and_rollback() {
 
 #[test]
 fn directory_favorites_filter_before_grouping_and_paging() {
-    use crate::model::DirectoryRow;
+    use rivu_protocol::model::DirectoryRow;
     let store = Store::open(Path::new(":memory:")).unwrap();
     store
         .apply_scan(&scan(vec![
@@ -3239,7 +3253,7 @@ fn directory_favorites_filter_before_grouping_and_paging() {
 
 #[test]
 fn directory_search_preserves_matching_ancestors_and_combines_favorites() {
-    use crate::model::DirectoryRow;
+    use rivu_protocol::model::DirectoryRow;
     let store = Store::open(Path::new(":memory:")).unwrap();
     store
         .apply_scan(&scan(vec![
@@ -3368,7 +3382,7 @@ fn directory_search_preserves_matching_ancestors_and_combines_favorites() {
 
 #[test]
 fn directory_search_reuses_literal_unicode_metadata_and_path_matching() {
-    use crate::model::{DirectoryRow, LibrarySort};
+    use rivu_protocol::model::{DirectoryRow, LibrarySort};
     let store = Store::open(Path::new(":memory:")).unwrap();
     store
         .apply_scan(&scan(vec![
@@ -3462,7 +3476,7 @@ fn directory_search_reuses_literal_unicode_metadata_and_path_matching() {
 
 #[test]
 fn library_root_queries_preserve_path_boundaries_overlap_and_unicode() {
-    use crate::model::{LibraryRootCount, LibrarySort};
+    use rivu_protocol::model::{LibraryRootCount, LibrarySort};
     let store = Store::open(Path::new(":memory:")).unwrap();
     let roots = [
         "/home/a",
@@ -3553,7 +3567,7 @@ fn library_root_queries_preserve_path_boundaries_overlap_and_unicode() {
 
 #[test]
 fn library_root_pages_reuse_search_filters_sort_and_total() {
-    use crate::model::LibrarySort;
+    use rivu_protocol::model::LibrarySort;
     let store = Store::open(Path::new(":memory:")).unwrap();
     for (index, (path, title, artist, album, disc, number, plays, favorite, missing)) in [
         (
@@ -3738,7 +3752,7 @@ fn library_root_pages_reuse_search_filters_sort_and_total() {
 
 #[test]
 fn library_root_queries_bound_root_batches_and_page_rows() {
-    use crate::model::{LibrarySort, MAX_QUERY_ROWS};
+    use rivu_protocol::model::{LibrarySort, MAX_QUERY_ROWS};
     let store = Store::open(Path::new(":memory:")).unwrap();
     assert!(store.library_root_counts(&[]).unwrap().is_empty());
     for id in 0..MAX_QUERY_ROWS + 3 {
@@ -3808,7 +3822,7 @@ fn library_root_queries_bound_root_batches_and_page_rows() {
 
 #[test]
 fn directory_pages_preserve_boundaries_and_duplicate_cue_sources() {
-    use crate::model::{DirectoryRow, MAX_QUERY_ROWS};
+    use rivu_protocol::model::{DirectoryRow, MAX_QUERY_ROWS};
     let store = Store::open(Path::new(":memory:")).unwrap();
     let mut records = (0..300)
         .map(|index| {
@@ -3937,7 +3951,7 @@ fn directory_pages_preserve_boundaries_and_duplicate_cue_sources() {
 
 #[test]
 fn library_pages_use_literal_unicode_search_and_database_sorting() {
-    use crate::model::LibrarySort;
+    use rivu_protocol::model::LibrarySort;
     let store = Store::open(Path::new(":memory:")).unwrap();
     store
         .apply_scan(&scan(vec![
@@ -4133,7 +4147,7 @@ fn batches_traverse_stably_validate_bounds_and_break_tied_positions() {
         }
     }
     assert_eq!(ids, [1, 2, 3, 4, 5]);
-    for id in 6..=(crate::model::MAX_QUERY_ROWS + 3) {
+    for id in 6..=(rivu_protocol::model::MAX_QUERY_ROWS + 3) {
         store
             .conn
             .execute(
@@ -4144,19 +4158,34 @@ fn batches_traverse_stably_validate_bounds_and_break_tied_positions() {
     }
     assert!(
         store
-            .track_batch(None, None, None, None, crate::model::MAX_QUERY_ROWS + 1)
+            .track_batch(
+                None,
+                None,
+                None,
+                None,
+                rivu_protocol::model::MAX_QUERY_ROWS + 1
+            )
             .is_err()
     );
     let first = store
-        .track_batch(None, None, None, None, crate::model::MAX_QUERY_ROWS)
+        .track_batch(None, None, None, None, rivu_protocol::model::MAX_QUERY_ROWS)
         .unwrap();
-    assert_eq!(first.rows.len(), crate::model::MAX_QUERY_ROWS);
-    assert_eq!(first.next, Some(crate::model::MAX_QUERY_ROWS as i64));
+    assert_eq!(first.rows.len(), rivu_protocol::model::MAX_QUERY_ROWS);
+    assert_eq!(
+        first.next,
+        Some(rivu_protocol::model::MAX_QUERY_ROWS as i64)
+    );
     let tail = store
-        .track_batch(None, None, None, first.next, crate::model::MAX_QUERY_ROWS)
+        .track_batch(
+            None,
+            None,
+            None,
+            first.next,
+            rivu_protocol::model::MAX_QUERY_ROWS,
+        )
         .unwrap();
-    let expected_tail: Vec<_> = ((crate::model::MAX_QUERY_ROWS + 1)
-        ..=(crate::model::MAX_QUERY_ROWS + 3))
+    let expected_tail: Vec<_> = ((rivu_protocol::model::MAX_QUERY_ROWS + 1)
+        ..=(rivu_protocol::model::MAX_QUERY_ROWS + 3))
         .map(|id| id as i64)
         .collect();
     assert_eq!(
@@ -4429,7 +4458,7 @@ fn queue_dedup_uses_first_position_not_allocation_order_and_track_deletes_remove
 
 #[test]
 fn library_locate_matches_tree_and_flat_projection_without_identity_fallback() {
-    use crate::model::{DirectoryRow, LibraryLocateResult, LibrarySort};
+    use rivu_protocol::model::{DirectoryRow, LibraryLocateResult, LibrarySort};
     let store = Store::open(Path::new(":memory:")).unwrap();
     store.conn.execute_batch(
         "INSERT INTO tracks(id,path,raw_title,raw_album,play_count,favorite,missing,cue_sheet,cue_number,cue_start_frame) VALUES
@@ -4540,7 +4569,7 @@ fn library_locate_matches_tree_and_flat_projection_without_identity_fallback() {
 
 #[test]
 fn all_catalog_locate_matches_empty_root_pages_for_absolute_and_relative_paths() {
-    use crate::model::{DirectoryRow, LibraryLocateResult, LibrarySort};
+    use rivu_protocol::model::{DirectoryRow, LibraryLocateResult, LibrarySort};
     let store = Store::open(Path::new(":memory:")).unwrap();
     store.conn.execute_batch(
         "INSERT INTO tracks(id,path,raw_title,favorite,missing,cue_sheet,cue_number,cue_start_frame) VALUES

@@ -1,21 +1,19 @@
 use super::{Queue, QueueEvent, QueueIdentity};
-use crate::{
-    gui::{
-        DragDestination,
-        components::{
-            search::set_search_counts,
-            track::{favorite_button, track_list_row},
-        },
-        format_time,
-        library::{LibraryDrag, LibraryNode},
-        list_interaction::{ContentDrag, ContentMenuRequest, TrackSource},
-        playlists::PlaylistDrag,
+use crate::gui::{
+    DragDestination,
+    components::{
+        search::set_search_counts,
+        track::{favorite_button, track_list_row},
     },
-    model::Command,
+    format_time,
+    library::{LibraryDrag, LibraryNode},
+    list_interaction::{ContentDrag, ContentMenuRequest, TrackSource},
+    playlists::PlaylistDrag,
 };
 use gpui::{
     AnyElement, Context, Div, EntityId, ExternalPaths, SharedString, Window, prelude::*, rgb,
 };
+use rivu_protocol::model::Command;
 use rivu_ui::{
     IconButton, IconButtonDensity, IconButtonGroup, IconButtonStyle, StatusKind, VirtualList,
     button, caption, hover_actions, list_panel_header, list_viewport, panel_surface, row,
@@ -865,7 +863,10 @@ impl Queue {
         }
     }
 
-    pub(super) fn panel_track_text(&self, track: &crate::model::LibraryRow) -> (String, String) {
+    pub(super) fn panel_track_text(
+        &self,
+        track: &rivu_protocol::model::LibraryRow,
+    ) -> (String, String) {
         let detail = format!(
             "{}{}{} · {}{}",
             track.artist,

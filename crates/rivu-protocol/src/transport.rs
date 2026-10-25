@@ -14,11 +14,11 @@ const BRIDGE_ALLOWANCE: Duration = Duration::from_secs(1);
 const FRAME_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const TRANSPORT_ALLOWANCE: Duration = Duration::from_secs(1);
 
-pub(super) fn bridge_timeout(operation_timeout: Duration) -> Duration {
+pub fn bridge_timeout(operation_timeout: Duration) -> Duration {
     operation_timeout + BRIDGE_ALLOWANCE
 }
 
-pub(super) fn response_timeout(operation_timeout: Duration) -> Duration {
+pub fn response_timeout(operation_timeout: Duration) -> Duration {
     bridge_timeout(operation_timeout) + FRAME_WRITE_TIMEOUT + TRANSPORT_ALLOWANCE
 }
 
@@ -45,7 +45,7 @@ fn decode_body<T: for<'de> Deserialize<'de>>(bytes: &[u8], context: &'static str
     Ok(value)
 }
 
-pub(super) fn decode_request_frame(bytes: &[u8]) -> Result<WireRequest> {
+pub fn decode_request_frame(bytes: &[u8]) -> Result<WireRequest> {
     let (message_type, body) = decode_message_header(bytes, MAX_REQUEST)?;
     let message_type = RequestType::try_from(message_type)?;
     let request = match message_type {
@@ -60,7 +60,7 @@ pub(super) fn decode_request_frame(bytes: &[u8]) -> Result<WireRequest> {
     Ok(request)
 }
 
-pub(super) fn decode_response_frame(bytes: &[u8]) -> Result<WireResponse> {
+pub fn decode_response_frame(bytes: &[u8]) -> Result<WireResponse> {
     let (message_type, body) = decode_message_header(bytes, MAX_RESPONSE)?;
     let message_type = ResponseType::try_from(message_type)?;
     let response = match message_type {
@@ -85,10 +85,10 @@ pub(super) fn decode_response_frame(bytes: &[u8]) -> Result<WireResponse> {
 }
 
 // Reuse small frames, but never retain a bulk transfer for an idle session.
-pub(super) const RETAINED_BUFFER_LIMIT: usize = 256 * 1024;
+pub const RETAINED_BUFFER_LIMIT: usize = 256 * 1024;
 const FRAME_GROWTH_SLACK: usize = 64 * 1024;
 
-pub(super) fn release_large_buffer(buffer: &mut Vec<u8>) {
+pub fn release_large_buffer(buffer: &mut Vec<u8>) {
     if buffer.capacity() > RETAINED_BUFFER_LIMIT {
         *buffer = Vec::new();
     }
@@ -141,7 +141,7 @@ fn encode_message_into<T: Serialize>(
     Ok(())
 }
 
-pub(super) fn encode_request_frame_into(request: &WireRequest, bytes: &mut Vec<u8>) -> Result<()> {
+pub fn encode_request_frame_into(request: &WireRequest, bytes: &mut Vec<u8>) -> Result<()> {
     match request {
         WireRequest::Hello(value) => encode_message_into(
             PROTOCOL_VERSION,
@@ -181,10 +181,7 @@ pub(super) fn encode_request_frame_into(request: &WireRequest, bytes: &mut Vec<u
     }
 }
 
-pub(super) fn encode_response_frame_into(
-    response: &WireResponse,
-    bytes: &mut Vec<u8>,
-) -> Result<()> {
+pub fn encode_response_frame_into(response: &WireResponse, bytes: &mut Vec<u8>) -> Result<()> {
     match response {
         WireResponse::Hello(value) => encode_message_into(
             PROTOCOL_VERSION,
@@ -230,7 +227,7 @@ pub(super) fn encode_response_frame_into(
         ),
     }
 }
-pub(super) async fn read_frame<S: AsyncRead + Unpin>(
+pub async fn read_frame<S: AsyncRead + Unpin>(
     stream: &mut S,
     limit: usize,
     pending: &mut BytesMut,
@@ -273,7 +270,7 @@ async fn fill_frame<S: AsyncRead + Unpin>(
     Ok(length)
 }
 
-pub(super) async fn write_frame_buffered<S: AsyncWrite + Unpin>(
+pub async fn write_frame_buffered<S: AsyncWrite + Unpin>(
     stream: &mut S,
     value: &WireResponse,
     buffer: &mut Vec<u8>,
@@ -294,7 +291,7 @@ pub(super) async fn write_frame_buffered<S: AsyncWrite + Unpin>(
     result?
 }
 
-pub(super) async fn write_error_frame<S: AsyncWrite + Unpin>(
+pub async fn write_error_frame<S: AsyncWrite + Unpin>(
     stream: &mut S,
     buffer: &mut Vec<u8>,
     error: impl Into<String>,
@@ -303,7 +300,7 @@ pub(super) async fn write_error_frame<S: AsyncWrite + Unpin>(
     write_frame_buffered(stream, &response, buffer).await
 }
 
-pub(super) async fn write_request_frame_buffered<S: AsyncWrite + Unpin>(
+pub async fn write_request_frame_buffered<S: AsyncWrite + Unpin>(
     stream: &mut S,
     request: &WireRequest,
     buffer: &mut Vec<u8>,
@@ -325,7 +322,7 @@ pub(super) async fn write_request_frame_buffered<S: AsyncWrite + Unpin>(
     result?
 }
 
-pub(super) async fn read_response_frame<S: AsyncRead + Unpin>(
+pub async fn read_response_frame<S: AsyncRead + Unpin>(
     stream: &mut S,
     pending: &mut BytesMut,
 ) -> Result<WireResponse> {
@@ -348,18 +345,18 @@ pub(super) async fn read_response_frame<S: AsyncRead + Unpin>(
     result
 }
 
-pub(super) fn error_frame(error: impl Into<String>) -> WireResponse {
+pub fn error_frame(error: impl Into<String>) -> WireResponse {
     WireResponse::Error(error.into())
 }
 
-pub(super) fn unpack_error(response: WireResponse) -> Result<WireResponse> {
+pub fn unpack_error(response: WireResponse) -> Result<WireResponse> {
     if let WireResponse::Error(error) = response {
         bail!("IPC server error: {error}");
     }
     Ok(response)
 }
 
-pub(super) fn validate_hello(response: HelloResponse) -> Result<HelloResponse> {
+pub fn validate_hello(response: HelloResponse) -> Result<HelloResponse> {
     ensure!(
         u32::from_le_bytes(response.instance_id) != UNKNOWN_INSTANCE,
         "IPC Hello returned instance 0"
@@ -367,7 +364,7 @@ pub(super) fn validate_hello(response: HelloResponse) -> Result<HelloResponse> {
     Ok(response)
 }
 
-pub(super) fn unpack_hello(response: WireResponse) -> Result<HelloResponse> {
+pub fn unpack_hello(response: WireResponse) -> Result<HelloResponse> {
     let WireResponse::Hello(response) = unpack_error(response)? else {
         bail!("IPC response was not a Hello response")
     };

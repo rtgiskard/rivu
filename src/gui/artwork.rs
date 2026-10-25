@@ -7,10 +7,8 @@ use std::{
     sync::Arc,
 };
 
-use crate::{
-    artwork::{Artwork as LoadedArtwork, ArtworkIdentity},
-    model::Track,
-};
+use crate::artwork::{Artwork as LoadedArtwork, ArtworkIdentity};
+use rivu_protocol::model::Track;
 
 use gpui::{
     App, Asset, Context, Entity, EntityId, ImageCache, ImageCacheError, ImageCacheItem, Img,
@@ -1370,10 +1368,8 @@ mod tests {
             album_artwork::{AlbumArtwork, AlbumArtworkPanel},
             layout::{Axis, Node, Panel},
         };
-        use crate::{
-            config::{AlbumArtworkMode, AlbumArtworkOptions, AlbumArtworkStyle, Config},
-            model::PlaybackStatus,
-        };
+        use crate::config::{AlbumArtworkMode, AlbumArtworkOptions, AlbumArtworkStyle, Config};
+        use rivu_protocol::model::PlaybackStatus;
 
         cx.update(|cx| {
             crate::gui::appearance::theme::set_theme(crate::theme::Theme::default(), cx);
@@ -1564,10 +1560,8 @@ mod tests {
             album_artwork::{AlbumArtwork, AlbumArtworkPanel},
             layout::{Axis, Node, Panel},
         };
-        use crate::{
-            config::{AlbumArtworkOptions, AlbumArtworkStyle, Config},
-            model::PlaybackStatus,
-        };
+        use crate::config::{AlbumArtworkOptions, AlbumArtworkStyle, Config};
+        use rivu_protocol::model::PlaybackStatus;
 
         let directory = tempfile::tempdir().unwrap();
         let manager = Arc::new(crate::artwork::ArtworkManager::new(directory.path()));

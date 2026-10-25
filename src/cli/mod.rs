@@ -15,16 +15,12 @@ use self::{
 use anyhow::{Context, Result, bail};
 use clap::{CommandFactory, FromArgMatches};
 use rivu::config::ConfigPersistence;
-use rivu::{
-    app::App,
-    config,
-    i18n::Localizer,
-    ipc,
+use rivu::{app::App, config, i18n::Localizer, terminal};
+use rivu_audio as audio;
+use rivu_protocol::{
     model::{Command, Query, RepeatMode},
     response::{StateSections, ViewResponse},
-    terminal,
 };
-use rivu_audio as audio;
 use std::{path::PathBuf, thread, time::Duration};
 
 pub(super) fn print_error(error: &anyhow::Error) {
@@ -165,7 +161,7 @@ pub(super) fn run() -> Result<()> {
             Ok(())
         }
         Action::Library(LibraryAction::Status) => {
-            let response = ipc::get_state(&data_dir, StateSections::ALL)?;
+            let response = rivu_client::get_state(&data_dir, StateSections::ALL)?;
             show_state(&i18n, &response, args.json)
         }
         Action::Library(LibraryAction::List {
@@ -179,13 +175,13 @@ pub(super) fn run() -> Result<()> {
             | OtherTracksAction::Locate { .. }),
         )) => {
             let query = other_tracks_query(action)?;
-            let view = ipc::query(&data_dir, &query)?
+            let view = rivu_client::query(&data_dir, &query)?
                 .result
                 .map_err(anyhow::Error::from)?;
             output::show_other_tracks(&i18n, view, args.json)
         }
         Action::Library(LibraryAction::ScanStatus { id }) => {
-            let view = ipc::query(&data_dir, &Query::ScanTask { id })?
+            let view = rivu_client::query(&data_dir, &Query::ScanTask { id })?
                 .result
                 .map_err(anyhow::Error::from)?;
             let ViewResponse::ScanTask(task) = view else {
@@ -205,7 +201,7 @@ pub(super) fn run() -> Result<()> {
             Ok(())
         }
         Action::Library(LibraryAction::Stats) => {
-            let response = ipc::query(&data_dir, &Query::LibraryStats)?;
+            let response = rivu_client::query(&data_dir, &Query::LibraryStats)?;
             let ViewResponse::LibraryStats(stats) = response.result.map_err(anyhow::Error::from)?
             else {
                 bail!("Statistics query returned an unexpected response");
@@ -227,7 +223,7 @@ pub(super) fn run() -> Result<()> {
             Ok(())
         }
         Action::Library(LibraryAction::History { limit }) => {
-            let response = ipc::get_state(
+            let response = rivu_client::get_state(
                 &data_dir,
                 StateSections {
                     library: true,
@@ -266,7 +262,7 @@ pub(super) fn run() -> Result<()> {
                 album,
                 decoder_hint: None,
             };
-            let ack = command_ack(ipc::request_ack(&data_dir, &command), args.json)?;
+            let ack = command_ack(rivu_client::request_ack(&data_dir, &command), args.json)?;
             show_ack(&i18n, &ack, args.json)
         }
         Action::Library(LibraryAction::Duplicates {
@@ -282,7 +278,7 @@ pub(super) fn run() -> Result<()> {
                 },
                 None => Query::DuplicateGroups { offset, limit },
             };
-            let view = ipc::query(&data_dir, &query)?
+            let view = rivu_client::query(&data_dir, &query)?
                 .result
                 .map_err(anyhow::Error::from)?;
             if args.json {
@@ -386,7 +382,7 @@ pub(super) fn run() -> Result<()> {
             Ok(())
         }
         Action::Library(LibraryAction::RelocationStatus { id }) => {
-            let view = ipc::query(&data_dir, &Query::RelocationTask { id })?
+            let view = rivu_client::query(&data_dir, &Query::RelocationTask { id })?
                 .result
                 .map_err(anyhow::Error::from)?;
             let ViewResponse::RelocationTask(task) = view else {
@@ -396,10 +392,10 @@ pub(super) fn run() -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&task)?);
             } else {
                 let phase = i18n.text(match task.phase {
-                    rivu::model::RelocationPhase::Verifying => "core-verifying",
-                    rivu::model::RelocationPhase::Completed => "core-completed",
-                    rivu::model::RelocationPhase::Cancelled => "core-cancelled",
-                    rivu::model::RelocationPhase::Failed => "core-failed",
+                    rivu_protocol::model::RelocationPhase::Verifying => "core-verifying",
+                    rivu_protocol::model::RelocationPhase::Completed => "core-completed",
+                    rivu_protocol::model::RelocationPhase::Cancelled => "core-cancelled",
+                    rivu_protocol::model::RelocationPhase::Failed => "core-failed",
                 });
                 println!(
                     "{}",
@@ -424,7 +420,7 @@ pub(super) fn run() -> Result<()> {
             target_id,
             wait,
         }) => {
-            let mut session = ipc::client_session(&data_dir)?;
+            let mut session = rivu_client::client_session(&data_dir)?;
             let ack = command_ack(
                 session.request_ack(&Command::RelocateTrack {
                     source_id,
@@ -459,8 +455,8 @@ pub(super) fn run() -> Result<()> {
                     bail!("Unexpected relocation status response");
                 };
                 match task.phase {
-                    rivu::model::RelocationPhase::Verifying => continue,
-                    rivu::model::RelocationPhase::Completed => {
+                    rivu_protocol::model::RelocationPhase::Verifying => continue,
+                    rivu_protocol::model::RelocationPhase::Completed => {
                         if args.json {
                             println!("{}", serde_json::to_string_pretty(&task)?);
                         } else {
@@ -489,13 +485,13 @@ pub(super) fn run() -> Result<()> {
         }
         Action::Library(LibraryAction::Optimize) => {
             let ack = command_ack(
-                ipc::request_ack(&data_dir, &Command::OptimizeDatabase),
+                rivu_client::request_ack(&data_dir, &Command::OptimizeDatabase),
                 args.json,
             )?;
             if !ack.is_success() {
                 return show_ack(&i18n, &ack, args.json);
             }
-            let response = ipc::get_state(
+            let response = rivu_client::get_state(
                 &data_dir,
                 StateSections {
                     system: true,
@@ -533,14 +529,14 @@ pub(super) fn run() -> Result<()> {
         }
         Action::Quit => {
             let ack = command_ack(
-                ipc::request_ack(&data_dir, &rivu::app::AppCommand::Shutdown),
+                rivu_client::request_ack(&data_dir, &rivu_protocol::AppCommand::Shutdown),
                 args.json,
             )?;
             show_ack(&i18n, &ack, args.json)
         }
         action => {
             let (command, wait_scan) = translate(action)?;
-            let mut session = ipc::client_session(&data_dir)?;
+            let mut session = rivu_client::client_session(&data_dir)?;
             let ack = command_ack(session.request_ack(&command), args.json)?;
             if !ack.is_success() {
                 return show_ack(&i18n, &ack, args.json);
@@ -559,7 +555,7 @@ pub(super) fn run() -> Result<()> {
                         bail!("Scan task query returned a different task ID");
                     }
                     match task.progress.phase {
-                        rivu::model::ScanPhase::Completed => {
+                        rivu_protocol::model::ScanPhase::Completed => {
                             if args.json {
                                 println!("{}", serde_json::to_string_pretty(&task)?);
                             } else {
@@ -567,7 +563,8 @@ pub(super) fn run() -> Result<()> {
                             }
                             return Ok(());
                         }
-                        rivu::model::ScanPhase::Failed | rivu::model::ScanPhase::Cancelled => {
+                        rivu_protocol::model::ScanPhase::Failed
+                        | rivu_protocol::model::ScanPhase::Cancelled => {
                             if args.json {
                                 println!("{}", serde_json::to_string_pretty(&task)?);
                             }
@@ -849,7 +846,7 @@ mod other_tracks_tests {
     use super::{Action, Args, Command, LibraryAction, Query, other_tracks_query, translate};
     use anyhow::Result;
     use clap::Parser;
-    use rivu::model::LibrarySort;
+    use rivu_protocol::model::LibrarySort;
 
     fn action(arguments: &[&str]) -> Action {
         Args::try_parse_from(std::iter::once("rivu").chain(arguments.iter().copied()))

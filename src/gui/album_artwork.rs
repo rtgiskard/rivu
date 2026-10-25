@@ -15,8 +15,8 @@ use crate::{
         AlbumArtworkDirection, AlbumArtworkMode, AlbumArtworkOptions, AlbumArtworkStyle, Config,
     },
     i18n::Localizer,
-    model::{PlaybackStatus, Track},
 };
+use rivu_protocol::model::{PlaybackStatus, Track};
 
 use super::artwork::{Artwork, ArtworkDecoration, ArtworkImages, ArtworkLoader, ArtworkView};
 

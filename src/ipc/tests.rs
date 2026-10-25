@@ -1,8 +1,9 @@
 use super::*;
-use super::{protocol::*, transport::*};
+use crate::app::AppHandle;
 use crate::config::ConfigPersistence;
-use crate::{
-    app::{AppCommand, AppHandle},
+use rivu_client::{CommandFailure, InstanceChanged, client_session};
+use rivu_protocol::{AppCommand, protocol::*, transport::*};
+use rivu_protocol::{
     model::{Command, Query},
     response::{Ack, QueryResponse, StateResponse, StateRevisions, StateSections},
 };
@@ -84,7 +85,7 @@ fn scan_task_query_and_cancel_wire_round_trip_preserve_id() {
 
 #[test]
 fn other_tracks_requests_round_trip_boundaries() {
-    use crate::model::LibrarySort;
+    use rivu_protocol::model::LibrarySort;
     let mut encoded = Vec::new();
     for query in [None, Some(String::new()), Some("Été_100%".into())] {
         for favorite in [None, Some(false), Some(true)] {
@@ -192,7 +193,7 @@ fn other_tracks_requests_round_trip_boundaries() {
 
 #[test]
 fn other_tracks_wire_usize_boundaries_are_checked() {
-    use crate::model::LibrarySort;
+    use rivu_protocol::model::LibrarySort;
     for (offset, limit) in [(u64::MAX, 0), (0, u64::MAX)] {
         let decoded = Query::try_from(WireQuery::OtherTracksPage {
             query: None,
@@ -219,7 +220,7 @@ fn optional_search_queries_round_trip() {
         let query = filter.map(str::to_owned);
         for expected in [
             Query::AlbumTracks {
-                key: crate::model::AlbumKey {
+                key: rivu_protocol::model::AlbumKey {
                     directory: "/music".into(),
                     title: "Album".into(),
                 },
@@ -379,36 +380,38 @@ fn playlist_group_requests_and_locations_round_trip_stable_identities() {
         );
     }
     let response = QueryResponse {
-        revisions: crate::response::QueryRevisions {
+        revisions: rivu_protocol::response::QueryRevisions {
             library: 5,
             structure: 6,
             playlist: 7,
             queue: 8,
-            playlist_entries: Some(crate::response::PlaylistEntryRevision {
+            playlist_entries: Some(rivu_protocol::response::PlaylistEntryRevision {
                 playlist_id: 10,
                 revision: 9,
             }),
             duplicate_groups: 10,
             duplicate_members: 11,
-            track: Some(crate::response::TrackRevision {
+            track: Some(rivu_protocol::response::TrackRevision {
                 track_id: 11,
                 revision: 12,
             }),
-            playlist_metadata: Some(crate::response::PlaylistEntryRevision {
+            playlist_metadata: Some(rivu_protocol::response::PlaylistEntryRevision {
                 playlist_id: 10,
                 revision: 13,
             }),
         },
-        result: Ok(crate::response::ViewResponse::PlaylistEntryLocations(vec![
-            crate::model::PlaylistEntryLocation {
-                id: 42,
-                playlist_id: 10,
-                track_id: 11,
-                position: 1000,
-                offset: 1000,
-                total: 2000,
-            },
-        ])),
+        result: Ok(
+            rivu_protocol::response::ViewResponse::PlaylistEntryLocations(vec![
+                rivu_protocol::model::PlaylistEntryLocation {
+                    id: 42,
+                    playlist_id: 10,
+                    track_id: 11,
+                    position: 1000,
+                    offset: 1000,
+                    total: 2000,
+                },
+            ]),
+        ),
     };
     let expected = serde_json::to_value(&response).unwrap();
     encode_response_frame_into(&WireResponse::Query(response), &mut encoded).unwrap();
@@ -420,7 +423,7 @@ fn playlist_group_requests_and_locations_round_trip_stable_identities() {
 
 #[test]
 fn scan_task_status_wire_round_trip_preserves_all_phases() {
-    use crate::{
+    use rivu_protocol::{
         model::{ScanPhase, ScanProgress, ScanTaskStatus},
         response::{QueryRevisions, ViewResponse},
     };
@@ -517,7 +520,7 @@ fn library_locate_wire_round_trip_preserves_exact_identity_and_projection() {
             query: Some("needle".into()),
             favorite: Some(true),
             missing: Some(false),
-            sort: crate::model::LibrarySort::MostPlayed,
+            sort: rivu_protocol::model::LibrarySort::MostPlayed,
         };
         let expected = serde_json::to_value(&query).unwrap();
         let mut encoded = Vec::new();
@@ -535,7 +538,7 @@ fn library_locate_wire_round_trip_preserves_exact_identity_and_projection() {
 
 #[test]
 fn library_root_query_wire_round_trip_preserves_paths_filters_and_pages() {
-    use crate::model::LibrarySort;
+    use rivu_protocol::model::LibrarySort;
     for sort in [LibrarySort::Id, LibrarySort::Album, LibrarySort::MostPlayed] {
         for query in [None, Some(""), Some("Été_100%")] {
             for favorite in [None, Some(true), Some(false)] {
@@ -576,7 +579,7 @@ fn library_root_query_wire_round_trip_preserves_paths_filters_and_pages() {
             "/音楽/夏".into(),
             "/音楽".into(),
         ],
-        vec!["/music".into(); crate::model::MAX_QUERY_ROWS],
+        vec!["/music".into(); rivu_protocol::model::MAX_QUERY_ROWS],
     ] {
         let query = Query::LibraryRootCounts { roots };
         let expected = serde_json::to_value(&query).unwrap();
@@ -595,7 +598,7 @@ fn library_root_query_wire_round_trip_preserves_paths_filters_and_pages() {
 
 #[test]
 fn library_root_responses_wire_round_trip_preserves_projection_and_revisions() {
-    use crate::{
+    use rivu_protocol::{
         model::{LibraryRootCount, LibraryRow, Page},
         response::{QueryRevisions, ViewResponse},
     };
@@ -656,12 +659,10 @@ fn library_root_responses_wire_round_trip_preserves_projection_and_revisions() {
 
 #[test]
 fn library_root_queries_run_through_real_owner_and_ipc_session() {
-    use crate::{
-        config::Config,
-        core::Runtime,
+    use crate::{config::Config, core::Runtime, store::Store};
+    use rivu_protocol::{
         model::{LibrarySort, MAX_QUERY_ROWS},
         response::{QueryError, ViewResponse},
-        store::Store,
     };
     let directory = socket_test_directory();
     let root = directory.path().join("音楽");
@@ -772,12 +773,8 @@ fn library_root_queries_run_through_real_owner_and_ipc_session() {
 
 #[test]
 fn playlist_content_lifetimes_and_batches_are_isolated_from_the_catalog() {
-    use crate::{
-        config::Config,
-        core::Runtime,
-        response::{PlaylistEntryRevision, QueryError, ViewResponse},
-        store::Store,
-    };
+    use crate::{config::Config, core::Runtime, store::Store};
+    use rivu_protocol::response::{PlaylistEntryRevision, QueryError, ViewResponse};
     let directory = socket_test_directory();
     let database = directory.path().join("library.db");
     drop(Store::open(&database).unwrap());
@@ -1291,7 +1288,7 @@ fn playlist_content_lifetimes_and_batches_are_isolated_from_the_catalog() {
 #[test]
 fn ack_wire_round_trip_has_explicit_response_type() {
     let ack = Ack {
-        status: crate::response::AckStatus::Failed,
+        status: rivu_protocol::response::AckStatus::Failed,
         error: Some("failed".into()),
         revision: 42,
         scan_id: Some(u64::MAX),
@@ -1313,8 +1310,10 @@ fn ack_wire_round_trip_has_explicit_response_type() {
 #[test]
 fn query_wire_response_has_no_state_queue_payload() {
     let response = QueryResponse {
-        revisions: crate::response::QueryRevisions::default(),
-        result: Err(crate::response::QueryError::Message("query failed".into())),
+        revisions: rivu_protocol::response::QueryRevisions::default(),
+        result: Err(rivu_protocol::response::QueryError::Message(
+            "query failed".into(),
+        )),
     };
     let mut encoded = Vec::new();
     encode_response_frame_into(&WireResponse::Query(response), &mut encoded).unwrap();
@@ -1336,7 +1335,7 @@ fn partial_state_wire_round_trip_omits_unrequested_sections() {
         },
         playback: None,
         queue: None,
-        library: Some(crate::model::LibrarySnapshot::default()),
+        library: Some(rivu_protocol::model::LibrarySnapshot::default()),
         system: None,
     };
     let mut encoded = Vec::new();
@@ -1356,7 +1355,7 @@ fn partial_state_wire_round_trip_omits_unrequested_sections() {
 #[test]
 fn system_scan_task_identity_wire_round_trip_preserves_boundaries() {
     for scan_task_id in [None, Some(0), Some(42), Some(u64::MAX)] {
-        let system = crate::model::SystemState {
+        let system = rivu_protocol::model::SystemState {
             scan_task_id,
             scanning: scan_task_id.is_some(),
             ..Default::default()
@@ -1417,10 +1416,10 @@ fn system_config_wire_adapter_preserves_optional_fields_and_library_columns() {
             album_artwork_fps: 240,
             ..Default::default()
         });
-        let system = crate::model::SystemState {
+        let system = rivu_protocol::model::SystemState {
             config: config.clone(),
             revision: 42,
-            ..crate::model::SystemState::default()
+            ..rivu_protocol::model::SystemState::default()
         };
         let mut encoded = Vec::new();
         encode_response_frame_into(
@@ -1453,7 +1452,7 @@ fn request_round_trip_uses_explicit_message_types() {
             query: Some("album".into()),
             favorite: Some(true),
             missing: Some(false),
-            sort: crate::model::LibrarySort::Album,
+            sort: rivu_protocol::model::LibrarySort::Album,
             offset: 7,
             limit: 11,
         })),
@@ -1733,9 +1732,9 @@ fn command_decode_rejects_malicious_postcard_collection_length() {
 #[test]
 fn response_decode_rejects_malicious_postcard_collection_length() {
     let response = WireResponse::Query(QueryResponse {
-        revisions: crate::response::QueryRevisions::default(),
-        result: Ok(crate::response::ViewResponse::PlaylistSummaries(
-            crate::model::Page {
+        revisions: rivu_protocol::response::QueryRevisions::default(),
+        result: Ok(rivu_protocol::response::ViewResponse::PlaylistSummaries(
+            rivu_protocol::model::Page {
                 total: 0,
                 rows: Vec::new(),
             },
@@ -2044,9 +2043,9 @@ pub(crate) fn reply_test_ack(stream: &mut std::os::unix::net::UnixStream, ack: A
 
 fn playlist_test_response(total: usize) -> QueryResponse {
     QueryResponse {
-        revisions: crate::response::QueryRevisions::default(),
-        result: Ok(crate::response::ViewResponse::PlaylistSummaries(
-            crate::model::Page {
+        revisions: rivu_protocol::response::QueryRevisions::default(),
+        result: Ok(rivu_protocol::response::ViewResponse::PlaylistSummaries(
+            rivu_protocol::model::Page {
                 total,
                 rows: Vec::new(),
             },
@@ -2060,7 +2059,8 @@ fn client_session_reuses_connection_after_command_and_request_rejections() {
 
     let directory = socket_test_directory();
     let listener =
-        UnixListener::bind_addr(&super::endpoint::address(directory.path()).unwrap()).unwrap();
+        UnixListener::bind_addr(&rivu_protocol::protocol::address(directory.path()).unwrap())
+            .unwrap();
     let server = std::thread::spawn(move || {
         let mut stream = listener.accept().unwrap().0;
         complete_test_handshake(&mut stream);
@@ -2076,7 +2076,7 @@ fn client_session_reuses_connection_after_command_and_request_rejections() {
         reply_test_ack(
             &mut stream,
             Ack {
-                status: crate::response::AckStatus::Failed,
+                status: rivu_protocol::response::AckStatus::Failed,
                 error: Some("rejected".into()),
                 revision: 3,
                 scan_id: None,
@@ -2107,7 +2107,7 @@ fn client_session_reuses_connection_after_command_and_request_rejections() {
     };
     let response = session.query(&query).unwrap();
     assert!(
-        matches!(response.result, Ok(crate::response::ViewResponse::PlaylistSummaries(page)) if page.total == 40)
+        matches!(response.result, Ok(rivu_protocol::response::ViewResponse::PlaylistSummaries(page)) if page.total == 40)
     );
     let ack = session
         .request_ack(&Command::CreatePlaylist { name: "new".into() })
@@ -2122,7 +2122,7 @@ fn client_session_reuses_connection_after_command_and_request_rejections() {
     assert!(session.query(&query).is_err());
     let response = session.query(&query).unwrap();
     assert!(
-        matches!(response.result, Ok(crate::response::ViewResponse::PlaylistSummaries(page)) if page.total == 7)
+        matches!(response.result, Ok(rivu_protocol::response::ViewResponse::PlaylistSummaries(page)) if page.total == 7)
     );
     server.join().unwrap();
 }
@@ -2133,7 +2133,8 @@ fn client_session_discards_partial_failed_response_before_next_explicit_request(
 
     let directory = socket_test_directory();
     let listener =
-        UnixListener::bind_addr(&super::endpoint::address(directory.path()).unwrap()).unwrap();
+        UnixListener::bind_addr(&rivu_protocol::protocol::address(directory.path()).unwrap())
+            .unwrap();
     let server = std::thread::spawn(move || {
         let mut stream = listener.accept().unwrap().0;
         complete_test_handshake(&mut stream);
@@ -2143,7 +2144,7 @@ fn client_session_discards_partial_failed_response_before_next_explicit_request(
         let mut frame = Vec::new();
         encode_response_frame_into(
             &WireResponse::Ack(Ack {
-                status: crate::response::AckStatus::Succeeded,
+                status: rivu_protocol::response::AckStatus::Succeeded,
                 error: None,
                 revision: 1,
                 scan_id: None,
@@ -2165,7 +2166,7 @@ fn client_session_discards_partial_failed_response_before_next_explicit_request(
         reply_test_ack(
             &mut stream,
             Ack {
-                status: crate::response::AckStatus::Succeeded,
+                status: rivu_protocol::response::AckStatus::Succeeded,
                 error: None,
                 revision: 2,
                 scan_id: None,
@@ -2183,7 +2184,7 @@ fn client_session_discards_partial_failed_response_before_next_explicit_request(
         .unwrap_err();
     assert_eq!(
         error.downcast_ref::<CommandFailure>().unwrap().status,
-        crate::response::AckStatus::Unknown
+        rivu_protocol::response::AckStatus::Unknown
     );
     let ack = session
         .request_ack(&Command::CreatePlaylist {
@@ -2204,7 +2205,8 @@ fn cancelling_client_session_closes_pending_watch_with_partial_response() {
 
     let directory = socket_test_directory();
     let listener =
-        UnixListener::bind_addr(&super::endpoint::address(directory.path()).unwrap()).unwrap();
+        UnixListener::bind_addr(&rivu_protocol::protocol::address(directory.path()).unwrap())
+            .unwrap();
     let mut session = client_session(directory.path()).unwrap();
     let stop = session.cancellation();
     let client = std::thread::spawn(move || {
@@ -2234,7 +2236,7 @@ fn cancelling_client_session_closes_pending_watch_with_partial_response() {
 #[test]
 fn peer_verification_checks_kernel_credentials_on_both_ends() {
     let directory = socket_test_directory();
-    let address = super::endpoint::address(directory.path()).unwrap();
+    let address = rivu_protocol::protocol::address(directory.path()).unwrap();
     let listener = std::os::unix::net::UnixListener::bind_addr(&address).unwrap();
     let client = std::os::unix::net::UnixStream::connect_addr(&address).unwrap();
     let accepted = listener.accept().unwrap().0;
@@ -2250,7 +2252,7 @@ fn peer_verification_checks_kernel_credentials_on_both_ends() {
         let stream = tokio::net::UnixStream::from_std(stream).unwrap();
         assert_eq!(stream.peer_cred().unwrap().uid(), uid);
         assert_eq!(stream.peer_cred().unwrap().gid(), gid);
-        assert!(super::endpoint::verify_peer(&stream).is_ok());
+        assert!(rivu_protocol::protocol::verify_peer(&stream).is_ok());
     }
 }
 
@@ -2259,7 +2261,8 @@ fn pinned_session_rejects_initial_replacement_before_commands_queries_or_state()
     use std::{io::Read, os::unix::net::UnixListener};
     let directory = socket_test_directory();
     let listener =
-        UnixListener::bind_addr(&super::endpoint::address(directory.path()).unwrap()).unwrap();
+        UnixListener::bind_addr(&rivu_protocol::protocol::address(directory.path()).unwrap())
+            .unwrap();
     let server = std::thread::spawn(move || {
         for _ in 0..3 {
             let mut stream = listener.accept().unwrap().0;
@@ -2281,7 +2284,7 @@ fn pinned_session_rejects_initial_replacement_before_commands_queries_or_state()
     assert!(error.is::<InstanceChanged>());
     assert_eq!(
         error.downcast_ref::<CommandFailure>().unwrap().status,
-        crate::response::AckStatus::NotAdmitted
+        rivu_protocol::response::AckStatus::NotAdmitted
     );
     let error = session
         .query(&Query::PlaylistSummaries {
@@ -2305,7 +2308,8 @@ fn pinned_session_rejects_reconnected_instance_without_replaying_failed_mutation
     };
     let directory = socket_test_directory();
     let listener =
-        UnixListener::bind_addr(&super::endpoint::address(directory.path()).unwrap()).unwrap();
+        UnixListener::bind_addr(&rivu_protocol::protocol::address(directory.path()).unwrap())
+            .unwrap();
     let server = std::thread::spawn(move || {
         let mut stream = listener.accept().unwrap().0;
         complete_test_handshake(&mut stream);
@@ -2341,7 +2345,8 @@ fn independent_cli_session_can_explicitly_reconnect_to_a_new_instance() {
     use std::os::unix::net::UnixListener;
     let directory = socket_test_directory();
     let listener =
-        UnixListener::bind_addr(&super::endpoint::address(directory.path()).unwrap()).unwrap();
+        UnixListener::bind_addr(&rivu_protocol::protocol::address(directory.path()).unwrap())
+            .unwrap();
     let server = std::thread::spawn(move || {
         let mut stream = listener.accept().unwrap().0;
         complete_test_handshake(&mut stream);
@@ -2355,7 +2360,7 @@ fn independent_cli_session_can_explicitly_reconnect_to_a_new_instance() {
         reply_test_ack(
             &mut stream,
             Ack {
-                status: crate::response::AckStatus::Succeeded,
+                status: rivu_protocol::response::AckStatus::Succeeded,
                 error: None,
                 revision: 2,
                 scan_id: None,
@@ -2393,7 +2398,7 @@ fn instance_acquisition_creates_directory_without_socket_or_lock_files() {
     assert!(data_dir.is_dir());
     assert_eq!(std::fs::read_dir(&data_dir).unwrap().count(), 0);
     assert!(SocketOwner::acquire(&data_dir).is_err());
-    let address = super::endpoint::address(&data_dir).unwrap();
+    let address = rivu_protocol::protocol::address(&data_dir).unwrap();
     assert!(std::os::unix::net::UnixStream::connect_addr(&address).is_ok());
     drop(owner);
     assert_eq!(std::fs::read_dir(&data_dir).unwrap().count(), 0);
@@ -2412,7 +2417,7 @@ fn directory_aliases_share_instance_ownership_and_transport() {
     let relative = data_dir.strip_prefix(&current_dir).unwrap();
     for alias in [symlink.as_path(), relative] {
         assert!(SocketOwner::acquire(alias).is_err());
-        let address = super::endpoint::address(alias).unwrap();
+        let address = rivu_protocol::protocol::address(alias).unwrap();
         assert!(std::os::unix::net::UnixStream::connect_addr(&address).is_ok());
     }
     drop(owner);
@@ -2431,7 +2436,7 @@ fn distinct_data_directories_acquire_independent_instances() {
     let second_owner = SocketOwner::acquire(&second).unwrap();
     for data_dir in [&first, &second] {
         assert!(SocketOwner::acquire(data_dir).is_err());
-        let address = super::endpoint::address(data_dir).unwrap();
+        let address = rivu_protocol::protocol::address(data_dir).unwrap();
         assert!(std::os::unix::net::UnixStream::connect_addr(&address).is_ok());
     }
     drop(first_owner);
@@ -2460,7 +2465,7 @@ fn simultaneous_starters_acquire_one_real_listener() {
             .filter_map(|thread| thread.join().unwrap().ok())
             .collect();
         assert_eq!(owners.len(), 1);
-        let address = super::endpoint::address(directory.path()).unwrap();
+        let address = rivu_protocol::protocol::address(directory.path()).unwrap();
         assert!(std::os::unix::net::UnixStream::connect_addr(&address).is_ok());
     });
     assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
@@ -2469,20 +2474,20 @@ fn simultaneous_starters_acquire_one_real_listener() {
 
 #[test]
 fn album_queries_and_commands_round_trip_exact_keys() {
-    let key = crate::model::AlbumKey {
+    let key = rivu_protocol::model::AlbumKey {
         directory: "/音楽/album".into(),
         title: String::new(),
     };
     for query in [
         Query::Albums {
             query: Some("artist 音楽".into()),
-            sort: crate::model::AlbumSort::Artist,
+            sort: rivu_protocol::model::AlbumSort::Artist,
             offset: 24,
             limit: 24,
         },
         Query::Albums {
             query: None,
-            sort: crate::model::AlbumSort::Title,
+            sort: rivu_protocol::model::AlbumSort::Title,
             offset: 0,
             limit: 24,
         },
@@ -2523,7 +2528,7 @@ fn album_queries_and_commands_round_trip_exact_keys() {
 
 #[test]
 fn queue_queries_and_full_queue_playlist_commands_round_trip() {
-    use crate::model::QueueCursor;
+    use rivu_protocol::model::QueueCursor;
     for query in [
         Query::QueuePage {
             query: None,
@@ -2532,7 +2537,7 @@ fn queue_queries_and_full_queue_playlist_commands_round_trip() {
         },
         Query::QueueBatch {
             query: None,
-            after: Some(crate::model::BatchContinuation {
+            after: Some(rivu_protocol::model::BatchContinuation {
                 cursor: QueueCursor {
                     position: 255,
                     id: 1000,
@@ -2541,7 +2546,7 @@ fn queue_queries_and_full_queue_playlist_commands_round_trip() {
                 scope: [42; 32],
             }),
             limit: 256,
-            expected: Some(crate::response::QueryRevisions {
+            expected: Some(rivu_protocol::response::QueryRevisions {
                 queue: 42,
                 ..Default::default()
             }),
@@ -2549,8 +2554,8 @@ fn queue_queries_and_full_queue_playlist_commands_round_trip() {
         Query::PlaylistEntryBatch {
             query: Some("needle".into()),
             playlist_id: 10,
-            after: Some(crate::model::BatchContinuation {
-                cursor: crate::model::PlaylistEntryCursor {
+            after: Some(rivu_protocol::model::BatchContinuation {
+                cursor: rivu_protocol::model::PlaylistEntryCursor {
                     position: 1023,
                     id: 5000,
                 },
@@ -2593,7 +2598,7 @@ fn queue_queries_and_full_queue_playlist_commands_round_trip() {
 
 #[test]
 fn filtered_occurrence_continuations_round_trip_and_reject_stale_ipc_scopes() {
-    use crate::response::{QueryError, ViewResponse};
+    use rivu_protocol::response::{QueryError, ViewResponse};
     let directory = socket_test_directory();
     let database = directory.path().join("library.db");
     drop(crate::store::Store::open(&database).unwrap());
@@ -2778,7 +2783,7 @@ fn large_explicit_occurrence_selections_fit_bounded_request_frames() {
 
 #[test]
 fn processing_commands_and_configuration_use_current_positional_contract() {
-    use crate::model::{
+    use rivu_protocol::model::{
         EqBandEdit, EqualizerEdit, NeuralPatch, NoiseSelection, ProcessingOperation,
     };
     let commands = [
@@ -2835,7 +2840,7 @@ fn processing_commands_and_configuration_use_current_positional_contract() {
 
 #[test]
 fn graph_command_frames_preserve_revision_typed_edit_targets_modes_and_export_paths() {
-    use crate::model::{GraphEdit, GraphExecutionMode, GraphNodeKind, GraphPort};
+    use rivu_protocol::model::{GraphEdit, GraphExecutionMode, GraphNodeKind, GraphPort};
     let port = GraphPort {
         node: u64::MAX,
         port: u16::MAX,
@@ -2895,7 +2900,7 @@ fn graph_command_frames_preserve_revision_typed_edit_targets_modes_and_export_pa
 
 #[test]
 fn graph_configuration_round_trip_retains_authoritative_revision_nodes_and_edges() {
-    use crate::model::{GraphEdit, GraphNodeKind};
+    use rivu_protocol::model::{GraphEdit, GraphNodeKind};
     let mut config = crate::config::Config::default();
     config
         .processing_graph
@@ -2930,7 +2935,7 @@ fn graph_configuration_round_trip_retains_authoritative_revision_nodes_and_edges
 
 #[test]
 fn graph_task_query_frame_retains_snapshot_revision_and_multiple_node_output_paths() {
-    use crate::model::{
+    use rivu_protocol::model::{
         GraphExecutionMode, GraphNodeOutput, GraphPort, ProcessingGraph, ProcessingOperation,
         ProcessingPhase, ProcessingSettings, ProcessingTaskStatus,
     };
@@ -2972,7 +2977,7 @@ fn graph_task_query_frame_retains_snapshot_revision_and_multiple_node_output_pat
             GraphNodeOutput {
                 port: target,
                 path: "/cache/run 91/output.wav".into(),
-                context: Some(crate::model::GraphOutputContext {
+                context: Some(rivu_protocol::model::GraphOutputContext {
                     path: "/cache/run 91/output-context.wav".into(),
                     start_frame: -256,
                 }),
@@ -2986,7 +2991,7 @@ fn graph_task_query_frame_retains_snapshot_revision_and_multiple_node_output_pat
     encode_response_frame_into(
         &WireResponse::Query(QueryResponse {
             revisions: Default::default(),
-            result: Ok(crate::response::ViewResponse::ProcessingTask(Some(
+            result: Ok(rivu_protocol::response::ViewResponse::ProcessingTask(Some(
                 Box::new(task.clone()),
             ))),
         }),
@@ -2996,7 +3001,8 @@ fn graph_task_query_frame_retains_snapshot_revision_and_multiple_node_output_pat
     let WireResponse::Query(decoded) = decode_response_frame(&encoded[4..]).unwrap() else {
         panic!("expected graph task response");
     };
-    let crate::response::ViewResponse::ProcessingTask(Some(decoded)) = decoded.result.unwrap()
+    let rivu_protocol::response::ViewResponse::ProcessingTask(Some(decoded)) =
+        decoded.result.unwrap()
     else {
         panic!("expected retained graph task");
     };

@@ -9,10 +9,10 @@ use crate::{
         coordination::manual_actions::ManualIntentId,
         feature::FeatureContext,
     },
-    model::{Command, DirectoryRow},
     projection::GuiSnapshot,
 };
 use gpui::{App, Context, SharedString, Window, prelude::*};
+use rivu_protocol::model::{Command, DirectoryRow};
 use rivu_ui::search::SearchEvent;
 use std::{cell::RefCell, rc::Rc, sync::Arc, time::Instant};
 
@@ -405,7 +405,7 @@ mod tests {
             .artist = !previous.system.config.library_columns.artist;
         assert!(display_changed(&previous, &next));
         next = previous.clone();
-        next.playback.status = crate::model::PlaybackStatus::Playing;
+        next.playback.status = rivu_protocol::model::PlaybackStatus::Playing;
         assert!(display_changed(&previous, &next));
     }
 }

@@ -1,14 +1,12 @@
 //! Dockable processing controls. Core owns committed parameters and task results;
 //! this owner retains only field drafts, selection and cancellable pointer intent.
 use super::{feature::FeatureContext, layout::interaction::DockGeometry};
-use crate::{
-    model::{
-        AuditionMode, Command, DenoisePatch, EqualizerEdit, NeuralPatch, NoiseSelection,
-        ProcessingOperation, ProcessingPhase, Track,
-    },
-    projection::GuiSnapshot,
-};
+use crate::projection::GuiSnapshot;
 use gpui::{prelude::*, *};
+use rivu_protocol::model::{
+    AuditionMode, Command, DenoisePatch, EqualizerEdit, NeuralPatch, NoiseSelection,
+    ProcessingOperation, ProcessingPhase, Track,
+};
 use rivu_ui::{
     IconButton, IconButtonDensity, IconButtonStyle, Popover, activate_control, button, caption,
     checkbox, column, disabled_control, dropdown_trigger, icon,
@@ -1361,7 +1359,7 @@ impl AudioProcessing {
         content
     }
 
-    fn task_settings(&self, task: &crate::model::ProcessingTaskStatus, cx: &App) -> Div {
+    fn task_settings(&self, task: &rivu_protocol::model::ProcessingTaskStatus, cx: &App) -> Div {
         let theme = rivu_ui::theme::palette(cx);
         let neural = &task.settings.neural;
         let parameters = match task.operation {
@@ -1684,9 +1682,9 @@ impl AudioProcessing {
         .flex_shrink_0()
         .whitespace_nowrap();
         let transport = self.tr(match self.state.playback.status {
-            crate::model::PlaybackStatus::Playing => "processing-workspace-playing",
-            crate::model::PlaybackStatus::Paused => "processing-workspace-paused",
-            crate::model::PlaybackStatus::Stopped => "processing-workspace-stopped",
+            rivu_protocol::model::PlaybackStatus::Playing => "processing-workspace-playing",
+            rivu_protocol::model::PlaybackStatus::Paused => "processing-workspace-paused",
+            rivu_protocol::model::PlaybackStatus::Stopped => "processing-workspace-stopped",
         });
         let selected_audio = match self.state.system.processing_audition {
             Some(audition) => {
@@ -1698,12 +1696,18 @@ impl AudioProcessing {
                     .mode
                     .map(|mode| {
                         self.tr(match mode {
-                            crate::model::GraphExecutionMode::Auto => "processing-graph-auto",
-                            crate::model::GraphExecutionMode::Realtime => {
+                            rivu_protocol::model::GraphExecutionMode::Auto => {
+                                "processing-graph-auto"
+                            }
+                            rivu_protocol::model::GraphExecutionMode::Realtime => {
                                 "processing-graph-realtime"
                             }
-                            crate::model::GraphExecutionMode::Hybrid => "processing-graph-hybrid",
-                            crate::model::GraphExecutionMode::Offline => "processing-graph-cached",
+                            rivu_protocol::model::GraphExecutionMode::Hybrid => {
+                                "processing-graph-hybrid"
+                            }
+                            rivu_protocol::model::GraphExecutionMode::Offline => {
+                                "processing-graph-cached"
+                            }
                         })
                     })
                     .unwrap_or_else(|| self.tr("processing-workspace-processed"));

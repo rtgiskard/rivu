@@ -1,5 +1,5 @@
 use super::*;
-use crate::model::Page;
+use rivu_protocol::model::Page;
 use std::time::Duration;
 
 fn search(ui: &UiState) -> &LibrarySearch {
@@ -66,7 +66,10 @@ fn fixture() -> (UiState, TuiSnapshot, Instant) {
     // its debounce deadline without sleeping or depending on test execution speed.
     let now = Instant::now() + Duration::from_secs(86_400);
     edit(&mut ui, "active", now);
-    assert!(apply_pending(&mut ui, now + crate::model::SEARCH_DEBOUNCE));
+    assert!(apply_pending(
+        &mut ui,
+        now + rivu_protocol::model::SEARCH_DEBOUNCE
+    ));
     let request = ui.query_request(&state).unwrap();
     assert_eq!(request.kind, QueryKind::Search("active".into()));
     assert!(ui.apply_query(&state, &request, Ok(page(&request, 100))));
@@ -93,7 +96,10 @@ fn pending_draft_retains_rows_and_accepts_active_query_pages() {
     assert_row(&ui, 0, 100);
     assert_row(&ui, 2, 102);
 
-    assert!(apply_pending(&mut ui, now + crate::model::SEARCH_DEBOUNCE));
+    assert!(apply_pending(
+        &mut ui,
+        now + rivu_protocol::model::SEARCH_DEBOUNCE
+    ));
     assert!(search(&ui).results.get(0).is_none());
     let replacement = ui.query_request(&state).unwrap();
     assert_eq!(replacement.kind, QueryKind::Search("replacement".into()));
@@ -105,7 +111,7 @@ fn pending_draft_retains_rows_and_accepts_active_query_pages() {
 #[test]
 fn nonempty_edits_restart_the_tail_deadline_and_trim_the_applied_query() {
     let (mut ui, state, now) = fixture();
-    let debounce = crate::model::SEARCH_DEBOUNCE;
+    let debounce = rivu_protocol::model::SEARCH_DEBOUNCE;
     edit(&mut ui, "next", now);
     let second_edit = now + debounce / 2;
     edit(&mut ui, "  next album\t", second_edit);
@@ -176,14 +182,17 @@ fn applied_query_change_rejects_old_completion_even_after_returning_to_same_text
     let (mut ui, state, now) = fixture();
     let old = ui.query_request(&state).unwrap();
     edit(&mut ui, "other", now);
-    assert!(apply_pending(&mut ui, now + crate::model::SEARCH_DEBOUNCE));
+    assert!(apply_pending(
+        &mut ui,
+        now + rivu_protocol::model::SEARCH_DEBOUNCE
+    ));
     assert!(!ui.apply_query(&state, &old, Ok(page(&old, 900))));
 
     let later = now + Duration::from_secs(1);
     edit(&mut ui, "active", later);
     assert!(apply_pending(
         &mut ui,
-        later + crate::model::SEARCH_DEBOUNCE
+        later + rivu_protocol::model::SEARCH_DEBOUNCE
     ));
     let first = ui.query_request(&state).unwrap();
     assert!(ui.apply_query(&state, &first, Ok(page(&first, 500))));

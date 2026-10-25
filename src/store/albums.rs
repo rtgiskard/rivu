@@ -1,9 +1,9 @@
 use super::rows::{LIBRARY_ROW_COLUMNS, TRACK_COLUMNS, library_row_from_row, track_from_row};
 use super::tracks::{search_filter, search_query};
 use super::{Store, queue::invalidate_structure};
-use crate::model::{AlbumKey, AlbumSort, AlbumSummary, LibraryRow, MAX_QUERY_ROWS, Page};
 use anyhow::{Context, Result, ensure};
 use rivu_format::database::{DIRECTORY, ORDER, TITLE, eligible_title};
+use rivu_protocol::model::{AlbumKey, AlbumSort, AlbumSummary, LibraryRow, MAX_QUERY_ROWS, Page};
 use rusqlite::params;
 
 // Exact parent and effective title match the leading member-index expressions;

@@ -3,12 +3,12 @@ use crate::gui::library::{
     LibraryNode,
     tree::{TreeBranch, TreeRangeSpan},
 };
-use crate::{
+use crate::projection::QueryProjection;
+use gpui::Context;
+use rivu_protocol::{
     model::{DirectoryRow, LibrarySort, Query, QueryStamp},
-    projection::QueryProjection,
     response::{QueryResponse, QueryRevisions, ViewResponse},
 };
-use gpui::Context;
 use std::{
     collections::{HashSet, VecDeque},
     ops::Range,
@@ -825,7 +825,7 @@ impl Library {
 mod tests {
     use super::*;
     use crate::gui::library::model::merge_selection;
-    use crate::model::{LibraryRow, Page};
+    use rivu_protocol::model::{LibraryRow, Page};
 
     fn revisions(library: u64, structure: u64) -> QueryRevisions {
         QueryRevisions {
@@ -1956,7 +1956,9 @@ mod tests {
                     &slice,
                     QueryResponse {
                         revisions: revisions(7, 3),
-                        result: Err(crate::response::QueryError::Message("read failed".into())),
+                        result: Err(rivu_protocol::response::QueryError::Message(
+                            "read failed".into()
+                        )),
                     },
                     revisions(7, 3),
                 )
@@ -1997,7 +1999,9 @@ mod tests {
                     &slice,
                     QueryResponse {
                         revisions: revisions(7, 3),
-                        result: Err(crate::response::QueryError::Message("timeout".into())),
+                        result: Err(rivu_protocol::response::QueryError::Message(
+                            "timeout".into()
+                        )),
                     },
                     revisions(7, 3)
                 )
@@ -2018,7 +2022,9 @@ mod tests {
                 &slice,
                 QueryResponse {
                     revisions: revisions(7, 3),
-                    result: Err(crate::response::QueryError::Message("late timeout".into())),
+                    result: Err(rivu_protocol::response::QueryError::Message(
+                        "late timeout".into(),
+                    )),
                 },
                 revisions(7, 3),
             )

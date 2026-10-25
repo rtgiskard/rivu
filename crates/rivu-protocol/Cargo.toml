@@ -1,0 +1,20 @@
+[package]
+name = "rivu-protocol"
+version = "0.2.0"
+edition = "2024"
+description = "Rivu IPC contracts, wire encoding, and bounded transport"
+
+[dependencies]
+anyhow = "1"
+blake3 = "1"
+bytes = "1"
+libc = "0.2"
+postcard = { version = "1", default-features = false, features = ["use-std"] }
+rivu-dsp = { path = "../rivu-dsp", default-features = false }
+rivu-format = { path = "../rivu-format", default-features = false }
+serde = { version = "1", features = ["derive", "rc"] }
+tokio = { version = "1", default-features = false, features = ["net", "io-util", "time"] }
+
+[dev-dependencies]
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "macros", "test-util"] }

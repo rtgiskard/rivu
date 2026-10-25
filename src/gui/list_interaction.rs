@@ -1,11 +1,11 @@
 use super::*;
-use crate::response::ViewResponse;
+use rivu_protocol::response::ViewResponse;
 use rivu_ui::{POPOVER_MAX_REMS, Popover, caption, menu_item};
 
 #[derive(Clone)]
 pub(super) enum TrackSource {
     Tracks(Vec<i64>),
-    Album(crate::model::AlbumKey),
+    Album(rivu_protocol::model::AlbumKey),
 }
 
 pub(super) struct ContentDrag {
@@ -190,21 +190,33 @@ impl CollectionResolution {
 }
 
 fn query_collection_page(
-    query_page: &mut impl FnMut(Query, crate::core::QueryTicket) -> crate::response::QueryResponse,
+    query_page: &mut impl FnMut(
+        Query,
+        crate::core::QueryTicket,
+    ) -> rivu_protocol::response::QueryResponse,
     query: Query,
     ticket: &crate::core::QueryTicket,
-) -> Result<crate::response::QueryResponse> {
-    anyhow::ensure!(ticket.is_current(), crate::response::QueryError::Cancelled);
+) -> Result<rivu_protocol::response::QueryResponse> {
+    anyhow::ensure!(
+        ticket.is_current(),
+        rivu_protocol::response::QueryError::Cancelled
+    );
     let response = query_page(query, ticket.clone());
-    anyhow::ensure!(ticket.is_current(), crate::response::QueryError::Cancelled);
+    anyhow::ensure!(
+        ticket.is_current(),
+        rivu_protocol::response::QueryError::Cancelled
+    );
     Ok(response)
 }
 
 // Each request is bounded; no subset is published before the complete collection succeeds.
 fn resolve_album(
-    mut query_page: impl FnMut(Query, crate::core::QueryTicket) -> crate::response::QueryResponse,
-    key: crate::model::AlbumKey,
-    expected: crate::model::QueryStamp,
+    mut query_page: impl FnMut(
+        Query,
+        crate::core::QueryTicket,
+    ) -> rivu_protocol::response::QueryResponse,
+    key: rivu_protocol::model::AlbumKey,
+    expected: rivu_protocol::model::QueryStamp,
     ticket: &crate::core::QueryTicket,
 ) -> Result<Vec<i64>> {
     let mut ids = Vec::new();
@@ -213,7 +225,7 @@ fn resolve_album(
         key,
         query: None,
         offset: 0,
-        limit: crate::model::MAX_QUERY_ROWS,
+        limit: rivu_protocol::model::MAX_QUERY_ROWS,
     };
     loop {
         let mut query = scope.clone();
@@ -246,9 +258,12 @@ fn resolve_album(
 }
 
 fn resolve_playlist(
-    mut query_page: impl FnMut(Query, crate::core::QueryTicket) -> crate::response::QueryResponse,
+    mut query_page: impl FnMut(
+        Query,
+        crate::core::QueryTicket,
+    ) -> rivu_protocol::response::QueryResponse,
     playlist_id: i64,
-    revisions: crate::response::QueryRevisions,
+    revisions: rivu_protocol::response::QueryRevisions,
     ticket: &crate::core::QueryTicket,
 ) -> Result<Vec<i64>> {
     let mut after = None;
@@ -258,7 +273,7 @@ fn resolve_playlist(
             query: None,
             playlist_id,
             after,
-            limit: crate::model::MAX_QUERY_ROWS,
+            limit: rivu_protocol::model::MAX_QUERY_ROWS,
             expected: Some(revisions),
         };
         let response = query_collection_page(&mut query_page, query.clone(), ticket)?;
@@ -271,7 +286,7 @@ fn resolve_playlist(
             anyhow::bail!("unexpected playlist response");
         };
         anyhow::ensure!(
-            batch.rows.len() <= crate::model::MAX_QUERY_ROWS
+            batch.rows.len() <= rivu_protocol::model::MAX_QUERY_ROWS
                 && (batch.next.is_none() || (!batch.rows.is_empty() && batch.next != after)),
             "incomplete playlist response"
         );
@@ -285,7 +300,7 @@ fn resolve_playlist(
 
 fn valid_page(offset: usize, rows: usize, total: usize) -> bool {
     offset <= total
-        && rows <= crate::model::MAX_QUERY_ROWS
+        && rows <= rivu_protocol::model::MAX_QUERY_ROWS
         && rows <= total - offset
         && (rows > 0 || offset == total)
 }
@@ -317,7 +332,7 @@ impl GuiApp {
     fn timeout_content_resolution(
         &mut self,
         read: &CollectionRead,
-        response: crate::response::QueryResponse,
+        response: rivu_protocol::response::QueryResponse,
         current: bool,
         cx: &mut Context<Self>,
     ) {
@@ -446,7 +461,7 @@ impl GuiApp {
                 key: key.clone(),
                 query: None,
                 offset: 0,
-                limit: crate::model::MAX_QUERY_ROWS,
+                limit: rivu_protocol::model::MAX_QUERY_ROWS,
             };
             let stamp = query.stamp(self.state.query_revisions(None));
             let handle = self.handle.clone();
@@ -523,7 +538,7 @@ impl GuiApp {
                     key: key.clone(),
                     query: None,
                     offset: 0,
-                    limit: crate::model::MAX_QUERY_ROWS,
+                    limit: rivu_protocol::model::MAX_QUERY_ROWS,
                 };
                 let stamp = query.stamp(self.state.query_revisions(None));
                 let target_revision = destination.playlist_id().and_then(|id| {
@@ -1026,8 +1041,8 @@ mod tests {
         CollectionResolution, ContentDrag, ResolutionOwner, TrackSource, resolve_album,
         resolve_playlist, valid_page,
     };
-    use crate::{
-        core::QueryEpoch,
+    use crate::core::QueryEpoch;
+    use rivu_protocol::{
         model::Query,
         response::{QueryError, QueryRevisions, ViewResponse},
     };
@@ -1134,33 +1149,37 @@ mod tests {
         assert!(!valid_page(3, 0, 5));
         assert!(!valid_page(3, 3, 5));
         assert!(!valid_page(6, 0, 5));
-        assert!(!valid_page(0, crate::model::MAX_QUERY_ROWS + 1, usize::MAX));
+        assert!(!valid_page(
+            0,
+            rivu_protocol::model::MAX_QUERY_ROWS + 1,
+            usize::MAX
+        ));
     }
 
     fn album_query() -> Query {
         Query::AlbumTracks {
-            key: crate::model::AlbumKey {
+            key: rivu_protocol::model::AlbumKey {
                 directory: PathBuf::from("/album"),
                 title: "Album".into(),
             },
             query: None,
             offset: 0,
-            limit: crate::model::MAX_QUERY_ROWS,
+            limit: rivu_protocol::model::MAX_QUERY_ROWS,
         }
     }
 
     fn album_page(
         ids: &[i64],
         total: usize,
-        revisions: crate::response::QueryRevisions,
-    ) -> crate::response::QueryResponse {
-        crate::response::QueryResponse {
+        revisions: rivu_protocol::response::QueryRevisions,
+    ) -> rivu_protocol::response::QueryResponse {
+        rivu_protocol::response::QueryResponse {
             revisions,
-            result: Ok(ViewResponse::AlbumTracks(crate::model::Page {
+            result: Ok(ViewResponse::AlbumTracks(rivu_protocol::model::Page {
                 total,
                 rows: ids
                     .iter()
-                    .map(|id| crate::model::LibraryRow {
+                    .map(|id| rivu_protocol::model::LibraryRow {
                         id: *id,
                         path: Default::default(),
                         title: String::new(),
@@ -1185,7 +1204,7 @@ mod tests {
         let Query::AlbumTracks { key, .. } = query.clone() else {
             unreachable!()
         };
-        let revisions = crate::response::QueryRevisions {
+        let revisions = rivu_protocol::response::QueryRevisions {
             library: 8,
             structure: 4,
             ..Default::default()
@@ -1199,7 +1218,7 @@ mod tests {
                     unreachable!()
                 };
                 offsets.push(offset);
-                assert_eq!(limit, crate::model::MAX_QUERY_ROWS);
+                assert_eq!(limit, rivu_protocol::model::MAX_QUERY_ROWS);
                 if offset == 0 {
                     album_page(&[9, 2], 4, revisions)
                 } else {
@@ -1221,7 +1240,7 @@ mod tests {
         let Query::AlbumTracks { key, .. } = query.clone() else {
             unreachable!()
         };
-        let revisions = crate::response::QueryRevisions {
+        let revisions = rivu_protocol::response::QueryRevisions {
             library: 8,
             structure: 4,
             ..Default::default()
@@ -1240,7 +1259,7 @@ mod tests {
                         0 => album_page(
                             &[8, 3],
                             4,
-                            crate::response::QueryRevisions {
+                            rivu_protocol::response::QueryRevisions {
                                 library: 9,
                                 ..revisions
                             },
@@ -1248,15 +1267,17 @@ mod tests {
                         1 => album_page(
                             &[8, 3],
                             4,
-                            crate::response::QueryRevisions {
+                            rivu_protocol::response::QueryRevisions {
                                 structure: 5,
                                 ..revisions
                             },
                         ),
                         2 => album_page(&[], 4, revisions),
-                        _ => crate::response::QueryResponse {
+                        _ => rivu_protocol::response::QueryResponse {
                             revisions,
-                            result: Err(crate::response::QueryError::Message("read failed".into())),
+                            result: Err(rivu_protocol::response::QueryError::Message(
+                                "read failed".into(),
+                            )),
                         },
                     }
                 },
@@ -1361,9 +1382,9 @@ mod tests {
 
     fn playlist_cursor(
         offset: usize,
-    ) -> crate::model::BatchContinuation<crate::model::PlaylistEntryCursor> {
-        crate::model::BatchContinuation {
-            cursor: crate::model::PlaylistEntryCursor {
+    ) -> rivu_protocol::model::BatchContinuation<rivu_protocol::model::PlaylistEntryCursor> {
+        rivu_protocol::model::BatchContinuation {
+            cursor: rivu_protocol::model::PlaylistEntryCursor {
                 position: offset as i64,
                 id: offset as i64,
             },
@@ -1374,38 +1395,42 @@ mod tests {
 
     fn playlist_batch(
         ids: &[i64],
-        next: Option<crate::model::BatchContinuation<crate::model::PlaylistEntryCursor>>,
+        next: Option<
+            rivu_protocol::model::BatchContinuation<rivu_protocol::model::PlaylistEntryCursor>,
+        >,
         revisions: QueryRevisions,
-    ) -> crate::response::QueryResponse {
-        crate::response::QueryResponse {
+    ) -> rivu_protocol::response::QueryResponse {
+        rivu_protocol::response::QueryResponse {
             revisions,
-            result: Ok(ViewResponse::PlaylistEntryBatch(crate::model::Batch {
-                rows: ids
-                    .iter()
-                    .enumerate()
-                    .map(|(offset, id)| crate::model::PlaylistEntryRow {
-                        id: offset as i64,
-                        track_id: *id,
-                        position: offset,
-                        offset,
-                        title: String::new(),
-                        artist: String::new(),
-                        album: String::new(),
-                        duration: None,
-                        codec: String::new(),
-                        favorite: false,
-                        missing: false,
-                    })
-                    .collect(),
-                next,
-            })),
+            result: Ok(ViewResponse::PlaylistEntryBatch(
+                rivu_protocol::model::Batch {
+                    rows: ids
+                        .iter()
+                        .enumerate()
+                        .map(|(offset, id)| rivu_protocol::model::PlaylistEntryRow {
+                            id: offset as i64,
+                            track_id: *id,
+                            position: offset,
+                            offset,
+                            title: String::new(),
+                            artist: String::new(),
+                            album: String::new(),
+                            duration: None,
+                            codec: String::new(),
+                            favorite: false,
+                            missing: false,
+                        })
+                        .collect(),
+                    next,
+                },
+            )),
         }
     }
 
     #[test]
     fn playlist_resolution_keeps_complete_order_and_occurrences() {
         let revisions = QueryRevisions {
-            playlist_entries: Some(crate::response::PlaylistEntryRevision {
+            playlist_entries: Some(rivu_protocol::response::PlaylistEntryRevision {
                 playlist_id: 7,
                 revision: 4,
             }),
@@ -1429,7 +1454,7 @@ mod tests {
                 };
                 assert_eq!(playlist_id, 7);
                 assert!(query.is_none());
-                assert_eq!(limit, crate::model::MAX_QUERY_ROWS);
+                assert_eq!(limit, rivu_protocol::model::MAX_QUERY_ROWS);
                 assert_eq!(expected, Some(revisions));
                 offsets.push(after);
                 // Replacing/closing an unrelated menu cannot cancel this operation.
@@ -1493,7 +1518,7 @@ mod tests {
     fn playlist_resolution_never_returns_partial_stale_or_incomplete_batches() {
         let revisions = QueryRevisions {
             library: 8,
-            playlist_entries: Some(crate::response::PlaylistEntryRevision {
+            playlist_entries: Some(rivu_protocol::response::PlaylistEntryRevision {
                 playlist_id: 7,
                 revision: 4,
             }),
@@ -1522,16 +1547,18 @@ mod tests {
                             &[8],
                             None,
                             QueryRevisions {
-                                playlist_entries: Some(crate::response::PlaylistEntryRevision {
-                                    playlist_id: 7,
-                                    revision: 5,
-                                }),
+                                playlist_entries: Some(
+                                    rivu_protocol::response::PlaylistEntryRevision {
+                                        playlist_id: 7,
+                                        revision: 5,
+                                    },
+                                ),
                                 ..revisions
                             },
                         ),
                         2 => playlist_batch(&[], Some(playlist_cursor(3)), revisions),
                         3 => playlist_batch(&[8], Some(playlist_cursor(2)), revisions),
-                        _ => crate::response::QueryResponse {
+                        _ => rivu_protocol::response::QueryResponse {
                             revisions,
                             result: Err(QueryError::Message("read failed".into())),
                         },

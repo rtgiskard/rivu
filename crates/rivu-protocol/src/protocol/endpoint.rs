@@ -4,11 +4,11 @@ use tokio::net::UnixStream;
 
 /// Directory identity, not spelling: aliases and bind mounts share one address.
 /// No UID or protocol version in the name: neither may split directory ownership.
-pub(crate) fn address(data_dir: &Path) -> Result<std::os::unix::net::SocketAddr> {
+pub fn address(data_dir: &Path) -> Result<std::os::unix::net::SocketAddr> {
     rivu_format::ownership::data_directory_address(data_dir)
 }
 
-pub(crate) fn verify_peer(stream: &UnixStream) -> Result<()> {
+pub fn verify_peer(stream: &UnixStream) -> Result<()> {
     let peer = stream.peer_cred().context("Reading IPC peer credentials")?;
     // SAFETY: geteuid takes no arguments and cannot fail.
     let uid = unsafe { libc::geteuid() };
@@ -16,7 +16,7 @@ pub(crate) fn verify_peer(stream: &UnixStream) -> Result<()> {
     Ok(())
 }
 
-pub(crate) async fn connect(data_dir: &Path) -> Result<UnixStream> {
+pub async fn connect(data_dir: &Path) -> Result<UnixStream> {
     let stream = UnixStream::connect_addr(&address(data_dir)?.into()).await?;
     verify_peer(&stream)?;
     Ok(stream)

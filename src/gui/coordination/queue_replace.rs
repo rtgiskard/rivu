@@ -5,13 +5,13 @@ use rivu_ui::{IconButton, IconButtonDensity, IconButtonStyle, danger_control, pa
 #[derive(Clone)]
 pub(in crate::gui) enum QueueReplacement {
     Playlist { id: i64, name: String },
-    Album(crate::model::AlbumKey),
+    Album(rivu_protocol::model::AlbumKey),
 }
 
 impl GuiApp {
     pub(in crate::gui) fn request_album_play(
         &mut self,
-        key: crate::model::AlbumKey,
+        key: rivu_protocol::model::AlbumKey,
         cx: &mut Context<Self>,
     ) {
         self.request_queue_replace(QueueReplacement::Album(key), cx);

@@ -2,9 +2,9 @@
 
 use super::{History, HistoryEvent, HistorySort};
 use crate::gui::{appearance::fonts::tabular_numbers, components::search::set_search_counts};
-use crate::model::{Command, PlaybackStatus};
 use chrono::{DateTime, Local};
 use gpui::{AnyElement, Context, Div, SharedString, Window, div, prelude::*, px, rgb};
+use rivu_protocol::model::{Command, PlaybackStatus};
 use rivu_ui::{
     VirtualList, caption, column, hover_actions, list_panel_header, list_row, list_viewport,
     panel_header_actions, panel_heading_row, panel_surface, row, sortable_header,
@@ -14,7 +14,7 @@ use std::cell::RefCell;
 // Static content is independent of playback. At most one row's time label is
 // replaced, so two maxima preserve the exact width without retaining every row.
 pub(super) struct HistoryColumnWidths {
-    source: std::sync::Arc<Vec<crate::model::HistoryEntry>>,
+    source: std::sync::Arc<Vec<rivu_protocol::model::HistoryEntry>>,
     font: gpui::Font,
     rem_size: gpui::Pixels,
     font_size_scale: f32,

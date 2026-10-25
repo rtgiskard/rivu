@@ -1563,7 +1563,7 @@ fn auto_graph_prepares_off_thread_and_opens_stopped_source_paused() {
     assert_eq!(core.state.current_track.as_ref().unwrap().id, 1);
     assert_eq!(
         core.state.processing_audition,
-        Some(crate::model::ProcessingAudition {
+        Some(crate::projection::ProcessingAudition {
             id: 1,
             output: Some(graph_port(2, 0)),
             mode: Some(GraphExecutionMode::Realtime),
@@ -1597,7 +1597,7 @@ fn cached_audition_tracks_the_selected_port_without_following_new_results() {
     assert!(core.state.processing_audition.is_none());
     let _commands = recording_audio(&mut core);
     core.processing_graph_audition(1, graph_port(2, 0)).unwrap();
-    let admitted = crate::model::ProcessingAudition {
+    let admitted = crate::projection::ProcessingAudition {
         id: 1,
         output: Some(graph_port(2, 0)),
         mode: Some(GraphExecutionMode::Offline),
@@ -1616,7 +1616,7 @@ fn cached_audition_tracks_the_selected_port_without_following_new_results() {
     );
     assert_eq!(core.state.processing_audition, Some(admitted));
     core.processing_graph_audition(1, graph_port(1, 0)).unwrap();
-    let selected = crate::model::ProcessingAudition {
+    let selected = crate::projection::ProcessingAudition {
         output: Some(graph_port(1, 0)),
         ..admitted
     };

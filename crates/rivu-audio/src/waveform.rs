@@ -4,7 +4,7 @@ use super::{
     PlaybackRange,
     source::{Source, SourceIdentity},
 };
-use crate::DecoderHint;
+use rivu_format::media::DecoderHint;
 use std::{
     path::{Path, PathBuf},
     sync::{

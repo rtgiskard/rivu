@@ -1,7 +1,7 @@
 use super::render::tests::render_view;
 use super::*;
-use crate::{model::Page, response::QueryRevisions};
 use ratatui::{backend::TestBackend, text::Line};
+use rivu_protocol::{model::Page, response::QueryRevisions};
 
 #[test]
 fn startup_hint_expires_once_at_its_deadline() {
@@ -224,8 +224,8 @@ fn details_pin_search_target_reject_late_reads_and_restore_source() {
     assert!(ui.query_request(&state).is_none());
 }
 
-pub(super) fn full_track(id: i64) -> crate::model::Track {
-    crate::model::Track {
+pub(super) fn full_track(id: i64) -> rivu_protocol::model::Track {
+    rivu_protocol::model::Track {
         id,
         path: "/music/夜航.flac".into(),
         fingerprint: None,
@@ -244,7 +244,7 @@ pub(super) fn full_track(id: i64) -> crate::model::Track {
         bits_per_sample: Some(24),
         release_date: Some("2026-10".into()),
         favorite: true,
-        decoder_hint: rivu_audio::DecoderHint::Native,
+        decoder_hint: rivu_format::media::DecoderHint::Native,
         missing: true,
         play_count: 0,
         last_played: None,
@@ -488,14 +488,16 @@ pub(super) fn response(request: &QueryRequest, total: usize) -> QueryResult {
         QueryKind::PlaylistSelection {
             playlist_id,
             entry_id,
-        } => ViewResponse::PlaylistEntryLocations(vec![crate::model::PlaylistEntryLocation {
-            id: *entry_id,
-            playlist_id: *playlist_id,
-            position: *entry_id as usize,
-            offset: *entry_id as usize,
-            track_id: *entry_id,
-            total,
-        }]),
+        } => ViewResponse::PlaylistEntryLocations(vec![
+            rivu_protocol::model::PlaylistEntryLocation {
+                id: *entry_id,
+                playlist_id: *playlist_id,
+                position: *entry_id as usize,
+                offset: *entry_id as usize,
+                track_id: *entry_id,
+                total,
+            },
+        ]),
     };
     QueryResult {
         revisions: request.stamp.revisions(),
@@ -1338,8 +1340,8 @@ fn other_tracks_pending_selection_regression(revisions: bool) {
     assert_ne!(old, fresh);
     let located = |offset| QueryResult {
         revisions: state.query_revisions(None),
-        view: ViewResponse::LibraryLocate(crate::model::LibraryLocateResult::Located(
-            crate::model::LibraryLocation {
+        view: ViewResponse::LibraryLocate(rivu_protocol::model::LibraryLocateResult::Located(
+            rivu_protocol::model::LibraryLocation {
                 offset,
                 total: 3,
                 child: None,
@@ -1411,8 +1413,8 @@ fn other_tracks_selection_survives_changes_between_locate_and_page() {
         let locate = tui.ui.query_request(&state).unwrap();
         let located = |request: &QueryRequest, offset| QueryResult {
             revisions: request.stamp.revisions(),
-            view: ViewResponse::LibraryLocate(crate::model::LibraryLocateResult::Located(
-                crate::model::LibraryLocation {
+            view: ViewResponse::LibraryLocate(rivu_protocol::model::LibraryLocateResult::Located(
+                rivu_protocol::model::LibraryLocation {
                     offset,
                     total: 3,
                     child: None,
@@ -1794,12 +1796,12 @@ fn boundary_navigation_queries_unloaded_pages_and_rejects_old_demands() {
 #[test]
 fn terminal_routes_playback_chords_and_exit_without_stopping_core() {
     let state = TuiSnapshot {
-        playback: crate::model::PlaybackState {
+        playback: rivu_protocol::model::PlaybackState {
             status: PlaybackStatus::Playing,
             position: 12.0,
             ..Default::default()
         },
-        queue: crate::model::QueueState {
+        queue: rivu_protocol::model::QueueState {
             current_id: Some(7),
             ..Default::default()
         },

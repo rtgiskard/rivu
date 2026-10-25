@@ -6,7 +6,7 @@ pub use duplicates::{DuplicateGroup, DuplicateMember};
 mod query;
 pub use query::{Query, QueryIdentity, QueryStamp};
 
-use rivu_audio::DecoderHint;
+use rivu_format::media::DecoderHint;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap},
@@ -206,7 +206,7 @@ pub struct LibraryRootCount {
 pub use rivu_format::config::MAX_QUERY_ROWS;
 
 /// Quiet interval before interactive search submits its final query.
-pub(crate) const SEARCH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(150);
+pub const SEARCH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(150);
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct QueueRow {
@@ -272,7 +272,7 @@ pub struct LibrarySnapshot {
 
 /// Exact recent metadata scopes; unknown or overflowing batches reset all scopes.
 /// The bound covers both maps, independently of library and playlist sizes.
-pub(crate) const MAX_METADATA_SCOPES: usize = 256;
+pub const MAX_METADATA_SCOPES: usize = 256;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct MetadataRevisions {
@@ -329,7 +329,7 @@ impl MetadataRevisions {
         }
     }
 
-    pub(crate) fn track_revision(&self, id: i64, library: u64) -> u64 {
+    pub fn track_revision(&self, id: i64, library: u64) -> u64 {
         if self.revision == library {
             self.tracks.get(&id).copied().unwrap_or(self.baseline)
         } else {
@@ -337,7 +337,7 @@ impl MetadataRevisions {
         }
     }
 
-    pub(crate) fn playlist_revision(&self, id: i64, library: u64) -> u64 {
+    pub fn playlist_revision(&self, id: i64, library: u64) -> u64 {
         if self.revision == library {
             self.playlists.get(&id).copied().unwrap_or(self.baseline)
         } else {
@@ -432,7 +432,7 @@ pub struct SystemState {
     pub devices: Arc<Vec<String>>,
     pub selected_device: Option<String>,
     pub revision: u64,
-    pub config: Arc<crate::config::Config>,
+    pub config: Arc<rivu_format::config::Config>,
     pub config_path: PathBuf,
     pub mpris_status: String,
     pub ffmpeg_status: String,
@@ -452,7 +452,7 @@ impl Default for SystemState {
             devices: Arc::new(Vec::new()),
             selected_device: None,
             revision: 0,
-            config: Arc::new(crate::config::Config::default()),
+            config: Arc::new(rivu_format::config::Config::default()),
             config_path: PathBuf::new(),
             mpris_status: String::new(),
             ffmpeg_status: "disabled".into(),
@@ -529,7 +529,7 @@ pub enum LibraryLocateResult {
 }
 
 impl LibrarySnapshot {
-    pub(crate) fn query_revisions(
+    pub fn query_revisions(
         &self,
         queue_revision: u64,
         playlist_id: Option<i64>,
@@ -549,7 +549,7 @@ impl LibrarySnapshot {
         )
     }
 
-    pub(crate) fn change_metadata(&mut self, tracks: Option<&[i64]>, playlists: Option<&[i64]>) {
+    pub fn change_metadata(&mut self, tracks: Option<&[i64]>, playlists: Option<&[i64]>) {
         let previous = self.revision;
         self.revision = previous.wrapping_add(1);
         Arc::make_mut(&mut self.metadata_revisions).record(
@@ -560,7 +560,7 @@ impl LibrarySnapshot {
         );
     }
 
-    pub(crate) fn query_revisions_for(
+    pub fn query_revisions_for(
         &self,
         query: &Query,
         queue_revision: u64,
@@ -771,7 +771,7 @@ pub enum Command {
     },
     DismissError,
     Configure {
-        config: Arc<crate::config::Config>,
+        config: Arc<rivu_format::config::Config>,
     },
     MprisStatus {
         status: String,

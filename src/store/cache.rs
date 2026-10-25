@@ -1,7 +1,7 @@
 use super::Store;
 use super::rows::{TRACK_COLUMNS, track_from_row};
-use crate::model::Track;
 use anyhow::Result;
+use rivu_protocol::model::Track;
 use rusqlite::OptionalExtension;
 use std::collections::HashMap;
 

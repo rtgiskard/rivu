@@ -23,18 +23,15 @@ use super::{
     feature::FeatureContext,
     format_time,
 };
-use crate::{
-    artwork::ArtworkManager,
-    model::{Command, PlaybackStatus, Query, Track},
-    projection::GuiSnapshot,
-};
+use crate::{artwork::ArtworkManager, projection::GuiSnapshot};
 use chrono::{DateTime, Local};
 use gpui::{
     AnyElement, App, Context, Div, Entity, EventEmitter, Font, SharedString, Subscription, Window,
     div, prelude::*, px, rgb,
 };
 use read::{MetadataReadCoordinator, MetadataReadTask, ReadCompletion, ReadEnvironment};
-use rivu_audio::DecoderHint;
+use rivu_format::media::DecoderHint;
+use rivu_protocol::model::{Command, PlaybackStatus, Query, Track};
 use rivu_ui::{
     FormField, IconButton, IconButtonDensity, IconButtonStyle, active_control, button, caption,
     column, disabled_control,
@@ -487,7 +484,7 @@ impl Metadata {
         token: session::SaveToken,
         values: MetadataValues,
         hint_change: Option<Track>,
-        ack: crate::response::Ack,
+        ack: rivu_protocol::response::Ack,
         cx: &mut Context<Self>,
     ) {
         // A committed source change survives editor selection/discard.

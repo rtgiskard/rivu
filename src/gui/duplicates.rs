@@ -2,15 +2,15 @@
 //! Core retains relocation workers and task IDs; dismissal never joins a worker.
 
 use super::{feature::FeatureContext, format_time};
-use crate::{
+use crate::projection::{GuiSnapshot, QueryProjection};
+use gpui::{prelude::*, *};
+use rivu_protocol::{
     model::{
         Command, DuplicateGroup, DuplicateMember, Page, Query, RelocationPhase,
         RelocationTaskStatus,
     },
-    projection::{GuiSnapshot, QueryProjection},
     response::{Ack, QueryResponse, QueryRevisions, ViewResponse},
 };
-use gpui::{prelude::*, *};
 use rivu_ui::{
     IconButton, IconButtonDensity, IconButtonStyle, StatusKind, active_control, button, caption,
     column, panel_toolbar, row, status_message,
@@ -1821,7 +1821,7 @@ mod tests {
     use rivu_ui::StatusKind;
 
     use super::{Busy, DuplicateReview, Member, ReviewFeedback, TaskReadOutcome};
-    use crate::{
+    use rivu_protocol::{
         model::{Command, DuplicateMember, Page, RelocationPhase, RelocationTaskStatus, Track},
         response::{Ack, QueryResponse, QueryRevisions, ViewResponse},
     };
@@ -1865,7 +1865,9 @@ mod tests {
     fn timeout_response() -> QueryResponse {
         QueryResponse {
             revisions: QueryRevisions::default(),
-            result: Err(crate::response::QueryError::Message("timed out".into())),
+            result: Err(rivu_protocol::response::QueryError::Message(
+                "timed out".into(),
+            )),
         }
     }
 
@@ -2058,7 +2060,9 @@ mod tests {
                 let response = if failed {
                     QueryResponse {
                         revisions: QueryRevisions::default(),
-                        result: Err(crate::response::QueryError::Message("read failed".into())),
+                        result: Err(rivu_protocol::response::QueryError::Message(
+                            "read failed".into(),
+                        )),
                     }
                 } else {
                     task_response(7, RelocationPhase::Verifying)
@@ -2328,9 +2332,9 @@ mod tests {
     fn ack(ok: bool, relocation_id: Option<u64>) -> Ack {
         Ack {
             status: if ok {
-                crate::response::AckStatus::Succeeded
+                rivu_protocol::response::AckStatus::Succeeded
             } else {
-                crate::response::AckStatus::Failed
+                rivu_protocol::response::AckStatus::Failed
             },
             error: None,
             revision: 0,
@@ -2660,7 +2664,9 @@ mod tests {
         review.begin_task_read(7);
         let response = QueryResponse {
             revisions: QueryRevisions::default(),
-            result: Err(crate::response::QueryError::Message("read failed".into())),
+            result: Err(rivu_protocol::response::QueryError::Message(
+                "read failed".into(),
+            )),
         };
         assert!(matches!(
             review.accept_task_read(epoch, 7, response),

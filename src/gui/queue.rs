@@ -23,12 +23,12 @@ use crate::{
         library::LibraryNode,
         list_interaction::{ContentMenuRequest, TrackSource},
     },
-    model::Command,
     projection::GuiSnapshot,
 };
 use gpui::{Context, Entity, SharedString, Window, prelude::*};
 use model::QueueSelection;
 pub(in crate::gui) use model::{QueueCommit, QueueIdentity};
+use rivu_protocol::model::Command;
 use rivu_ui::loading::LoadingText;
 use rivu_ui::search::{SearchEvent, SearchField};
 use std::{cell::RefCell, rc::Rc};

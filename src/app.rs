@@ -5,12 +5,9 @@
 use crate::config::ConfigPersistence;
 use crate::{
     artwork::ArtworkManager,
-    core::{CoreHandle, REPLY_TIMEOUT, Runtime, RuntimeControl},
+    core::{CoreHandle, Runtime, RuntimeControl},
     gui::{self, session::UiSession},
-    ipc, logging,
-    model::Command,
-    mpris,
-    response::Ack,
+    ipc, logging, mpris,
     tray::TrayController,
 };
 use anyhow::{Context, Result, anyhow, bail};
@@ -18,36 +15,15 @@ use anyhow::{Context, Result, anyhow, bail};
 use crossbeam_channel::bounded;
 use futures::{StreamExt, channel::mpsc};
 use gpui::{App as GpuiApp, GraphicalEnvironment, QuitMode, Subscription, Task, WindowingRequest};
+use rivu_protocol::AppCommand;
+use rivu_protocol::{model::Command, response::Ack};
 use signal_hook::{
     consts::{SIGINT, SIGTERM},
     iterator::{Handle as SignalHandle, Signals},
 };
-use std::{cell::RefCell, path::PathBuf, rc::Rc, sync::Arc, thread, time::Duration};
-
-/// Application requests are never business commands or core view state.
-#[derive(Clone, Debug)]
-pub enum AppCommand {
-    Core(Command),
-    ShowWindow,
-    Shutdown,
-}
-
-impl AppCommand {
-    /// Total operation wait, before IPC bridge and response transport allowances.
-    pub fn wait_timeout(&self) -> Duration {
-        match self {
-            Self::Core(command) => CoreHandle::command_wait_timeout(command),
-            Self::ShowWindow | Self::Shutdown => REPLY_TIMEOUT,
-        }
-    }
-}
-
-impl From<Command> for AppCommand {
-    fn from(command: Command) -> Self {
-        Self::Core(command)
-    }
-}
-
+#[cfg(test)]
+use std::time::Duration;
+use std::{cell::RefCell, path::PathBuf, rc::Rc, sync::Arc, thread};
 #[derive(Default)]
 struct ControlState {
     graphical: bool,
@@ -245,10 +221,10 @@ impl App {
     /// Show an existing instance, or start a graphical application if none exists.
     /// Import paths must already be resolved against the calling client's cwd.
     pub fn open_gui(data_dir: PathBuf, config_path: PathBuf, paths: Vec<PathBuf>) -> Result<()> {
-        match ipc::request_ack(&data_dir, &AppCommand::ShowWindow) {
+        match rivu_client::request_ack(&data_dir, &AppCommand::ShowWindow) {
             Ok(ack) if ack.is_success() => {
                 if !paths.is_empty() {
-                    let ack = ipc::request_ack(
+                    let ack = rivu_client::request_ack(
                         &data_dir,
                         &Command::Scan {
                             paths,
@@ -849,7 +825,7 @@ mod tests {
         started
             .recv_timeout(std::time::Duration::from_secs(15))
             .unwrap();
-        let ack = ipc::request_ack(directory.path(), &AppCommand::Shutdown).unwrap();
+        let ack = rivu_client::request_ack(directory.path(), &AppCommand::Shutdown).unwrap();
         assert!(ack.is_success());
         worker.join().unwrap().unwrap();
         assert!(ipc::SocketOwner::acquire(directory.path()).is_ok());
@@ -877,7 +853,7 @@ mod tests {
         );
         assert!(
             std::os::unix::net::UnixStream::connect_addr(
-                &ipc::endpoint::address(directory.path()).unwrap()
+                &rivu_protocol::protocol::address(directory.path()).unwrap()
             )
             .is_ok()
         );
@@ -915,27 +891,30 @@ mod tests {
             running.recv_timeout(Duration::from_secs(5)).unwrap();
         }
         assert!(
-            ipc::request_ack(directory.path(), &Command::Volume { value: 0.4 })
+            rivu_client::request_ack(directory.path(), &Command::Volume { value: 0.4 })
                 .unwrap()
                 .is_success()
         );
         assert_eq!(
-            ipc::get_state(directory.path(), crate::response::StateSections::ALL)
-                .unwrap()
-                .playback
-                .unwrap()
-                .playback
-                .volume,
+            rivu_client::get_state(
+                directory.path(),
+                rivu_protocol::response::StateSections::ALL
+            )
+            .unwrap()
+            .playback
+            .unwrap()
+            .playback
+            .volume,
             0.4
         );
         assert!(matches!(
-            ipc::query(
+            rivu_client::query(
                 directory.path(),
-                &crate::model::Query::Track { track_id: 1 }
+                &rivu_protocol::model::Query::Track { track_id: 1 }
             )
             .unwrap()
             .result,
-            Ok(crate::response::ViewResponse::Track(None))
+            Ok(rivu_protocol::response::ViewResponse::Track(None))
         ));
         // No waiter borrowed a blocking slot; producers can run as soon as
         // capacity is released, without restarting or replaying any request.
@@ -944,7 +923,7 @@ mod tests {
             futures::executor::block_on(worker).unwrap();
         }
         assert!(
-            ipc::request_ack(directory.path(), &Command::OptimizeDatabase)
+            rivu_client::request_ack(directory.path(), &Command::OptimizeDatabase)
                 .unwrap()
                 .is_success()
         );

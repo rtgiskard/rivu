@@ -91,10 +91,10 @@ fn batch_limit(limit: usize) -> Result<i64> {
     if limit == 0 {
         bail!("batch limit must be at least 1");
     }
-    if limit > crate::model::MAX_QUERY_ROWS {
+    if limit > rivu_protocol::model::MAX_QUERY_ROWS {
         bail!(
             "batch limit must be at most {}; got {}",
-            crate::model::MAX_QUERY_ROWS,
+            rivu_protocol::model::MAX_QUERY_ROWS,
             limit
         );
     }

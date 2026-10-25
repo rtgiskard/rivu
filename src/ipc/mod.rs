@@ -1,13 +1,4 @@
-mod client;
-pub(crate) mod endpoint;
-mod protocol;
 mod server;
-mod transport;
-
-pub use client::{
-    ClientSession, CommandFailure, InstanceChanged, SessionStop, client_session,
-    client_session_with_cancel, get_state, query, request_ack,
-};
 pub use server::{Server, SocketOwner, is_no_instance};
 
 #[cfg(test)]

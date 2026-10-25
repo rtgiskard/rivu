@@ -7,11 +7,9 @@ pub(in crate::gui) mod selection;
 pub(super) mod tree;
 
 use super::feature::FeatureContext;
-use crate::{
-    config::{LibraryColumn, LibraryColumns},
-    model::{Command, DirectoryRow, LibraryRow},
-};
+use crate::config::{LibraryColumn, LibraryColumns};
 use gpui::{AnyElement, Context, Div, Render, SharedString, Window, div, prelude::*, px, rgb};
+use rivu_protocol::model::{Command, DirectoryRow, LibraryRow};
 use rivu_ui::{
     IconButton, IconButtonDensity, IconButtonStyle, VirtualList, button, caption,
     list_panel_header, list_viewport, panel_surface, row,
@@ -69,7 +67,7 @@ impl gpui::EventEmitter<LibraryEvent> for Library {}
 
 pub(super) fn track_detail(
     i18n: &crate::i18n::Localizer,
-    track: &crate::model::LibraryRow,
+    track: &rivu_protocol::model::LibraryRow,
 ) -> String {
     let mut detail = track.artist.clone();
     if !track.album.is_empty() {
@@ -565,7 +563,7 @@ impl Library {
                         .min_w_0().w(row_height - px(2.)).px_0()
                 };
                 let playing_track = this.state.current_track()
-                    .filter(|_| this.state.playback.status == crate::model::PlaybackStatus::Playing)
+                    .filter(|_| this.state.playback.status == rivu_protocol::model::PlaybackStatus::Playing)
                     .map(|track| track.id);
                 let focused_index = this.focused
                     .then(|| this.library.tree().selected_index())
@@ -1136,7 +1134,7 @@ impl Library {
                 .current_track()
                 .is_some_and(|track| track.id == *track_id)
         {
-            use crate::model::LibraryLocateResult;
+            use rivu_protocol::model::LibraryLocateResult;
             let message = match result {
                 LibraryLocateResult::Filtered => Some("gl-locate-library-filtered"),
                 LibraryLocateResult::OutsideRoot => Some("gl-locate-library-outside"),
@@ -1238,9 +1236,9 @@ mod library_root_tests {
         core::{CoreHandle, GuiConfigChange, Runtime},
         gui::library::tree::TreeItem,
         i18n::Localizer,
-        model::{DirectoryRow, Query},
     };
     use gpui::{Entity, IntoElement, VisualTestContext, point, px, size};
+    use rivu_protocol::model::{DirectoryRow, Query};
     use std::{path::PathBuf, sync::Arc};
 
     fn settle_config(handle: &CoreHandle) {

@@ -1,12 +1,13 @@
 //! Delivers a logical waiting failure while the background read still owns its slot.
 
-use crate::{core::CoreHandle, response::QueryResponse};
+use crate::core::CoreHandle;
 use futures::{
     channel::oneshot,
     future::{Either, select},
 };
 use gpui::AsyncApp;
 use parking_lot::Mutex;
+use rivu_protocol::response::QueryResponse;
 
 pub(super) async fn run<T: Send + 'static>(
     handle: CoreHandle,

@@ -1,10 +1,10 @@
 use super::model::{QueueJob, QueueLocateRequest, QueueReconcileJob, QueueTarget};
 use super::{Queue, QueueCommit, QueueEvent, QueueIdentity, QueueSelectionRequest};
-use crate::{
+use gpui::{Context, Window};
+use rivu_protocol::{
     model::{Page, Query},
     response::ViewResponse,
 };
-use gpui::{Context, Window};
 use std::{ops::Range, time::Duration};
 
 impl Queue {
@@ -240,7 +240,7 @@ impl Queue {
         cx.spawn(async move |this, cx| {
             let result: Result<Option<Vec<QueueIdentity>>, String> = async {
                 let mut selected = Vec::with_capacity(job.ids.len());
-                for chunk in job.ids.chunks(crate::model::MAX_QUERY_ROWS) {
+                for chunk in job.ids.chunks(rivu_protocol::model::MAX_QUERY_ROWS) {
                     if !this
                         .update(cx, |this, cx| {
                             this.refresh(cx);
@@ -511,7 +511,7 @@ impl Queue {
     fn timeout_queue_selection(
         &mut self,
         job: &QueueJob,
-        response: crate::response::QueryResponse,
+        response: rivu_protocol::response::QueryResponse,
         cx: &mut Context<Self>,
     ) {
         self.refresh(cx);
@@ -629,7 +629,7 @@ impl Queue {
                         {
                             return Ok(None);
                         }
-                        let limit = (end - offset).min(crate::model::MAX_QUERY_ROWS);
+                        let limit = (end - offset).min(rivu_protocol::model::MAX_QUERY_ROWS);
                         let handle = handle.clone();
                         let ticket = ticket.clone();
                         let query = job.query.clone();

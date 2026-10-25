@@ -1,11 +1,11 @@
 use super::*;
-use crate::model::RepeatMode;
 use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, LineGauge, List, ListItem, Paragraph},
 };
+use rivu_protocol::model::RepeatMode;
 
 pub(super) fn track_label<'a>(title: &'a str, artist: &'a str) -> Cow<'a, str> {
     if title.is_empty() {
@@ -383,9 +383,9 @@ fn draw_details(
             ));
             lines.push(Line::default());
             let decoder = match track.decoder_hint {
-                rivu_audio::DecoderHint::Auto => i18n.text("gl-auto"),
-                rivu_audio::DecoderHint::Native => i18n.text("gl-native"),
-                rivu_audio::DecoderHint::Ffmpeg => "FFmpeg",
+                rivu_format::media::DecoderHint::Auto => i18n.text("gl-auto"),
+                rivu_format::media::DecoderHint::Native => i18n.text("gl-native"),
+                rivu_format::media::DecoderHint::Ffmpeg => "FFmpeg",
             };
             lines.extend(detail_field(
                 i18n.text("gl-decoder-hint"),
@@ -827,7 +827,7 @@ fn draw_status(
         );
     } else if state.system.scanning || state.system.scan_progress.is_some() {
         let color = if state.system.scan_progress.as_ref().is_some_and(|progress| {
-            progress.phase == crate::model::ScanPhase::Failed || progress.errors != 0
+            progress.phase == rivu_protocol::model::ScanPhase::Failed || progress.errors != 0
         }) {
             colors.error
         } else {
@@ -835,12 +835,12 @@ fn draw_status(
         };
         let text = if let Some(progress) = &state.system.scan_progress {
             let phase = ui.i18n.text(match progress.phase {
-                crate::model::ScanPhase::Discovering => "gl-scan-discovering",
-                crate::model::ScanPhase::ReadingMetadata => "gl-scan-metadata",
-                crate::model::ScanPhase::Saving => "gl-scan-saving",
-                crate::model::ScanPhase::Completed => "gl-scan-completed",
-                crate::model::ScanPhase::Failed => "gl-scan-failed",
-                crate::model::ScanPhase::Cancelled => "gl-scan-cancelled",
+                rivu_protocol::model::ScanPhase::Discovering => "gl-scan-discovering",
+                rivu_protocol::model::ScanPhase::ReadingMetadata => "gl-scan-metadata",
+                rivu_protocol::model::ScanPhase::Saving => "gl-scan-saving",
+                rivu_protocol::model::ScanPhase::Completed => "gl-scan-completed",
+                rivu_protocol::model::ScanPhase::Failed => "gl-scan-failed",
+                rivu_protocol::model::ScanPhase::Cancelled => "gl-scan-cancelled",
             });
             format!(
                 "{phase} · {}/{} · !{} · {}",
@@ -1388,9 +1388,9 @@ fn draw_tree(
             "{} · {}{}{} · /{}{} · {}",
             i18n.text("library-other"),
             i18n.text(match tree.sort {
-                crate::model::LibrarySort::Id => "terminal-sort-id",
-                crate::model::LibrarySort::Album => "terminal-sort-album",
-                crate::model::LibrarySort::MostPlayed => "terminal-sort-most-played",
+                rivu_protocol::model::LibrarySort::Id => "terminal-sort-id",
+                rivu_protocol::model::LibrarySort::Album => "terminal-sort-album",
+                rivu_protocol::model::LibrarySort::MostPlayed => "terminal-sort-most-played",
             }),
             if tree.favorite.is_some() { " ♥" } else { "" },
             if tree.missing.is_some() { " !" } else { "" },

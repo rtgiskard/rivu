@@ -1,4 +1,4 @@
-use crate::model::{Command, PlaybackState, PlaybackStatus};
+use rivu_protocol::model::{Command, PlaybackState, PlaybackStatus};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Modifiers {

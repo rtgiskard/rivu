@@ -1,13 +1,21 @@
-use crate::{
-    config::Config,
-    core::CoreState,
-    model::{
-        ClientSnapshot, DatabaseOptimization, HistoryEntry, PlaybackState, PlaybackStatus,
-        QueueState, RepeatMode, Track,
-    },
+use crate::{config::Config, core::CoreState};
+use rivu_protocol::model::{
+    ClientSnapshot, DatabaseOptimization, HistoryEntry, PlaybackState, PlaybackStatus, QueueState,
+    RepeatMode, Track,
 };
+use rivu_protocol::model::{GraphExecutionMode, GraphPort};
 use std::{collections::BTreeMap, sync::Arc};
 
+/// Selected audio source admitted by Core, independent of the latest task and editor.
+/// Transport status remains separate: a selected source can be paused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProcessingAudition {
+    pub id: u64,
+    pub output: Option<GraphPort>,
+    /// Cached graph output is Offline; a prepared live runner is Realtime or Hybrid.
+    /// Legacy denoise/separation audition has no graph mode.
+    pub mode: Option<GraphExecutionMode>,
+}
 #[derive(Clone, Debug, Default)]
 pub struct GuiSnapshot {
     pub library: GuiLibrarySnapshot,
@@ -15,7 +23,7 @@ pub struct GuiSnapshot {
     pub current_track: Option<Arc<Track>>,
     pub playback: PlaybackState,
     pub system: GuiSystemSnapshot,
-    pub revisions: crate::response::StateRevisions,
+    pub revisions: rivu_protocol::response::StateRevisions,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -26,7 +34,7 @@ pub struct GuiLibrarySnapshot {
     pub structure_revision: u64,
     pub playlist_revision: u64,
     pub playlist_entry_revisions: Arc<BTreeMap<i64, u64>>,
-    pub metadata_revisions: Arc<crate::model::MetadataRevisions>,
+    pub metadata_revisions: Arc<rivu_protocol::model::MetadataRevisions>,
     pub duplicate_groups_revision: u64,
     pub duplicate_members_revision: u64,
     pub history: Arc<Vec<HistoryEntry>>,
@@ -44,7 +52,7 @@ pub enum MediaTaskOwner {
 pub struct GuiSystemSnapshot {
     pub scanning: bool,
     pub scan_message: String,
-    pub scan_progress: Option<crate::model::ScanProgress>,
+    pub scan_progress: Option<rivu_protocol::model::ScanProgress>,
     pub scan_task_id: Option<u64>,
     pub scan_owner: Option<MediaTaskOwner>,
     pub last_error: Option<String>,
@@ -56,9 +64,9 @@ pub struct GuiSystemSnapshot {
     pub ffmpeg_status: String,
     pub database_optimization: Option<DatabaseOptimization>,
     pub shutting_down: bool,
-    pub relocation_task: Option<crate::model::RelocationTaskStatus>,
-    pub processing: Option<crate::model::ProcessingTaskStatus>,
-    pub processing_audition: Option<crate::model::ProcessingAudition>,
+    pub relocation_task: Option<rivu_protocol::model::RelocationTaskStatus>,
+    pub processing: Option<rivu_protocol::model::ProcessingTaskStatus>,
+    pub processing_audition: Option<crate::projection::ProcessingAudition>,
 }
 
 impl GuiSystemSnapshot {
@@ -128,7 +136,7 @@ pub struct TuiLibrarySnapshot {
     pub structure_revision: u64,
     pub playlist_revision: u64,
     pub playlist_entry_revisions: Arc<BTreeMap<i64, u64>>,
-    pub metadata_revisions: Arc<crate::model::MetadataRevisions>,
+    pub metadata_revisions: Arc<rivu_protocol::model::MetadataRevisions>,
     pub duplicate_groups_revision: u64,
     pub duplicate_members_revision: u64,
 }
@@ -136,7 +144,7 @@ pub struct TuiLibrarySnapshot {
 #[derive(Clone, Debug)]
 pub struct TuiSystemSnapshot {
     pub scanning: bool,
-    pub scan_progress: Option<crate::model::ScanProgress>,
+    pub scan_progress: Option<rivu_protocol::model::ScanProgress>,
     pub scan_task_id: Option<u64>,
     pub scan_message: String,
     pub last_error: Option<String>,
@@ -210,16 +218,16 @@ impl TuiSnapshot {
 /// Page demand and the physical in-flight worker gate stay with the consumer.
 #[derive(Debug, Default)]
 pub(crate) struct QueryProjection {
-    identity: Option<crate::model::Query>,
-    stamp: Option<crate::model::QueryStamp>,
+    identity: Option<rivu_protocol::model::Query>,
+    stamp: Option<rivu_protocol::model::QueryStamp>,
     generation: crate::core::QueryEpoch,
 }
 
 impl QueryProjection {
     pub(crate) fn sync(
         &mut self,
-        query: &crate::model::Query,
-        revisions: crate::response::QueryRevisions,
+        query: &rivu_protocol::model::Query,
+        revisions: rivu_protocol::response::QueryRevisions,
     ) -> bool {
         let stamp = query.stamp(revisions);
         let identity_changed = !self.matches_identity(query);
@@ -238,11 +246,11 @@ impl QueryProjection {
         self.generation.generation()
     }
 
-    pub(crate) fn stamp(&self) -> Option<crate::model::QueryStamp> {
+    pub(crate) fn stamp(&self) -> Option<rivu_protocol::model::QueryStamp> {
         self.stamp
     }
 
-    pub(crate) fn matches_identity(&self, query: &crate::model::Query) -> bool {
+    pub(crate) fn matches_identity(&self, query: &rivu_protocol::model::Query) -> bool {
         self.identity
             .as_ref()
             .is_some_and(|current| current.identity() == query.identity())
@@ -259,9 +267,9 @@ impl QueryProjection {
 
     pub(crate) fn accepts(
         &self,
-        query: &crate::model::Query,
+        query: &rivu_protocol::model::Query,
         generation: u64,
-        revisions: crate::response::QueryRevisions,
+        revisions: rivu_protocol::response::QueryRevisions,
     ) -> bool {
         self.generation.generation() == generation
             && self.matches_identity(query)
@@ -273,8 +281,8 @@ impl GuiLibrarySnapshot {
     pub(crate) fn query_revisions(
         &self,
         playlist_id: Option<i64>,
-    ) -> crate::response::QueryRevisions {
-        crate::response::QueryRevisions::from_library(
+    ) -> rivu_protocol::response::QueryRevisions {
+        rivu_protocol::response::QueryRevisions::from_library(
             self.revision,
             self.structure_revision,
             self.playlist_revision,
@@ -294,7 +302,7 @@ impl GuiSnapshot {
     pub(crate) fn query_revisions(
         &self,
         playlist_id: Option<i64>,
-    ) -> crate::response::QueryRevisions {
+    ) -> rivu_protocol::response::QueryRevisions {
         let mut revisions = self.library.query_revisions(playlist_id);
         revisions.queue = self.queue.revision;
         revisions
@@ -302,8 +310,8 @@ impl GuiSnapshot {
 
     pub(crate) fn query_revisions_for(
         &self,
-        query: &crate::model::Query,
-    ) -> crate::response::QueryRevisions {
+        query: &rivu_protocol::model::Query,
+    ) -> rivu_protocol::response::QueryRevisions {
         self.query_revisions(None).for_query(
             query,
             &self.library.playlist_entry_revisions,
@@ -316,8 +324,8 @@ impl TuiSnapshot {
     pub(crate) fn query_revisions(
         &self,
         playlist_id: Option<i64>,
-    ) -> crate::response::QueryRevisions {
-        crate::response::QueryRevisions::from_library(
+    ) -> rivu_protocol::response::QueryRevisions {
+        rivu_protocol::response::QueryRevisions::from_library(
             self.library.revision,
             self.library.structure_revision,
             self.library.playlist_revision,

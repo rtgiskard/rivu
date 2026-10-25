@@ -3,4 +3,5 @@ pub mod config;
 #[cfg(feature = "database")]
 pub mod database;
 pub mod input;
+pub mod media;
 pub mod ownership;

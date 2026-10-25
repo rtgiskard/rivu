@@ -25,11 +25,7 @@ mod shell;
 mod visualization;
 mod workspace;
 use crate::{
-    config::AudioVisualizerOptions,
-    core::CoreHandle,
-    i18n::Localizer,
-    model::{Command, Query, Track},
-    projection::GuiSnapshot,
+    config::AudioVisualizerOptions, core::CoreHandle, i18n::Localizer, projection::GuiSnapshot,
 };
 use anyhow::Result;
 use ashpd::desktop::file_chooser::SelectedFiles;
@@ -44,6 +40,7 @@ use layout::save_owner::LayoutSaveHandle;
 use layout::{Axis, Edge, Node};
 use library::LibraryNode;
 use list_interaction::{ContentDrag, ContentMenuRequest, TrackSource};
+use rivu_protocol::model::{Command, Query, Track};
 use rivu_ui::drag_preview;
 use rivu_ui::input::{Input, InputEvent};
 pub(crate) use session::UiSession;
@@ -1471,7 +1468,7 @@ impl GuiApp {
                     return;
                 }
                 match response.result {
-                    Ok(crate::response::ViewResponse::Track(Some(track)))
+                    Ok(rivu_protocol::response::ViewResponse::Track(Some(track)))
                         if this.full_waveform_request.accepts(generation, Some(&track)) =>
                     {
                         this.waveform.update(cx, |waveform, cx| {

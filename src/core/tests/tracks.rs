@@ -273,7 +273,7 @@ fn metadata_intents_merge_and_pages_invalidate_only_for_queued_changes() {
             title: Some("Title".into()),
             artist: None,
             album: None,
-            decoder_hint: Some(rivu_audio::DecoderHint::Ffmpeg),
+            decoder_hint: Some(rivu_format::media::DecoderHint::Ffmpeg),
         };
         let artist = Command::EditTrack {
             track_id: 1,
@@ -293,7 +293,10 @@ fn metadata_intents_merge_and_pages_invalidate_only_for_queued_changes() {
         assert_ne!(core.state.queue.revision, revision);
         let current = core.state.current_track().unwrap();
         assert_eq!((&*current.title, &*current.artist), ("Title", "Artist"));
-        assert_eq!(current.decoder_hint, rivu_audio::DecoderHint::Ffmpeg);
+        assert_eq!(
+            current.decoder_hint,
+            rivu_format::media::DecoderHint::Ffmpeg
+        );
         let page = core.store.queue_page(None, 0, MAX_QUERY_ROWS).unwrap();
         assert_eq!(
             (&*page.rows[0].track.title, &*page.rows[0].track.artist),
@@ -540,7 +543,7 @@ fn targeted_metadata_preserves_unrelated_track_and_playlist_reads() {
         title: None,
         artist: None,
         album: None,
-        decoder_hint: Some(rivu_audio::DecoderHint::Native),
+        decoder_hint: Some(rivu_format::media::DecoderHint::Native),
     })
     .unwrap();
     assert_eq!(

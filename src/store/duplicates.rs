@@ -1,7 +1,7 @@
 use super::Store;
 use super::rows::{TRACK_COLUMN_COUNT, TRACK_COLUMNS, fingerprint_from_row, track_from_row};
-use crate::model::{DuplicateGroup, DuplicateMember, Page};
 use anyhow::{Context, Result, bail};
+use rivu_protocol::model::{DuplicateGroup, DuplicateMember, Page};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::PathBuf;
 
@@ -136,7 +136,7 @@ impl Store {
         let rows = query
             .query_map(
                 params![
-                    limit.min(crate::model::MAX_QUERY_ROWS) as i64,
+                    limit.min(rivu_protocol::model::MAX_QUERY_ROWS) as i64,
                     offset.min(i64::MAX as usize) as i64
                 ],
                 |row| {
@@ -177,7 +177,7 @@ impl Store {
             .query_map(
                 params![
                     fingerprint.as_bytes().as_slice(),
-                    limit.min(crate::model::MAX_QUERY_ROWS) as i64,
+                    limit.min(rivu_protocol::model::MAX_QUERY_ROWS) as i64,
                     offset.min(i64::MAX as usize) as i64
                 ],
                 duplicate_member_from_row,
@@ -192,7 +192,7 @@ impl Store {
         track_ids: &[i64],
     ) -> Result<Page<DuplicateMember>> {
         anyhow::ensure!(
-            track_ids.len() <= crate::model::MAX_QUERY_ROWS,
+            track_ids.len() <= rivu_protocol::model::MAX_QUERY_ROWS,
             "Duplicate selection exceeds query limit"
         );
         let fingerprint = blake3::Hash::from_hex(fingerprint)
@@ -291,7 +291,7 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rivu_audio::DecoderHint;
+    use rivu_format::media::DecoderHint;
     use std::path::Path;
 
     fn fixture() -> Result<Store> {
@@ -359,7 +359,7 @@ mod tests {
         assert_eq!(store.queue_state()?, before);
         assert_eq!(store.track_count()?, 6);
 
-        for index in 0..crate::model::MAX_QUERY_ROWS + 3 {
+        for index in 0..rivu_protocol::model::MAX_QUERY_ROWS + 3 {
             let hash = blake3::hash(index.to_string().as_bytes());
             store.conn.execute(
                 "INSERT INTO tracks(path,fingerprint) VALUES(?1,?3),(?2,?3)",
@@ -372,7 +372,7 @@ mod tests {
         }
         assert_eq!(
             store.duplicate_groups_page(0, usize::MAX)?.rows.len(),
-            crate::model::MAX_QUERY_ROWS
+            rivu_protocol::model::MAX_QUERY_ROWS
         );
         store.conn.execute(
             "INSERT INTO tracks(path,fingerprint) SELECT '/more/'||value,?1 FROM json_each(?2)",
@@ -383,7 +383,7 @@ mod tests {
         )?;
         let members = store.duplicate_members_page(hash.to_hex().as_ref(), 0, usize::MAX)?;
         assert_eq!(members.total, 302);
-        assert_eq!(members.rows.len(), crate::model::MAX_QUERY_ROWS);
+        assert_eq!(members.rows.len(), rivu_protocol::model::MAX_QUERY_ROWS);
         assert_eq!(
             store
                 .duplicate_members_page(hash.to_hex().as_ref(), 256, 256)?
@@ -564,7 +564,7 @@ mod tests {
             store
                 .duplicate_member_selection(
                     &fingerprint,
-                    &vec![1; crate::model::MAX_QUERY_ROWS + 1]
+                    &vec![1; rivu_protocol::model::MAX_QUERY_ROWS + 1]
                 )
                 .is_err()
         );

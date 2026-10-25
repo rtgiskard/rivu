@@ -2060,7 +2060,8 @@ impl Render for Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{core::Runtime, model::Command};
+    use crate::core::Runtime;
+    use rivu_protocol::model::Command;
     // gpui::* also imports its test macro; expansion needs Rust's builtin attribute.
     use core::prelude::v1::test;
 

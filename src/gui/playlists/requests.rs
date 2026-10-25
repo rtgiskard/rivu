@@ -1,8 +1,8 @@
 //! Playlist demand and physical gates; cancellation never releases a worker.
 use super::model::{PlaylistBrowser, PlaylistRefresh};
-use crate::{
+use crate::projection::QueryProjection;
+use rivu_protocol::{
     model::{Page, PlaylistSummary, Query},
-    projection::QueryProjection,
     response::{QueryResponse, QueryRevisions, ViewResponse},
 };
 use std::{
@@ -28,12 +28,12 @@ impl ViewRequestKind {
 }
 struct ViewDemand {
     query: Query,
-    stamp: crate::model::QueryStamp,
+    stamp: rivu_protocol::model::QueryStamp,
     selection_generation: u64,
     quiet_until: Instant,
 }
 
-pub(in crate::gui) type SelectionKey = (u64, crate::model::QueryStamp);
+pub(in crate::gui) type SelectionKey = (u64, rivu_protocol::model::QueryStamp);
 
 #[derive(Default)]
 pub(in crate::gui) struct ViewRequests {
@@ -55,7 +55,7 @@ impl ViewRequests {
         kind: ViewRequestKind,
         query: Query,
         generation: u64,
-        revisions: crate::response::QueryRevisions,
+        revisions: rivu_protocol::response::QueryRevisions,
         selection_generation: u64,
         now: Instant,
     ) -> Option<(Query, Duration)> {
@@ -215,7 +215,7 @@ impl PlaylistState {
 
     pub(super) fn accept_playlist_entry_locations(
         &mut self,
-        rows: Vec<crate::model::PlaylistEntryLocation>,
+        rows: Vec<rivu_protocol::model::PlaylistEntryLocation>,
     ) {
         self.playlists.accept_entry_locations(rows);
     }
@@ -709,17 +709,19 @@ mod tests {
     fn lookup_error(revisions: QueryRevisions, message: &str) -> QueryResponse {
         QueryResponse {
             revisions,
-            result: Err(crate::response::QueryError::Message(message.into())),
+            result: Err(rivu_protocol::response::QueryError::Message(message.into())),
         }
     }
 
     fn lookup_success(revisions: QueryRevisions, id: i64, count: usize) -> QueryResponse {
         QueryResponse {
             revisions,
-            result: Ok(ViewResponse::PlaylistSummaryBatch(crate::model::Batch {
-                rows: vec![summary(id, count)],
-                next: None,
-            })),
+            result: Ok(ViewResponse::PlaylistSummaryBatch(
+                rivu_protocol::model::Batch {
+                    rows: vec![summary(id, count)],
+                    next: None,
+                },
+            )),
         }
     }
 
@@ -1034,7 +1036,9 @@ mod tests {
             let (read, _) = prepared.into_read().unwrap();
             let timeout = || QueryResponse {
                 revisions,
-                result: Err(crate::response::QueryError::Message("timeout".into())),
+                result: Err(rivu_protocol::response::QueryError::Message(
+                    "timeout".into(),
+                )),
             };
             assert_eq!(
                 browser.timeout_playlist_read(&read, revisions, timeout()),
@@ -1071,7 +1075,9 @@ mod tests {
             .unwrap();
         let timeout = || QueryResponse {
             revisions,
-            result: Err(crate::response::QueryError::Message("timeout".into())),
+            result: Err(rivu_protocol::response::QueryError::Message(
+                "timeout".into(),
+            )),
         };
         assert!(
             browser
@@ -1128,7 +1134,7 @@ mod tests {
             revisions,
             QueryResponse {
                 revisions,
-                result: Ok(ViewResponse::PlaylistEntries(crate::model::Page {
+                result: Ok(ViewResponse::PlaylistEntries(rivu_protocol::model::Page {
                     total: 0,
                     rows: Vec::new(),
                 })),
@@ -1146,7 +1152,7 @@ mod tests {
             revisions,
             QueryResponse {
                 revisions,
-                result: Ok(ViewResponse::PlaylistEntries(crate::model::Page {
+                result: Ok(ViewResponse::PlaylistEntries(rivu_protocol::model::Page {
                     total: 0,
                     rows: Vec::new(),
                 })),
@@ -1216,7 +1222,7 @@ mod tests {
             changed,
             QueryResponse {
                 revisions,
-                result: Ok(ViewResponse::PlaylistEntries(crate::model::Page {
+                result: Ok(ViewResponse::PlaylistEntries(rivu_protocol::model::Page {
                     total: 0,
                     rows: Vec::new(),
                 })),
@@ -1235,7 +1241,7 @@ mod tests {
     fn queued_playlist_demand_uses_elapsed_latest_deadline() {
         let start = Instant::now();
         let kind = ViewRequestKind::Entries;
-        let query = |offset| crate::model::Query::PlaylistEntries {
+        let query = |offset| rivu_protocol::model::Query::PlaylistEntries {
             query: None,
             playlist_id: 1,
             offset,
@@ -1293,7 +1299,7 @@ mod tests {
     fn playlist_replacement_and_hidden_reopen_preserve_remaining_quiet_interval() {
         let start = Instant::now();
         let kind = ViewRequestKind::Summaries;
-        let query = |offset| crate::model::Query::PlaylistSummaries {
+        let query = |offset| rivu_protocol::model::Query::PlaylistSummaries {
             query: None,
             offset,
             limit: 20,
@@ -1364,7 +1370,7 @@ mod tests {
     fn playlist_freshness_and_identity_changes_establish_new_quiet_deadlines() {
         let start = Instant::now();
         let kind = ViewRequestKind::Entries;
-        let query = crate::model::Query::PlaylistEntries {
+        let query = rivu_protocol::model::Query::PlaylistEntries {
             query: None,
             playlist_id: 1,
             offset: 0,
@@ -1376,7 +1382,7 @@ mod tests {
             .prepare_view(kind, query.clone(), 1, revisions, 1, start)
             .unwrap();
         assert!(requests.workers.remove(&kind));
-        let revisions = crate::response::QueryRevisions {
+        let revisions = rivu_protocol::response::QueryRevisions {
             library: 1,
             ..revisions
         };
@@ -1407,7 +1413,7 @@ mod tests {
 
     #[test]
     fn playlist_query_owners_separate_metadata_catalog_and_occurrences() {
-        use crate::model::Query;
+        use rivu_protocol::model::Query;
         let mut library = GuiLibrarySnapshot::default();
         Arc::make_mut(&mut library.playlist_entry_revisions).insert(1, 0);
         let summaries = Query::PlaylistSummaries {
@@ -1478,7 +1484,7 @@ mod tests {
         let kind = ViewRequestKind::Entries;
         let empty = || QueryResponse {
             revisions,
-            result: Ok(ViewResponse::PlaylistEntries(crate::model::Page {
+            result: Ok(ViewResponse::PlaylistEntries(rivu_protocol::model::Page {
                 total: 0,
                 rows: Vec::new(),
             })),
@@ -1518,7 +1524,9 @@ mod tests {
                 QueryResponse {
                     // Transport failures lack the playlist-local revision scope.
                     revisions: QueryRevisions::default(),
-                    result: Err(crate::response::QueryError::Message("unavailable".into())),
+                    result: Err(rivu_protocol::response::QueryError::Message(
+                        "unavailable".into()
+                    )),
                 }
             ),
             Some("unavailable".into())
@@ -1587,7 +1595,7 @@ mod tests {
         browser.requests.begin(ViewRequestKind::Summaries, 2);
         assert!(browser.requests.finish(ViewRequestKind::Summaries, 2));
         browser.accept_playlist_summaries(
-            crate::model::Page {
+            rivu_protocol::model::Page {
                 total: 0,
                 rows: Vec::new(),
             },

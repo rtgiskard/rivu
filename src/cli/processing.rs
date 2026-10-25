@@ -6,8 +6,7 @@ use super::{
     output::Terminal,
 };
 use anyhow::{Context, Result, bail};
-use rivu::{
-    ipc,
+use rivu_protocol::{
     model::*,
     response::{StateSections, ViewResponse},
 };
@@ -25,7 +24,7 @@ pub(super) fn run(data_dir: &Path, action: ProcessingAction, json: bool) -> Resu
     }
     result
 }
-fn status(session: &mut ipc::ClientSession, id: u64) -> Result<ProcessingTaskStatus> {
+fn status(session: &mut rivu_client::ClientSession, id: u64) -> Result<ProcessingTaskStatus> {
     let view = session
         .query(&Query::ProcessingTask { id })?
         .result
@@ -118,7 +117,7 @@ fn execute(data_dir: &Path, action: ProcessingAction, json: bool) -> Result<()> 
         ProcessingAction::Graph(ProcessingGraphAction::Show)
     );
     if graph_show || matches!(&action, ProcessingAction::Show) {
-        let state = ipc::get_state(
+        let state = rivu_client::get_state(
             data_dir,
             StateSections {
                 system: true,
@@ -135,7 +134,7 @@ fn execute(data_dir: &Path, action: ProcessingAction, json: bool) -> Result<()> 
         println!("{}", serde_json::to_string_pretty(&value)?);
         return Ok(());
     }
-    let mut session = ipc::client_session(data_dir)?;
+    let mut session = rivu_client::client_session(data_dir)?;
     let mut wait = false;
     let command = match action {
         ProcessingAction::Bypass => Command::ProcessingBypass,

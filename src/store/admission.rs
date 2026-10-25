@@ -207,8 +207,8 @@ impl Store {
 mod tests {
     use super::*;
     use crate::library::{ScanRecord, ScanResult};
-    use crate::model::CueSegment;
     use rivu_audio::MediaInfo;
+    use rivu_protocol::model::CueSegment;
     use std::path::Path;
 
     fn record(path: &str) -> ScanRecord {

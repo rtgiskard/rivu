@@ -55,7 +55,7 @@ impl EqualizerEdit {
     /// Apply monitor/node-independent parameter edits to a caller-owned candidate.
     /// Returns owner-only preset/A-B operations untouched. The caller validates
     /// and commits the whole candidate atomically; errors must discard it.
-    pub(crate) fn apply_config(
+    pub fn apply_config(
         self,
         config: &mut EqualizerConfig,
         sample_rate: Option<u32>,
@@ -368,17 +368,6 @@ pub struct GraphOutputContext {
     pub path: PathBuf,
     /// Source-relative frame represented by the first context frame.
     pub start_frame: i64,
-}
-
-/// Selected audio source admitted by Core, independent of the latest task and editor.
-/// Transport status remains separate: a selected source can be paused.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ProcessingAudition {
-    pub id: u64,
-    pub output: Option<GraphPort>,
-    /// Cached graph output is Offline; a prepared live runner is Realtime or Hybrid.
-    /// Legacy denoise/separation audition has no graph mode.
-    pub mode: Option<GraphExecutionMode>,
 }
 
 #[cfg(test)]

@@ -3,8 +3,8 @@ use super::scan::{
     UNCACHEABLE_MODIFIED_NS, cache_modified_ns,
 };
 use super::*;
-use crate::model::{CueSegment, PlaylistExportTrack, ScanPhase, Track};
 use anyhow::{Context, Result};
+use rivu_protocol::model::{CueSegment, PlaylistExportTrack, ScanPhase, Track};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};

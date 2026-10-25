@@ -33,8 +33,10 @@ use gpui::{
 };
 use parking_lot::RwLock;
 
-use crate::{config::Config, model::Track};
-use rivu_audio::{DecoderHint, PlaybackRange, WaveformFrame};
+use crate::config::Config;
+use rivu_audio::{PlaybackRange, WaveformFrame};
+use rivu_format::media::DecoderHint;
+use rivu_protocol::model::Track;
 
 #[derive(Clone, PartialEq)]
 struct Source {
@@ -2759,7 +2761,7 @@ mod tests {
 
     fn cue_track() -> Track {
         let mut track = track("track.flac", DecoderHint::Ffmpeg);
-        track.cue = Some(crate::model::CueSegment {
+        track.cue = Some(rivu_protocol::model::CueSegment {
             sheet: PathBuf::from("track.cue"),
             number: 2,
             start_frame: 150,
@@ -3282,7 +3284,7 @@ mod tests {
             let state = |visible, has_panel| PresentationState {
                 config: Arc::clone(&config),
                 panels: if has_panel { &panels } else { &[] },
-                status: crate::model::PlaybackStatus::Paused,
+                status: rivu_protocol::model::PlaybackStatus::Paused,
                 visible,
                 shutting_down: false,
                 track: Some(&track),

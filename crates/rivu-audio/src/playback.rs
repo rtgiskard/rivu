@@ -7,13 +7,13 @@ use super::{
     source::{DECODE_WORK_BUDGET, DecodeStep, Source},
     waveform::{WaveformAccumulator, WaveformCoverage},
 };
-use crate::DecoderHint;
 use crate::analysis::{AnalysisAudioIdentity, AnalysisProducer, AnalysisWorker};
 use anyhow::{Result, bail};
 use crossbeam_channel::Receiver;
 use parking_lot::RwLock;
 use rivu_dsp::equalizer::{config::EqualizerConfig, iir::Equalizer};
 use rivu_format::config::VisualizationSignal;
+use rivu_format::media::DecoderHint;
 use std::{collections::VecDeque, path::PathBuf, sync::Arc};
 
 const PENDING_BUFFER_CAPACITY: usize = 16_384;

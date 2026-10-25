@@ -590,7 +590,7 @@ fn failed_cue_import_never_reuses_old_entries_but_keeps_readable_items() {
             size: 1,
             modified_ns: 1,
             fingerprint: None,
-            cue: Some(crate::model::CueSegment {
+            cue: Some(rivu_protocol::model::CueSegment {
                 sheet: sheet.clone(),
                 number: 1,
                 start_frame: 0,

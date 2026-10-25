@@ -1,12 +1,11 @@
 use super::{Command, Path, PathBuf, Query, TuiSnapshot};
-use crate::{
-    ipc,
-    model::{ClientSnapshot, LibrarySort, QueryStamp},
-    response::{Ack, StateSections, ViewResponse},
-};
 use anyhow::{Context, Result};
 use crossbeam_channel::{Receiver, Sender, TryRecvError, bounded};
 use parking_lot::Mutex;
+use rivu_protocol::{
+    model::{ClientSnapshot, LibrarySort, QueryStamp},
+    response::{Ack, StateSections, ViewResponse},
+};
 use std::{
     sync::{
         Arc,
@@ -20,7 +19,7 @@ type WatchedSnapshot = Result<(u32, ClientSnapshot), String>;
 pub(super) struct Watcher {
     pub(super) receiver: Receiver<()>,
     pub(super) latest: Arc<Mutex<Option<WatchedSnapshot>>>,
-    stopping: ipc::SessionStop,
+    stopping: rivu_client::SessionStop,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -60,10 +59,10 @@ pub(super) fn spawn_watcher(data_dir: &Path) -> Watcher {
     let (sender, receiver) = bounded(1);
     let latest = Arc::new(Mutex::new(None));
     let latest_worker = Arc::clone(&latest);
-    let stopping = ipc::SessionStop::default();
+    let stopping = rivu_client::SessionStop::default();
     let stop = stopping.clone();
     let worker = std::thread::spawn(move || {
-        let Ok(mut session) = ipc::client_session_with_cancel(&data_dir, stop) else {
+        let Ok(mut session) = rivu_client::client_session_with_cancel(&data_dir, stop) else {
             *latest_worker.lock() = Some(Err("TUI state watcher could not initialize".into()));
             let _ = sender.try_send(());
             return;
@@ -154,7 +153,7 @@ pub(super) struct WorkerFailure {
 impl From<anyhow::Error> for WorkerFailure {
     fn from(error: anyhow::Error) -> Self {
         Self {
-            instance_changed: error.is::<ipc::InstanceChanged>(),
+            instance_changed: error.is::<rivu_client::InstanceChanged>(),
             message: format!("{error:#}"),
         }
     }
@@ -172,7 +171,7 @@ impl WorkerFailure {
 pub(super) struct CommandWorker {
     pub(super) sender: Option<Sender<Command>>,
     stopping: Option<Sender<()>>,
-    shutdown: ipc::SessionStop,
+    shutdown: rivu_client::SessionStop,
     pub(super) results: Receiver<Result<Ack, WorkerFailure>>,
     worker: Option<JoinHandle<()>>,
 }
@@ -195,10 +194,10 @@ pub(super) fn spawn_command_worker(data_dir: &Path, instance_id: u32) -> Command
     let (sender, receiver) = bounded::<Command>(8);
     let (stopping, stop_receiver) = bounded::<()>(1);
     let (result_sender, results) = bounded::<Result<Ack, WorkerFailure>>(8);
-    let shutdown = ipc::SessionStop::default();
+    let shutdown = rivu_client::SessionStop::default();
     let stop = shutdown.clone();
     let worker = std::thread::spawn(move || {
-        let mut session = ipc::client_session_with_cancel(&data_dir, stop.clone())
+        let mut session = rivu_client::client_session_with_cancel(&data_dir, stop.clone())
             .and_then(|mut session| {
                 session.bind_instance(instance_id)?;
                 Ok(session)
@@ -367,7 +366,7 @@ impl QueryRequest {
 }
 
 pub(super) struct QueryResult {
-    pub(super) revisions: crate::response::QueryRevisions,
+    pub(super) revisions: rivu_protocol::response::QueryRevisions,
     pub(super) view: ViewResponse,
 }
 
@@ -383,7 +382,7 @@ pub(super) struct QueryWorker {
     pending: Arc<Mutex<Option<QueryJob>>>,
     pub(super) latest: Arc<Mutex<Option<QueryCompletion>>>,
     cancellation: Option<Arc<AtomicBool>>,
-    shutdown: ipc::SessionStop,
+    shutdown: rivu_client::SessionStop,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -427,10 +426,10 @@ pub(super) fn spawn_query_worker(data_dir: &Path, instance_id: u32) -> QueryWork
     let requests = Arc::clone(&pending);
     let latest = Arc::new(Mutex::new(None));
     let results = Arc::clone(&latest);
-    let shutdown = ipc::SessionStop::default();
+    let shutdown = rivu_client::SessionStop::default();
     let stopping = shutdown.clone();
     let worker = std::thread::spawn(move || {
-        let mut session = ipc::client_session_with_cancel(&data_dir, stopping.clone())
+        let mut session = rivu_client::client_session_with_cancel(&data_dir, stopping.clone())
             .and_then(|mut session| {
                 session.bind_instance(instance_id)?;
                 Ok(session)

@@ -1,7 +1,7 @@
 use super::*;
-use crate::response::QueryRevisions;
 use crate::terminal::tests::*;
 use ratatui::backend::TestBackend;
+use rivu_protocol::response::QueryRevisions;
 
 #[test]
 fn snapshot_theme_changes_recolor_main_help_and_details_without_changing_content() {

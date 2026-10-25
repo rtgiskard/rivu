@@ -1,6 +1,6 @@
 use super::{PlaylistEvent, Playlists};
-use crate::model::Command;
 use gpui::{AnyElement, Context, Focusable, Window, div, prelude::*, rems};
+use rivu_protocol::model::Command;
 use rivu_ui::{
     FormField, IconButton, IconButtonDensity, IconButtonStyle, StatusKind, caption, column, row,
     status_message,

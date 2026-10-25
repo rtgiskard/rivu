@@ -1,7 +1,9 @@
 use crate::{
     gui::{coordination::manual_actions::ManualIntentId, paged},
-    model::{Query, QueryStamp, QueueRow},
     projection::QueryProjection,
+};
+use rivu_protocol::{
+    model::{Query, QueryStamp, QueueRow},
     response::{QueryRevisions, ViewResponse},
 };
 use std::{collections::HashMap, ops::Range};
@@ -432,7 +434,7 @@ impl QueueSelection {
         &mut self,
         query: &Query,
         generation: u64,
-        response: crate::response::QueryResponse,
+        response: rivu_protocol::response::QueryResponse,
         unexpected: impl FnOnce() -> String,
     ) {
         if !self
@@ -621,7 +623,7 @@ impl QueueSelection {
 #[cfg(test)]
 mod tests {
     use super::{QueueIdentity, QueueSelection};
-    use crate::{
+    use rivu_protocol::{
         model::{LibraryRow, Page, Query, QueueRow},
         response::QueryRevisions,
     };
@@ -674,9 +676,11 @@ mod tests {
         queue.accept_page(
             &request,
             generation,
-            crate::response::QueryResponse {
+            rivu_protocol::response::QueryResponse {
                 revisions: revisions(7),
-                result: Err(crate::response::QueryError::Message("timeout".into())),
+                result: Err(rivu_protocol::response::QueryError::Message(
+                    "timeout".into(),
+                )),
             },
             || unreachable!(),
         );
@@ -694,9 +698,11 @@ mod tests {
         queue.accept_page(
             &request,
             generation,
-            crate::response::QueryResponse {
+            rivu_protocol::response::QueryResponse {
                 revisions: revisions(7),
-                result: Err(crate::response::QueryError::Message("obsolete".into())),
+                result: Err(rivu_protocol::response::QueryError::Message(
+                    "obsolete".into(),
+                )),
             },
             || unreachable!(),
         );
@@ -716,7 +722,7 @@ mod tests {
         assert_eq!(queue.rows.total(), None);
         let (query, _) = queue.demand_page(0..3, 20).unwrap();
         assert!(
-            matches!(query, crate::model::Query::QueuePage { query: Some(query), offset: 0, .. } if query == "needle")
+            matches!(query, rivu_protocol::model::Query::QueuePage { query: Some(query), offset: 0, .. } if query == "needle")
         );
         queue.select(identity, false);
         assert_eq!(queue.ordered_ids(), [20]);
@@ -1069,9 +1075,11 @@ mod tests {
         queue.accept_page(
             &query,
             generation,
-            crate::response::QueryResponse {
+            rivu_protocol::response::QueryResponse {
                 revisions: revisions(7),
-                result: Err(crate::response::QueryError::Message("offline".into())),
+                result: Err(rivu_protocol::response::QueryError::Message(
+                    "offline".into(),
+                )),
             },
             || unreachable!(),
         );

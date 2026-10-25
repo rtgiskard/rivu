@@ -1182,7 +1182,7 @@ fn album_commands_resolve_all_members_and_reject_stale_keys_before_stop() {
         })
         .unwrap();
     core.apply_scan_impacts(impacts).unwrap();
-    let key = crate::model::AlbumKey {
+    let key = rivu_protocol::model::AlbumKey {
         directory: directory.path().into(),
         title: "Large".into(),
     };
@@ -1201,7 +1201,7 @@ fn album_commands_resolve_all_members_and_reject_stale_keys_before_stop() {
     let current_id = core.state.queue.current_id;
     let playback_status = core.state.playback.status;
     for title in ["Absent", "", " \t\r\n", "\u{a0}\u{2003}\u{202f}\u{3000}"] {
-        let key = crate::model::AlbumKey {
+        let key = rivu_protocol::model::AlbumKey {
             directory: directory.path().into(),
             title: title.into(),
         };

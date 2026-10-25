@@ -2,11 +2,11 @@ use super::positions::{PositionScope, close_gaps, move_selection};
 use super::rows::cue_from_row;
 use super::tracks::{SOURCE_FILTER, search_filter, search_query, validate_encoded_track_ids};
 use super::{Store, batch_limit, changed};
-use crate::model::{
+use anyhow::{Context, Result, anyhow, bail};
+use rivu_protocol::model::{
     Batch, BatchContinuation, Page, PlaylistEntryCursor, PlaylistEntryLocation, PlaylistEntryRow,
     PlaylistExportTrack, PlaylistSummary, QueryStamp,
 };
-use anyhow::{Context, Result, anyhow, bail};
 use rusqlite::{OptionalExtension, Transaction, params};
 use std::path::PathBuf;
 
@@ -43,9 +43,9 @@ impl Store {
         entry_ids: &[i64],
     ) -> Result<Vec<PlaylistEntryLocation>> {
         anyhow::ensure!(
-            entry_ids.len() <= crate::model::MAX_QUERY_ROWS,
+            entry_ids.len() <= rivu_protocol::model::MAX_QUERY_ROWS,
             "Playlist entry query exceeds {} IDs",
-            crate::model::MAX_QUERY_ROWS
+            rivu_protocol::model::MAX_QUERY_ROWS
         );
         if entry_ids.is_empty() {
             let exists = self.conn.query_row(
@@ -128,7 +128,7 @@ impl Store {
             .query_map(
                 params![
                     query,
-                    limit.min(crate::model::MAX_QUERY_ROWS) as i64,
+                    limit.min(rivu_protocol::model::MAX_QUERY_ROWS) as i64,
                     offset.min(i64::MAX as usize) as i64
                 ],
                 |row| {
@@ -217,7 +217,7 @@ impl Store {
         let query = search_query(query);
         let scope = revisions.continuation_scope(query.as_deref(), Some(playlist_id));
         if after.is_some_and(|after| after.scope != scope) {
-            return Err(crate::response::QueryError::RevisionChanged.into());
+            return Err(rivu_protocol::response::QueryError::RevisionChanged.into());
         }
         let exists = self.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM playlists WHERE id=?1)",
@@ -355,7 +355,7 @@ impl Store {
             "AND e.position>=?3 ORDER BY e.position,e.id LIMIT ?4"
         };
         let mut stmt = self.conn.prepare(&format!("SELECT e.id,e.track_id,COALESCE(t.title_override,t.raw_title),COALESCE(t.artist_override,t.raw_artist),COALESCE(t.album_override,t.raw_album),COALESCE(t.missing,1),t.favorite,e.position,t.duration,COALESCE(t.codec,'') FROM playlist_entries e LEFT JOIN tracks t ON t.id=e.track_id WHERE e.playlist_id=?1 AND {filter} {paging}"))?;
-        let limit = limit.min(crate::model::MAX_QUERY_ROWS) as i64;
+        let limit = limit.min(rivu_protocol::model::MAX_QUERY_ROWS) as i64;
         let offset = offset.min(i64::MAX as usize) as i64;
         let mut rows = stmt
             .query_map(params![playlist_id, query, offset, limit], |r| {
@@ -907,7 +907,7 @@ mod request_tests {
     #[test]
     fn deep_pages_preserve_entry_identity_missing_tracks_and_exact_totals() -> Result<()> {
         let store = store()?;
-        let total = crate::model::MAX_QUERY_ROWS + 17;
+        let total = rivu_protocol::model::MAX_QUERY_ROWS + 17;
         store.conn.execute(
             "WITH RECURSIVE ids(id) AS (SELECT 5 UNION ALL SELECT id+1 FROM ids WHERE id<?1) INSERT INTO tracks(id,path) SELECT id,'track-'||id FROM ids",
             [total as i64],
@@ -945,7 +945,7 @@ mod request_tests {
                 .playlist_entries_page(id, None, 0, usize::MAX)?
                 .rows
                 .len(),
-            crate::model::MAX_QUERY_ROWS
+            rivu_protocol::model::MAX_QUERY_ROWS
         );
         assert_eq!(
             store.playlist_summary_page(None, 0, 10)?.rows[0].entry_count,
@@ -1065,7 +1065,7 @@ mod request_tests {
 #[cfg(test)]
 mod export_tests {
     use super::*;
-    use crate::model::MAX_QUERY_ROWS;
+    use rivu_protocol::model::MAX_QUERY_ROWS;
     use std::path::Path;
 
     #[test]
@@ -1501,9 +1501,9 @@ mod group_tests {
              WITH RECURSIVE entries(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM entries WHERE n<1000)
              INSERT INTO playlist_entries(id,playlist_id,track_id,position) SELECT 1000+n,30,1000+n,n-1 FROM entries;",
         )?;
-        let ids: Vec<_> = (1001..=1000 + crate::model::MAX_QUERY_ROWS as i64).collect();
+        let ids: Vec<_> = (1001..=1000 + rivu_protocol::model::MAX_QUERY_ROWS as i64).collect();
         let locations = store.playlist_entry_locations(30, None, &ids)?;
-        assert_eq!(locations.len(), crate::model::MAX_QUERY_ROWS);
+        assert_eq!(locations.len(), rivu_protocol::model::MAX_QUERY_ROWS);
         assert!(
             locations
                 .iter()
@@ -1512,7 +1512,11 @@ mod group_tests {
         );
         assert!(
             store
-                .playlist_entry_locations(30, None, &vec![1001; crate::model::MAX_QUERY_ROWS + 1])
+                .playlist_entry_locations(
+                    30,
+                    None,
+                    &vec![1001; rivu_protocol::model::MAX_QUERY_ROWS + 1]
+                )
                 .is_err()
         );
         assert!(store.playlist_entry_locations(999, None, &[]).is_err());

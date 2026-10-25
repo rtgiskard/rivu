@@ -1,8 +1,8 @@
 //! Library-owned query dispatch; worker retirement is independent of visibility.
 use super::{Library, LibraryEvent, TreeBranch, model};
 use crate::gui::components::search::set_search_counts;
-use crate::{model::Query, response::ViewResponse};
 use gpui::Context;
+use rivu_protocol::{model::Query, response::ViewResponse};
 use std::rc::Rc;
 
 fn library_search_counts(
@@ -393,10 +393,10 @@ mod tests {
             core::Runtime,
             gui::library::model::LibraryBrowser,
             library::{ScanRecord, ScanResult},
-            model::Query,
             store::Store,
         };
         use rivu_audio::MediaInfo;
+        use rivu_protocol::model::Query;
 
         let directory = tempfile::tempdir().unwrap();
         let parent = directory.path().join("music");

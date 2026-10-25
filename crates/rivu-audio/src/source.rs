@@ -4,9 +4,9 @@ use super::{
     BYTES_PER_MEBIBYTE, Channel, MediaInfo,
     bitrate::{self, PacketStats},
 };
-use crate::DecoderHint;
 use anyhow::{Context, Result, anyhow, bail};
 use rivu_format::input::open_regular_file;
+use rivu_format::media::DecoderHint;
 use std::{
     fs::File,
     io::Seek,

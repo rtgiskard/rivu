@@ -1,9 +1,9 @@
 use super::Store;
 use super::rows::{cue_from_row, fingerprint_from_row};
 use crate::library::{KnownFile, ScanResult, ScanUncertainty};
-use crate::model::CueSegment;
 use anyhow::{Context, Result, bail};
 use rivu_audio::MediaInfo;
+use rivu_protocol::model::CueSegment;
 use rusqlite::{OptionalExtension, params};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -777,8 +777,8 @@ impl Store {
 mod tests {
     use super::{PROBE_VERSION, ScanImpacts, Store};
     use crate::library::{ScanRecord, ScanResult};
-    use crate::model::CueSegment;
     use rivu_audio::MediaInfo;
+    use rivu_protocol::model::CueSegment;
     use std::path::Path;
 
     fn record() -> ScanRecord {

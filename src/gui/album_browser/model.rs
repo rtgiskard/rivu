@@ -1,9 +1,8 @@
 use std::ops::Range;
 
-use crate::{
-    core::QueryTicket,
+use crate::{core::QueryTicket, projection::QueryProjection};
+use rivu_protocol::{
     model::{AlbumKey, AlbumSort, AlbumSummary, LibraryRow, Query, QueryStamp},
-    projection::QueryProjection,
     response::{QueryResponse, QueryRevisions, ViewResponse},
 };
 
@@ -509,7 +508,8 @@ fn cancel_pages<T>(projection: &mut QueryProjection, pages: &mut PagedRows<T>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{gui::paged, model::Page};
+    use crate::gui::paged;
+    use rivu_protocol::model::Page;
     fn key(title: &str) -> AlbumKey {
         AlbumKey {
             directory: "/music".into(),
@@ -577,7 +577,9 @@ mod tests {
                 first.generation,
                 QueryResponse {
                     revisions: model.revisions,
-                    result: Err(crate::response::QueryError::Message("timed out".into())),
+                    result: Err(rivu_protocol::response::QueryError::Message(
+                        "timed out".into(),
+                    )),
                 },
                 model.revisions,
             );
@@ -784,7 +786,9 @@ mod tests {
             request.generation,
             QueryResponse {
                 revisions: model.revisions,
-                result: Err(crate::response::QueryError::Message("offline".into())),
+                result: Err(rivu_protocol::response::QueryError::Message(
+                    "offline".into(),
+                )),
             },
             None,
             model.revisions,

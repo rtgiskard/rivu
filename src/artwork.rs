@@ -2,8 +2,8 @@
 //! reads never probe media; blocking loads belong on existing background workers.
 //! No decoder or audio output is opened; failures never propagate into playback.
 
-use crate::model::Track;
 use parking_lot::{Mutex, RwLock};
+use rivu_protocol::model::Track;
 use std::{
     collections::{HashMap, VecDeque},
     fs,
@@ -525,7 +525,8 @@ pub(crate) mod tests {
     use std::fs::File;
 
     fn assert_budget_audio(path: &Path) {
-        use rivu_audio::{DecoderHint, ProbeBackend, render_source};
+        use rivu_audio::{ProbeBackend, render_source};
+        use rivu_format::media::DecoderHint;
         use std::sync::atomic::AtomicBool;
 
         let details = rivu_audio::probe_details(path, false, false).unwrap();

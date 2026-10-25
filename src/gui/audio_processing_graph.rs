@@ -2,10 +2,10 @@
 //! Hidden fields own shared drafts/commit state. Painted inputs belong to one
 //! panel each and mirror text only on changes, never sharing focus or geometry.
 use super::*;
-use crate::model::GraphExecutionMode;
 use rivu_format::config::processing_graph::{
     EqImplementation, GraphEdit, GraphNode, GraphNodeKind, GraphPort, ProcessingGraph,
 };
+use rivu_protocol::model::GraphExecutionMode;
 
 #[path = "audio_processing_workbench.rs"]
 mod workbench;
@@ -225,11 +225,14 @@ impl AudioProcessing {
             return field.input.clone();
         }
         let backing = self.fields[key].input.clone();
+        let placeholder = self
+            .path_placeholder(key)
+            .unwrap_or_else(|| label.to_owned().into());
         let input = cx.new(|cx| {
             Input::new(
                 label.to_owned(),
                 backing.read(cx).text().to_owned(),
-                label.to_owned(),
+                placeholder,
                 cx,
             )
         });
@@ -1619,7 +1622,7 @@ mod tests {
         processing.update(cx, |this, cx| {
             this.reconcile_graph(cx);
             let config = &this.state.system.config;
-            let task = crate::model::ProcessingTaskStatus {
+            let task = rivu_protocol::model::ProcessingTaskStatus {
                 id: 1,
                 track_id: 1,
                 operation: ProcessingOperation::Graph,
@@ -1636,7 +1639,7 @@ mod tests {
                 source_path: "source.wav".into(),
                 source_version: "source".into(),
                 source_cue: None,
-                settings: crate::model::ProcessingSettings {
+                settings: rivu_protocol::model::ProcessingSettings {
                     denoise: config.denoise.clone(),
                     neural: config.neural.clone(),
                     profile: None,

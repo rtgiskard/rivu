@@ -1,19 +1,20 @@
-use super::protocol::{
-    HELLO_TIMEOUT, HelloResponse, MAX_CLIENTS, MAX_REQUEST, SessionState, UNKNOWN_INSTANCE,
-    WireRequest, WireResponse, wire_state,
-};
-use super::transport::{
-    bridge_timeout, decode_request_frame, read_frame, write_error_frame, write_frame_buffered,
-};
+use crate::app::AppHandle;
 use crate::core::CoreHandle;
-use crate::{
-    app::{AppCommand, AppHandle},
-    model::Query,
-    response::{Ack, QueryResponse, StateRevisions},
-};
 use anyhow::{Context, Error, Result, bail};
 use bytes::{BufMut, Bytes, BytesMut};
 use rand::RngExt;
+use rivu_protocol::protocol::{
+    HELLO_TIMEOUT, HelloResponse, MAX_CLIENTS, MAX_REQUEST, SessionState, UNKNOWN_INSTANCE,
+    WireRequest, WireResponse, wire_state,
+};
+use rivu_protocol::transport::{
+    bridge_timeout, decode_request_frame, read_frame, write_error_frame, write_frame_buffered,
+};
+use rivu_protocol::{AppCommand, query_wait_timeout};
+use rivu_protocol::{
+    model::Query,
+    response::{Ack, QueryResponse, StateRevisions},
+};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -36,7 +37,7 @@ pub struct SocketOwner {
 impl SocketOwner {
     pub fn acquire(data_dir: &Path) -> Result<Self> {
         fs::create_dir_all(data_dir)?;
-        let address = super::endpoint::address(data_dir)?;
+        let address = rivu_protocol::protocol::address(data_dir)?;
         let listener = std::os::unix::net::UnixListener::bind_addr(&address)
             .context("Cannot acquire Rivu IPC address; another Rivu may own this data directory")?;
         listener.set_nonblocking(true)?;
@@ -93,7 +94,7 @@ async fn run_command(app: &AppHandle, command: AppCommand) -> Result<Ack> {
 
 async fn run_query(handle: &CoreHandle, query: Query) -> Result<QueryResponse> {
     timeout(
-        bridge_timeout(CoreHandle::query_wait_timeout()),
+        bridge_timeout(query_wait_timeout()),
         handle.query_async(query),
     )
     .await
@@ -359,7 +360,7 @@ async fn run_server(
                         continue;
                     }
                 };
-                if let Err(error) = super::endpoint::verify_peer(&stream) {
+                if let Err(error) = rivu_protocol::protocol::verify_peer(&stream) {
                     tracing::warn!(error = %error, "ipc_peer_rejected");
                     continue;
                 }

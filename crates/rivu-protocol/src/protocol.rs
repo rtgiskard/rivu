@@ -1,23 +1,26 @@
+mod endpoint;
+pub use endpoint::{address, connect, verify_peer};
+
 use crate::{
-    app::AppCommand,
+    AppCommand,
     model::{Command, DatabaseOptimization, Query, ScanProgress, SystemState},
     response::{Ack, QueryResponse, StateResponse, StateRevisions, StateSections},
 };
 use anyhow::{Context, Result, bail};
-use rivu_audio::DecoderHint;
+use rivu_format::media::DecoderHint;
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-pub(super) const PROTOCOL_VERSION: u8 = 9;
-pub(super) const MAX_REQUEST: usize = 4 * 1024 * 1024;
-pub(super) const MAX_RESPONSE: usize = 16 * 1024 * 1024;
-pub(super) const MAX_CLIENTS: usize = 16;
-pub(super) const HELLO_TIMEOUT: Duration = Duration::from_secs(1);
-pub(super) const UNKNOWN_INSTANCE: u32 = 0;
+pub const PROTOCOL_VERSION: u8 = 9;
+pub const MAX_REQUEST: usize = 4 * 1024 * 1024;
+pub const MAX_RESPONSE: usize = 16 * 1024 * 1024;
+pub const MAX_CLIENTS: usize = 16;
+pub const HELLO_TIMEOUT: Duration = Duration::from_secs(1);
+pub const UNKNOWN_INSTANCE: u32 = 0;
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum RequestType {
+pub enum RequestType {
     Hello = 0,
     State = 1,
     Query = 2,
@@ -42,7 +45,7 @@ impl TryFrom<u8> for RequestType {
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum ResponseType {
+pub enum ResponseType {
     Hello = 0,
     State = 1,
     Query = 2,
@@ -66,18 +69,18 @@ impl TryFrom<u8> for ResponseType {
         })
     }
 }
-pub(super) enum SessionState {
+pub enum SessionState {
     Unbound,
     Bound(u32),
 }
 
 impl SessionState {
-    pub(super) fn is_bound(&self) -> bool {
+    pub fn is_bound(&self) -> bool {
         matches!(self, Self::Bound(_))
     }
 }
 
-pub(super) enum WireRequest {
+pub enum WireRequest {
     Hello(StateSections),
     State(StateSections),
     Query(WireQuery),
@@ -87,7 +90,7 @@ pub(super) enum WireRequest {
 
 /// Binary query wire format. Variant order belongs to the versioned wire schema.
 #[derive(Serialize, Deserialize)]
-pub(super) enum WireQuery {
+pub enum WireQuery {
     LibraryPage {
         query: Option<String>,
         favorite: Option<bool>,
@@ -245,7 +248,7 @@ pub(super) enum WireQuery {
 
 /// Binary command wire format. Variant order belongs to the versioned wire schema.
 #[derive(Serialize, Deserialize)]
-pub(super) enum WireCommand {
+pub enum WireCommand {
     ShowWindow,
     OptimizeDatabase,
     SetFavorite {
@@ -505,7 +508,7 @@ pub(super) enum WireCommand {
     ProcessingBypass,
 }
 
-pub(super) fn wire_usize(value: u64, field: &str) -> Result<usize> {
+pub fn wire_usize(value: u64, field: &str) -> Result<usize> {
     usize::try_from(value).with_context(|| format!("{field} does not fit in usize"))
 }
 
@@ -1544,13 +1547,13 @@ impl TryFrom<WireCommand> for Command {
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub(super) struct HelloResponse {
-    pub(super) instance_id: [u8; 4],
-    pub(super) state: WireStateResponse,
+pub struct HelloResponse {
+    pub instance_id: [u8; 4],
+    pub state: WireStateResponse,
 }
 
 #[derive(Clone, Debug)]
-pub(super) enum WireResponse {
+pub enum WireResponse {
     Hello(HelloResponse),
     Query(QueryResponse),
     State(WireStateResponse),
@@ -1560,7 +1563,7 @@ pub(super) enum WireResponse {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub(super) struct WireStateResponse {
+pub struct WireStateResponse {
     revisions: StateRevisions,
     playback: Option<crate::response::PlaybackSnapshot>,
     queue: Option<crate::model::QueueState>,
@@ -1573,7 +1576,7 @@ pub(super) struct WireStateResponse {
 /// Keep this explicit instead of serializing `Config` directly: its human-readable
 /// serde attributes are not a stable binary wire contract.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub(super) struct WireConfig {
+pub struct WireConfig {
     library_roots: Vec<PathBuf>,
     scan_max_depth: u32,
     scan_min_duration_secs: u32,
@@ -1585,7 +1588,7 @@ pub(super) struct WireConfig {
     tray_enabled: bool,
     confirm_queue_replace: bool,
     mpris_enabled: bool,
-    log_level: crate::config::LogLevel,
+    log_level: rivu_format::config::LogLevel,
     log_to_file: bool,
     log_retention_weeks: u32,
     page_size: u32,
@@ -1594,18 +1597,18 @@ pub(super) struct WireConfig {
     ui_font: String,
     ui_font_size: u32,
     ui_language: String,
-    ui_theme: crate::theme::Theme,
+    ui_theme: rivu_format::config::Theme,
     ui_scale: f32,
     layout_snap_enabled: bool,
     layout_snap_grid_px: u32,
     still_mode: bool,
-    visualization_signal: crate::config::VisualizationSignal,
+    visualization_signal: rivu_format::config::VisualizationSignal,
     analysis_fps: u32,
-    visual_background: crate::config::RgbColor,
-    visual_palette: crate::config::VisualizationPalette,
-    spectrum_style: crate::config::SpectrumStyle,
+    visual_background: rivu_format::config::RgbColor,
+    visual_palette: rivu_format::config::VisualizationPalette,
+    spectrum_style: rivu_format::config::SpectrumStyle,
     analysis_fft_size: u32,
-    analysis_window: crate::config::AnalysisWindow,
+    analysis_window: rivu_format::config::AnalysisWindow,
     spectrum_interpolate: bool,
     spectrum_bar_width: f32,
     spectrum_bars: u32,
@@ -1618,7 +1621,7 @@ pub(super) struct WireConfig {
     spectrum_smoothing_ms: u32,
     spectrum_grid: bool,
     spectrum_labels: bool,
-    audio_visualizer_style: crate::config::AudioVisualizerStyle,
+    audio_visualizer_style: rivu_format::config::AudioVisualizerStyle,
     audio_visualizer_grid: bool,
     audio_visualizer_labels: bool,
     audio_visualizer_sensitivity: f32,
@@ -1629,12 +1632,12 @@ pub(super) struct WireConfig {
     audio_visualizer_bloom_intensity: f32,
     audio_visualizer_inner_diameter: f32,
     audio_visualizer_fade_when_idle: bool,
-    audio_visualizer_primary_color: crate::config::RgbColor,
-    audio_visualizer_secondary_color: crate::config::RgbColor,
-    album_artwork_style: crate::config::AlbumArtworkStyle,
-    album_artwork_mode: crate::config::AlbumArtworkMode,
+    audio_visualizer_primary_color: rivu_format::config::RgbColor,
+    audio_visualizer_secondary_color: rivu_format::config::RgbColor,
+    album_artwork_style: rivu_format::config::AlbumArtworkStyle,
+    album_artwork_mode: rivu_format::config::AlbumArtworkMode,
     album_artwork_period_seconds: f32,
-    album_artwork_direction: crate::config::AlbumArtworkDirection,
+    album_artwork_direction: rivu_format::config::AlbumArtworkDirection,
     album_artwork_fps: u16,
     artwork_decode_budget_mb: u32,
     gpu_material_budget_mb: u32,
@@ -1651,7 +1654,7 @@ pub(super) struct WireConfig {
     spectrogram_history_seconds: u32,
     spectrogram_flow_speed: f32,
     spectrogram_accumulation: u32,
-    waveform_cursor_color: crate::config::RgbColor,
+    waveform_cursor_color: rivu_format::config::RgbColor,
     waveform_glow: f32,
     waveform_rms_gain: f32,
     waveform_peak_gain: f32,
@@ -1668,8 +1671,8 @@ pub(super) struct WireConfig {
     processing_graph: crate::model::ProcessingGraph,
 }
 
-impl From<&crate::config::Config> for WireConfig {
-    fn from(value: &crate::config::Config) -> Self {
+impl From<&rivu_format::config::Config> for WireConfig {
+    fn from(value: &rivu_format::config::Config) -> Self {
         Self {
             library_roots: value.library_roots.clone(),
             scan_max_depth: value.scan_max_depth,
@@ -1772,7 +1775,7 @@ impl From<&crate::config::Config> for WireConfig {
     }
 }
 
-impl From<WireConfig> for crate::config::Config {
+impl From<WireConfig> for rivu_format::config::Config {
     fn from(value: WireConfig) -> Self {
         Self {
             library_roots: value.library_roots,
@@ -1790,7 +1793,7 @@ impl From<WireConfig> for crate::config::Config {
             log_to_file: value.log_to_file,
             log_retention_weeks: value.log_retention_weeks,
             page_size: value.page_size,
-            library_columns: crate::config::LibraryColumns {
+            library_columns: rivu_format::config::LibraryColumns {
                 artist: value.library_columns[0],
                 album: value.library_columns[1],
                 duration: value.library_columns[2],
@@ -1877,7 +1880,7 @@ impl From<WireConfig> for crate::config::Config {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub(super) struct WireSystemState {
+pub struct WireSystemState {
     scanning: bool,
     scan_message: String,
     scan_progress: Option<ScanProgress>,
@@ -1942,7 +1945,7 @@ impl From<WireSystemState> for SystemState {
     }
 }
 
-pub(super) fn wire_state(response: StateResponse) -> WireStateResponse {
+pub fn wire_state(response: StateResponse) -> WireStateResponse {
     WireStateResponse {
         revisions: response.revisions,
         playback: response.playback,
@@ -1952,7 +1955,7 @@ pub(super) fn wire_state(response: StateResponse) -> WireStateResponse {
     }
 }
 
-pub(super) fn state_response(response: WireStateResponse) -> StateResponse {
+pub fn state_response(response: WireStateResponse) -> StateResponse {
     StateResponse {
         revisions: response.revisions,
         playback: response.playback,

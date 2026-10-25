@@ -3,7 +3,7 @@ use super::Library;
 #[cfg(test)]
 use crate::config::ConfigPersistence;
 use crate::gui::library;
-use crate::{
+use rivu_protocol::{
     model::Query,
     response::{QueryResponse, QueryRevisions, ViewResponse},
 };
@@ -205,12 +205,12 @@ impl Library {
                     Query::LibraryRootPage { .. } | Query::OtherTracksPage { .. }
                 ) =>
             {
-                crate::model::Page {
+                rivu_protocol::model::Page {
                     total: page.total,
                     rows: page
                         .rows
                         .into_iter()
-                        .map(crate::model::DirectoryRow::Track)
+                        .map(rivu_protocol::model::DirectoryRow::Track)
                         .collect(),
                 }
             }
@@ -261,7 +261,8 @@ impl Library {
         self.requests.root_count_workers.insert(offset);
         Some(RootCountRead {
             query: Query::LibraryRootCounts {
-                roots: roots[offset..(offset + crate::model::MAX_QUERY_ROWS).min(roots.len())]
+                roots: roots
+                    [offset..(offset + rivu_protocol::model::MAX_QUERY_ROWS).min(roots.len())]
                     .to_vec(),
             },
             ticket: self.library.root_count_ticket(),
@@ -371,7 +372,10 @@ mod tests {
             let Some(library::tree::TreeItem::Entry(entry)) = browser.library.tree().item(0) else {
                 panic!("other collection row");
             };
-            assert!(matches!(entry.row, crate::model::DirectoryRow::OtherTracks));
+            assert!(matches!(
+                entry.row,
+                rivu_protocol::model::DirectoryRow::OtherTracks
+            ));
             let branch = entry.branch.expect("explicit collection branch");
             assert!(branch.is_other_tracks());
             assert!(!branch.is_forest());
@@ -409,12 +413,12 @@ mod tests {
             for (index, root) in roots.iter().enumerate() {
                 assert!(matches!(
                     browser.library.tree().cached_row(&forest, index),
-                    Some(crate::model::DirectoryRow::Directory { path }) if path == root
+                    Some(rivu_protocol::model::DirectoryRow::Directory { path }) if path == root
                 ));
             }
             assert!(matches!(
                 browser.library.tree().cached_row(&forest, roots.len()),
-                Some(crate::model::DirectoryRow::OtherTracks)
+                Some(rivu_protocol::model::DirectoryRow::OtherTracks)
             ));
         });
     }
@@ -471,9 +475,9 @@ mod tests {
                 revisions,
                 QueryResponse {
                     revisions,
-                    result: Ok(ViewResponse::DirectoryPage(crate::model::Page {
+                    result: Ok(ViewResponse::DirectoryPage(rivu_protocol::model::Page {
                         total: 1,
-                        rows: vec![crate::model::DirectoryRow::Directory {
+                        rows: vec![rivu_protocol::model::DirectoryRow::Directory {
                             path: "/stale".into(),
                         }],
                     })),
@@ -493,7 +497,7 @@ mod tests {
                 revisions,
                 QueryResponse {
                     revisions,
-                    result: Ok(ViewResponse::DirectoryPage(crate::model::Page {
+                    result: Ok(ViewResponse::DirectoryPage(rivu_protocol::model::Page {
                         total: 0,
                         rows: vec![],
                     })),

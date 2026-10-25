@@ -8,12 +8,12 @@ use super::{
     playback::{Playback, PlaybackOptions},
     source::Source,
 };
-use crate::DecoderHint;
 use crate::analysis::AnalysisWorker;
 use anyhow::anyhow;
 use crossbeam_channel::{Receiver, select};
 use parking_lot::RwLock;
 use rivu_dsp::equalizer::config::EqualizerConfig;
+use rivu_format::media::DecoderHint;
 use std::{
     path::PathBuf,
     sync::Arc,

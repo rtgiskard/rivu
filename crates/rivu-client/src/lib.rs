@@ -1,17 +1,17 @@
-use super::protocol::{
-    SessionState, WireCommand, WireQuery, WireRequest, WireResponse, state_response,
-};
-use super::transport::{
-    read_response_frame, unpack_error, unpack_hello, write_request_frame_buffered,
-};
-use crate::{
-    app::AppCommand,
-    core::CoreHandle,
-    model::Query,
-    response::{Ack, AckStatus, QueryResponse, StateResponse, StateRevisions, StateSections},
-};
 use anyhow::{Context, Result, bail};
 use bytes::BytesMut;
+use rivu_protocol::protocol::{
+    SessionState, WireCommand, WireQuery, WireRequest, WireResponse, state_response,
+};
+use rivu_protocol::transport::{
+    read_response_frame, unpack_error, unpack_hello, write_request_frame_buffered,
+};
+use rivu_protocol::{
+    AppCommand,
+    model::Query,
+    query_wait_timeout,
+    response::{Ack, AckStatus, QueryResponse, StateResponse, StateRevisions, StateSections},
+};
 use std::{
     path::{Path, PathBuf},
     sync::{
@@ -159,10 +159,10 @@ impl ClientSession {
         self.stream = None;
         self.session = SessionState::Unbound;
         self.read_buffer.clear();
-        if self.read_buffer.capacity() > super::transport::RETAINED_BUFFER_LIMIT {
+        if self.read_buffer.capacity() > rivu_protocol::transport::RETAINED_BUFFER_LIMIT {
             self.read_buffer = BytesMut::new();
         }
-        super::transport::release_large_buffer(&mut self.write_buffer);
+        rivu_protocol::transport::release_large_buffer(&mut self.write_buffer);
     }
 
     fn ensure_handshake(&mut self) -> Result<()> {
@@ -188,7 +188,7 @@ impl ClientSession {
                 _ = self.stop.cancelled() => bail!("IPC request cancelled"),
                 response = async {
                     if self.stream.is_none() {
-                        self.stream = Some(super::endpoint::connect(&self.data_dir).await.with_context(|| {
+                        self.stream = Some(rivu_protocol::protocol::connect(&self.data_dir).await.with_context(|| {
                             format!(
                                 "Cannot connect to Rivu at {}. Start `rivu` or `rivu serve` first.",
                                 self.data_dir.display()
@@ -201,7 +201,7 @@ impl ClientSession {
                     if matches!(request, WireRequest::Watch(_)) {
                         response.await
                     } else {
-                        timeout(super::transport::response_timeout(wait_timeout), response)
+                        timeout(rivu_protocol::transport::response_timeout(wait_timeout), response)
                             .await
                             .context("Reading IPC response timed out")?
                     }
@@ -222,10 +222,7 @@ impl ClientSession {
 
     pub fn get_state(&mut self, sections: StateSections) -> Result<StateResponse> {
         if !self.session.is_bound() {
-            let response = self.exchange(
-                &WireRequest::Hello(sections),
-                CoreHandle::query_wait_timeout(),
-            )?;
+            let response = self.exchange(&WireRequest::Hello(sections), query_wait_timeout())?;
             return match unpack_hello(response) {
                 Ok(response) => {
                     let instance_id = u32::from_le_bytes(response.instance_id);
@@ -245,10 +242,7 @@ impl ClientSession {
                 }
             };
         }
-        match unpack_error(self.exchange(
-            &WireRequest::State(sections),
-            CoreHandle::query_wait_timeout(),
-        )?)? {
+        match unpack_error(self.exchange(&WireRequest::State(sections), query_wait_timeout())?)? {
             WireResponse::State(state) => Ok(state_response(state)),
             _ => bail!("IPC response was not a state response"),
         }
@@ -257,7 +251,7 @@ impl ClientSession {
     pub fn query(&mut self, query: &Query) -> Result<QueryResponse> {
         self.ensure_handshake()?;
         let request = WireRequest::Query(WireQuery::from(query.clone()));
-        match unpack_error(self.exchange(&request, CoreHandle::query_wait_timeout())?)? {
+        match unpack_error(self.exchange(&request, query_wait_timeout())?)? {
             WireResponse::Query(response) => Ok(response),
             _ => bail!("IPC response was not a query response"),
         }
@@ -295,13 +289,10 @@ impl ClientSession {
             .ok_or_else(|| anyhow::anyhow!("Watcher cancelled"))
     }
 
-    pub(crate) fn watch_until(
-        &mut self,
-        revisions: StateRevisions,
-    ) -> Result<Option<StateRevisions>> {
+    pub fn watch_until(&mut self, revisions: StateRevisions) -> Result<Option<StateRevisions>> {
         self.ensure_handshake()?;
         let request = WireRequest::Watch(revisions);
-        let response = match self.exchange(&request, CoreHandle::query_wait_timeout()) {
+        let response = match self.exchange(&request, query_wait_timeout()) {
             Ok(response) => response,
             Err(_) if self.stop.is_cancelled() => return Ok(None),
             Err(error) => return Err(error),
@@ -332,19 +323,86 @@ pub fn request_ack(data_dir: &Path, command: &(impl Clone + Into<AppCommand>)) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rivu_protocol::{
+        model::Command,
+        protocol::{HelloResponse, MAX_REQUEST, wire_state},
+        transport::{decode_request_frame, encode_response_frame_into},
+    };
+    fn socket_test_directory() -> tempfile::TempDir {
+        let cache =
+            std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")).join(".cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        tempfile::tempdir_in(cache).unwrap()
+    }
+
+    fn read_test_request(stream: &mut std::os::unix::net::UnixStream) -> WireRequest {
+        use std::io::Read;
+        let mut prefix = [0; 4];
+        stream.read_exact(&mut prefix).unwrap();
+        let length = u32::from_le_bytes(prefix) as usize;
+        assert!(length <= MAX_REQUEST);
+        let mut body = vec![0; length];
+        stream.read_exact(&mut body).unwrap();
+        decode_request_frame(&body).unwrap()
+    }
+
+    fn write_test_response(stream: &mut std::os::unix::net::UnixStream, response: WireResponse) {
+        use std::io::Write;
+        let mut frame = Vec::new();
+        encode_response_frame_into(&response, &mut frame).unwrap();
+        stream.write_all(&frame).unwrap();
+    }
+
+    fn complete_test_handshake(stream: &mut std::os::unix::net::UnixStream) {
+        complete_test_handshake_for_instance(stream, 1);
+    }
+
+    fn complete_test_handshake_for_instance(
+        stream: &mut std::os::unix::net::UnixStream,
+        instance_id: u32,
+    ) {
+        let timeout = Some(std::time::Duration::from_secs(5));
+        stream.set_read_timeout(timeout).unwrap();
+        stream.set_write_timeout(timeout).unwrap();
+        assert!(matches!(read_test_request(stream), WireRequest::Hello(_)));
+        write_test_response(
+            stream,
+            WireResponse::Hello(HelloResponse {
+                instance_id: instance_id.to_le_bytes(),
+                state: wire_state(StateResponse {
+                    revisions: StateRevisions::default(),
+                    playback: None,
+                    queue: None,
+                    library: None,
+                    system: None,
+                }),
+            }),
+        );
+    }
+
+    fn read_test_command(stream: &mut std::os::unix::net::UnixStream) -> Command {
+        let WireRequest::Command(command) = read_test_request(stream) else {
+            panic!("expected command")
+        };
+        Command::try_from(command).unwrap()
+    }
+
+    fn reply_test_ack(stream: &mut std::os::unix::net::UnixStream, ack: Ack) {
+        write_test_response(stream, WireResponse::Ack(ack));
+    }
 
     #[test]
     fn optimize_database_accepts_reply_after_old_response_deadline() {
-        use super::super::{
+        use rivu_protocol::model::Command;
+        use rivu_protocol::{
             protocol::{HelloResponse, MAX_REQUEST, wire_state},
             transport::{decode_request_frame, read_frame, write_frame_buffered},
         };
-        use crate::model::Command;
         use std::os::unix::net::UnixListener;
 
-        let directory = super::super::tests::socket_test_directory();
+        let directory = socket_test_directory();
         let listener =
-            UnixListener::bind_addr(&super::super::endpoint::address(directory.path()).unwrap())
+            UnixListener::bind_addr(&rivu_protocol::protocol::address(directory.path()).unwrap())
                 .unwrap();
         listener.set_nonblocking(true).unwrap();
         let mut client = client_session(directory.path()).unwrap();
@@ -426,13 +484,12 @@ mod tests {
 
     #[test]
     fn command_timeout_is_unknown_and_next_request_is_not_a_replay() {
-        use super::super::tests::{complete_test_handshake, read_test_command, reply_test_ack};
-        use crate::model::Command;
+        use rivu_protocol::model::Command;
         use std::{io::Read, os::unix::net::UnixListener};
 
-        let directory = super::super::tests::socket_test_directory();
+        let directory = socket_test_directory();
         let listener =
-            UnixListener::bind_addr(&super::super::endpoint::address(directory.path()).unwrap())
+            UnixListener::bind_addr(&rivu_protocol::protocol::address(directory.path()).unwrap())
                 .unwrap();
         let (read, command_read) = tokio::sync::oneshot::channel();
         let server = std::thread::spawn(move || {
@@ -463,7 +520,7 @@ mod tests {
             tokio::spawn(async move {
                 command_read.await.unwrap();
                 tokio::time::advance(
-                    super::super::transport::response_timeout(CoreHandle::query_wait_timeout())
+                    rivu_protocol::transport::response_timeout(query_wait_timeout())
                         + Duration::from_secs(1),
                 )
                 .await;
@@ -494,13 +551,12 @@ mod tests {
 
     #[test]
     fn handshake_and_encoding_failures_do_not_send_a_command() {
-        use super::super::tests::complete_test_handshake;
-        use crate::model::Command;
+        use rivu_protocol::model::Command;
         use std::{io::Read, os::unix::net::UnixListener};
 
-        let directory = super::super::tests::socket_test_directory();
+        let directory = socket_test_directory();
         let listener =
-            UnixListener::bind_addr(&super::super::endpoint::address(directory.path()).unwrap())
+            UnixListener::bind_addr(&rivu_protocol::protocol::address(directory.path()).unwrap())
                 .unwrap();
         let server = std::thread::spawn(move || {
             // First connection closes before Hello completes, so nothing was sent.
@@ -519,7 +575,7 @@ mod tests {
         let error = client
             .request_ack(&Command::Scan {
                 paths: vec![PathBuf::from(
-                    "x".repeat(super::super::protocol::MAX_REQUEST),
+                    "x".repeat(rivu_protocol::protocol::MAX_REQUEST),
                 )],
                 force: false,
             })
@@ -556,14 +612,14 @@ mod tests {
 
     #[test]
     fn cancelled_exchange_releases_partial_bulk_buffers() {
-        let directory = super::super::tests::socket_test_directory();
+        let directory = socket_test_directory();
         let mut client = client_session(directory.path()).unwrap();
         client.read_buffer.resize(1024 * 1024, 0);
         client.write_buffer.resize(1024 * 1024, 0);
         client.cancel();
         assert!(client.get_state(StateSections::ALL).is_err());
         assert!(client.read_buffer.is_empty());
-        assert!(client.read_buffer.capacity() <= super::super::transport::RETAINED_BUFFER_LIMIT);
-        assert!(client.write_buffer.capacity() <= super::super::transport::RETAINED_BUFFER_LIMIT);
+        assert!(client.read_buffer.capacity() <= rivu_protocol::transport::RETAINED_BUFFER_LIMIT);
+        assert!(client.write_buffer.capacity() <= rivu_protocol::transport::RETAINED_BUFFER_LIMIT);
     }
 }

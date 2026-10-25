@@ -1,9 +1,10 @@
 //! Library projection and selection identities, independent of the window shell.
 use super::{DirectoryTree, LibraryNode, TreeBranch, selection::LibrarySelection};
 use crate::gui::coordination::manual_actions::ManualIntentId;
-use crate::model::{DirectoryRow, LibrarySort, Page, Query};
-use crate::{projection::QueryProjection, response::QueryRevisions};
+use crate::projection::QueryProjection;
 use gpui::ScrollStrategy;
+use rivu_protocol::model::{DirectoryRow, LibrarySort, Page, Query};
+use rivu_protocol::response::QueryRevisions;
 use std::{collections::HashSet, ops::Range};
 
 pub(in crate::gui) fn merge_selection(
@@ -386,11 +387,12 @@ impl LibraryBrowser {
             return (self.counts.owner.generation(), Vec::new());
         }
         let batches = (0..roots.len())
-            .step_by(crate::model::MAX_QUERY_ROWS)
+            .step_by(rivu_protocol::model::MAX_QUERY_ROWS)
             .filter(|offset| {
                 !self.counts.pending.contains(offset)
                     && !self.counts.failed.contains(offset)
-                    && roots[*offset..(*offset + crate::model::MAX_QUERY_ROWS).min(roots.len())]
+                    && roots
+                        [*offset..(*offset + rivu_protocol::model::MAX_QUERY_ROWS).min(roots.len())]
                         .iter()
                         .any(|root| !self.counts.totals.contains_key(root))
             })
@@ -421,7 +423,7 @@ impl LibraryBrowser {
         &mut self,
         generation: u64,
         offset: usize,
-        counts: Vec<crate::model::LibraryRootCount>,
+        counts: Vec<rivu_protocol::model::LibraryRootCount>,
     ) {
         if self.counts.owner.generation() == generation && self.counts.pending.remove(&offset) {
             self.counts
@@ -463,8 +465,8 @@ impl LibraryBrowser {
             return self.search_counts.failed;
         }
         self.counts.failed.iter().any(|&offset| {
-            self.counts.roots
-                [offset..(offset + crate::model::MAX_QUERY_ROWS).min(self.counts.roots.len())]
+            self.counts.roots[offset
+                ..(offset + rivu_protocol::model::MAX_QUERY_ROWS).min(self.counts.roots.len())]
                 .iter()
                 .any(|root| root == path)
         })
@@ -576,7 +578,7 @@ impl LibraryBrowser {
         &mut self,
         root_index: Option<usize>,
         roots: &[std::path::PathBuf],
-        locations: &[crate::model::LibraryLocation],
+        locations: &[rivu_protocol::model::LibraryLocation],
     ) -> Option<(TreeBranch, usize)> {
         self.invalidate_selection();
         let other_tracks = !self.other_tracks_empty();
@@ -1091,7 +1093,7 @@ mod tests {
 
     #[test]
     fn library_locate_expands_ancestry_without_changing_selected_identities() {
-        use crate::model::LibraryLocation;
+        use rivu_protocol::model::LibraryLocation;
         let mut library = LibraryBrowser::default();
         let folder =
             LibraryNode::Directory(std::sync::Arc::from(std::path::Path::new("/music/other")));
@@ -1139,7 +1141,7 @@ mod tests {
             1,
             Page {
                 total: 1,
-                rows: vec![DirectoryRow::Track(crate::model::LibraryRow {
+                rows: vec![DirectoryRow::Track(rivu_protocol::model::LibraryRow {
                     id: 41,
                     path: Default::default(),
                     title: "selected".into(),
@@ -1330,7 +1332,7 @@ mod tests {
             library.accept_root_counts(
                 count_generation,
                 0,
-                vec![crate::model::LibraryRootCount {
+                vec![rivu_protocol::model::LibraryRootCount {
                     path: roots[0].clone(),
                     total: 9,
                 }],
@@ -1442,7 +1444,7 @@ mod tests {
     #[test]
     fn root_counts_are_batched_unknown_retryable_and_revision_bound() {
         let mut library = LibraryBrowser::default();
-        let roots: Vec<_> = (0..crate::model::MAX_QUERY_ROWS + 1)
+        let roots: Vec<_> = (0..rivu_protocol::model::MAX_QUERY_ROWS + 1)
             .map(|index| std::path::PathBuf::from(format!("/root/{index}")))
             .collect();
         let (generation, batches) = library.begin_root_counts(&roots, 7);
@@ -1451,9 +1453,9 @@ mod tests {
         library.accept_root_counts(
             generation,
             0,
-            roots[..crate::model::MAX_QUERY_ROWS]
+            roots[..rivu_protocol::model::MAX_QUERY_ROWS]
                 .iter()
-                .map(|path| crate::model::LibraryRootCount {
+                .map(|path| rivu_protocol::model::LibraryRootCount {
                     path: path.clone(),
                     total: 0,
                 })
@@ -1462,9 +1464,9 @@ mod tests {
         assert_eq!(library.root_count(&roots[0]), Some(0));
         assert_eq!(
             library.begin_root_counts(&roots, 7).1,
-            vec![crate::model::MAX_QUERY_ROWS]
+            vec![rivu_protocol::model::MAX_QUERY_ROWS]
         );
-        library.fail_root_counts(generation, crate::model::MAX_QUERY_ROWS);
+        library.fail_root_counts(generation, rivu_protocol::model::MAX_QUERY_ROWS);
         assert!(!library.root_count_failed(&roots[0]));
         assert!(library.root_count_failed(roots.last().unwrap()));
         assert!(!library.root_count_failed(std::path::Path::new("/other")));
@@ -1476,14 +1478,14 @@ mod tests {
         assert!(!library.root_counts_settled());
         assert_eq!(
             library.begin_root_counts(&roots, 7).1,
-            vec![crate::model::MAX_QUERY_ROWS]
+            vec![rivu_protocol::model::MAX_QUERY_ROWS]
         );
         assert!(!library.root_count_failed(roots.last().unwrap()));
         assert!(library.begin_root_counts(&roots, 7).1.is_empty());
         library.accept_root_counts(
             generation,
-            crate::model::MAX_QUERY_ROWS,
-            vec![crate::model::LibraryRootCount {
+            rivu_protocol::model::MAX_QUERY_ROWS,
+            vec![rivu_protocol::model::LibraryRootCount {
                 path: roots.last().unwrap().clone(),
                 total: 2,
             }],
@@ -1499,7 +1501,7 @@ mod tests {
         library.accept_root_counts(
             generation,
             0,
-            vec![crate::model::LibraryRootCount {
+            vec![rivu_protocol::model::LibraryRootCount {
                 path: roots[0].clone(),
                 total: 99,
             }],
@@ -1508,7 +1510,7 @@ mod tests {
         library.accept_root_counts(
             scanned,
             0,
-            vec![crate::model::LibraryRootCount {
+            vec![rivu_protocol::model::LibraryRootCount {
                 path: roots[0].clone(),
                 total: 3,
             }],
@@ -1532,7 +1534,7 @@ mod tests {
         library.accept_root_counts(
             generation,
             0,
-            vec![crate::model::LibraryRootCount {
+            vec![rivu_protocol::model::LibraryRootCount {
                 path: roots[0].clone(),
                 total: 4,
             }],
@@ -1548,7 +1550,7 @@ mod tests {
         library.accept_root_counts(
             generation,
             0,
-            vec![crate::model::LibraryRootCount {
+            vec![rivu_protocol::model::LibraryRootCount {
                 path: roots[0].clone(),
                 total: 99,
             }],
@@ -1559,7 +1561,7 @@ mod tests {
         library.accept_root_counts(
             next,
             0,
-            vec![crate::model::LibraryRootCount {
+            vec![rivu_protocol::model::LibraryRootCount {
                 path: replacement[0].clone(),
                 total: 6,
             }],
@@ -1647,7 +1649,7 @@ mod tests {
         library.accept_root_counts(
             current,
             0,
-            vec![crate::model::LibraryRootCount {
+            vec![rivu_protocol::model::LibraryRootCount {
                 path: roots[0].clone(),
                 total: 0,
             }],

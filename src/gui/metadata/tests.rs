@@ -1,7 +1,8 @@
 use super::*;
 use crate::config::ConfigPersistence;
-use crate::{config::Config, core::Runtime, i18n::Localizer, response::Ack};
+use crate::{config::Config, core::Runtime, i18n::Localizer};
 use gpui::{EntityInputHandler, TestAppContext};
+use rivu_protocol::response::Ack;
 
 fn track(id: i64, title: &str) -> Track {
     Track {
@@ -117,9 +118,9 @@ fn edit_text(
 fn ack(ok: bool) -> Ack {
     Ack {
         status: if ok {
-            crate::response::AckStatus::Succeeded
+            rivu_protocol::response::AckStatus::Succeeded
         } else {
-            crate::response::AckStatus::Failed
+            rivu_protocol::response::AckStatus::Failed
         },
         error: (!ok).then(|| "save failed".into()),
         revision: 0,

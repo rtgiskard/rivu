@@ -10,12 +10,7 @@ use worker::{
 use crate::{
     i18n::Localizer,
     keyboard::{self, Action, Context as KeyboardContext, Modifiers},
-    model::{
-        Command, DirectoryRow, LibraryRow, PlaybackStatus, PlaylistEntryRow, PlaylistSummary,
-        Query, QueueRow,
-    },
     projection::{QueryProjection, TuiSnapshot},
-    response::ViewResponse,
 };
 use anyhow::{Context, Result};
 use crossterm::{
@@ -24,6 +19,13 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{Terminal, backend::CrosstermBackend, widgets::ListState};
+use rivu_protocol::{
+    model::{
+        Command, DirectoryRow, LibraryRow, PlaybackStatus, PlaylistEntryRow, PlaylistSummary,
+        Query, QueueRow,
+    },
+    response::ViewResponse,
+};
 use signal_hook::{
     SigId,
     consts::{SIGINT, SIGTERM},
@@ -400,7 +402,7 @@ struct Details {
     target: Option<i64>,
     source_label: &'static str,
     state: DetailState,
-    stamp: Option<crate::model::QueryStamp>,
+    stamp: Option<rivu_protocol::model::QueryStamp>,
     scroll: usize,
     max_scroll: usize,
 }
@@ -409,7 +411,7 @@ struct Details {
 enum DetailState {
     #[default]
     Loading,
-    Ready(Box<crate::model::Track>),
+    Ready(Box<rivu_protocol::model::Track>),
     Removed,
     Error(String),
     Container(String),
@@ -813,7 +815,7 @@ impl UiState {
             (View::Tree(tree), ViewResponse::LibraryLocate(location)) if tree.other_tracks => {
                 let anchor = tree.anchor.take();
                 tree.selected_track_id = None;
-                if let crate::model::LibraryLocateResult::Located(location) = location {
+                if let rivu_protocol::model::LibraryLocateResult::Located(location) = location {
                     tree.selected_track_id = anchor;
                     tree.entries.total = location.total;
                     tree.entries.selection.select(Some(location.offset));
@@ -1109,11 +1111,9 @@ impl UiState {
         }
         if key.modifiers == KeyModifiers::ALT && key.code == KeyCode::Char('x') {
             return if state.system.scanning
-                && !state
-                    .system
-                    .scan_progress
-                    .as_ref()
-                    .is_some_and(|progress| progress.phase == crate::model::ScanPhase::Saving)
+                && !state.system.scan_progress.as_ref().is_some_and(|progress| {
+                    progress.phase == rivu_protocol::model::ScanPhase::Saving
+                })
                 && let Some(id) = state.system.scan_task_id
             {
                 KeyAction::Command(Command::CancelScan { id })
@@ -1598,7 +1598,7 @@ impl LibrarySearch {
             self.results = PagedList::default();
             return true;
         }
-        self.query_deadline = Some(now + crate::model::SEARCH_DEBOUNCE);
+        self.query_deadline = Some(now + rivu_protocol::model::SEARCH_DEBOUNCE);
         false
     }
 
@@ -1631,7 +1631,7 @@ struct LibraryTree {
     editing_query: bool,
     favorite: Option<bool>,
     missing: Option<bool>,
-    sort: crate::model::LibrarySort,
+    sort: rivu_protocol::model::LibrarySort,
     anchor: Option<i64>,
     selected_track_id: Option<i64>,
     other_count: Option<usize>,
@@ -1703,9 +1703,15 @@ impl LibraryTree {
                 }
                 (true, KeyCode::Char('s')) => {
                     self.sort = match self.sort {
-                        crate::model::LibrarySort::Id => crate::model::LibrarySort::Album,
-                        crate::model::LibrarySort::Album => crate::model::LibrarySort::MostPlayed,
-                        crate::model::LibrarySort::MostPlayed => crate::model::LibrarySort::Id,
+                        rivu_protocol::model::LibrarySort::Id => {
+                            rivu_protocol::model::LibrarySort::Album
+                        }
+                        rivu_protocol::model::LibrarySort::Album => {
+                            rivu_protocol::model::LibrarySort::MostPlayed
+                        }
+                        rivu_protocol::model::LibrarySort::MostPlayed => {
+                            rivu_protocol::model::LibrarySort::Id
+                        }
                     };
                     refresh = true;
                 }

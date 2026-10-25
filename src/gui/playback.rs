@@ -5,11 +5,9 @@ use super::{
     format_time,
     layout::interaction::{Dragging, SeekCommit},
 };
-use crate::{
-    model::{Command, PlaybackState, PlaybackStatus, RepeatMode},
-    projection::GuiSnapshot,
-};
+use crate::projection::GuiSnapshot;
 use gpui::{AnyElement, Context, EventEmitter, Pixels, Point, Window, div, prelude::*, rems, rgb};
+use rivu_protocol::model::{Command, PlaybackState, PlaybackStatus, RepeatMode};
 use rivu_ui::{
     IconButton, IconButtonDensity, IconButtonGroup, IconButtonStyle, Slider, SliderInput,
     SliderKey, caption, column, row,

@@ -7,12 +7,7 @@ use crate::{
     config::{Config, ConfigPatch, ConfigPersistence, LibraryColumn},
     library::{self, M3uItem, ScanResult},
     logging,
-    model::*,
     projection::{GuiSnapshot, MprisSnapshot, TraySnapshot},
-    response::{
-        Ack, AckStatus, PlaybackSnapshot, QueryError, QueryResponse, QueryRevisions, StateResponse,
-        StateRevisions, StateSections, ViewResponse,
-    },
     store::Store,
 };
 use anyhow::{Context, Result};
@@ -21,7 +16,15 @@ use futures::FutureExt;
 use parking_lot::{Mutex, RwLock};
 use rand::seq::SliceRandom;
 use rivu_audio::analysis::{AnalysisControl, AnalysisFrame, DisplayDemand};
-use rivu_audio::{self as audio, AudioCommand, AudioEngine, AudioEvent, DecoderHint, MediaInfo};
+use rivu_audio::{self as audio, AudioCommand, AudioEngine, AudioEvent, MediaInfo};
+use rivu_format::media::DecoderHint;
+use rivu_protocol::{
+    model::*,
+    response::{
+        Ack, AckStatus, PlaybackSnapshot, QueryError, QueryResponse, QueryRevisions, StateResponse,
+        StateRevisions, StateSections, ViewResponse,
+    },
+};
 use std::{
     collections::{HashSet, VecDeque},
     path::{Path, PathBuf},
@@ -37,9 +40,7 @@ use tasks::{TaskRuntime, wait_on};
 mod query_epoch;
 pub(crate) use query_epoch::{QueryEpoch, QueryTicket};
 
-const ADMISSION_TIMEOUT: Duration = Duration::from_secs(2);
-pub(crate) const REPLY_TIMEOUT: Duration = Duration::from_secs(12);
-const OPTIMIZE_REPLY_TIMEOUT: Duration = Duration::from_secs(120);
+use rivu_protocol::{ADMISSION_TIMEOUT, REPLY_TIMEOUT, command_reply_timeout};
 
 type Wakeup = Arc<dyn Fn() + Send + Sync>;
 type QueryTimeout = Arc<dyn Fn(QueryResponse) + Send + Sync>;
@@ -89,7 +90,7 @@ pub(crate) struct CoreState {
     pub(crate) queue: QueueState,
     pub(crate) current_track: Option<Arc<Track>>,
     pub(crate) playback: PlaybackState,
-    pub(crate) processing_audition: Option<crate::model::ProcessingAudition>,
+    pub(crate) processing_audition: Option<crate::projection::ProcessingAudition>,
     pub(crate) system: SystemState,
     pub(crate) scan_owner: Option<crate::projection::MediaTaskOwner>,
     pub(crate) revisions: StateRevisions,
@@ -186,23 +187,6 @@ pub(crate) struct MprisServiceState {
 }
 
 impl CoreHandle {
-    /// Total caller waiting budget, including queue admission and the query reply.
-    pub fn query_wait_timeout() -> Duration {
-        ADMISSION_TIMEOUT + REPLY_TIMEOUT
-    }
-
-    /// Total caller waiting budget; timing out never revokes an admitted command.
-    pub fn command_wait_timeout(command: &Command) -> Duration {
-        ADMISSION_TIMEOUT + Self::command_reply_timeout(command)
-    }
-
-    fn command_reply_timeout(command: &Command) -> Duration {
-        match command {
-            Command::OptimizeDatabase => OPTIMIZE_REPLY_TIMEOUT,
-            _ => REPLY_TIMEOUT,
-        }
-    }
-
     /// Publish complete display demand without entering the business command queue.
     pub(crate) fn set_display_demand(&self, demand: DisplayDemand) {
         self.analysis_control.set_display_demand(demand);
@@ -440,7 +424,7 @@ impl CoreHandle {
     }
 
     pub fn request_ack(&self, command: Command) -> Ack {
-        let duration = Self::command_reply_timeout(&command);
+        let duration = command_reply_timeout(&command);
         self.operation_ack(Operation::Command(command), duration)
     }
 
@@ -457,7 +441,7 @@ impl CoreHandle {
     }
 
     pub(crate) async fn request_ack_async(&self, command: Command) -> Ack {
-        let duration = Self::command_reply_timeout(&command);
+        let duration = command_reply_timeout(&command);
         self.operation_ack_async(Operation::Command(command), duration)
             .await
     }

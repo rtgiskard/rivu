@@ -1,7 +1,8 @@
 //! Offline processing runs outside Core and never publishes directly into player state.
-use crate::{config::Config, model::*};
+use crate::config::Config;
 use anyhow::{Context, Result, bail, ensure};
 use rivu_audio as audio;
+use rivu_protocol::model::*;
 use std::{
     fs,
     io::{Read, Write},

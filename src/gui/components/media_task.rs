@@ -1,10 +1,10 @@
 //! Accepted media-task progress shared by its owning Library, Queue or Playlists surface.
 use crate::{
     i18n::Localizer,
-    model::{Command, ScanPhase},
     projection::{GuiSystemSnapshot, MediaTaskOwner},
 };
 use gpui::{Context, Div, SharedString, div, prelude::*, px, relative, rgb};
+use rivu_protocol::model::{Command, ScanPhase};
 use rivu_ui::{
     IconButton, IconButtonDensity, IconButtonStyle, StatusKind, caption, column,
     panel_header_actions, panel_heading_row, status_message,

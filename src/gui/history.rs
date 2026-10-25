@@ -9,16 +9,14 @@ use super::{
     feature::FeatureContext,
     list_interaction::ContentMenuRequest,
 };
-use crate::{
-    model::{Command, PlaybackStatus},
-    projection::GuiSnapshot,
-};
+use crate::projection::GuiSnapshot;
 use gpui::{
     App, AppContext, Context, Entity, EventEmitter, Font, SharedString, Subscription, Window,
 };
 use model::HistoryBrowser;
 pub(super) use model::HistoryCommit;
 use panel::HistoryColumnWidths;
+use rivu_protocol::model::{Command, PlaybackStatus};
 use rivu_ui::search::{SearchEvent, SearchField};
 use std::{cell::RefCell, rc::Rc};
 

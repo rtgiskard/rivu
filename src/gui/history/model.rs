@@ -1,7 +1,7 @@
 //! History projection and transactional selection; independent of panel instances.
 
 use super::HistorySort;
-use crate::model::HistoryEntry;
+use rivu_protocol::model::HistoryEntry;
 use std::{collections::HashSet, sync::Arc};
 
 pub(in crate::gui) struct HistoryCommit {

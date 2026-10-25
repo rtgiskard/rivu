@@ -86,7 +86,7 @@ impl Core {
             let track_id = result.track.id;
             self.establish_graph_source_context(track_id)?;
             self.audition_path(id, Some(path))?;
-            self.state.processing_audition = Some(crate::model::ProcessingAudition {
+            self.state.processing_audition = Some(crate::projection::ProcessingAudition {
                 id,
                 output: Some(node),
                 mode: Some(GraphExecutionMode::Offline),
@@ -1031,7 +1031,7 @@ impl Core {
         self.state.processing_audition =
             self.processing
                 .audition
-                .map(|id| crate::model::ProcessingAudition {
+                .map(|id| crate::projection::ProcessingAudition {
                     id,
                     output: is_graph.then_some(status.settings.graph_target).flatten(),
                     mode: is_graph.then_some(status.settings.graph_mode).flatten(),

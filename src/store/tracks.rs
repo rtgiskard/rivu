@@ -4,9 +4,9 @@ use super::rows::{
     library_row_from_row, track_from_row,
 };
 use super::{Store, batch_limit};
-use crate::model::{Batch, HistoryEntry, Page, Track};
 use anyhow::{Context, Result, bail};
-use rivu_audio::DecoderHint;
+use rivu_format::media::DecoderHint;
+use rivu_protocol::model::{Batch, HistoryEntry, Page, Track};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -54,13 +54,13 @@ fn other_root_prefixes(roots: &[PathBuf]) -> Result<Vec<String>> {
         .collect()
 }
 
-fn library_order(sort: crate::model::LibrarySort) -> &'static str {
+fn library_order(sort: rivu_protocol::model::LibrarySort) -> &'static str {
     match sort {
-        crate::model::LibrarySort::Id => "id",
-        crate::model::LibrarySort::Album => {
+        rivu_protocol::model::LibrarySort::Id => "id",
+        rivu_protocol::model::LibrarySort::Album => {
             "COALESCE(album_override,raw_album), CASE WHEN COALESCE(album_override,raw_album)<>'' THEN COALESCE(disc_number,4294967295) END, CASE WHEN COALESCE(album_override,raw_album)<>'' THEN COALESCE(track_number,4294967295) END, COALESCE(title_override,raw_title),id"
         }
-        crate::model::LibrarySort::MostPlayed => "play_count DESC,id",
+        rivu_protocol::model::LibrarySort::MostPlayed => "play_count DESC,id",
     }
 }
 
@@ -99,7 +99,7 @@ pub(crate) struct PlaybackSource {
     pub(crate) path: PathBuf,
     pub(crate) file_size: u64,
     pub(crate) modified_ns: i64,
-    cue: Option<crate::model::CueSegment>,
+    cue: Option<rivu_protocol::model::CueSegment>,
     fingerprint: Option<blake3::Hash>,
 }
 
@@ -148,10 +148,10 @@ impl Store {
         query: Option<&str>,
         favorite: Option<bool>,
         missing: Option<bool>,
-        sort: crate::model::LibrarySort,
+        sort: rivu_protocol::model::LibrarySort,
         offset: usize,
         limit: usize,
-    ) -> Result<Page<crate::model::LibraryRow>> {
+    ) -> Result<Page<rivu_protocol::model::LibraryRow>> {
         let roots = serde_json::to_string(&other_root_prefixes(roots)?)?;
         let query = search_query(query);
         let total = self.conn.query_row(
@@ -172,7 +172,7 @@ impl Store {
                         favorite,
                         missing,
                         roots,
-                        limit.min(crate::model::MAX_QUERY_ROWS) as i64,
+                        limit.min(rivu_protocol::model::MAX_QUERY_ROWS) as i64,
                         offset.min(i64::MAX as usize) as i64
                     ],
                     library_row_from_row,
@@ -189,9 +189,9 @@ impl Store {
         query: Option<&str>,
         favorite: Option<bool>,
         missing: Option<bool>,
-        sort: crate::model::LibrarySort,
-    ) -> Result<crate::model::LibraryLocateResult> {
-        use crate::model::{LibraryLocateResult, LibraryLocation};
+        sort: rivu_protocol::model::LibrarySort,
+    ) -> Result<rivu_protocol::model::LibraryLocateResult> {
+        use rivu_protocol::model::{LibraryLocateResult, LibraryLocation};
         let roots = serde_json::to_string(&other_root_prefixes(roots)?)?;
         let exists = self.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM tracks WHERE id=?1)",
@@ -359,10 +359,10 @@ impl Store {
         query: Option<&str>,
         favorite: Option<bool>,
         missing: Option<bool>,
-        sort: crate::model::LibrarySort,
+        sort: rivu_protocol::model::LibrarySort,
         offset: usize,
         limit: usize,
-    ) -> Result<Page<crate::model::LibraryRow>> {
+    ) -> Result<Page<rivu_protocol::model::LibraryRow>> {
         let query = query
             .filter(|query| !query.is_empty())
             .map(str::to_lowercase);
@@ -383,7 +383,7 @@ impl Store {
                     query,
                     favorite,
                     missing,
-                    limit.min(crate::model::MAX_QUERY_ROWS) as i64,
+                    limit.min(rivu_protocol::model::MAX_QUERY_ROWS) as i64,
                     offset.min(i64::MAX as usize) as i64
                 ],
                 library_row_from_row,
@@ -402,10 +402,10 @@ impl Store {
         query: Option<&str>,
         favorite: Option<bool>,
         missing: Option<bool>,
-        sort: crate::model::LibrarySort,
+        sort: rivu_protocol::model::LibrarySort,
         offset: usize,
         limit: usize,
-    ) -> Result<Page<crate::model::LibraryRow>> {
+    ) -> Result<Page<rivu_protocol::model::LibraryRow>> {
         let prefix = directory_prefix(path)?;
         if prefix.is_empty() {
             return self.library_view_page(query, favorite, missing, sort, offset, limit);
@@ -433,7 +433,7 @@ impl Store {
                     favorite,
                     missing,
                     prefix,
-                    limit.min(crate::model::MAX_QUERY_ROWS) as i64,
+                    limit.min(rivu_protocol::model::MAX_QUERY_ROWS) as i64,
                     offset.min(i64::MAX as usize) as i64
                 ],
                 library_row_from_row,
@@ -454,9 +454,9 @@ impl Store {
         query: Option<&str>,
         favorite: Option<bool>,
         missing: Option<bool>,
-        sort: crate::model::LibrarySort,
-    ) -> Result<crate::model::LibraryLocateResult> {
-        use crate::model::{LibraryLocateResult, LibraryLocation};
+        sort: rivu_protocol::model::LibrarySort,
+    ) -> Result<rivu_protocol::model::LibraryLocateResult> {
+        use rivu_protocol::model::{LibraryLocateResult, LibraryLocation};
         let Some(source) = self
             .conn
             .query_row("SELECT path FROM tracks WHERE id=?1", [track_id], |row| {
@@ -541,11 +541,11 @@ impl Store {
     pub fn library_root_counts(
         &self,
         roots: &[PathBuf],
-    ) -> Result<Vec<crate::model::LibraryRootCount>> {
-        if roots.len() > crate::model::MAX_QUERY_ROWS {
+    ) -> Result<Vec<rivu_protocol::model::LibraryRootCount>> {
+        if roots.len() > rivu_protocol::model::MAX_QUERY_ROWS {
             bail!(
                 "Library root count request exceeds {} roots",
-                crate::model::MAX_QUERY_ROWS
+                rivu_protocol::model::MAX_QUERY_ROWS
             );
         }
         if roots.is_empty() {
@@ -575,7 +575,7 @@ impl Store {
         Ok(roots
             .iter()
             .zip(prefixes.iter())
-            .map(|(path, prefix)| crate::model::LibraryRootCount {
+            .map(|(path, prefix)| rivu_protocol::model::LibraryRootCount {
                 path: path.clone(),
                 total: totals[indices[prefix.as_str()]],
             })
@@ -654,12 +654,12 @@ impl Store {
         Ok(total)
     }
 
-    pub fn library_stats(&self) -> Result<crate::model::LibraryStats> {
+    pub fn library_stats(&self) -> Result<rivu_protocol::model::LibraryStats> {
         Ok(self.conn.query_row(
             "SELECT COUNT(*),COALESCE(SUM(play_count),0) FROM tracks",
             [],
             |row| {
-                Ok(crate::model::LibraryStats {
+                Ok(rivu_protocol::model::LibraryStats {
                     total: row.get::<_, i64>(0)? as usize,
                     play_count: row.get::<_, i64>(1)? as u64,
                 })
@@ -675,8 +675,8 @@ impl Store {
         missing: Option<bool>,
         offset: usize,
         limit: usize,
-    ) -> Result<Page<crate::model::DirectoryRow>> {
-        use crate::model::DirectoryRow;
+    ) -> Result<Page<rivu_protocol::model::DirectoryRow>> {
+        use rivu_protocol::model::DirectoryRow;
         let prefix = directory_prefix(path)?;
         let query = query
             .filter(|query| !query.is_empty())
@@ -738,7 +738,7 @@ impl Store {
             favorite,
             missing,
             prefix,
-            limit.min(crate::model::MAX_QUERY_ROWS) as i64,
+            limit.min(rivu_protocol::model::MAX_QUERY_ROWS) as i64,
             offset.min(i64::MAX as usize) as i64
         ])?;
         let mut page = Page {
@@ -846,7 +846,7 @@ impl Store {
         let sql = format!(
             "SELECT {TRACK_COLUMNS} FROM tracks {TRACK_SEARCH_FILTER} ORDER BY id LIMIT ?4 OFFSET ?5"
         );
-        let limit = limit.min(crate::model::MAX_QUERY_ROWS) as i64;
+        let limit = limit.min(rivu_protocol::model::MAX_QUERY_ROWS) as i64;
         let offset = offset.min(i64::MAX as usize) as i64;
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt
@@ -1126,9 +1126,9 @@ fn bounded_metadata_ids(
     let mut statement = conn.prepare(sql)?;
     let ids = statement
         .query_map(params, |row| row.get(0))?
-        .take(crate::model::MAX_METADATA_SCOPES + 1)
+        .take(rivu_protocol::model::MAX_METADATA_SCOPES + 1)
         .collect::<rusqlite::Result<Vec<i64>>>()?;
-    Ok((ids.len() <= crate::model::MAX_METADATA_SCOPES).then_some(ids))
+    Ok((ids.len() <= rivu_protocol::model::MAX_METADATA_SCOPES).then_some(ids))
 }
 
 fn favorite_metadata(
@@ -1443,7 +1443,7 @@ mod request_tests {
 
     #[test]
     fn directory_pages_distinguish_filesystem_root_from_empty_prefix() -> Result<()> {
-        use crate::model::DirectoryRow;
+        use rivu_protocol::model::DirectoryRow;
         let store = Store::open(Path::new(":memory:"))?;
         let empty = store.directory_page(Path::new(""), None, None, None, 0, 10)?;
         assert_eq!(empty.total, 0);
@@ -1490,7 +1490,7 @@ mod request_tests {
 
     #[test]
     fn indexed_directory_ranges_preserve_literal_unicode_and_case_boundaries() -> Result<()> {
-        use crate::model::{DirectoryRow, LibrarySort};
+        use rivu_protocol::model::{DirectoryRow, LibrarySort};
         let store = Store::open(Path::new(":memory:"))?;
         for root in ["/m%_usic", "/音楽🎵", "/a\\b", "/Upper"] {
             let included: i64 = store.conn.query_row(
@@ -1598,7 +1598,7 @@ mod request_tests {
             store
                 .library_root_counts(&vec![
                     PathBuf::from("/music");
-                    crate::model::MAX_QUERY_ROWS + 1
+                    rivu_protocol::model::MAX_QUERY_ROWS + 1
                 ])
                 .is_err()
         );

@@ -1,8 +1,8 @@
 //! Playlist identities, bounded pages and scroll positions.
 //! Request lifetimes are owned by the playlist feature's paired request state.
 use crate::gui::{paged::PagedRows, playlists::selection};
-use crate::model::{Page, PlaylistEntryLocation, PlaylistEntryRow, PlaylistSummary, Query};
 use gpui::ScrollStrategy;
+use rivu_protocol::model::{Page, PlaylistEntryLocation, PlaylistEntryRow, PlaylistSummary, Query};
 use std::ops::Range;
 
 #[derive(Default)]

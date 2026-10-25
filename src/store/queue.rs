@@ -2,10 +2,10 @@ use super::positions::{PositionScope, close_gaps, move_selection};
 use super::rows::{LIBRARY_ROW_COLUMNS_QUALIFIED, library_row_at};
 use super::tracks::{SOURCE_FILTER, search_filter, search_query};
 use super::{Store, batch_limit};
-use crate::model::{
+use anyhow::{Context, Result, ensure};
+use rivu_protocol::model::{
     Batch, BatchContinuation, MAX_QUERY_ROWS, Page, QueryStamp, QueueCursor, QueueRow, QueueState,
 };
-use anyhow::{Context, Result, ensure};
 use rusqlite::{OptionalExtension, Transaction, params};
 use std::path::PathBuf;
 
@@ -210,7 +210,7 @@ impl Store {
         let query = search_query(query);
         let scope = revisions.continuation_scope(query.as_deref(), None);
         if after.is_some_and(|after| after.scope != scope) {
-            return Err(crate::response::QueryError::RevisionChanged.into());
+            return Err(rivu_protocol::response::QueryError::RevisionChanged.into());
         }
         let filter = search_filter("t", "?4");
         let mut statement = self.conn.prepare(&format!("SELECT q.id,q.track_id,q.position,{LIBRARY_ROW_COLUMNS_QUALIFIED} FROM queue_entries q JOIN tracks t ON t.id=q.track_id WHERE (q.position,q.id)>(?1,?2) AND {filter} ORDER BY q.position,q.id LIMIT ?3"))?;

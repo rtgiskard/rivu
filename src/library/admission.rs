@@ -31,7 +31,7 @@ pub(crate) async fn prepare_external_admission<Fut>(
     mut known_sources: impl FnMut(Vec<PathBuf>) -> Fut,
     ffmpeg_enabled: bool,
     cancellation: &ScanCancellation,
-    mut progress: impl FnMut(crate::model::ScanProgress),
+    mut progress: impl FnMut(rivu_protocol::model::ScanProgress),
 ) -> Result<ExternalAdmission>
 where
     Fut: Future<Output = Result<Vec<Option<KnownFile>>>>,
@@ -86,8 +86,8 @@ where
             }
         }
         normalized_count += normalized_len;
-        progress(crate::model::ScanProgress {
-            phase: crate::model::ScanPhase::Discovering,
+        progress(rivu_protocol::model::ScanProgress {
+            phase: rivu_protocol::model::ScanPhase::Discovering,
             processed: normalized_count,
             total: Some(requested),
             errors: result.errors.len(),
@@ -108,8 +108,8 @@ where
         if batch.is_empty() {
             break;
         }
-        progress(crate::model::ScanProgress {
-            phase: crate::model::ScanPhase::ReadingMetadata,
+        progress(rivu_protocol::model::ScanProgress {
+            phase: rivu_protocol::model::ScanPhase::ReadingMetadata,
             processed: sources.len(),
             total: Some(total),
             errors: result.errors.len(),

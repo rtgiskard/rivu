@@ -1,9 +1,9 @@
 //! One explicit-target EQ editor per dock panel. Core owns committed parameters;
 //! these entities own only drafts, response samples and cancellable pointer intent.
 use super::*;
-use crate::model::EqBandEdit;
 use rivu_dsp::equalizer::config::{ChannelTarget, EqBand, EqualizerConfig, FilterKind, MAX_BANDS};
 use rivu_format::config::processing_graph::{GraphEdit, GraphNodeKind};
+use rivu_protocol::model::EqBandEdit;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum EqTarget {

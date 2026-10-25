@@ -8,6 +8,8 @@ use gpui::{prelude::*, *};
 use crate::{
     artwork::{Artwork as LoadedArtwork, ArtworkIdentity, ArtworkManager},
     core::CoreHandle,
+};
+use rivu_protocol::{
     model::{AlbumKey, AlbumSort, Command, PlaybackStatus, Track},
     response::QueryRevisions,
 };

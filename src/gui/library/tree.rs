@@ -1,5 +1,5 @@
-use crate::model::{DirectoryRow, Page};
 use gpui::UniformListScrollHandle;
+use rivu_protocol::model::{DirectoryRow, Page};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     ops::Range,
@@ -994,7 +994,7 @@ impl DirectoryTree {
         root_index: Option<usize>,
         roots: &[PathBuf],
         other_tracks: bool,
-        locations: &[crate::model::LibraryLocation],
+        locations: &[rivu_protocol::model::LibraryLocation],
     ) -> Option<(TreeBranch, usize)> {
         let (root_index, row) = if let Some(index) = root_index {
             (
@@ -1139,7 +1139,7 @@ mod tests {
     fn reveal_uses_zero_based_roots_and_keeps_other_at_the_optional_tail() {
         let mut tree = DirectoryTree::default();
         let roots = vec![PathBuf::from("/a"), PathBuf::from("/b")];
-        let locations = [crate::model::LibraryLocation {
+        let locations = [rivu_protocol::model::LibraryLocation {
             offset: 0,
             total: 1,
             child: None,
@@ -1794,7 +1794,7 @@ mod tests {
             Page {
                 total: 20,
                 rows: vec![
-                    DirectoryRow::Track(crate::model::LibraryRow {
+                    DirectoryRow::Track(rivu_protocol::model::LibraryRow {
                         id: 7,
                         path: Default::default(),
                         title: "Selected track".into(),

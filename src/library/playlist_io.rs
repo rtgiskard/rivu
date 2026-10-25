@@ -1,9 +1,9 @@
 use super::ScanCancellation;
 use super::input::{MAX_CUE_BYTES, read_input_async};
 use super::paths::{is_cue_path, logical_path};
-use crate::model::PlaylistExportTrack;
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use futures::{FutureExt, Stream, StreamExt};
+use rivu_protocol::model::PlaylistExportTrack;
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
