@@ -23,6 +23,29 @@ stable embedding SDK. Storage transactions, mutable analysis publication, and
 frontend implementation modules are crate-internal capabilities. External
 clients use the protocol rather than bypassing Core validation through storage.
 
+`rivu-protocol` owns the shared Rust contracts: `model` contains commands,
+queries, and shared snapshots; `response` contains revisions, acknowledgements,
+and sectioned results; `protocol` contains the versioned wire schemas and
+endpoint identity helpers; `transport` contains bounded framing and transport
+deadlines. `AppCommand` and the operation waiting policy are shared without a
+dependency on App or Core. Configuration and the decoder-routing enum come from
+`rivu-format`, with database support disabled; numerical configuration uses
+`rivu-dsp` without its execution feature. These client dependencies do not require
+GPUI, audio execution, PipeWire, SQLite, or FFT execution.
+These are standalone dependency requirements; a workspace consumer can enable
+database or DSP execution features through Cargo feature unification.
+
+`rivu-client` exposes `ClientSession`, cancellation, instance binding, command
+failure evidence, and the one-shot `get_state`, `query`, and `request_ack` helpers.
+The session API is synchronous and owns its runtime; async callers must run it
+outside their runtime's asynchronous execution context.
+External Rust clients depend on `rivu-client` and `rivu-protocol` directly, not on
+the root application crate. A retained session reuses its existing current-thread
+runtime, socket, and framing buffers; the package boundary adds no worker,
+channel, state copy, or serialization pass. The GUI still calls Core directly,
+and GUI-only projections and admitted processing-audition state remain in the
+application. The wire version and byte representation remain unchanged.
+
 === Consumer and application lifetimes
 
 The GUI, tray, and MPRIS service use `CoreHandle` for business commands and
@@ -255,8 +278,12 @@ merges these field intents into the current track rather than replacing it
 with a client snapshot.
 
 The source of truth for exact schemas and adapters is
-link:../src/ipc/protocol.rs[protocol.rs];
-link:../src/ipc/tests.rs[protocol tests] cover compatibility and transport bounds.
+link:../crates/rivu-protocol/src/protocol.rs[protocol.rs].
+link:../crates/rivu-protocol/src/transport.rs[Transport tests] cover framing,
+buffer retention, and deadlines; link:../crates/rivu-client/src/lib.rs[client tests]
+cover client transport failures and cancellation. The
+link:../src/ipc/tests.rs[application IPC tests] retain byte-compatibility fixtures,
+session behavior, ownership aliases, and real Core dispatch coverage.
 
 === Request failures and completion
 
