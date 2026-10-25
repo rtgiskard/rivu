@@ -630,6 +630,18 @@ impl Visuals {
                 && settings.window == data.analysis_window
                 && settings.signal == data.visualization_signal
         }) {
+            if !data.latest_levels.is_empty() {
+                data.latest_levels.clear();
+                data.peaks.clear();
+                data.peak_deadlines.clear();
+                data.bar_levels.clear();
+                data.bar_deadlines.clear();
+                data.smoothed_levels.clear();
+                data.spectrum_geometry.clear();
+                data.spectrum_geometry_revision = data.spectrum_geometry_revision.wrapping_add(1);
+                data.envelope_initialized = false;
+                data.last_analysis_sequence = None;
+            }
             data.display_time = None;
             data.last_update = None;
             return;
@@ -2985,6 +2997,28 @@ mod tests {
             generation: 1,
             ..AnalysisFrame::default()
         }
+    }
+
+    #[test]
+    fn invalidated_source_hides_spectrum_and_restarts_envelopes_on_fresh_audio() {
+        let mut visuals = configured_visuals();
+        let mut audio = frame(1.0, -10.0);
+        visuals.update(&audio, audio.sample_time);
+        assert!(visuals.data.borrow().spectrum_render_range().is_some());
+
+        audio.settings = None;
+        audio.generation += 1;
+        visuals.update(&audio, audio.sample_time);
+        assert!(visuals.data.borrow().spectrum_render_range().is_none());
+
+        let mut fresh = frame(1.1, -60.0);
+        fresh.generation = audio.generation;
+        visuals.update(&fresh, fresh.sample_time);
+        let data = visuals.data.borrow();
+        assert!(data.spectrum_render_range().is_some());
+        assert_eq!(data.peaks, vec![-60.0; 4]);
+        assert_eq!(data.bar_levels, vec![-60.0; 4]);
+        assert_eq!(data.smoothed_levels, vec![-60.0; 4]);
     }
 
     #[test]

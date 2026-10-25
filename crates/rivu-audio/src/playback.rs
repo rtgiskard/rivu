@@ -8,7 +8,7 @@ use super::{
     waveform::{WaveformAccumulator, WaveformCoverage},
 };
 use crate::DecoderHint;
-use crate::analysis::{AnalysisProducer, AnalysisWorker};
+use crate::analysis::{AnalysisAudioIdentity, AnalysisProducer, AnalysisWorker};
 use anyhow::{Result, bail};
 use crossbeam_channel::Receiver;
 use parking_lot::RwLock;
@@ -86,6 +86,7 @@ struct VisualizationCapture {
     last_end: Option<f64>,
     timestamp_tolerance: f64,
     tap_last_end: Option<f64>,
+    tap_identity: Option<AnalysisAudioIdentity>,
     // Destructive DSP needs a separate Before signal, bounded by its output
     // latency plus one decoder packet. Other taps borrow admitted PCM directly.
     before: VecDeque<([f32; 2], bool)>,
@@ -130,11 +131,25 @@ impl VisualizationCapture {
     }
 
     fn reset_tap(&mut self) {
-        self.before.clear();
+        self.before = VecDeque::new();
         self.tap_last_end = None;
+        self.tap_identity = None;
         if let Some(producer) = &mut self.producer {
             producer.discontinuity();
         }
+    }
+
+    fn sync_tap(&mut self) -> Option<AnalysisAudioIdentity> {
+        let identity = if self.still_mode {
+            None
+        } else {
+            self.producer.as_ref().and_then(AnalysisProducer::identity)
+        };
+        if identity != self.tap_identity || identity.is_none() {
+            self.reset_tap();
+            self.tap_identity = identity;
+        }
+        identity
     }
 
     fn stage_before(
@@ -146,16 +161,10 @@ impl VisualizationCapture {
         limit: usize,
     ) -> Result<()> {
         let gap = self.push(start, pcm, rate, channels);
-        if pcm.is_empty() {
-            return Ok(());
+        if gap {
+            self.reset_tap();
         }
-        if self.still_mode
-            || !self
-                .producer
-                .as_ref()
-                .is_some_and(AnalysisProducer::accepts_audio)
-        {
-            self.before = VecDeque::new();
+        if self.sync_tap().is_none() || pcm.is_empty() {
             return Ok(());
         }
         if self.before.len() + pcm.len() / channels > limit {
@@ -181,22 +190,20 @@ impl VisualizationCapture {
     }
 
     fn submit_tap(&mut self, tap: PendingTap, start: f64, pcm: &[f32], rate: u32, channels: usize) {
-        let Some(producer) = &mut self.producer else {
+        let Some(identity) = self.sync_tap() else {
             return;
         };
-        if !producer.accepts_audio() || self.still_mode {
-            self.before = VecDeque::new();
-            self.tap_last_end = None;
-            producer.discontinuity();
+        if pcm.is_empty() {
             return;
+        }
+        let producer = self.producer.as_mut().expect("active tap producer");
+        if self.tap_last_end.is_some_and(|end| {
+            (start - end).abs() > self.timestamp_tolerance.max(0.5 / rate as f64)
+        }) {
+            producer.discontinuity();
         }
         match tap {
             PendingTap::Direct(signal) if signal == self.signal => {
-                if self.tap_last_end.is_some_and(|end| {
-                    (start - end).abs() > self.timestamp_tolerance.max(0.5 / rate as f64)
-                }) {
-                    producer.discontinuity();
-                }
                 producer.push(pcm, &self.weights);
                 self.tap_last_end = Some(start + (pcm.len() / channels) as f64 / rate as f64);
             }
@@ -216,7 +223,7 @@ impl VisualizationCapture {
                 if lead != 0 || skip != 0 {
                     producer.discontinuity();
                 }
-                producer.push_samples(self.before.drain(..count));
+                producer.push_samples_for(identity, self.before.drain(..count));
                 self.before_offset_frames += count as u64;
                 if count != 0 {
                     self.tap_last_end = Some(start + (lead + count) as f64 / rate as f64);
@@ -365,6 +372,7 @@ impl Playback {
                 last_end: None,
                 timestamp_tolerance,
                 tap_last_end: None,
+                tap_identity: None,
                 before: VecDeque::new(),
                 before_start: start,
                 before_offset_frames: 0,
@@ -467,6 +475,9 @@ impl Playback {
     pub(super) fn pause(&mut self, paused: bool) {
         self.output.pause(paused);
         self.paused = paused;
+        if paused {
+            self.visualization.reset_tap();
+        }
     }
 
     pub(super) fn set_volume(&self, volume: f32) {
@@ -546,6 +557,8 @@ impl Playback {
         if self.paused {
             return Ok(false);
         }
+        // Control changes must retire staging even when output admits no PCM.
+        self.visualization.sync_tap();
         let channels = self.source.layout().len();
         let sample_rate = self.source.info().sample_rate;
         // Concurrent callback consumption belongs to the next refill, not this
@@ -558,6 +571,10 @@ impl Playback {
                 if self.offset_frames < self.pending.len() / channels {
                     break;
                 }
+            }
+            if !self.eof && self.graph_output_remaining == Some(0) {
+                self.eof = true;
+                self.visualization.finish();
             }
             if self.eof || remaining_frames == 0 || remaining_packets == 0 {
                 break;
@@ -697,6 +714,9 @@ impl Playback {
                 }
             }
         }
+        if self.eof && self.offset_frames == self.pending.len() / channels {
+            self.visualization.reset_tap();
+        }
         Ok(
             (!self.eof || self.offset_frames < self.pending.len() / channels)
                 && self.output.vacant_frames() > 0,
@@ -792,6 +812,65 @@ impl Playback {
 mod tests {
     use super::*;
     use std::io::{Seek, SeekFrom, Write};
+
+    #[test]
+    fn before_staging_rejects_old_identity_and_releases_on_pause_or_hidden_fill() {
+        use ringbuf::traits::Consumer;
+
+        let file = pcm();
+        for pause in [false, true] {
+            let (mut playback, _) = test_playback_with_waveform(file.path(), None, Arc::default());
+            let worker = AnalysisWorker::new(Arc::default()).unwrap();
+            worker.set_playback_active(true);
+            worker.control.set_display_enabled(true);
+            let (producer, mut captured) = AnalysisProducer::capture_for_test(&worker, 64);
+            playback.visualization.producer = Some(producer);
+            playback.set_signal(VisualizationSignal::Before);
+            playback
+                .visualization
+                .stage_before(0.0, &[0.5; 32], 8_000, 1, 32)
+                .unwrap();
+            if pause {
+                playback.pause(true);
+                assert_eq!(playback.visualization.before.capacity(), 0);
+                worker.set_playback_active(false);
+                playback.pause(false);
+                worker.set_playback_active(true);
+            } else {
+                worker.control.set_display_enabled(false);
+                worker.control.set_display_enabled(true);
+            }
+            playback
+                .visualization
+                .submit_tap(PendingTap::Before, 0.0, &[0.0; 32], 8_000, 1);
+            assert!(captured.try_pop().is_none());
+            assert_eq!(playback.visualization.before.capacity(), 0);
+
+            playback
+                .visualization
+                .stage_before(0.004, &[0.25; 32], 8_000, 1, 32)
+                .unwrap();
+            playback
+                .visualization
+                .submit_tap(PendingTap::Before, 0.004, &[0.0; 32], 8_000, 1);
+            let first = captured.try_pop().unwrap();
+            assert_eq!(
+                first.samples,
+                playback.visualization.weights[0].map(|w| w * 0.25)
+            );
+            assert!(first.gap);
+            assert_eq!(captured.pop_iter().count(), 31);
+
+            playback
+                .visualization
+                .stage_before(0.008, &[0.5; 32], 8_000, 1, 32)
+                .unwrap();
+            worker.control.set_display_enabled(false);
+            playback.eof = true;
+            playback.fill().unwrap();
+            assert_eq!(playback.visualization.before.capacity(), 0);
+        }
+    }
 
     fn pcm() -> tempfile::NamedTempFile {
         pcm_samples(16_000)
@@ -931,6 +1010,7 @@ mod tests {
                 last_end: None,
                 timestamp_tolerance,
                 tap_last_end: None,
+                tap_identity: None,
                 before: VecDeque::new(),
                 before_start: 0.0,
                 before_offset_frames: 0,

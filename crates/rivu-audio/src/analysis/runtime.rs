@@ -330,6 +330,13 @@ impl AnalysisControl {
     }
 }
 
+/// Capture identity for audio retained before output admission.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AnalysisAudioIdentity {
+    epoch: u64,
+    demand_token: u64,
+}
+
 /// The audio worker is the sole producer; device callbacks never inspect analysis.
 pub(crate) struct AnalysisProducer {
     ring: HeapProd<TapFrame>,
@@ -342,8 +349,15 @@ impl AnalysisProducer {
         self.gap = true;
     }
 
-    pub(crate) fn accepts_audio(&self) -> bool {
-        self.control.accepts_audio()
+    pub(crate) fn identity(&self) -> Option<AnalysisAudioIdentity> {
+        let demand_token = self.control.display_token();
+        let epoch = self.control.epoch.load(Ordering::Acquire);
+        (epoch.is_multiple_of(2) && self.control.accepts_audio_for(demand_token)).then_some(
+            AnalysisAudioIdentity {
+                epoch,
+                demand_token,
+            },
+        )
     }
 
     pub(crate) fn push(&mut self, pcm: &[f32], weights: &[[f32; 2]]) {
@@ -365,12 +379,22 @@ impl AnalysisProducer {
         &mut self,
         samples: impl ExactSizeIterator<Item = ([f32; 2], bool)>,
     ) {
+        let Some(identity) = self.identity() else {
+            self.gap = true;
+            return;
+        };
+        self.push_samples_for(identity, samples);
+    }
+
+    pub(crate) fn push_samples_for(
+        &mut self,
+        identity: AnalysisAudioIdentity,
+        samples: impl ExactSizeIterator<Item = ([f32; 2], bool)>,
+    ) {
         if samples.len() == 0 {
             return;
         }
-        let token = self.control.display_token();
-        let epoch = self.control.epoch.load(Ordering::Acquire);
-        if !epoch.is_multiple_of(2) || !self.control.accepts_audio_for(token) {
+        if self.identity() != Some(identity) {
             self.gap = true;
             return;
         }
@@ -379,8 +403,8 @@ impl AnalysisProducer {
         let accepted = self.ring.push_iter(samples.enumerate().map(
             |(index, (samples, discontinuity))| TapFrame {
                 samples,
-                epoch,
-                demand_token: token,
+                epoch: identity.epoch,
+                demand_token: identity.demand_token,
                 gap: discontinuity || (gap && index == 0),
             },
         ));
@@ -1055,6 +1079,25 @@ fn analyze(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retained_audio_cannot_acquire_a_new_capture_identity() {
+        let worker = AnalysisWorker::new(Arc::default()).unwrap();
+        worker.set_playback_active(true);
+        worker.control.set_display_enabled(true);
+        let (mut producer, mut captured) = AnalysisProducer::capture_for_test(&worker, 8);
+        let identity = producer.identity().unwrap();
+        worker.control.set_display_enabled(false);
+        worker.control.set_display_enabled(true);
+        producer.push_samples_for(identity, std::iter::once(([0.75; 2], false)));
+        assert!(captured.try_pop().is_none());
+        let current = producer.identity().unwrap();
+        producer.push_samples_for(current, std::iter::once(([0.25; 2], false)));
+        let frame = captured.try_pop().unwrap();
+        assert_eq!(frame.samples, [0.25; 2]);
+        assert_eq!(frame.demand_token, current.demand_token);
+        assert!(frame.gap);
+    }
 
     #[test]
     fn worker_producer_marks_overflow_and_suspended_gaps_with_native_downmix() {
