@@ -371,14 +371,11 @@ impl AnalysisProducer {
                 samples[0] += sample * weight[0];
                 samples[1] += sample * weight[1];
             }
-            (samples, false)
+            samples
         }));
     }
 
-    pub(crate) fn push_samples(
-        &mut self,
-        samples: impl ExactSizeIterator<Item = ([f32; 2], bool)>,
-    ) {
+    pub(crate) fn push_samples(&mut self, samples: impl ExactSizeIterator<Item = [f32; 2]>) {
         let Some(identity) = self.identity() else {
             self.gap = true;
             return;
@@ -389,7 +386,7 @@ impl AnalysisProducer {
     pub(crate) fn push_samples_for(
         &mut self,
         identity: AnalysisAudioIdentity,
-        samples: impl ExactSizeIterator<Item = ([f32; 2], bool)>,
+        samples: impl ExactSizeIterator<Item = [f32; 2]>,
     ) {
         if samples.len() == 0 {
             return;
@@ -400,14 +397,14 @@ impl AnalysisProducer {
         }
         let gap = self.gap;
         let frames = samples.len();
-        let accepted = self.ring.push_iter(samples.enumerate().map(
-            |(index, (samples, discontinuity))| TapFrame {
+        let accepted = self
+            .ring
+            .push_iter(samples.enumerate().map(|(index, samples)| TapFrame {
                 samples,
                 epoch: identity.epoch,
                 demand_token: identity.demand_token,
-                gap: discontinuity || (gap && index == 0),
-            },
-        ));
+                gap: gap && index == 0,
+            }));
         self.gap = accepted < frames;
         if self.gap {
             self.control.tap_overflow.store(true, Ordering::Release);
@@ -1089,10 +1086,10 @@ mod tests {
         let identity = producer.identity().unwrap();
         worker.control.set_display_enabled(false);
         worker.control.set_display_enabled(true);
-        producer.push_samples_for(identity, std::iter::once(([0.75; 2], false)));
+        producer.push_samples_for(identity, std::iter::once([0.75; 2]));
         assert!(captured.try_pop().is_none());
         let current = producer.identity().unwrap();
-        producer.push_samples_for(current, std::iter::once(([0.25; 2], false)));
+        producer.push_samples_for(current, std::iter::once([0.25; 2]));
         let frame = captured.try_pop().unwrap();
         assert_eq!(frame.samples, [0.25; 2]);
         assert_eq!(frame.demand_token, current.demand_token);
@@ -2036,7 +2033,7 @@ mod tests {
         });
         set_test_playback(&worker, true);
         let mut producer = worker.audio_producer();
-        producer.push_samples(std::iter::repeat_n(([0.5, -0.25], false), 511));
+        producer.push_samples(std::iter::repeat_n([0.5, -0.25], 511));
         worker.control.request_frame();
         wait_until(|| producer.ring.occupied_len() == 0);
         assert_eq!(shared.read().settings, None);
@@ -2044,7 +2041,7 @@ mod tests {
 
         // No second permit: completing the window must publish the outstanding
         // request, even if its first ingestion cycle saw only 511 samples.
-        producer.push_samples(std::iter::once(([0.5, -0.25], false)));
+        producer.push_samples(std::iter::once([0.5, -0.25]));
         wait_for_frame(&shared, |frame| frame.settings.is_some());
         let frame = shared.read();
         assert_eq!(frame.settings, Some(worker.settings()));
