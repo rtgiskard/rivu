@@ -23,6 +23,76 @@ const INITIAL_INSTANCE_DATA_CAPACITY: u64 = 2 * 1024 * 1024;
 const INSTANCE_DATA_SHRINK_DELAY_FRAMES: u16 = 120;
 
 const INSTANCE_TEXTURE_TEXEL_SIZE: u64 = 16;
+// Bound extra attachment storage even for very large or thin raster footprints.
+const MSAA_SCRATCH_MAX_SLACK: u32 = 64;
+const MSAA_SCRATCH_SHRINK_DELAY_FRAMES: u16 = 120;
+const MSAA_SCRATCH_FAST_SHRINK_DELAY_FRAMES: u16 = 8;
+
+struct MsaaScratchCapacity {
+    extent: (u32, u32),
+    low_frames: u16,
+    low_peak: (u32, u32),
+}
+
+impl MsaaScratchCapacity {
+    fn padded(demand: (u32, u32), limit: (u32, u32)) -> (u32, u32) {
+        let axis = |used: u32, max: u32| {
+            used.saturating_add(used.div_ceil(8).min(MSAA_SCRATCH_MAX_SLACK))
+                .min(max)
+        };
+        (axis(demand.0, limit.0), axis(demand.1, limit.1))
+    }
+
+    fn new(demand: (u32, u32), limit: (u32, u32)) -> Self {
+        Self {
+            extent: Self::padded(demand, limit),
+            low_frames: 0,
+            low_peak: (0, 0),
+        }
+    }
+
+    // Demand is nonzero and clipped to the physical viewport/device limit.
+    fn update(&mut self, demand: (u32, u32), limit: (u32, u32)) -> bool {
+        if demand.0 > self.extent.0
+            || demand.1 > self.extent.1
+            || self.extent.0 > limit.0
+            || self.extent.1 > limit.1
+        {
+            *self = Self::new(demand, limit);
+            return true;
+        }
+        let area = |extent: (u32, u32)| u64::from(extent.0) * u64::from(extent.1);
+        let capacity_area = area(self.extent);
+        if area(Self::padded(demand, limit)) <= capacity_area - capacity_area.div_ceil(4) {
+            self.low_frames += 1;
+            self.low_peak.0 = self.low_peak.0.max(demand.0);
+            self.low_peak.1 = self.low_peak.1.max(demand.1);
+            let excessive = |capacity: u32, used: u32| {
+                capacity > used.saturating_mul(2).max(used.saturating_add(MSAA_SCRATCH_MAX_SLACK))
+            };
+            let delay = if excessive(self.extent.0, self.low_peak.0)
+                || excessive(self.extent.1, self.low_peak.1)
+            {
+                MSAA_SCRATCH_FAST_SHRINK_DELAY_FRAMES
+            } else {
+                MSAA_SCRATCH_SHRINK_DELAY_FRAMES
+            };
+            if self.low_frames >= delay {
+                let target = Self::padded(self.low_peak, limit);
+                let previous = self.extent;
+                // Axis peaks may come from different frames; reclamation must not grow.
+                self.extent = (target.0.min(previous.0), target.1.min(previous.1));
+                self.low_frames = 0;
+                self.low_peak = (0, 0);
+                return self.extent != previous;
+            }
+        } else {
+            self.low_frames = 0;
+            self.low_peak = (0, 0);
+        }
+        false
+    }
+}
 
 /// Shader variant for backends with storage buffer support: the shared shader
 /// logic plus the storage-buffer instance transport.
@@ -119,7 +189,7 @@ struct MsaaScratch {
     _msaa: Option<wgpu::Texture>,
     msaa: Option<wgpu::TextureView>,
     texture: wgpu::BindGroup,
-    extent: (u32, u32),
+    capacity: MsaaScratchCapacity,
 }
 
 #[derive(Clone, Debug)]
@@ -1441,30 +1511,35 @@ impl WgpuRendererCore {
         &mut self.resources
     }
 
-    fn ensure_msaa_scratch(&mut self, extent: (u32, u32)) {
+    fn ensure_msaa_scratch(&mut self, extent: (u32, u32), size: Size<DevicePixels>) {
         if extent.0 == 0 || extent.1 == 0 {
             self.resources.invalidate_intermediate_textures();
             return;
         }
-        if self
-            .resources
-            .msaa_scratch
-            .as_ref()
-            .is_some_and(|pair| pair.extent == extent)
+        let device_limit = self.resources.device.limits().max_texture_dimension_2d;
+        let limit = (
+            (size.width.0 as u32).min(device_limit),
+            (size.height.0 as u32).min(device_limit),
+        );
+        if let Some(pair) = self.resources.msaa_scratch.as_mut()
+            && !pair.capacity.update(extent, limit)
         {
             return;
         }
-        // One pair sized to current frame demand, not a high-water pool.
+        let capacity = self.resources.msaa_scratch.take().map_or_else(
+            || MsaaScratchCapacity::new(extent, limit),
+            |pair| pair.capacity,
+        );
         // Submitted command buffers retain replaced handles until completion.
-        self.resources.msaa_scratch = None;
+        let (width, height) = capacity.extent;
         let device = &self.resources.device;
         let (resolved_texture, resolved) =
-            Self::create_path_intermediate(device, self.target_format, extent.0, extent.1);
+            Self::create_path_intermediate(device, self.target_format, width, height);
         let (msaa_texture, msaa) = Self::create_msaa_if_needed(
             device,
             self.target_format,
-            extent.0,
-            extent.1,
+            width,
+            height,
             self.rendering_params.path_sample_count,
         )
         .map(|(texture, view)| (Some(texture), Some(view)))
@@ -1476,7 +1551,7 @@ impl WgpuRendererCore {
             _msaa: msaa_texture,
             msaa,
             texture,
-            extent,
+            capacity,
         });
         #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
         {
@@ -1730,7 +1805,7 @@ impl WgpuRendererCore {
         extent.0 = extent.0.max(materials.msaa_extent.0);
         extent.1 = extent.1.max(materials.msaa_extent.1);
         self.preflight_msaa_instance_data(scene, &materials, instance_offset)?;
-        self.ensure_msaa_scratch(extent);
+        self.ensure_msaa_scratch(extent, size);
 
         let mut encoder =
             self.resources()
@@ -2846,7 +2921,7 @@ impl WgpuHeadlessRenderer {
                 .resources
                 .msaa_scratch
                 .as_ref()
-                .map(|pair| pair.extent),
+                .map(|pair| pair.capacity.extent),
             self.core.msaa_allocations,
         )
     }
@@ -2857,8 +2932,8 @@ impl WgpuHeadlessRenderer {
         let bytes = self.core.resources.msaa_scratch.as_ref().map_or(0, |pair| {
             let samples = self.core.rendering_params.path_sample_count;
             let copies = if samples > 1 { 1 + samples } else { 1 };
-            u64::from(pair.extent.0)
-                * u64::from(pair.extent.1)
+            u64::from(pair.capacity.extent.0)
+                * u64::from(pair.capacity.extent.1)
                 * u64::from(copies)
                 * u64::from(self.core.target_format.block_copy_size(None).unwrap())
         });
@@ -3205,6 +3280,57 @@ mod tests {
     };
     #[cfg(target_os = "linux")]
     use gpui::{DevicePixels, PlatformHeadlessRenderer, Scene};
+
+    #[test]
+    fn msaa_capacity_slack_respects_thin_and_device_sized_limits() {
+        for demand in [(1, 8192), (8192, 1), (u32::MAX - 1, u32::MAX)] {
+            let limit = (u32::MAX, u32::MAX);
+            let capacity = MsaaScratchCapacity::new(demand, limit).extent;
+            assert!(capacity.0 >= demand.0 && capacity.1 >= demand.1);
+            assert!(capacity.0 - demand.0 <= MSAA_SCRATCH_MAX_SLACK);
+            assert!(capacity.1 - demand.1 <= MSAA_SCRATCH_MAX_SLACK);
+            assert_eq!(MsaaScratchCapacity::new(demand, demand).extent, demand);
+        }
+    }
+
+    #[test]
+    fn msaa_capacity_reuses_slack_and_reclaims_sustained_low_demand() {
+        let limit = (2048, 2048);
+        let mut capacity = MsaaScratchCapacity::new((800, 600), limit);
+        let initial = capacity.extent;
+        assert!(initial.0 > 800 && initial.0 <= 864);
+        assert!(initial.1 > 600 && initial.1 <= 664);
+        assert!(!capacity.update((801, 601), limit));
+        for _ in 0..MSAA_SCRATCH_SHRINK_DELAY_FRAMES {
+            assert!(!capacity.update((100, 100), limit));
+            assert!(!capacity.update((800, 600), limit));
+        }
+        for _ in 1..MSAA_SCRATCH_FAST_SHRINK_DELAY_FRAMES {
+            assert!(!capacity.update((100, 100), limit));
+        }
+        assert!(capacity.update((100, 100), limit));
+        assert!(capacity.extent.0 >= 100 && capacity.extent.0 < initial.0);
+        assert!(capacity.extent.1 >= 100 && capacity.extent.1 < initial.1);
+        assert!(!capacity.update((100, 100), limit));
+        assert!(capacity.update((800, 600), limit));
+        assert!(capacity.update((400, 300), (400, 300)));
+        assert!(capacity.extent.0 <= 400 && capacity.extent.1 <= 300);
+    }
+
+    #[test]
+    fn msaa_capacity_moderate_shrink_tracks_whole_interval_peak() {
+        let limit = (2048, 2048);
+        let mut capacity = MsaaScratchCapacity::new((800, 800), limit);
+        let initial = capacity.extent;
+        for frame in 1..MSAA_SCRATCH_SHRINK_DELAY_FRAMES {
+            let demand = if frame % 2 == 0 { (600, 500) } else { (500, 600) };
+            assert!(!capacity.update(demand, limit));
+        }
+        assert!(capacity.update((500, 600), limit));
+        assert!(capacity.extent.0 >= 600 && capacity.extent.0 < initial.0);
+        assert!(capacity.extent.1 >= 600 && capacity.extent.1 < initial.1);
+        assert!(!capacity.update((600, 500), limit));
+    }
 
     #[cfg(target_os = "linux")]
     #[test]
@@ -3707,11 +3833,12 @@ mod tests {
         let pair = resources.msaa_scratch.as_ref().unwrap();
         let restored = &pair._resolved;
         assert_ne!(restored, &first_texture);
-        assert_eq!((restored.width(), restored.height()), (16, 16));
+        assert!(restored.width() >= 16 && restored.width() <= resized.width.0 as u32);
+        assert!(restored.height() >= 16 && restored.height() <= resized.height.0 as u32);
         assert_eq!(pair._msaa.is_some(), multisampled);
         if let Some(texture) = &pair._msaa {
             assert_ne!(Some(texture), first_msaa.as_ref());
-            assert_eq!((texture.width(), texture.height()), (16, 16));
+            assert_eq!((texture.width(), texture.height()), (restored.width(), restored.height()));
         }
         assert_pixel(&image, 4, 8, RED);
         assert_pixel(&image, 10, 8, BLUE);
@@ -4200,7 +4327,10 @@ mod tests {
         recovered.finish();
         let image = renderer.render_scene_to_image(&recovered, device_size(128, 96))?;
         assert_pixel(&image, 8, 8, RED);
-        assert_eq!(renderer.msaa_attachment_stats(), (Some((8, 8)), 1));
+        let (extent, allocations) = renderer.msaa_attachment_stats();
+        let (width, height) = extent.expect("visible paths allocate scratch");
+        assert!(width >= 8 && height >= 8 && width <= 32 && height <= 32);
+        assert_eq!(allocations, 1);
         Ok(())
     }
 
@@ -4305,7 +4435,8 @@ mod tests {
             );
             assert_pixel(&image, 22, 40, BLACK);
             assert_pixel(&image, 42, 40, BLACK);
-            assert_eq!(renderer.msaa_attachment_stats().0, Some((17, 17)));
+            let (width, height) = renderer.msaa_attachment_stats().0.unwrap();
+            assert!(width >= 17 && height >= 17 && width <= 64 && height <= 64);
             assert_eq!(renderer.msaa_frame_stats().1, 1);
         }
         Ok(())

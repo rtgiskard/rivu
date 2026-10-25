@@ -250,15 +250,24 @@ at the actual existing instance offset. Admission and the writer share transport
 alignment, WebGL texel rounding, capacity growth and rollover arithmetic; the
 original maximum upload budget remains authoritative. Rejected recordings release
 scratch ownership and frame-plan storage without destroying in-flight resources.
-The pair extent is the componentwise maximum of current clipped raster extents,
-never larger than the viewport. Stable demand reuses it; changed
-demand replaces it instead of retaining a high-water mark or an unbounded pool.
+Current demand is the componentwise maximum of clipped raster extents. Attachment
+capacity adds `ceil(dimension / 8)` pixels of slack per axis, capped at 64 pixels
+and at the physical viewport/device limit. Demand that fits reuses the pair;
+growth or a viewport limit below retained capacity replaces it immediately.
+A padded demand at least 25% smaller in area starts a low-demand interval.
+After 120 consecutive low-demand frames, capacity shrinks to the padded
+componentwise peak of that interval, without growing either axis. Reclamation
+accelerates to eight frames only when that whole interval's peak is below both
+half the retained size and the retained size minus 64 pixels on at least one
+axis. Alternating large/small frames therefore do not evict useful capacity.
 Orthogonal wide/short and narrow/tall footprints can still require a large shared
 pair; this is a bounded one-pair ownership tradeoff, not a claim of optimal packing.
 No demand, renderer destruction, surface invalidation or device replacement
 releases renderer ownership. Resize recomputes all footprints and viewport data;
-an unchanged required extent may reuse the pair. Submitted commands retain
-replaced textures until completion: explicit early `destroy()` is forbidden.
+fitting demand may reuse the pair. Capacity slack changes neither raster
+viewport/scissor nor composition bounds; composition uses integer local pixels,
+not normalized capacity-relative coordinates. Submitted commands retain replaced
+textures until completion: explicit early `destroy()` is forbidden.
 Surface alpha pipeline rebuilds do not invalidate same-size scratch attachments
 or require a lazily restored special compositor.
 Reusable material-range and native-raster plan vectors follow the same 120-frame
