@@ -25,10 +25,12 @@ The desktop requires Wayland; audio output requires a running PipeWire 1.2 or ne
 
 . Install Rivu using the <<_build_and_install,instructions below>>.
 . Run `rivu` (equivalent to `rivu gui`) to open the desktop UI.
-. Add a music directory with the Library `+` button, then trigger a scan from
-  the Library controls. Adding a directory and starting Rivu do not scan it automatically.
+. Add a music directory with the Library `+` button. Hover its directory row and
+  use the scan button on the right to import tracks. Adding a directory and
+  starting Rivu do not scan it automatically.
   Alternatively, drag individual audio files into Queue without configuring a
-  folder; they remain registered under link:doc/02_library.adoc#_other[Other].
+  folder. This registers them under link:doc/02_library.adoc#_other[Other] and
+  appends queue entries without starting or replacing playback.
 . Browse Library or Albums and double-click a track to play it.
 
 Music directories can also be set through `library.roots` in `config.toml`;

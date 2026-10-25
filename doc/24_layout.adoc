@@ -11,6 +11,13 @@ configuration, and audio analysis; layout edits must not replace that ownership.
 User operations and file syntax are documented in
 link:01_config.adoc#_layout[Configuration and layout].
 
+The first half of this chapter follows the layout lifecycle: tree invariants,
+coordinates, edits, geometry and persistence. <<_instance_preferences_and_visibility>>
+then connects panel lifetime to feature demand; <<_gui_composition_boundaries>>
+and <<_reusable_gpui_controls>> describe the ownership and input contracts shared
+by those panels. These are current desktop contracts, not a proposed replacement
+GUI architecture.
+
 Switching or duplicating a saved layout replaces the panel tree inside the
 existing window and GUI session. Existing owners retain their state naturally;
 switching does not introduce snapshots, state migration, restoration machinery,
@@ -225,10 +232,12 @@ rules so switching tabs does not change separator behavior. Saved proportions,
 docking and cramped viewports may still produce smaller panels: lists must shrink
 inside them rather than overflow neighbors, and longer headings do not increase
 the layout minimum.
-Headings give remaining width to a shrinkable title block and keep the right-hand
-actions together on one line; long titles do not force the controls onto another
-row. Track details field pairs stack in narrow panels and return to equal columns
-when space permits; individual label/value rows retain their baseline alignment.
+Heading actions stay on one line while the title shrinks; their shared overflow
+policy is described below. Track details field pairs stack in narrow panels and
+return to equal columns when space permits; individual label/value rows retain
+their baseline alignment.
+
+=== Panel chrome and overlays
 
 The main shell owns a uniform 0.25rem outer inset (4px at the default interface
 scale) around the workspace and footer, separated by a 0.25rem gap. Neither child
@@ -246,8 +255,8 @@ shrink and truncate; the button group does not shrink. Its content determines it
 a fixed or minimum height. Its menu and panel catalog anchor above the actual
 footer bounds, with a 1rem right inset and a 0.5rem clearance from the other
 window edges. Menus size to their contents rather than a fixed width or the
-whole workspace; catalog buttons wrap to the available width. An individual
-overlong label truncates within its button and exposes its full text in a
+whole workspace; catalog items wrap to the available width. An individual
+overlong label truncates within its item and exposes its full text in a
 tooltip. Oversized menus scroll within the available height. Shared
 menus, tooltip width limits, and drag-preview width limits likewise retain
 0.5rem clearance on both sides of the viewport, following interface scale.
@@ -259,6 +268,8 @@ standalone headings, empty-state captions, and error captions do not repeat that
 edge padding. Cards, list rows (including placeholder rows), and form groups
 retain their internal spacing; scrollable content remains bounded by the shell's
 inset and clipping region.
+
+=== Headings and inline actions
 
 Library, Queue, Albums, Playlists, Track details and Recent tracks compose headings
 with `panel_heading_row` and `panel_header_actions`. The same composition serves
@@ -290,7 +301,6 @@ hint fits neither vertically, try either horizontal side with the same clearance
 before clamping on the roomier vertical side. Oversized content can still exceed
 the viewport; placement does not truncate text or change the existing show/hide
 lifecycle.
-
 
 == Persistence and failure semantics
 
@@ -673,11 +683,9 @@ edit path; selection requests validate node identity and Unicode character bound
 Platform adapter support determines which text actions reach those handlers.
 `SearchLabels::name` names the editable search independently of its icon actions.
 
-`ChoiceState` directly owns candidates, keyboard highlight, open state and the
-existing scroll handle. `DropdownItem` stores its label as `SharedString`, so
-rendering clones the shared label without allocating a new string. Owners access
-an already-filtered candidate with `ChoiceState::item(index)`; filtering remains
-the owner's responsibility rather than a second candidate-state layer.
+`ChoiceState` owns candidates, keyboard highlight, open state and the existing
+scroll handle. The host supplies an already-filtered candidate set; the control
+does not maintain another filtering model.
 Closing releases the candidates and clears the highlighted selection; reopening
 supplies a fresh candidate set.
 `ChoicePopup` renders their viewport-bounded anchored surface. Select and editable
@@ -725,9 +733,8 @@ lose their redraw during prepaint. The owner is weakly held and release skips
 delivery; visibility, query generations and demand eligibility remain owner guards.
 Equal ranges are delivered again, allowing retry and new data without scrolling.
 The low-level synchronous `on_viewport` remains for side-effect-free observation.
-Callbacks must be cheaply cloneable and capture weak rather than strong owners.
-Each report clones the callback and weak owner into the existing deferred effect;
-there is no shared callback-wrapper allocation, task, timer, channel or range cache.
+Callbacks must be cheaply cloneable and capture weak rather than strong owners;
+deferred delivery must not extend a feature's lifetime.
 Workspace remains responsible for panel lifetime and hidden-tab input routing.
 Library's sparse tree, album grid projection, and History's column geometry remain
 feature-owned; bounded heterogeneous duplicate-review pages use ordinary scroll

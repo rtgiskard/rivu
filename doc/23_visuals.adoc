@@ -45,21 +45,36 @@ reusable stereo FIFO because its source-aligned samples can lead graph output
 by algorithmic latency. Its length is bounded by that latency plus one decoder
 packet; realtime graphs admit at most two seconds of latency and 65,536 frames
 per packet, excluding source preguard from the retained lead. Each stored frame
-contains two `f32` channels and a gap flag, with layout padding and deque capacity
-slack. Retained input keeps its capture epoch and display-demand identity; a
-quick hide/show or pause/resume cannot relabel old samples as current audio.
-Source replacement, seeking, signal changes, pause and Still Mode discard
-incompatible pending tap state. Inactive analysis and exhausted output spans
-release the retained FIFO even without another output submission.
+contains only two `f32` channels (eight payload bytes); deque capacity slack
+remains, so the frame-count bound is not a byte-exact memory limit.
+
+The FIFO belongs to one capture epoch and complete display-demand token, not
+merely the current enabled flag. Staging and output admission both reconcile that
+identity, and ring submission preserves it. A quick hide/show or pause/resume
+therefore cannot relabel retained samples as current audio, even if the final
+enablement is unchanged. Source replacement, seeking, signal changes, pause and
+Still Mode discard incompatible pending tap state without reprocessing pending
+output. Inactive analysis releases FIFO capacity on the next audio-worker refill,
+even if output admits no PCM; exhausting the final output span also releases it.
+
+Decoder timestamp discontinuities use the larger of one container tick and half
+a sample as their tolerance. With a realtime graph, packet boundaries map into
+latency-trimmed output frame coordinates, excluding source preguard; a boundary
+at or before the preguard end does not publish a gap. Output admission splits at
+each retained boundary so both Before and After mark the discontinuity when
+that output span is admitted, not early while the decoder is feeding the graph.
+The marker prevents an FFT window from bridging the break without discarding
+valid earlier audio still awaiting admission. Restart and exhausted final output
+release the boundary queue.
 
 === Ingestion and publication
 
 While playback and display demand are active, audio arrival wakes the worker to
 ingest a finite queued prefix into its rolling sampling window and demanded
-accumulators. Ingestion does not wait
-for a display request or its FPS deadline: at 192 kHz and 5 FPS, the 38,400 frames
-between publications need not fit in the tap at once. Continuing production
-cannot postpone control handling or shutdown beyond one queued prefix.
+accumulators. Ingestion does not wait for a display request or its FPS deadline:
+at 192 kHz and 5 FPS, the 38,400 frames between publications need not fit in the
+tap at once. Continuing production cannot postpone control handling or shutdown
+beyond one queued prefix.
 
 Consumer requests coalesce into one publication permit, retained until a fresh,
 complete FFT window is available. `analysis_fps` caps transforms and publications,
@@ -93,7 +108,8 @@ snapshot is invalid; the next accepted window starts fresh envelopes rather
 than holding the previous source on screen.
 Spectrogram starts a new pooling interval at a break; compatible historical
 frequency buckets can remain visible. Its sample time follows accepted audio,
-not wall time or the track's seek position.
+not wall time or the track's seek position; presentation interpolates only within
+the accepted boundary described below.
 
 Changing the selected signal resets the analysis sampling window and incompatible
 history. Monitor EQ edits preserve realtime analysis history; new samples reflect
@@ -536,14 +552,12 @@ standalone manifests retain that pinned dependency baseline. This is a
 maintained rendering capability patch, not a framework replacement or upgrade.
 The extensions add centered image transforms and shared GPU materials on
 Rivu's Linux/WGPU rendering path. Existing untransformed images and ordinary
-path backgrounds retain their existing behavior.
-The fixed-schema materials cover rectangles, numerical fields, existing paths,
-independent segments and numerical waveform columns through one publication and
-recording interface. See
-link:25_gpu_rendering.adoc#_internal_led_vertical_slice[the implemented GPU interface]
-for its closed schemas and limits; the general `Program` and generated-schema
-interfaces remain proposals. Radial Bars, Rings and Bars + Rings retain ordinary
-GPUI paths rather than these materials.
+path backgrounds retain their drawing semantics, although ordinary Paths share
+the renderer's local MSAA scratch. See
+link:25_gpu_rendering.adoc#_implemented_fixed_schema_slices[Implemented fixed-schema slices]
+for the available schemas, consumer cutover and resource limits. Radial Bars,
+Rings and Bars + Rings retain ordinary GPUI paths. The general `Program` and
+generated-schema interfaces remain proposals.
 
 GPUI also captures entity dependencies independently for each cached-view scope,
 including entities already accessed by a caller or enclosing cached view. On

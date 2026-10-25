@@ -58,9 +58,9 @@ save or the configuration loaded at startup. Starting Rivu does not rewrite an
 existing file; a missing file is created on the first such save or orderly exit.
 
 Playback controls and desktop shortcuts, including output selection, Still Mode,
-Library columns, and library-folder changes, take effect in memory without
-writing the configuration file. A later configuration save includes these current
-values together with its explicit edits. Closing the desktop window is not application
+Waveform seeking, Library columns, and library-folder changes, take effect in
+memory without writing the configuration file. A later configuration save includes
+these current values together with its explicit edits. Closing the desktop window is not application
 exit: the core keeps running. A crash or forced termination can lose changes
 since the last successful save. Database and layout persistence are independent.
 
@@ -183,9 +183,6 @@ still loads and validates configuration for the operation itself.
 Missing translations fall back to English. Configuration keys, command names,
 machine-readable output, paths, and user metadata are not translated. Diagnostic
 details may remain in English.
-Saving the queue suggests an editable `Queue_YYYYMMDD_HHMMSS` playlist name.
-Generated names do not pass through translation or contain presentation-only
-bidirectional isolation characters.
 
 === Decoding and read buffering
 
@@ -445,22 +442,19 @@ link:02_library.adoc#_desktop_selection_and_directory_tree[Library display].
 
 === Output and applying changes
 
-Omitted `playback.output_device` uses the default PipeWire sink. A selected device
-must be available to play, but can remain saved while unavailable; playback
-reports the failure without substituting another device.
-`playback.pipewire_auto_mix` defaults to `true` and permits PipeWire remixing;
-disable it to require a compatible speaker layout without remixing.
-See link:04_playback.adoc#_output_devices_and_speaker_layouts[Playback] for
-normalization, source-rate negotiation and output gain behavior.
-Changing either setting rebuilds the output stream and seeks the existing
-decoder to the current position, retaining paused state. It does not open a new
-decoder or apply a newly saved Decoder hint or media read-buffer size.
+`playback.output_device` selects the default PipeWire sink when omitted, or an
+exact name from `rivu playback devices`. `playback.pipewire_auto_mix` defaults to
+`true`; disable it to require a compatible speaker layout without remixing.
+Selection syntax, unavailable-device recovery, output rebuilding, normalization,
+and source-rate negotiation are documented in
+link:04_playback.adoc#_output_devices_and_speaker_layouts[Playback output].
 
 Apply validates and saves the settings draft across all four sidebar groups together;
-navigation preserves the draft and each page's scroll position. Discard drops unapplied changes and closes
-settings. Invalid input or a save failure is reported in settings. Saving an
-unavailable output target succeeds; applying it stops playback and reports an
-audio error while retaining the saved selection. Instance settings instead apply
+navigation preserves the draft and each page's scroll position. An unavailable
+output target can be saved; applying it reports an audio error and can stop
+playback while retaining the saved selection. Draft merging, Discard, and error
+handling follow the <<_desktop_settings,Desktop settings>> rules.
+Instance settings instead apply
 only the selected panel's options to the in-memory layout: style, reference lines
 and labels for Audio Visualizer; style, mode, period and direction for artwork.
 They do not request a `layout.json` write; use layout sync or orderly exit to
@@ -535,18 +529,11 @@ use at the cost of less smooth motion; zero can render more frequently on
 high-refresh displays. Changing the cap preserves the angle. All Album artwork
 panels share only frame rate; the analysis rate is independent. Mode, period, and
 direction in this configuration supply defaults for new panels, not live overrides.
-Rotation follows playback rather than audio energy. Pausing or hiding the panel
-preserves its angle; resuming does not catch up on suspended time.
-Stopping, changing the current track, or selecting static mode resets the cover
-upright. A track without artwork uses Playback's generated default cover with
-the same rotation, interaction, and lifecycle rules as a real cover. Pending
-rotation work is cancelled while paused, hidden, or static, and resuming never
-produces a catch-up burst. Animated source covers can continue while paused or
-static and share the same FPS cap; lower caps skip displayed frames without
-slowing the source timeline. Hiding the panel stops both kinds of animation.
-Still Mode does not affect artwork acquisition, display, track changes, or
-animation. Rendering uses GPU transforms, without rotating geometry on the CPU
-every frame or introducing an application image cache. Metadata's full preview
+Playback-driven rotation and animated source covers have separate clocks but
+share this FPS cap. Their pause, hiding, track-change, and Still Mode behavior is
+documented in link:04_playback.adoc#_album_artwork_panel[Album artwork panel].
+Rendering uses GPU transforms, without rotating geometry on the CPU every frame
+or introducing an application image cache. Track details' full, static preview
 does not use the Album artwork FPS cap.
 
 
@@ -780,6 +767,15 @@ motion, and generative light follow native window frames between accepted audio
 updates. Display time never advances beyond received audio; pause, hidden windows,
 and Still Mode stop both clocks. Stereo Density and Spatial Spectrum retain
 their measured analysis-update cadence.
+
+When no matching panel remains visible, Spectrum drops derived geometry and
+resets its envelopes, Spectrogram releases its history, and Audio Visualizer
+releases the hidden style's fields or scene. Reopening starts from fresh analysis,
+not a replay of hidden time. This differs from ordinary playback pause, which
+freezes visible results. Waveform retains its track preview when hidden; Still
+Mode discards it. Resource boundaries are documented in
+link:22_cache.adoc#_visualization_caching[Visualization caching].
+
 `visualizations.palette` accepts `tokyo_night` or `deadbeef` (default `deadbeef`).
 `visualizations.cache` defaults to `true`; disabling it preserves the displayed
 results but rebuilds derived graphics on repaint. It does not affect Radial

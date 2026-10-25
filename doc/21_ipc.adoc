@@ -243,7 +243,11 @@ in Artist, Album, Duration, Codec, and Bitrate order; all false means no columns
 
 The codec and positional payload schema are not negotiated. Changes require
 coordinated client and server updates, preserving configuration semantics such
-as omitted overrides inheriting their common setting.
+as omitted overrides inheriting their common setting. The IPC protocol version
+is independent of on-disk configuration and database schema versions:
+`WireConfig` transports runtime settings, not a versioned TOML document. Disk
+version authority and maintenance belong to
+link:26_migration.adoc#_version_authority[Database and configuration migration].
 
 `EditTrack` carries optional title, artist, and album fields. `None` leaves a
 field untouched; `Some("")` explicitly overrides it with empty text. The core
@@ -299,7 +303,9 @@ socket write. From that point, write, flush, response, and cancellation failures
 are conservatively `Unknown`, even if no bytes are known to have reached the peer.
 A request-write timeout therefore does not authorize mutation replay. The client
 exposes `CommandFailure` without inventing a Core revision or task ID.
-Shutdown acknowledgement means accepted shutdown, not final persistence or worker
+`Shutdown` is an App lifecycle request and bypasses GUI draft confirmation;
+interactive GUI/tray quit uses the separate user-shutdown path. Shutdown
+acknowledgement means accepted shutdown, not final persistence or worker
 retirement. Blocking I/O and cooperative cancellation provide no hard exit deadline.
 
 Failed exchanges discard the client connection. A later explicit request can

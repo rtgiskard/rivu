@@ -55,8 +55,8 @@ is no playlist or queue-size cap. Empty or unknown playlists leave the queue
 unchanged.
 
 When the queue is nonempty, the GUI asks before replacing it by default. Cancel
-or Esc keeps queue and playback untouched. Settings → Playback & Audio controls
-this with `interface.confirm_queue_replace`, also used for albums.
+or Esc keeps queue and playback untouched. Configure this shared album/playlist
+preference under link:01_config.adoc#_volume_and_playback_controls[Volume and playback controls].
 
 The row menu also offers Add current track, Rename, and Delete. Add current track
 uses the playback track, not Library selection, and is unavailable without one.
@@ -107,8 +107,9 @@ the Playlists panel is not visible. Track menus follow the
 link:02_library.adoc#_desktop_selection_and_directory_tree[shared selection rules].
 
 Use Queue → Save queue as playlist for a nonempty queue. The name dialog suggests
-a date-and-time name; duplicate occurrences become one entry, retaining the first
-occurrence's order. Saving does not change the queue. The dialog uses the same
+an editable `Queue_YYYYMMDD_HHMMSS` name, independent of presentation language.
+Duplicate occurrences become one entry, retaining the first occurrence's order.
+Saving does not change the queue. The dialog uses the same
 background-save and failure-retry behavior as New playlist and Rename. Loading
 or failed queue selection shows status; Retry remains available after failure.
 
@@ -160,24 +161,18 @@ also applies; excluded new tracks do not enter the playlist.
 Import fails if no entries resolve successfully. Without `--name`, the playlist
 name comes from the imported file's name without its extension. Both explicit
 and default names are validated before a scan starts or any scan data is saved.
-Another import or scan cannot start while scanning is active.
+Imports share one media-task slot with scans, Other checks, and external-file
+queue additions; another request is rejected while one is active.
 
 An accepted import returns a scan task ID; acceptance is not proof of completion.
 Use `--wait` to observe input, scan, or playlist-creation errors. Playlist reads,
-decoding, CUE expansion, and metadata scanning run in the background. Cancellation
-and shutdown cancel preparation without saving results or creating a playlist.
-Once Saving begins, the link:02_library.adoc#_cancellation[scan maintenance and cancellation rules]
-apply instead.
-
-In the desktop, accepted imports show their phase, counts, current path, and
-message in the Playlists panel. Cancel is available during preparation, not
-Saving. Completed, failed, and cancelled results stay visible until dismissed or
-replaced by a later media task. Dismissing a result hides its progress and message;
-it does not undo saved tracks or a created playlist. A rejected import request is
-an error, not an accepted task or a replacement for its progress. Closing the
-desktop window does not cancel an accepted import. The shared lifecycle and
-resource-release boundary are described under
-link:02_library.adoc#_cancellation[Library cancellation].
+decoding, CUE expansion, and metadata scanning run in the background. In the
+desktop, task feedback belongs to the Playlists panel; a rejected request reports
+an error without replacing an accepted task's progress or result. Shared status
+queries, result dismissal, cancellation and shutdown are documented under
+link:02_library.adoc#_cancellation[Library cancellation]. Preparation can be
+cancelled without saving results or creating a playlist; once Saving begins,
+the commits below must finish.
 
 === Input limits and cancellation
 

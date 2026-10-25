@@ -6,7 +6,7 @@
 
 The design baseline dates to 2026-10-18. The fixed-schema rectangle,
 numerical-field, existing-path, independent-segment and numerical-waveform slices
-under <<_internal_led_vertical_slice>> are implemented and used by Rivu.
+under <<_implemented_fixed_schema_slices>> are implemented and used by Rivu.
 The general `Program`, `RenderState<Schema>`, `RenderData<T>`, `Field2D<T>` and
 `ColorRamp` APIs, generated schemas, and general update transactions are proposals,
 not available interfaces. The agreed safety and platform boundaries remain binding.
@@ -250,30 +250,41 @@ at the actual existing instance offset. Admission and the writer share transport
 alignment, WebGL texel rounding, capacity growth and rollover arithmetic; the
 original maximum upload budget remains authoritative. Rejected recordings release
 scratch ownership and frame-plan storage without destroying in-flight resources.
-Current demand is the componentwise maximum of clipped raster extents. Attachment
-capacity adds `ceil(dimension / 8)` pixels of slack per axis, capped at 64 pixels
-and at the physical viewport/device limit. Demand that fits reuses the pair;
-growth or a viewport limit below retained capacity replaces it immediately.
+Current raster demand is the componentwise maximum of clipped raster extents;
+retained attachment capacity can be larger. Capacity adds `ceil(dimension / 8)`
+pixels of slack per axis, capped at 64 pixels and at the physical viewport/device
+limit. Demand that fits reuses the pair; growth or a viewport limit below retained
+capacity replaces it immediately.
+
 A padded demand at least 25% smaller in area starts a low-demand interval.
 After 120 consecutive low-demand frames, capacity shrinks to the padded
 componentwise peak of that interval, without growing either axis. Reclamation
-accelerates to eight frames only when that whole interval's peak is below both
+accelerates to eight frames only when the interval's unpadded peak is below both
 half the retained size and the retained size minus 64 pixels on at least one
-axis. Alternating large/small frames therefore do not evict useful capacity.
-Orthogonal wide/short and narrow/tall footprints can still require a large shared
-pair; this is a bounded one-pair ownership tradeoff, not a claim of optimal packing.
-No demand, renderer destruction, surface invalidation or device replacement
-releases renderer ownership. Resize recomputes all footprints and viewport data;
+axis. A frame above the low-demand threshold resets the interval, so alternating
+large/small frames do not evict useful capacity. Orthogonal wide/short and
+narrow/tall footprints can still require a large shared pair; this is a bounded
+one-pair ownership tradeoff, not a claim of optimal packing.
+
+A planned frame with no raster demand releases the pair immediately. Renderer
+destruction, surface invalidation and device replacement also release renderer
+ownership. Hiding does not guarantee another frame, and the low-demand policy is
+frame-driven, not an idle timer. Resize recomputes footprints and viewport data;
 fitting demand may reuse the pair. Capacity slack changes neither raster
 viewport/scissor nor composition bounds; composition uses integer local pixels,
 not normalized capacity-relative coordinates. Submitted commands retain replaced
 textures until completion: explicit early `destroy()` is forbidden.
-Surface alpha pipeline rebuilds do not invalidate same-size scratch attachments
-or require a lazily restored special compositor.
-Reusable material-range and native-raster plan vectors follow the same 120-frame
-sustained-low-demand reclamation policy as Path expansion scratch. Native plans
-are consumed in sorted scene order with linear cursors rather than a retained
-hash map. Surface unconfiguration releases both plan vectors immediately.
+Changing only surface alpha mode rebuilds ordinary/composite pipelines without
+invalidating same-size scratch attachments. Reattachment has a separate lifetime
+boundary described under <<_surface_reattachment>>.
+
+Reusable material-range and native-raster plan vectors follow the Path expansion
+scratch policy: capacity above 4096 elements shrinks after 120 consecutive
+successful frames at no more than one-quarter utilization, retaining twice the
+interval peak with a 1024-element floor. They do not use the attachment's
+eight-frame shortcut. Native plans are consumed in sorted scene order with
+linear cursors rather than a retained hash map. Surface unconfiguration releases
+both plan vectors immediately.
 
 Attachment bytes are separate from the material buffer budget. Four-byte targets
 with 4x sampling retain `width * height * (4 + 1) * 4` nominal bytes; single-sample
@@ -330,6 +341,23 @@ introduced. Completed storage omitted from a later scene is reclaimed on draw,
 including an empty scene; window/device destruction drops the renderer's ownership.
 Ordinary scenes with no extension resources do not perform extension-specific
 device polling. Native Metal remains explicitly unsupported.
+
+=== Surface reattachment
+
+Reattaching a native surface to an existing renderer preserves its device, queue,
+atlas and immutable material uploads. It uses the originating WGPU instance;
+this operation does not recreate a renderer whose GPU resources were released.
+The replacement extent is clamped to at least one physical pixel per axis and
+at most the renderer's device texture limit. Surface creation and handle errors
+return through the existing failure path without introducing retries.
+
+If the replacement changes alpha mode, ordinary drawing and Path-composite
+pipelines rebuild for that mode, as they do for a transparency update. Material
+and resolve composition use the current frame's alpha convention. Reattachment
+releases size-bound MSAA scratch ownership; the next admitted frame recreates
+it under the same bounded-capacity policy. In-flight commands retain prior
+resources until completion. Headless alpha/pixel checks do not establish native
+surface reattachment or compositor behavior; those require platform evidence.
 
 === Consumer integration boundary
 
@@ -841,9 +869,12 @@ The `shared_local_msaa_20261023` record in
 link:25_gpu_rendering_benchmark.json[the benchmark data] retains source and binary
 hashes, raw timing samples, native process samples and interpretation limits.
 
-Successful 192x128, 4x-MSAA synthetic frames retain the following nominal
-attachment bytes. These are current renderer-owned texture dimensions, not
-physical VRAM or in-flight retired allocations.
+At the measured revision, successful 192x128, 4x-MSAA synthetic frames retained
+the following nominal attachment bytes. These describe renderer-owned capacity
+in those runs, not physical VRAM or in-flight retired allocations. The later
+capacity-slack and sustained-reclamation policy in
+<<_shared_local_multisample_scratch>> is not measured by this table or the timing
+and image comparisons below.
 
 [cols="2,1,1,1,1",options="header"]
 |===
@@ -979,10 +1010,11 @@ Three independent processes per path, each running all four workloads, reported
 peak process RSS medians of 86.48 MiB [86.05–87.43] for Path and
 72.20 MiB [72.15–72.44] for instances (`wait4` maximum RSS). This is not isolated
 VRAM accounting. The matched 768-by-320 output had maximum channel difference
-1/255 and mean absolute channel difference 0.046/255. Actual application animation,
-other visualizers, isolated GPU execution time and GPU memory still need their
-own measurements during consumer migration; do not extrapolate these kernel
-results to total player CPU usage or frame rate.
+1/255 and mean absolute channel difference 0.046/255. At that rectangle-only
+stage, application animation, other visualizers, isolated GPU execution time and
+GPU memory were not measured. The later consumer measurements below have their
+own workloads and identities; neither set establishes total player CPU usage or
+frame rate for the current revision.
 
 === Unified field and path measurements
 
@@ -1018,14 +1050,16 @@ were slower. These costs informed the later consumer migrations; the measurement
 do not justify a second sampling mode or an unmeasured color cache.
 Both field representations upload 262,144 bytes per changed source. The new
 256-sample palette adds 4,096 shared bytes, and each placement encodes 112 bytes.
-These are payload counts, not bus traffic or physical VRAM measurements. Existing
-path intermediate/MSAA textures remain outside the extension's buffer-only budget.
+These are payload counts at that revision, not bus traffic, current record strides
+or physical VRAM measurements. Path intermediate/MSAA textures were outside the
+extension's buffer-only budget, as shared scratch attachments remain today.
 
 Matched field outputs differ by at most 1/255 per channel. The path comparison
 has maximum difference 7/255, mean absolute difference 0.00338/255, with 58 of
-245,760 pixels exceeding 3/255. The continuous palette material is not bit-identical
-to existing BGRA texture sampling; consumer-specific palettes still need acceptance
-when migrated. No application visualizer changed in this historical vendor slice.
+245,760 pixels exceeding 3/255. That continuous palette material was not
+bit-identical to BGRA texture sampling, so the vendor-only comparison did not
+establish acceptance for subsequently migrated application palettes. No
+application visualizer changed in this historical vendor slice.
 
 The `unified_material_slice` entry in
 link:25_gpu_rendering_benchmark.json[the raw benchmark record] contains samples,

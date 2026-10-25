@@ -4,8 +4,8 @@
 
 == Scope and decisions
 
-This document first describes today's offline maintenance path: current-format
-validation, album-trigger replacement, backup and reentry. The separate
+This document describes current-format validation and derived-trigger maintenance,
+then the offline tool's backup and reentry protocol. The separate
 <<_future_historical_conversion>> and <<_future_application_invocation>> sections
 define design requirements, not additional supported inputs or startup behavior.
 Operational commands belong in
@@ -34,9 +34,10 @@ conversion belong to an independent migration executable. Isolation is a depende
 and responsibility boundary, not a prohibition on invoking another process.
 
 The implemented integration exposes an explicit maintenance executable. The
-application does not invoke it during startup. A later startup integration may
-invoke it before business initialization without moving historical rules into
-the application.
+application does not invoke it during startup; normal database opening performs
+only the <<_derived_trigger_maintenance,current-format trigger maintenance>>
+described below. A later startup integration may invoke the executable before
+business initialization without moving historical rules into the application.
 
 Non-goals are automatic downgrade, a migration plugin framework, distributed or
 cross-file transactions, a recovery-state database, automatic paired restore,
@@ -135,11 +136,13 @@ structure belongs to schema migration. Fixing maintenance behavior also requires
 checking whether existing summaries need rebuilding: replacing triggers only fixes
 future writes and does not automatically repair prior derived data.
 
-The application may ensure current derived structures using current definitions
-only. That operation must be transactional, avoid reinstalling an up-to-date set,
-and refuse unknown future maintenance revisions rather than silently downgrade them.
-It must not contain historical conversion branches. Installing current definitions
-and rebuilding summaries have distinct effects and must not be conflated.
+Normal application opening creates current structures for an empty database and
+transactionally installs current trigger definitions when a schema 1 database's
+maintenance marker is missing or older. An up-to-date marker skips reinstallation;
+an unknown future revision is rejected before writes. This uses the shared current
+definitions, not historical conversion branches or the offline executable. It
+preserves existing summaries rather than rebuilding them. The offline tool adds
+structural preflight and a backup before replacement; normal opening does not.
 
 == Target selection and exclusion
 

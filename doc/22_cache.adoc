@@ -325,6 +325,16 @@ reuse even before the next publication, and restoration waits for current data
 rather than reviving hidden results. The continuity contract belongs to
 link:23_visuals.adoc[Visualization Rendering Design].
 
+The audio worker's processed Before tap owns a separate stereo FIFO for
+source-aligned input awaiting output admission. Its frame count is bounded by
+the graph's retained latency plus one decoder packet, not by panel dimensions
+or `visualizations.cache`. Capture-identity changes and inactive analysis discard
+both its samples and allocation; refill checks retire it even when output admits
+no new PCM. Exhausting the output span also releases it. This is distinct from
+the bounded analysis ring and waveform preview retention. Admission, continuity,
+and signal-selection rules are defined in
+link:23_visuals.adoc#_pcm_admission[PCM admission].
+
 Density keeps one 256 by 256 accumulation field and three fixed immutable
 snapshot slots: 1 MiB of cell storage per active analyzer, excluding rendering and
 small control allocations. A publication materializes into a uniquely held slot;
@@ -669,14 +679,18 @@ also releases idle tessellation scratch on its calling thread; other threads'
 scratch remains bounded and is released when those threads exit.
 
 Ordinary Paths and multisampled GPU materials, including rectangles and segments,
-share one renderer-owned resolve/MSAA scratch pair. Its extent is the
-componentwise maximum of the current clipped raster extents, never larger than
-the viewport, rather than an unconditional window-sized texture. Unchanged
-extent reuses the pair; changed demand replaces it, and a frame with no raster
-demand drops the renderer's references. Submitted GPU work retains old resources
-until completion; reclamation does not destroy in-flight textures or wait for
-the GPU. These attachment bytes are separate from the GPU-material buffer budget;
-see link:25_gpu_rendering.adoc#_shared_local_multisample_scratch[Shared local multisample scratch].
+share one renderer-owned resolve/MSAA scratch pair. Current demand is the
+componentwise maximum of clipped raster extents; retained attachment capacity
+may exceed it. Bounded slack absorbs small changes, fitting demand reuses the
+pair, and sustained low demand reclaims capacity rather than replacing it on
+every size change. Capacity stays within the physical viewport/device limit;
+growth or a lower limit replaces it immediately. A frame with no raster demand
+drops renderer ownership. Capacity slack does not enlarge raster or composition
+bounds. Submitted GPU work retains replaced resources until completion;
+reclamation neither destroys in-flight textures nor waits for the GPU. These
+attachment bytes are separate from the GPU-material buffer budget. Exact
+capacity and reclamation policy is authoritative in
+link:25_gpu_rendering.adoc#_shared_local_multisample_scratch[Shared local multisample scratch].
 Instance storage above its initial capacity shrinks after
 120 successful frames at no more than one-quarter utilization, retaining twice
 the observed peak rounded up to a power of two and never below initial capacity.

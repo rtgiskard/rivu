@@ -14,9 +14,9 @@ library commands address the running host for the selected data directory.
 
 == Other
 
-`Other` appears after configured music folders and is hidden when it contains no
-registered tracks. It contains tracks whose paths are outside every configured
-folder; with no configured folders, it contains all registered tracks. Adding or
+In the desktop Library, `Other` appears after configured music folders and is
+hidden when it contains no registered tracks. It contains tracks whose paths are
+outside every configured folder; with no configured folders, it contains all registered tracks. Adding or
 removing a folder changes where its tracks appear, without changing tracks, user
 edits, or saved references. It is a view of the shared library, not a separate
 library or a temporary queue.
@@ -43,8 +43,13 @@ rivu library other check --wait
 rivu library other check --force --wait
 ----
 
-`library other list` returns one page; use `--offset` and `--limit` to read more.
-`rivu queue add-other` appends the complete collection without starting playback.
+`library other list` returns one page (100 rows by default); use `--offset` and
+`--limit` to read more. List and locate accept `--query`, `--favorite true|false`,
+`--missing true|false`, and `--sort id|album|most-played`. Omit a boolean filter to
+include both states. Count always returns the unfiltered collection total.
+`rivu queue add-other` appends the complete collection without starting playback,
+independently of browsing filters. Terminal browsing and keys are documented in
+link:04_playback.adoc#_terminal_client[Terminal client].
 
 == Roots and scanning
 
@@ -74,20 +79,22 @@ rivu library scan ~/Music --force --wait
 ----
 
 The desktop does not scan configured roots during startup. Scanning runs in the
-background without stopping playback; a second scan or playlist import is rejected
-while one is active. Progress reports completion or failure. `--wait` waits for
-completion and reports scan errors even when readable tracks were saved.
+background without stopping playback. Scans, Other checks, playlist imports, and
+external-file queue additions share one media-task slot; a second request is
+rejected while one is active. `--wait` waits for completion and reports scan errors
+even when readable tracks were saved.
 `--force` rereads unchanged audio metadata. CUE sheets are always reread.
 Requested paths must be inside a configured logical root. A failed scan may still
 save readable tracks; fix errors and rescan before cleaning missing records.
 See <<_scan_policies_and_recovery,Scan policies and recovery>> for depth and
 duration admission, source checks, and the point after which cancellation is refused.
 
-Library scans and Other checks keep progress, cancellation and retained terminal
-results in Library. Playlist imports use the Playlists panel; external-file queue
-admission uses Queue. A rejected Library request is a separate dismissible error,
-not a replacement for an already accepted task's progress or outcome. Dismissing
-that request error leaves the accepted task and its result unchanged.
+Library scans and Other checks keep progress and results in Library; playlist
+imports use Playlists and external-file queue additions use Queue. See
+<<_cancellation,Cancellation>> for shared task feedback, status queries, and shutdown.
+A rejected Library request is a separate dismissible error, not a replacement for
+an already accepted task's progress or outcome. Dismissing that request error
+leaves the accepted task and its result unchanged.
 
 Cancelling a desktop file chooser leaves configuration, commands, and existing
 errors unchanged. This also applies to
@@ -176,9 +183,6 @@ Scans refresh affected views, including previously empty expanded folders;
 collapsed folders load current contents when reopened. Unchanged scans preserve
 existing views. Query and refresh ownership is described in
 link:21_ipc.adoc#_query_results_and_pagination[IPC query results].
-The scan status row offers a close button after completion or failure. Closing
-it hides the result and progress bar without changing imported tracks or the
-separate error message. A new scan shows progress again.
 
 == Desktop list search
 
@@ -372,10 +376,9 @@ Hidden or removed panels cannot own these actions.
 
 The TUI Library tree starts with Other, followed by configured roots in their
 configured order, including empty roots. With no roots, Other remains available;
-no filesystem-root entry is inferred from stored tracks. Enter opens a collection
-or directory; Left or Backspace returns to its parent. Within Other, Alt+f and
-Alt+m toggle favorite and missing filters, Alt+s changes sort, Alt+c checks files,
-and Alt+Shift+c forces a metadata reread. Alt+e appends the complete collection to Queue.
+no filesystem-root entry is inferred from stored tracks. Terminal browsing and
+collection actions are documented in
+link:04_playback.adoc#_terminal_client[Terminal client].
 
 In the GUI, unmodified `PageUp` / `PageDown` scroll one viewport height without
 changing selected rows. They target the last-clicked visible scroll viewport;
@@ -390,11 +393,13 @@ PageUp/PageDown moves the selection by one screen; returning from a directory or
 playlist detail restores the parent selection and viewport. Exiting the TUI
 does not have to wait for a stalled query.
 
-CLI library and playlist listings include all matching rows, independently of
-`interface.page_size`. If relevant data changes while a listing is being read, the command
-stops, prints a `Listing incomplete` notice on stderr, and exits with status 1.
-Already emitted text may be incomplete, and JSON may be invalid; discard it and
-retry. GUI/TUI refresh stale query results automatically.
+CLI `library list`, `queue list`, and `playlist list` include all matching rows,
+independently of `interface.page_size`. If relevant data changes while a listing
+is being read, the command stops, prints a `Listing incomplete` notice on stderr,
+and exits with status 1. Already emitted text may be incomplete, and JSON may be
+invalid; discard it and retry. GUI/TUI refresh stale query results automatically.
+The explicitly paged `library other list` and `library duplicates` commands do
+not traverse the full collection automatically.
 
 Query limits, revisions, and batch contracts: link:21_ipc.adoc[IPC].
 
@@ -624,17 +629,38 @@ for the resource limits and their scope.
 
 === Cancellation
 
-Cancel a scan during preparation to discard its results, including tracks already
-read. Cancellation is cooperative; an active audio probe must return before the
-task can retire.
+Scans, Other checks, playlist imports, and external-file queue additions share
+this lifecycle. An accepted CLI request returns a `scan_id`, not proof of success;
+use `--wait` to wait for its result, or query and cancel that task explicitly:
 
-Once the task enters Saving, cancellation is refused. The atomic database merge
-and optional playlist creation finish in the background; published status and
-existing-playback controls remain available, while database reads and edits report
-maintenance in progress. Shutdown waits for the actual result. A failed task may
-still report committed library or playlist changes: inspect its result before
-retrying. A new scan or import is admitted only after the previous task has
-released its resources, not merely after cancellation was requested.
+[source,sh]
+----
+rivu library scan-status TASK_ID
+rivu library cancel-scan TASK_ID
+----
+
+The running core retains the latest 32 media-task results, not persistent history.
+A successful status query means the result was retrieved, not that the task
+succeeded; inspect its phase and error. Later tasks do not change a retained result.
+
+In the desktop, the owning panel shows phase, counts, current path, and message.
+Completed, failed, and cancelled results stay visible until dismissed or replaced
+by a later accepted media task. Dismissal hides progress and message, without
+undoing saved data, clearing a separate request error, or deleting the retained
+task result. Closing the desktop window does not cancel a task.
+
+Cancel during preparation to discard its results, including tracks already read.
+Application shutdown also cancels preparation. Cancellation is cooperative; an
+active audio probe must return and started work must join before the task retires.
+
+Once the task enters Saving, cancellation is refused. The database commit and any
+playlist creation finish in the background; published status and existing-playback
+controls remain available, while database reads and edits report maintenance in
+progress. Shutdown waits for the actual result. A failed task may still report
+committed changes: inspect its result before retrying. A new media task is admitted
+only after the previous task has released its resources, not merely after
+cancellation was requested. Import commits have the separate boundaries described
+in link:03_playlist.adoc#_commit_and_export_lifecycle[Commit and export lifecycle].
 
 == Same files and relocation
 
@@ -805,23 +831,29 @@ values or JSON data.
 * Ordinary command acknowledgements contain `status`, `error`, `revision`,
   `scan_id`, and `relocation_id`. Status is `Succeeded`, `Failed`, `NotAdmitted`,
   or `Unknown`; `Failed` does not guarantee rollback, and `Unknown` must not be
-  automatically retried. Task IDs are present only for accepted scan/import or
-  relocation startup. Export replies after writing, not at worker startup.
+  automatically retried. `scan_id` is present only for accepted media-task startup
+  (scan, Other check, playlist import, or external-file queue addition);
+  `relocation_id` identifies relocation startup. Export replies after writing,
+  not at worker startup.
   JSON prints failed acknowledgements too, with an unsuccessful exit status.
   Transport command failures print only `status` and `error`, without invented
   revisions or task IDs. Diagnostics also go to stderr.
-* Scan/import with `--wait` returns the submitted task's
+* Media tasks with `--wait`, and `library scan-status`, return the task's
   `{id, progress, message, library_committed, playlist_id, error}` status, including
-  failed/cancelled terminal results in JSON. The exit status still distinguishes
-  success. Confirmed commits survive later refresh failures; a failed result with
-  no confirmation is not proof of zero effects after an uncertain worker failure.
-  Later scans and unrelated command errors do not change that task result.
+  failed/cancelled terminal results in JSON. `--wait` exits unsuccessfully for a
+  failed or cancelled task; a successful status query only confirms retrieval.
+  Confirmed commits survive later refresh failures; a failed result with no
+  confirmation is not proof of zero effects after an uncertain worker failure.
+  Later tasks and unrelated command errors do not change that task result.
 * `library relocate` without `--wait` returns the acknowledgement; use its
   `relocation_id` with `library relocation-status`. Successful relocation with
   `--wait` and every successful `relocation-status` query return
   `{id, source_id, target_id, phase, error}`. The phase is `verifying`, `completed`,
   `cancelled`, or `failed`. A status query reports the retained task even when
   cancelled or failed; its successful exit does not imply relocation succeeded.
+* `library other list` returns a single `{total, rows}` page, not a streamed array.
+  `library other count` returns a number; `library other locate` returns its tagged
+  location result. Filters, sorting, and pagination are described under <<_other,Other>>.
 * `library duplicates` returns `{"DuplicateGroups": {"total": ..., "rows": [...]}}`;
   with `--fingerprint`, it returns the corresponding `DuplicateMembers` wrapper.
   These are single pages controlled by `--offset` and `--limit`, not streamed
@@ -829,7 +861,6 @@ values or JSON data.
 * `library stats` returns aggregate statistics; `library probe` returns metadata
   and decoder status; `playback devices` returns an array of device names.
 
-Queue listings stream a JSON array of occurrence rows from bounded queries.
 History state responses contain the requested Library section; read `library.history`.
 History's `--limit` affects human output only. Protocol and query contracts are
 described in link:21_ipc.adoc[IPC].

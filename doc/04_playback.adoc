@@ -113,11 +113,13 @@ operation's completion, including skipped-file errors even when valid files were
 saved. Registered tracks appear under their configured folder or in
 link:02_library.adoc#_other[Other]. Clearing Queue does not remove them from Library.
 
-The desktop Queue panel shows accepted file-addition progress and retains the
-terminal result until dismissed or replaced by another media task. Cancelling is
-available before Saving; dismissal does not remove registered tracks or inserted
-occurrences. See link:02_library.adoc#_cancellation[Library cancellation] for the
-shared cancellation and resource-release rules.
+File additions share one media-task slot with scans, Other checks, and playlist
+imports. Accepted-task feedback belongs to the desktop Queue panel; shared status
+queries, result dismissal, cancellation, and shutdown are documented under
+link:02_library.adoc#_cancellation[Library cancellation]. A failed task can still
+have registered files and inserted occurrences, for example when some input files
+were skipped or a refresh failed after commit. Inspect its result and the queue
+before retrying: replaying a committed addition creates more occurrences.
 
 === Queue controls
 
@@ -440,9 +442,13 @@ animation parameters, defaults, and shared frame rate.
 
 Rotation follows playback while the panel is visible. Pausing or hiding it retains
 the angle without advancing hidden time; stopping, changing tracks, or choosing
-Static resets the cover upright. Missing artwork uses the generated default cover.
-Still Mode does not affect cover loading or rotation. Panels share cover loading
-but retain independent rotation state. Track details keeps its full, static preview.
+Static resets the cover upright. Animated source covers can continue while paused
+or Static; both animation types use the shared frame-rate cap. Lower caps skip
+source frames without slowing their timeline. Hiding the panel stops both kinds
+of animation, and rotation resumes without catching up on suspended time.
+Missing artwork uses the generated default cover. Still Mode does not affect cover
+loading or animation. Panels share cover loading but retain independent rotation
+and source-animation state. Track details keeps its full, static preview.
 
 == MPRIS and artwork
 
