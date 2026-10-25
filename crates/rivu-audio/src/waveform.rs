@@ -281,13 +281,20 @@ impl WaveformAccumulator {
             self.dirty = None;
             return;
         }
+        // Publish statistics only: controls (including scan cancellation) may
+        // have changed since the private seed was captured without a revision.
+        let initial = shared.peaks.is_empty();
         let dirty = self.dirty.take().unwrap_or(0..0);
         let end = dirty.end.min(self.frame.peaks.len());
         let start = dirty.start.min(end);
         macro_rules! publish_bins {
             ($($field:ident),+ $(,)?) => { $(
-                shared.$field[start..end].copy_from_slice(&self.frame.$field[start..end]);
-                shared.$field.truncate(self.frame.$field.len());
+                if initial {
+                    shared.$field.clone_from(&self.frame.$field);
+                } else {
+                    shared.$field[start..end].clone_from_slice(&self.frame.$field[start..end]);
+                    shared.$field.truncate(self.frame.$field.len());
+                }
             )+ };
         }
         publish_bins!(
@@ -301,12 +308,10 @@ impl WaveformAccumulator {
             left_rms_counts,
             right_rms_counts,
             bin_revisions,
-            bin_epochs
+            bin_epochs,
+            rms_spans,
+            rms_prefixes
         );
-        shared.rms_spans[start..end].clone_from_slice(&self.frame.rms_spans[start..end]);
-        shared.rms_spans.truncate(self.frame.rms_spans.len());
-        shared.rms_prefixes[start..end].clone_from_slice(&self.frame.rms_prefixes[start..end]);
-        shared.rms_prefixes.truncate(self.frame.rms_prefixes.len());
         shared.complete = self.frame.complete;
         shared.duration = self.frame.duration;
         shared.span_seconds = self.frame.span_seconds;
@@ -979,6 +984,44 @@ mod tests {
         assert_eq!(actual.duration, expected.duration);
         assert_eq!(actual.span_seconds, expected.span_seconds);
         assert_eq!(actual.max_peak, expected.max_peak);
+    }
+
+    #[test]
+    fn first_publication_preserves_registered_scan_cancellation() {
+        let mut shared = WaveformFrame::default();
+        shared.select_identity(
+            Path::new("track.wav"),
+            None,
+            DecoderHint::Auto,
+            Some(2.0),
+            WaveformIdentity::FullScan {
+                duration: Some(2.0),
+                sample_rate: 8_000,
+            },
+        );
+        // Decoder captures its seed before a manual scan registers its token.
+        let mut seed = shared.clone();
+        seed.prepare_bins(8_000);
+        let mut pending = WaveformAccumulator::new(seed);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        shared.cancel_scan_on_suspend(&cancelled);
+        let revision = shared.revision;
+        pending.push(0.0, &[0.75; 160], 8_000, 1);
+        pending.publish(&mut shared);
+        assert!(shared.revision > revision);
+        assert_eq!(shared.rms_counts.iter().sum::<u64>(), 160);
+        assert!(!cancelled.load(Ordering::Relaxed));
+        assert!(shared.peaks.len() <= MAX_BINS);
+        shared.set_still_mode(true);
+        assert!(cancelled.load(Ordering::Relaxed));
+        assert_eq!(shared.retained_capacity_bytes(), 0);
+        let suspended_revision = shared.revision;
+        shared.set_still_mode(false);
+        pending.push(0.5, &[1.0; 160], 8_000, 1);
+        pending.publish(&mut shared);
+        assert_eq!(shared.revision, suspended_revision);
+        assert_eq!(shared.suspension_generation(), 1);
+        assert_eq!(shared.retained_capacity_bytes(), 0);
     }
 
     #[test]

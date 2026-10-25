@@ -20,7 +20,6 @@ const PENDING_BUFFER_CAPACITY: usize = 16_384;
 // Bound output/tap admission independently of device queue and decoder packet
 // sizes. A ready refill returns through command/control handling before more work.
 const MAX_REFILL_FRAMES: usize = 16_384;
-const MAX_GRAPH_PACKET_FRAMES: usize = 65_536;
 
 #[derive(Clone, Copy)]
 enum PendingTap {
@@ -82,6 +81,8 @@ pub(super) struct Playback {
 struct VisualizationCapture {
     waveform: Arc<RwLock<WaveformFrame>>,
     accumulator: Option<WaveformAccumulator>,
+    // Captured at load/Still boundaries, so first PCM never needs a GUI lock.
+    seed: Option<WaveformFrame>,
     weights: Vec<[f32; 2]>,
     coverage: WaveformCoverage,
     still_mode: bool,
@@ -92,7 +93,7 @@ struct VisualizationCapture {
     tap_last_end: Option<f64>,
     tap_identity: Option<AnalysisAudioIdentity>,
     // Destructive DSP needs a separate Before signal, bounded by its output
-    // latency plus one decoder packet. Other taps borrow admitted PCM directly.
+    // latency plus one PCM fragment. Other taps borrow admitted PCM directly.
     before: VecDeque<[f32; 2]>,
     before_start: f64,
     before_offset_frames: u64,
@@ -123,15 +124,30 @@ impl VisualizationCapture {
         }
         self.coverage.record(start, pcm.len() / channels, rate);
         let accumulator = self.accumulator.get_or_insert_with(|| {
-            let mut waveform = self.waveform.write();
-            waveform.prepare_bins(rate);
-            let mut accumulator = WaveformAccumulator::new(waveform.clone());
+            let mut frame = self.seed.take().expect("active waveform seed");
+            frame.prepare_bins(rate);
+            let mut accumulator = WaveformAccumulator::new(frame);
             accumulator.set_channel_weights(&self.weights);
             accumulator
         });
         accumulator.push(start, pcm, rate, channels);
-        accumulator.publish(&mut self.waveform.write());
+        self.try_publish();
         gap
+    }
+
+    fn try_publish(&mut self) {
+        if let Some(accumulator) = &mut self.accumulator
+            && let Some(mut waveform) = self.waveform.try_write()
+        {
+            accumulator.publish(&mut waveform);
+        }
+    }
+
+    // Control/teardown boundaries must not discard an unpublished dirty range.
+    fn flush(&mut self) {
+        if let Some(accumulator) = &mut self.accumulator {
+            accumulator.publish(&mut self.waveform.write());
+        }
     }
 
     fn reset_tap(&mut self) {
@@ -243,6 +259,12 @@ impl VisualizationCapture {
         }
     }
 }
+
+impl Drop for VisualizationCapture {
+    fn drop(&mut self) {
+        self.flush();
+    }
+}
 impl Playback {
     pub(super) fn from_source(
         mut source: Source,
@@ -308,7 +330,7 @@ impl Playback {
             analyzer,
         )?;
         let waveform_weights = super::channels::analysis_weights(source.layout());
-        {
+        let waveform_seed = {
             let mut waveform = waveform.write();
             waveform.set_still_mode(still_mode);
             if let Some(info) = &source_info {
@@ -325,7 +347,8 @@ impl Playback {
             } else {
                 waveform.select_source(&path, range, decoder_hint, &source);
             }
-        }
+            (!still_mode).then(|| waveform.clone())
+        };
         let timestamp_tolerance = source.waveform_timestamp_tolerance();
         let waveform_coverage = WaveformCoverage::new(start, timestamp_tolerance);
         let mut scan_source = super::WaveformScanSnapshot::original(
@@ -366,6 +389,7 @@ impl Playback {
             visualization: VisualizationCapture {
                 waveform,
                 accumulator: None,
+                seed: waveform_seed,
                 weights: waveform_weights,
                 coverage: waveform_coverage,
                 still_mode,
@@ -522,6 +546,7 @@ impl Playback {
             return;
         }
         if enabled {
+            self.visualization.flush();
             self.visualization.accumulator = None;
             // Discarding the prefix invalidates coverage even when no PCM is
             // decoded during a quick on/off transition.
@@ -529,7 +554,9 @@ impl Playback {
             self.visualization.reset_tap();
             self.visualization.before = VecDeque::new();
         }
-        self.visualization.waveform.write().set_still_mode(enabled);
+        let mut waveform = self.visualization.waveform.write();
+        waveform.set_still_mode(enabled);
+        self.visualization.seed = (!enabled).then(|| waveform.clone());
         self.visualization.still_mode = enabled;
     }
 
@@ -557,6 +584,7 @@ impl Playback {
     }
 
     fn fill_with(&mut self, mut after_packet: impl FnMut()) -> Result<bool> {
+        self.visualization.try_publish();
         self.output.check_timing()?;
         if self.paused {
             return Ok(false);
@@ -611,11 +639,6 @@ impl Playback {
                 DecodeStep::Frames((frames, start_seconds)) => {
                     if !frames.len().is_multiple_of(channels) {
                         bail!("Decoded audio ends in an incomplete interleaved frame");
-                    }
-                    if self.graph.is_some() && frames.len() / channels > MAX_GRAPH_PACKET_FRAMES {
-                        bail!(
-                            "Decoded packet exceeds realtime graph's 65,536-frame work bound; use Offline execution"
-                        );
                     }
                     let borrowed = self.graph.is_none() && self.equalizer.is_bypassed();
                     if let Some(graph) = &self.graph {
@@ -1010,6 +1033,7 @@ mod tests {
         let waveform_coverage = WaveformCoverage::new(0.0, timestamp_tolerance);
         let equalizer =
             Equalizer::new(&EqualizerConfig::default(), rate, source.layout().len()).unwrap();
+        let waveform_seed = Some(waveform.read().clone());
         let playback = Playback {
             source,
             output,
@@ -1038,6 +1062,7 @@ mod tests {
             visualization: VisualizationCapture {
                 waveform,
                 accumulator: None,
+                seed: waveform_seed,
                 weights: waveform_weights,
                 coverage: waveform_coverage,
                 still_mode: false,
@@ -1121,17 +1146,17 @@ mod tests {
                         assert_eq!(playback.output.vacant_frames(), capacity - admitted);
                         assert!(!playback.eof);
                         assert!(!playback.finished());
-                        assert!(playback.pending.len() - playback.offset_frames > 32_768);
-                        // Rolling waveform ownership remains decoder-driven.
-                        assert_eq!(
+                        // A legal large codec block may be converted in finite
+                        // fragments; admitted PCM already has a rolling envelope.
+                        assert!(
                             playback
                                 .visualization
                                 .waveform
                                 .read()
                                 .rms_counts
                                 .iter()
-                                .sum::<u64>(),
-                            65_535
+                                .sum::<u64>()
+                                >= admitted as u64
                         );
                         worker.control.request_frame();
                         let deadline = Instant::now() + Duration::from_secs(3);
@@ -1165,10 +1190,66 @@ mod tests {
                                 .iter()
                                 .all(|sample| sample.is_finite() && *sample > 0.0)
                         );
+                        let mut consumed = admitted;
+                        while consumed < 65_535 {
+                            playback.fill().unwrap();
+                            let count = admitted.min(65_535 - consumed);
+                            let mut tail = vec![0.0; count];
+                            render(&mut tail, (consumed as u64 * 1000) / u64::from(rate));
+                            assert!(
+                                tail.iter()
+                                    .all(|sample| *sample > 0.0 && sample.is_finite())
+                            );
+                            consumed += count;
+                        }
+                        playback.fill().unwrap();
+                        assert!(playback.eof);
+                        let waveform = playback.visualization.waveform.read();
+                        assert!(waveform.complete);
+                        assert_eq!(waveform.rms_counts.iter().sum::<u64>(), 65_535);
                     }
                 }
             }
         }
+    }
+
+    #[test]
+    fn waveform_readers_do_not_stall_refill_or_lose_deferred_coverage() {
+        use std::time::Duration;
+
+        let file = pcm_level(16_000, 8192);
+        let shared = Arc::new(RwLock::new(WaveformFrame::default()));
+        let (mut playback, mut render) =
+            test_playback_with_waveform(file.path(), None, shared.clone());
+        let initial_revision = shared.read().revision;
+        let (ready, locked) = crossbeam_channel::bounded(1);
+        let (release, released) = crossbeam_channel::bounded(1);
+        let reader = std::thread::spawn(move || {
+            let frame = shared.read();
+            ready.send(()).unwrap();
+            let result = released.recv_timeout(Duration::from_secs(2));
+            assert_eq!(frame.revision, initial_revision);
+            drop(frame);
+            result.unwrap();
+        });
+        locked.recv_timeout(Duration::from_secs(2)).unwrap();
+        playback.fill().unwrap();
+        let mut audio = [0.0; 160];
+        render(&mut audio, 0);
+        assert!(audio.iter().all(|sample| *sample == 0.25));
+        playback.fill().unwrap();
+        release.send(()).unwrap();
+        reader.join().unwrap();
+        for block in 1..100 {
+            playback.fill().unwrap();
+            render(&mut audio, block * 20);
+            assert!(audio.iter().all(|sample| *sample == 0.25));
+        }
+        playback.fill().unwrap();
+        let waveform = playback.visualization.waveform.read();
+        assert!(waveform.complete);
+        assert!(waveform.revision > initial_revision);
+        assert_eq!(waveform.rms_counts.iter().sum::<u64>(), 16_000);
     }
 
     #[test]

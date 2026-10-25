@@ -330,7 +330,7 @@ link:23_visuals.adoc[Visualization Rendering Design].
 
 The audio worker's processed Before tap owns a separate stereo FIFO for
 source-aligned input awaiting output admission. Its frame count is bounded by
-the graph's retained latency plus one decoder packet, not by panel dimensions
+the graph's retained latency plus one converted PCM fragment, not by panel dimensions
 or `visualizations.cache`. Capture-identity changes and inactive analysis discard
 both its samples and allocation; refill checks retire it even when output admits
 no new PCM. Exhausting the output span also releases it. This is distinct from

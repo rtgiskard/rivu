@@ -37,14 +37,14 @@ The tap holds at most 32,768 frames. Playback submits analysis only for PCM
 admitted to output, not an entire decoded packet ahead of its pending tail.
 Each refill admits at most 16,384 frames, independently of output queue or packet
 size, and returns through control handling before another ready refill. DSP and
-monitor EQ still process each packet once; pending processed output is unchanged
-by later monitor EQ edits. Rolling waveform capture remains decoder-driven.
+monitor EQ process each converted fragment once; pending processed output is
+unchanged by later monitor EQ edits. Rolling waveform capture remains decoder-driven.
 
 After and bypass taps borrow admitted PCM. A processed Before tap retains a
 reusable stereo FIFO because its source-aligned samples can lead graph output
-by algorithmic latency. Its length is bounded by that latency plus one decoder
-packet; realtime graphs admit at most two seconds of latency and 65,536 frames
-per packet, excluding source preguard from the retained lead. Each stored frame
+by algorithmic latency. Its length is bounded by that latency plus one converted
+PCM fragment; realtime graphs admit at most two seconds of latency and each
+fragment has at most 16,384 frames, excluding source preguard. Each stored frame
 contains only two `f32` channels (eight payload bytes); deque capacity slack
 remains, so the frame-count bound is not a byte-exact memory limit.
 
@@ -220,12 +220,23 @@ span. EOF can truncate trailing bins and normalize the display timeline without
 moving cached samples between bins. Pairwise coarsening doubles the sample width;
 source changes or discarded bins reset the geometry. The accumulator publishes
 this geometry with its statistics so later playback uses the same coordinates.
+Ordinary refill publishes only when the shared waveform write lock is immediately
+available. Contention retains private dirty ranges for a later refill rather than
+delaying output replenishment or dropping coverage. EOF, Still transitions and
+source retirement flush pending statistics and may wait for a current reader;
+identity and revision checks still reject stale publications.
+Both first and subsequent publications copy only waveform statistics: live scan
+cancellation registration and suspension controls remain shared-frame-owned.
+A scan registered after the decoder captures its private seed therefore still
+receives cancellation when Still Mode starts, even after the first PCM publication.
+
 
 Each native or FFmpeg decode call uses one work budget across packet skipping,
-seek discards, and codec buffering. Exhausting the budget yields control, not EOF;
-playback and full-waveform callers can continue on a later call. This bounds
-decode-loop work per call, not the duration of a single demux syscall or other
-blocking file/container/codec operation.
+seek discards, codec buffering and retained PCM fragments. Exhausting the budget
+yields control, not EOF; playback and full-waveform callers can continue later.
+Rivu converts at most 16,384 frames and 256 KiB of float PCM per fragment. These
+bounds do not limit internal codec allocations or the duration of a single demux
+syscall or blocking file/container/codec operation.
 
 An explicit full-track scan supplies a baseline for the same rolling display.
 The previous display remains visible during its Track query and decode, and on

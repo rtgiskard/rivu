@@ -18,7 +18,7 @@ use symphonia::core::errors::Error as SymphoniaError;
 use symphonia::{
     core::{
         audio::{
-            Audio, AudioBuffer, ChannelLabel, Channels, GenericAudioBufferRef, Position,
+            Audio, AudioSlice, ChannelLabel, Channels, GenericAudioBufferRef, Position,
             conv::FromSample, sample::Sample,
         },
         codecs::{
@@ -38,6 +38,30 @@ use symphonia::{
 
 const PROBE_BUFFER_LEN: usize = 2 * BYTES_PER_MEBIBYTE;
 pub(super) const DECODE_WORK_BUDGET: usize = 64;
+// These bound this crate's PCM conversion, not allocations/work inside a codec.
+// Retain larger legal codec blocks in the decoder and expose finite fragments.
+const PCM_CHUNK_BYTES: usize = 256 * 1024;
+const PCM_CHUNK_FRAMES: usize = 16_384;
+
+pub(super) fn pcm_chunk_frames(channels: usize) -> Result<usize> {
+    let frame_bytes = channels
+        .checked_mul(std::mem::size_of::<f32>())
+        .filter(|bytes| *bytes != 0 && *bytes <= PCM_CHUNK_BYTES)
+        .context("Decoded PCM frame exceeds conversion byte budget")?;
+    Ok(PCM_CHUNK_FRAMES.min(PCM_CHUNK_BYTES / frame_bytes))
+}
+
+pub(super) fn reserve_pcm(output: &mut Vec<f32>, frames: usize, channels: usize) -> Result<usize> {
+    let samples = frames
+        .checked_mul(channels)
+        .filter(|samples| *samples <= PCM_CHUNK_BYTES / std::mem::size_of::<f32>())
+        .context("Decoded PCM fragment exceeds conversion byte budget")?;
+    output.clear();
+    output
+        .try_reserve_exact(samples)
+        .context("Allocating PCM conversion fragment")?;
+    Ok(samples)
+}
 
 /// Share one admission budget across probing and all later metadata revisions.
 /// Playback/probe retain tags only; artwork explicitly opts into visual bytes.
@@ -381,6 +405,11 @@ impl std::fmt::Display for UnsupportedNative {
 }
 impl std::error::Error for UnsupportedNative {}
 
+struct NativePcm {
+    start: f64,
+    offset: usize,
+}
+
 pub(super) struct Source {
     identity: SourceIdentity,
     format: Option<Box<dyn FormatReader>>,
@@ -390,6 +419,7 @@ pub(super) struct Source {
     time_base: TimeBase,
     frames: Vec<f32>,
     frame_start: f64,
+    native_pcm: Option<NativePcm>,
     layout: Vec<Channel>,
     info: MediaInfo,
     probe_backend: ProbeBackend,
@@ -550,6 +580,7 @@ impl Source {
             time_base,
             frames: Vec::new(),
             frame_start: 0.0,
+            native_pcm: None,
             layout,
             info,
             probe_backend: ProbeBackend::Ffmpeg,
@@ -736,6 +767,7 @@ impl Source {
             decode,
             frames: Vec::with_capacity(8192),
             frame_start: 0.0,
+            native_pcm: None,
             layout: Vec::new(),
             info,
             probe_backend: ProbeBackend::Native,
@@ -788,6 +820,7 @@ impl Source {
         self.complete_stream = false;
         self.packet_stats.invalidate();
         let target = target.max(0.0);
+        self.native_pcm = None;
         if self
             .range_end
             .is_some_and(|end| self.range_start + target >= end)
@@ -1282,6 +1315,26 @@ impl Source {
         }
     }
 
+    fn copy_native_pcm(&mut self) -> Result<Option<f64>> {
+        let Some(pending) = &mut self.native_pcm else {
+            return Ok(None);
+        };
+        let Decode::Native(decoder) = &self.decode else {
+            unreachable!()
+        };
+        let audio = decoder.last_decoded();
+        let channels = self.layout.len();
+        let count = (audio.frames() - pending.offset).min(pcm_chunk_frames(channels)?);
+        let end = pending.offset + count;
+        let timestamp = pending.start + pending.offset as f64 / f64::from(self.info.sample_rate);
+        interleave_audio(audio, pending.offset..end, &mut self.frames)?;
+        pending.offset = end;
+        if end == decoder.last_decoded().frames() {
+            self.native_pcm = None;
+        }
+        Ok(Some(timestamp))
+    }
+
     fn read_next(
         &mut self,
         cancelled: Option<&AtomicBool>,
@@ -1332,6 +1385,15 @@ impl Source {
             // Seeking can discard whole packets (including Opus preroll).
             // Never append the next packet onto samples already discarded.
             self.frames.clear();
+            if let Some(start) = self.copy_native_pcm()? {
+                if self.retain_pcm(start) {
+                    return Ok(DecodeStep::Frames(()));
+                }
+                if self.exhausted {
+                    return Ok(DecodeStep::Eof);
+                }
+                continue;
+            }
             let format = self
                 .format
                 .as_mut()
@@ -1376,12 +1438,15 @@ impl Source {
                             )?)
                         })
                     };
-                    interleave_audio(audio, &mut self.frames);
                     packet_start += self
                         .time_base
                         .calc_duration(packet.trim_start)
                         .context("Packet trim out of range")?
                         .as_secs_f64();
+                    self.native_pcm = Some(NativePcm {
+                        start: packet_start,
+                        offset: 0,
+                    });
                     represented
                 }
                 Decode::Opus(opus) => {
@@ -1418,6 +1483,9 @@ impl Source {
             match encoded_samples {
                 Some(samples) => self.packet_stats.add(packet.data.len() as u64, samples),
                 None => self.packet_stats.invalidate(),
+            }
+            if let Some(start) = self.copy_native_pcm()? {
+                packet_start = start;
             }
             if self.retain_pcm(packet_start) {
                 return Ok(DecodeStep::Frames(()));
@@ -1473,29 +1541,53 @@ pub(super) fn finite_sample(sample: f32) -> f32 {
 }
 
 fn interleave_samples<S: Sample>(
-    audio: &AudioBuffer<S>,
+    audio: AudioSlice<'_, S>,
     output: &mut Vec<f32>,
     convert: impl Fn(S) -> f32,
-) {
-    output.clear();
-    output.reserve(audio.samples_interleaved());
+) -> Result<()> {
+    reserve_pcm(output, audio.frames(), audio.spec().channels().count())?;
     output.extend(audio.iter_interleaved().map(convert));
+    Ok(())
 }
 
-fn interleave_audio(audio: GenericAudioBufferRef<'_>, output: &mut Vec<f32>) {
+fn interleave_audio(
+    audio: GenericAudioBufferRef<'_>,
+    range: std::ops::Range<usize>,
+    output: &mut Vec<f32>,
+) -> Result<()> {
     match audio {
-        GenericAudioBufferRef::U8(audio) => interleave_samples(audio, output, f32::from_sample),
-        GenericAudioBufferRef::U16(audio) => interleave_samples(audio, output, f32::from_sample),
-        GenericAudioBufferRef::U24(audio) => interleave_samples(audio, output, f32::from_sample),
-        GenericAudioBufferRef::U32(audio) => interleave_samples(audio, output, f32::from_sample),
-        GenericAudioBufferRef::S8(audio) => interleave_samples(audio, output, f32::from_sample),
-        GenericAudioBufferRef::S16(audio) => interleave_samples(audio, output, f32::from_sample),
-        GenericAudioBufferRef::S24(audio) => interleave_samples(audio, output, f32::from_sample),
-        GenericAudioBufferRef::S32(audio) => interleave_samples(audio, output, f32::from_sample),
-        GenericAudioBufferRef::F32(audio) => interleave_samples(audio, output, finite_sample),
-        GenericAudioBufferRef::F64(audio) => interleave_samples(audio, output, |sample| {
-            finite_sample(f32::from_sample(sample))
-        }),
+        GenericAudioBufferRef::U8(audio) => {
+            interleave_samples(audio.slice(range), output, f32::from_sample)
+        }
+        GenericAudioBufferRef::U16(audio) => {
+            interleave_samples(audio.slice(range), output, f32::from_sample)
+        }
+        GenericAudioBufferRef::U24(audio) => {
+            interleave_samples(audio.slice(range), output, f32::from_sample)
+        }
+        GenericAudioBufferRef::U32(audio) => {
+            interleave_samples(audio.slice(range), output, f32::from_sample)
+        }
+        GenericAudioBufferRef::S8(audio) => {
+            interleave_samples(audio.slice(range), output, f32::from_sample)
+        }
+        GenericAudioBufferRef::S16(audio) => {
+            interleave_samples(audio.slice(range), output, f32::from_sample)
+        }
+        GenericAudioBufferRef::S24(audio) => {
+            interleave_samples(audio.slice(range), output, f32::from_sample)
+        }
+        GenericAudioBufferRef::S32(audio) => {
+            interleave_samples(audio.slice(range), output, f32::from_sample)
+        }
+        GenericAudioBufferRef::F32(audio) => {
+            interleave_samples(audio.slice(range), output, finite_sample)
+        }
+        GenericAudioBufferRef::F64(audio) => {
+            interleave_samples(audio.slice(range), output, |sample| {
+                finite_sample(f32::from_sample(sample))
+            })
+        }
     }
 }
 
@@ -1664,19 +1756,34 @@ mod tests {
 
     #[test]
     fn native_interleave_reuses_storage_and_replaces_previous_packet() {
-        use symphonia::core::audio::AudioSpec;
+        use symphonia::core::audio::{AudioBuffer, AudioSpec};
         let mut audio = AudioBuffer::<i16>::new(AudioSpec::new(48_000, Channels::Discrete(2)), 3);
         audio.resize(1, &[16_384, -16_384]);
         audio.resize(3, &[8_192, -8_192]);
         let mut output = Vec::with_capacity(32);
         let allocation = output.as_ptr();
-        interleave_audio(GenericAudioBufferRef::S16(&audio), &mut output);
+        interleave_audio(
+            GenericAudioBufferRef::S16(&audio),
+            0..audio.frames(),
+            &mut output,
+        )
+        .unwrap();
         assert_eq!(output, [0.5, -0.5, 0.25, -0.25, 0.25, -0.25]);
         audio.resize(1, &[0, 0]);
-        interleave_audio(GenericAudioBufferRef::S16(&audio), &mut output);
+        interleave_audio(
+            GenericAudioBufferRef::S16(&audio),
+            0..audio.frames(),
+            &mut output,
+        )
+        .unwrap();
         assert_eq!(output, [0.5, -0.5]);
         audio.clear();
-        interleave_audio(GenericAudioBufferRef::S16(&audio), &mut output);
+        interleave_audio(
+            GenericAudioBufferRef::S16(&audio),
+            0..audio.frames(),
+            &mut output,
+        )
+        .unwrap();
         assert!(output.is_empty());
         assert_eq!(output.as_ptr(), allocation);
     }

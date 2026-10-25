@@ -545,6 +545,7 @@ pub(super) struct Decoder {
     draining: bool,
     require_timestamp: bool,
     next_sample: i64,
+    pending_frame: Option<(usize, f64)>,
     layout: Vec<Channel>,
     info: MediaInfo,
     packet_stats: PacketStats,
@@ -718,6 +719,7 @@ impl Decoder {
             draining: false,
             require_timestamp: false,
             next_sample: 0,
+            pending_frame: None,
             layout: Vec::new(),
             info,
             packet_stats: PacketStats::new(),
@@ -802,6 +804,9 @@ impl Decoder {
                 return Ok(DecodeStep::Yield);
             }
             *budget -= 1;
+            if self.pending_frame.is_some() {
+                return self.copy_pending_frame(frames).map(DecodeStep::Frames);
+            }
             let ret = unsafe { (self.rt.f.receive_frame)(self.codec, self.frame) };
             check_cancelled(cancelled)?;
             if ret >= 0 {
@@ -861,10 +866,9 @@ impl Decoder {
                 self.require_timestamp = false;
                 self.next_sample = ((timestamp.max(0.0) * rate as f64).round() as i64)
                     .saturating_add(frame.nb_samples as i64);
-                frames.resize(frame.nb_samples as usize * channels as usize, 0.0);
-                copy_frame(frame, frames)?;
+                self.pending_frame = Some((0, timestamp.max(0.0)));
                 self.packet_stats.add_duration(frame.nb_samples as u64);
-                return Ok(DecodeStep::Frames(timestamp.max(0.0)));
+                return self.copy_pending_frame(frames).map(DecodeStep::Frames);
             }
             if ret != ERR_EAGAIN {
                 if ret == ERR_EOF {
@@ -921,6 +925,22 @@ impl Decoder {
             }
         }
     }
+    // AVFrame remains decoder-owned until every fragment is consumed. This
+    // limits our converted PCM allocation/work without rejecting codec blocks
+    // larger than a playback round or claiming to bound FFmpeg internals.
+    fn copy_pending_frame(&mut self, output: &mut Vec<f32>) -> Result<f64> {
+        let (offset, timestamp) = self.pending_frame.expect("pending FFmpeg frame");
+        let frame = unsafe { &*self.frame };
+        let channels = self.layout.len();
+        let count =
+            (frame.nb_samples as usize - offset).min(super::source::pcm_chunk_frames(channels)?);
+        let samples = super::source::reserve_pcm(output, count, channels)?;
+        output.resize(samples, 0.0);
+        copy_frame(frame, offset, output)?;
+        self.pending_frame =
+            (offset + count < frame.nb_samples as usize).then_some((offset + count, timestamp));
+        Ok(timestamp + offset as f64 / f64::from(self.info.sample_rate))
+    }
     pub(super) fn seek(&mut self, seconds: f64, cancelled: Option<&AtomicBool>) -> Result<()> {
         self.packet_stats.invalidate();
         check_cancelled(cancelled)?;
@@ -951,6 +971,7 @@ impl Decoder {
         self.draining = false;
         self.require_timestamp = seconds > 0.0;
         self.next_sample = 0;
+        self.pending_frame = None;
         Ok(())
     }
 }
@@ -980,7 +1001,7 @@ fn frame_channel(rt: &Runtime, layout: &AVChannelLayout, index: u32) -> Option<C
         .ok()
         .and_then(Channel::from_standard_index)
 }
-fn copy_frame(frame: &AVFrame, output: &mut [f32]) -> Result<()> {
+fn copy_frame(frame: &AVFrame, offset: usize, output: &mut [f32]) -> Result<()> {
     use abi::{
         AVSampleFormat_AV_SAMPLE_FMT_DBL as F64, AVSampleFormat_AV_SAMPLE_FMT_DBLP as F64P,
         AVSampleFormat_AV_SAMPLE_FMT_FLT as F32, AVSampleFormat_AV_SAMPLE_FMT_FLTP as F32P,
@@ -990,6 +1011,18 @@ fn copy_frame(frame: &AVFrame, output: &mut [f32]) -> Result<()> {
         AVSampleFormat_AV_SAMPLE_FMT_U8 as U8, AVSampleFormat_AV_SAMPLE_FMT_U8P as U8P,
     };
     let channels = frame.ch_layout.nb_channels as usize;
+    if channels == 0
+        || !output.len().is_multiple_of(channels)
+        || offset
+            .checked_add(output.len() / channels)
+            .is_none_or(|end| end > frame.nb_samples.max(0) as usize)
+        || (frame.nb_samples.max(0) as usize)
+            .checked_mul(channels)
+            .and_then(|samples| samples.checked_mul(std::mem::size_of::<f64>()))
+            .is_none_or(|bytes| bytes > isize::MAX as usize)
+    {
+        bail!("FFmpeg returned an invalid audio frame extent");
+    }
     let planar = matches!(frame.format, U8P | S16P | S32P | S64P | F32P | F64P);
     if frame.extended_data.is_null()
         || (!planar && frame.data[0].is_null())
@@ -1003,22 +1036,22 @@ fn copy_frame(frame: &AVFrame, output: &mut [f32]) -> Result<()> {
     // per frame, rather than checking format and looking up a plane per sample.
     unsafe {
         match frame.format {
-            U8 | U8P => copy_samples::<u8>(frame, output, planar, |value| {
+            U8 | U8P => copy_samples::<u8>(frame, offset, output, planar, |value| {
                 (value as f32 - 128.0) / 128.0
             }),
-            S16 | S16P => {
-                copy_samples::<i16>(frame, output, planar, |value| value as f32 / 32768.0)
-            }
-            S32 | S32P => {
-                copy_samples::<i32>(frame, output, planar, |value| value as f32 / 2147483648.0)
-            }
-            S64 | S64P => copy_samples::<i64>(frame, output, planar, |value| {
+            S16 | S16P => copy_samples::<i16>(frame, offset, output, planar, |value| {
+                value as f32 / 32768.0
+            }),
+            S32 | S32P => copy_samples::<i32>(frame, offset, output, planar, |value| {
+                value as f32 / 2147483648.0
+            }),
+            S64 | S64P => copy_samples::<i64>(frame, offset, output, planar, |value| {
                 value as f32 / 9223372036854775808.0
             }),
-            F32 | F32P => copy_samples::<f32>(frame, output, planar, finite_sample),
-            F64 | F64P => {
-                copy_samples::<f64>(frame, output, planar, |value| finite_sample(value as f32))
-            }
+            F32 | F32P => copy_samples::<f32>(frame, offset, output, planar, finite_sample),
+            F64 | F64P => copy_samples::<f64>(frame, offset, output, planar, |value| {
+                finite_sample(value as f32)
+            }),
             _ => bail!("Unsupported FFmpeg sample format {}", frame.format),
         }
     }
@@ -1027,6 +1060,7 @@ fn copy_frame(frame: &AVFrame, output: &mut [f32]) -> Result<()> {
 
 unsafe fn copy_samples<T: Copy>(
     frame: &AVFrame,
+    offset: usize,
     output: &mut [f32],
     planar: bool,
     convert: impl Fn(T) -> f32,
@@ -1036,8 +1070,8 @@ unsafe fn copy_samples<T: Copy>(
         for channel in 0..channels {
             let plane = unsafe {
                 std::slice::from_raw_parts(
-                    (*frame.extended_data.add(channel)).cast::<T>(),
-                    frame.nb_samples as usize,
+                    (*frame.extended_data.add(channel)).cast::<T>().add(offset),
+                    output.len() / channels,
                 )
             };
             for (out, &sample) in output.iter_mut().skip(channel).step_by(channels).zip(plane) {
@@ -1045,8 +1079,14 @@ unsafe fn copy_samples<T: Copy>(
             }
         }
     } else {
-        let samples =
-            unsafe { std::slice::from_raw_parts(frame.data[0].cast::<T>(), output.len()) };
+        let samples = unsafe {
+            std::slice::from_raw_parts(
+                frame.data[0]
+                    .cast::<T>()
+                    .add(offset * frame.ch_layout.nb_channels as usize),
+                output.len(),
+            )
+        };
         for (out, &sample) in output.iter_mut().zip(samples) {
             *out = convert(sample);
         }
@@ -1324,7 +1364,7 @@ mod tests {
         frame.data[0] = samples.as_ptr().cast_mut().cast();
         frame.extended_data = frame.data.as_mut_ptr();
         let mut output = [0.0; 4];
-        copy_frame(&frame, &mut output).unwrap();
+        copy_frame(&frame, 0, &mut output).unwrap();
         assert_eq!(output, [-1.0, 0.0, 1.0, 0.5]);
     }
 
@@ -1342,7 +1382,7 @@ mod tests {
         frame.nb_samples = 3;
         frame.extended_data = planes.as_mut_ptr();
         let mut output = [0.0; 6];
-        copy_frame(&frame, &mut output).unwrap();
+        copy_frame(&frame, 0, &mut output).unwrap();
         assert_eq!(output, [0.0, 0.0, 2.0, -3.0, f32::MAX, 0.5]);
     }
 }

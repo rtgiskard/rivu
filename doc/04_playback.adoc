@@ -274,6 +274,12 @@ The decoded output queue holds a quarter second of audio (at least 2048 frames),
 bounded to 16 MiB of interleaved float samples, plus at most 2 MiB of callback
 scratch space. Unsupported rate/channel combinations or allocation failure report
 a playback error rather than allocating without bound or changing the output route.
+Native and FFmpeg PCM conversion exposes at most 16,384 frames and 256 KiB of
+interleaved float samples per fragment. Larger legal codec results remain in the
+decoder and are converted in bounded fragments, preserving all samples and seek
+timestamps. This bounds Rivu's conversion work, not the codec's internal memory
+or the duration of a decode call.
+
 
 == Optional FFmpeg decoder
 
