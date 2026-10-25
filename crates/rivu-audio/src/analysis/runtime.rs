@@ -271,6 +271,21 @@ pub struct AnalysisControl {
 }
 
 impl AnalysisControl {
+    fn new() -> Self {
+        Self {
+            playback_active: AtomicBool::new(false),
+            settings: RwLock::new(AnalysisSettings::from(&Config::default())),
+            sample_rate: AtomicU32::new(48_000),
+            epoch: AtomicU64::new(0),
+            shutdown: AtomicBool::new(false),
+            display_demand: AtomicU64::new(0),
+            frame_requested: AtomicBool::new(false),
+            tap_overflow: AtomicBool::new(false),
+            worker_thread: OnceLock::new(),
+            still_mode: AtomicU64::new(0),
+        }
+    }
+
     #[cfg(feature = "test-support")]
     pub fn epoch(&self) -> u64 {
         self.epoch.load(Ordering::Acquire)
@@ -449,18 +464,7 @@ impl AnalysisWorker {
 
     fn with_capacity(shared: Arc<RwLock<AnalysisFrame>>, capacity: usize) -> std::io::Result<Self> {
         let ring = Arc::new(HeapRb::new(capacity));
-        let control = Arc::new(AnalysisControl {
-            playback_active: AtomicBool::new(false),
-            settings: RwLock::new(AnalysisSettings::from(&Config::default())),
-            sample_rate: AtomicU32::new(48_000),
-            epoch: AtomicU64::new(0),
-            shutdown: AtomicBool::new(false),
-            display_demand: AtomicU64::new(0),
-            frame_requested: AtomicBool::new(false),
-            tap_overflow: AtomicBool::new(false),
-            worker_thread: OnceLock::new(),
-            still_mode: AtomicU64::new(0),
-        });
+        let control = Arc::new(AnalysisControl::new());
         let consumer = HeapCons::new(ring.clone());
         let thread_control = control.clone();
         let worker = thread::Builder::new()
@@ -523,9 +527,7 @@ impl AnalysisWorker {
             .sample_rate
             .store(sample_rate, Ordering::Release);
         self.control.epoch.fetch_add(1, Ordering::AcqRel);
-        if self.control.accepts_audio()
-            && let Some(worker) = &self.worker
-        {
+        if let Some(worker) = &self.worker {
             worker.thread().unpark();
         }
     }
@@ -539,9 +541,7 @@ impl AnalysisWorker {
             self.control.frame_requested.store(false, Ordering::Release);
             self.control.epoch.fetch_add(2, Ordering::AcqRel);
             drop(current);
-            if self.control.accepts_audio()
-                && let Some(worker) = &self.worker
-            {
+            if let Some(worker) = &self.worker {
                 worker.thread().unpark();
             }
         }
@@ -729,47 +729,6 @@ impl SpectrumAnalyzer {
         self.push(frame.samples);
     }
 
-    /// Consume one finite prefix; retain a newer control identity for its cycle.
-    fn ingest_available(
-        &mut self,
-        consumer: &mut HeapCons<TapFrame>,
-        control: &AnalysisControl,
-        epoch: u64,
-        demand_token: u64,
-        active: bool,
-    ) -> (usize, bool) {
-        let mut accepted = 0;
-        let mut remaining = consumer.occupied_len();
-        while remaining != 0 {
-            let (first, second) = consumer.as_slices();
-            let mut consumed = 0;
-            let mut controls_changed = false;
-            for frame in first.iter().chain(second).take(remaining.min(1024)) {
-                if frame.epoch == epoch && frame.demand_token == demand_token {
-                    if active {
-                        accepted += 1;
-                        self.push_tap(frame);
-                    }
-                } else if frame.epoch == control.epoch.load(Ordering::Acquire)
-                    && frame.demand_token == control.display_token()
-                    && control.accepts_audio_for(frame.demand_token)
-                {
-                    // A control transition can finish while a cycle reads its
-                    // snapshot. Do not discard that next cycle's fresh window.
-                    controls_changed = true;
-                    break;
-                }
-                consumed += 1;
-            }
-            consumer.skip(consumed);
-            remaining -= consumed;
-            if controls_changed || consumed == 0 {
-                return (accepted, controls_changed);
-            }
-        }
-        (accepted, false)
-    }
-
     fn transform(&mut self) -> [f32; 2] {
         let n = self.rolling.len();
         let mut rms = [0.0_f32; 2];
@@ -900,17 +859,121 @@ fn calibrated_spatial_power(power: f32, normalization_squared: f32) -> f32 {
     }
 }
 
-/// Discard results and continuity, retaining reusable FFT machinery.
-fn discard_analysis(analyzer: &mut SpectrumAnalyzer, shared: &RwLock<AnalysisFrame>) {
-    analyzer.reset();
-    analyzer.set_visualizer_demand(VisualizerDemand::default());
-    analyzer.metadata_dirty = true;
+/// Control invalidations do not require FFT plans or frame-sized storage.
+struct AnalysisRuntime {
+    analyzer: Option<SpectrumAnalyzer>,
+    generation: u64,
+    settings: AnalysisSettings,
+    sample_rate: u32,
+    demand: VisualizerDemand,
+}
+
+impl AnalysisRuntime {
+    fn new(settings: AnalysisSettings, sample_rate: u32) -> Self {
+        Self {
+            analyzer: None,
+            generation: 0,
+            settings,
+            sample_rate,
+            demand: VisualizerDemand::default(),
+        }
+    }
+
+    fn reset(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        if let Some(analyzer) = &mut self.analyzer {
+            analyzer.reset();
+        }
+    }
+
+    /// Called only after a tap with the current, active capture identity arrives.
+    fn prepare(&mut self) {
+        let replan = self.analyzer.as_ref().is_none_or(|analyzer| {
+            analyzer.sample_rate != self.sample_rate
+                || analyzer.settings.fft_size != self.settings.fft_size
+                || analyzer.settings.window != self.settings.window
+        });
+        if replan {
+            let mut analyzer = SpectrumAnalyzer::new(self.settings, self.sample_rate);
+            analyzer.generation = self.generation;
+            self.analyzer = Some(analyzer);
+        }
+        let analyzer = self.analyzer.as_mut().unwrap();
+        analyzer.settings = self.settings;
+        analyzer.set_visualizer_demand(self.demand);
+    }
+
+    /// Consume one finite prefix; retain a newer control identity for its cycle.
+    fn ingest_available(
+        &mut self,
+        consumer: &mut HeapCons<TapFrame>,
+        control: &AnalysisControl,
+        epoch: u64,
+        demand_token: u64,
+        active: bool,
+    ) -> (usize, bool) {
+        let mut accepted = 0;
+        let mut remaining = consumer.occupied_len();
+        while remaining != 0 {
+            let (first, second) = consumer.as_slices();
+            let mut consumed = 0;
+            let mut controls_changed = false;
+            for frame in first.iter().chain(second).take(remaining.min(1024)) {
+                if frame.epoch == epoch && frame.demand_token == demand_token {
+                    if active {
+                        if accepted == 0 {
+                            self.prepare();
+                        }
+                        let analyzer = self.analyzer.as_mut().unwrap();
+                        analyzer.push_tap(frame);
+                        if frame.gap {
+                            self.generation = analyzer.generation;
+                        }
+                        accepted += 1;
+                    }
+                } else if frame.epoch == control.epoch.load(Ordering::Acquire)
+                    && frame.demand_token == control.display_token()
+                    && control.accepts_audio_for(frame.demand_token)
+                {
+                    // A control transition can finish while a cycle reads its
+                    // snapshot. Do not discard that next cycle's fresh window.
+                    controls_changed = true;
+                    break;
+                }
+                consumed += 1;
+            }
+            consumer.skip(consumed);
+            remaining -= consumed;
+            if controls_changed || consumed == 0 {
+                return (accepted, controls_changed);
+            }
+        }
+        (accepted, false)
+    }
+}
+
+/// Discard results and continuity, retaining all prepared worker machinery.
+fn discard_analysis(
+    runtime: &mut AnalysisRuntime,
+    shared: &RwLock<AnalysisFrame>,
+    display_token: u64,
+    demand: VisualizerDemand,
+) {
+    runtime.reset();
+    if let Some(analyzer) = &mut runtime.analyzer {
+        analyzer.metadata_dirty = true;
+    }
     let retired = {
         let mut frame = shared.write();
         let empty = AnalysisFrame {
             sequence: frame.sequence.wrapping_add(1),
-            generation: analyzer.generation,
+            display_token,
+            generation: runtime.generation,
             sample_time: frame.sample_time,
+            visualizer: VisualizerFrame {
+                demand,
+                ..VisualizerFrame::default()
+            },
             ..AnalysisFrame::default()
         };
         std::mem::replace(&mut *frame, empty)
@@ -923,7 +986,7 @@ fn analyze(
     control: Arc<AnalysisControl>,
     shared: Arc<RwLock<AnalysisFrame>>,
 ) {
-    let mut analyzer = SpectrumAnalyzer::new(
+    let mut runtime = AnalysisRuntime::new(
         *control.settings.read(),
         control.sample_rate.load(Ordering::Acquire),
     );
@@ -937,39 +1000,31 @@ fn analyze(
         if control.shutdown.load(Ordering::Acquire) {
             break;
         }
+        let previous_generation = runtime.generation;
         let current_still_token = control.still_mode.load(Ordering::Acquire);
-        if current_still_token != still_token {
-            discard_analysis(&mut analyzer, &shared);
-            still_token = current_still_token;
-            demand_token = u64::MAX;
-            fresh = false;
-        }
-        if current_still_token & 1 != 0 {
-            consumer.clear();
-            control.tap_overflow.store(false, Ordering::Release);
-            thread::park();
-            continue;
-        }
+        let still = current_still_token & 1 != 0;
         let current_demand_token = control.display_token();
         let display = DisplayDemand::from_bits(current_demand_token);
-        let demand = if display.enabled {
+        let demand = if display.enabled && !still {
             display.visualizer
         } else {
             VisualizerDemand::default()
         };
-        if demand_token != current_demand_token {
-            demand_token = current_demand_token;
-            // Invalidate every old result, including spectrum-only frames, even
-            // when an off/on transition was coalesced before this worker ran.
-            discard_analysis(&mut analyzer, &shared);
-            analyzer.set_visualizer_demand(demand);
+        let still_changed = current_still_token != still_token;
+        let demand_changed = current_demand_token != demand_token;
+        if still_changed || (demand_changed && !still) {
+            // Transition identities also invalidate coalesced off/on commands.
+            // No FFT or optional plot storage is constructed by invalidation.
+            discard_analysis(&mut runtime, &shared, current_demand_token, demand);
             fresh = false;
-            let mut frame = shared.write();
-            frame.visualizer.demand = demand;
-            frame.display_token = current_demand_token;
+        } else if demand_changed {
+            runtime.reset();
+            fresh = false;
         }
-        let settings = *control.settings.read();
+        still_token = current_still_token;
+        demand_token = current_demand_token;
         let current_epoch = control.epoch.load(Ordering::Acquire);
+        let settings = *control.settings.read();
         let sample_rate = control.sample_rate.load(Ordering::Acquire);
         if !current_epoch.is_multiple_of(2)
             || control.epoch.load(Ordering::Acquire) != current_epoch
@@ -977,35 +1032,29 @@ fn analyze(
             thread::park();
             continue;
         }
-        let previous_generation = analyzer.generation;
-        if sample_rate != analyzer.sample_rate
-            || settings.fft_size != analyzer.settings.fft_size
-            || settings.window != analyzer.settings.window
-        {
-            let generation = analyzer.generation.wrapping_add(1);
-            analyzer = SpectrumAnalyzer::new(settings, sample_rate);
-            analyzer.generation = generation;
-            analyzer.set_visualizer_demand(demand);
-            fresh = false;
-        }
-        analyzer.settings = settings;
+        runtime.settings = settings;
+        runtime.sample_rate = sample_rate;
+        runtime.demand = demand;
         if current_epoch != epoch {
             epoch = current_epoch;
-            analyzer.reset();
+            runtime.reset();
             fresh = false;
         }
         let active = control.accepts_audio_for(current_demand_token);
+        if still {
+            consumer.clear();
+        }
         if !active {
             control.tap_overflow.store(false, Ordering::Release);
         } else if control.tap_overflow.swap(false, Ordering::AcqRel) {
             // A stalled consumer drops the stale prefix, never blocking playback.
             // Fresh PCM wakes recovery independently of the next display request.
             consumer.clear();
-            analyzer.reset();
+            runtime.reset();
             fresh = false;
         }
         // PCM ingestion follows arrival, not the publication permit or FPS.
-        let (accepted, controls_changed) = analyzer.ingest_available(
+        let (accepted, controls_changed) = runtime.ingest_available(
             &mut consumer,
             &control,
             current_epoch,
@@ -1018,7 +1067,11 @@ fn analyze(
         let remaining = last_frame_at.map_or(Duration::ZERO, |started| {
             (started + interval).saturating_duration_since(Instant::now())
         });
-        let ready = fresh && analyzer.filled == analyzer.rolling.len();
+        let ready = fresh
+            && runtime
+                .analyzer
+                .as_ref()
+                .is_some_and(|analyzer| analyzer.filled == analyzer.rolling.len());
         let requested = active
             && ready
             && remaining.is_zero()
@@ -1026,9 +1079,9 @@ fn analyze(
         let rms = requested.then(|| {
             last_frame_at = Some(Instant::now());
             fresh = false;
-            analyzer.transform()
+            runtime.analyzer.as_mut().unwrap().transform()
         });
-        if rms.is_some() || analyzer.generation != previous_generation {
+        if rms.is_some() || runtime.generation != previous_generation {
             let mut frame = shared.write();
             let published = rms.is_some_and(|rms| {
                 control.epoch.load(Ordering::Acquire) == current_epoch
@@ -1038,18 +1091,23 @@ fn analyze(
                     && control.still_mode.load(Ordering::Acquire) == current_still_token
                     && !control.tap_overflow.load(Ordering::Acquire)
                     && !control.shutdown.load(Ordering::Acquire)
-                    && analyzer.publish(&mut frame, rms, sample_time)
+                    && runtime
+                        .analyzer
+                        .as_mut()
+                        .unwrap()
+                        .publish(&mut frame, rms, sample_time)
             });
             if published {
                 frame.display_token = current_demand_token;
-            } else if analyzer.generation != previous_generation {
+            } else if runtime.generation != previous_generation {
                 // A ready replacement and its generation commit together. Only
                 // a genuine wait for fresh analysis exposes an invalid frame.
                 frame.visualizer = VisualizerFrame {
                     demand,
                     ..VisualizerFrame::default()
                 };
-                frame.generation = analyzer.generation;
+                frame.display_token = current_demand_token;
+                frame.generation = runtime.generation;
                 frame.settings = None;
             }
         }
@@ -1152,16 +1210,17 @@ mod tests {
         band_energy: true,
     };
 
+    fn visualizer_settings() -> AnalysisSettings {
+        AnalysisSettings {
+            fps: 20,
+            fft_size: 512,
+            window: AnalysisWindow::None,
+            signal: VisualizationSignal::After,
+        }
+    }
+
     fn visualizer_analyzer(demand: VisualizerDemand) -> SpectrumAnalyzer {
-        let mut analyzer = SpectrumAnalyzer::new(
-            AnalysisSettings {
-                fps: 20,
-                fft_size: 512,
-                window: AnalysisWindow::None,
-                signal: VisualizationSignal::After,
-            },
-            5120,
-        );
+        let mut analyzer = SpectrumAnalyzer::new(visualizer_settings(), 5120);
         analyzer.set_visualizer_demand(demand);
         analyzer
     }
@@ -1973,6 +2032,368 @@ mod tests {
     }
 
     #[test]
+    fn unprepared_runtime_requires_audio_and_every_admission_gate() {
+        let control = AnalysisControl::new();
+        assert_eq!(control.still_mode.load(Ordering::Acquire), 0);
+        let mut runtime = AnalysisRuntime::new(visualizer_settings(), 5120);
+        runtime.demand = ALL_DEMAND;
+        let ring = Arc::new(HeapRb::new(16));
+        let mut producer = HeapProd::new(ring.clone());
+        let mut consumer = HeapCons::new(ring);
+        for playback in [false, true] {
+            for enabled in [false, true] {
+                for still in [false, true] {
+                    if playback && enabled && !still {
+                        continue;
+                    }
+                    control.playback_active.store(playback, Ordering::Release);
+                    control
+                        .still_mode
+                        .store(u64::from(still), Ordering::Release);
+                    control.set_display_demand(DisplayDemand {
+                        enabled,
+                        visualizer: ALL_DEMAND,
+                    });
+                    let token = control.display_token();
+                    assert!(
+                        producer
+                            .try_push(TapFrame {
+                                demand_token: token,
+                                ..TapFrame::default()
+                            })
+                            .is_ok()
+                    );
+                    assert_eq!(
+                        runtime.ingest_available(
+                            &mut consumer,
+                            &control,
+                            0,
+                            token,
+                            control.accepts_audio(),
+                        ),
+                        (0, false)
+                    );
+                    assert_eq!(consumer.occupied_len(), 0);
+                    assert!(runtime.analyzer.is_none());
+                }
+            }
+        }
+        control.playback_active.store(true, Ordering::Release);
+        control.still_mode.store(0, Ordering::Release);
+        control.set_display_enabled(true);
+        let token = control.display_token();
+        control.request_frame();
+        assert!(control.frame_requested.load(Ordering::Acquire));
+        assert_eq!(
+            runtime.ingest_available(&mut consumer, &control, 0, token, true),
+            (0, false)
+        );
+        assert!(runtime.analyzer.is_none());
+        for (epoch, demand_token) in [(2, token), (0, token.wrapping_sub(16))] {
+            assert!(
+                producer
+                    .try_push(TapFrame {
+                        epoch,
+                        demand_token,
+                        ..TapFrame::default()
+                    })
+                    .is_ok()
+            );
+        }
+        assert_eq!(
+            runtime.ingest_available(&mut consumer, &control, 0, token, true),
+            (0, false)
+        );
+        assert!(runtime.analyzer.is_none());
+        assert!(
+            producer
+                .try_push(TapFrame {
+                    demand_token: token,
+                    gap: true,
+                    ..TapFrame::default()
+                })
+                .is_ok()
+        );
+        assert_eq!(
+            runtime.ingest_available(&mut consumer, &control, 0, token, true),
+            (1, false)
+        );
+        let analyzer = runtime.analyzer.as_ref().unwrap();
+        assert_eq!(analyzer.filled, 1);
+        assert_eq!(analyzer.rolling.len(), 512);
+        assert_eq!(analyzer.generation, runtime.generation);
+        assert_eq!(runtime.generation, 1);
+        assert_eq!(analyzer.visualizer.demand, ALL_DEMAND);
+        assert!(analyzer.density.is_some());
+        assert_eq!(analyzer.visualizer.spatial.capacity(), 256);
+        assert!(control.frame_requested.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn worker_invalidates_settings_and_display_before_any_audio_arrives() {
+        let shared = Arc::new(RwLock::new(AnalysisFrame::default()));
+        let worker = AnalysisWorker::new(shared.clone()).unwrap();
+        wait_for_frame(&shared, |frame| frame.generation != 0);
+        let mut generation = shared.read().generation;
+        worker.configure(visualizer_settings());
+        wait_for_frame(&shared, |frame| frame.generation > generation);
+        generation = shared.read().generation;
+        worker.reset(96_000);
+        wait_for_frame(&shared, |frame| frame.generation > generation);
+        generation = shared.read().generation;
+        worker.control.set_display_demand(DisplayDemand {
+            enabled: true,
+            visualizer: ALL_DEMAND,
+        });
+        let token = worker.control.display_token();
+        wait_for_frame(&shared, |frame| {
+            frame.generation > generation && frame.display_token == token
+        });
+        assert_eq!(shared.read().visualizer.demand, ALL_DEMAND);
+        generation = shared.read().generation;
+        worker.control.set_display_enabled(false);
+        worker.control.set_display_enabled(true);
+        let token = worker.control.display_token();
+        wait_for_frame(&shared, |frame| {
+            frame.generation > generation && frame.display_token == token
+        });
+        assert_eq!(shared.read().settings, None);
+        generation = shared.read().generation;
+        worker.set_still_mode(true);
+        wait_for_frame(&shared, |frame| frame.generation > generation);
+        let suspended_sequence = shared.read().sequence;
+        generation = shared.read().generation;
+        worker.configure(AnalysisSettings {
+            fft_size: 32768,
+            ..visualizer_settings()
+        });
+        wait_for_frame(&shared, |frame| frame.generation > generation);
+        generation = shared.read().generation;
+        worker.reset(192_000);
+        wait_for_frame(&shared, |frame| frame.generation > generation);
+        generation = shared.read().generation;
+        worker.control.set_display_demand(DisplayDemand {
+            enabled: true,
+            visualizer: BAND_ENERGY_DEMAND,
+        });
+        let token = worker.control.display_token();
+        wait_for_frame(&shared, |frame| {
+            frame.generation > generation && frame.display_token == token
+        });
+        let frame = shared.read();
+        assert_eq!(frame.sequence, suspended_sequence);
+        assert_eq!(frame.settings, None);
+        assert_eq!(frame.sample_time, Duration::ZERO);
+        assert!(frame.frequencies_hz.is_empty());
+        assert!(frame.spectrum_db.is_empty());
+        assert_eq!(frame.visualizer.demand, VisualizerDemand::default());
+        assert!(frame.visualizer.density.is_empty());
+        assert_eq!(frame.visualizer.spatial.capacity(), 0);
+    }
+
+    #[test]
+    fn prepared_runtime_retains_fft_and_plot_storage_across_hide_and_still_mode() {
+        let control = AnalysisControl::new();
+        control.playback_active.store(true, Ordering::Release);
+        control.set_display_demand(DisplayDemand {
+            enabled: true,
+            visualizer: ALL_DEMAND,
+        });
+        let mut runtime = AnalysisRuntime::new(visualizer_settings(), 5120);
+        runtime.demand = ALL_DEMAND;
+        let ring = Arc::new(HeapRb::new(1024));
+        let mut producer = HeapProd::new(ring.clone());
+        let mut consumer = HeapCons::new(ring);
+        push_window(&mut producer, 0, control.display_token(), [0.5, -0.5]);
+        assert_eq!(
+            runtime.ingest_available(&mut consumer, &control, 0, control.display_token(), true),
+            (512, false)
+        );
+        let shared = RwLock::new(AnalysisFrame::default());
+        let analyzer = runtime.analyzer.as_mut().unwrap();
+        let rms = analyzer.transform();
+        assert!(analyzer.publish(&mut shared.write(), rms, Duration::from_secs(1)));
+        let fft = Arc::clone(&analyzer.fft);
+        let storage = |analyzer: &SpectrumAnalyzer| {
+            let density = analyzer.density.as_ref().unwrap();
+            (
+                analyzer.frequency.as_ptr(),
+                analyzer.scratch.as_ptr(),
+                analyzer.window.as_ptr(),
+                analyzer.rolling.as_ptr(),
+                density.cells.as_ptr(),
+                density.snapshots.each_ref().map(|slot| slot.as_ptr()),
+                analyzer.visualizer.spatial.as_ptr(),
+                analyzer.visualizer.spatial.capacity(),
+            )
+        };
+        let prepared_storage = storage(analyzer);
+        for still in [false, true, false, true] {
+            if still {
+                control.still_mode.fetch_add(3, Ordering::AcqRel);
+            } else {
+                control.set_display_enabled(false);
+            }
+            control.epoch.fetch_add(2, Ordering::AcqRel);
+            discard_analysis(
+                &mut runtime,
+                &shared,
+                control.display_token(),
+                VisualizerDemand::default(),
+            );
+            runtime.demand = VisualizerDemand::default();
+            let analyzer = runtime.analyzer.as_ref().unwrap();
+            assert!(Arc::ptr_eq(&analyzer.fft, &fft));
+            assert_eq!(storage(analyzer), prepared_storage);
+            assert_eq!(analyzer.filled, 0);
+            assert!(shared.read().spectrum_db.is_empty());
+            assert!(shared.read().visualizer.density.is_empty());
+            assert_eq!(shared.read().visualizer.spatial.capacity(), 0);
+
+            // Desired configuration may change repeatedly while suspended;
+            // returning to the prepared configuration must not rebuild it.
+            runtime.settings.fft_size = 32768;
+            runtime.sample_rate = 192_000;
+            assert_eq!(
+                runtime.ingest_available(
+                    &mut consumer,
+                    &control,
+                    control.epoch.load(Ordering::Acquire),
+                    control.display_token(),
+                    control.accepts_audio(),
+                ),
+                (0, false)
+            );
+            assert_eq!(
+                storage(runtime.analyzer.as_ref().unwrap()),
+                prepared_storage
+            );
+            runtime.settings = visualizer_settings();
+            runtime.sample_rate = 5120;
+            runtime.demand = ALL_DEMAND;
+            if still {
+                control.still_mode.fetch_add(1, Ordering::AcqRel);
+            } else {
+                control.set_display_enabled(true);
+            }
+            let epoch = control.epoch.fetch_add(2, Ordering::AcqRel) + 2;
+            runtime.reset();
+            push_window(&mut producer, epoch, control.display_token(), [0.0; 2]);
+            assert_eq!(
+                runtime.ingest_available(
+                    &mut consumer,
+                    &control,
+                    epoch,
+                    control.display_token(),
+                    control.accepts_audio(),
+                ),
+                (512, false)
+            );
+            let analyzer = runtime.analyzer.as_mut().unwrap();
+            assert!(Arc::ptr_eq(&analyzer.fft, &fft));
+            assert_eq!(storage(analyzer), prepared_storage);
+            let rms = analyzer.transform();
+            assert_eq!(rms, [0.0; 2]);
+            assert!(analyzer.publish(&mut shared.write(), rms, Duration::from_secs(2)));
+            let frame = shared.read();
+            assert_eq!(frame.generation, runtime.generation);
+            assert!(!frame.frequencies_hz.is_empty());
+            assert_eq!(frame.frequencies_hz.len(), frame.spectrum_db.len());
+            assert!(frame.visualizer.density.iter().all(|cell| *cell == 0.0));
+            assert!(
+                frame
+                    .visualizer
+                    .spatial
+                    .iter()
+                    .all(|bin| bin.power == 1e-14)
+            );
+        }
+    }
+
+    #[test]
+    fn prepared_runtime_defers_changed_fft_configuration_until_current_audio() {
+        let control = AnalysisControl::new();
+        control.playback_active.store(true, Ordering::Release);
+        control.set_display_enabled(true);
+        let token = control.display_token();
+        let mut runtime = AnalysisRuntime::new(visualizer_settings(), 5120);
+        let ring = Arc::new(HeapRb::new(16));
+        let mut producer = HeapProd::new(ring.clone());
+        let mut consumer = HeapCons::new(ring);
+        assert!(
+            producer
+                .try_push(TapFrame {
+                    demand_token: token,
+                    ..TapFrame::default()
+                })
+                .is_ok()
+        );
+        assert_eq!(
+            runtime.ingest_available(&mut consumer, &control, 0, token, true),
+            (1, false)
+        );
+        let fft = Arc::clone(&runtime.analyzer.as_ref().unwrap().fft);
+        runtime.settings.fps = 60;
+        runtime.settings.signal = VisualizationSignal::Before;
+        runtime.reset();
+        assert!(
+            producer
+                .try_push(TapFrame {
+                    demand_token: token,
+                    ..TapFrame::default()
+                })
+                .is_ok()
+        );
+        assert_eq!(
+            runtime.ingest_available(&mut consumer, &control, 0, token, true),
+            (1, false)
+        );
+        assert!(Arc::ptr_eq(&runtime.analyzer.as_ref().unwrap().fft, &fft));
+        assert_eq!(
+            runtime.analyzer.as_ref().unwrap().settings,
+            runtime.settings
+        );
+        runtime.settings.fft_size = 1024;
+        runtime.settings.window = AnalysisWindow::Hann;
+        runtime.sample_rate = 96_000;
+        runtime.reset();
+        assert!(
+            producer
+                .try_push(TapFrame {
+                    epoch: 2,
+                    demand_token: token,
+                    ..TapFrame::default()
+                })
+                .is_ok()
+        );
+        assert_eq!(
+            runtime.ingest_available(&mut consumer, &control, 0, token, true),
+            (0, false)
+        );
+        assert!(Arc::ptr_eq(&runtime.analyzer.as_ref().unwrap().fft, &fft));
+        assert_eq!(runtime.analyzer.as_ref().unwrap().rolling.len(), 512);
+        assert!(
+            producer
+                .try_push(TapFrame {
+                    demand_token: token,
+                    ..TapFrame::default()
+                })
+                .is_ok()
+        );
+        assert_eq!(
+            runtime.ingest_available(&mut consumer, &control, 0, token, true),
+            (1, false)
+        );
+        let analyzer = runtime.analyzer.as_ref().unwrap();
+        assert!(!Arc::ptr_eq(&analyzer.fft, &fft));
+        assert_eq!(analyzer.settings, runtime.settings);
+        assert_eq!(analyzer.sample_rate, 96_000);
+        assert_eq!(analyzer.rolling.len(), 1024);
+        assert_eq!(analyzer.filled, 1);
+        assert_eq!(analyzer.generation, runtime.generation);
+    }
+
+    #[test]
     fn ingestion_retains_new_epoch_and_demand_input_for_their_own_cycle() {
         let worker = AnalysisWorker::new(Arc::default()).unwrap();
         set_test_playback(&worker, true);
@@ -1994,9 +2415,10 @@ mod tests {
             };
             push_window(&mut producer, old_epoch, old_token, [0.25; 2]);
             push_window(&mut producer, epoch, token, [0.75; 2]);
-            let mut analyzer = visualizer_analyzer(BAND_ENERGY_DEMAND);
+            let mut runtime = AnalysisRuntime::new(visualizer_settings(), 5120);
+            runtime.demand = BAND_ENERGY_DEMAND;
             assert_eq!(
-                analyzer.ingest_available(
+                runtime.ingest_available(
                     &mut consumer,
                     &worker.control,
                     old_epoch,
@@ -2006,11 +2428,12 @@ mod tests {
                 (512, true)
             );
             assert_eq!(consumer.occupied_len(), 512);
-            analyzer.reset();
+            runtime.reset();
             assert_eq!(
-                analyzer.ingest_available(&mut consumer, &worker.control, epoch, token, true),
+                runtime.ingest_available(&mut consumer, &worker.control, epoch, token, true),
                 (512, false)
             );
+            let analyzer = runtime.analyzer.as_mut().unwrap();
             let rms = analyzer.transform();
             let mut frame = AnalysisFrame::default();
             assert!(analyzer.publish(&mut frame, rms, Duration::from_millis(100)));

@@ -76,6 +76,13 @@ at 192 kHz and 5 FPS, the 38,400 frames between publications need not fit in the
 tap at once. Continuing production cannot postpone control handling or shutdown
 beyond one queued prefix.
 
+FFT plans and analysis working storage are prepared on the analysis worker only
+when it accepts current-identity audio with active playback and display demand,
+outside Still Mode. Startup, configuration changes and metadata invalidation alone
+do not prepare them. Once prepared, hide/Still transitions clear published results
+and continuity but retain reusable working storage. An FFT configuration change
+is prepared when eligible audio next arrives, not while analysis is suspended.
+
 Consumer requests coalesce into one publication permit, retained until a fresh,
 complete FFT window is available. `analysis_fps` caps transforms and publications,
 not PCM ingestion; audio arrival without a permit never runs an FFT. One latest
