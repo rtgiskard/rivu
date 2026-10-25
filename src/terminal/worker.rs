@@ -208,7 +208,7 @@ pub(super) fn spawn_command_worker(data_dir: &Path, instance_id: u32) -> Command
                 break;
             }
             let result = match &mut session {
-                Ok(session) => session.request_ack(&command).map_err(WorkerFailure::from),
+                Ok(session) => session.request_ack(command).map_err(WorkerFailure::from),
                 Err(error) => Err(error.clone()),
             };
             let instance_changed = result.as_ref().is_err_and(|error| error.instance_changed);
@@ -444,7 +444,7 @@ pub(super) fn spawn_query_worker(data_dir: &Path, instance_id: u32) -> QueryWork
             };
             let result = match &mut session {
                 Ok(session) => session
-                    .query(&job.request.query())
+                    .query(job.request.query())
                     .map_err(WorkerFailure::from)
                     .and_then(|response| {
                         let view = response.result.map_err(|error| WorkerFailure {

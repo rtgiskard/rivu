@@ -38,7 +38,9 @@ database or DSP execution features through Cargo feature unification.
 `rivu-client` exposes `ClientSession`, cancellation, instance binding, command
 failure evidence, and the one-shot `get_state`, `query`, and `request_ack` helpers.
 The session API is synchronous and owns its runtime; async callers must run it
-outside their runtime's asynchronous execution context.
+outside their runtime's asynchronous execution context. Both session and one-shot
+`query` consume a `Query`; `request_ack` consumes a value convertible to
+`AppCommand`. Callers clone explicitly only when retaining a request for later use.
 External Rust clients depend on `rivu-client` and `rivu-protocol` directly, not on
 the root application crate. A retained session reuses its existing current-thread
 runtime, socket, and framing buffers; the package boundary adds no worker,
@@ -191,8 +193,8 @@ multiplexed response matching.
 
 Sessions reuse encoding buffers up to 256 KiB capacity. Larger send buffers are
 released after the write and flush, before an idle request or Watch wait; repeated
-bulk transfers therefore allocate again. Large encodings grow with at most 64 KiB
-requested spare capacity rather than doubling, capped at the frame boundary.
+bulk transfers therefore allocate again. Above 64 KiB, encoding capacity grows
+geometrically or directly to the required size, capped at the frame boundary.
 Client responses decode directly from the receive buffer without splitting or
 copying the payload. Once decoding finishes and no pending frame bytes remain,
 backing allocations above 256 KiB are released, including growth caused by several

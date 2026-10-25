@@ -26,7 +26,7 @@ pub(super) fn run(data_dir: &Path, action: ProcessingAction, json: bool) -> Resu
 }
 fn status(session: &mut rivu_client::ClientSession, id: u64) -> Result<ProcessingTaskStatus> {
     let view = session
-        .query(&Query::ProcessingTask { id })?
+        .query(Query::ProcessingTask { id })?
         .result
         .map_err(anyhow::Error::from)?;
     let ViewResponse::ProcessingTask(task) = view else {
@@ -203,7 +203,7 @@ fn execute(data_dir: &Path, action: ProcessingAction, json: bool) -> Result<()> 
         },
         ProcessingAction::Show => unreachable!(),
     };
-    let ack = session.request_ack(&command)?;
+    let ack = session.request_ack(command)?;
     if !ack.is_success() {
         bail!("{}", ack.error.as_deref().unwrap_or("Command rejected"));
     }

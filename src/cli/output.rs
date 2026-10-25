@@ -76,7 +76,7 @@ pub(super) fn list_queue(i18n: &Localizer, data_dir: &Path, json: bool) -> Resul
         write!(output, "[")?;
     }
     loop {
-        let response = session.query(&Query::QueueBatch {
+        let response = session.query(Query::QueueBatch {
             query: None,
             after,
             limit: MAX_QUERY_ROWS,
@@ -139,7 +139,7 @@ pub(super) fn list_library(
     }
     let mut first = true;
     loop {
-        let response = session.query(&Query::TrackBatch {
+        let response = session.query(Query::TrackBatch {
             query: query.clone(),
             favorite: favorites.then_some(true),
             missing: missing.then_some(true),
@@ -269,7 +269,7 @@ pub(super) fn list_playlists(i18n: &Localizer, data_dir: &Path, json: bool) -> R
     }
     let mut first_playlist = true;
     loop {
-        let response = session.query(&Query::PlaylistSummaryBatch {
+        let response = session.query(Query::PlaylistSummaryBatch {
             query: None,
             after,
             limit: MAX_QUERY_ROWS,
@@ -313,7 +313,7 @@ pub(super) fn list_playlists(i18n: &Localizer, data_dir: &Path, json: bool) -> R
             let mut entry_index = 0usize;
             let mut first_entry = true;
             loop {
-                let response = session.query(&Query::PlaylistEntryBatch {
+                let response = session.query(Query::PlaylistEntryBatch {
                     query: None,
                     playlist_id: playlist.id,
                     after: entry_after,

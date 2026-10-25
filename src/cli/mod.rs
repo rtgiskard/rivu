@@ -175,13 +175,13 @@ pub(super) fn run() -> Result<()> {
             | OtherTracksAction::Locate { .. }),
         )) => {
             let query = other_tracks_query(action)?;
-            let view = rivu_client::query(&data_dir, &query)?
+            let view = rivu_client::query(&data_dir, query)?
                 .result
                 .map_err(anyhow::Error::from)?;
             output::show_other_tracks(&i18n, view, args.json)
         }
         Action::Library(LibraryAction::ScanStatus { id }) => {
-            let view = rivu_client::query(&data_dir, &Query::ScanTask { id })?
+            let view = rivu_client::query(&data_dir, Query::ScanTask { id })?
                 .result
                 .map_err(anyhow::Error::from)?;
             let ViewResponse::ScanTask(task) = view else {
@@ -201,7 +201,7 @@ pub(super) fn run() -> Result<()> {
             Ok(())
         }
         Action::Library(LibraryAction::Stats) => {
-            let response = rivu_client::query(&data_dir, &Query::LibraryStats)?;
+            let response = rivu_client::query(&data_dir, Query::LibraryStats)?;
             let ViewResponse::LibraryStats(stats) = response.result.map_err(anyhow::Error::from)?
             else {
                 bail!("Statistics query returned an unexpected response");
@@ -262,7 +262,7 @@ pub(super) fn run() -> Result<()> {
                 album,
                 decoder_hint: None,
             };
-            let ack = command_ack(rivu_client::request_ack(&data_dir, &command), args.json)?;
+            let ack = command_ack(rivu_client::request_ack(&data_dir, command), args.json)?;
             show_ack(&i18n, &ack, args.json)
         }
         Action::Library(LibraryAction::Duplicates {
@@ -278,7 +278,7 @@ pub(super) fn run() -> Result<()> {
                 },
                 None => Query::DuplicateGroups { offset, limit },
             };
-            let view = rivu_client::query(&data_dir, &query)?
+            let view = rivu_client::query(&data_dir, query)?
                 .result
                 .map_err(anyhow::Error::from)?;
             if args.json {
@@ -382,7 +382,7 @@ pub(super) fn run() -> Result<()> {
             Ok(())
         }
         Action::Library(LibraryAction::RelocationStatus { id }) => {
-            let view = rivu_client::query(&data_dir, &Query::RelocationTask { id })?
+            let view = rivu_client::query(&data_dir, Query::RelocationTask { id })?
                 .result
                 .map_err(anyhow::Error::from)?;
             let ViewResponse::RelocationTask(task) = view else {
@@ -422,7 +422,7 @@ pub(super) fn run() -> Result<()> {
         }) => {
             let mut session = rivu_client::client_session(&data_dir)?;
             let ack = command_ack(
-                session.request_ack(&Command::RelocateTrack {
+                session.request_ack(Command::RelocateTrack {
                     source_id,
                     target_id,
                 }),
@@ -448,7 +448,7 @@ pub(super) fn run() -> Result<()> {
             loop {
                 thread::sleep(Duration::from_millis(200));
                 let view = session
-                    .query(&Query::RelocationTask { id })?
+                    .query(Query::RelocationTask { id })?
                     .result
                     .map_err(anyhow::Error::from)?;
                 let ViewResponse::RelocationTask(task) = view else {
@@ -485,7 +485,7 @@ pub(super) fn run() -> Result<()> {
         }
         Action::Library(LibraryAction::Optimize) => {
             let ack = command_ack(
-                rivu_client::request_ack(&data_dir, &Command::OptimizeDatabase),
+                rivu_client::request_ack(&data_dir, Command::OptimizeDatabase),
                 args.json,
             )?;
             if !ack.is_success() {
@@ -529,7 +529,7 @@ pub(super) fn run() -> Result<()> {
         }
         Action::Quit => {
             let ack = command_ack(
-                rivu_client::request_ack(&data_dir, &rivu_protocol::AppCommand::Shutdown),
+                rivu_client::request_ack(&data_dir, rivu_protocol::AppCommand::Shutdown),
                 args.json,
             )?;
             show_ack(&i18n, &ack, args.json)
@@ -537,7 +537,7 @@ pub(super) fn run() -> Result<()> {
         action => {
             let (command, wait_scan) = translate(action)?;
             let mut session = rivu_client::client_session(&data_dir)?;
-            let ack = command_ack(session.request_ack(&command), args.json)?;
+            let ack = command_ack(session.request_ack(command), args.json)?;
             if !ack.is_success() {
                 return show_ack(&i18n, &ack, args.json);
             }
@@ -545,7 +545,7 @@ pub(super) fn run() -> Result<()> {
                 let id = ack.scan_id.context("Scan startup omitted task ID")?;
                 loop {
                     thread::sleep(Duration::from_millis(200));
-                    let response = session.query(&Query::ScanTask { id })?;
+                    let response = session.query(Query::ScanTask { id })?;
                     let ViewResponse::ScanTask(task) =
                         response.result.map_err(anyhow::Error::from)?
                     else {

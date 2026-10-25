@@ -221,12 +221,12 @@ impl App {
     /// Show an existing instance, or start a graphical application if none exists.
     /// Import paths must already be resolved against the calling client's cwd.
     pub fn open_gui(data_dir: PathBuf, config_path: PathBuf, paths: Vec<PathBuf>) -> Result<()> {
-        match rivu_client::request_ack(&data_dir, &AppCommand::ShowWindow) {
+        match rivu_client::request_ack(&data_dir, AppCommand::ShowWindow) {
             Ok(ack) if ack.is_success() => {
                 if !paths.is_empty() {
                     let ack = rivu_client::request_ack(
                         &data_dir,
-                        &Command::Scan {
+                        Command::Scan {
                             paths,
                             force: false,
                         },
@@ -825,7 +825,7 @@ mod tests {
         started
             .recv_timeout(std::time::Duration::from_secs(15))
             .unwrap();
-        let ack = rivu_client::request_ack(directory.path(), &AppCommand::Shutdown).unwrap();
+        let ack = rivu_client::request_ack(directory.path(), AppCommand::Shutdown).unwrap();
         assert!(ack.is_success());
         worker.join().unwrap().unwrap();
         assert!(ipc::SocketOwner::acquire(directory.path()).is_ok());
@@ -891,7 +891,7 @@ mod tests {
             running.recv_timeout(Duration::from_secs(5)).unwrap();
         }
         assert!(
-            rivu_client::request_ack(directory.path(), &Command::Volume { value: 0.4 })
+            rivu_client::request_ack(directory.path(), Command::Volume { value: 0.4 })
                 .unwrap()
                 .is_success()
         );
@@ -910,7 +910,7 @@ mod tests {
         assert!(matches!(
             rivu_client::query(
                 directory.path(),
-                &rivu_protocol::model::Query::Track { track_id: 1 }
+                rivu_protocol::model::Query::Track { track_id: 1 }
             )
             .unwrap()
             .result,
@@ -923,7 +923,7 @@ mod tests {
             futures::executor::block_on(worker).unwrap();
         }
         assert!(
-            rivu_client::request_ack(directory.path(), &Command::OptimizeDatabase)
+            rivu_client::request_ack(directory.path(), Command::OptimizeDatabase)
                 .unwrap()
                 .is_success()
         );

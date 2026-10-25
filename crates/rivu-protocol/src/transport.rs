@@ -86,7 +86,7 @@ pub fn decode_response_frame(bytes: &[u8]) -> Result<WireResponse> {
 
 // Reuse small frames, but never retain a bulk transfer for an idle session.
 pub const RETAINED_BUFFER_LIMIT: usize = 256 * 1024;
-const FRAME_GROWTH_SLACK: usize = 64 * 1024;
+const FRAME_GROWTH_THRESHOLD: usize = 64 * 1024;
 
 pub fn release_large_buffer(buffer: &mut Vec<u8>) {
     if buffer.capacity() > RETAINED_BUFFER_LIMIT {
@@ -108,9 +108,9 @@ impl Write for FrameWriter<'_> {
             ));
         }
         let required = self.bytes.len() + bytes.len();
-        if required > self.bytes.capacity() && required > FRAME_GROWTH_SLACK {
+        if required > self.bytes.capacity() && required > FRAME_GROWTH_THRESHOLD {
             let target = required
-                .saturating_add(FRAME_GROWTH_SLACK)
+                .max(self.bytes.capacity().saturating_mul(2))
                 .min(4 + self.limit);
             self.bytes.reserve_exact(target - self.bytes.len());
         }
@@ -487,18 +487,9 @@ mod tests {
     }
 
     #[test]
-    fn bulk_frame_growth_is_bounded_and_limit_is_still_enforced() {
+    fn bulk_request_limit_is_enforced() {
         let mut buffer = Vec::new();
         let payload = "X".repeat(6 * 1024 * 1024);
-        encode_message_into(
-            PROTOCOL_VERSION,
-            0,
-            &(payload.as_str(), 1u8),
-            &mut buffer,
-            MAX_RESPONSE,
-        )
-        .unwrap();
-        assert!(buffer.capacity() <= buffer.len() + FRAME_GROWTH_SLACK);
         assert!(
             encode_message_into(PROTOCOL_VERSION, 0, &payload, &mut buffer, MAX_REQUEST).is_err()
         );

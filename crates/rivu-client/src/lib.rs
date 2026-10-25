@@ -248,20 +248,20 @@ impl ClientSession {
         }
     }
 
-    pub fn query(&mut self, query: &Query) -> Result<QueryResponse> {
+    pub fn query(&mut self, query: Query) -> Result<QueryResponse> {
         self.ensure_handshake()?;
-        let request = WireRequest::Query(WireQuery::from(query.clone()));
+        let request = WireRequest::Query(WireQuery::from(query));
         match unpack_error(self.exchange(&request, query_wait_timeout())?)? {
             WireResponse::Query(response) => Ok(response),
             _ => bail!("IPC response was not a query response"),
         }
     }
 
-    pub fn request_ack(&mut self, command: &(impl Clone + Into<AppCommand>)) -> Result<Ack> {
+    pub fn request_ack(&mut self, command: impl Into<AppCommand>) -> Result<Ack> {
         self.ensure_handshake().context(CommandFailure {
             status: AckStatus::NotAdmitted,
         })?;
-        let command: AppCommand = command.clone().into();
+        let command: AppCommand = command.into();
         let wait_timeout = command.wait_timeout();
         let request = WireRequest::Command(WireCommand::from(command));
         let mut write_started = false;
@@ -304,7 +304,7 @@ impl ClientSession {
     }
 }
 
-pub fn query(data_dir: &Path, query: &Query) -> Result<QueryResponse> {
+pub fn query(data_dir: &Path, query: Query) -> Result<QueryResponse> {
     client_session(data_dir)?.query(query)
 }
 
@@ -312,7 +312,7 @@ pub fn get_state(data_dir: &Path, sections: StateSections) -> Result<StateRespon
     client_session(data_dir)?.get_state(sections)
 }
 
-pub fn request_ack(data_dir: &Path, command: &(impl Clone + Into<AppCommand>)) -> Result<Ack> {
+pub fn request_ack(data_dir: &Path, command: impl Into<AppCommand>) -> Result<Ack> {
     client_session(data_dir)
         .context(CommandFailure {
             status: AckStatus::NotAdmitted,
@@ -476,7 +476,7 @@ mod tests {
             })
         };
 
-        let ack = client.request_ack(&Command::OptimizeDatabase).unwrap();
+        let ack = client.request_ack(Command::OptimizeDatabase).unwrap();
         assert!(ack.is_success());
         assert_eq!(ack.revision, 17);
         drop(client.runtime.block_on(server).unwrap());
@@ -528,7 +528,7 @@ mod tests {
             guard
         };
         let error = client
-            .request_ack(&Command::CreatePlaylist {
+            .request_ack(Command::CreatePlaylist {
                 name: "first".into(),
             })
             .unwrap_err();
@@ -539,7 +539,7 @@ mod tests {
         assert!(format!("{error:#}").contains("do not automatically retry"));
         assert!(
             client
-                .request_ack(&Command::CreatePlaylist {
+                .request_ack(Command::CreatePlaylist {
                     name: "second".into()
                 })
                 .unwrap()
@@ -567,13 +567,13 @@ mod tests {
             assert_eq!(stream.read(&mut [0]).unwrap(), 0);
         });
         let mut client = client_session(directory.path()).unwrap();
-        let error = client.request_ack(&Command::Pause).unwrap_err();
+        let error = client.request_ack(Command::Pause).unwrap_err();
         assert_eq!(
             error.downcast_ref::<CommandFailure>().unwrap().status,
             AckStatus::NotAdmitted
         );
         let error = client
-            .request_ack(&Command::Scan {
+            .request_ack(Command::Scan {
                 paths: vec![PathBuf::from(
                     "x".repeat(rivu_protocol::protocol::MAX_REQUEST),
                 )],
