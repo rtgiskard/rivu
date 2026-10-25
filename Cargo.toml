@@ -7,7 +7,7 @@ gpui = { git = "https://github.com/zed-industries/zed", rev = "df48a139ce9c29273
 
 [package]
 name = "rivu"
-version = "0.2.0"
+version = "0.2.2"
 edition = "2024"
 description = "A lightweight, local-first Linux music player"
 
