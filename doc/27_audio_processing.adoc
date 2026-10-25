@@ -530,6 +530,15 @@ channels, 64 MiB estimated state, two seconds of latency and a conservative
 arithmetic-work budget. These are planning limits, not measured device-deadline
 guarantees. An EQ configuration supported by the DSP crate alone can therefore
 still be rejected by the realtime graph planner.
+
+Admission charges IIR stages only for effective bands: disabled bands, bands
+excluded by an enabled solo selection, and identity peak/shelf sections do not
+consume filter-stage estimates. Disabled EQ and fully bypassed restoration use
+pass-through nodes without DSP state or processing latency; node buffers and
+input edges still count toward graph budgets. Configuration validation remains
+required. Enabled flat FIR keeps its convolution latency and budget, and active
+hum or impulse repair is not bypassed merely because spectral denoising is Off.
+
 Hybrid uses a single cached output port as its boundary: every path into the
 live target must cross that exact port. A separate uncached source branch or
 another separation output cannot be substituted by the same cached stream.

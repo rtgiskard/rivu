@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use anyhow::{Context, Result, bail, ensure};
 use rivu_dsp::{
     denoise::{DenoiseMode, Denoiser},
+    equalizer::config::FilterKind,
     equalizer::fir::FirEqualizer,
     equalizer::iir::Equalizer,
 };
@@ -322,8 +323,9 @@ impl GraphRunner {
                     }
                 }
             }
+            let bypassed = !is_source && is_bypassed(&graph_node.kind);
             // Bound cumulative state and work before allocating each processor.
-            let (extra_state, extra_work) = if is_source {
+            let (extra_state, extra_work) = if is_source || bypassed {
                 (0, 0)
             } else {
                 estimate(&graph_node.kind, channels)
@@ -342,6 +344,23 @@ impl GraphRunner {
             );
             let (processor, latency, tail) = if is_source {
                 (Processor::Source, 0, 0)
+            } else if bypassed {
+                // Keep constructor validation without allocating an unused DSP
+                // instance or denoise staging buffers.
+                match &graph_node.kind {
+                    GraphNodeKind::Equalizer { config, .. } => {
+                        config.validate_for_stream(sample_rate, channels)?;
+                    }
+                    GraphNodeKind::Denoise { config, .. } => {
+                        ensure!(
+                            config.mode != DenoiseMode::Profile,
+                            "profile denoise requires offline profile capture; use a cached prefix in Hybrid mode"
+                        );
+                        config.validate_for_format(sample_rate, channels)?;
+                    }
+                    _ => unreachable!(),
+                }
+                (Processor::Pass, 0, 0)
             } else {
                 match &graph_node.kind {
                     GraphNodeKind::Source => unreachable!(),
@@ -642,6 +661,21 @@ fn visit(
     Ok(())
 }
 
+// Match the settled constructor bypass conditions in the DSP implementations.
+// An enabled flat FIR still has convolution latency and must not be bypassed.
+fn is_bypassed(kind: &GraphNodeKind) -> bool {
+    match kind {
+        GraphNodeKind::Equalizer { config, .. } => !config.enabled,
+        GraphNodeKind::Denoise { config, .. } => {
+            config.wet == 0.0
+                || (config.mode == DenoiseMode::Off
+                    && !config.hum.enabled
+                    && !config.impulse.enabled)
+        }
+        _ => false,
+    }
+}
+
 fn estimate(kind: &GraphNodeKind, channels: usize) -> (usize, u64) {
     let (state, work) = match kind {
         GraphNodeKind::Equalizer {
@@ -649,7 +683,23 @@ fn estimate(kind: &GraphNodeKind, channels: usize) -> (usize, u64) {
             implementation,
         } if config.enabled => match implementation {
             EqImplementation::Iir => {
-                let stages: usize = config.bands.iter().map(|band| band.stages as usize).sum();
+                let solo = config.bands.iter().any(|band| band.enabled && band.solo);
+                // Bank::prepare_response omits disabled, excluded, and identity
+                // sections; charge only the stages that it actually constructs.
+                let stages: usize = config
+                    .bands
+                    .iter()
+                    .filter(|band| {
+                        band.enabled
+                            && (!solo || band.solo)
+                            && !(band.gain_db == 0.0
+                                && matches!(
+                                    band.kind,
+                                    FilterKind::Peak | FilterKind::LowShelf | FilterKind::HighShelf
+                                ))
+                    })
+                    .map(|band| band.stages as usize)
+                    .sum();
                 (
                     stages * channels * 16 * 3,
                     stages as u64 * channels as u64 * 12,
@@ -677,12 +727,301 @@ fn estimate(kind: &GraphNodeKind, channels: usize) -> (usize, u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rivu_dsp::{denoise::DenoiseConfig, equalizer::config::EqualizerConfig};
+    use rivu_dsp::{
+        denoise::DenoiseConfig,
+        equalizer::config::{EqBand, EqualizerConfig, MAX_BANDS},
+    };
     use rivu_format::config::processing_graph::{GraphEdge, GraphNode};
 
     fn port(node: u64, port: u16) -> GraphPort {
         GraphPort { node, port }
     }
+    fn chain_graph(kind: GraphNodeKind, processors: usize) -> ProcessingGraph {
+        let mut kinds = vec![GraphNodeKind::Source];
+        kinds.extend((0..processors).map(|_| kind.clone()));
+        kinds.push(GraphNodeKind::Output);
+        ProcessingGraph {
+            revision: 0,
+            next_id: processors as u64 + 3,
+            nodes: kinds
+                .into_iter()
+                .enumerate()
+                .map(|(index, kind)| GraphNode {
+                    id: index as u64 + 1,
+                    position: [0.0; 2],
+                    kind,
+                })
+                .collect(),
+            edges: (1..processors as u64 + 2)
+                .map(|id| GraphEdge {
+                    from: port(id, 0),
+                    to: port(id + 1, 0),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn six_off_denoisers_keep_only_edge_and_output_costs() {
+        let graph = chain_graph(
+            GraphNodeKind::Denoise {
+                config: DenoiseConfig::default(),
+                profile: None,
+            },
+            6,
+        );
+        let mut runner = GraphRunner::compile(&graph, port(8, 0), 48_000, 2).unwrap();
+        assert_eq!(runner.latency_frames(), 0);
+        assert_eq!(runner.tail_frames(), 0);
+        assert_eq!(
+            runner.estimated_state_bytes(),
+            8 * GRAPH_BLOCK_FRAMES * 2 * 4
+        );
+        assert_eq!(runner.estimated_work_per_frame(), 7 * 2);
+        assert!(
+            runner.nodes[1..]
+                .iter()
+                .all(|node| matches!(node.processor, Processor::Pass))
+        );
+        let original: Vec<_> = (0..2048)
+            .flat_map(|frame| [(frame as f32 * 0.017).sin(), -0.0])
+            .collect();
+        for _ in 0..2 {
+            let mut samples = original.clone();
+            for chunk in samples.chunks_mut(74) {
+                runner.process_interleaved(chunk).unwrap();
+            }
+            assert!(
+                samples
+                    .iter()
+                    .zip(&original)
+                    .all(|(a, b)| a.to_bits() == b.to_bits())
+            );
+            assert_eq!(runner.finish_interleaved(&mut [0.0; 2]).unwrap(), 0);
+            runner.reset();
+        }
+    }
+
+    #[test]
+    fn wet_zero_bypasses_but_off_hum_and_repair_remain_active() {
+        let mut config = DenoiseConfig::default();
+        config.hum.enabled = true;
+        config.impulse.enabled = true;
+        config.mode = DenoiseMode::Stationary;
+        config.wet = 0.0;
+        let graph = chain_graph(
+            GraphNodeKind::Denoise {
+                config,
+                profile: None,
+            },
+            1,
+        );
+        let mut runner = GraphRunner::compile(&graph, port(3, 0), 48_000, 2).unwrap();
+        assert_eq!(runner.latency_frames(), 0);
+        let mut samples = [0.5, -0.25];
+        runner.process_interleaved(&mut samples).unwrap();
+        assert_eq!(samples, [0.5, -0.25]);
+
+        for repair in [false, true] {
+            let mut config = DenoiseConfig::default();
+            config.hum.enabled = !repair;
+            config.impulse.enabled = repair;
+            let graph = chain_graph(
+                GraphNodeKind::Denoise {
+                    config,
+                    profile: None,
+                },
+                1,
+            );
+            let runner = GraphRunner::compile(&graph, port(3, 0), 48_000, 2).unwrap();
+            assert_eq!(runner.latency_frames() > 0, repair);
+            assert!(runner.estimated_work_per_frame() > 4);
+        }
+    }
+
+    #[test]
+    fn bypass_preserves_denoise_validation_and_profile_rejection() {
+        let graph = chain_graph(
+            GraphNodeKind::Denoise {
+                config: DenoiseConfig::default(),
+                profile: None,
+            },
+            1,
+        );
+        assert!(GraphRunner::compile(&graph, port(3, 0), 4_000, 2).is_err());
+        let mut config = DenoiseConfig {
+            wet: 0.0,
+            ..Default::default()
+        };
+        config.hum.enabled = true;
+        config.hum.fundamental_hz = 1000.0;
+        config.hum.harmonics = 32;
+        let graph = chain_graph(
+            GraphNodeKind::Denoise {
+                config,
+                profile: None,
+            },
+            1,
+        );
+        assert!(GraphRunner::compile(&graph, port(3, 0), 48_000, 2).is_err());
+        let graph = chain_graph(
+            GraphNodeKind::Denoise {
+                config: DenoiseConfig {
+                    mode: DenoiseMode::Profile,
+                    wet: 0.0,
+                    ..Default::default()
+                },
+                profile: None,
+            },
+            1,
+        );
+        let error = GraphRunner::compile(&graph, port(3, 0), 48_000, 2).unwrap_err();
+        assert!(error.to_string().contains("profile"));
+    }
+
+    #[test]
+    fn disabled_equalizers_use_pass_without_applying_gains() {
+        for implementation in [
+            EqImplementation::Iir,
+            EqImplementation::LinearPhase { taps: 513 },
+        ] {
+            let graph = chain_graph(
+                GraphNodeKind::Equalizer {
+                    config: EqualizerConfig {
+                        enabled: false,
+                        preamp_db: 12.0,
+                        output_gain_db: 6.0,
+                        bands: vec![EqBand {
+                            frequency_hz: 96_000.0,
+                            ..Default::default()
+                        }],
+                    },
+                    implementation,
+                },
+                1,
+            );
+            let mut runner = GraphRunner::compile(&graph, port(3, 0), 4_000, 2).unwrap();
+            assert_eq!(runner.latency_frames(), 0);
+            assert_eq!(runner.tail_frames(), 0);
+            let mut samples = [0.75, -0.0];
+            runner.process_interleaved(&mut samples).unwrap();
+            assert_eq!(
+                samples.map(f32::to_bits),
+                [0.75_f32, -0.0].map(f32::to_bits)
+            );
+        }
+    }
+
+    #[test]
+    fn iir_budget_and_pcm_ignore_disabled_and_non_solo_bands() {
+        for excluded_by_solo in [false, true] {
+            let active = EqBand {
+                kind: FilterKind::LowPass,
+                stages: 2,
+                solo: excluded_by_solo,
+                ..Default::default()
+            };
+            let reference = EqualizerConfig {
+                enabled: true,
+                preamp_db: 3.0,
+                output_gain_db: 2.0,
+                bands: vec![active],
+            };
+            let mut config = reference.clone();
+            config.bands.extend((1..MAX_BANDS).map(|_| EqBand {
+                enabled: excluded_by_solo,
+                solo: !excluded_by_solo,
+                kind: FilterKind::LowPass,
+                frequency_hz: 96_000.0,
+                stages: 4,
+                ..Default::default()
+            }));
+            let graph = chain_graph(
+                GraphNodeKind::Equalizer {
+                    config,
+                    implementation: EqImplementation::Iir,
+                },
+                6,
+            );
+            let mut runner = GraphRunner::compile(&graph, port(8, 0), 48_000, 2).unwrap();
+            assert_eq!(runner.estimated_work_per_frame(), 6 * 2 * 2 * 12 + 7 * 2);
+            assert_eq!(
+                runner.estimated_state_bytes(),
+                6 * 2 * 2 * 16 * 3 + 8 * GRAPH_BLOCK_FRAMES * 2 * 4
+            );
+            let mut expected: Vec<_> = (0..2048).map(|i| (i as f32 * 0.017).sin() * 0.1).collect();
+            let mut samples = expected.clone();
+            for _ in 0..6 {
+                Equalizer::new(&reference, 48_000, 2)
+                    .unwrap()
+                    .process(&mut expected)
+                    .unwrap();
+            }
+            runner.process_interleaved(&mut samples).unwrap();
+            assert_eq!(samples, expected);
+        }
+    }
+
+    #[test]
+    fn identity_iir_bands_still_apply_enabled_gains() {
+        let config = EqualizerConfig {
+            enabled: true,
+            preamp_db: 6.0,
+            output_gain_db: 3.0,
+            bands: vec![EqBand::default(); MAX_BANDS],
+        };
+        let graph = chain_graph(
+            GraphNodeKind::Equalizer {
+                config: config.clone(),
+                implementation: EqImplementation::Iir,
+            },
+            1,
+        );
+        let mut runner = GraphRunner::compile(&graph, port(3, 0), 48_000, 2).unwrap();
+        assert_eq!(runner.estimated_work_per_frame(), 4);
+        let mut samples = [0.1, -0.2];
+        let mut expected = samples;
+        Equalizer::new(&config, 48_000, 2)
+            .unwrap()
+            .process(&mut expected)
+            .unwrap();
+        runner.process_interleaved(&mut samples).unwrap();
+        assert_eq!(samples, expected);
+        assert!(samples[0] > 0.1);
+    }
+
+    #[test]
+    fn effective_denoise_and_iir_work_still_exceed_the_budget() {
+        for kind in [
+            GraphNodeKind::Denoise {
+                config: DenoiseConfig {
+                    mode: DenoiseMode::Stationary,
+                    ..Default::default()
+                },
+                profile: None,
+            },
+            GraphNodeKind::Equalizer {
+                config: EqualizerConfig {
+                    enabled: true,
+                    bands: vec![
+                        EqBand {
+                            kind: FilterKind::LowPass,
+                            stages: 4,
+                            ..Default::default()
+                        };
+                        MAX_BANDS
+                    ],
+                    ..Default::default()
+                },
+                implementation: EqImplementation::Iir,
+            },
+        ] {
+            let graph = chain_graph(kind, 6);
+            let error = GraphRunner::compile(&graph, port(8, 0), 48_000, 2).unwrap_err();
+            assert!(error.to_string().contains("arithmetic work budget"));
+        }
+    }
+
     fn branch_graph() -> ProcessingGraph {
         ProcessingGraph {
             revision: 0,
@@ -748,6 +1087,8 @@ mod tests {
         input[1] = -0.7;
         runner.process_interleaved(&mut input).unwrap();
         let delay = runner.latency_frames();
+        assert_eq!(delay, (513 - 1) / 2 + GRAPH_BLOCK_FRAMES);
+        assert_eq!(runner.tail_frames(), 513 - 1 + GRAPH_BLOCK_FRAMES);
         assert!((input[delay * 2] - 1.8).abs() < 2e-6);
         assert!((input[delay * 2 + 1] + 1.4).abs() < 2e-6);
         for (index, sample) in input.iter().enumerate() {
