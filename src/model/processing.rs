@@ -1,10 +1,20 @@
 use rivu_dsp::equalizer::config::{ChannelTarget, EqBand, EqualizerConfig, FilterKind};
 pub use rivu_format::config::processing_graph::{
-    EqImplementation, GraphEdge, GraphEdit, GraphExecutionMode, GraphNode, GraphNodeKind,
-    GraphPort, NoiseSelection, ProcessingGraph,
+    EqImplementation, GraphEdge, GraphEdit, GraphNode, GraphNodeKind, GraphPort, NoiseSelection,
+    ProcessingGraph,
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphExecutionMode {
+    #[default]
+    Auto,
+    Offline,
+    Realtime,
+    Hybrid,
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum EqBandEdit {

@@ -183,6 +183,11 @@ Normal save destinations, symlink handling and last-writer-wins behavior belong 
 link:01_config.adoc[Configuration and layout]. A check reserves neither database
 ownership nor configuration against later edits.
 
+Configuration preflight uses the same ordinary-file admission as the application,
+including symlinks, and rejects FIFOs without waiting for a writer. Human-readable
+reports escape control characters in paths and error chains; those escapes do not
+change the literal filesystem paths used by the operation.
+
 == Apply protocol
 
 . Acquire data-directory ownership and select the fixed targets.

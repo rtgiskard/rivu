@@ -5048,7 +5048,6 @@ dependencies = [
  "clap",
  "crossbeam-channel",
  "crossterm",
- "directories",
  "fluent-bundle",
  "fluent-syntax",
  "futures",
@@ -5129,6 +5128,7 @@ name = "rivu-format"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "directories",
  "libc",
  "rivu-dsp",
  "rusqlite",
@@ -5144,8 +5144,8 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
- "directories",
  "fs2",
+ "libc",
  "rivu-format",
  "rusqlite",
  "tempfile",

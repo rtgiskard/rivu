@@ -4,7 +4,7 @@ pub use rivu_format::config::*;
 use std::path::PathBuf;
 
 mod persistence;
-pub use persistence::{ConfigPersistence, default_path};
+pub use persistence::ConfigPersistence;
 
 #[cfg(test)]
 mod tests;

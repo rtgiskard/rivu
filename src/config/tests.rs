@@ -669,6 +669,31 @@ fn missing_file_returns_defaults_without_creating_directories() {
 }
 
 #[test]
+fn configuration_load_follows_regular_links_and_rejects_fifos_without_a_writer() {
+    use std::{ffi::CString, os::unix::fs::symlink};
+
+    let directory = tempfile::tempdir().unwrap();
+    let target = directory.path().join("target.toml");
+    let link = directory.path().join("config.toml");
+    symlink("target.toml", &link).unwrap();
+    assert_eq!(Config::load(&link).unwrap(), Config::default());
+    assert!(!target.exists());
+    fs::write(&target, "[playback]\nvolume_percent=37\n").unwrap();
+    assert_eq!(Config::load(&link).unwrap().volume, 0.37);
+    fs::remove_file(&target).unwrap();
+    let name = CString::new(target.as_os_str().as_encoded_bytes()).unwrap();
+    // SAFETY: name is NUL terminated and mkfifo retains no pointer.
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+    for path in [&target, &link] {
+        let error = Config::load(path).unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+    }
+}
+
+#[test]
 fn save_reload_replaces_file_and_leaves_no_temporary_files() {
     let directory = tempfile::tempdir().unwrap();
     let parent = directory.path().join("settings");

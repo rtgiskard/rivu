@@ -1,9 +1,7 @@
 //! Cross-process ownership shared by the host and offline migration tool.
 use anyhow::{Context, Result, ensure};
 use std::{
-    borrow::Cow,
     fs,
-    io::ErrorKind,
     os::{linux::net::SocketAddrExt, unix::fs::MetadataExt},
     path::Path,
 };
@@ -18,35 +16,6 @@ pub fn data_directory_address(data_dir: &Path) -> Result<std::os::unix::net::Soc
     name[5..13].copy_from_slice(&metadata.dev().to_be_bytes());
     name[13..21].copy_from_slice(&metadata.ino().to_be_bytes());
     Ok(std::os::unix::net::SocketAddr::from_abstract_name(name)?)
-}
-
-/// Follow configuration links without creating anything or requiring the final
-/// target or its parent to exist. Writers can create the parent before saving.
-pub fn configuration_destination(path: &Path) -> Result<Cow<'_, Path>> {
-    let mut destination = Cow::Borrowed(path);
-    let mut followed = 0;
-    loop {
-        match fs::symlink_metadata(destination.as_ref()) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {}
-            Ok(_) => return Ok(destination),
-            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(destination),
-            Err(error) => return Err(error).context("Resolving configuration target"),
-        }
-        ensure!(
-            followed < 40,
-            "configuration symbolic link traversal exceeds 40 links"
-        );
-        let target = fs::read_link(destination.as_ref())?;
-        destination = Cow::Owned(if target.is_absolute() {
-            target
-        } else {
-            destination
-                .parent()
-                .unwrap_or_else(|| Path::new("."))
-                .join(target)
-        });
-        followed += 1;
-    }
 }
 
 #[cfg(test)]

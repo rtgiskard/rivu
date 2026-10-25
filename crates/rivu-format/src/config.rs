@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
 
 mod file;
+pub mod paths;
 pub mod processing_graph;
 
 #[cfg(test)]

@@ -2,9 +2,9 @@
 //! Hidden fields own shared drafts/commit state. Painted inputs belong to one
 //! panel each and mirror text only on changes, never sharing focus or geometry.
 use super::*;
+use crate::model::GraphExecutionMode;
 use rivu_format::config::processing_graph::{
-    EqImplementation, GraphEdit, GraphExecutionMode, GraphNode, GraphNodeKind, GraphPort,
-    ProcessingGraph,
+    EqImplementation, GraphEdit, GraphNode, GraphNodeKind, GraphPort, ProcessingGraph,
 };
 
 #[path = "audio_processing_workbench.rs"]

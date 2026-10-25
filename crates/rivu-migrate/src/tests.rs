@@ -139,6 +139,28 @@ fn missing_configuration_and_default_resources_are_not_created() {
 }
 
 #[test]
+fn config_preflight_rejects_fifos_without_a_writer_including_symlinks() {
+    use std::ffi::CString;
+
+    let (directory, options) = fixture();
+    let fifo = directory.path().join("fifo.toml");
+    let name = CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+    // SAFETY: name is NUL terminated and mkfifo retains no pointer.
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+    symlink("fifo.toml", &options.config).unwrap();
+    for path in [&fifo, &options.config] {
+        let error = validate_config(path).unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            ErrorKind::InvalidInput
+        );
+    }
+    fs::remove_file(&fifo).unwrap();
+    assert_eq!(validate_config(&options.config).unwrap(), None);
+    assert!(!fifo.exists());
+}
+
+#[test]
 fn explicitly_missing_database_fails_without_creating_it_or_changing_config() {
     let directory = tempfile::tempdir().unwrap();
     let options = Options {

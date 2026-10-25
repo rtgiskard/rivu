@@ -7,7 +7,7 @@ use rusqlite::{
 };
 use std::{
     fs::{self, File, OpenOptions},
-    io::ErrorKind,
+    io::{ErrorKind, Read},
     os::unix::{fs::OpenOptionsExt, net::UnixListener},
     path::{Path, PathBuf},
 };
@@ -27,27 +27,11 @@ pub struct Options {
 impl Options {
     /// Match the host's --config/--data-dir precedence, including its fallback.
     pub fn resolve(data_dir: Option<PathBuf>, config: Option<PathBuf>) -> Self {
-        let project = directories::ProjectDirs::from("", "", "rivu");
-        let config = config.unwrap_or_else(|| {
-            data_dir.as_ref().map_or_else(
-                || {
-                    project.as_ref().map_or_else(
-                        || PathBuf::from(".rivu/config.toml"),
-                        |p| p.config_dir().join("config.toml"),
-                    )
-                },
-                |p| p.join("config.toml"),
-            )
-        });
         let explicit_data_dir = data_dir.is_some();
-        let data_dir = data_dir.unwrap_or_else(|| {
-            project
-                .as_ref()
-                .map_or_else(|| PathBuf::from(".rivu"), |p| p.data_dir().to_path_buf())
-        });
+        let paths = config::paths::Paths::resolve(data_dir, config);
         Self {
-            data_dir,
-            config,
+            data_dir: paths.data_dir,
+            config: paths.config,
             explicit_data_dir,
         }
     }
@@ -80,13 +64,16 @@ struct DatabasePlan {
 }
 
 fn validate_config(path: &Path) -> Result<Option<PathBuf>> {
-    let original = match fs::read(path) {
-        Ok(bytes) => bytes,
+    let mut file = match rivu_format::input::open_regular_file(path) {
+        Ok(file) => file,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
         Err(error) => {
             return Err(error).with_context(|| format!("Reading configuration {}", path.display()));
         }
     };
+    let mut original = Vec::new();
+    file.read_to_end(&mut original)
+        .with_context(|| format!("Reading configuration {}", path.display()))?;
     let target = fs::canonicalize(path).context("Resolving existing configuration target")?;
     let text = std::str::from_utf8(&original).context("Configuration is not UTF-8")?;
     config::validate_toml(text).context("Validating current configuration")?;

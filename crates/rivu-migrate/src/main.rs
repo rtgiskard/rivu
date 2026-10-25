@@ -1,6 +1,9 @@
+mod terminal;
+
 use clap::{Parser, Subcommand};
 use rivu_migrate::{Mode, Options, Report, run};
 use std::{path::PathBuf, process::ExitCode};
+use terminal::Terminal;
 
 #[derive(Parser)]
 #[command(
@@ -34,16 +37,17 @@ fn main() -> ExitCode {
     let mut report = Report::default();
     let result = run(&options, mode, &mut report);
     for line in &report.resources {
-        println!("{line}");
+        println!("{}", Terminal(line));
     }
     for path in &report.backups {
-        println!("Backup: {}", path.display());
+        println!("Backup: {}", Terminal(path.display()));
     }
     if let Err(error) = result {
-        eprintln!("Migration failed: {error:#}");
+        eprintln!("Migration failed: {:#}", Terminal(error));
         eprintln!(
             "Resource status: configuration {}; database {}. No automatic rollback was performed.",
-            report.config_status, report.database_status
+            Terminal(report.config_status),
+            Terminal(report.database_status)
         );
         return ExitCode::from(2);
     }

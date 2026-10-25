@@ -8,10 +8,10 @@ description = "Offline configuration validation and database maintenance for Riv
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-directories = "6"
 fs2 = "0.4"
 rivu-format = { path = "../rivu-format", default-features = false, features = ["database"] }
 rusqlite = { version = "0.40.2", features = ["bundled", "backup"] }
 
 [dev-dependencies]
+libc = "0.2"
 tempfile = "3.27"

@@ -29,7 +29,6 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 bytes = "1"
 crossbeam-channel = "0.5"
 crossterm = "0.29"
-directories = "6"
 fluent-bundle = "0.16"
 fluent-syntax = "0.12"
 unic-langid = "0.9"

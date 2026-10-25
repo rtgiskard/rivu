@@ -26,15 +26,6 @@ impl NoiseSelection {
     }
 }
 pub use rivu_dsp::equalizer::config::EqImplementation;
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GraphExecutionMode {
-    #[default]
-    Auto,
-    Offline,
-    Realtime,
-    Hybrid,
-}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GraphPort {

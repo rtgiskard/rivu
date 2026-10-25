@@ -10,6 +10,7 @@ database = ["dep:rusqlite"]
 
 [dependencies]
 anyhow = "1"
+directories = "6"
 libc = "0.2"
 rivu-dsp = { path = "../rivu-dsp", default-features = false }
 rusqlite = { version = "0.40.2", features = ["bundled", "functions"], optional = true }

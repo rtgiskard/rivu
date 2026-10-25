@@ -42,18 +42,10 @@ pub(super) fn run() -> Result<()> {
         .try_get_matches()
         .unwrap_or_else(|error| terminal_cli_error(error).exit());
     let args = Args::from_arg_matches(&matches)?;
-    let config_path = args.config.unwrap_or_else(|| {
-        args.data_dir
-            .as_ref()
-            .map_or_else(config::default_path, |directory| {
-                directory.join("config.toml")
-            })
-    });
-    let data_dir = args.data_dir.unwrap_or_else(|| {
-        directories::ProjectDirs::from("", "", "rivu")
-            .map(|dirs| dirs.data_dir().to_path_buf())
-            .unwrap_or_else(|| PathBuf::from(".rivu"))
-    });
+    let config::paths::Paths {
+        config: config_path,
+        data_dir,
+    } = config::paths::Paths::resolve(args.data_dir, args.config);
     let action = args.action.unwrap_or(Action::Gui { paths: Vec::new() });
     if let Action::Processing(action) = action {
         return processing::run(&data_dir, action, args.json);

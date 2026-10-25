@@ -6,9 +6,10 @@
 use super::Config;
 use anyhow::{Context, Result, ensure};
 use std::{
+    borrow::Cow,
     fs,
-    io::{ErrorKind, Write},
-    path::{Path, PathBuf},
+    io::{ErrorKind, Read, Write},
+    path::Path,
 };
 
 pub trait ConfigPersistence: Sized {
@@ -20,14 +21,17 @@ impl ConfigPersistence for Config {
     /// Read settings without creating files or directories. Only a missing file
     /// selects defaults; unreadable, malformed, and invalid files are errors.
     fn load(path: &Path) -> Result<Self> {
-        let contents = match fs::read_to_string(path) {
-            Ok(contents) => contents,
+        let mut file = match rivu_format::input::open_regular_file(path) {
+            Ok(file) => file,
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Self::default()),
             Err(error) => {
                 return Err(error)
                     .with_context(|| format!("cannot read configuration {}", path.display()));
             }
         };
+        let mut contents = String::new();
+        file.read_to_string(&mut contents)
+            .with_context(|| format!("cannot read configuration {}", path.display()))?;
         rivu_format::config::from_toml(&contents)
             .with_context(|| format!("invalid configuration {}", path.display()))
     }
@@ -44,7 +48,7 @@ impl ConfigPersistence for Config {
     fn save(&self, path: &Path) -> Result<()> {
         let contents = rivu_format::config::to_toml(self)
             .with_context(|| format!("cannot serialize configuration {}", path.display()))?;
-        let destination = rivu_format::ownership::configuration_destination(path)
+        let destination = configuration_destination(path)
             .with_context(|| format!("cannot resolve configuration {}", path.display()))?;
         let path = destination.as_ref();
         ensure!(
@@ -95,10 +99,53 @@ impl ConfigPersistence for Config {
     }
 }
 
-/// The platform configuration directory, not Rivu's library/data directory.
-/// If no home/configuration directory can be determined, use a local `.rivu`.
-pub fn default_path() -> PathBuf {
-    directories::ProjectDirs::from("", "", "rivu")
-        .map(|dirs| dirs.config_dir().join("config.toml"))
-        .unwrap_or_else(|| PathBuf::from(".rivu/config.toml"))
+/// Follow only the final path component's symbolic links, leaving intermediate
+/// directory resolution to the filesystem. The final target and parent may be
+/// missing; writers create parents separately and preserve the links themselves.
+fn configuration_destination(path: &Path) -> Result<Cow<'_, Path>> {
+    let mut destination = Cow::Borrowed(path);
+    let mut followed = 0;
+    loop {
+        match fs::symlink_metadata(destination.as_ref()) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {}
+            Ok(_) => return Ok(destination),
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(destination),
+            Err(error) => return Err(error).context("Resolving configuration target"),
+        }
+        ensure!(
+            followed < 40,
+            "configuration symbolic link traversal exceeds 40 links"
+        );
+        let target = fs::read_link(destination.as_ref())?;
+        destination = Cow::Owned(if target.is_absolute() {
+            target
+        } else {
+            destination
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join(target)
+        });
+        followed += 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    #[test]
+    fn destination_preserves_directory_aliases_and_missing_relative_targets() {
+        let directory = tempfile::tempdir().unwrap();
+        let real = directory.path().join("real");
+        fs::create_dir(&real).unwrap();
+        let alias = directory.path().join("alias");
+        symlink("real", &alias).unwrap();
+        symlink("missing/target.toml", real.join("config.toml")).unwrap();
+        assert_eq!(
+            configuration_destination(&alias.join("config.toml")).unwrap(),
+            alias.join("missing/target.toml")
+        );
+        assert!(!real.join("missing").exists());
+    }
 }
