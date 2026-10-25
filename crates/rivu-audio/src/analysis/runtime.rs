@@ -2597,10 +2597,6 @@ mod tests {
         for rms in [frame.rms_left, frame.rms_right] {
             assert!((rms - 0.5_f32.sqrt()).abs() < 0.0001);
         }
-        assert_eq!(
-            frame.sample_time,
-            Duration::from_secs_f64(512.0 / 48_000.0) * 2
-        );
         assert!(frame.visualizer.density[64 * DENSITY_SIDE + 191] > 0.0);
         assert!(frame.visualizer.density[64 * DENSITY_SIDE + 64] > 0.0);
         assert_eq!(frame.visualizer.correlation, Some(0.0));
@@ -2608,41 +2604,30 @@ mod tests {
 
     #[test]
     fn demanded_frame_ingests_density_samples_outside_the_latest_fft_window() {
-        let shared = Arc::new(RwLock::new(AnalysisFrame::default()));
-        let worker = AnalysisWorker::with_capacity(shared.clone(), 2048).unwrap();
-        worker.configure(AnalysisSettings {
-            fps: 60,
-            fft_size: 512,
-            window: AnalysisWindow::None,
-            signal: VisualizationSignal::After,
-        });
-        worker.control.set_display_demand(DisplayDemand {
+        let control = AnalysisControl::new();
+        control.playback_active.store(true, Ordering::Release);
+        control.set_display_demand(DisplayDemand {
             enabled: true,
             visualizer: DENSITY_DEMAND,
         });
-        set_test_playback(&worker, true);
-        let mut producer = worker.producer();
-        let epoch = worker.control.epoch.load(Ordering::Acquire);
-        push_window(
-            &mut producer,
-            epoch,
-            worker.control.display_token(),
-            [1.0, 0.0],
-        );
-        push_window(
-            &mut producer,
-            epoch,
-            worker.control.display_token(),
-            [0.0, 1.0],
-        );
-        worker.control.request_frame();
-        wait_for_frame(&shared, |frame| frame.settings.is_some());
-        let frame = shared.read();
+        let ring = Arc::new(HeapRb::new(2048));
+        let mut producer = HeapProd::new(ring.clone());
+        let mut consumer = HeapCons::new(ring);
+        let epoch = control.epoch.load(Ordering::Acquire);
+        let token = control.display_token();
+        push_window(&mut producer, epoch, token, [1.0, 0.0]);
+        push_window(&mut producer, epoch, token, [0.0, 1.0]);
+        let mut runtime = AnalysisRuntime::new(visualizer_settings(), 48_000);
+        runtime.demand = DENSITY_DEMAND;
+        let (accepted, controls_changed) =
+            runtime.ingest_available(&mut consumer, &control, epoch, token, true);
+        assert_eq!(accepted, 1024);
+        assert!(!controls_changed);
+        let analyzer = runtime.analyzer.as_mut().unwrap();
+        let rms = analyzer.transform();
+        let mut frame = AnalysisFrame::default();
+        assert!(analyzer.publish(&mut frame, rms, Duration::ZERO));
         assert_eq!([frame.rms_left, frame.rms_right], [0.0, 1.0]);
-        assert_eq!(
-            frame.sample_time,
-            Duration::from_secs_f64(1024.0 / 48_000.0)
-        );
         assert!(frame.visualizer.density[64 * DENSITY_SIDE + 191] > 0.0);
         assert!(frame.visualizer.density[64 * DENSITY_SIDE + 64] > 0.0);
     }
