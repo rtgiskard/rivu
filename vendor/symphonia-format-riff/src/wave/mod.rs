@@ -94,7 +94,7 @@ impl<'s> WavReader<'s> {
             ChunksReader::<RiffWaveChunks>::new(riff_data_len, ByteOrder::LittleEndian);
 
         let mut codec_params = AudioCodecParameters::new();
-        let mut metadata: MetadataLog = Default::default();
+        let mut metadata = opts.external_data.metadata.unwrap_or_default();
         let mut packet_info = None;
         let mut fact = None;
 
@@ -133,7 +133,13 @@ impl<'s> WavReader<'s> {
                     // Riff Lists can have many different forms, but WavReader only supports Info
                     // lists.
                     match &list.form {
-                        b"INFO" => metadata.push(read_info_chunk(&mut mss, list.len)?),
+                        b"INFO" => {
+                            let revision = read_info_chunk(&mut mss, list.len)?;
+                            // Empty lists and exhausted admission must not grow the revision log.
+                            if !revision.media.tags.is_empty() {
+                                metadata.push(revision);
+                            }
+                        }
                         _ => list.skip(&mut mss)?,
                     }
                 }
@@ -170,7 +176,7 @@ impl<'s> WavReader<'s> {
                         media_info: MediaInfo::from_track(&track),
                         tracks: vec![track],
                         chapters: opts.external_data.chapters,
-                        metadata: opts.external_data.metadata.unwrap_or_default(),
+                        metadata,
                         packet_info,
                         data_start_pos,
                         data_end_pos,

@@ -554,6 +554,98 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn native_wave_info_metadata_preserves_external_revision_order() {
+        let directory = tempfile::tempdir().unwrap();
+        for external in [false, true] {
+            let path = directory.path().join(format!("info-{external}.wav"));
+            let mut bytes = Vec::new();
+            if external {
+                let text = b"\0External title\0";
+                let mut frame = b"TIT2".to_vec();
+                frame.extend_from_slice(&(text.len() as u32).to_be_bytes());
+                frame.extend_from_slice(&[0, 0]);
+                frame.extend_from_slice(text);
+                bytes.extend_from_slice(b"ID3\x03\0\0");
+                bytes.extend_from_slice(&syncsafe(frame.len()));
+                bytes.extend_from_slice(&frame);
+            }
+            let mut info = b"INFO".to_vec();
+            for (key, value) in [
+                (b"INAM", b"Info title\0".as_slice()),
+                (b"IART", b"Info artist\0".as_slice()),
+            ] {
+                info.extend_from_slice(key);
+                info.extend_from_slice(&(value.len() as u32).to_le_bytes());
+                info.extend_from_slice(value);
+                if value.len() % 2 != 0 {
+                    info.push(0);
+                }
+            }
+            let empty_info = b"LIST\x04\0\0\0INFO";
+            bytes.extend_from_slice(b"RIFF");
+            bytes.extend_from_slice(
+                &(46 + info.len() as u32 + 2 * empty_info.len() as u32).to_le_bytes(),
+            );
+            bytes.extend_from_slice(
+                b"WAVEfmt \x10\0\0\0\x01\0\x01\0\x40\x1f\0\0\x80\x3e\0\0\x02\0\x10\0",
+            );
+            bytes.extend_from_slice(empty_info);
+            bytes.extend_from_slice(b"LIST");
+            bytes.extend_from_slice(&(info.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(&info);
+            bytes.extend_from_slice(empty_info);
+            bytes.extend_from_slice(b"data\x02\0\0\0\0\x40");
+            fs::write(&path, bytes).unwrap();
+
+            let mut budget = rivu_audio::metadata_budget(false);
+            let mut format = budget
+                .with(|| {
+                    get_probe().probe(
+                        &Hint::new(),
+                        MediaSourceStream::new(
+                            Box::new(File::open(&path).unwrap()),
+                            MediaSourceStreamOptions::default(),
+                        ),
+                        FormatOptions::default(),
+                        MetadataOptions::default(),
+                    )
+                })
+                .unwrap();
+            let mut metadata = format.metadata();
+            if external {
+                let revision = metadata.pop().expect("external revision precedes INFO");
+                assert_eq!(revision.media.tags.len(), 1);
+                assert_eq!(
+                    revision.media.tags[0].raw.value.to_string(),
+                    "External title"
+                );
+            }
+            let revision = metadata.current().expect("INFO revision survives");
+            assert_eq!(revision.media.tags.len(), 2);
+            assert_eq!(revision.media.tags[0].raw.key, "INAM");
+            assert_eq!(
+                revision.media.tags[0]
+                    .raw
+                    .value
+                    .to_string()
+                    .trim_end_matches('\0'),
+                "Info title"
+            );
+            assert_eq!(revision.media.tags[1].raw.key, "IART");
+            assert_eq!(
+                revision.media.tags[1]
+                    .raw
+                    .value
+                    .to_string()
+                    .trim_end_matches('\0'),
+                "Info artist"
+            );
+            assert!(metadata.is_latest());
+            assert_eq!(format.next_packet().unwrap().unwrap().data.len(), 2);
+        }
+    }
+
+    #[test]
     fn native_metadata_budget_preserves_unsynchronised_audio() {
         let directory = tempfile::tempdir().unwrap();
         for (version, tag_wide) in [(2, true), (3, true), (4, false), (4, true)] {

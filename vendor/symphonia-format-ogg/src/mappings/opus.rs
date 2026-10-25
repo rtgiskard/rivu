@@ -177,6 +177,10 @@ impl Mapper for OpusMapper {
             reader.read_buf_exact(&mut sig)?;
 
             if sig == *OGG_OPUS_COMMENT_SIGNATURE {
+                // The comment packet is consumed even if its payload is malformed. Keep the
+                // parsing error, but do not interpret subsequent audio as another comment.
+                self.need_comment = false;
+
                 // This packet should be a metadata packet containing a Vorbis Comment.
                 let mut builder = MetadataBuilder::new(VORBIS_COMMENT_METADATA_INFO);
                 let mut side_data = Default::default();
@@ -185,8 +189,6 @@ impl Mapper for OpusMapper {
 
                 let rev = builder.build();
 
-                self.need_comment = false;
-
                 Ok(MapResult::SideData { data: SideData::Metadata { rev, side_data } })
             }
             else {
@@ -194,5 +196,67 @@ impl Mapper for OpusMapper {
                 Ok(MapResult::Unknown)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mapper() -> OpusMapper {
+        OpusMapper { track: Track::new(1), need_comment: true }
+    }
+
+    fn assert_audio(mapper: &mut OpusMapper) {
+        assert!(matches!(
+            mapper.map_packet(&[0]),
+            Ok(MapResult::StreamData { dur, discard })
+                if dur == Duration::new(480) && discard == Duration::ZERO
+        ));
+    }
+
+    #[test]
+    fn valid_comment_then_audio() {
+        let mut mapper = mapper();
+        let packet = b"OpusTags\0\0\0\0\0\0\0\0";
+        assert!(matches!(mapper.map_packet(packet), Ok(MapResult::SideData { .. })));
+        assert!(!mapper.need_comment);
+        assert_audio(&mut mapper);
+    }
+
+    #[test]
+    fn damaged_comment_then_audio() {
+        let mut mapper = mapper();
+        // The declared vendor string extends past the packet boundary.
+        let packet = b"OpusTags\x04\0\0\0x";
+        assert!(mapper.map_packet(packet).is_err());
+        assert!(!mapper.need_comment);
+        assert_audio(&mut mapper);
+    }
+
+    #[test]
+    fn truncated_comment_payload_then_audio() {
+        let packet = b"OpusTags\0\0\0\0\x01\0\0\0\x03\0\0\0A=B";
+        // Every truncation after the complete signature is a consumed comment,
+        // including truncated vendor length, comment count, length, and value.
+        for len in OGG_OPUS_COMMENT_SIGNATURE.len()..packet.len() {
+            let mut mapper = mapper();
+            assert!(mapper.map_packet(&packet[..len]).is_err(), "length {len}");
+            assert!(!mapper.need_comment, "length {len}");
+            assert_audio(&mut mapper);
+        }
+    }
+
+    #[test]
+    fn unrecognized_comment_signature_keeps_pending_state() {
+        for len in 0..OGG_OPUS_COMMENT_SIGNATURE.len() {
+            let mut mapper = mapper();
+            assert!(mapper.map_packet(&OGG_OPUS_COMMENT_SIGNATURE[..len]).is_err());
+            assert!(mapper.need_comment);
+        }
+
+        let mut mapper = mapper();
+        assert!(matches!(mapper.map_packet(b"NotATags"), Ok(MapResult::Unknown)));
+        assert!(mapper.need_comment);
     }
 }

@@ -641,6 +641,14 @@ full payloads; otherwise decodable audio remains usable, but some metadata may
 be absent. See link:22_cache.adoc#_native_metadata_admission[Native metadata admission]
 for the resource limits and their scope.
 
+Native WAVE probing retains LIST/INFO metadata in file order after any external
+metadata revisions, including embedded title and artist. A recognized OpusTags
+packet with a malformed payload is reported and skipped without treating later
+audio packets as more comments. These parsing rules retain the shared metadata
+budget; they do not add a native Opus decoder. Force a scan to refresh metadata
+already stored in the library.
+INFO lists without admitted tags do not create empty metadata revisions.
+
 === Cancellation
 
 Scans, Other checks, playlist imports, and external-file queue additions share
