@@ -385,6 +385,7 @@ impl Core {
     }
 
     pub(in crate::core) fn drain_playback_events(&mut self, generation: u64) -> Result<()> {
+        let mut result = Ok(());
         while let Ok(event) = self
             .engine
             .events
@@ -392,9 +393,9 @@ impl Core {
             .expect("Core owns audio events")
             .try_recv()
         {
-            self.retiring_audio_event(generation, event)?;
+            result = result.and(self.retiring_audio_event(generation, event));
         }
-        Ok(())
+        result
     }
     pub(in crate::core) fn finish_playback(
         &mut self,
@@ -407,7 +408,8 @@ impl Core {
         // played audio. Acknowledged stops make that queued bookkeeping safe to
         // consume before generation fencing; errors still fence below.
         let bookkeeping = if snapshot.is_ok() {
-            bookkeeping.and_then(|()| self.drain_playback_events(generation))
+            let drained = self.drain_playback_events(generation);
+            bookkeeping.and(drained)
         } else {
             bookkeeping
         };
@@ -419,14 +421,10 @@ impl Core {
         self.state.playback.status = PlaybackStatus::Stopped;
         self.state.playback.position = 0.0;
         self.state.playback.seek_revision = self.state.playback.seek_revision.wrapping_add(1);
-        let snapshot = match snapshot {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                self.playback = None;
-                return Err(error);
-            }
+        let (snapshot, stopped) = match snapshot {
+            Ok(snapshot) => (snapshot, Ok(())),
+            Err(error) => (None, Err(error)),
         };
-        let mut final_activity = None;
         if let Some(playback) = &mut self.playback {
             if let Some(snapshot) = snapshot
                 && snapshot.generation == generation
@@ -452,33 +450,23 @@ impl Core {
                 // duration; a seek target or accumulated heard time cannot.
                 self.state.playback.duration = playback.position.filter(|position| *position > 0.0);
             }
-            if playback.started && playback.activity_updated {
-                final_activity = playback.last_heard_at.map(|at| (playback.track_id, at));
-            }
         }
-        if self.database_maintenance_active() {
-            if let Some(stats) = self.playback.take() {
-                debug_assert!(self.retired_playback.is_none());
-                self.retired_playback = Some(RetiredPlayback {
-                    stats,
-                    duration: self.state.playback.duration,
-                });
-                self.playback_write_deferred = true;
-            }
-            return bookkeeping;
+        if let Some(stats) = self.playback.take() {
+            debug_assert!(self.retired_playback.is_none());
+            self.retired_playback = Some(RetiredPlayback {
+                stats,
+                duration: self.state.playback.duration,
+            });
+            self.playback_write_deferred = true;
         }
-        let result = (|| -> Result<()> {
-            bookkeeping?;
-            if let Some((track_id, played_at)) = final_activity {
-                let stats = self.store.mark_played(track_id, played_at)?;
-                self.update_track_stats(track_id, stats)?;
-                self.state.library.history = Arc::new(self.store.history(MAX_QUERY_ROWS)
-                    .context("Playback statistics committed, but refreshing history failed; previous history retained")?);
-            }
-            self.count_play()
-        })();
-        self.playback = None;
-        result
+        if stopped.is_err() || bookkeeping.is_err() {
+            self.pending_navigation = None;
+        }
+        // Retain the same bounded producer owner on ordinary stop failures as
+        // during maintenance. Neither a projection error nor an activity write
+        // may skip an independently eligible count or discard confirmed facts.
+        let statistics = self.flush_deferred_playback();
+        stopped.and(bookkeeping).and(statistics)
     }
     pub(in crate::core) fn stop_playback(&mut self, natural: bool) -> Result<()> {
         let mut stop = self.engine.stop_request();
@@ -491,8 +479,10 @@ impl Core {
         let snapshot = wait_on(
             &executor,
             stop.wait(|event| {
-                if bookkeeping.is_ok() {
-                    bookkeeping = self.retiring_audio_event(generation, event);
+                if let Err(error) = self.retiring_audio_event(generation, event)
+                    && bookkeeping.is_ok()
+                {
+                    bookkeeping = Err(error);
                 }
             }),
         )

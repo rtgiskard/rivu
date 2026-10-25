@@ -353,6 +353,14 @@ track first when sorting newest first; title and play-count sorting are unaffect
 The retained snapshot contains up to 256 recent tracks both after startup and
 after subsequent activity or catalog refreshes.
 
+Stopping fences retired audio events even when saving final statistics fails.
+Play-count and recent-activity writes are attempted independently. After a write
+or projection failure, Rivu retains one stopped playback's confirmed facts in
+memory; a new playback must settle them before replacing that owner. Independent
+controls such as volume remain available. Explicit playback transitions and
+orderly shutdown retry these facts without incrementing an already-committed
+count. This in-memory recovery does not survive process exit.
+
 `rivu library history --limit N` prints up to N retained rows in human mode.
 For the JSON history shape and `--limit` behavior, see <<_cli_output,CLI output>>.
 
