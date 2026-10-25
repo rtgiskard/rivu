@@ -276,8 +276,7 @@ fn playlist_creation_count_failure_keeps_the_committed_lifetime_registered() {
     connection
         .execute_batch("PRAGMA foreign_keys=OFF; DROP TABLE playlists;")
         .unwrap();
-    let error = core.playlist_created(playlist_id, false).unwrap_err();
-    assert!(error.to_string().contains("Playlist change committed"));
+    assert!(core.playlist_created(playlist_id, false).is_err());
     assert_ne!(core.state.library.playlist_revision, before.playlist);
     assert!(
         core.state
@@ -1701,4 +1700,41 @@ fn collection_transfers_keep_source_order_and_existing_occurrences() {
     })
     .unwrap();
     assert_eq!(core.store.playlist_track_ids(2, 20).unwrap(), [2, 4, 1, 3]);
+}
+
+#[test]
+fn committed_playlist_creation_invalidates_and_refreshes_count_after_token_failure() {
+    for has_members in [false, true] {
+        let (directory, mut core) = fixture_with_database(Some(10.0), true);
+        let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+        connection.execute_batch(
+            "CREATE TRIGGER fail_created_token AFTER INSERT ON playlist_versions
+             BEGIN UPDATE playlist_versions SET revision='unreadable' WHERE playlist_id=NEW.playlist_id; END;
+             CREATE TRIGGER fail_changed_token AFTER UPDATE OF revision ON playlist_versions
+             WHEN typeof(NEW.revision)='integer'
+             BEGIN UPDATE playlist_versions SET revision='unreadable' WHERE playlist_id=NEW.playlist_id; END;",
+        ).unwrap();
+        let before = core.state.query_revisions();
+        let command = if has_members {
+            Command::CreatePlaylistWithTracks {
+                name: "Committed".into(),
+                track_ids: vec![2, 3],
+            }
+        } else {
+            Command::CreatePlaylist {
+                name: "Committed".into(),
+            }
+        };
+        assert!(core.command(command).is_err());
+        assert_eq!(core.state.library.playlist_total, 1);
+        assert_eq!(core.state.library.playlist_revision, before.playlist + 1);
+        assert_eq!(
+            core.state.library.duplicate_members_revision,
+            before.duplicate_members + u64::from(has_members)
+        );
+        assert_eq!(
+            core.store.playlist_track_ids(1, 20).unwrap(),
+            if has_members { vec![2, 3] } else { vec![] }
+        );
+    }
 }

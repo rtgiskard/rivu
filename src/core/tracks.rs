@@ -226,7 +226,7 @@ impl Core {
             ..crate::store::ScanImpacts::default()
         };
         self.invalidate_scan_impacts(impacts);
-        self.invalidate_playlist_members(affected_playlists)?;
+        let playlists = self.invalidate_playlist_members(affected_playlists);
         let catalog = self.refresh_scan_catalog(impacts);
         // Only a fresh ID set can supply the queue projection's total. Retain
         // the previous queue snapshot if reading the committed IDs fails.
@@ -235,7 +235,7 @@ impl Core {
             self.prune_queue_history();
             self.refresh_queue_tracks()
         });
-        catalog.and(queue).context(
+        playlists.and(catalog).and(queue).context(
             "Track deletion committed, but refreshing views failed; some projections may be stale",
         )
     }

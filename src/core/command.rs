@@ -7,7 +7,7 @@ impl Core {
             return Ok(());
         }
         let result = self.apply_command(command);
-        self.state.library.album_revision = self.store.album_revision()?;
+        self.refresh_album_revision();
         result
     }
 

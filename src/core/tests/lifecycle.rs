@@ -448,3 +448,58 @@ fn owner_failure_retires_background_work_without_blocking_tokio() {
         assert!(scan_retired.is_finished());
     }
 }
+
+#[test]
+fn album_projection_failure_preserves_command_results_and_scan_identity() {
+    let (directory, mut core) = fixture_with_database(Some(10.0), true);
+    let original_error = format!(
+        "{:#}",
+        core.command(Command::Volume { value: -1.0 }).unwrap_err()
+    );
+    let (handle, control, worker, _publications) = navigation_runtime(core);
+    let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+    connection
+        .execute_batch(
+            "UPDATE collection_meta SET album_revision='unreadable';
+             CREATE TRIGGER fail_album_refresh AFTER UPDATE OF album_revision ON collection_meta
+             WHEN typeof(NEW.album_revision)='integer'
+             BEGIN UPDATE collection_meta SET album_revision='unreadable'; END;",
+        )
+        .unwrap();
+    let accepted = handle.request_ack(Command::Volume { value: 0.37 });
+    assert_eq!(accepted.status, AckStatus::Succeeded);
+    assert_eq!(handle.state.read().playback.volume, 0.37);
+    assert!(
+        handle
+            .state
+            .read()
+            .system
+            .last_error
+            .as_ref()
+            .unwrap()
+            .contains("album collection token")
+    );
+    let rejected = handle.request_ack(Command::Volume { value: -1.0 });
+    assert_eq!(rejected.status, AckStatus::Failed);
+    assert_eq!(rejected.error.as_deref(), Some(original_error.as_str()));
+    let accepted = handle.request_ack(Command::Scan {
+        paths: vec![directory.path().join("1.wav")],
+        force: true,
+    });
+    assert_eq!(accepted.status, AckStatus::Succeeded);
+    let id = accepted
+        .scan_id
+        .expect("accepted scan must remain queryable");
+    connection
+        .execute_batch(
+            "DROP TRIGGER fail_album_refresh;
+             UPDATE collection_meta SET album_revision=sequence;",
+        )
+        .unwrap();
+    match handle.query(Query::ScanTask { id }).result.unwrap() {
+        ViewResponse::ScanTask(task) => assert_eq!(task.id, id),
+        other => panic!("Unexpected scan response: {other:?}"),
+    }
+    control.request_shutdown().unwrap();
+    worker.join().unwrap();
+}

@@ -1065,3 +1065,44 @@ fn committed_metadata_refresh_preserves_the_old_snapshot_until_audio_admission()
     ));
     assert!(receive.is_empty());
 }
+
+#[test]
+fn committed_deletion_recovers_other_playlists_catalog_and_queue_after_token_failure() {
+    let (directory, mut core) = fixture_with_database(Some(10.0), true);
+    for (name, track_ids) in [("First", vec![2, 3]), ("Second", vec![2, 4])] {
+        core.command(Command::CreatePlaylistWithTracks {
+            name: name.into(),
+            track_ids,
+        })
+        .unwrap();
+    }
+    let before = core.state.query_revisions();
+    let second = core.state.library.playlist_entry_revisions[&2];
+    let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER fail_first_token AFTER UPDATE OF revision ON playlist_versions
+         WHEN NEW.playlist_id=1 AND typeof(NEW.revision)='integer'
+         BEGIN UPDATE playlist_versions SET revision='unreadable' WHERE playlist_id=1; END;",
+        )
+        .unwrap();
+    let error = core
+        .command(Command::RemoveTracks { track_ids: vec![2] })
+        .unwrap_err();
+    assert!(error.to_string().contains("Track deletion committed"));
+    assert_eq!(core.state.library.track_total, 3);
+    assert_eq!(core.state.library.playlist_revision, before.playlist + 1);
+    assert_eq!(
+        core.state.library.duplicate_members_revision,
+        before.duplicate_members + 1
+    );
+    assert_ne!(core.state.library.playlist_entry_revisions[&2], second);
+    assert_eq!(
+        core.state.library.playlist_entry_revisions[&2],
+        core.store.playlist_entry_revision(2).unwrap().unwrap()
+    );
+    assert_eq!(core.queue_ids, [1, 4, 5]);
+    assert_eq!(core.state.queue.total, 3);
+    assert_eq!(core.store.playlist_track_ids(1, 20).unwrap(), [3]);
+    assert_eq!(core.store.playlist_track_ids(2, 20).unwrap(), [4]);
+}
