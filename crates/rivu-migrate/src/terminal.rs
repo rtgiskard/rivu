@@ -38,6 +38,32 @@ impl<T: fmt::Display> fmt::Display for Terminal<T> {
     }
 }
 
+pub(super) fn cli_error(mut error: clap::Error) -> clap::Error {
+    use clap::error::{ContextKind, ContextValue};
+
+    // Preserve clap's trusted layout and styling; only argv values are untrusted.
+    for kind in [
+        ContextKind::InvalidArg,
+        ContextKind::InvalidSubcommand,
+        ContextKind::InvalidValue,
+        ContextKind::PriorArg,
+    ] {
+        if let Some(mut value) = error.remove(kind) {
+            match &mut value {
+                ContextValue::String(text) => *text = Terminal(&*text).to_string(),
+                ContextValue::Strings(texts) => {
+                    for text in texts {
+                        *text = Terminal(&*text).to_string();
+                    }
+                }
+                _ => {}
+            }
+            error.insert(kind, value);
+        }
+    }
+    error
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

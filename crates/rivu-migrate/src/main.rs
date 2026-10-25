@@ -28,7 +28,7 @@ enum Command {
 }
 
 fn main() -> ExitCode {
-    let args = Args::parse();
+    let args = Args::try_parse().unwrap_or_else(|error| terminal::cli_error(error).exit());
     let mode = match args.command {
         Command::Check => Mode::Check,
         Command::Apply => Mode::Apply,
@@ -65,5 +65,32 @@ fn main() -> ExitCode {
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn argument_diagnostics_escape_controls_without_flattening_layout() {
+        for (argument, escaped) in [
+            ("--bad\n\r\t\u{009b}", "--bad\\n\\r\\t\\u{009b}"),
+            ("bad\n\r\u{009b}", "bad\\n\\r\\u{009b}"),
+        ] {
+            let error = Args::try_parse_from(["rivu-migrate", argument])
+                .err()
+                .expect("invalid argument must fail");
+            let error = terminal::cli_error(error);
+            assert_eq!(error.exit_code(), 2);
+            let diagnostic = error.to_string();
+            assert!(diagnostic.contains(escaped), "{diagnostic:?}");
+            assert!(!diagnostic.contains(argument));
+            assert!(
+                diagnostic
+                    .chars()
+                    .all(|character| { !character.is_control() || character == '\n' })
+            );
+        }
     }
 }

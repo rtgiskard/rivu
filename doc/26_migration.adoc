@@ -190,7 +190,10 @@ ownership nor configuration against later edits.
 Configuration preflight uses the same ordinary-file admission and 4 MiB UTF-8
 TOML limit as the application, including symlinks, and rejects FIFOs without
 waiting for a writer. Human-readable reports escape control characters in paths
-and error chains; those escapes do not change the literal filesystem paths.
+and error chains, and argument errors escape untrusted command-line values while
+preserving clap's usage layout, styling, output stream and exit status. These
+escapes do not change literal filesystem paths; help and version output retain
+their normal formatting.
 
 == Apply protocol
 
