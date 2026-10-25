@@ -615,6 +615,85 @@ mod tests {
     }
 
     #[test]
+    fn cancelling_a_pending_handshake_never_sends_the_command() {
+        use std::{io::Read, os::unix::net::UnixListener};
+
+        let directory = socket_test_directory();
+        let listener =
+            UnixListener::bind_addr(&rivu_protocol::protocol::address(directory.path()).unwrap())
+                .unwrap();
+        let mut client = client_session(directory.path()).unwrap();
+        let stop = client.cancellation();
+        let server = std::thread::spawn(move || {
+            let mut stream = listener.accept().unwrap().0;
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            assert!(matches!(
+                read_test_request(&mut stream),
+                WireRequest::Hello(_)
+            ));
+            // Cancel after Hello was sent, before allowing the handshake to finish.
+            stop.cancel();
+            assert_eq!(stream.read(&mut [0]).unwrap(), 0);
+        });
+        let error = client.request_ack(Command::Pause).unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<CommandFailure>().unwrap().status,
+            AckStatus::NotAdmitted
+        );
+        assert_eq!(client.instance_id(), None);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn cancelling_a_sent_command_is_unknown_and_never_replays_it() {
+        use std::{io::Read, os::unix::net::UnixListener};
+
+        let directory = socket_test_directory();
+        let listener =
+            UnixListener::bind_addr(&rivu_protocol::protocol::address(directory.path()).unwrap())
+                .unwrap();
+        let mut client = client_session(directory.path()).unwrap();
+        let stop = client.cancellation();
+        let server = std::thread::spawn(move || {
+            let mut stream = listener.accept().unwrap().0;
+            complete_test_handshake(&mut stream);
+            assert!(matches!(
+                read_test_command(&mut stream),
+                Command::CreatePlaylist { name } if name == "accepted-once"
+            ));
+            // Receipt is synchronized before cancellation; no timing assumption
+            // can misclassify this exchange as a pre-write cancellation.
+            stop.cancel();
+            assert_eq!(stream.read(&mut [0]).unwrap(), 0);
+            listener.set_nonblocking(true).unwrap();
+            listener
+        });
+        let error = client
+            .request_ack(Command::CreatePlaylist {
+                name: "accepted-once".into(),
+            })
+            .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<CommandFailure>().unwrap().status,
+            AckStatus::Unknown
+        );
+        assert_eq!(client.instance_id(), None);
+        let listener = server.join().unwrap();
+        // Stopping a session is sticky, even for a later explicit request.
+        let error = client.request_ack(Command::Pause).unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<CommandFailure>().unwrap().status,
+            AckStatus::NotAdmitted
+        );
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[test]
     fn cancelling_a_blocked_watch_wakes_the_session_and_closes_the_socket() {
         use std::{io::Read, os::unix::net::UnixListener, sync::mpsc};
 
