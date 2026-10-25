@@ -1,6 +1,15 @@
 search-toggle = Search this list (Ctrl+F)
 search-clear = Clear search
-search-placeholder = Search titles…
+search-library-placeholder = Title, artist or path…
+search-library-hint = Search titles, artists and full paths (Ctrl+F).
+search-albums-placeholder = Albums or artists…
+search-albums-hint = Search album titles and member artists (Ctrl+F).
+search-playlists-placeholder = Playlist names…
+search-playlists-hint = Search playlist names, not their tracks (Ctrl+F).
+search-tracks-placeholder = Search tracks…
+search-tracks-hint = Search titles, artists, albums and file names (Ctrl+F).
+search-recent-placeholder = Track titles…
+search-recent-hint = Search displayed track titles (Ctrl+F).
 search-count = { $matched }/{ $total }
 search-empty = This list is empty
 search-no-matches = No matches
@@ -164,6 +173,7 @@ gl-ready = Ready
 gl-track-unavailable = Track unavailable
 
 gl-metadata-saving = Saving metadata…
+gl-metadata-edit-note = Changes are saved only in Rivu, not to audio files. Clearing and saving a field clears its displayed text.
 
 gl-unsaved = Unsaved changes
 

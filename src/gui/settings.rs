@@ -230,7 +230,7 @@ impl Field {
             Self::MediaReadBuffer => settings.tr("settings-media-buffer-hint"),
             Self::ArtworkDecodeBudget => settings.tr("settings-artwork-decode-budget-hint"),
             Self::GpuMaterialBudget => settings.tr("settings-gpu-material-budget-hint"),
-            Self::Font => "".into(),
+            Self::Font => settings.tr("settings-font-hint"),
             Self::FontSize => "8–18 pt".into(),
             Self::Scale => "0.75–2.".into(),
             Self::LayoutSnapGrid => settings.tr("settings-layout-grid-hint"),

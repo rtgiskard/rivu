@@ -1,6 +1,15 @@
 search-toggle = 搜索当前列表（Ctrl+F）
 search-clear = 清除搜索
-search-placeholder = 搜索标题…
+search-library-placeholder = 标题、艺人或路径…
+search-library-hint = 搜索标题、艺人和完整路径（Ctrl+F）。
+search-albums-placeholder = 专辑或艺人…
+search-albums-hint = 搜索专辑标题和曲目艺人（Ctrl+F）。
+search-playlists-placeholder = 播放列表名称…
+search-playlists-hint = 搜索播放列表名称，不搜索其中曲目（Ctrl+F）。
+search-tracks-placeholder = 搜索曲目…
+search-tracks-hint = 搜索标题、艺人、专辑和文件名（Ctrl+F）。
+search-recent-placeholder = 曲目标题…
+search-recent-hint = 搜索曲目的显示标题（Ctrl+F）。
 search-count = { $matched }/{ $total }
 search-empty = 列表为空
 search-no-matches = 无匹配结果
@@ -164,6 +173,7 @@ gl-ready = 就绪
 gl-track-unavailable = 曲目不可用
 
 gl-metadata-saving = 正在保存元数据…
+gl-metadata-edit-note = 仅保存到 Rivu，不修改音频文件；清空并保存会清除显示文本。
 
 gl-unsaved = 有未保存的更改
 

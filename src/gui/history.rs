@@ -4,8 +4,10 @@ mod model;
 mod panel;
 
 use super::{
-    components::search::new_search, coordination::manual_actions::ManualIntentId,
-    feature::FeatureContext, list_interaction::ContentMenuRequest,
+    components::search::{SearchScope, new_search},
+    coordination::manual_actions::ManualIntentId,
+    feature::FeatureContext,
+    list_interaction::ContentMenuRequest,
 };
 use crate::{
     model::{Command, PlaybackStatus},
@@ -66,7 +68,7 @@ impl History {
     pub(super) fn new(context: FeatureContext, cx: &mut Context<Self>) -> Self {
         let state = context.snapshot();
         let ui_font = super::appearance::fonts::resolve(&state.system.config.ui_font, cx);
-        let search = cx.new(|cx| new_search(&context.i18n, cx));
+        let search = cx.new(|cx| new_search(&context.i18n, SearchScope::Recent, cx));
         let subscription = cx.subscribe(&search, |this, _, event, cx| {
             let SearchEvent::Changed(query) = event;
             this.model.set_query(query.clone());

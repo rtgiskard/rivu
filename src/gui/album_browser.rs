@@ -15,7 +15,7 @@ use crate::{
 use super::{
     artwork::{Artwork, ArtworkImages, ArtworkLoader, ArtworkView},
     components::{
-        search::{new_search, set_search_counts},
+        search::{SearchScope, new_search, set_search_counts},
         track::track_list_row,
     },
     format_time,
@@ -189,8 +189,8 @@ impl AlbumBrowser {
         .into_iter()
         .map(|id| (id, SharedString::from(i18n.text(id).to_owned())))
         .collect();
-        let album_search = cx.new(|cx| new_search(&i18n, cx));
-        let tracks_search = cx.new(|cx| new_search(&i18n, cx));
+        let album_search = cx.new(|cx| new_search(&i18n, SearchScope::Albums, cx));
+        let tracks_search = cx.new(|cx| new_search(&i18n, SearchScope::Tracks, cx));
         let album_subscription = cx.subscribe(&album_search, |this, _, event, cx| {
             let SearchEvent::Changed(query) = event;
             if let Some(change) = this.model.set_query(query.clone()) {

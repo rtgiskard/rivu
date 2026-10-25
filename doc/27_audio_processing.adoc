@@ -326,6 +326,13 @@ names the environment by operation; preparation names the actual model. Run
 only the backend setup steps you need; the example does not require all models.
 
 
+In the GUI, model manifest paths are optional: applying an empty value clears
+the selected model. Interpreter and worker paths are required; empty values do
+not restore defaults. Their placeholders show path examples, not installed
+resources. Hover the path controls for their requirements. These
+hints apply to both standalone processing controls and each graph node's fields.
+
+
 Preparation prints absolute `worker`, `interpreter` and `model_manifest` paths.
 Configure *all three*, not only the manifest, and preserve the venv executable
 symlink path rather than resolving it to base Python. The binary does not bundle

@@ -19,7 +19,7 @@ use gpui::{AnyElement, Context, Div, SharedString, Window, div, prelude::*, px, 
 use crate::gui::list_interaction::TrackSource;
 use crate::gui::{
     BrowserFocus,
-    components::search::{new_search, set_search_counts},
+    components::search::{SearchScope, new_search, set_search_counts},
     coordination::manual_actions::ManualIntentId,
     feature::FeatureContext,
 };
@@ -116,8 +116,8 @@ impl Playlists {
     pub(in crate::gui) fn new(context: FeatureContext, cx: &mut Context<Self>) -> Self {
         let i18n = context.i18n.clone();
         let state = context.snapshot();
-        let playlist_search = cx.new(|cx| new_search(&i18n, cx));
-        let playlist_entries_search = cx.new(|cx| new_search(&i18n, cx));
+        let playlist_search = cx.new(|cx| new_search(&i18n, SearchScope::PlaylistNames, cx));
+        let playlist_entries_search = cx.new(|cx| new_search(&i18n, SearchScope::Tracks, cx));
         let name_input = cx.new(|cx| {
             Input::new(
                 i18n.text("shell-playlist-name").to_owned(),

@@ -556,7 +556,13 @@ impl AudioProcessing {
             .into_any_element()
         } else {
             let input = self.graph_panel_input(panel, &key, &label, cx);
-            let mut editor = row().gap_1().child(div().flex_1().min_w_0().child(input));
+            let mut editor = row()
+                .id(SharedString::from(format!("graph-path-help-{panel}-{key}")))
+                .gap_1()
+                .child(div().flex_1().min_w_0().child(input))
+                .when_some(self.path_help(&key), |view, help| {
+                    view.tooltip(rivu_ui::text_tooltip(help))
+                });
             if let Some(step) = numeric_step(path, value) {
                 for (sign, delta) in [("−", -step), ("+", step)] {
                     let key = key.clone();

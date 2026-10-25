@@ -1172,6 +1172,7 @@ impl Metadata {
                         self.tr("gl-tags"),
                         column()
                             .gap_2()
+                            .child(caption(theme, self.tr("gl-metadata-edit-note")))
                             .child(metadata_row(
                                 self.panel_field(theme, Field::Title, self.tr("gl-title")),
                                 self.panel_field(theme, Field::Artist, self.tr("gl-artist")),

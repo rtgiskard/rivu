@@ -195,6 +195,8 @@ field. From list focus, Esc clears that list's search first and folds an empty
 field on the next press. Leaving a focused editor or dismissing an active popup
 or composition takes precedence. Ctrl+F retains the already focused search field,
 including when playlist names and playlist entries have different searches.
+The placeholder identifies the list's search scope; hover over its Search button
+for the fields it searches.
 While the search field is open, counts inside its right edge show matches and the
 unfiltered total; counts are hidden when it is folded. No matches is distinct from an empty
 collection. Searching changes the view, not the saved contents or playback order.
@@ -445,6 +447,8 @@ during a save remain unsaved; failure preserves them for correction or retry.
 A successful save advances the submitted baseline and adopts newer loaded values
 only when no later edits remain. It cannot overwrite a newer draft or a different
 track's details.
+The visible note beside the editors explains that saves affect only Rivu, not
+audio files, and that clearing and saving a field clears its displayed text.
 
 Only one track's draft is retained. Unsaved or saving details stay on that track
 instead of following playback. To abandon the draft, select another track, clear

@@ -5,7 +5,8 @@ use super::{
 };
 use crate::{
     gui::{
-        components::search::new_search, coordination::manual_actions::ManualIntentId,
+        components::search::{SearchScope, new_search},
+        coordination::manual_actions::ManualIntentId,
         feature::FeatureContext,
     },
     model::{Command, DirectoryRow},
@@ -43,7 +44,7 @@ impl Library {
     pub(in crate::gui) fn new(context: FeatureContext, cx: &mut Context<Self>) -> Self {
         let state = context.snapshot();
         let i18n = Arc::clone(&context.i18n);
-        let library_search = cx.new(|cx| new_search(&i18n, cx));
+        let library_search = cx.new(|cx| new_search(&i18n, SearchScope::Library, cx));
         let subscription = cx.subscribe(&library_search, |this, _, event, cx| {
             let SearchEvent::Changed(query) = event;
             this.apply_library_search(query.clone(), cx);

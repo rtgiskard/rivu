@@ -398,6 +398,7 @@ backgrounds, signal palettes, canvas labels, cursor colors, or album artwork.
 
 Search or browse installed fonts in Settings, including `monospace`, `sans-serif`,
 and `serif`. Enter or click to select; custom family names are accepted.
+The empty field identifies the `monospace` fallback; hover for font-search guidance.
 
 `interface.font` defaults to `monospace`, including empty values. Names must not
 contain control characters or exceed 128 UTF-8 bytes. Fontconfig system and user

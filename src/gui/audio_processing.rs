@@ -301,6 +301,29 @@ impl AudioProcessing {
         cx.notify();
     }
 
+    fn path_placeholder(&self, key: &str) -> Option<SharedString> {
+        let id = match key.rsplit(['.', '/']).next()? {
+            "speech_manifest" | "separation_manifest" => "processing-manifest-placeholder",
+            "speech_interpreter" | "separation_interpreter" => "processing-interpreter-placeholder",
+            "worker" => "processing-worker-placeholder",
+            "preset_path" => "processing-preset-path-placeholder",
+            "graph_export" => "processing-export-path-placeholder",
+            _ => return None,
+        };
+        Some(self.tr(id))
+    }
+
+    fn path_help(&self, key: &str) -> Option<SharedString> {
+        let id = match key.rsplit(['.', '/']).next()? {
+            "speech_manifest" | "separation_manifest" => "processing-manifest-path-help",
+            "speech_interpreter" => "processing-speech-interpreter-help",
+            "separation_interpreter" => "processing-separation-interpreter-help",
+            "worker" => "processing-worker-path-help",
+            _ => return None,
+        };
+        Some(self.tr(id))
+    }
+
     fn field(&mut self, key: &str, label: &str, value: String, cx: &mut Context<Self>) {
         if let Some(field) = self.fields.get_mut(key) {
             if field.committed != value {
@@ -313,7 +336,10 @@ impl AudioProcessing {
             }
             return;
         }
-        let input = cx.new(|cx| Input::new(label.to_owned(), value.clone(), label.to_owned(), cx));
+        let placeholder = self
+            .path_placeholder(key)
+            .unwrap_or_else(|| label.to_owned().into());
+        let input = cx.new(|cx| Input::new(label.to_owned(), value.clone(), placeholder, cx));
         let subscription = self.subscribe_field(&input, key.to_owned(), cx);
         self.fields.insert(
             key.to_owned(),
@@ -566,7 +592,7 @@ impl AudioProcessing {
                     .min_w_0()
                     .truncate()
                     .id(SharedString::from(format!("field-label-{key}")))
-                    .tooltip(rivu_ui::text_tooltip(label)),
+                    .tooltip(rivu_ui::text_tooltip(self.path_help(key).unwrap_or(label))),
             )
             .child(div().flex_1().min_w_0().child(field.input.clone()));
         control.opacity(if enabled { 1. } else { 0.5 })

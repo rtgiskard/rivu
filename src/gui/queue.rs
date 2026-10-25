@@ -17,7 +17,7 @@ mod view;
 
 use crate::{
     gui::{
-        components::search::new_search,
+        components::search::{SearchScope, new_search},
         coordination::manual_actions::ManualIntentId,
         feature::FeatureContext,
         library::LibraryNode,
@@ -81,7 +81,7 @@ impl gpui::EventEmitter<QueueEvent> for Queue {}
 impl Queue {
     pub(in crate::gui) fn new(context: FeatureContext, cx: &mut Context<Self>) -> Self {
         let state = context.snapshot();
-        let queue_search = cx.new(|cx| new_search(&context.i18n, cx));
+        let queue_search = cx.new(|cx| new_search(&context.i18n, SearchScope::Tracks, cx));
         let subscription = cx.subscribe(&queue_search, |this, _, event, cx| {
             let SearchEvent::Changed(query) = event;
             this.apply_queue_search(query.clone(), cx);
