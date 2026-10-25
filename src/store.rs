@@ -29,6 +29,7 @@ pub(crate) struct Store {
     conn: Connection,
     track_cache: RefCell<cache::TrackCache>,
     count_cache: RefCell<Option<tracks::TrackCount>>,
+    duplicate_group_count_cache: RefCell<Option<duplicates::DuplicateGroupCount>>,
 }
 
 impl Store {
@@ -51,6 +52,7 @@ impl Store {
                 clock: 0,
             }),
             count_cache: RefCell::new(None),
+            duplicate_group_count_cache: RefCell::new(None),
         })
     }
 
@@ -69,6 +71,7 @@ impl Store {
     pub(crate) fn invalidate_caches(&self) {
         self.track_cache.borrow_mut().entries.clear();
         *self.count_cache.borrow_mut() = None;
+        *self.duplicate_group_count_cache.borrow_mut() = None;
     }
 }
 

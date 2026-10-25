@@ -38,10 +38,13 @@ a whole-library snapshot nor a GUI page cache. Read-only export does not use it.
 Library track/display pages retain one latest exact filtered count, keyed by
 normalized filters and optional root. SQLite local-change/external-commit counters
 gate reuse; explicit transactions neither read nor populate it, avoiding rollback
-leakage. No rows or multi-query map are retained. Root aggregation and directory
-child relations are request-local; persistent album summaries are transactionally
-maintained database projections, not an evictable page cache. Their query costs
-and invariants are in
+leakage. A separate scalar slot retains the duplicate-group total under the same
+counter and transaction rules, so unchanged-data pagination does not repeat its
+full grouped count. Any local write or external commit conservatively invalidates
+both totals. No rows or multi-query map are retained. Root aggregation and
+directory child relations are request-local; persistent album summaries are
+transactionally maintained database projections, not an evictable page cache.
+Their query costs and invariants are in
 link:21_ipc.adoc#_transactional_inputs_and_bounded_storage_queries[IPC storage queries].
 
 === Window-local query retention

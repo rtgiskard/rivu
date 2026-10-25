@@ -830,8 +830,8 @@ Directory pages derive one temporary child relation for exact count and ordered
 page selection; track payloads join only for selected track children. Its size
 follows matching children, not page limit. Count-only requests avoid that relation;
 empty/out-of-range pages still report exact totals. OFFSET traversal retains its
-preceding-match cost. The latest-count reuse slot is described in
-link:22_cache.adoc#_core_owned_lookup_retention[Core lookup retention].
+preceding-match cost. Exact filtered-track and duplicate-group count retention is
+described in link:22_cache.adoc#_core_owned_lookup_retention[Core lookup retention].
 
 Album summaries and member-artist reference counts are persistent SQLite
 projections, maintained by triggers in the same transaction as track changes,

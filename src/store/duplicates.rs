@@ -12,6 +12,12 @@ const DUPLICATE_MEMBER_COLUMNS: &str = "file_size,modified_ns,
     (SELECT COUNT(*) FROM queue_entries WHERE track_id=tracks.id),
     relocation_independent";
 
+pub(super) struct DuplicateGroupCount {
+    changes: u64,
+    data_version: i64,
+    total: usize,
+}
+
 fn duplicate_member_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DuplicateMember> {
     Ok(DuplicateMember {
         track: track_from_row(row)?,
@@ -113,11 +119,22 @@ fn validate_pair(source: &RelocationRow, target: &RelocationRow) -> Result<()> {
 }
 
 impl Store {
-    pub fn duplicate_groups_page(
-        &self,
-        offset: usize,
-        limit: usize,
-    ) -> Result<Page<DuplicateGroup>> {
+    fn duplicate_group_count(&self) -> Result<usize> {
+        // Match the track-count cache: explicit snapshots never escape their
+        // transaction, and both local writes and external commits invalidate.
+        let cacheable = self.conn.is_autocommit();
+        let changes = self.conn.total_changes();
+        let data_version = self
+            .conn
+            .prepare_cached("PRAGMA data_version")?
+            .query_row([], |row| row.get::<_, i64>(0))?;
+        if cacheable
+            && let Some(cached) = self.duplicate_group_count_cache.borrow().as_ref()
+            && cached.changes == changes
+            && cached.data_version == data_version
+        {
+            return Ok(cached.total);
+        }
         let total = self.conn.query_row(
             "SELECT COUNT(*) FROM (
                 SELECT fingerprint FROM tracks INDEXED BY tracks_fingerprint
@@ -127,6 +144,22 @@ impl Store {
             [],
             |row| row.get::<_, i64>(0),
         )? as usize;
+        if cacheable {
+            *self.duplicate_group_count_cache.borrow_mut() = Some(DuplicateGroupCount {
+                changes,
+                data_version,
+                total,
+            });
+        }
+        Ok(total)
+    }
+
+    pub fn duplicate_groups_page(
+        &self,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Page<DuplicateGroup>> {
+        let total = self.duplicate_group_count()?;
         let mut query = self.conn.prepare(
             "SELECT fingerprint,COUNT(*),SUM(missing<>0),SUM(missing=0)
              FROM tracks INDEXED BY tracks_fingerprint
@@ -308,6 +341,43 @@ mod tests {
             [hash.as_bytes().as_slice()],
         )?;
         Ok(store)
+    }
+
+    #[test]
+    fn group_totals_follow_local_writes_external_commits_and_rollback() -> Result<()> {
+        let directory = tempfile::tempdir_in(concat!(env!("CARGO_MANIFEST_DIR"), "/.cache"))?;
+        let path = directory.path().join("duplicates.db");
+        let store = Store::open(&path)?;
+        let first = blake3::hash(b"first");
+        let second = blake3::hash(b"second");
+        store.conn.execute(
+            "INSERT INTO tracks(id,path,fingerprint) VALUES
+             (1,'/first/a',?1),(2,'/first/b',?1),
+             (3,'/second/a',?2),(4,'/second/b',?2)",
+            params![first.as_bytes().as_slice(), second.as_bytes().as_slice()],
+        )?;
+        let total = || -> Result<usize> { Ok(store.duplicate_groups_page(0, 0)?.total) };
+        assert_eq!(total()?, 2);
+        store
+            .conn
+            .execute("UPDATE tracks SET fingerprint=NULL WHERE id=2", [])?;
+        assert_eq!(total()?, 1);
+        let external = Connection::open(&path)?;
+        external.execute(
+            "UPDATE tracks SET fingerprint=?1 WHERE id=2",
+            [first.as_bytes().as_slice()],
+        )?;
+        assert_eq!(total()?, 2);
+        let transaction = store.conn.unchecked_transaction()?;
+        transaction.execute("UPDATE tracks SET fingerprint=NULL", [])?;
+        assert_eq!(total()?, 0);
+        transaction.rollback()?;
+        assert_eq!(total()?, 2);
+        external.execute_batch("BEGIN; UPDATE tracks SET fingerprint=NULL; ROLLBACK;")?;
+        assert_eq!(total()?, 2);
+        store.conn.execute("DELETE FROM tracks WHERE id=2", [])?;
+        assert_eq!(total()?, 1);
+        Ok(())
     }
 
     #[test]

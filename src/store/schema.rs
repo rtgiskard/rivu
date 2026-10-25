@@ -48,6 +48,7 @@ impl Store {
                 clock: 0,
             }),
             count_cache: RefCell::new(None),
+            duplicate_group_count_cache: RefCell::new(None),
         };
         Ok(store)
     }
