@@ -87,6 +87,8 @@ pub(super) enum PlaybackAction {
 pub(super) enum ProcessingAction {
     /// Show authoritative equalizer, denoise, neural settings and latest task.
     Show,
+    /// Bypass all playback effects, keep their parameters and offline tasks.
+    Bypass,
     /// Inspect, edit and execute the persisted audio node graph.
     #[command(subcommand)]
     Graph(ProcessingGraphAction),

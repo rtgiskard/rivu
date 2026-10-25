@@ -138,6 +138,7 @@ fn execute(data_dir: &Path, action: ProcessingAction, json: bool) -> Result<()> 
     let mut session = ipc::client_session(data_dir)?;
     let mut wait = false;
     let command = match action {
+        ProcessingAction::Bypass => Command::ProcessingBypass,
         ProcessingAction::Graph(action) => {
             let (command, requested) = graph_command(action)?;
             wait = requested;

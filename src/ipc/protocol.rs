@@ -502,6 +502,7 @@ pub(super) enum WireCommand {
         index: Option<u64>,
         expected_revision: Option<u64>,
     },
+    ProcessingBypass,
 }
 
 pub(super) fn wire_usize(value: u64, field: &str) -> Result<usize> {
@@ -1238,6 +1239,7 @@ impl From<Command> for WireCommand {
             },
             Command::CancelRelocation { id } => Self::CancelRelocation { id },
             Command::KeepTrackIndependent { track_id } => Self::KeepTrackIndependent { track_id },
+            Command::ProcessingBypass => Self::ProcessingBypass,
             Command::EqualizerEdit { edit } => Self::EqualizerEdit { edit },
             Command::DenoiseEdit { patch } => Self::DenoiseEdit { patch },
             Command::NeuralEdit { patch } => Self::NeuralEdit { patch },
@@ -1495,6 +1497,7 @@ impl TryFrom<WireCommand> for Command {
             WireCommand::KeepTrackIndependent { track_id } => {
                 Self::KeepTrackIndependent { track_id }
             }
+            WireCommand::ProcessingBypass => Self::ProcessingBypass,
             WireCommand::EqualizerEdit { edit } => Self::EqualizerEdit { edit },
             WireCommand::DenoiseEdit { patch } => Self::DenoiseEdit { patch },
             WireCommand::NeuralEdit { patch } => Self::NeuralEdit { patch },

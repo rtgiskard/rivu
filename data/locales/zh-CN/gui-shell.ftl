@@ -318,6 +318,7 @@ processing-workspace-run-committed = 存在未应用字段；运行使用已提�
 processing-workspace-monitor-eq = 监听 EQ
 processing-workspace-monitor-on = 监听 EQ：已启用
 processing-workspace-monitor-off = 监听 EQ：已旁路
+processing-workspace-bypass = 旁路全部播放音效
 processing-result-hide-details = 收起诊断
 processing-result-show-details = 展开诊断与冻结设置
 processing-result-frames = 帧

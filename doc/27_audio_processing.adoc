@@ -46,6 +46,13 @@ Return to original addresses the currently selected audition, even when the late
 task belongs to a different run. Invalid node/port requests leave the prior
 selection unchanged; playback retirement clears it.
 
+To return all playback effects to the original path, use the footer's bypass
+button or `rivu processing bypass`. This disables Monitor EQ and restores original
+audio from any live, hybrid or cached audition. EQ parameters, graph and restoration
+settings, queue and retained results remain available; rendering and export jobs
+continue. Pending automatic audition is revoked, so a late result cannot undo the
+bypass. Re-enabling EQ or selecting a retained output is an explicit later action.
+
 === Node graph desktop workflow
 
 Choose an execution mode for the current playback track. Preview executes the
@@ -138,6 +145,9 @@ gain remain above that working area. Valid finite values within ±24 dB submit a
 you type, without Enter or a separate Apply control. Empty text, a lone sign,
 incomplete exponents and out-of-range values remain drafts and do not
 change the committed gain. Acknowledgements preserve newer typed text.
+IME preedit remains a draft even when it parses as a valid gain. Unmarking or
+committing submits the completed value once; Escape cancels composition without
+applying the preedit.
 Band numeric step icons stage drafts; Enter or the check icon commits a band field.
 The response-channel selector belongs to the curve, not to the band target editor.
 It is hidden for mono, follows the available stream channels and scrolls horizontally;
@@ -145,9 +155,6 @@ changing it only changes the displayed response, never the channels a band proce
 The overall toolbar groups the EQ power switch and monitor presets, band count
 and batch addition, and reset/A-B/help actions. Groups wrap together in narrow panels.
 The preset dropdown loads a preset; its management popover exposes naming, save,
-IME preedit remains a draft even when it parses as a valid gain. Unmarking or
-committing submits the completed value once; Escape cancels composition without
-applying the preedit.
 delete, copy and file actions without expanding the toolbar.
 
 Use the power icon switch to enable or bypass EQ. While EQ is off, its desktop
@@ -543,6 +550,9 @@ result. Source files are not modified.
   gain compensation and latency are explicit, not silent quality fallbacks.
 * Non-finite graph input or intermediate PCM fails before downstream publication.
   Finite over-range samples are not clipped or replaced with silence.
+  Numerical failure can advance a finite prefix of DSP history; reset the processor
+  before reuse and discard the failed job's partial output. Failed noise-profile
+  capture cannot publish a profile and also requires reset before reuse.
 * Every task result is bound to source identity and captured processing settings,
   including model identity where applicable. Core alone admits worker results;
   cancellation or events from an inactive task cannot publish audio. Playback
@@ -553,9 +563,6 @@ result. Source files are not modified.
 * Allocation, channel count, block work, retained results and scratch storage have
   explicit finite bounds. Long processing stays outside the device callback.
 
-  Numerical failure can advance a finite prefix of DSP history; reset the processor
-  before reuse and discard the failed job's partial output. Failed noise-profile
-  capture cannot publish a profile and also requires reset before reuse.
 === Timeline and source identity
 
 Graph execution retains full causal intermediate context: FIR ringing, denoiser
@@ -589,6 +596,13 @@ unification can still enable execution when these crates share a dependency
 graph with an execution consumer. The `equalizer_benchmark` and `denoise_render`
 examples require `--features execution`.
 
+Disabled FIR constructs no FFT plans or convolution storage. Classical restoration
+prepares only the required path: exact bypass for zero Wet or an entirely disabled
+chain, time-domain state for hum/repair without spectral denoising, and FFT/STFT
+storage only for spectral modes. Configuration and required noise profiles are
+still validated on bypass. Hum-only processing has no lookahead or dry-alignment
+queue; partial-wet delayed processing retains only the alignment it needs.
+
 == Quality acceptance
 
 === Equalizer acceptance
@@ -599,13 +613,6 @@ input/output gain, presets and response inspection. Graphical and numerical
 editing operate on one authoritative filter configuration.
 
 Numerical acceptance is based on independent transfer-function evaluation and
-Disabled FIR constructs no FFT plans or convolution storage. Classical restoration
-prepares only the required path: exact bypass for zero Wet or an entirely disabled
-chain, time-domain state for hum/repair without spectral denoising, and FFT/STFT
-storage only for spectral modes. Configuration and required noise profiles are
-still validated on bypass. Hum-only processing has no lookahead or dry-alignment
-queue; partial-wet delayed processing retains only the alignment it needs.
-
 processed signals, not source-text or copied-value tests:
 
 * Disabled processing is sample-exact and does not allocate in processing.

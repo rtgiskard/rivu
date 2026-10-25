@@ -318,6 +318,7 @@ processing-workspace-run-committed = Unapplied fields; runs use committed settin
 processing-workspace-monitor-eq = Monitor EQ
 processing-workspace-monitor-on = Monitor EQ: on
 processing-workspace-monitor-off = Monitor EQ: bypassed
+processing-workspace-bypass = Bypass all playback effects
 processing-result-hide-details = Hide diagnostics
 processing-result-show-details = Show diagnostics and captured settings
 processing-result-frames = frames

@@ -3,6 +3,23 @@ use anyhow::ensure;
 use std::sync::atomic::Ordering;
 
 impl Core {
+    pub(in crate::core) fn processing_bypass(&mut self) -> Result<()> {
+        // Reserve the complete cutover before changing desired configuration.
+        self.engine.ensure_command_capacity(3)?;
+        if self.state.system.config.equalizer.enabled {
+            self.equalizer_edit(EqualizerEdit::Enabled(false))?;
+        }
+        // Revoking audition intent does not cancel the rendering/export owner.
+        self.processing.pending_audition = None;
+        if let Some(id) = self.processing.audition
+            && let Err(error) = self.audition_path(id, None)
+        {
+            self.stop()?;
+            return Err(error);
+        }
+        Ok(())
+    }
+
     pub(in crate::core) fn processing_graph_edit(
         &mut self,
         revision: u64,
@@ -32,7 +49,7 @@ impl Core {
         let id = status.id;
         self.state.system.processing = Some(status);
         if mode != GraphExecutionMode::Offline {
-            self.processing.pending_graph_audition = Some((id, self.generation));
+            self.processing.pending_audition = Some((id, self.generation));
         }
         Ok(())
     }
@@ -87,7 +104,7 @@ impl Core {
         let status = self
             .processing
             .start_graph(track, Arc::new(config), request)?;
-        self.processing.pending_graph_audition = Some((status.id, self.generation));
+        self.processing.pending_audition = Some((status.id, self.generation));
         self.state.system.processing = Some(status);
         Ok(())
     }
@@ -239,10 +256,10 @@ impl Core {
         }
         if self
             .processing
-            .pending_graph_audition
+            .pending_audition
             .is_some_and(|(task, _)| task == id)
         {
-            self.processing.pending_graph_audition = None;
+            self.processing.pending_audition = None;
         }
         if selected {
             if let Err(error) = self.audition_path(id, None) {
@@ -593,11 +610,10 @@ impl Core {
                                 }
                             }
                         }
-                        if let Some((pending_id, generation)) =
-                            self.processing.pending_graph_audition
+                        if let Some((pending_id, generation)) = self.processing.pending_audition
                             && pending_id == id
                         {
-                            self.processing.pending_graph_audition = None;
+                            self.processing.pending_audition = None;
                             let outcome = if generation != self.generation {
                                 Ok(())
                             } else if let Some(runner) = runner {
@@ -637,10 +653,10 @@ impl Core {
                     Err(error) => {
                         if self
                             .processing
-                            .pending_graph_audition
+                            .pending_audition
                             .is_some_and(|(task, _)| task == id)
                         {
-                            self.processing.pending_graph_audition = None;
+                            self.processing.pending_audition = None;
                         }
                         if let Some(status) =
                             self.state.system.processing.as_mut().filter(|s| s.id == id)
@@ -679,9 +695,21 @@ impl Core {
                 let task = self.processing.active.take().unwrap();
                 let cancelled = task.cancelled.load(Ordering::Acquire);
                 let _ = task.worker.join();
+                let requested = self.processing.pending_audition == Some((id, generation));
+                if self
+                    .processing
+                    .pending_audition
+                    .is_some_and(|(task, _)| task == id)
+                {
+                    self.processing.pending_audition = None;
+                }
                 let outcome = match result {
-                    Ok(path) if !cancelled && generation == self.generation => {
-                        let outcome = self.audition_path(id, Some(path.clone()));
+                    Ok(path) if !cancelled && (!requested || generation == self.generation) => {
+                        let outcome = if requested {
+                            self.audition_path(id, Some(path.clone()))
+                        } else {
+                            Ok(())
+                        };
                         if outcome.is_ok() {
                             if let Some(result) = self
                                 .processing
@@ -806,6 +834,7 @@ impl Core {
                 vocal_gain_db,
                 accompaniment_gain_db,
             )?;
+            self.processing.pending_audition = Some((id, self.generation));
             status.phase = ProcessingPhase::Processing;
             status.error = None;
             self.state.system.processing = Some(status);
@@ -897,6 +926,7 @@ impl Core {
             None
         };
         self.engine.ensure_command_capacity(2)?;
+        self.processing.pending_audition = None;
         let generation = self.generation;
         let mut bookkeeping = Ok(());
         let executor = self.executor.clone();

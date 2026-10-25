@@ -102,7 +102,7 @@ pub(crate) struct Service {
     pub next_id: u64,
     pub audition: Option<u64>,
     pub audition_generation: Option<u64>,
-    pub pending_graph_audition: Option<(u64, u64)>,
+    pub pending_audition: Option<(u64, u64)>,
     root: Option<tempfile::TempDir>,
     data_dir: PathBuf,
 }
@@ -119,7 +119,7 @@ impl Service {
             data_dir,
             audition: None,
             audition_generation: None,
-            pending_graph_audition: None,
+            pending_audition: None,
         }
     }
     pub fn start(

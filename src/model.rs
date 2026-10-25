@@ -791,6 +791,9 @@ pub enum Command {
     KeepTrackIndependent {
         track_id: i64,
     },
+    /// Return current playback to its source and disable monitor EQ without
+    /// changing stored effect parameters or cancelling offline work.
+    ProcessingBypass,
     EqualizerEdit {
         edit: EqualizerEdit,
     },

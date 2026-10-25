@@ -1801,3 +1801,154 @@ fn shutdown_closes_processing_delivery_and_retires_unpublished_outputs() {
     assert!(!blocked_path.exists());
     assert!(core.processing.active.is_none());
 }
+
+#[test]
+fn playback_bypass_preserves_parameters_queue_and_final_heard_snapshot() {
+    let (directory, mut core) = fixture();
+    source(directory.path());
+    core.start_processing(1, ProcessingOperation::Denoise, None)
+        .unwrap();
+    complete(&mut core);
+    let _initial_commands = recording_audio(&mut core);
+    let equalizer = rivu_dsp::equalizer::config::EqualizerConfig {
+        enabled: true,
+        preamp_db: -4.0,
+        bands: vec![rivu_dsp::equalizer::config::EqBand::default()],
+        ..Default::default()
+    };
+    core.equalizer_edit(EqualizerEdit::Replace {
+        config: equalizer.clone(),
+    })
+    .unwrap();
+    core.audition_processing(1, AuditionMode::Denoised, 0.0, 0.0)
+        .unwrap();
+    core.state.playback.status = PlaybackStatus::Paused;
+    core.playback.as_mut().unwrap().started = true;
+    core.playback.as_mut().unwrap().heard = 2.5;
+    core.playback.as_mut().unwrap().counted = true;
+    let generation = core.generation;
+    let _commands = recording_final_snapshot(
+        &mut core,
+        audio::AudioSnapshot {
+            generation,
+            position_seconds: 0.065,
+            listened_seconds: 2.52,
+        },
+    );
+    let queue = core.state.queue.clone();
+    let track = core.state.current_track.clone();
+    let denoise = core.state.system.config.denoise.clone();
+    core.command(Command::ProcessingBypass).unwrap();
+    let mut expected = equalizer;
+    expected.enabled = false;
+    assert_eq!(core.state.system.config.equalizer, expected);
+    assert_eq!(core.state.system.config.denoise, denoise);
+    assert_eq!(core.state.queue, queue);
+    assert_eq!(core.state.current_track, track);
+    assert_eq!(core.state.playback.status, PlaybackStatus::Paused);
+    assert_eq!(core.state.playback.position, 0.065);
+    assert_eq!(core.playback.as_ref().unwrap().heard, 2.52);
+    assert!(core.playback.as_ref().unwrap().counted);
+    assert!(core.state.processing_audition.is_none());
+    assert!(core.processing.audition.is_none());
+    assert_eq!(
+        core.processing_status(1).unwrap().phase,
+        ProcessingPhase::Complete
+    );
+    assert!(
+        core.processing.results[0]
+            .status
+            .outputs
+            .as_ref()
+            .unwrap()
+            .denoised
+            .as_ref()
+            .unwrap()
+            .is_file()
+    );
+}
+
+#[test]
+fn playback_bypass_revokes_prepared_graph_selection_without_cancelling_job() {
+    for mode in [GraphExecutionMode::Auto, GraphExecutionMode::Offline] {
+        let (directory, mut core) = fixture();
+        let expected = source(directory.path());
+        let _commands = recording_audio(&mut core);
+        core.processing_graph_run(1, graph_port(2, 0), mode)
+            .unwrap();
+        let event = completion(&mut core);
+        let generation = core.generation;
+        core.command(Command::ProcessingBypass).unwrap();
+        assert!(
+            !core
+                .processing
+                .active
+                .as_ref()
+                .unwrap()
+                .cancelled
+                .load(Ordering::Acquire)
+        );
+        core.processing_event(event);
+        assert_eq!(
+            core.processing_status(1).unwrap().phase,
+            ProcessingPhase::Complete
+        );
+        assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
+        assert_eq!(core.generation, generation);
+        assert!(core.state.current_track.is_none());
+        assert!(core.state.processing_audition.is_none());
+        assert!(core.processing.pending_audition.is_none());
+        if mode == GraphExecutionMode::Offline {
+            let path = &core.processing.results[0].status.graph_outputs[0].path;
+            let pcm = hound::WavReader::open(path)
+                .unwrap()
+                .samples::<f32>()
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .unwrap();
+            assert_eq!(pcm, expected);
+        }
+    }
+}
+
+#[test]
+fn playback_bypass_revokes_late_mix_selection_but_keeps_completed_audio() {
+    let (directory, mut core) = fixture();
+    let original = source(directory.path());
+    core.start_processing(1, ProcessingOperation::Denoise, None)
+        .unwrap();
+    complete(&mut core);
+    let result = &mut core.processing.results[0];
+    let outputs = result.status.outputs.as_mut().unwrap();
+    outputs.vocals = outputs.denoised.clone();
+    outputs.accompaniment = outputs.denoised.clone();
+    let _commands = recording_audio(&mut core);
+    core.audition_processing(1, AuditionMode::Mix, 0.0, 0.0)
+        .unwrap();
+    let event = next_processing_event(&mut core, Duration::from_secs(10)).unwrap();
+    assert!(matches!(
+        event,
+        crate::processing::Event::MixFinished { result: Ok(_), .. }
+    ));
+    let generation = core.generation;
+    core.command(Command::ProcessingBypass).unwrap();
+    core.processing_event(event);
+    assert_eq!(core.generation, generation);
+    assert!(core.processing.audition.is_none());
+    assert!(core.state.processing_audition.is_none());
+    assert_eq!(
+        core.processing_status(1).unwrap().phase,
+        ProcessingPhase::Complete
+    );
+    let pcm = hound::WavReader::open(core.processing.results[0].mix.as_ref().unwrap())
+        .unwrap()
+        .samples::<f32>()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(
+        pcm,
+        original
+            .iter()
+            .map(|sample| sample * 2.0)
+            .collect::<Vec<_>>()
+    );
+}

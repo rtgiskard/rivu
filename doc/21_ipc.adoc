@@ -956,6 +956,11 @@ remain unchanged. For neural manifests, explicit JSON `null` clears the selected
 manifest, whereas an omitted manifest leaves it unchanged; the binary adapter
 preserves the same three-way intent.
 
+`ProcessingBypass` disables Monitor EQ, restores original playback and revokes
+pending automatic audition without cancelling render/export jobs or deleting their
+results. Parameters and queue remain intact. See
+link:27_audio_processing.adoc#_practical_workflow[Playback bypass] for desktop/CLI use.
+
 `StartProcessing { track_id, operation, profile }` accepts `denoise`, `speech` or
 `separate`; profile is null or `{start_seconds,end_seconds}` in source-relative
 seconds. Acceptance returns `Ack.processing_id`, not completed output.

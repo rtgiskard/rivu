@@ -1758,7 +1758,19 @@ impl AudioProcessing {
                     .whitespace_nowrap(),
             );
         }
-        selected_audio = selected_audio.child(monitor_status);
+        selected_audio = selected_audio.child(monitor_status).child(
+            IconButton::new(
+                ("processing-bypass", panel),
+                "󰓅",
+                self.tr("processing-workspace-bypass"),
+            )
+            .build(
+                IconButtonStyle::Quiet,
+                IconButtonDensity::Compact,
+                cx,
+                |this, _, cx| this.send(Command::ProcessingBypass, cx),
+            ),
+        );
         if self.page != Page::Graph {
             self.deactivate_graph_inputs(panel, window, cx);
         }
