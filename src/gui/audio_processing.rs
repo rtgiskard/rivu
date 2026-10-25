@@ -22,10 +22,8 @@ use std::{
     sync::Arc,
 };
 
-#[path = "audio_processing_graph.rs"]
 mod processing_graph_ui;
 use processing_graph_ui::GraphUi;
-#[path = "audio_processing_equalizer.rs"]
 mod equalizer_editor;
 use equalizer_editor::EqualizerUi;
 

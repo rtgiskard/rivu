@@ -7,13 +7,10 @@ use rivu_format::config::processing_graph::{
 };
 use rivu_protocol::model::GraphExecutionMode;
 
-#[path = "audio_processing_workbench.rs"]
 mod workbench;
 use workbench::{WorkbenchChoice, WorkbenchMenu, WorkbenchPanel};
-#[path = "audio_processing_results.rs"]
 mod results;
 
-#[path = "audio_processing_graph_fields.rs"]
 mod inspector;
 use inspector::{DraftStamp, SubmittedField};
 

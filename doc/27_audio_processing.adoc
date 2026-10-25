@@ -544,6 +544,11 @@ result. Source files are not modified.
 == Ownership and invariants
 
 * Core commits configuration; UI submits edits, not stale replacement snapshots.
+* The GUI processing owner retains drafts, selection and cancellable pointer intent.
+  Its link:../src/gui/audio_processing/processing_graph_ui.rs[graph editor] owns
+  inspector, workbench and result-view state; Core owns committed graph state and
+  admits processing results. The equalizer editor is a sibling within the same
+  GUI feature, not a second configuration owner.
 * Prepared DSP owns its coefficients, history, rate and channel layout. The device
   callback performs no model loading, FFT planning, file I/O or unbounded work.
 * Disabled processing preserves the original signal path. Protection, resampling,
