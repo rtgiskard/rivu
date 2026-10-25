@@ -433,9 +433,11 @@ Confirmed commits advance affected tokens before any fallible count or view
 refresh; rollback and no-op operations advance none. Creation and deletion publish
 their lifetime/catalog validity before refreshing `playlist_total`. Renames and
 membership edits retain that total without a catalog count read. Playlist maps
-use copy-on-write only when a token or presence changes. Unknown background commit
+use copy-on-write only when a token or presence changes. Background completion
+applies confirmed commit facts even if later worker retirement fails. Unknown
 outcomes retain the database operation gate until restart, including final saves;
-they never authorize replay or trust stale tokens.
+that isolated completion neither applies prepared views nor reads the database.
+It never authorizes replay or discards confirmed revision changes.
 
 Playback-statistics writes return count and activity time directly to the Core.
 The bounded track cache and current/recent snapshots receive these scalar changes

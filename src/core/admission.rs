@@ -432,9 +432,18 @@ impl Core {
             saved.uncertain = true;
             saved.error = Some(error);
         }
+        task.status.library_committed = saved.committed;
+        if saved.committed {
+            self.store.invalidate_caches();
+        }
+        // Confirmed effects remain authoritative even when later retirement
+        // fails. Publish their tokens before isolating an uncertain outcome,
+        // without reading or applying potentially stale view projections.
+        if let Some(impacts) = saved.impacts {
+            self.invalidate_scan_impacts(impacts);
+        }
         if saved.uncertain {
             self.database_outcome_uncertain();
-            task.status.library_committed = saved.committed;
             task.status.progress.phase = ScanPhase::Failed;
             task.status.message = "Database outcome is uncertain; restart Rivu".into();
             task.status.error = Some(saved.error.map_or_else(
@@ -444,18 +453,10 @@ impl Core {
             self.retain_external(task.status.clone());
             return;
         }
-        task.status.library_committed = saved.committed;
         let invalid_diagnostics = saved.errors.len();
         let mut errors = saved.errors;
         if let Some(error) = saved.error {
             errors.push(format!("{error:#}"));
-        }
-        if saved.committed || saved.uncertain {
-            self.store.invalidate_caches();
-        }
-        let impacts = saved.impacts;
-        if let Some(impacts) = impacts {
-            self.invalidate_scan_impacts(impacts);
         }
         let queued = saved.inserted.as_ref().map_or(0, Vec::len);
         if let Some(inserted) = saved.inserted {
@@ -497,8 +498,6 @@ impl Core {
                 "Queued {queued} external audio occurrences; skipped {} invalid paths",
                 saved.rejected
             )
-        } else if saved.uncertain {
-            "External audio outcome is uncertain; inspect the queue before retrying".into()
         } else {
             "External audio admission was not committed".into()
         };
@@ -558,15 +557,17 @@ impl Core {
         };
         if task.is_saving() {
             let joined = task.join();
-            let event = task.finished.try_recv().ok().flatten().unwrap_or_else(|| {
-                Event::Saved(Box::new(Saved::uncertain(anyhow::anyhow!(
+            let mut saved = match task.finished.try_recv().ok().flatten() {
+                Some(Event::Saved(saved)) => *saved,
+                _ => Saved::uncertain(anyhow::anyhow!(
                     "External audio saving ended without completion facts during shutdown"
-                ))))
-            });
+                )),
+            };
             if let Err(error) = joined {
-                tracing::error!(error = %error, "external_admission_shutdown_join_failed");
+                saved.uncertain = true;
+                saved.error = Some(error);
             }
-            self.external_admission_event(event);
+            self.finish_external_saving(saved);
         } else {
             task.cancellation.cancel();
             let result = task.retire();
@@ -636,6 +637,103 @@ mod tests {
         assert!(!retired.load(Ordering::Acquire));
         drop(task);
         assert!(retired.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn uncertain_retirement_preserves_known_committed_revisions() {
+        let (directory, mut core) = super::super::tests::fixture_with_database(None);
+        let before = core.state.query_revisions();
+        let (_, events) = async_channel::bounded(3);
+        let (_, finished) = oneshot::channel();
+        core.active_external_admission = Some(ExternalAdmissionTask {
+            status: ScanTaskStatus {
+                id: 1,
+                progress: ScanProgress {
+                    phase: ScanPhase::Saving,
+                    processed: 1,
+                    total: Some(1),
+                    errors: 0,
+                    path: None,
+                },
+                message: String::new(),
+                library_committed: false,
+                playlist_id: None,
+                error: None,
+            },
+            events,
+            finished,
+            database_path: directory.path().join("library.db"),
+            index: None,
+            expected_revision: None,
+            cancellation: library::ScanCancellation::default(),
+            worker: None,
+        });
+        let mut saved = Saved::uncertain(anyhow::anyhow!("retirement failed after commit"));
+        saved.committed = true;
+        saved.impacts = Some(crate::store::ScanImpacts {
+            changed: true,
+            library: true,
+            structure: true,
+            queue: true,
+            albums: true,
+            duplicate_groups: true,
+            duplicate_members: true,
+            ..Default::default()
+        });
+        core.finish_external_saving(saved);
+        let after = core.state.query_revisions();
+        assert_ne!(after.library, before.library);
+        assert_ne!(after.structure, before.structure);
+        assert_ne!(after.queue, before.queue);
+        assert_ne!(after.album, before.album);
+        assert_ne!(after.duplicate_groups, before.duplicate_groups);
+        assert_ne!(after.duplicate_members, before.duplicate_members);
+        assert!(core.database_maintenance_active());
+        let status = core.scan_results.back().unwrap();
+        assert!(status.library_committed);
+        assert_eq!(status.progress.phase, ScanPhase::Failed);
+    }
+
+    #[test]
+    fn shutdown_preserves_saving_supervisor_failure_after_completion() {
+        let (directory, mut core) = super::super::tests::fixture_with_database(None);
+        let (_, events) = async_channel::bounded(3);
+        let (finished_tx, finished) = oneshot::channel();
+        let worker = core.executor.spawn(async move {
+            let mut saved = Saved::new(0, Vec::new());
+            saved.committed = true;
+            let _ = finished_tx.send(Event::Saved(Box::new(saved)));
+            panic!("injected saving supervisor failure after completion");
+        });
+        core.active_external_admission = Some(ExternalAdmissionTask {
+            status: ScanTaskStatus {
+                id: 1,
+                progress: ScanProgress {
+                    phase: ScanPhase::Saving,
+                    processed: 1,
+                    total: Some(1),
+                    errors: 0,
+                    path: None,
+                },
+                message: String::new(),
+                library_committed: false,
+                playlist_id: None,
+                error: None,
+            },
+            events,
+            finished,
+            database_path: directory.path().join("library.db"),
+            index: None,
+            expected_revision: None,
+            cancellation: library::ScanCancellation::default(),
+            worker: Some(worker),
+        });
+        core.shutdown_external_admission();
+        assert!(core.database_maintenance_active());
+        let status = core.scan_results.back().unwrap();
+        assert!(status.library_committed);
+        assert_eq!(status.progress.phase, ScanPhase::Failed);
+        assert!(status.error.as_deref().unwrap().contains("worker panicked"));
     }
 
     #[test]

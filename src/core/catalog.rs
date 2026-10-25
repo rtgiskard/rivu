@@ -779,6 +779,15 @@ impl Core {
         let mut task = self.active_scan.take().unwrap();
         let retired =
             futures::executor::block_on(std::panic::AssertUnwindSafe(task.worker).catch_unwind());
+        // Confirmed commits remain facts even if later worker retirement fails.
+        // Publish only their tokens here; uncertain outcomes must not read views.
+        if let Some(playlist_id) = saved.playlist_id {
+            self.advance_playlist_entry_revision(playlist_id);
+            self.invalidate_playlist_creation(true);
+        }
+        if let Some(impacts) = saved.impacts {
+            self.invalidate_scan_impacts(impacts);
+        }
         if saved.outcome_uncertain || retired.is_err() {
             self.database_outcome_uncertain();
             task.status.progress = saved.progress;
@@ -803,16 +812,11 @@ impl Core {
         if let Some(error) = saved.error {
             errors.push(error);
         }
-        if saved.library_committed || saved.outcome_uncertain {
+        if saved.library_committed {
             self.store.invalidate_caches();
-        }
-        if let Some(playlist_id) = saved.playlist_id {
-            self.advance_playlist_entry_revision(playlist_id);
-            self.invalidate_playlist_creation(true);
         }
         let impacts = saved.impacts;
         if let Some(impacts) = impacts {
-            self.invalidate_scan_impacts(impacts);
             if let Some(total) = saved.library_total {
                 match total {
                     Ok(total) => self.state.library.track_total = total,
@@ -896,6 +900,85 @@ impl Core {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uncertain_scan_completion_publishes_known_commits_without_refreshing_views() {
+        for supervisor_panicked in [false, true] {
+            let (_directory, mut core) = super::super::tests::fixture_with_database(Some(10.0));
+            let before = core.state.query_revisions();
+            let total = core.state.library.track_total;
+            let playlist_total = core.state.library.playlist_total;
+            let edit = core
+                .store
+                .edit_track(1, Some("Committed title"), None, None, None)
+                .unwrap();
+            let playlist_id = core
+                .store
+                .create_playlist_with_tracks("Committed playlist", &[1])
+                .unwrap();
+            let progress = ScanProgress {
+                phase: ScanPhase::Saving,
+                processed: 1,
+                total: Some(1),
+                errors: 0,
+                path: None,
+            };
+            core.active_scan = Some(ScanTask {
+                status: ScanTaskStatus {
+                    id: 1,
+                    progress: progress.clone(),
+                    message: String::new(),
+                    library_committed: false,
+                    playlist_id: None,
+                    error: None,
+                },
+                owner: crate::projection::MediaTaskOwner::Library,
+                cancellation: library::ScanCancellation::default(),
+                worker: core.executor.spawn(async move {
+                    assert!(!supervisor_panicked, "supervisor failed after completion");
+                }),
+                pending_save: None,
+            });
+            core.complete_saved_scan(ScanSaved {
+                id: 1,
+                progress,
+                library_committed: true,
+                playlist_id: Some(playlist_id),
+                outcome_uncertain: !supervisor_panicked,
+                impacts: Some(crate::store::ScanImpacts {
+                    changed: edit.changed,
+                    library: edit.library,
+                    queue: edit.queue,
+                    albums: edit.albums,
+                    ..Default::default()
+                }),
+                summary: String::new(),
+                scan_errors: None,
+                error: None,
+                library_total: Some(Ok(999)),
+                history: Some(Ok(Vec::new())),
+                playlist_total: Some(Ok(999)),
+            });
+            let after = core.state.query_revisions();
+            assert_ne!(after.library, before.library);
+            assert_ne!(after.queue, before.queue);
+            assert_ne!(after.playlist, before.playlist);
+            assert_ne!(after.duplicate_members, before.duplicate_members);
+            assert!(
+                core.state
+                    .library
+                    .playlist_entry_revisions
+                    .contains_key(&playlist_id)
+            );
+            assert_eq!(core.state.library.track_total, total);
+            assert_eq!(core.state.library.playlist_total, playlist_total);
+            assert!(core.database_unavailable);
+            let status = core.scan_results.back().unwrap();
+            assert!(status.library_committed);
+            assert_eq!(status.playlist_id, Some(playlist_id));
+            assert_eq!(status.progress.phase, ScanPhase::Failed);
+        }
+    }
 
     #[test]
     fn saving_unwind_reports_uncertainty_and_preserves_confirmed_commit_facts() {
