@@ -69,10 +69,11 @@ impl SearchField {
         self.timer.take();
         self.generation = self.generation.wrapping_add(1);
         let text = self.input.read(cx).text().trim();
-        let query = (!text.is_empty()).then(|| text.to_owned());
+        let query = (!text.is_empty()).then_some(text);
         if query.is_none() {
             self.apply(None, cx);
-        } else {
+        } else if query != self.query.as_deref() {
+            let query = query.map(str::to_owned);
             let generation = self.generation;
             let delay = cx.background_executor().timer(self.debounce);
             self.timer = Some(cx.spawn(async move |this, cx| {
@@ -498,6 +499,13 @@ mod tests {
 
         edit("current", &mut cx);
         cx.executor().advance_clock(delay);
+        cx.run_until_parked();
+        assert_eq!(*published.borrow(), vec![Some("current".into())]);
+        // Returning to the applied query must cancel a different pending query.
+        edit("obsolete", &mut cx);
+        cx.executor().advance_clock(delay / 2);
+        edit("current ", &mut cx);
+        cx.executor().advance_clock(delay * 2);
         cx.run_until_parked();
         assert_eq!(*published.borrow(), vec![Some("current".into())]);
         edit("uncommitted", &mut cx);

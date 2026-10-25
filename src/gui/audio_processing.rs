@@ -52,6 +52,15 @@ struct Submission {
 
 type MeasuredGraph = Rc<Cell<Option<(Bounds<Pixels>, DockGeometry)>>>;
 
+// A transient belongs to exactly one visible Monitor panel. Restoration is
+// conditional on focus still belonging to this scope, never a newer editor.
+struct PresetPopup {
+    panel: u64,
+    manage: bool,
+    scope: rivu_ui::FocusScope,
+    restore: Option<FocusHandle>,
+}
+
 pub(super) struct AudioProcessing {
     context: FeatureContext,
     state: Rc<GuiSnapshot>,
@@ -66,8 +75,7 @@ pub(super) struct AudioProcessing {
     equalizer_ui: EqualizerUi,
     speech_advanced: bool,
     separation_advanced: bool,
-    preset_open: bool,
-    preset_manage: bool,
+    preset_popup: Option<PresetPopup>,
     preset_bounds: HashMap<u64, Rc<Cell<Option<Bounds<Pixels>>>>>,
     task_details: bool,
 }
@@ -89,8 +97,7 @@ impl AudioProcessing {
             equalizer_ui: EqualizerUi::default(),
             speech_advanced: false,
             separation_advanced: false,
-            preset_open: false,
-            preset_manage: false,
+            preset_popup: None,
             preset_bounds: HashMap::new(),
             task_details: false,
         };
@@ -110,6 +117,21 @@ impl AudioProcessing {
             != state
                 .current_track()
                 .map(|t| (t.id, t.sample_rate, t.channels));
+        let preset_names_changed = self.preset_popup.is_some()
+            && !Arc::ptr_eq(&self.state.system.config, &state.system.config)
+            && !self
+                .state
+                .system
+                .config
+                .equalizer_presets
+                .iter()
+                .map(|preset| &preset.name)
+                .eq(state
+                    .system
+                    .config
+                    .equalizer_presets
+                    .iter()
+                    .map(|preset| &preset.name));
         let changed = !Arc::ptr_eq(&self.state.system.config, &state.system.config)
             || self.state.system.processing != state.system.processing
             || self.state.system.processing_audition != state.system.processing_audition
@@ -121,6 +143,12 @@ impl AudioProcessing {
             self.task_details = false;
         }
         self.state = state;
+        if !self.state.system.config.equalizer.enabled {
+            let _ = self.set_preset_popup(None, cx);
+        }
+        if preset_names_changed && let Some(popup) = &self.preset_popup {
+            self.notify_preset_panel(popup.panel, cx);
+        }
         self.reconcile_graph(cx);
         self.reconcile_equalizers(cx);
         if changed {
@@ -148,7 +176,7 @@ impl AudioProcessing {
         for bounds in self.preset_bounds.values() {
             bounds.set(None);
         }
-        self.preset_open = false;
+        let _ = self.set_preset_popup(None, cx);
         self.cancel_pointer(cx);
     }
 
@@ -176,9 +204,14 @@ impl AudioProcessing {
         self.retain_equalizer_panels(layout, visible, cx);
         self.preset_bounds
             .retain(|id, _| layout.contains_panel(*id));
+        if self
+            .preset_popup
+            .as_ref()
+            .is_some_and(|popup| !visible || !layout.is_panel_active(popup.panel))
+        {
+            let _ = self.set_preset_popup(None, cx);
+        }
         if !visible {
-            self.preset_open = false;
-            self.preset_manage = false;
             self.cancel_pointer(cx);
         }
         self.graph_ui
@@ -362,7 +395,13 @@ impl AudioProcessing {
                 if let Some(field) = this.fields.get_mut(&name) {
                     field.dirty = true;
                 }
+                if name == "preset_name" {
+                    this.notify_preset_labels(cx);
+                }
                 cx.notify();
+            }
+            InputEvent::Changed { user: false, .. } if name == "preset_name" => {
+                this.notify_preset_labels(cx);
             }
             InputEvent::Submit => this.apply_field(&name, cx),
             _ => {}
@@ -597,13 +636,73 @@ impl AudioProcessing {
         control.opacity(if enabled { 1. } else { 0.5 })
     }
 
+    fn set_preset_popup(
+        &mut self,
+        popup: Option<PresetPopup>,
+        cx: &mut Context<Self>,
+    ) -> Option<PresetPopup> {
+        let next_panel = popup.as_ref().map(|popup| popup.panel);
+        let previous = std::mem::replace(&mut self.preset_popup, popup);
+        let previous_panel = previous.as_ref().map(|popup| popup.panel);
+        if let Some(panel) = previous_panel {
+            self.notify_preset_panel(panel, cx);
+        }
+        if let Some(panel) = next_panel.filter(|panel| Some(*panel) != previous_panel) {
+            self.notify_preset_panel(panel, cx);
+        }
+        previous
+    }
+
+    fn close_preset(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(popup) = self.set_preset_popup(None, cx)
+            && popup.scope.handle().contains_focused(window, cx)
+            && let Some(origin) = popup.restore
+        {
+            origin.focus(window, cx);
+        }
+        cx.notify();
+    }
+
+    fn toggle_preset(
+        &mut self,
+        panel: u64,
+        manage: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.state.system.config.equalizer.enabled {
+            return;
+        }
+        if self
+            .preset_popup
+            .as_ref()
+            .is_some_and(|popup| popup.panel == panel && popup.manage == manage)
+        {
+            self.close_preset(window, cx);
+            return;
+        }
+        let restore = self
+            .preset_popup
+            .as_ref()
+            .and_then(|popup| popup.restore.clone())
+            .or_else(|| window.focused(cx));
+        let scope = rivu_ui::FocusScope::new(cx);
+        scope.focus(window, cx);
+        let _ = self.set_preset_popup(
+            Some(PresetPopup {
+                panel,
+                manage,
+                scope,
+                restore,
+            }),
+            cx,
+        );
+        cx.notify();
+    }
+
     fn preset_view(&mut self, panel: u64, cx: &mut Context<Self>) -> Div {
         let theme = rivu_ui::theme::palette(cx);
         let enabled = self.state.system.config.equalizer.enabled;
-        if !enabled {
-            self.preset_open = false;
-            self.preset_manage = false;
-        }
         for key in ["preset_name", "preset_path"] {
             if let Some(field) = self.fields.get(key) {
                 field
@@ -624,13 +723,21 @@ impl AudioProcessing {
             name.into()
         };
         let trigger = activate_control(
-            dropdown_trigger(theme, ("eq-presets", panel), label, self.preset_open, cx),
+            disabled_control(
+                theme,
+                dropdown_trigger(
+                    theme,
+                    ("eq-presets", panel),
+                    label,
+                    self.preset_popup
+                        .as_ref()
+                        .is_some_and(|popup| popup.panel == panel && !popup.manage),
+                    cx,
+                ),
+                !enabled,
+            ),
             cx,
-            |this, _, cx| {
-                this.preset_open = !this.preset_open;
-                this.preset_manage = false;
-                cx.notify();
-            },
+            move |this, window, cx| this.toggle_preset(panel, false, window, cx),
         );
         let mut content = column().min_w_0().gap_1().child(
             row()
@@ -654,23 +761,29 @@ impl AudioProcessing {
                         "󰒓",
                         self.tr("processing-preset-manage"),
                     )
-                    .toggled(self.preset_manage)
+                    .enabled(enabled)
+                    .toggled(
+                        self.preset_popup
+                            .as_ref()
+                            .is_some_and(|popup| popup.panel == panel && popup.manage),
+                    )
                     .build(
                         IconButtonStyle::Quiet,
                         IconButtonDensity::Compact,
                         cx,
-                        |this, _, cx| {
-                            this.preset_manage = !this.preset_manage;
-                            this.preset_open = false;
-                            cx.notify();
-                        },
+                        move |this, window, cx| this.toggle_preset(panel, true, window, cx),
                     ),
                 ),
         );
-        if self.preset_open
+        if let Some(popup) = self
+            .preset_popup
+            .as_ref()
+            .filter(|popup| popup.panel == panel && !popup.manage)
             && let Some(bounds) = bounds.get()
         {
-            let mut choices = Popover::surface(theme, ("eq-preset-choices", panel))
+            let mut choices = popup
+                .scope
+                .menu_surface(Popover::surface(theme, ("eq-preset-choices", panel)))
                 .role(Role::Menu)
                 .flex()
                 .flex_col()
@@ -678,16 +791,18 @@ impl AudioProcessing {
                 .overflow_y_scroll()
                 .p_1()
                 .w(bounds.size.width)
-                .on_mouse_down_out(cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                    if !bounds.contains(&event.position) {
-                        this.preset_open = false;
-                        cx.notify();
-                    }
-                }))
-                .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
-                    if event.keystroke.key == "escape" {
-                        this.preset_open = false;
-                        cx.notify();
+                .on_mouse_down_out(
+                    cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                        if !bounds.contains(&event.position) {
+                            this.close_preset(window, cx);
+                            cx.stop_propagation();
+                        }
+                    }),
+                )
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                    if event.keystroke.key == "escape" && !event.keystroke.modifiers.modified() {
+                        this.close_preset(window, cx);
+                        cx.stop_propagation();
                     }
                 }));
             for (index, preset) in self
@@ -703,14 +818,17 @@ impl AudioProcessing {
                     SharedString::from(format!("eq-preset-{panel}-{index}")),
                     name.clone(),
                     cx,
-                    move |this, _, cx| {
+                    move |this, window, cx| {
+                        if !this.state.system.config.equalizer.enabled {
+                            return;
+                        }
                         if let Some(field) = this.fields.get_mut("preset_name") {
                             field
                                 .input
                                 .update(cx, |input, cx| input.set_text(name.clone(), cx));
                             field.dirty = false;
                         }
-                        this.preset_open = false;
+                        this.close_preset(window, cx);
                         this.eq(EqualizerEdit::LoadPreset { name: name.clone() }, cx);
                     },
                 ));
@@ -728,7 +846,10 @@ impl AudioProcessing {
                 .with_priority(2),
             );
         }
-        if self.preset_manage
+        if let Some(popup) = self
+            .preset_popup
+            .as_ref()
+            .filter(|popup| popup.panel == panel && popup.manage)
             && let Some(bounds) = bounds.get()
         {
             content = content.child(
@@ -737,7 +858,9 @@ impl AudioProcessing {
                         .position(bounds.bottom_left())
                         .snap_to_window()
                         .child(
-                            Popover::surface(theme, ("eq-preset-management", panel))
+                            popup
+                                .scope
+                                .surface(Popover::surface(theme, ("eq-preset-management", panel)))
                                 .flex()
                                 .flex_col()
                                 .gap_1()
@@ -746,19 +869,23 @@ impl AudioProcessing {
                                 .max_h(rems(24.))
                                 .overflow_y_scroll()
                                 .on_mouse_down_out(cx.listener(
-                                    move |this, event: &MouseDownEvent, _, cx| {
+                                    move |this, event: &MouseDownEvent, window, cx| {
                                         if !bounds.contains(&event.position) {
-                                            this.preset_manage = false;
-                                            cx.notify();
+                                            this.close_preset(window, cx);
+                                            cx.stop_propagation();
                                         }
                                     },
                                 ))
-                                .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
-                                    if event.keystroke.key == "escape" {
-                                        this.preset_manage = false;
-                                        cx.notify();
-                                    }
-                                }))
+                                .on_key_down(cx.listener(
+                                    |this, event: &KeyDownEvent, window, cx| {
+                                        if event.keystroke.key == "escape"
+                                            && !event.keystroke.modifiers.modified()
+                                        {
+                                            this.close_preset(window, cx);
+                                            cx.stop_propagation();
+                                        }
+                                    },
+                                ))
                                 .child(self.field_view(
                                     "preset_name",
                                     self.tr("processing-preset-name"),
@@ -1640,8 +1767,7 @@ impl AudioProcessing {
                     move |this, _, cx| {
                         this.cancel_pointer(cx);
                         this.close_workbench_controls();
-                        this.preset_open = false;
-                        this.preset_manage = false;
+                        let _ = this.set_preset_popup(None, cx);
                         this.page = page;
                         cx.notify();
                     },

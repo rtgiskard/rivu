@@ -328,6 +328,13 @@ impl GuiApp {
                         return;
                     }
                     this.shell.focus_surface(epoch, window, cx);
+                    if matches!(
+                        surface,
+                        Some(KeyboardSurface::Menu(MenuSurface::Content(_)))
+                    ) && let Some(menu) = &mut this.content_menu
+                    {
+                        menu.focus_playlist_return(window, cx);
+                    }
                 }
             });
         });

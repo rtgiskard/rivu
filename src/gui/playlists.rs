@@ -478,6 +478,12 @@ impl Playlists {
     pub(in crate::gui) fn catalog_len(&self) -> usize {
         self.browser.playlists().summaries().rows.len()
     }
+    pub(in crate::gui) fn catalog_identity(&self) -> (u64, Option<&str>) {
+        (
+            self.state.library.playlist_revision,
+            self.browser.playlists().summaries().query.as_deref(),
+        )
+    }
     pub(in crate::gui) fn catalog_row(
         &self,
         index: usize,
@@ -816,7 +822,8 @@ impl Playlists {
                     },
                 ))
                 .child(rivu_ui::menu_separator(theme))
-                .child(
+                .child(rivu_ui::disabled_control(
+                    theme,
                     rivu_ui::menu_item(
                         "playlist-row-add",
                         self.tr("gl-add-current"),
@@ -835,10 +842,9 @@ impl Playlists {
                                 cx,
                             );
                         },
-                    )
-                    .opacity(if has_tracks { 1. } else { 0.4 })
-                    .when(!has_tracks, |view| view.cursor_default()),
-                )
+                    ),
+                    !has_tracks,
+                ))
                 .child(rivu_ui::menu_item(
                     "playlist-row-rename",
                     self.tr("gl-rename"),
@@ -2066,5 +2072,398 @@ mod playlist_drag_tests {
             ..drag
         };
         assert!(empty.command(None, false).is_none());
+    }
+}
+
+#[cfg(test)]
+mod content_menu_keyboard_tests {
+    use super::*;
+    use crate::config::ConfigPersistence;
+    use crate::gui::{ContentMenuRequest, GuiApp, layout::save_owner::LayoutSaveOwner};
+    use gpui::{
+        AnyWindowHandle, InputEvent, KeyDownEvent, KeyUpEvent, Keystroke, TestAppContext,
+        VisualTestContext,
+    };
+    use rivu_protocol::model::{Page, PlaylistSummary, Query};
+    use rivu_protocol::response::ViewResponse;
+
+    fn fixture(
+        cx: &mut TestAppContext,
+    ) -> (
+        tempfile::TempDir,
+        crate::core::Runtime,
+        LayoutSaveOwner,
+        Entity<GuiApp>,
+        AnyWindowHandle,
+    ) {
+        cx.update(rivu_ui::input::Input::init);
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        crate::config::Config {
+            volume: 0.0,
+            ffmpeg_enabled: false,
+            mpris_enabled: false,
+            ..Default::default()
+        }
+        .save(&path)
+        .unwrap();
+        let database = directory.path().join("library.db");
+        let store = crate::store::Store::open(&database).unwrap();
+        rusqlite::Connection::open(&database)
+            .unwrap()
+            .execute(
+                "INSERT INTO tracks(id,path,raw_title) VALUES(1,?1,'Source')",
+                [directory.path().join("source.wav").to_str().unwrap()],
+            )
+            .unwrap();
+        for id in 1..=72 {
+            assert_eq!(
+                store.create_playlist(&format!("Target {id:03}")).unwrap(),
+                id
+            );
+        }
+        drop(store);
+        let runtime = crate::core::Runtime::start(directory.path(), &path).unwrap();
+        let save = LayoutSaveOwner::new(directory.path().join("layouts.json"));
+        let handle = runtime.handle.clone();
+        let save_handle = save.handle();
+        let artwork = Arc::new(crate::artwork::ArtworkManager::new(directory.path()));
+        let window = cx.add_window(move |window, cx| {
+            let mut app = GuiApp::new(
+                handle,
+                save_handle,
+                artwork,
+                Default::default(),
+                Arc::new(crate::i18n::Localizer::new("en-US")),
+                window,
+                cx,
+            );
+            // Drive snapshots explicitly: the real core thread must not wake GPUI's
+            // single-threaded deterministic scheduler.
+            app.handle.set_wakeup(|| {});
+            // Supply deterministic sparse pages, without racing real catalog reads.
+            app.window_visible = false;
+            app.reconcile_feature_demand(cx);
+            app
+        });
+        let app = window.root(cx).unwrap();
+        (directory, runtime, save, app, window.into())
+    }
+
+    fn page(
+        app: &Entity<GuiApp>,
+        offset: usize,
+        loaded: usize,
+        total: usize,
+        cx: &mut TestAppContext,
+    ) {
+        app.update(cx, |app, cx| {
+            app.playlists.update(cx, |playlists, cx| {
+                playlists
+                    .browser
+                    .playlists
+                    .prepare_page(false, offset, loaded);
+                playlists.browser.playlists.accept_summaries(Page {
+                    total,
+                    rows: (offset..offset + loaded)
+                        .map(|index| PlaylistSummary {
+                            id: index as i64 + 1,
+                            name: format!("Target {:03}", index + 1),
+                            entry_count: 0,
+                        })
+                        .collect(),
+                });
+                cx.notify();
+            });
+            cx.notify();
+        });
+    }
+
+    fn draw(handle: AnyWindowHandle, cx: &mut TestAppContext) {
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.refresh();
+            window.draw(cx).clear(cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            // Test windows have no platform frame loop to deliver deferred focus.
+            window.simulate_next_frame(cx);
+            window.refresh();
+            window.draw(cx).clear(cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+    }
+
+    fn key(handle: AnyWindowHandle, key: &str, cx: &mut TestAppContext) {
+        cx.update_window(handle, |_, window, cx| {
+            let keystroke = Keystroke::parse(key).unwrap();
+            window.dispatch_event(
+                KeyDownEvent {
+                    keystroke: keystroke.clone(),
+                    is_held: false,
+                    prefer_character_input: false,
+                }
+                .to_platform_input(),
+                cx,
+            );
+            // Native menu controls activate on release, after a matching key down.
+            window.dispatch_event(KeyUpEvent { keystroke }.to_platform_input(), cx);
+        })
+        .unwrap();
+        draw(handle, cx);
+    }
+
+    fn open_targets(app: &Entity<GuiApp>, handle: AnyWindowHandle, cx: &mut TestAppContext) {
+        app.update(cx, |app, cx| {
+            app.open_content_menu(
+                ContentMenuRequest {
+                    source: TrackSource::Tracks(vec![1]),
+                    position: gpui::point(px(10.), px(10.)),
+                    play: None,
+                },
+                cx,
+            );
+        });
+        draw(handle, cx);
+        key(handle, "down", cx);
+        key(handle, "down", cx);
+        key(handle, "enter", cx);
+        assert!(app.read_with(cx, |app, _| {
+            app.content_menu.as_ref().is_some_and(|menu| menu.playlists)
+        }));
+    }
+
+    #[gpui::test]
+    fn content_playlist_keyboard_reaches_targets_beyond_three_screens(cx: &mut TestAppContext) {
+        let (_directory, runtime, _save, app, handle) = fixture(cx);
+        page(&app, 0, 72, 72, cx);
+        open_targets(&app, handle, cx);
+        // Menus enter on the scope anchor, then New playlist. Arrows must walk
+        // logical rows, not the currently rendered native tab stops.
+        key(handle, "down", cx);
+        for _ in 0..72 {
+            key(handle, "down", cx);
+        }
+        assert!(
+            VisualTestContext::from_window(handle, cx)
+                .debug_bounds("content-playlist-target-72")
+                .is_some(),
+            "the last logical target must be scrolled into the rendered viewport"
+        );
+        key(handle, "enter", cx);
+        assert!(app.read_with(cx, |app, _| app.content_menu.is_none()));
+        let ViewResponse::PlaylistSummaries(page) = runtime
+            .handle
+            .query(Query::PlaylistSummaries {
+                query: None,
+                offset: 0,
+                limit: 100,
+            })
+            .result
+            .unwrap()
+        else {
+            panic!("expected playlist summaries");
+        };
+        assert_eq!(page.total, 72);
+        for target in page.rows {
+            assert_eq!(target.entry_count, usize::from(target.id == 72));
+        }
+        let ViewResponse::PlaylistEntries(page) = runtime
+            .handle
+            .query(Query::PlaylistEntries {
+                playlist_id: 72,
+                query: None,
+                offset: 0,
+                limit: 10,
+            })
+            .result
+            .unwrap()
+        else {
+            panic!("expected destination entries");
+        };
+        assert_eq!(page.total, 1);
+        assert_eq!(page.rows[0].track_id, 1);
+    }
+
+    #[gpui::test]
+    fn content_playlist_unloaded_target_cannot_submit_and_back_restores_trigger(
+        cx: &mut TestAppContext,
+    ) {
+        let (_directory, runtime, _save, app, handle) = fixture(cx);
+        page(&app, 0, 12, 72, cx);
+        open_targets(&app, handle, cx);
+        key(handle, "down", cx);
+        key(handle, "down", cx);
+        key(handle, "end", cx);
+        key(handle, "enter", cx);
+        assert!(app.read_with(cx, |app, _| app.content_menu.is_some()));
+        let ViewResponse::PlaylistSummaries(unchanged) = runtime
+            .handle
+            .query(Query::PlaylistSummaries {
+                query: None,
+                offset: 0,
+                limit: 100,
+            })
+            .result
+            .unwrap()
+        else {
+            panic!("expected playlist summaries");
+        };
+        assert!(unchanged.rows.iter().all(|target| target.entry_count == 0));
+        page(&app, 60, 12, 72, cx);
+        draw(handle, cx);
+        key(handle, "down", cx);
+        key(handle, "enter", cx);
+        assert!(app.read_with(cx, |app, _| {
+            app.content_menu
+                .as_ref()
+                .is_some_and(|menu| !menu.playlists)
+        }));
+        // Back restores the Playlist trigger, not the first Queue command.
+        key(handle, "enter", cx);
+        assert!(app.read_with(cx, |app, _| {
+            app.content_menu.as_ref().is_some_and(|menu| menu.playlists)
+        }));
+        key(handle, "down", cx);
+        key(handle, "enter", cx);
+        assert!(app.read_with(cx, |app, cx| app.playlists.read(cx).editor_open()));
+    }
+
+    #[gpui::test]
+    fn content_playlist_home_end_and_page_keys_scroll_logical_targets(cx: &mut TestAppContext) {
+        let (_directory, runtime, _save, app, handle) = fixture(cx);
+        page(&app, 0, 72, 72, cx);
+        open_targets(&app, handle, cx);
+        key(handle, "down", cx);
+        key(handle, "down", cx);
+        key(handle, "end", cx);
+        let last_at_end = VisualTestContext::from_window(handle, cx)
+            .debug_bounds("content-playlist-target-72")
+            .expect("End must reveal the last target");
+        key(handle, "pageup", cx);
+        // A fractional viewport can retain the last row's edge after one page.
+        // Assert actual scrolling rather than depending on full-row clipping.
+        assert!(
+            VisualTestContext::from_window(handle, cx)
+                .debug_bounds("content-playlist-target-72")
+                .is_none_or(|bounds| bounds.origin.y > last_at_end.origin.y)
+        );
+        key(handle, "pagedown", cx);
+        assert_eq!(
+            VisualTestContext::from_window(handle, cx).debug_bounds("content-playlist-target-72"),
+            Some(last_at_end),
+            "PageDown must restore the last target's viewport position"
+        );
+        key(handle, "home", cx);
+        assert!(
+            VisualTestContext::from_window(handle, cx)
+                .debug_bounds("content-playlist-target-1")
+                .is_some()
+        );
+        key(handle, "enter", cx);
+        let ViewResponse::PlaylistEntries(entries) = runtime
+            .handle
+            .query(Query::PlaylistEntries {
+                playlist_id: 1,
+                query: None,
+                offset: 0,
+                limit: 10,
+            })
+            .result
+            .unwrap()
+        else {
+            panic!("expected destination entries");
+        };
+        assert_eq!(entries.total, 1);
+        assert_eq!(entries.rows[0].track_id, 1);
+    }
+
+    #[gpui::test]
+    fn content_playlist_changed_record_cannot_submit_the_old_index(cx: &mut TestAppContext) {
+        let (_directory, runtime, _save, app, handle) = fixture(cx);
+        page(&app, 0, 12, 12, cx);
+        open_targets(&app, handle, cx);
+        key(handle, "down", cx);
+        key(handle, "down", cx);
+        app.update(cx, |app, cx| {
+            app.playlists.update(cx, |playlists, cx| {
+                playlists.browser.playlists.prepare_page(false, 0, 12);
+                playlists.browser.playlists.accept_summaries(Page {
+                    total: 12,
+                    rows: (2..=12)
+                        .chain(std::iter::once(1))
+                        .map(|id| PlaylistSummary {
+                            id,
+                            name: format!("Target {id:03}"),
+                            entry_count: 0,
+                        })
+                        .collect(),
+                });
+                cx.notify();
+            });
+            cx.notify();
+        });
+        draw(handle, cx);
+        key(handle, "enter", cx);
+        assert!(app.read_with(cx, |app, _| app.content_menu.is_some()));
+        let ViewResponse::PlaylistSummaries(unchanged) = runtime
+            .handle
+            .query(Query::PlaylistSummaries {
+                query: None,
+                offset: 0,
+                limit: 100,
+            })
+            .result
+            .unwrap()
+        else {
+            panic!("expected playlist summaries");
+        };
+        assert!(unchanged.rows.iter().all(|target| target.entry_count == 0));
+        // Explicitly selecting the replacement makes its own stable ID eligible.
+        key(handle, "home", cx);
+        key(handle, "enter", cx);
+        let ViewResponse::PlaylistEntries(entries) = runtime
+            .handle
+            .query(Query::PlaylistEntries {
+                playlist_id: 2,
+                query: None,
+                offset: 0,
+                limit: 10,
+            })
+            .result
+            .unwrap()
+        else {
+            panic!("expected destination entries");
+        };
+        assert_eq!(entries.total, 1);
+        assert_eq!(entries.rows[0].track_id, 1);
+    }
+
+    #[gpui::test]
+    fn playlist_add_current_without_a_track_is_skipped_by_menu_keyboard(cx: &mut TestAppContext) {
+        let (_directory, _runtime, _save, app, handle) = fixture(cx);
+        app.update(cx, |app, cx| {
+            app.playlists.update(cx, |playlists, cx| {
+                assert!(playlists.state.current_track().is_none());
+                playlists.playlist_action = Some(PlaylistAction::Menu(
+                    PlaylistTarget {
+                        id: 1,
+                        name: "Target".into(),
+                    },
+                    gpui::point(px(10.), px(10.)),
+                ));
+                cx.notify();
+            });
+            cx.notify();
+        });
+        draw(handle, cx);
+        key(handle, "down", cx);
+        key(handle, "down", cx);
+        key(handle, "down", cx);
+        key(handle, "enter", cx);
+        assert!(app.read_with(cx, |app, cx| app.playlists.read(cx).editor_open()));
     }
 }

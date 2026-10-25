@@ -102,7 +102,6 @@ struct EqualizerEditor {
     removing_band: Option<(EqualizerConfig, usize)>,
     pending_added_band: Option<(usize, usize)>,
     geometry_epoch: u64,
-    _preset_subscription: Option<Subscription>,
 }
 
 impl EqualizerEditor {
@@ -122,13 +121,6 @@ impl EqualizerEditor {
         let pending = parent.pending;
         let geometry_epoch = parent.geometry_epoch;
         let format = equalizer_format(&state);
-        let preset_subscription = if target == EqTarget::Monitor {
-            owner
-                .upgrade()
-                .map(|owner| cx.observe(&owner, |_, _, cx| cx.notify()))
-        } else {
-            None
-        };
         let mut editor = Self {
             owner,
             context,
@@ -160,7 +152,6 @@ impl EqualizerEditor {
             pending_added_band: None,
             geometry_epoch,
             pointer_count: Rc::clone(&parent.equalizer_ui.pointer_count),
-            _preset_subscription: preset_subscription,
         };
         editor.sync_fields(cx);
         editor.update_response();
@@ -2029,6 +2020,24 @@ impl AudioProcessing {
             .child(editor)
     }
 
+    pub(super) fn notify_preset_panel(&self, panel: u64, cx: &mut Context<Self>) {
+        if let Some(editor) = self.equalizer_ui.editors.get(&(panel, EqTarget::Monitor)) {
+            editor.update(cx, |_, cx| cx.notify());
+        }
+    }
+
+    pub(super) fn notify_preset_labels(&self, cx: &mut Context<Self>) {
+        for ((panel, target), editor) in &self.equalizer_ui.editors {
+            if *target == EqTarget::Monitor && self.equalizer_ui.active.get(panel) == Some(target) {
+                editor.update(cx, |editor, cx| {
+                    if editor.active {
+                        cx.notify();
+                    }
+                });
+            }
+        }
+    }
+
     pub(super) fn reconcile_equalizers(&mut self, cx: &mut Context<Self>) {
         let state = Rc::clone(&self.state);
         let blocked = self.equalizer_blocked(EqTarget::Node(0));
@@ -2585,6 +2594,189 @@ mod tests {
         (directory, runtime, editor, handle)
     }
 
+    struct PresetWindow {
+        owner: Entity<AudioProcessing>,
+        scope: rivu_ui::FocusScope,
+        outside_clicks: Rc<Cell<usize>>,
+        _subscription: Subscription,
+    }
+
+    impl Render for PresetWindow {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let panels = self.owner.update(cx, |owner, cx| {
+                (owner.preset_view(7, cx), owner.preset_view(8, cx))
+            });
+            self.scope
+                .surface(div().id("preset-test").size_full())
+                .child(panels.0)
+                .child(panels.1)
+                .child(
+                    button("preset-outside", "Outside action", cx, |this, _, _| {
+                        this.outside_clicks.set(this.outside_clicks.get() + 1);
+                    })
+                    .debug_selector(|| "preset-outside".to_owned())
+                    .mt_32(),
+                )
+        }
+    }
+
+    #[gpui::test]
+    fn preset_keyboard_management_restores_origin_and_disabled_trigger_is_inert(
+        cx: &mut TestAppContext,
+    ) {
+        let (_directory, _runtime, owner, _editor, _handle) = fixture_with_owner(cx);
+        owner.update(cx, |owner, cx| {
+            owner.command_active = true;
+            let mut state = (*owner.state).clone();
+            Arc::make_mut(&mut state.system.config).equalizer_presets = ["First", "Second"]
+                .into_iter()
+                .map(|name| rivu_format::config::EqualizerPreset {
+                    name: name.into(),
+                    config: Default::default(),
+                })
+                .collect();
+            owner.reconcile(Rc::new(state), cx);
+        });
+        let scope = cx.update(rivu_ui::FocusScope::new);
+        let outside_clicks = Rc::new(Cell::new(0));
+        let window = cx.open_window(size(px(800.), px(600.)), {
+            let owner = owner.clone();
+            let scope = scope.clone();
+            let outside_clicks = outside_clicks.clone();
+            move |_, cx| {
+                let subscription = cx.observe(&owner, |_, _, cx| cx.notify());
+                PresetWindow {
+                    owner,
+                    scope,
+                    outside_clicks,
+                    _subscription: subscription,
+                }
+            }
+        });
+        let handle = window.into();
+        draw(cx, handle);
+        cx.update_window(handle, |_, window, cx| {
+            window.activate_window();
+            scope.handle().focus(window, cx);
+            scope.advance(false, window, cx);
+        })
+        .unwrap();
+        draw(cx, handle);
+        let origin = cx
+            .update_window(handle, |_, window, cx| window.focused(cx))
+            .unwrap();
+        press(cx, handle, "enter");
+        cx.update_window(handle, |_, window, cx| {
+            owner.read_with(cx, |owner, cx| {
+                let popup = owner.preset_popup.as_ref().expect("keyboard opens presets");
+                assert_eq!(popup.panel, 7);
+                assert!(popup.scope.handle().contains_focused(window, cx));
+            });
+        })
+        .unwrap();
+        press(cx, handle, "escape");
+        assert!(owner.read_with(cx, |owner, _| owner.preset_popup.is_none()));
+        assert_eq!(
+            cx.update_window(handle, |_, window, cx| window.focused(cx))
+                .unwrap(),
+            origin
+        );
+        press(cx, handle, "enter");
+        press(cx, handle, "down");
+        press(cx, handle, "enter");
+        owner.read_with(cx, |owner, cx| {
+            assert!(owner.preset_popup.is_none());
+            assert_eq!(owner.fields["preset_name"].input.read(cx).text(), "Second");
+            assert!(matches!(&owner.commands.back().unwrap().command,
+                Command::EqualizerEdit { edit: EqualizerEdit::LoadPreset { name } } if name == "Second"));
+        });
+        // Tab reaches Manage; its first tab stop is the native name input.
+        press(cx, handle, "tab");
+        press(cx, handle, "enter");
+        cx.update_window(handle, |_, window, cx| {
+            owner.read_with(cx, |owner, cx| {
+                assert!(owner.preset_popup.as_ref().unwrap().manage);
+                assert!(
+                    owner.fields["preset_name"]
+                        .input
+                        .read(cx)
+                        .is_focused(window)
+                );
+            });
+        })
+        .unwrap();
+        cx.update_window(handle, |_, window, cx| {
+            use gpui::EntityInputHandler as _;
+            let input = owner.read_with(cx, |owner, _| owner.fields["preset_name"].input.clone());
+            input.update(cx, |input, cx| {
+                input.replace_and_mark_text_in_range(None, "预设", None, window, cx)
+            });
+        })
+        .unwrap();
+        press(cx, handle, "escape");
+        assert!(owner.read_with(cx, |owner, _| owner.preset_popup.is_some()));
+        press(cx, handle, "escape");
+        assert!(owner.read_with(cx, |owner, _| owner.preset_popup.is_none()));
+        // The next trigger belongs to the second panel, never both panels.
+        press(cx, handle, "tab");
+        press(cx, handle, "enter");
+        assert_eq!(
+            owner.read_with(cx, |owner, _| owner.preset_popup.as_ref().unwrap().panel),
+            8
+        );
+        owner.update(cx, |owner, cx| {
+            owner.sync_panels(&crate::gui::layout::Layout::default(), false, cx);
+            cx.notify();
+        });
+        draw(cx, handle);
+        assert!(owner.read_with(cx, |owner, _| owner.preset_popup.is_none()));
+        cx.update_window(handle, |_, window, cx| {
+            scope.handle().focus(window, cx);
+            scope.advance(false, window, cx);
+        })
+        .unwrap();
+        draw(cx, handle);
+        press(cx, handle, "enter");
+        click(cx, handle, "preset-outside");
+        assert!(owner.read_with(cx, |owner, _| owner.preset_popup.is_none()));
+        assert_eq!(
+            outside_clicks.get(),
+            0,
+            "dismissal must not activate the underlying action"
+        );
+        click(cx, handle, "preset-outside");
+        assert_eq!(
+            outside_clicks.get(),
+            1,
+            "the next ordinary click remains live"
+        );
+        owner.update(cx, |owner, cx| {
+            let mut state = (*owner.state).clone();
+            Arc::make_mut(&mut state.system.config).equalizer.enabled = false;
+            owner.reconcile(Rc::new(state), cx);
+        });
+        draw(cx, handle);
+        cx.update_window(handle, |_, window, cx| {
+            scope.handle().focus(window, cx);
+            scope.advance(false, window, cx);
+        })
+        .unwrap();
+        draw(cx, handle);
+        press(cx, handle, "enter");
+        assert_eq!(
+            outside_clicks.get(),
+            2,
+            "Tab skips every disabled preset control"
+        );
+        cx.update_window(handle, |_, window, cx| {
+            origin.as_ref().unwrap().focus(window, cx);
+        })
+        .unwrap();
+        draw(cx, handle);
+        press(cx, handle, "enter");
+        assert!(owner.read_with(cx, |owner, _| owner.preset_popup.is_none()));
+    }
+
     #[gpui::test]
     fn gain_preedit_submits_once_only_after_unchanged_unmark_or_commit(cx: &mut TestAppContext) {
         let (_directory, _runtime, owner, editor, handle) = fixture_with_owner(cx);
@@ -2714,6 +2906,35 @@ mod tests {
         cx.run_until_parked();
         cx.update_window(handle, |_, window, cx| window.draw(cx).clear(cx))
             .unwrap();
+    }
+
+    fn press(cx: &mut TestAppContext, handle: AnyWindowHandle, key: &str) {
+        use gpui::InputEvent as _;
+        let keystroke = gpui::Keystroke::parse(key).unwrap();
+        cx.update_window(handle, |_, window, cx| {
+            // GPUI commits native keyboard Click on key-up with matching focus.
+            // simulate_keystrokes dispatches only key-down, never that activation.
+            window.dispatch_event(
+                KeyDownEvent {
+                    keystroke: keystroke.clone(),
+                    is_held: false,
+                    prefer_character_input: false,
+                }
+                .to_platform_input(),
+                cx,
+            );
+            window.dispatch_event(gpui::KeyUpEvent { keystroke }.to_platform_input(), cx);
+        })
+        .unwrap();
+        draw(cx, handle);
+        // Opening a FocusScope advances from its sentinel after the new surface
+        // is painted; TestAppContext has no platform frame loop to deliver it.
+        let callbacks = cx
+            .update_window(handle, |_, window, cx| window.simulate_next_frame(cx))
+            .unwrap();
+        if callbacks > 0 {
+            draw(cx, handle);
+        }
     }
 
     fn click(cx: &mut TestAppContext, handle: AnyWindowHandle, selector: &'static str) {

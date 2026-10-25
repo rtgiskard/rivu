@@ -692,7 +692,9 @@ geometry or editing behavior; ordinary standalone inputs keep their input surfac
 Disabling an input keeps its draft while rejecting edits and removing its Tab
 stop. `SearchField` owns expansion, clear/Escape interaction and a cancellable
 debounce task; the host supplies the delay, text and count formatter. Clearing or
-resetting invalidates an older pending query. Its single-line height is bounded
+resetting invalidates an older pending query. Returning to the applied, trimmed
+query also cancels pending work without scheduling another wake; IME preedit
+continues to participate in live filtering. Its single-line height is bounded
 in both horizontal and vertical parent layouts.
 
 `Input::new(name, value, placeholder, cx)` requires a resolved accessible name;
@@ -725,6 +727,16 @@ generation and cannot dismiss a replacement popup.
 Owners handle select-mode keys in capture, before GPUI arms native Enter/Space
 activation. `ChoiceDisposition::apply` prevents that activation from being armed;
 it cannot clear one already registered by an earlier listener.
+
+Monitor EQ preset and management popovers have one explicit panel owner and use
+the shared focus scope for native keyboard traversal. Closing restores the live
+trigger only while focus still belongs to that popover; an outside press dismisses
+without activating the underlying control. Hiding the owner, changing its page
+or invalidating its geometry retires the popover. Disabled EQ removes preset
+actions from keyboard traversal as well as rejecting activation.
+Popup changes invalidate only the old/new owner editors. External preset-name
+changes refresh the open owner; shared name-draft edits refresh active monitor
+labels, without observing every processing-owner notification.
 
 Ordinary form and confirmation dialogs use `Dialog::scroll_card` for padded,
 viewport-bounded vertical scrolling, with width chosen by the caller. Specialized
@@ -762,13 +774,28 @@ Library's sparse tree, album grid projection, and History's column geometry rema
 feature-owned; bounded heterogeneous duplicate-review pages use ordinary scroll
 areas rather than uniform-row virtualization.
 
+The content menu's playlist-target page owns one logical cursor and one native
+list focus stop, not one tab stop per rendered row. Arrow, Page, Home and End keys
+move the cursor and scroll it into view; New and Back remain ordinary menu stops.
+The cursor binds a loaded row ID to the current catalog revision/query, rejecting
+unloaded or replaced targets at submission. It retains no copy of the catalog;
+the same sparse viewport demand path continues to fetch missing rows. Returning
+to the parent menu restores the Playlist trigger, whose explicit focus handle
+also explicitly opts into native Tab traversal.
+
 `scrollable_area` assembles a supplied vertical viewport and its scrollbar around
-the same owner-retained `Rc<ScrollHandle>`; it creates no scroll state. Workspace
-`ScrollViews` retains the one handle per panel/region. Hiding a tab preserves it;
+the same owner-retained `Rc<ScrollHandle>`; it creates no additional position handle.
+Workspace `ScrollViews` retains the one handle per panel/region. Hiding a tab preserves it;
 activating a layout resets the registry and the next render obtains its current
 handle. Processing workbench regions do not keep a second handle cache. Settings
 and keyboard help retain their independent owner-held handles; Metadata and
 Playback keep their existing ordinary tracked scrolling without added scrollbars.
+
+The scrollbar owns its element-local pointer gesture and an activation subscription,
+released with that element. Window exit or deactivation cancels the gesture;
+returning with a button held cannot revive it. Geometry or handle replacement
+cancels movement but retains ownership of the pending release, preventing it from
+reaching a row.
 
 ==== Progress and sliders
 

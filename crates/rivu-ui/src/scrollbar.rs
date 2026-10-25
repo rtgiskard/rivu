@@ -1,10 +1,11 @@
-use std::{cell::RefCell, rc::Rc};
+use std::rc::Rc;
 
 use gpui::{
-    App, Bounds, DispatchPhase, Element, ElementId, GlobalElementId, Hitbox, HitboxBehavior,
-    InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, ScrollWheelEvent, Style, UniformListScrollHandle, Window, div, fill,
-    linear_color_stop, linear_gradient, point, prelude::*, px, relative, rgb, size,
+    App, Bounds, DispatchPhase, Element, ElementId, Entity, GlobalElementId, Hitbox,
+    HitboxBehavior, InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent,
+    MouseExitEvent, MouseMoveEvent, MouseUpEvent, Pixels, ScrollWheelEvent, Style, Subscription,
+    UniformListScrollHandle, Window, div, fill, linear_color_stop, linear_gradient, point,
+    prelude::*, px, relative, rgb, size,
 };
 
 const SLOT_WIDTH: f32 = 12.;
@@ -199,6 +200,7 @@ struct ScrollbarState {
     // An owned press survives geometry invalidation so its release cannot reach
     // a row. A missing grab offset cancels movement until that release.
     gesture: Option<Gesture>,
+    _activation: Subscription,
 }
 
 impl ScrollbarState {
@@ -261,7 +263,7 @@ struct Scrollbar {
 }
 
 struct FrameState {
-    state: Rc<RefCell<ScrollbarState>>,
+    state: Entity<ScrollbarState>,
     hitbox: Hitbox,
 }
 
@@ -307,22 +309,27 @@ impl Element for Scrollbar {
         bounds: Bounds<Pixels>,
         _: &mut (),
         window: &mut Window,
-        _: &mut App,
+        cx: &mut App,
     ) -> FrameState {
         let geometry = Geometry::read(bounds, &self.scroll);
-        let state = window.with_element_state::<Rc<RefCell<ScrollbarState>>, _>(
+        let state = window.with_element_state::<Entity<ScrollbarState>, _>(
             id.expect("scrollbar has a stable element id"),
-            |state, _| {
+            |state, window| {
                 let state = state.unwrap_or_else(|| {
-                    Rc::new(RefCell::new(ScrollbarState {
+                    cx.new(|cx: &mut gpui::Context<ScrollbarState>| ScrollbarState {
                         scroll: self.scroll.clone(),
                         geometry,
                         hovered: false,
                         gesture: None,
-                    }))
+                        _activation: cx.observe_window_activation(window, |state, window, _| {
+                            if !window.is_window_active() {
+                                state.gesture = None;
+                                state.hovered = false;
+                            }
+                        }),
+                    })
                 });
-                {
-                    let mut retained = state.borrow_mut();
+                state.update(cx, |retained, _| {
                     if !retained.scroll.same_handle(&self.scroll) {
                         retained.scroll = self.scroll.clone();
                         retained.cancel_motion();
@@ -332,7 +339,7 @@ impl Element for Scrollbar {
                     // Retain the same invariant for empty lists as well.
                     let offset = self.scroll.handle().offset().y;
                     retained.set_offset(offset);
-                }
+                });
                 (state.clone(), state)
             },
         );
@@ -353,9 +360,10 @@ impl Element for Scrollbar {
         cx: &mut App,
     ) {
         let theme = crate::theme::palette(cx);
+        let hovered = frame.hitbox.is_hovered(window);
+        frame.state.update(cx, |state, _| state.hovered = hovered);
         {
-            let mut state = frame.state.borrow_mut();
-            state.hovered = frame.hitbox.is_hovered(window);
+            let state = frame.state.read(cx);
             let offset = self.scroll.handle().offset().y;
             paint_scroll_edges(theme, state.geometry, offset, window);
             if let Some(mut thumb) = state.geometry.thumb(offset) {
@@ -381,7 +389,7 @@ impl Element for Scrollbar {
         window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
             if phase == DispatchPhase::Capture && hitbox.is_hovered(window) {
                 if event.button == MouseButton::Left {
-                    state.borrow_mut().begin(event.position.y);
+                    state.update(cx, |state, _| state.begin(event.position.y));
                     window.refresh();
                 }
                 window.prevent_default();
@@ -395,11 +403,15 @@ impl Element for Scrollbar {
             if phase != DispatchPhase::Capture {
                 return;
             }
-            let mut state = state.borrow_mut();
-            let hovered = hitbox.is_hovered(window);
-            let hover_changed = hovered != state.hovered;
-            state.hovered = hovered;
-            let owned = state.move_pointer(event.position.y, event.dragging());
+            let (hover_changed, owned) = state.update(cx, |state, _| {
+                let hovered = hitbox.is_hovered(window);
+                let hover_changed = hovered != state.hovered;
+                state.hovered = hovered;
+                (
+                    hover_changed,
+                    state.move_pointer(event.position.y, event.dragging()),
+                )
+            });
             if hover_changed || owned {
                 window.refresh();
             }
@@ -412,7 +424,8 @@ impl Element for Scrollbar {
         let hitbox = frame.hitbox.clone();
         window.on_mouse_event(move |event: &MouseUpEvent, phase, window, cx| {
             if phase == DispatchPhase::Capture {
-                let owned = event.button == MouseButton::Left && state.borrow_mut().release();
+                let owned = event.button == MouseButton::Left
+                    && state.update(cx, |state, _| state.release());
                 if owned || hitbox.is_hovered(window) {
                     window.refresh();
                     cx.stop_propagation();
@@ -421,10 +434,25 @@ impl Element for Scrollbar {
         });
 
         let state = frame.state.clone();
+        window.on_mouse_event(move |_: &MouseExitEvent, phase, window, cx| {
+            if phase == DispatchPhase::Capture {
+                let changed = state.update(cx, |state, _| {
+                    let owned = state.gesture.take().is_some();
+                    let changed = state.hovered || owned;
+                    state.hovered = false;
+                    changed
+                });
+                if changed {
+                    window.refresh();
+                }
+            }
+        });
+
+        let state = frame.state.clone();
         let hitbox = frame.hitbox.clone();
         window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
             if phase == DispatchPhase::Bubble && hitbox.should_handle_scroll(window) {
-                let state = state.borrow();
+                let state = state.read(cx);
                 let delta = event.delta.pixel_delta(window.line_height()).y;
                 let offset = state.scroll.handle().offset().y;
                 state.set_offset(offset + delta);
@@ -454,6 +482,7 @@ mod tests {
             geometry,
             hovered: false,
             gesture: None,
+            _activation: Subscription::new(|| {}),
         }
     }
 
@@ -518,5 +547,146 @@ mod tests {
         assert!(state.release());
         state.begin(px(15.));
         assert!(state.gesture.is_none());
+    }
+
+    struct ScrollFixture {
+        scroll: UniformListScrollHandle,
+    }
+
+    impl gpui::Render for ScrollFixture {
+        fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+            div().w(px(200.)).h(px(200.)).child(
+                crate::VirtualList::new("rows", 100, &self.scroll, |range, _, _| {
+                    range
+                        .map(|index| div().id(index).h(px(20.)))
+                        .collect::<Vec<_>>()
+                })
+                .size_full()
+                .scrollbar("scroll"),
+            )
+        }
+    }
+
+    #[test]
+    fn scrollbar_cancels_drag_on_window_exit_and_deactivation() {
+        use gpui::{InputEvent, TestAppContext};
+
+        for deactivate in [false, true] {
+            let mut cx = TestAppContext::single();
+            cx.update(crate::theme::init_test);
+            let scroll = UniformListScrollHandle::new();
+            let window = cx.add_window({
+                let scroll = scroll.clone();
+                move |_, _| ScrollFixture { scroll }
+            });
+            let other = cx.add_window(|_, _| ScrollFixture {
+                scroll: UniformListScrollHandle::new(),
+            });
+            let handle = window.into();
+            cx.update_window(handle, |_, window, cx| {
+                window.activate_window();
+                window.draw(cx).clear(cx);
+            })
+            .unwrap();
+            cx.run_until_parked();
+            cx.update_window(handle, |_, window, cx| {
+                window.simulate_mouse_move(point(px(194.), px(10.)), cx);
+                window.dispatch_event(
+                    MouseDownEvent {
+                        button: MouseButton::Left,
+                        position: point(px(194.), px(10.)),
+                        ..Default::default()
+                    }
+                    .to_platform_input(),
+                    cx,
+                );
+                window.dispatch_event(
+                    MouseMoveEvent {
+                        position: point(px(194.), px(50.)),
+                        pressed_button: Some(MouseButton::Left),
+                        ..Default::default()
+                    }
+                    .to_platform_input(),
+                    cx,
+                );
+            })
+            .unwrap();
+            let offset = scroll.0.borrow().base_handle.offset();
+            assert!(offset.y < px(0.), "the initial drag must scroll");
+            if deactivate {
+                cx.update_window(other.into(), |_, window, _| window.activate_window())
+                    .unwrap();
+                cx.run_until_parked();
+                // Reactivate without painting an inactive frame: cancellation is event-driven.
+                cx.update_window(handle, |_, window, _| window.activate_window())
+                    .unwrap();
+                cx.run_until_parked();
+            } else {
+                cx.update_window(handle, |_, window, cx| {
+                    window.dispatch_event(
+                        gpui::MouseExitEvent {
+                            position: point(px(400.), px(50.)),
+                            pressed_button: Some(MouseButton::Left),
+                            ..Default::default()
+                        }
+                        .to_platform_input(),
+                        cx,
+                    );
+                })
+                .unwrap();
+            }
+            cx.update_window(handle, |_, window, cx| {
+                window.dispatch_event(
+                    MouseMoveEvent {
+                        position: point(px(100.), px(150.)),
+                        pressed_button: Some(MouseButton::Left),
+                        ..Default::default()
+                    }
+                    .to_platform_input(),
+                    cx,
+                );
+            })
+            .unwrap();
+            assert_eq!(
+                scroll.0.borrow().base_handle.offset(),
+                offset,
+                "cancelled drag revived: deactivate={deactivate}"
+            );
+            cx.update_window(handle, |_, window, cx| {
+                window.dispatch_event(
+                    MouseUpEvent {
+                        button: MouseButton::Left,
+                        position: point(px(100.), px(150.)),
+                        ..Default::default()
+                    }
+                    .to_platform_input(),
+                    cx,
+                );
+                window.simulate_mouse_move(point(px(194.), px(50.)), cx);
+                window.dispatch_event(
+                    MouseDownEvent {
+                        button: MouseButton::Left,
+                        position: point(px(194.), px(50.)),
+                        ..Default::default()
+                    }
+                    .to_platform_input(),
+                    cx,
+                );
+                window.dispatch_event(
+                    MouseMoveEvent {
+                        position: point(px(194.), px(80.)),
+                        pressed_button: Some(MouseButton::Left),
+                        ..Default::default()
+                    }
+                    .to_platform_input(),
+                    cx,
+                );
+            })
+            .unwrap();
+            assert!(
+                scroll.0.borrow().base_handle.offset().y < offset.y,
+                "a new drag must still scroll"
+            );
+        }
     }
 }
