@@ -85,8 +85,9 @@ impl FirEqualizer {
             inverse,
         };
         if !bypass {
+            let mut designer = KernelDesigner::new(sample_rate, taps);
             for channel in 0..channels {
-                let impulse = design_kernel(config, sample_rate, channels, channel, taps)?;
+                let impulse = designer.design(config, sample_rate, channels, channel)?;
                 for partition in 0..partitions {
                     equalizer.work.fill(Complex::default());
                     for (bin, &value) in equalizer
@@ -234,43 +235,81 @@ fn finite_complex(values: &[Complex<f32>]) -> bool {
         .all(|value| value.re.is_finite() && value.im.is_finite())
 }
 
-fn design_kernel(
-    config: &EqualizerConfig,
-    sample_rate: u32,
-    channels: usize,
-    channel: usize,
-    taps: usize,
-) -> Result<Vec<f32>> {
-    let size = (taps * 8).next_power_of_two();
-    let frequencies: Vec<_> = (0..=size / 2)
-        .map(|bin| bin as f64 * f64::from(sample_rate) / size as f64)
-        .collect();
-    let mut decibels = vec![0.0; frequencies.len()];
-    config.sample_response_db(sample_rate, channels, channel, &frequencies, &mut decibels)?;
-    let mut spectrum = vec![Complex::<f64>::default(); size];
-    for (bin, db) in decibels.into_iter().enumerate() {
-        let magnitude = 10.0_f64.powf(db / 20.0);
-        ensure!(magnitude.is_finite(), "FIR target response is not finite");
-        spectrum[bin].re = magnitude;
-        if bin != 0 && bin != size / 2 {
-            spectrum[size - bin].re = magnitude;
+/// Shared only by the channels of one construction, then released before use.
+struct KernelDesigner {
+    frequencies: Vec<f64>,
+    decibels: Vec<f64>,
+    spectrum: Vec<Complex<f64>>,
+    inverse: Arc<dyn Fft<f64>>,
+    scratch: Vec<Complex<f64>>,
+    window: Vec<f64>,
+    impulse: Vec<f32>,
+}
+
+impl KernelDesigner {
+    fn new(sample_rate: u32, taps: usize) -> Self {
+        let size = (taps * 8).next_power_of_two();
+        let frequencies: Vec<_> = (0..=size / 2)
+            .map(|bin| bin as f64 * f64::from(sample_rate) / size as f64)
+            .collect();
+        let inverse = FftPlanner::new().plan_fft_inverse(size);
+        let scratch = vec![Complex::default(); inverse.get_inplace_scratch_len()];
+        let window = (0..=(taps - 1) / 2)
+            .map(|index| {
+                let phase = 2.0 * PI * index as f64 / (taps - 1) as f64;
+                0.42 - 0.5 * phase.cos() + 0.08 * (2.0 * phase).cos()
+            })
+            .collect();
+        Self {
+            decibels: vec![0.0; frequencies.len()],
+            frequencies,
+            spectrum: vec![Complex::default(); size],
+            inverse,
+            scratch,
+            window,
+            impulse: vec![0.0; taps],
         }
     }
-    FftPlanner::new()
-        .plan_fft_inverse(size)
-        .process(&mut spectrum);
-    let center = (taps - 1) / 2;
-    let mut impulse = vec![0.0; taps];
-    for index in 0..=center {
-        let phase = 2.0 * PI * index as f64 / (taps - 1) as f64;
-        let window = 0.42 - 0.5 * phase.cos() + 0.08 * (2.0 * phase).cos();
-        let lag = (index + size - center) % size;
-        let value = (spectrum[lag].re * window / size as f64) as f32;
-        ensure!(value.is_finite(), "FIR impulse is not finite");
-        impulse[index] = value;
-        impulse[taps - 1 - index] = value;
+
+    fn design(
+        &mut self,
+        config: &EqualizerConfig,
+        sample_rate: u32,
+        channels: usize,
+        channel: usize,
+    ) -> Result<&[f32]> {
+        config.sample_response_db(
+            sample_rate,
+            channels,
+            channel,
+            &self.frequencies,
+            &mut self.decibels,
+        )?;
+        let size = self.spectrum.len();
+        // The previous inverse FFT leaves imaginary components as well as real
+        // values; each channel starts from the same real, even target spectrum.
+        self.spectrum.fill(Complex::default());
+        for (bin, &db) in self.decibels.iter().enumerate() {
+            let magnitude = 10.0_f64.powf(db / 20.0);
+            ensure!(magnitude.is_finite(), "FIR target response is not finite");
+            self.spectrum[bin].re = magnitude;
+            if bin != 0 && bin != size / 2 {
+                self.spectrum[size - bin].re = magnitude;
+            }
+        }
+        self.inverse
+            .process_with_scratch(&mut self.spectrum, &mut self.scratch);
+        let taps = self.impulse.len();
+        let center = (taps - 1) / 2;
+        for (index, &window) in self.window.iter().enumerate() {
+            let lag = (index + size - center) % size;
+            let value = (self.spectrum[lag].re * window / size as f64) as f32;
+            ensure!(value.is_finite(), "FIR impulse is not finite");
+            self.impulse[index] = value;
+            self.impulse[taps - 1 - index] = value;
+        }
+        Ok(&self.impulse)
     }
-    Ok(impulse)
 }
 
 #[cfg(test)]
@@ -340,6 +379,64 @@ mod tests {
             .sum();
         assert!((20.0 * response.norm().log10() - 12.0).abs() < 0.1);
         assert!((signal[fir.latency_frames() * 2 + 1] - 1.0).abs() < 2e-6);
+    }
+
+    #[test]
+    fn channel_targets_and_global_solo_match_independent_streams() {
+        let selected = EqBand {
+            solo: true,
+            gain_db: 9.0,
+            channels: ChannelTarget::Selected(vec![0, 2]),
+            ..Default::default()
+        };
+        let config = EqualizerConfig {
+            enabled: true,
+            preamp_db: -3.0,
+            bands: vec![
+                selected.clone(),
+                EqBand {
+                    gain_db: -12.0,
+                    ..Default::default()
+                },
+                EqBand {
+                    enabled: false,
+                    solo: true,
+                    gain_db: 18.0,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let mut multi = FirEqualizer::new(&config, 48_000, 3, 513).unwrap();
+        let frames = multi.tail_frames() + 1024;
+        let input: Vec<_> = (0..frames)
+            .map(|i| {
+                if i < 1024 {
+                    (i as f32 * 0.13).sin()
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let mut actual: Vec<_> = input.iter().flat_map(|&x| [x; 3]).collect();
+        multi.process_interleaved(&mut actual).unwrap();
+        for channel in 0..3 {
+            let mut independent = config.clone();
+            independent.bands = if channel == 1 {
+                Vec::new()
+            } else {
+                vec![EqBand {
+                    channels: ChannelTarget::All,
+                    ..selected.clone()
+                }]
+            };
+            let mut mono = FirEqualizer::new(&independent, 48_000, 1, 513).unwrap();
+            let mut expected = input.clone();
+            mono.process_interleaved(&mut expected).unwrap();
+            for (frame, expected) in actual.as_chunks::<3>().0.iter().zip(expected) {
+                assert_eq!(frame[channel], expected);
+            }
+        }
     }
 
     #[test]

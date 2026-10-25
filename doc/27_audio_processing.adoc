@@ -601,8 +601,13 @@ unification can still enable execution when these crates share a dependency
 graph with an execution consumer. The `equalizer_benchmark` and `denoise_render`
 examples require `--features execution`.
 
-Disabled FIR constructs no FFT plans or convolution storage. Classical restoration
-prepares only the required path: exact bypass for zero Wet or an entirely disabled
+Disabled FIR constructs no FFT plans or convolution storage.
+Active FIR construction shares its frequency grid, inverse design FFT plan and
+scratch, window and impulse workspace across channels of that construction.
+Each channel still evaluates its own target response; the workspace is released
+before streaming and is not a global kernel cache.
+
+Classical restoration prepares only the required path: exact bypass for zero Wet or an entirely disabled
 chain, time-domain state for hum/repair without spectral denoising, and FFT/STFT
 storage only for spectral modes. Configuration and required noise profiles are
 still validated on bypass. Hum-only processing has no lookahead or dry-alignment
