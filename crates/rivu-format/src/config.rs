@@ -15,6 +15,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+mod edit;
 mod file;
 pub mod paths;
 pub mod processing_graph;
@@ -1047,5 +1048,22 @@ pub fn to_toml(config: &Config) -> Result<String> {
     let contents = toml::to_string_pretty(&file::FileConfigView::from(config))
         .context("cannot serialize configuration")?;
     check_config_size(contents.len() as u64)?;
+    Ok(contents)
+}
+
+/// Apply effective configuration changes without rebuilding the original TOML.
+/// An explicit baseline is the owner's last saved (possibly normalized) config;
+/// otherwise the validated original supplies it. Empty input defaults that baseline.
+/// Existing input and the final output retain the shared size and validation rules.
+pub fn update_toml(contents: &str, baseline: Option<&Config>, config: &Config) -> Result<String> {
+    let original = from_toml(contents)?;
+    let baseline = baseline.unwrap_or(&original);
+    config.validate()?;
+    let mut document: toml_edit::DocumentMut = contents.parse()?;
+    file::FileConfig::patch(document.as_table_mut(), baseline, config)
+        .context("cannot update configuration")?;
+    let contents = document.to_string();
+    check_config_size(contents.len() as u64)?;
+    validate_toml(&contents)?;
     Ok(contents)
 }

@@ -15,6 +15,7 @@ use std::{
 pub trait ConfigPersistence: Sized {
     fn load(path: &Path) -> Result<Self>;
     fn save(&self, path: &Path) -> Result<()>;
+    fn save_with_baseline(&self, path: &Path, baseline: Option<&Self>) -> Result<()>;
 }
 
 impl ConfigPersistence for Config {
@@ -33,7 +34,7 @@ impl ConfigPersistence for Config {
             .with_context(|| format!("invalid configuration {}", path.display()))
     }
 
-    /// Validate, serialize, and atomically replace the destination using a
+    /// Validate, patch, and atomically replace the destination using a
     /// private same-directory temporary file. Symbolic links are followed to
     /// their destination, including missing targets; the links stay untouched.
     /// Failures before replacement leave the previous file untouched and clean
@@ -43,8 +44,10 @@ impl ConfigPersistence for Config {
     /// writes must not block on storage flushes. Existing directory
     /// permissions are never changed.
     fn save(&self, path: &Path) -> Result<()> {
-        let contents = rivu_format::config::to_toml(self)
-            .with_context(|| format!("cannot serialize configuration {}", path.display()))?;
+        self.save_with_baseline(path, None)
+    }
+
+    fn save_with_baseline(&self, path: &Path, baseline: Option<&Self>) -> Result<()> {
         let destination = configuration_destination(path)
             .with_context(|| format!("cannot resolve configuration {}", path.display()))?;
         let path = destination.as_ref();
@@ -53,6 +56,23 @@ impl ConfigPersistence for Config {
             "configuration path must name a file: {}",
             path.display()
         );
+        let original = match rivu_format::config::read_toml(path) {
+            Ok(contents) => Some(contents),
+            Err(error) if error.kind() == ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("cannot read configuration {}", path.display()));
+            }
+        };
+        let contents = rivu_format::config::update_toml(
+            original.as_deref().unwrap_or_default(),
+            baseline.filter(|_| original.is_some()),
+            self,
+        )
+        .with_context(|| format!("cannot update configuration {}", path.display()))?;
+        if original.as_deref() == Some(contents.as_str()) {
+            return Ok(());
+        }
         let parent = path
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
@@ -132,8 +152,8 @@ mod tests {
     use std::os::unix::fs::symlink;
 
     #[test]
-    fn load_shares_the_format_byte_budget_and_preserves_input() {
-        use rivu_format::config::{MAX_CONFIG_BYTES, from_toml};
+    fn filesystem_reads_share_the_format_byte_budget_and_preserve_input() {
+        use rivu_format::config::MAX_CONFIG_BYTES;
 
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.toml");
@@ -144,10 +164,23 @@ mod tests {
             if size <= MAX_CONFIG_BYTES {
                 assert_eq!(result.unwrap(), Config::default());
             } else {
-                let expected = from_toml(&text).unwrap_err();
                 assert_eq!(
-                    result.unwrap_err().root_cause().to_string(),
-                    expected.to_string()
+                    result
+                        .unwrap_err()
+                        .downcast_ref::<std::io::Error>()
+                        .unwrap()
+                        .kind(),
+                    ErrorKind::InvalidData,
+                );
+                let config = Config {
+                    volume: 0.25,
+                    ..Config::default()
+                };
+                assert!(config.save(&path).is_err());
+                assert!(
+                    config
+                        .save_with_baseline(&path, Some(&Config::default()))
+                        .is_err()
                 );
             }
             assert_eq!(fs::read_to_string(&path).unwrap(), text);
@@ -167,11 +200,8 @@ mod tests {
             ..Config::default()
         };
         config.validate().unwrap();
-        let Err(expected) = rivu_format::config::to_toml(&config) else {
-            panic!("oversized serialization was accepted");
-        };
         let error = config.save(&path).unwrap_err();
-        assert_eq!(error.root_cause().to_string(), expected.to_string());
+        assert!(format!("{error:#}").contains("exceeds"));
         assert_eq!(fs::read_to_string(&path).unwrap(), previous);
         assert_eq!(Config::load(&path).unwrap().volume, 0.25);
         assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
@@ -179,6 +209,44 @@ mod tests {
         let missing = directory.path().join("missing/config.toml");
         assert!(config.save(&missing).is_err());
         assert!(!missing.parent().unwrap().exists());
+    }
+
+    #[test]
+    fn retained_comments_count_toward_the_output_budget() {
+        use rivu_format::config::MAX_CONFIG_BYTES;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let original = format!("#{}\n", "x".repeat(MAX_CONFIG_BYTES - 2));
+        fs::write(&path, &original).unwrap();
+        assert_eq!(Config::load(&path).unwrap(), Config::default());
+        let config = Config {
+            volume: 0.25,
+            ..Config::default()
+        };
+        assert!(config.save(&path).is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn non_utf8_input_is_not_overwritten_with_or_without_a_saved_baseline() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let original = b"# invalid UTF-8: \xff\n";
+        fs::write(&path, original).unwrap();
+        let config = Config {
+            volume: 0.25,
+            ..Config::default()
+        };
+        assert!(config.save(&path).is_err());
+        assert!(
+            config
+                .save_with_baseline(&path, Some(&Config::default()))
+                .is_err()
+        );
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
     }
 
     #[test]

@@ -57,6 +57,14 @@ A save is skipped when the effective configuration matches the last successful
 save or the configuration loaded at startup. Starting Rivu does not rewrite an
 existing file; a missing file is created on the first such save or orderly exit.
 
+Saves patch only fields whose effective values changed since startup or the last
+successful save. Untouched values, comments, and formatting are retained, and
+omitted default-valued fields stay absent. Explicitly written defaults are not
+pruned; changing a field back to its default writes that value explicitly.
+Clearing an optional setting removes its key. Changed arrays, including arrays of
+tables, may be replaced as a unit rather than preserving their internal formatting
+and comments. A new or recreated file contains only overrides of the defaults.
+
 Playback controls and desktop shortcuts, including output selection, Still Mode,
 Waveform seeking, Library columns, and library-folder changes, take effect in
 memory without writing the configuration file. A later configuration save includes
@@ -87,23 +95,21 @@ so a FIFO does not wait for a writer. Configuration input is limited to 4 MiB of
 UTF-8 TOML, including comments. The application, offline migration tool and direct
 format parser enforce the same limit before parsing; file reads check the opened
 descriptor and read at most the limit plus one byte, including files that grow.
-Saving checks the serialized UTF-8 TOML against the same 4 MiB limit, including
-emitted defaults, formatting and string escapes. A configuration that fits when
-read can therefore be too large to save. An oversized save fails before creating
-directories or temporary files and leaves the existing file untouched; Settings
-Apply retains its draft under the usual save-failure rules.
+Saving checks the actual patched UTF-8 TOML document against the same 4 MiB limit,
+including retained comments, formatting, and string escapes. An oversized save
+fails before creating directories or temporary files and leaves the existing file
+untouched; Settings Apply retains its draft under the usual save-failure rules.
 Configuration symlinks are followed when saving, including relative chains and
 missing targets; saving atomically replaces the target file, not the links.
 Link loops and inaccessible targets are reported as errors without replacing the links.
 Configuration saves do not create a lock file. GUI and TUI changes share the same
 host core; data-directory ownership prevents a second host for that directory.
 Separate hosts sharing one configuration file, or external editors, are not
-coordinated: the last save wins, without merging external changes. Exit Rivu before
-editing the file manually, then restart to load the changes. Legacy
+coordinated. Format-preserving saves do not provide conflict detection or a merge
+of concurrent edits, and do not reload settings into the running core. Exit Rivu
+before editing the file manually, then restart to load the changes. Legacy
 `.config.toml.rivu-lock` files are ignored and not automatically removed; remove
 them only after all older Rivu instances using that configuration have exited.
-Saves serialize current settings rather than patching the original TOML; comments
-and formatting are not retained, and omitted default-valued fields can be written explicitly.
 
 == Parameters
 
@@ -1081,8 +1087,8 @@ selected instance style does not use them.
 == Configuration upgrades
 
 The application reads only the current configuration schema. A valid unversioned
-file needs no migration and is not rewritten merely to add a version. Normal
-application saves include the current `schema_version`.
+file needs no migration; normal application saves preserve an omitted
+`schema_version` rather than adding it.
 
 When an unversioned file fails current parsing or validation, the error retains
 the specific cause and explains the current-schema assumption. If it is an older

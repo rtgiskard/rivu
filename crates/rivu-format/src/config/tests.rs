@@ -338,3 +338,129 @@ fn graph_neural_validation_is_node_local_and_shared_with_global_settings() {
     config.neural = neural;
     assert!(config.validate().is_err());
 }
+
+#[test]
+fn changed_fields_preserve_unrelated_toml_and_explicit_defaults() {
+    let original = "# Hand maintained\n[playback]\nvolume_percent=70 # chosen volume\nshuffle = false # explicit default\n[interface]\nlanguage = 'ZH_cn'\ntheme = 'rivu_dark' # pinned\n";
+    let baseline = from_toml(original).unwrap();
+    let mut config = baseline.clone();
+    config.volume = 0.25;
+    let saved = update_toml(original, Some(&baseline), &config).unwrap();
+    assert_eq!(
+        saved,
+        original.replace("volume_percent=70", "volume_percent=25.0")
+    );
+    assert_eq!(from_toml(&saved).unwrap(), config);
+    assert_eq!(update_toml(&saved, None, &config).unwrap(), saved);
+}
+
+#[test]
+fn new_configuration_only_materializes_changed_nested_fields() {
+    let baseline = Config::default();
+    let mut config = baseline.clone();
+    config.neural.threads = 2;
+    config.ui_scale = 1.25;
+    let saved = update_toml("", None, &config).unwrap();
+    let expected: toml::Value =
+        toml::from_str("[interface]\nscale = 1.25\n[neural]\nthreads = 2\n").unwrap();
+    let actual: toml::Value = toml::from_str(&saved).unwrap();
+    assert_eq!(actual, expected);
+    assert_eq!(from_toml(&saved).unwrap(), config);
+    assert_eq!(update_toml("", None, &baseline).unwrap(), "");
+}
+
+#[test]
+fn incremental_edits_preserve_inline_and_dotted_tables() {
+    for original in [
+        "interface = { scale = 1.0, font = 'monospace' } # inline\n",
+        "interface.scale = 1.0 # dotted\ninterface.font = 'monospace'\n",
+    ] {
+        let baseline = from_toml(original).unwrap();
+        let mut config = baseline.clone();
+        config.ui_scale = 1.25;
+        let saved = update_toml(original, Some(&baseline), &config).unwrap();
+        assert_eq!(saved, original.replace("1.0", "1.25"));
+        assert_eq!(from_toml(&saved).unwrap(), config);
+    }
+    let original = "visualizations = { spectrum = { labels = true }, cache = true }\n";
+    let baseline = from_toml(original).unwrap();
+    let mut config = baseline.clone();
+    config.spectrum_labels = false;
+    config.waveform_labels = !baseline.waveform_labels;
+    let saved = update_toml(original, Some(&baseline), &config).unwrap();
+    assert!(saved.contains("spectrum = { labels = false }"));
+    assert_eq!(from_toml(&saved).unwrap(), config);
+}
+
+#[test]
+fn clearing_optional_fields_removes_old_values_without_expanding_defaults() {
+    let original = "# Keep header\n[playback]\noutput_device = 'old device'\n[neural]\nspeech_manifest = '/models/speech.json'\n[visualizations.spectrum]\ndb_range = 80.0\n";
+    let baseline = from_toml(original).unwrap();
+    let mut config = baseline.clone();
+    config.output_device = None;
+    config.neural.speech_manifest = None;
+    config.spectrum_db_range = None;
+    let saved = update_toml(original, Some(&baseline), &config).unwrap();
+    assert_eq!(from_toml(&saved).unwrap(), config);
+    assert!(saved.contains("# Keep header"));
+    for key in [
+        "output_device",
+        "speech_manifest",
+        "db_range",
+        "threads",
+        "shuffle",
+    ] {
+        assert!(!saved.contains(key), "unexpected {key}: {saved}");
+    }
+}
+
+#[test]
+fn structured_arrays_replace_as_units_and_leave_other_fields_intact() {
+    let original = "# My presets\n[interface]\nfont = 'monospace' # keep\n";
+    let baseline = from_toml(original).unwrap();
+    let mut config = baseline.clone();
+    config.equalizer_presets.push(EqualizerPreset {
+        name: "Custom".into(),
+        config: EqualizerConfig::default(),
+    });
+    let saved = update_toml(original, Some(&baseline), &config).unwrap();
+    assert!(saved.contains("font = 'monospace' # keep"));
+    assert_eq!(from_toml(&saved).unwrap(), config);
+    let mut changed = config.clone();
+    changed.equalizer_presets[0].name = "Renamed".into();
+    let saved = update_toml(&saved, Some(&config), &changed).unwrap();
+    assert_eq!(from_toml(&saved).unwrap(), changed);
+    changed.equalizer_presets.clear();
+    let cleared = update_toml(&saved, None, &changed).unwrap();
+    assert_eq!(from_toml(&cleared).unwrap(), changed);
+}
+
+#[test]
+fn inline_structured_arrays_remain_valid_when_updated_and_cleared() {
+    let original = "equalizer_presets = [{ name = 'Custom', config = {} }] # presets\n";
+    let baseline = from_toml(original).unwrap();
+    let mut config = baseline.clone();
+    config.equalizer_presets[0].name = "Renamed".into();
+    let saved = update_toml(original, Some(&baseline), &config).unwrap();
+    assert_eq!(from_toml(&saved).unwrap(), config);
+    assert!(saved.ends_with(" # presets\n"));
+    let mut cleared = config.clone();
+    cleared.equalizer_presets.clear();
+    let saved = update_toml(&saved, Some(&config), &cleared).unwrap();
+    assert_eq!(from_toml(&saved).unwrap(), cleared);
+    assert!(saved.ends_with(" # presets\n"));
+}
+
+#[test]
+fn incremental_output_budget_includes_retained_comments() {
+    let original = format!("#{}\n", "x".repeat(MAX_CONFIG_BYTES - 2));
+    let baseline = from_toml(&original).unwrap();
+    let mut config = baseline.clone();
+    config.shuffle = true;
+    let error = update_toml(&original, Some(&baseline), &config).unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<io::Error>().unwrap().kind(),
+        io::ErrorKind::InvalidData
+    );
+    assert!(update_toml("[playback", Some(&baseline), &config).is_err());
+}

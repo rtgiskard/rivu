@@ -1,33 +1,67 @@
 //! Strict grouped representation used only by config.toml persistence.
 use super::*;
+use toml_edit::TableLike;
+
+// Serialize only changed runtime fields, using the same key and serde rules as
+// full exports. Optional fields serialize to an absent entry when cleared.
+macro_rules! patch_field {
+    ($table:expr, $baseline:expr, $config:expr, $(#[$attr:meta])* $key:ident => $field:ident : $ty:ty) => {
+        if $baseline.$field != $config.$field {
+            #[derive(Serialize)]
+            struct Field<'a> {
+                $(#[$attr])*
+                $key: &'a $ty,
+            }
+            let before = toml_edit::ser::to_document(&Field { $key: &$baseline.$field })?;
+            let mut after = toml_edit::ser::to_document(&Field { $key: &$config.$field })?;
+            super::edit::patch($table, stringify!($key), before.get(stringify!($key)), after.remove(stringify!($key)))?;
+        }
+    };
+}
 
 // Each leaf declares its file key, runtime field and type once. Loading overlays
 // supplied values on one Config::default(); saving borrows the runtime fields.
 macro_rules! file_group {
-    ($owned:ident, $view:ident { $( $(#[$attr:meta])* $key:ident => $field:ident : $ty:ty, )* } $(; $nested:ident : $nested_owned:ident, $nested_view:ident)?) => {
+    ($owned:ident, $view:ident { $( $(#[$attr:meta])* $key:ident => $field:ident : $ty:ty, )* } $(; $nested:ident : $nested_owned:ident, $nested_view:ident)*) => {
         #[derive(Default, Deserialize)]
         #[serde(default, deny_unknown_fields)]
         struct $owned {
             $( $(#[$attr])* $key: Option<$ty>, )*
-            $( $nested: $nested_owned, )?
+            $( $nested: $nested_owned, )*
         }
 
         impl $owned {
             fn apply(self, config: &mut Config) {
                 $( if let Some(value) = self.$key { config.$field = value; } )*
-                $( self.$nested.apply(config); )?
+                $( self.$nested.apply(config); )*
+            }
+
+            fn changed(baseline: &Config, config: &Config) -> bool {
+                $( baseline.$field != config.$field || )*
+                $( $nested_owned::changed(baseline, config) || )*
+                false
+            }
+
+            fn patch(parent: &mut dyn TableLike, key: &str, baseline: &Config, config: &Config) -> Result<()> {
+                if !Self::changed(baseline, config) {
+                    return Ok(());
+                }
+                let table = super::edit::group(parent, key)?;
+                $( patch_field!(table, baseline, config, $(#[$attr])* $key => $field: $ty); )*
+                $( $nested_owned::patch(table, stringify!($nested), baseline, config)?; )*
+                Ok(())
             }
         }
 
         #[derive(Serialize)]
         struct $view<'a> {
             $( $(#[$attr])* $key: &'a $ty, )*
-            $( $nested: $nested_view<'a>, )?
+            $( $nested: $nested_view<'a>, )*
         }
 
         impl<'a> From<&'a Config> for $view<'a> {
             fn from(config: &'a Config) -> Self {
-                Self { $( $key: &config.$field, )* $( $nested: config.into(), )? }
+                Self { $( $key: &config.$field, )* $( $nested: config.into(), )* }
             }
         }
     };
@@ -58,77 +92,18 @@ fn serialize_volume_percent<S: serde::Serializer>(
     serializer.serialize_f64(f64::from(*volume) * 100.0)
 }
 
-#[derive(Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-struct Playback {
-    output_device: Option<Option<String>>,
-    #[serde(deserialize_with = "deserialize_volume_percent")]
-    volume_percent: Option<f32>,
-    shuffle: Option<bool>,
-    repeat: Option<RepeatMode>,
-    play_count_threshold_percent: Option<f64>,
-    media_read_buffer_mb: Option<u32>,
-    ffmpeg_enabled: Option<bool>,
-    pipewire_auto_mix: Option<bool>,
-}
-
-impl Playback {
-    fn apply(self, config: &mut Config) {
-        if let Some(value) = self.output_device {
-            config.output_device = value;
-        }
-        if let Some(value) = self.volume_percent {
-            config.volume = value;
-        }
-        if let Some(value) = self.shuffle {
-            config.shuffle = value;
-        }
-        if let Some(value) = self.repeat {
-            config.repeat = value;
-        }
-        if let Some(value) = self.play_count_threshold_percent {
-            config.play_count_threshold_percent = value;
-        }
-        if let Some(value) = self.media_read_buffer_mb {
-            config.media_read_buffer_mb = value;
-        }
-        if let Some(value) = self.ffmpeg_enabled {
-            config.ffmpeg_enabled = value;
-        }
-        if let Some(value) = self.pipewire_auto_mix {
-            config.pipewire_auto_mix = value;
-        }
-    }
-}
-
-#[derive(Serialize)]
-struct PlaybackView<'a> {
+file_group!(Playback, PlaybackView {
     #[serde(skip_serializing_if = "Option::is_none")]
-    output_device: &'a Option<String>,
-    #[serde(serialize_with = "serialize_volume_percent")]
-    volume_percent: &'a f32,
-    shuffle: &'a bool,
-    repeat: &'a RepeatMode,
-    play_count_threshold_percent: &'a f64,
-    media_read_buffer_mb: &'a u32,
-    ffmpeg_enabled: &'a bool,
-    pipewire_auto_mix: &'a bool,
-}
-
-impl<'a> From<&'a Config> for PlaybackView<'a> {
-    fn from(config: &'a Config) -> Self {
-        Self {
-            output_device: &config.output_device,
-            volume_percent: &config.volume,
-            shuffle: &config.shuffle,
-            repeat: &config.repeat,
-            play_count_threshold_percent: &config.play_count_threshold_percent,
-            media_read_buffer_mb: &config.media_read_buffer_mb,
-            ffmpeg_enabled: &config.ffmpeg_enabled,
-            pipewire_auto_mix: &config.pipewire_auto_mix,
-        }
-    }
-}
+    output_device => output_device: Option<String>,
+    #[serde(deserialize_with = "deserialize_volume_percent", serialize_with = "serialize_volume_percent")]
+    volume_percent => volume: f32,
+    shuffle => shuffle: bool,
+    repeat => repeat: RepeatMode,
+    play_count_threshold_percent => play_count_threshold_percent: f64,
+    media_read_buffer_mb => media_read_buffer_mb: u32,
+    ffmpeg_enabled => ffmpeg_enabled: bool,
+    pipewire_auto_mix => pipewire_auto_mix: bool,
+});
 
 file_group!(Interface, InterfaceView {
     language => ui_language: String,
@@ -219,40 +194,20 @@ file_group!(AlbumArtwork, AlbumArtworkView {
     fps => album_artwork_fps: u16,
 });
 
-#[derive(Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-struct Visualizations {
-    still_mode: Option<bool>,
-    signal: Option<VisualizationSignal>,
-    analysis_fps: Option<u32>,
-    background: Option<RgbColor>,
-    palette: Option<VisualizationPalette>,
-    analysis_fft_size: Option<u32>,
-    analysis_window: Option<AnalysisWindow>,
-    db_range: Option<f32>,
-    cache: Option<bool>,
-    spectrum: Spectrum,
-    spectrogram: Spectrogram,
-    audio_visualizer: AudioVisualizer,
-    waveform: Waveform,
-}
-
-#[derive(Serialize)]
-struct VisualizationsView<'a> {
-    still_mode: &'a bool,
-    signal: &'a VisualizationSignal,
-    analysis_fps: &'a u32,
-    background: &'a RgbColor,
-    palette: &'a VisualizationPalette,
-    analysis_fft_size: &'a u32,
-    analysis_window: &'a AnalysisWindow,
-    db_range: &'a f32,
-    cache: &'a bool,
-    spectrum: SpectrumView<'a>,
-    spectrogram: SpectrogramView<'a>,
-    audio_visualizer: AudioVisualizerView<'a>,
-    waveform: WaveformView<'a>,
-}
+file_group!(Visualizations, VisualizationsView {
+    still_mode => still_mode: bool,
+    signal => visualization_signal: VisualizationSignal,
+    analysis_fps => analysis_fps: u32,
+    background => visual_background: RgbColor,
+    palette => visual_palette: VisualizationPalette,
+    analysis_fft_size => analysis_fft_size: u32,
+    analysis_window => analysis_window: AnalysisWindow,
+    db_range => visualization_db_range: f32,
+    cache => visualization_cache: bool,
+}; spectrum: Spectrum, SpectrumView
+; spectrogram: Spectrogram, SpectrogramView
+; audio_visualizer: AudioVisualizer, AudioVisualizerView
+; waveform: Waveform, WaveformView);
 
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -298,38 +253,27 @@ impl FileConfig {
             config.equalizer_presets = value;
         }
         config.equalizer_ab = self.equalizer_ab;
-        if let Some(value) = self.visualizations.signal {
-            config.visualization_signal = value;
-        }
-        if let Some(value) = self.visualizations.still_mode {
-            config.still_mode = value;
-        }
-        if let Some(value) = self.visualizations.analysis_fps {
-            config.analysis_fps = value;
-        }
-        if let Some(value) = self.visualizations.background {
-            config.visual_background = value;
-        }
-        if let Some(value) = self.visualizations.palette {
-            config.visual_palette = value;
-        }
-        if let Some(value) = self.visualizations.analysis_fft_size {
-            config.analysis_fft_size = value;
-        }
-        if let Some(value) = self.visualizations.analysis_window {
-            config.analysis_window = value;
-        }
-        if let Some(value) = self.visualizations.db_range {
-            config.visualization_db_range = value;
-        }
-        if let Some(value) = self.visualizations.cache {
-            config.visualization_cache = value;
-        }
-        self.visualizations.spectrum.apply(&mut config);
-        self.visualizations.spectrogram.apply(&mut config);
-        self.visualizations.audio_visualizer.apply(&mut config);
-        self.visualizations.waveform.apply(&mut config);
+        self.visualizations.apply(&mut config);
         config
+    }
+
+    pub(super) fn patch(
+        table: &mut dyn TableLike,
+        baseline: &Config,
+        config: &Config,
+    ) -> Result<()> {
+        Library::patch(table, "library", baseline, config)?;
+        Playback::patch(table, "playback", baseline, config)?;
+        Interface::patch(table, "interface", baseline, config)?;
+        Logging::patch(table, "logging", baseline, config)?;
+        Visualizations::patch(table, "visualizations", baseline, config)?;
+        patch_field!(table, baseline, config, equalizer => equalizer: EqualizerConfig);
+        patch_field!(table, baseline, config, denoise => denoise: DenoiseConfig);
+        patch_field!(table, baseline, config, neural => neural: NeuralConfig);
+        patch_field!(table, baseline, config, processing_graph => processing_graph: ProcessingGraph);
+        patch_field!(table, baseline, config, equalizer_presets => equalizer_presets: Vec<EqualizerPreset>);
+        patch_field!(table, baseline, config, #[serde(skip_serializing_if = "Option::is_none")] equalizer_ab => equalizer_ab: Option<EqualizerConfig>);
+        Ok(())
     }
 }
 
@@ -364,21 +308,7 @@ impl<'a> From<&'a Config> for FileConfigView<'a> {
             processing_graph: &config.processing_graph,
             equalizer_presets: &config.equalizer_presets,
             equalizer_ab: &config.equalizer_ab,
-            visualizations: VisualizationsView {
-                still_mode: &config.still_mode,
-                signal: &config.visualization_signal,
-                analysis_fps: &config.analysis_fps,
-                background: &config.visual_background,
-                palette: &config.visual_palette,
-                analysis_fft_size: &config.analysis_fft_size,
-                analysis_window: &config.analysis_window,
-                db_range: &config.visualization_db_range,
-                cache: &config.visualization_cache,
-                spectrum: config.into(),
-                spectrogram: config.into(),
-                audio_visualizer: config.into(),
-                waveform: config.into(),
-            },
+            visualizations: config.into(),
         }
     }
 }

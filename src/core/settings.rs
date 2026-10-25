@@ -133,7 +133,7 @@ impl Core {
             return Ok(());
         }
         let result = config
-            .save(&self.state.system.config_path)
+            .save_with_baseline(&self.state.system.config_path, self.saved_config.as_ref())
             .context("Saving configuration");
         match &result {
             Ok(()) => {

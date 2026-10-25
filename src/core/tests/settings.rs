@@ -115,6 +115,137 @@ fn missing_config_is_created_only_at_apply_or_orderly_exit() {
 }
 
 #[test]
+fn changed_apply_and_exit_preserve_comments_and_untouched_normalized_settings() {
+    for apply in [false, true] {
+        let (directory, mut core) = fixture();
+        let _audio = recording_audio(&mut core);
+        let path = core.state.system.config_path.clone();
+        let original = format!(
+            "# Hand-edited configuration\n[playback]\nvolume_percent = 75 # chosen volume\n[interface]\nlanguage = 'ZH_cn' # preserve spelling\npage_size=42\n[library]\nroots = ['{}/unused/..'] # preserve logical spelling\n",
+            directory.path().display(),
+        );
+        std::fs::write(&path, &original).unwrap();
+        let mut config = Config::load(&path).unwrap();
+        config.library_roots = vec![directory.path().to_path_buf()];
+        core.state.playback.volume = config.volume;
+        core.state.playback.shuffle = config.shuffle;
+        core.state.playback.repeat = config.repeat;
+        core.state.system.selected_device = config.output_device.clone();
+        core.saved_config = Some(config.clone());
+        core.state.system.config = Arc::new(config);
+
+        core.command(Command::Volume { value: 0.25 }).unwrap();
+        if apply {
+            let baseline = core.state.system.config.clone();
+            core.update_gui_config(GuiConfigChange::Settings(Box::new(ConfigPatch::between(
+                &baseline, &baseline,
+            ))))
+            .unwrap();
+        } else {
+            let (sender, receiver) = mpsc::channel(1);
+            drop(sender);
+            core = run_until_disconnected(core, receiver);
+        }
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("# Hand-edited configuration\n"));
+        assert!(saved.contains("# chosen volume\n"));
+        assert!(saved.contains("language = 'ZH_cn' # preserve spelling\npage_size=42\n"));
+        assert!(saved.contains(&format!(
+            "roots = ['{}/unused/..'] # preserve logical spelling\n",
+            directory.path().display(),
+        )));
+        let loaded = Config::load(&path).unwrap();
+        assert_eq!(loaded.volume, 0.25);
+        assert_eq!(loaded.page_size, 42);
+        assert_eq!(loaded.ui_language, "zh-CN");
+        let document: toml::Table = toml::from_str(&saved).unwrap();
+        assert!(document.get("visualizations").is_none());
+        assert!(document.get("logging").is_none());
+        assert_eq!(core.saved_config.as_ref().unwrap().volume, 0.25);
+    }
+}
+
+#[test]
+fn changed_save_recreates_missing_file_from_defaults_not_saved_snapshot() {
+    let (_directory, mut core) = fixture();
+    let _audio = recording_audio(&mut core);
+    let mut config = core.effective_config();
+    config.page_size = 42;
+    config.output_device = Some("retained-output".into());
+    core.command(Command::Configure {
+        config: Arc::new(config),
+    })
+    .unwrap();
+    let path = core.state.system.config_path.clone();
+    std::fs::remove_file(&path).unwrap();
+    core.command(Command::Volume { value: 0.25 }).unwrap();
+    assert!(core.flush_config().unwrap());
+    let loaded = Config::load(&path).unwrap();
+    assert_eq!(loaded, core.effective_config());
+    assert_eq!(loaded.page_size, 42);
+    assert_eq!(loaded.output_device.as_deref(), Some("retained-output"));
+    assert_eq!(loaded.volume, 0.25);
+    let saved: toml::Table = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert!(saved.get("logging").is_none());
+    assert!(saved.get("visualizations").is_none());
+}
+
+#[test]
+fn apply_clears_optional_device_without_rewriting_unrelated_settings() {
+    let (_directory, mut core) = fixture();
+    let _audio = recording_audio(&mut core);
+    let mut config = core.effective_config();
+    config.output_device = Some("USB DAC".into());
+    core.command(Command::Configure {
+        config: Arc::new(config),
+    })
+    .unwrap();
+    let path = core.state.system.config_path.clone();
+    let original = "# Keep these comments\n[playback]\noutput_device = 'USB DAC'\n[interface]\npage_size = 64 # explicit default\n";
+    std::fs::write(&path, original).unwrap();
+    let baseline = core.state.system.config.clone();
+    let mut draft = baseline.as_ref().clone();
+    draft.output_device = None;
+    core.update_gui_config(GuiConfigChange::Settings(Box::new(ConfigPatch::between(
+        &baseline, &draft,
+    ))))
+    .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        original.replace("output_device = 'USB DAC'\n", ""),
+    );
+    assert!(Config::load(&path).unwrap().output_device.is_none());
+    assert!(core.state.system.selected_device.is_none());
+    assert!(core.saved_config.as_ref().unwrap().output_device.is_none());
+}
+
+#[test]
+fn changed_apply_and_exit_reject_invalid_existing_input_without_overwriting_it() {
+    for apply in [false, true] {
+        let (_directory, mut core) = fixture();
+        let _audio = recording_audio(&mut core);
+        core.flush_config().unwrap();
+        let saved_config = core.saved_config.clone();
+        let path = core.state.system.config_path.clone();
+        let original = "# Preserve invalid user input\n[playback]\nvolume_percent = 101\n";
+        std::fs::write(&path, original).unwrap();
+        core.command(Command::Volume { value: 0.25 }).unwrap();
+        if apply {
+            let config = Arc::new(core.effective_config());
+            assert!(core.command(Command::Configure { config }).is_err());
+        } else {
+            let (sender, receiver) = mpsc::channel(1);
+            drop(sender);
+            core = run_until_disconnected(core, receiver);
+        }
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        assert_eq!(core.saved_config, saved_config);
+        assert!(core.state.system.last_error.is_some());
+        assert_eq!(core.state.playback.volume, 0.25);
+    }
+}
+
+#[test]
 fn runtime_start_with_missing_config_waits_until_exit_to_create_it() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");

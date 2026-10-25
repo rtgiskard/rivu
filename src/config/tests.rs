@@ -12,6 +12,40 @@ fn write_current_config(path: &Path, contents: impl AsRef<str>) -> std::io::Resu
 }
 
 #[test]
+fn missing_save_writes_only_overrides_and_clears_optional_keys() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    let mut config = Config {
+        volume: 0.25,
+        output_device: Some("USB DAC".into()),
+        ..Config::default()
+    };
+    config.save(&path).unwrap();
+    let saved: toml::Table = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(saved["playback"].as_table().unwrap().len(), 2);
+    assert!(saved.get("interface").is_none());
+    assert!(saved.get("visualizations").is_none());
+    assert!(saved.get("library").is_none());
+    assert!(saved.get("logging").is_none());
+    assert_eq!(Config::load(&path).unwrap(), config);
+
+    let original = "# Keep explicit defaults and unrelated formatting\n[playback]\nvolume_percent=25 # chosen volume\noutput_device = 'USB DAC'\n[interface]\npage_size = 64 # explicit default\n";
+    fs::write(&path, original).unwrap();
+    config = Config::load(&path).unwrap();
+    config.output_device = None;
+    config.save(&path).unwrap();
+    let saved = fs::read_to_string(&path).unwrap();
+    assert_eq!(saved, original.replace("output_device = 'USB DAC'\n", ""));
+    assert_eq!(Config::load(&path).unwrap(), config);
+
+    fs::remove_file(&path).unwrap();
+    Config::default().save(&path).unwrap();
+    let saved: toml::Table = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert!(saved.keys().all(|key| key == "schema_version"));
+    assert_eq!(Config::load(&path).unwrap(), Config::default());
+}
+
+#[test]
 fn invalid_existing_files_are_rejected_without_being_rewritten() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");
@@ -27,6 +61,7 @@ fn invalid_existing_files_are_rejected_without_being_rewritten() {
     ] {
         fs::write(&path, contents).unwrap();
         assert!(Config::load(&path).is_err());
+        assert!(Config::default().save(&path).is_err());
         assert_eq!(fs::read_to_string(&path).unwrap(), contents);
     }
 }
@@ -49,11 +84,7 @@ fn unversioned_current_files_load_without_being_rewritten() {
     assert_eq!(config.page_size, 42);
     assert_eq!(fs::read(&path).unwrap(), contents.as_bytes());
     config.save(&path).unwrap();
-    let saved: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-    assert_eq!(
-        saved["schema_version"].as_integer(),
-        Some(i64::from(CONFIG_SCHEMA_VERSION))
-    );
+    assert_eq!(fs::read_to_string(&path).unwrap(), contents);
     assert_eq!(Config::load(&path).unwrap(), config);
 }
 
@@ -337,6 +368,7 @@ fn album_artwork_settings_round_trip_and_reject_invalid_motion_values() {
         let error = Config::load(&path).unwrap_err();
         assert!(format!("{error:#}").contains("interface.album_artwork.period_seconds"));
     }
+    fs::remove_file(&path).unwrap();
     Config::default().save(&path).unwrap();
     let original = fs::read(&path).unwrap();
     for period in [0.0, -1.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
@@ -439,7 +471,11 @@ fn spectrogram_flow_defaults_nested_round_trip_and_boundaries() {
         let saved = fs::read_to_string(&path).unwrap();
         let table: toml::Value = toml::from_str(&saved).unwrap();
         let nested = &table["visualizations"]["spectrogram"];
-        assert_eq!(nested["flow_speed"].as_float().unwrap() as f32, speed);
+        let flow_speed = nested["flow_speed"]
+            .as_float()
+            .or_else(|| nested["flow_speed"].as_integer().map(|value| value as f64))
+            .unwrap();
+        assert_eq!(flow_speed as f32, speed);
         assert_eq!(
             nested["accumulation"].as_integer(),
             Some(i64::from(accumulation))
@@ -690,7 +726,10 @@ fn configuration_load_follows_regular_links_and_rejects_fifos_without_a_writer()
             error.downcast_ref::<std::io::Error>().unwrap().kind(),
             std::io::ErrorKind::InvalidInput
         );
+        assert!(Config::default().save(path).is_err());
     }
+    use std::os::unix::fs::FileTypeExt;
+    assert!(fs::symlink_metadata(&target).unwrap().file_type().is_fifo());
 }
 
 #[test]
@@ -1136,18 +1175,13 @@ fn visualization_ranges_inherit_and_preserve_explicit_overrides() {
     let saved: toml::Table = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
     for view in ["spectrum", "spectrogram", "audio_visualizer"] {
         assert!(
-            !saved["visualizations"][view]
-                .as_table()
-                .unwrap()
-                .contains_key("db_range")
+            saved["visualizations"]
+                .get(view)
+                .and_then(|table| table.get("db_range"))
+                .is_none()
         );
     }
-    assert!(
-        !saved["playback"]
-            .as_table()
-            .unwrap()
-            .contains_key("output_device")
-    );
+    assert!(saved.get("playback").is_none());
     assert_eq!(Config::load(&path).unwrap(), config);
 
     write_current_config(&path, "visualizations.db_range = 85\nvisualizations.spectrum.db_range = 70\nvisualizations.spectrogram.db_range = 110\nvisualizations.audio_visualizer.db_range = 85\n")
@@ -1164,6 +1198,19 @@ fn visualization_ranges_inherit_and_preserve_explicit_overrides() {
     assert_eq!(Config::load(&path).unwrap(), config);
     config.spectrum_db_range = None;
     assert_eq!(config.spectrum_db_range(), 95.0);
+    config.save(&path).unwrap();
+    assert_eq!(Config::load(&path).unwrap(), config);
+    let saved: toml::Table = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert!(
+        saved["visualizations"]
+            .get("spectrum")
+            .and_then(|table| table.get("db_range"))
+            .is_none()
+    );
+    assert_eq!(
+        saved["visualizations"]["spectrogram"]["db_range"].as_integer(),
+        Some(110)
+    );
 }
 
 #[test]
@@ -1422,14 +1469,13 @@ fn invalid_save_preserves_previous_file() {
 }
 
 #[test]
-fn failed_replacement_cleans_temporary_file_immediately() {
+fn non_regular_destination_preserves_contents_without_temporary_files() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");
     fs::create_dir(&path).unwrap();
     let sentinel = path.join("keep");
     fs::write(&sentinel, "unchanged").unwrap();
     let _error = Config::default().save(&path).unwrap_err();
-    // Keep the error alive while checking cleanup of PersistError's file.
     assert_eq!(entries(directory.path()), vec![path]);
     assert_eq!(fs::read_to_string(sentinel).unwrap(), "unchanged");
     directory.close().unwrap();
@@ -1439,6 +1485,7 @@ fn failed_replacement_cleans_temporary_file_immediately() {
 fn unreadable_configuration_is_not_treated_as_missing() {
     let directory = tempfile::tempdir().unwrap();
     assert!(Config::load(directory.path()).is_err());
+    assert!(Config::default().save(directory.path()).is_err());
     directory.close().unwrap();
 }
 
