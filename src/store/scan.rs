@@ -23,6 +23,10 @@ pub struct ScanImpacts {
     pub changed: bool,
     /// Effective full Track values (raw metadata hidden by overrides is excluded).
     pub library: bool,
+    /// Effective queue-row values changed for an already queued identity.
+    pub queue: bool,
+    /// Album membership, ordering, member rows, or representative values changed.
+    pub albums: bool,
     /// Track insertion or a changed path/CUE identity; missing is not removal.
     pub structure: bool,
     /// Ordinary fingerprint membership or present/missing grouping facts.
@@ -31,6 +35,37 @@ pub struct ScanImpacts {
     pub duplicate_members: bool,
     /// Successfully scanned new identities excluded by the duration threshold.
     pub skipped_short_tracks: usize,
+}
+
+/// Compare staged values before updating tracks; hidden raw changes are excluded.
+pub(super) fn staged_projection_columns(cue: bool) -> String {
+    let visible = "t.path IS NOT s.path
+        OR COALESCE(t.title_override,t.raw_title) IS NOT COALESCE(t.title_override,s.raw_title)
+        OR COALESCE(t.artist_override,t.raw_artist) IS NOT COALESCE(t.artist_override,s.raw_artist)
+        OR COALESCE(t.album_override,t.raw_album) IS NOT COALESCE(t.album_override,s.raw_album)
+        OR t.duration IS NOT s.duration OR t.codec IS NOT s.codec OR t.missing IS NOT 0
+        OR t.bitrate_bps IS NOT s.bitrate_bps OR t.bitrate_exact IS NOT s.bitrate_exact";
+    let cue_values = if cue {
+        "OR t.cue_sheet IS NOT s.cue_sheet OR t.cue_number IS NOT s.cue_number
+         OR t.cue_start_frame IS NOT s.cue_start_frame OR t.cue_end_frame IS NOT s.cue_end_frame"
+    } else {
+        ""
+    };
+    let full = format!(
+        "{visible} OR t.fingerprint IS NOT s.fingerprint
+        OR t.channels IS NOT s.channels OR t.sample_rate IS NOT s.sample_rate
+        OR t.bits_per_sample IS NOT s.bits_per_sample OR t.release_date IS NOT s.release_date
+        {cue_values}"
+    );
+    let old_album = super::albums::eligible_member("t");
+    let new_album = rivu_format::database::eligible_title("COALESCE(t.album_override,s.raw_album)");
+    let representative = super::albums::representative("t");
+    format!(
+        "COALESCE(MAX(({visible}) AND EXISTS(SELECT 1 FROM queue_entries WHERE track_id=t.id)),0),
+        COALESCE(MAX(((t.id IS NULL OR {visible}
+            OR t.track_number IS NOT s.track_number OR t.disc_number IS NOT s.disc_number)
+            AND ({old_album} OR {new_album})) OR (({full}) AND {representative})),0)"
+    )
 }
 
 // Keep equality and descendant branches separate so both path indexes can seek.
@@ -647,7 +682,7 @@ impl Store {
         // while the old rows and their overrides are still available. These flags
         // describe changed dependencies, not hashes of materialized query results.
         let mut impacts = tx.query_row(
-            "SELECT
+            &format!("SELECT
                 COALESCE(MAX(t.id IS NULL OR t.path IS NOT s.path
                     OR t.fingerprint IS NOT s.fingerprint
                     OR COALESCE(t.title_override,t.raw_title) IS NOT COALESCE(t.title_override,s.raw_title)
@@ -674,8 +709,9 @@ impl Store {
                     ((t.cue_sheet IS NULL AND t.fingerprint IS NOT NULL)
                         OR (s.cue_sheet IS NULL AND s.fingerprint IS NOT NULL))
                     AND (t.id IS NULL OR t.file_size IS NOT s.file_size
-                        OR t.modified_ns IS NOT s.modified_ns)),0)
-             FROM temp.scan_stage AS s LEFT JOIN tracks AS t ON t.id=s.resolved_id",
+                        OR t.modified_ns IS NOT s.modified_ns)),0),
+                {}
+             FROM temp.scan_stage AS s LEFT JOIN tracks AS t ON t.id=s.resolved_id", staged_projection_columns(true)),
             [],
             |row| {
                 Ok(ScanImpacts {
@@ -683,6 +719,8 @@ impl Store {
                     structure: row.get(1)?,
                     duplicate_groups: row.get(2)?,
                     duplicate_members: row.get(3)?,
+                    queue: row.get(4)?,
+                    albums: row.get(5)?,
                     skipped_short_tracks,
                     ..ScanImpacts::default()
                 })
@@ -728,8 +766,10 @@ impl Store {
             [],
         )?;
         tx.execute_batch("DROP TABLE temp.scan_stage")?;
-        let mut mark_missing =
-            tx.prepare("UPDATE tracks SET missing=1 WHERE id=?1 AND missing=0")?;
+        let mut mark_missing = tx.prepare(&format!(
+            "UPDATE tracks SET missing=1 WHERE id=?1 AND missing=0 RETURNING EXISTS(SELECT 1 FROM queue_entries WHERE track_id=tracks.id),{}",
+            super::albums::eligible_member("tracks"),
+        ))?;
         for o in &old {
             let owner = if exact_sources {
                 o.path.as_path()
@@ -749,13 +789,17 @@ impl Store {
                         .any(|root| owner == root || owner.starts_with(root))
                 }) || absent_ordinary.contains(&o.id))
                 && !unconfirmed(o)
+                && let Some((queue, albums)) = mark_missing
+                    .query_row([o.id], |row| {
+                        Ok((row.get::<_, bool>(0)?, row.get::<_, bool>(1)?))
+                    })
+                    .optional()?
             {
-                let changed = mark_missing.execute([o.id])?;
-                changed_tracks += changed;
-                if changed != 0 {
-                    impacts.library = true;
-                    impacts.duplicate_groups |= o.cue.is_none() && o.hash.is_some();
-                }
+                changed_tracks += 1;
+                impacts.library = true;
+                impacts.queue |= queue;
+                impacts.albums |= albums;
+                impacts.duplicate_groups |= o.cue.is_none() && o.hash.is_some();
             }
         }
         drop(mark_missing);
@@ -944,6 +988,7 @@ mod tests {
                 ScanImpacts {
                     changed: true,
                     library: true,
+                    albums: true,
                     structure: true,
                     duplicate_groups: !cue && fingerprint,
                     duplicate_members: !cue && fingerprint,
@@ -1002,6 +1047,7 @@ mod tests {
                 ScanImpacts {
                     changed: true,
                     library: true,
+                    albums: true,
                     duplicate_groups: true,
                     ..ScanImpacts::default()
                 }
@@ -1014,7 +1060,54 @@ mod tests {
     }
 
     #[test]
-    fn identical_rescans_keep_queue_content_and_revision_stable() {
+    fn library_changes_do_not_proxy_for_queue_or_album_effects() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let mut first = record();
+        first.media.title = "First".into();
+        first.media.track_number = Some(1);
+        let mut second = first.clone();
+        second.path = "/music/second.wav".into();
+        second.media.title = "Second".into();
+        second.media.track_number = Some(2);
+        let mut plain = first.clone();
+        plain.path = "/other/plain.wav".into();
+        plain.media.album.clear();
+        let mut scan = ScanResult {
+            records: vec![first, second, plain],
+            ..ScanResult::default()
+        };
+        store.apply_scan(&scan).unwrap();
+        let id = store
+            .track_id_for_source(&scan.records[0].path, None)
+            .unwrap()
+            .unwrap();
+        store.enqueue_tracks(&[id]).unwrap();
+
+        scan.records[1].media.sample_rate += 1;
+        let member = store.apply_scan(&scan).unwrap();
+        assert!(member.changed && member.library && !member.queue && !member.albums);
+        scan.records[2].media.title = "Retitled plain track".into();
+        let plain = store.apply_scan(&scan).unwrap();
+        assert!(plain.changed && plain.library && !plain.queue && !plain.albums);
+        scan.records[1].media.title = "Retitled album member".into();
+        let member = store.apply_scan(&scan).unwrap();
+        assert!(member.changed && member.library && !member.queue && member.albums);
+        scan.records[0].media.sample_rate += 1;
+        let representative = store.apply_scan(&scan).unwrap();
+        assert!(
+            representative.changed
+                && representative.library
+                && !representative.queue
+                && representative.albums
+        );
+        scan.records[0].media.title = "Retitled queued track".into();
+        let queued = store.apply_scan(&scan).unwrap();
+        assert!(queued.changed && queued.library && queued.queue && queued.albums);
+        assert_eq!(store.apply_scan(&scan).unwrap(), ScanImpacts::default());
+    }
+
+    #[test]
+    fn identical_rescans_keep_queue_content_stable() {
         let (store, scan, id) = queued(record());
         store.set_favorite(&[id], true).unwrap();
         store.mark_played(id, 123).unwrap();
@@ -1048,10 +1141,12 @@ mod tests {
             ScanImpacts {
                 changed: true,
                 library: true,
+                queue: true,
+                albums: true,
                 ..ScanImpacts::default()
             }
         );
-        assert!(store.queue_state().unwrap().revision > state.revision);
+        assert_eq!(store.queue_state().unwrap(), state);
         let after = store.queue_page(None, 0, 10).unwrap().rows.remove(0);
         assert_eq!(
             (after.id, after.track_id, after.position),
@@ -1107,7 +1202,7 @@ mod tests {
     }
 
     #[test]
-    fn equal_to_raw_and_repeated_overrides_keep_queue_revision_stable() {
+    fn equal_to_raw_and_repeated_overrides_keep_queue_values_stable() {
         let (store, mut scan, id) = queued(record());
         let page = store.queue_page(None, 0, 10).unwrap();
         let state = store.queue_state().unwrap();
@@ -1145,8 +1240,13 @@ mod tests {
         ] {
             let before = store.queue_page(None, 0, 10).unwrap().rows.remove(0);
             let state = store.queue_state().unwrap();
-            store.edit_track(id, title, artist, album, None).unwrap();
-            assert!(store.queue_state().unwrap().revision > state.revision);
+            assert!(
+                store
+                    .edit_track(id, title, artist, album, None)
+                    .unwrap()
+                    .queue
+            );
+            assert_eq!(store.queue_state().unwrap(), state);
             let after = store.queue_page(None, 0, 10).unwrap().rows.remove(0);
             assert_eq!(
                 (after.id, after.track_id, after.position),
@@ -1174,12 +1274,14 @@ mod tests {
         let expected = ScanImpacts {
             changed: true,
             library: true,
+            queue: true,
+            albums: true,
             duplicate_groups: true,
             ..ScanImpacts::default()
         };
         assert_eq!(store.apply_scan(&missing).unwrap(), expected);
         let state = store.queue_state().unwrap();
-        assert!(state.revision > initial.revision);
+        assert_eq!(state, initial);
         let row = store.queue_page(None, 0, 10).unwrap().rows.remove(0);
         assert_eq!(row.id, page.rows[0].id);
         assert_eq!(row.track_id, id);
@@ -1189,7 +1291,7 @@ mod tests {
         assert_eq!(store.queue_page(None, 0, 10).unwrap().rows[0], row);
         assert_eq!(store.apply_scan(&scan).unwrap(), expected);
         let recovered = store.queue_state().unwrap();
-        assert!(recovered.revision > state.revision);
+        assert_eq!(recovered, state);
         assert_eq!(store.queue_page(None, 0, 10).unwrap(), page);
         assert_eq!(store.apply_scan(&scan).unwrap(), ScanImpacts::default());
         assert_eq!(store.queue_state().unwrap(), recovered);
@@ -1204,9 +1306,9 @@ mod tests {
         scan.records[0].media.duration = None;
         scan.records[0].media.bitrate_bps = None;
         scan.records[0].fingerprint = None;
-        store.apply_scan(&scan).unwrap();
+        assert!(store.apply_scan(&scan).unwrap().queue);
         let cleared = store.queue_state().unwrap();
-        assert!(cleared.revision > state.revision);
+        assert_eq!(cleared, state);
         let row = store.queue_page(None, 0, 10).unwrap().rows.remove(0);
         assert_eq!(row.track.duration, None);
         assert_eq!(row.track.bitrate_bps, None);
@@ -1215,8 +1317,8 @@ mod tests {
         assert_eq!(store.queue_state().unwrap(), cleared);
         assert_eq!(store.queue_page(None, 0, 10).unwrap().rows[0], row);
         scan.records[0] = original;
-        store.apply_scan(&scan).unwrap();
-        assert!(store.queue_state().unwrap().revision > cleared.revision);
+        assert!(store.apply_scan(&scan).unwrap().queue);
+        assert_eq!(store.queue_state().unwrap(), cleared);
         let row = store.queue_page(None, 0, 10).unwrap().rows.remove(0);
         assert_eq!(row.track.duration, Some(60.0));
         assert_eq!(row.track.bitrate_bps, Some(1_536_000));
@@ -1252,6 +1354,7 @@ mod tests {
             ScanImpacts {
                 changed: true,
                 library: true,
+                albums: true,
                 ..ScanImpacts::default()
             }
         );
@@ -1320,12 +1423,13 @@ mod tests {
             ScanImpacts {
                 changed: true,
                 library: true,
+                queue: true,
+                albums: true,
                 structure: true,
                 ..ScanImpacts::default()
             }
         );
         let after = store.queue_state().unwrap();
-        assert!(after.revision > before.revision);
         assert_eq!(
             (after.total, after.current_id, after.current_position),
             (before.total, before.current_id, before.current_position)
@@ -1450,6 +1554,7 @@ mod tests {
             ScanImpacts {
                 changed: true,
                 library: true,
+                albums: true,
                 structure: true,
                 ..ScanImpacts::default()
             }
@@ -1873,11 +1978,15 @@ mod tests {
             roots: vec![ordinary.path.clone()],
             ..Default::default()
         };
-        store.apply_other_tracks_check(&mut absent, &[]).unwrap();
+        assert!(
+            store
+                .apply_other_tracks_check(&mut absent, &[])
+                .unwrap()
+                .queue
+        );
         assert!(store.track(id).unwrap().unwrap().missing);
         assert!(store.track(cue_id).unwrap().unwrap().missing);
         let missing_queue = store.queue_state().unwrap();
-        assert!(missing_queue.revision > queue.revision);
         assert_eq!(occurrences(), entries);
         assert_eq!(
             (
@@ -1894,7 +2003,12 @@ mod tests {
             records: vec![source],
             ..Default::default()
         };
-        store.apply_other_tracks_check(&mut restored, &[]).unwrap();
+        assert!(
+            store
+                .apply_other_tracks_check(&mut restored, &[])
+                .unwrap()
+                .queue
+        );
         let segment = store.track(cue_id).unwrap().unwrap();
         assert!(!segment.missing);
         assert!(!store.track(id).unwrap().unwrap().missing);
@@ -1912,7 +2026,6 @@ mod tests {
             .unwrap();
         assert_eq!(stored, ("Registered segment".into(), 9));
         let restored_queue = store.queue_state().unwrap();
-        assert!(restored_queue.revision > missing_queue.revision);
         assert_eq!(occurrences(), entries);
         assert_eq!(
             (

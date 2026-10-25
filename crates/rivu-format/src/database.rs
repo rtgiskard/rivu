@@ -1,17 +1,11 @@
 use anyhow::{Context, Result, bail, ensure};
 use rusqlite::{Connection, OptionalExtension};
 
-// The persisted marker governs album, queue metadata, and collection authority triggers.
-pub const ALBUM_TRIGGER_REVISION: i64 = 4;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DatabaseState {
     Empty,
     Unversioned,
-    Versioned {
-        schema_version: i64,
-        album_trigger_revision: Option<i64>,
-    },
+    Versioned { schema_version: i64 },
 }
 
 /// Inspect metadata without creating, upgrading, or modifying the database.
@@ -25,7 +19,7 @@ pub fn inspect(conn: &Connection) -> Result<DatabaseState> {
         return Ok(DatabaseState::Empty);
     }
     let metadata: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='schema_meta')",
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='rivu_meta')",
         [],
         |row| row.get(0),
     )?;
@@ -34,7 +28,7 @@ pub fn inspect(conn: &Connection) -> Result<DatabaseState> {
     }
     let schema_version = conn
         .query_row(
-            "SELECT value FROM schema_meta WHERE key='version'",
+            "SELECT format_version FROM rivu_meta WHERE singleton=1",
             [],
             |row| row.get(0),
         )
@@ -43,48 +37,33 @@ pub fn inspect(conn: &Connection) -> Result<DatabaseState> {
     let Some(schema_version) = schema_version else {
         return Ok(DatabaseState::Unversioned);
     };
-    let album_trigger_revision = conn
-        .query_row(
-            "SELECT value FROM schema_meta WHERE key='album_trigger_revision'",
-            [],
-            |row| row.get(0),
-        )
-        .optional()
-        .context("Read album trigger revision")?;
-    Ok(DatabaseState::Versioned {
-        schema_version,
-        album_trigger_revision,
-    })
+    Ok(DatabaseState::Versioned { schema_version })
 }
 
-/// Validate the current schema version and derived-revision markers without writes.
+/// Validate the current format without writes.
 pub fn validate_current(conn: &Connection) -> Result<()> {
-    let revision = match inspect(conn)? {
+    match inspect(conn)? {
         DatabaseState::Versioned {
             schema_version: SCHEMA_VERSION,
-            album_trigger_revision,
-        } => album_trigger_revision,
-        DatabaseState::Versioned { schema_version, .. } => bail!(
+        } => Ok(()),
+        DatabaseState::Versioned { schema_version } => bail!(
             "Unsupported database version {schema_version}; back up the database and WAL before replacing it; rescanning cannot restore user state"
         ),
         DatabaseState::Empty | DatabaseState::Unversioned => bail!(
             "Unsupported library database; back up the database and WAL before replacing it; rescanning cannot restore user state"
         ),
-    };
-    ensure!(
-        revision == Some(ALBUM_TRIGGER_REVISION),
-        "Unsupported album trigger revision {revision:?}; this application requires revision {ALBUM_TRIGGER_REVISION}"
-    );
-    Ok(())
+    }
 }
 
-/// Read-only structural preflight for offline migration. This checks the fields
+/// Read-only structural preflight for offline operations. This checks the fields
 /// used by current readers and writers and the required indexes, not SQL spelling.
-/// Runtime opening keeps the cheaper version/derived-revision guard instead.
 pub fn validate_structure(conn: &Connection) -> Result<()> {
     validate_current(conn)?;
     for (table, columns) in [
-        ("schema_meta", "key,value"),
+        (
+            "rivu_meta",
+            "singleton,format_version,current_queue_entry_id",
+        ),
         (
             "tracks",
             "id,path,fingerprint,file_size,modified_ns,raw_title,raw_artist,raw_album,title_override,artist_override,album_override,duration,codec,channels,sample_rate,missing,play_count,last_played,cue_sheet,cue_number,cue_start_frame,cue_end_frame,probe_version,bitrate_bps,track_number,disc_number,bitrate_exact,bits_per_sample,release_date,favorite,relocation_independent,decoder_hint",
@@ -92,7 +71,6 @@ pub fn validate_structure(conn: &Connection) -> Result<()> {
         ("playlists", "id,name"),
         ("playlist_entries", "id,playlist_id,track_id,position"),
         ("queue_entries", "id,track_id,position"),
-        ("queue_meta", "singleton,current_id,revision"),
         ("albums", "directory,title,track_count,artist"),
         ("album_artists", "directory,title,artist,track_count"),
     ] {
@@ -111,12 +89,11 @@ pub fn validate_structure(conn: &Connection) -> Result<()> {
     let mut primary_key =
         conn.prepare("SELECT name FROM pragma_table_info(?1) WHERE pk>0 ORDER BY pk")?;
     for (table, columns) in [
-        ("schema_meta", &["key"][..]),
+        ("rivu_meta", &["singleton"][..]),
         ("tracks", &["id"][..]),
         ("playlists", &["id"][..]),
         ("playlist_entries", &["id"][..]),
         ("queue_entries", &["id"][..]),
-        ("queue_meta", &["singleton"][..]),
         ("albums", &["directory", "title"][..]),
         ("album_artists", &["directory", "title", "artist"][..]),
     ] {
@@ -137,13 +114,13 @@ pub fn validate_structure(conn: &Connection) -> Result<()> {
     }
     let queue_singleton: bool = conn.query_row(
         "SELECT count(*)=1 AND count(CASE WHEN singleton=1 THEN 1 END)=1
-         FROM (SELECT singleton FROM queue_meta LIMIT 2)",
+         FROM (SELECT singleton FROM rivu_meta LIMIT 2)",
         [],
         |row| row.get(0),
     )?;
     ensure!(
         queue_singleton,
-        "Unsupported library database: missing or incompatible queue_meta singleton"
+        "Unsupported library database: missing or incompatible rivu_meta singleton"
     );
     let mut index =
         conn.prepare("SELECT \"unique\",partial FROM pragma_index_list(?1) WHERE name=?2")?;
@@ -225,44 +202,7 @@ pub fn validate_structure(conn: &Connection) -> Result<()> {
             format!("Unsupported library database: index {name} cannot serve current queries")
         })?;
     }
-    for (table, columns) in [
-        ("collection_meta", "singleton,sequence,album_revision"),
-        ("playlist_versions", "playlist_id,revision"),
-    ] {
-        conn.prepare(&format!("SELECT {columns} FROM {table} LIMIT 0"))
-            .with_context(|| format!("Unsupported library database: incompatible table {table}"))?;
-    }
-    let singleton: bool = conn.query_row(
-        "SELECT count(*)=1 AND count(CASE WHEN singleton=1 THEN 1 END)=1 FROM collection_meta",
-        [],
-        |row| row.get(0),
-    )?;
-    ensure!(
-        singleton,
-        "Unsupported library database: missing collection_meta singleton"
-    );
-    for (table, name) in [
-        ("playlists", "collection_playlist_insert"),
-        ("playlists", "collection_playlist_delete"),
-        ("playlists", "collection_playlist_identity"),
-        ("playlist_entries", "collection_entry_insert"),
-        ("playlist_entries", "collection_entry_delete"),
-        ("playlist_entries", "collection_entry_update"),
-        ("tracks", "collection_track_insert"),
-        ("tracks", "collection_track_delete"),
-        ("tracks", "collection_track_update"),
-    ] {
-        let exists: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='trigger' AND name=?1 AND tbl_name=?2)",
-            [name, table], |row| row.get(0),
-        )?;
-        ensure!(
-            exists,
-            "Unsupported library database: missing trigger {name}"
-        );
-    }
     for name in [
-        "queue_metadata",
         "albums_insert",
         "albums_delete",
         "albums_update",
@@ -281,7 +221,7 @@ pub fn validate_structure(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Create an empty database, or validate the exact current schema and trigger revision.
+/// Create an empty database, or validate the exact current format.
 pub fn ensure_current(conn: &Connection) -> Result<()> {
     if inspect(conn)? == DatabaseState::Empty {
         create_current(conn)
@@ -289,7 +229,7 @@ pub fn ensure_current(conn: &Connection) -> Result<()> {
         validate_current(conn)
     }
 }
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 const TRACK_TABLE: &str = "CREATE TABLE tracks(
     id INTEGER PRIMARY KEY AUTOINCREMENT,path TEXT NOT NULL,
@@ -320,29 +260,12 @@ const TRACK_INDEXES: &str = "
     CREATE INDEX tracks_album ON tracks(COALESCE(album_override,raw_album), CASE WHEN COALESCE(album_override,raw_album)<>'' THEN COALESCE(disc_number,4294967295) END, CASE WHEN COALESCE(album_override,raw_album)<>'' THEN COALESCE(track_number,4294967295) END, COALESCE(title_override,raw_title));
     CREATE INDEX tracks_most_played ON tracks(play_count DESC);";
 
-const QUEUE_METADATA_TRIGGER: &str = "
-    CREATE TRIGGER queue_metadata AFTER UPDATE OF path,raw_title,raw_artist,raw_album,
-        title_override,artist_override,album_override,duration,favorite,missing,
-        play_count,codec,bitrate_bps,bitrate_exact ON tracks
-    WHEN (COALESCE(old.title_override,old.raw_title) IS NOT COALESCE(new.title_override,new.raw_title)
-        OR COALESCE(old.artist_override,old.raw_artist) IS NOT COALESCE(new.artist_override,new.raw_artist)
-        OR COALESCE(old.album_override,old.raw_album) IS NOT COALESCE(new.album_override,new.raw_album)
-        OR old.path IS NOT new.path
-        OR old.duration IS NOT new.duration
-        OR old.favorite IS NOT new.favorite OR old.missing IS NOT new.missing
-        OR old.play_count IS NOT new.play_count OR old.codec IS NOT new.codec
-        OR old.bitrate_bps IS NOT new.bitrate_bps OR old.bitrate_exact IS NOT new.bitrate_exact)
-        AND EXISTS(SELECT 1 FROM queue_entries WHERE track_id=new.id) BEGIN
-        UPDATE queue_meta SET revision=revision+1;
-    END;";
-
-/// Create schema 1 transactionally. The connection must have no user tables.
+/// Create the current format transactionally. The connection must have no user tables.
 pub fn create_current(conn: &Connection) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
     tx.execute_batch(TRACK_TABLE)?;
     tx.execute_batch(
-        "CREATE TABLE schema_meta(key TEXT PRIMARY KEY,value INTEGER NOT NULL);
-        CREATE TABLE playlists(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL);
+        "CREATE TABLE playlists(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL);
         CREATE TABLE playlist_entries(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             playlist_id INTEGER NOT NULL REFERENCES playlists(id) ON DELETE CASCADE,
@@ -358,20 +281,17 @@ pub fn create_current(conn: &Connection) -> Result<()> {
         );
         CREATE INDEX queue_order ON queue_entries(position);
         CREATE INDEX queue_track ON queue_entries(track_id);
-        CREATE TABLE queue_meta(
+        CREATE TABLE rivu_meta(
             singleton INTEGER PRIMARY KEY CHECK(singleton=1),
-            current_id INTEGER REFERENCES queue_entries(id) ON DELETE SET NULL,
-            revision INTEGER NOT NULL DEFAULT 0
-        );
-        INSERT INTO queue_meta(singleton) VALUES(1);",
+            format_version INTEGER NOT NULL,
+            current_queue_entry_id INTEGER REFERENCES queue_entries(id) ON DELETE SET NULL
+        );",
     )?;
     tx.execute(
-        "INSERT INTO schema_meta(key,value) VALUES('version',?1)",
+        "INSERT INTO rivu_meta(singleton,format_version) VALUES(1,?1)",
         [SCHEMA_VERSION],
     )?;
     tx.execute_batch(TRACK_INDEXES)?;
-    tx.execute_batch(QUEUE_METADATA_TRIGGER)?;
-    install_collection_versions(&tx)?;
     create_summary_schema(&tx)?;
     tx.commit()?;
     Ok(())
@@ -491,83 +411,6 @@ fn install_summary_triggers(conn: &Connection) -> Result<()> {
         eligible = eligible_title(&title("new")),
         refresh = refresh_artist("new"),
     ))?;
-    conn.execute(
-        "INSERT INTO schema_meta(key,value) VALUES('album_trigger_revision',?1)
-        ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        [ALBUM_TRIGGER_REVISION],
-    )?;
-    Ok(())
-}
-
-// One durable sequence prevents playlist deletion/recreation (including explicit ID
-// reuse) from reviving an old token. Triggers run in the writer's transaction, on
-// every connection, so rollbacks undo both collection data and its version.
-const COLLECTION_ENTRY_UPDATE_TRIGGER: &str = "
-    CREATE TRIGGER collection_entry_update AFTER UPDATE ON playlist_entries
-    WHEN old.id IS NOT new.id OR old.playlist_id IS NOT new.playlist_id
-        OR old.track_id IS NOT new.track_id OR old.position IS NOT new.position BEGIN
-        UPDATE collection_meta SET sequence=sequence+1;
-        UPDATE playlist_versions SET revision=(SELECT sequence FROM collection_meta)
-            WHERE playlist_id IN(old.playlist_id,new.playlist_id);
-    END;";
-
-fn install_collection_versions(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
-        "CREATE TABLE collection_meta(
-            singleton INTEGER PRIMARY KEY CHECK(singleton=1),
-            sequence INTEGER NOT NULL CHECK(typeof(sequence)='integer' AND sequence>=0),
-            album_revision INTEGER NOT NULL
-        );
-        INSERT INTO collection_meta VALUES(1,0,0);
-        CREATE TABLE playlist_versions(playlist_id INTEGER PRIMARY KEY,revision INTEGER NOT NULL);
-        CREATE TRIGGER collection_playlist_insert AFTER INSERT ON playlists BEGIN
-            UPDATE collection_meta SET sequence=sequence+1;
-            INSERT INTO playlist_versions SELECT new.id,sequence FROM collection_meta;
-        END;
-        CREATE TRIGGER collection_playlist_delete AFTER DELETE ON playlists BEGIN
-            UPDATE collection_meta SET sequence=sequence+1;
-            DELETE FROM playlist_versions WHERE playlist_id=old.id;
-        END;
-        CREATE TRIGGER collection_playlist_identity AFTER UPDATE OF id ON playlists
-        WHEN old.id IS NOT new.id BEGIN
-            UPDATE collection_meta SET sequence=sequence+1;
-            DELETE FROM playlist_versions WHERE playlist_id=old.id;
-            INSERT INTO playlist_versions SELECT new.id,sequence FROM collection_meta;
-        END;
-        CREATE TRIGGER collection_entry_insert AFTER INSERT ON playlist_entries BEGIN
-            UPDATE collection_meta SET sequence=sequence+1;
-            UPDATE playlist_versions SET revision=(SELECT sequence FROM collection_meta) WHERE playlist_id=new.playlist_id;
-        END;
-        CREATE TRIGGER collection_entry_delete AFTER DELETE ON playlist_entries BEGIN
-            UPDATE collection_meta SET sequence=sequence+1;
-            UPDATE playlist_versions SET revision=(SELECT sequence FROM collection_meta) WHERE playlist_id=old.playlist_id;
-        END;
-        CREATE TRIGGER collection_track_insert AFTER INSERT ON tracks BEGIN
-            UPDATE collection_meta SET sequence=sequence+1,album_revision=sequence+1;
-            UPDATE playlist_versions SET revision=(SELECT sequence FROM collection_meta)
-                WHERE playlist_id IN(SELECT playlist_id FROM playlist_entries WHERE track_id=new.id);
-        END;
-        CREATE TRIGGER collection_track_delete AFTER DELETE ON tracks BEGIN
-            UPDATE collection_meta SET sequence=sequence+1,album_revision=sequence+1;
-            UPDATE playlist_versions SET revision=(SELECT sequence FROM collection_meta)
-                WHERE playlist_id IN(SELECT playlist_id FROM playlist_entries WHERE track_id=old.id);
-        END;
-        CREATE TRIGGER collection_track_update AFTER UPDATE ON tracks
-        WHEN old.id IS NOT new.id OR old.path IS NOT new.path
-            OR COALESCE(old.title_override,old.raw_title) IS NOT COALESCE(new.title_override,new.raw_title)
-            OR COALESCE(old.artist_override,old.raw_artist) IS NOT COALESCE(new.artist_override,new.raw_artist)
-            OR COALESCE(old.album_override,old.raw_album) IS NOT COALESCE(new.album_override,new.raw_album)
-            OR old.disc_number IS NOT new.disc_number OR old.track_number IS NOT new.track_number
-            OR old.duration IS NOT new.duration OR old.codec IS NOT new.codec
-            OR old.bitrate_bps IS NOT new.bitrate_bps OR old.bitrate_exact IS NOT new.bitrate_exact
-            OR old.favorite IS NOT new.favorite OR old.missing IS NOT new.missing
-            OR old.play_count IS NOT new.play_count OR old.last_played IS NOT new.last_played BEGIN
-            UPDATE collection_meta SET sequence=sequence+1,album_revision=sequence+1;
-            UPDATE playlist_versions SET revision=(SELECT sequence FROM collection_meta)
-                WHERE old.id IS NOT new.id AND playlist_id IN(SELECT playlist_id FROM playlist_entries WHERE track_id IN(old.id,new.id));
-        END;",
-    )?;
-    conn.execute_batch(COLLECTION_ENTRY_UPDATE_TRIGGER)?;
     Ok(())
 }
 
@@ -584,7 +427,6 @@ mod tests {
             inspect(&conn)?,
             DatabaseState::Versioned {
                 schema_version: SCHEMA_VERSION,
-                album_trigger_revision: Some(ALBUM_TRIGGER_REVISION),
             }
         );
         validate_structure(&conn)?;
@@ -592,6 +434,49 @@ mod tests {
         conn.execute_batch("PRAGMA query_only=ON;")?;
         ensure_current(&conn)?;
         assert_eq!(conn.total_changes(), changes);
+        Ok(())
+    }
+
+    #[test]
+    fn current_metadata_tracks_queue_occurrence_without_version_tables() -> Result<()> {
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch("PRAGMA foreign_keys=ON;")?;
+        create_current(&conn)?;
+        conn.execute_batch(
+            "INSERT INTO tracks(id,path) VALUES(1,'/retained.wav');
+             INSERT INTO queue_entries(id,track_id,position) VALUES(41,1,0),(42,1,1);
+             UPDATE rivu_meta SET current_queue_entry_id=42 WHERE singleton=1;
+             DELETE FROM queue_entries WHERE id=41;",
+        )?;
+        let current = || {
+            conn.query_row(
+                "SELECT current_queue_entry_id FROM rivu_meta WHERE singleton=1",
+                [],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+        };
+        assert_eq!(current()?, Some(42));
+        conn.execute("DELETE FROM queue_entries WHERE id=42", [])?;
+        assert_eq!(current()?, None);
+        assert!(
+            conn.execute(
+                "INSERT INTO rivu_meta(singleton,format_version) VALUES(2,2)",
+                []
+            )
+            .is_err()
+        );
+        let tables: i64 = conn.query_row(
+            "SELECT count(*) FROM sqlite_schema WHERE type='table' AND name NOT GLOB 'sqlite_*'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(tables, 7);
+        let triggers: i64 = conn.query_row(
+            "SELECT count(*) FROM sqlite_schema WHERE type='trigger'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(triggers, 4);
         Ok(())
     }
 
@@ -627,58 +512,13 @@ mod tests {
     }
 
     #[test]
-    fn absent_and_older_trigger_markers_are_rejected_without_writes() -> Result<()> {
-        for revision in [None, Some(-1), Some(0), Some(1), Some(2), Some(3)] {
-            let conn = Connection::open_in_memory()?;
-            create_current(&conn)?;
-            conn.execute_batch("INSERT INTO tracks(id,path) VALUES(1,'/retained.wav');")?;
-            if let Some(revision) = revision {
-                conn.execute(
-                    "UPDATE schema_meta SET value=?1 WHERE key='album_trigger_revision'",
-                    [revision],
-                )?;
-            } else {
-                conn.execute(
-                    "DELETE FROM schema_meta WHERE key='album_trigger_revision'",
-                    [],
-                )?;
-            }
-            let schema: i64 = conn.query_row("PRAGMA schema_version", [], |row| row.get(0))?;
-            let changes = conn.total_changes();
-            conn.execute_batch("PRAGMA query_only=ON;")?;
-            assert!(validate_current(&conn).is_err());
-            assert!(validate_structure(&conn).is_err());
-            assert!(ensure_current(&conn).is_err());
-            assert_eq!(conn.total_changes(), changes);
-            assert_eq!(
-                conn.query_row("PRAGMA schema_version", [], |row| row.get::<_, i64>(0))?,
-                schema
-            );
-            assert_eq!(
-                conn.query_row("SELECT path FROM tracks WHERE id=1", [], |row| row
-                    .get::<_, String>(0))?,
-                "/retained.wav"
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
     fn unsupported_versions_are_rejected_before_any_schema_or_data_write() -> Result<()> {
-        for (version, revision) in [
-            (0, ALBUM_TRIGGER_REVISION),
-            (2, ALBUM_TRIGGER_REVISION),
-            (SCHEMA_VERSION, ALBUM_TRIGGER_REVISION + 1),
-        ] {
+        for version in [0, 1, SCHEMA_VERSION + 1] {
             let conn = Connection::open_in_memory()?;
             create_current(&conn)?;
             conn.execute(
-                "UPDATE schema_meta SET value=?1 WHERE key='version'",
+                "UPDATE rivu_meta SET format_version=?1 WHERE singleton=1",
                 [version],
-            )?;
-            conn.execute(
-                "UPDATE schema_meta SET value=?1 WHERE key='album_trigger_revision'",
-                [revision],
             )?;
             let schema: i64 = conn.query_row("PRAGMA schema_version", [], |row| row.get(0))?;
             let changes = conn.total_changes();
@@ -827,7 +667,7 @@ mod tests {
             conn.query_row("PRAGMA schema_version", [], |row| row.get::<_, i64>(0))?,
             schema
         );
-        conn.execute_batch("PRAGMA query_only=OFF; DELETE FROM queue_meta; PRAGMA query_only=ON;")?;
+        conn.execute_batch("PRAGMA query_only=OFF; DELETE FROM rivu_meta; PRAGMA query_only=ON;")?;
         let changes = conn.total_changes();
         assert!(validate_structure(&conn).is_err());
         assert_eq!(conn.total_changes(), changes);
@@ -835,13 +675,12 @@ mod tests {
     }
 
     #[test]
-    fn preflight_requires_current_collection_definitions_without_writes() -> Result<()> {
+    fn preflight_requires_summary_definitions_without_writes() -> Result<()> {
         for sql in [
-            "DROP TABLE collection_meta",
-            "DROP TABLE playlist_versions",
-            "DROP TRIGGER collection_entry_update",
+            "DROP TRIGGER albums_insert",
+            "DROP TRIGGER albums_delete",
             "DROP TRIGGER albums_update",
-            "DROP TRIGGER queue_metadata",
+            "DROP TRIGGER albums_artist_update",
         ] {
             let conn = Connection::open_in_memory()?;
             create_current(&conn)?;
@@ -856,61 +695,6 @@ mod tests {
                 schema
             );
         }
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod collection_version_tests {
-    use super::*;
-
-    fn revision(conn: &Connection, id: i64) -> Result<Option<i64>> {
-        Ok(conn
-            .query_row(
-                "SELECT revision FROM playlist_versions WHERE playlist_id=?1",
-                [id],
-                |row| row.get(0),
-            )
-            .optional()?)
-    }
-
-    #[test]
-    fn collection_authority_covers_reparenting_identity_reuse_and_track_removal() -> Result<()> {
-        let conn = Connection::open_in_memory()?;
-        create_current(&conn)?;
-        conn.execute_batch("INSERT INTO tracks(id,path) VALUES(1,'/one.wav'),(2,'/two.wav');
-            INSERT INTO playlists(id,name) VALUES(1,'source'),(2,'target'),(3,'unrelated');
-            INSERT INTO playlist_entries(id,playlist_id,track_id,position) VALUES(1,1,1,0),(2,2,2,0);")?;
-        let before_identity = revision(&conn, 1)?;
-        conn.execute("UPDATE playlist_entries SET id=20 WHERE id=1", [])?;
-        assert_ne!(revision(&conn, 1)?, before_identity);
-        let before = [
-            revision(&conn, 1)?,
-            revision(&conn, 2)?,
-            revision(&conn, 3)?,
-        ];
-        conn.execute(
-            "UPDATE playlist_entries SET playlist_id=2,position=1 WHERE id=20",
-            [],
-        )?;
-        assert_ne!(revision(&conn, 1)?, before[0]);
-        assert_ne!(revision(&conn, 2)?, before[1]);
-        assert_eq!(revision(&conn, 3)?, before[2]);
-        let before_delete = revision(&conn, 2)?;
-        conn.execute("DELETE FROM tracks WHERE id=1", [])?;
-        assert_ne!(revision(&conn, 2)?, before_delete);
-        let before_reinsert = revision(&conn, 2)?;
-        conn.execute(
-            "INSERT INTO tracks(id,path) VALUES(1,'/replacement.wav')",
-            [],
-        )?;
-        assert_ne!(revision(&conn, 2)?, before_reinsert);
-        let old = revision(&conn, 1)?;
-        conn.execute("UPDATE playlists SET id=4 WHERE id=1", [])?;
-        assert_eq!(revision(&conn, 1)?, None);
-        assert_ne!(revision(&conn, 4)?, old);
-        conn.execute("UPDATE playlists SET id=1 WHERE id=4", [])?;
-        assert_ne!(revision(&conn, 1)?, old);
         Ok(())
     }
 }

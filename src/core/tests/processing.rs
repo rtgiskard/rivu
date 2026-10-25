@@ -145,6 +145,45 @@ fn cancellation_after_physical_completion_still_prevents_publication() {
     );
     assert!(core.processing.results.is_empty());
 }
+
+#[test]
+fn uncertain_database_rejects_held_processing_completion_before_source_read_or_export() {
+    let (directory, mut core) = fixture_with_database(Some(10.0), true);
+    source(directory.path());
+    core.start_processing(1, ProcessingOperation::Denoise, None)
+        .unwrap();
+    let mut event = completion(&mut core);
+    let destination = directory.path().join("must-not-publish.wav");
+    if let crate::processing::Event::Finished {
+        result: Ok(result), ..
+    } = &mut event
+    {
+        let temporary = tempfile::NamedTempFile::new_in(directory.path()).unwrap();
+        std::fs::write(temporary.path(), b"staged export").unwrap();
+        result.pending_export = Some((temporary, destination.clone()));
+    } else {
+        panic!("expected successful physical processing completion");
+    }
+    core.database_outcome_uncertain();
+    let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+    connection
+        .execute_batch("ALTER TABLE tracks RENAME TO quarantined_tracks")
+        .unwrap();
+    core.processing_event(event);
+    let status = core.processing_status(1).unwrap();
+    assert_eq!(status.phase, ProcessingPhase::Failed);
+    assert!(
+        status
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("Database outcome is uncertain")
+    );
+    assert!(core.processing.active.is_none());
+    assert!(core.processing.results.is_empty());
+    assert!(!destination.exists());
+}
+
 #[test]
 fn changed_source_between_completion_and_commit_is_rejected() {
     let (directory, mut core) = fixture();

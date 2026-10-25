@@ -165,9 +165,9 @@ pub fn run(options: &Options, mode: Mode, report: &mut Report) -> Result<()> {
     }
     match &database {
         Some(plan) => report.resources.push(format!(
-            "Database {}: schema 1; current, untouched (required derived trigger revision {})",
+            "Database {}: schema {}; current, untouched",
             plan.path.display(),
-            database::ALBUM_TRIGGER_REVISION
+            database::SCHEMA_VERSION
         )),
         None => report.resources.push(format!(
             "Database {}: absent at default location; not created",

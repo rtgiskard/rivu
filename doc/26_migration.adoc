@@ -14,16 +14,14 @@ link:01_config.adoc#_configuration_upgrades[Configuration upgrades].
 
 === Current implementation
 
-The database schema and configuration schema are both `1`; they are independent
-version authorities. The current derived-trigger maintenance revision is `4`.
+The database format is `2`; the independent configuration schema is `1`.
 
-* `rivu-migrate check` validates existing current configuration and a schema `1`
-  database with derived-trigger revision `4`.
+* `rivu-migrate check` validates existing current configuration and database formats.
 * `rivu-migrate apply` repeats validation under offline ownership. The current
   release baseline has no migration steps, so current resources are left unchanged
   and no backup is created.
-* Populated databases with missing or noncurrent schema/revision markers are
-  rejected, not upgraded or reset. No historical conversion is implemented.
+* Populated databases with missing or noncurrent format metadata are rejected,
+  not upgraded or reset. No historical conversion is implemented.
   A valid configuration without an explicit version is current and left untouched.
 
 
@@ -35,7 +33,7 @@ and responsibility boundary, not a prohibition on invoking another process.
 
 The application does not invoke the tool during startup. Normal database opening
 creates current structures only for an empty database and otherwise requires the
-current schema and maintenance marker. A later startup integration may invoke the
+current format. A later startup integration may invoke the
 executable before business initialization without moving historical rules into
 the application.
 
@@ -79,10 +77,11 @@ are not historical compatibility logic.
 
 === Database schema
 
-The `schema_meta` row whose `key` is `version` is the authoritative database
-schema version. Its `value` describes persistent structure and interpretation,
-not the application release or a count of writes. New databases are created
-directly in the current schema; they do not replay historical migrations.
+The singleton `rivu_meta` row stores `format_version` and
+`current_queue_entry_id`. The version describes persistent structure and
+interpretation, not the application release or a count of writes. The current
+queue occurrence retains its foreign key with `ON DELETE SET NULL`.
+New databases create the current format directly, without historical migrations.
 
 
 Offline preflight checks required tables and readable columns, primary and unique
@@ -91,7 +90,7 @@ names. It does not rely on a version stamp alone or compare SQL text for exact
 spelling. A failed structural check is rejected, not repaired by installing
 current triggers. This is not a full integrity check or proof of trigger semantics
 and derived-summary correctness. Normal application opening uses the cheaper
-version/maintenance-marker guard rather than repeating offline structural preflight.
+format guard rather than repeating offline structural preflight.
 
 A missing version is not evidence of a known oldest schema. Unknown, future, or
 malformed formats are rejected; changing a marker does not make them current.
@@ -124,35 +123,26 @@ writer locks, or replacement. `format_version` is not an alias. User-facing load
 saving and upgrade guidance is authoritative in
 link:01_config.adoc#_configuration_upgrades[Configuration upgrades].
 
-== Derived-trigger maintenance
+== Persistent summaries and runtime authority
 
-`albums` and `album_artists` are derived summaries maintained by SQLite triggers;
-the same maintenance revision also covers queue metadata and collection versions.
-Business consumers need correct maintenance, not knowledge of historical trigger
-versions. A trigger's existence or successful execution does not prove semantic
-correctness: it might omit a relevant update or maintain the wrong grouping rule.
+`albums` and `album_artists` remain derived summaries maintained by their existing
+four SQLite triggers and indexes. Their definitions belong to the database format;
+there is no independent trigger-maintenance revision. A future persistent trigger
+change must account for both future writes and already stored summaries.
 
-`album_trigger_revision` identifies the installed album, queue metadata, and
-collection-version maintenance definitions. It is an internal maintenance marker,
-not a second database format version. New databases create all current authority
-tables and triggers directly. SQLite triggers advance durable content/lifetime
-tokens in the same transaction as collection mutations on every connection,
-including changes to playlist-entry identities.
+The seven application tables are `tracks`, `playlists`, `playlist_entries`,
+`queue_entries`, `rivu_meta`, `albums`, and `album_artists`.
+Core owns queue and album revisions, playlist content/lifetime tokens and their
+issuing sequence in memory. They are reconstructed at startup and never persisted.
+Normal queries and state publication do not synchronize tokens from SQLite.
 
-The current contract requires revision `4`. A populated database with a missing,
-lower or higher revision is rejected before writes. Offline preflight also checks
-the current authority tables and named triggers, but does not compare trigger bodies.
-
-A trigger implementation change with unchanged persistent semantics does not by
-itself require a database schema bump. A change to grouping meaning or persistent
-structure belongs to schema migration. Fixing maintenance behavior also requires
-checking whether existing summaries need rebuilding: replacing triggers only fixes
-future writes and does not automatically repair prior derived data.
-
-Application opening initializes empty databases transactionally; it does not
-replace triggers or repair existing populated databases. Changing only a marker
-neither converts trigger definitions nor repairs summaries. Future released
-changes requiring conversion belong in the independent migration executable.
+Runtime business writes must be coordinated by Core. Background saves use their
+own connections under the existing save gate; external writes while Rivu runs
+are unsupported. Stop Rivu before modifying its database with another tool.
+Confirmed commits advance affected tokens before fallible projection refreshes;
+rollbacks and no-ops do not advance them. Unknown worker outcomes close database
+business operations until restart, including shutdown database saves, rather than
+replaying writes or guessing the result.
 
 == Target selection and exclusion
 

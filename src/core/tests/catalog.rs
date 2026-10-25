@@ -88,7 +88,7 @@ fn scan_count_failure_preserves_playlist_domains_and_still_refreshes_queue() {
         .media
         .clone()
         .unwrap();
-    let impacts = core
+    let mut impacts = core
         .store
         .apply_scan(&ScanResult {
             records: vec![ScanRecord {
@@ -103,11 +103,14 @@ fn scan_count_failure_preserves_playlist_domains_and_still_refreshes_queue() {
         })
         .unwrap();
     assert!(impacts.library && impacts.structure);
-    // Commit a queued display change too, so observing its DB token proves
-    // that queue refresh is still attempted after the count read fails.
-    core.store
+    // Include a queued display change in the committed fixture facts. Queue
+    // invalidation must survive the later count projection failure.
+    let edit = core
+        .store
         .edit_track(1, Some("Committed queued title"), None, None, None)
         .unwrap();
+    impacts.queue |= edit.queue;
+    impacts.albums |= edit.albums;
     let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
     // Remove the count's source after the insertion commits.
     connection
@@ -135,7 +138,7 @@ fn scan_count_failure_preserves_playlist_domains_and_still_refreshes_queue() {
     assert_eq!(core.state.library.playlist_total, 1);
     assert!(Arc::ptr_eq(&core.state.library.history, &history));
     assert_ne!(after.queue, before.queue);
-    assert_eq!(core.state.queue, core.store.queue_state().unwrap());
+    assert_queue_saved(&core);
 }
 
 #[test]
@@ -205,7 +208,8 @@ fn startup_and_catalog_refresh_retain_the_same_recent_history() {
 #[test]
 fn unchanged_scans_keep_query_results_valid_and_still_import_playlists() {
     let (directory, mut core) = fixture();
-    core.store.set_queue_current(Some(1)).unwrap();
+    core.state.queue.current_id = Some(1);
+    core.save_queue().unwrap();
     core.refresh_queue_tracks().unwrap();
     core.command(Command::CreatePlaylistWithTracks {
         name: "retained".into(),
@@ -442,7 +446,8 @@ fn playlist_refresh_failure_preserves_both_committed_results() {
     core.create_playlist_with_tracks("Existing".into(), vec![1])
         .unwrap();
     let scopes = Arc::clone(&core.state.library.playlist_entry_revisions);
-    core.store.set_queue_current(Some(1)).unwrap();
+    core.state.queue.current_id = Some(1);
+    core.save_queue().unwrap();
     core.refresh_queue_tracks().unwrap();
     let source = directory.path().join("imported.wav");
     write_pcm(&source);

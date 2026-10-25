@@ -36,12 +36,13 @@ before reads resume. This bounds entries, not track-string bytes, and is neither
 a whole-library snapshot nor a GUI page cache. Read-only export does not use it.
 
 Library track/display pages retain one latest exact filtered count, keyed by
-normalized filters and optional root. SQLite local-change/external-commit counters
-gate reuse; explicit transactions neither read nor populate it, avoiding rollback
-leakage. A separate scalar slot retains the duplicate-group total under the same
-counter and transaction rules, so unchanged-data pagination does not repeat its
-full grouped count. Any local write or external commit conservatively invalidates
-both totals. No rows or multi-query map are retained. Root aggregation and
+normalized filters and optional root. SQLite's local-change counter gates reuse;
+explicit transactions neither read nor populate it, avoiding rollback leakage.
+A separate scalar slot retains the duplicate-group total under the same counter
+and transaction rules, so unchanged-data pagination does not repeat its full
+grouped count. Local writes invalidate totals through that counter; Core explicitly
+clears caches after background commits. No external-commit polling, rows or
+multi-query map are retained. Root aggregation and
 directory child relations are request-local; persistent album summaries are
 transactionally maintained database projections, not an evictable page cache.
 Their query costs and invariants are in

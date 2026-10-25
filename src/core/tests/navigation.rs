@@ -77,7 +77,7 @@ fn navigation_endpoint_preserves_execution_status_and_occurrence_selection() {
             let core = worker.join().unwrap();
             assert_eq!(
                 core.store
-                    .queue_projection(core.queue_ids.len())
+                    .queue_projection(core.queue_ids.len(), core.state.queue.revision)
                     .unwrap()
                     .current_id,
                 Some(expected)
@@ -306,8 +306,7 @@ fn preserving_navigation_reuses_repeat_and_single_occurrence_shuffle_selection()
         ] {
             let (_directory, mut core) = navigation_fixture(status);
             let expected = if shuffle {
-                core.store.clear_queue().unwrap();
-                core.reload_queue().unwrap();
+                core.command(Command::ClearQueue).unwrap();
                 core.enqueue(&[1]).unwrap();
                 core.queue_ids[0]
             } else if repeat == RepeatMode::All {

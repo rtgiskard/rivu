@@ -14,7 +14,6 @@ mod rows;
 mod scan;
 mod schema;
 mod tracks;
-mod versions;
 
 use anyhow::{Result, bail};
 use rusqlite::Connection;
@@ -34,6 +33,14 @@ pub(crate) struct Store {
 }
 
 impl Store {
+    pub(crate) fn playlist_ids(&self) -> Result<Vec<i64>> {
+        Ok(self
+            .conn
+            .prepare("SELECT id FROM playlists ORDER BY id")?
+            .query_map([], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Validate the playlist once and pin its read snapshot before any export I/O.
     pub(crate) fn open_export(path: &std::path::Path, playlist_id: i64) -> Result<Self> {
         let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
@@ -80,6 +87,9 @@ impl Store {
 pub(crate) struct TrackStats {
     pub play_count: u64,
     pub last_played: Option<i64>,
+    pub changed: bool,
+    pub queue: bool,
+    pub albums: bool,
 }
 
 impl TrackStats {
@@ -87,6 +97,9 @@ impl TrackStats {
         Ok(Self {
             play_count: row.get::<_, i64>(0)? as u64,
             last_played: row.get(1)?,
+            changed: false,
+            queue: false,
+            albums: false,
         })
     }
 }

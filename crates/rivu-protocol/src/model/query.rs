@@ -267,8 +267,6 @@ impl Query {
                 }
             }
             Self::Albums { .. } | Self::AlbumTracks { .. } => {
-                stamp.library = revisions.library;
-                stamp.structure = revisions.structure;
                 stamp.album = revisions.album;
             }
             Self::DirectoryPage { .. }

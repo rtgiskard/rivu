@@ -17,17 +17,6 @@ pub(super) fn integer<T: TryFrom<i64>>(
     T::try_from(value).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(index, value))
 }
 
-// Call once after all structural writes, before committing their transaction.
-pub(super) fn invalidate_structure(tx: &Transaction<'_>, changed: bool) -> Result<()> {
-    if changed {
-        tx.execute(
-            "UPDATE queue_meta SET revision=revision+1 WHERE singleton=1",
-            [],
-        )?;
-    }
-    Ok(())
-}
-
 fn reorder_interval(tx: &Transaction<'_>, start: i64, ids: &[u64]) -> Result<bool> {
     if ids.is_empty() {
         return Ok(false);
@@ -70,17 +59,17 @@ impl Store {
             .query_row("SELECT COUNT(*) FROM queue_entries", [], |row| {
                 integer(row, 0)
             })?;
-        self.queue_projection(total)
+        self.queue_projection(total, 0)
     }
 
-    pub(crate) fn queue_projection(&self, total: usize) -> Result<QueueState> {
+    pub(crate) fn queue_projection(&self, total: usize, revision: u64) -> Result<QueueState> {
         Ok(self.conn.query_row(
-            "SELECT current_id,(SELECT position FROM queue_entries WHERE id=current_id),revision FROM queue_meta WHERE singleton=1",
+            "SELECT current_queue_entry_id,(SELECT position FROM queue_entries WHERE id=current_queue_entry_id) FROM rivu_meta WHERE singleton=1",
             [], |row| Ok(QueueState {
                 total,
                 current_id: row.get::<_, Option<i64>>(0)?.map(|value| u64::try_from(value).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, value))).transpose()?,
                 current_position: row.get::<_, Option<i64>>(1)?.map(|value| usize::try_from(value).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(1, value))).transpose()?,
-                revision: integer(row, 2)?,
+                revision,
             }),
         )?)
     }
@@ -134,7 +123,7 @@ impl Store {
             .transpose()
             .context("Queue entry ID exceeds database range")?;
         self.conn.execute(
-            "UPDATE queue_meta SET current_id=?1 WHERE singleton=1 AND current_id IS NOT ?1",
+            "UPDATE rivu_meta SET current_queue_entry_id=?1 WHERE singleton=1 AND current_queue_entry_id IS NOT ?1",
             [current],
         )?;
         Ok(())
@@ -272,13 +261,12 @@ impl Store {
             .collect::<rusqlite::Result<_>>()?)
     }
 
-    pub(crate) fn enqueue_tracks(&self, ids: &[i64]) -> Result<()> {
+    pub(crate) fn enqueue_tracks(&self, ids: &[i64]) -> Result<bool> {
         let tx = self.conn.unchecked_transaction()?;
         let ids = self.validated_track_ids(ids)?;
         let changed = tx.execute("INSERT INTO queue_entries(track_id,position) SELECT value,(SELECT COALESCE(MAX(position)+1,0) FROM queue_entries)+CAST(key AS INTEGER) FROM json_each(?1) ORDER BY CAST(key AS INTEGER)", [ids])?;
-        invalidate_structure(&tx, changed != 0)?;
         tx.commit()?;
-        Ok(())
+        Ok(changed != 0)
     }
 
     pub(crate) fn enqueue_sources(
@@ -286,23 +274,17 @@ impl Store {
         directories: &[PathBuf],
         ids: &[i64],
         other_roots: Option<&[PathBuf]>,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let tx = self.conn.unchecked_transaction()?;
         let (directories, ids) = self.source_parameters(directories, ids, other_roots)?;
         let changed = tx.execute(&format!("INSERT INTO queue_entries(track_id,position) SELECT tracks.id,(SELECT COALESCE(MAX(position)+1,0) FROM queue_entries)+row_number() OVER (ORDER BY tracks.id)-1 FROM tracks WHERE {SOURCE_FILTER} ORDER BY tracks.id"), params![directories, ids])?;
-        invalidate_structure(&tx, changed != 0)?;
         tx.commit()?;
-        Ok(())
+        Ok(changed != 0)
     }
 
-    pub(crate) fn insert_queue_tracks(
-        &self,
-        ids: &[i64],
-        index: usize,
-        expected_revision: u64,
-    ) -> Result<Vec<u64>> {
+    pub(crate) fn insert_queue_tracks(&self, ids: &[i64], index: usize) -> Result<Vec<u64>> {
         let ids = self.validated_track_ids(ids)?;
-        self.insert_queue(&ids, None, index, expected_revision)
+        self.insert_queue(&ids, None, index)
     }
 
     pub(crate) fn insert_queue_sources(
@@ -311,32 +293,18 @@ impl Store {
         ids: &[i64],
         other_roots: Option<&[PathBuf]>,
         index: usize,
-        expected_revision: u64,
     ) -> Result<Vec<u64>> {
         let (directories, ids) = self.source_parameters(directories, ids, other_roots)?;
-        self.insert_queue(&ids, Some(&directories), index, expected_revision)
+        self.insert_queue(&ids, Some(&directories), index)
     }
 
-    fn insert_queue(
-        &self,
-        ids: &str,
-        directories: Option<&str>,
-        index: usize,
-        expected_revision: u64,
-    ) -> Result<Vec<u64>> {
+    fn insert_queue(&self, ids: &str, directories: Option<&str>, index: usize) -> Result<Vec<u64>> {
         let tx = self.conn.unchecked_transaction()?;
-        let revision: u64 = tx.query_row(
-            "SELECT revision FROM queue_meta WHERE singleton=1",
-            [],
-            |row| integer(row, 0),
-        )?;
-        ensure!(revision == expected_revision, "Queue revision changed");
         let count =
             super::positions::insert_tracks(&tx, PositionScope::Queue, index, ids, directories)?;
         let inserted = tx.prepare("SELECT id FROM queue_entries WHERE position>=?1 AND position<?2 ORDER BY position,id")?
             .query_map(params![i64::try_from(index)?, i64::try_from(index.checked_add(count).context("Queue insertion overflow")?)?], |row| integer(row, 0))?
             .collect::<rusqlite::Result<Vec<u64>>>()?;
-        invalidate_structure(&tx, count != 0)?;
         tx.commit()?;
         Ok(inserted)
     }
@@ -351,12 +319,11 @@ impl Store {
         ensure!(count > 0, "Playlist is empty or not found");
         tx.execute("DELETE FROM queue_entries", [])?;
         tx.execute("INSERT INTO queue_entries(track_id,position) SELECT track_id,row_number() OVER (ORDER BY position,id)-1 FROM playlist_entries WHERE playlist_id=?1 ORDER BY position,id", [playlist])?;
-        invalidate_structure(&tx, true)?;
         tx.commit()?;
         Ok(())
     }
 
-    pub(crate) fn remove_queue_entries(&self, ids: &[u64]) -> Result<()> {
+    pub(crate) fn remove_queue_entries(&self, ids: &[u64]) -> Result<bool> {
         let tx = self.conn.unchecked_transaction()?;
         let ids = serde_json::to_string(ids)?;
         let missing: Option<i64> = tx.query_row("SELECT value FROM json_each(?1) WHERE value NOT IN (SELECT id FROM queue_entries) LIMIT 1", [&ids], |row| row.get(0)).optional()?;
@@ -374,12 +341,11 @@ impl Store {
             [&ids],
         )?;
         close_gaps(&tx, &positions, PositionScope::Queue)?;
-        invalidate_structure(&tx, !positions.is_empty())?;
         tx.commit()?;
-        Ok(())
+        Ok(!positions.is_empty())
     }
 
-    pub(crate) fn reorder_queue(&self, ids: &[u64]) -> Result<()> {
+    pub(crate) fn reorder_queue(&self, ids: &[u64]) -> Result<bool> {
         let tx = self.conn.unchecked_transaction()?;
         let total: usize = tx.query_row("SELECT COUNT(*) FROM queue_entries", [], |row| {
             integer(row, 0)
@@ -389,26 +355,23 @@ impl Store {
             "Queue order does not contain every entry"
         );
         let changed = reorder_interval(&tx, 0, ids)?;
-        invalidate_structure(&tx, changed)?;
         tx.commit()?;
-        Ok(())
+        Ok(changed)
     }
 
     pub(crate) fn move_queue_entries(&self, selected: &[(i64, i64)], index: usize) -> Result<bool> {
         let tx = self.conn.unchecked_transaction()?;
         let insertion = i64::try_from(index).context("Queue target exceeds database range")?;
         let changed = move_selection(&tx, PositionScope::Queue, selected, insertion)?;
-        invalidate_structure(&tx, changed)?;
         tx.commit()?;
         Ok(changed)
     }
 
-    pub(crate) fn clear_queue(&self) -> Result<()> {
+    pub(crate) fn clear_queue(&self) -> Result<bool> {
         let tx = self.conn.unchecked_transaction()?;
         let changed = tx.execute("DELETE FROM queue_entries", [])?;
-        invalidate_structure(&tx, changed != 0)?;
         tx.commit()?;
-        Ok(())
+        Ok(changed != 0)
     }
 
     pub(crate) fn deduplicate_queue(&self) -> Result<bool> {
@@ -423,9 +386,8 @@ impl Store {
             return Ok(false);
         }
         // Keep the playing occurrence's identity, but move it to its track's first position.
-        tx.execute_batch("UPDATE queue_entries SET position=(SELECT MIN(other.position) FROM queue_entries other WHERE other.track_id=queue_entries.track_id) WHERE id=(SELECT current_id FROM queue_meta) AND position<>(SELECT MIN(other.position) FROM queue_entries other WHERE other.track_id=queue_entries.track_id); WITH ranked AS (SELECT id,row_number() OVER (PARTITION BY track_id ORDER BY CASE WHEN id=(SELECT current_id FROM queue_meta) THEN 0 ELSE 1 END,position,id) AS occurrence FROM queue_entries) DELETE FROM queue_entries WHERE id IN (SELECT id FROM ranked WHERE occurrence>1);")?;
+        tx.execute_batch("UPDATE queue_entries SET position=(SELECT MIN(other.position) FROM queue_entries other WHERE other.track_id=queue_entries.track_id) WHERE id=(SELECT current_queue_entry_id FROM rivu_meta) AND position<>(SELECT MIN(other.position) FROM queue_entries other WHERE other.track_id=queue_entries.track_id); WITH ranked AS (SELECT id,row_number() OVER (PARTITION BY track_id ORDER BY CASE WHEN id=(SELECT current_queue_entry_id FROM rivu_meta) THEN 0 ELSE 1 END,position,id) AS occurrence FROM queue_entries) DELETE FROM queue_entries WHERE id IN (SELECT id FROM ranked WHERE occurrence>1);")?;
         close_gaps(&tx, &positions, PositionScope::Queue)?;
-        invalidate_structure(&tx, true)?;
         tx.commit()?;
         Ok(true)
     }
@@ -444,16 +406,14 @@ mod tests {
         Ok(store)
     }
 
-    fn assert_invalidated(store: &Store, revision: u64) -> Result<u64> {
-        let state = store.queue_state()?;
-        assert!(state.revision > revision);
+    fn assert_compact(store: &Store) -> Result<()> {
         let rows = store.queue_page(None, 0, MAX_QUERY_ROWS)?.rows;
         assert!(
             rows.iter()
                 .enumerate()
                 .all(|(index, row)| row.position == index)
         );
-        Ok(state.revision)
+        Ok(())
     }
 
     #[test]
@@ -463,8 +423,7 @@ mod tests {
             store.enqueue_tracks(&[1, 2, 2])?;
             let original = store.queue_ids()?;
             store.set_queue_current(Some(original[2]))?;
-            let before = store.queue_state()?;
-            let inserted = store.insert_queue_tracks(&[3, 1, 3], index, before.revision)?;
+            let inserted = store.insert_queue_tracks(&[3, 1, 3], index)?;
             assert_eq!(inserted.len(), 3);
             let mut expected_ids = original.clone();
             expected_ids.splice(index..index, inserted);
@@ -487,24 +446,15 @@ mod tests {
                 after.current_position,
                 Some(2 + if index <= 2 { 3 } else { 0 })
             );
-            assert_eq!(after.revision, before.revision + 1);
         }
         Ok(())
     }
 
     #[test]
-    fn indexed_queue_sources_keep_union_order_and_reject_stale_or_invalid_boundaries() -> Result<()>
-    {
+    fn indexed_queue_sources_keep_union_order_and_reject_invalid_boundaries() -> Result<()> {
         let store = fixture()?;
         store.enqueue_tracks(&[4])?;
-        let before = store.queue_state()?;
-        store.insert_queue_sources(
-            &["/music".into(), "/music".into()],
-            &[3, 1, 3],
-            None,
-            0,
-            before.revision,
-        )?;
+        store.insert_queue_sources(&["/music".into(), "/music".into()], &[3, 1, 3], None, 0)?;
         let state = store.queue_state()?;
         let order = store.queue_ids()?;
         assert_eq!(
@@ -516,37 +466,20 @@ mod tests {
                 .collect::<Vec<_>>(),
             [1, 2, 3, 4]
         );
-        assert!(store.insert_queue_tracks(&[], 0, before.revision).is_err());
         for index in [state.total + 1, usize::MAX] {
-            assert!(
-                store
-                    .insert_queue_tracks(&[], index, state.revision)
-                    .is_err()
-            );
-            assert!(
-                store
-                    .insert_queue_sources(&[], &[], None, index, state.revision)
-                    .is_err()
-            );
+            assert!(store.insert_queue_tracks(&[], index).is_err());
+            assert!(store.insert_queue_sources(&[], &[], None, index).is_err());
         }
+        assert!(store.insert_queue_tracks(&[1, 999], 1).is_err());
         assert!(
             store
-                .insert_queue_tracks(&[1, 999], 1, state.revision)
+                .insert_queue_sources(&["/music".into()], &[999], None, 1)
                 .is_err()
         );
+        assert!(store.insert_queue_tracks(&[], state.total)?.is_empty());
         assert!(
             store
-                .insert_queue_sources(&["/music".into()], &[999], None, 1, state.revision)
-                .is_err()
-        );
-        assert!(
-            store
-                .insert_queue_tracks(&[], state.total, state.revision)?
-                .is_empty()
-        );
-        assert!(
-            store
-                .insert_queue_sources(&["/absent".into()], &[], None, 0, state.revision)?
+                .insert_queue_sources(&["/absent".into()], &[], None, 0)?
                 .is_empty()
         );
         assert_eq!(store.queue_state()?, state);
@@ -555,147 +488,120 @@ mod tests {
     }
 
     #[test]
-    fn indexed_queue_insertions_roll_back_gap_entries_revision_and_current() -> Result<()> {
+    fn indexed_queue_insertions_roll_back_gap_entries_and_current() -> Result<()> {
         let store = fixture()?;
         store.enqueue_tracks(&[1, 2, 2])?;
         let order = store.queue_ids()?;
         store.set_queue_current(Some(order[2]))?;
         let before = store.queue_state()?;
-        store.conn.execute_batch("CREATE TRIGGER reject_insertion_revision BEFORE UPDATE OF revision ON queue_meta BEGIN SELECT RAISE(ABORT,'reject revision'); END;")?;
+        store.conn.execute_batch("CREATE TEMP TRIGGER reject_insertion BEFORE INSERT ON queue_entries WHEN new.track_id=3 BEGIN SELECT RAISE(ABORT,'reject entry'); END;")?;
+        assert!(store.insert_queue_tracks(&[3, 3], 1).is_err());
         assert!(
             store
-                .insert_queue_tracks(&[3, 3], 1, before.revision)
-                .is_err()
-        );
-        assert!(
-            store
-                .insert_queue_sources(&["/music".into()], &[], None, 1, before.revision)
+                .insert_queue_sources(&["/music".into()], &[], None, 1)
                 .is_err()
         );
         assert_eq!(store.queue_ids()?, order);
         assert_eq!(store.queue_state()?, before);
-        store
-            .conn
-            .execute_batch("DROP TRIGGER reject_insertion_revision;")?;
-        assert_eq!(
-            store.insert_queue_tracks(&[3], 1, before.revision)?.len(),
-            1
-        );
+        store.conn.execute_batch("DROP TRIGGER reject_insertion;")?;
+        assert_eq!(store.insert_queue_tracks(&[3], 1)?.len(), 1);
         Ok(())
     }
 
     #[test]
-    fn structural_changes_invalidate_but_noops_preserve_revision() -> Result<()> {
+    fn structural_changes_return_effects_but_noops_do_not() -> Result<()> {
         let store = fixture()?;
         let before = store.queue_state()?;
-        store.enqueue_tracks(&[])?;
-        store.enqueue_sources(&[], &[], None)?;
-        store.enqueue_sources(&["/absent".into()], &[], None)?;
-        store.reorder_queue(&[])?;
+        assert!(!store.enqueue_tracks(&[])?);
+        assert!(!store.enqueue_sources(&[], &[], None)?);
+        assert!(!store.enqueue_sources(&["/absent".into()], &[], None)?);
+        assert!(!store.reorder_queue(&[])?);
         assert!(!store.move_queue_entries(&[], 0)?);
-        store.remove_queue_entries(&[])?;
-        store.clear_queue()?;
+        assert!(!store.remove_queue_entries(&[])?);
+        assert!(!store.clear_queue()?);
         assert!(!store.deduplicate_queue()?);
         assert_eq!(store.queue_state()?, before);
 
-        store.enqueue_tracks(&[1, 2, 3])?;
-        let mut revision = assert_invalidated(&store, before.revision)?;
+        assert!(store.enqueue_tracks(&[1, 2, 3])?);
         let ids = store.queue_ids()?;
         store.set_queue_current(Some(ids[1]))?;
         let before = store.queue_state()?;
         assert!(!store.move_queue_entries(&[(ids[1] as i64, 1)], 1)?);
-        store.reorder_queue(&ids)?;
+        assert!(!store.reorder_queue(&ids)?);
         assert!(!store.move_queue_entries(&[(ids[1] as i64, 1), (ids[2] as i64, 2)], 1)?);
-        store.remove_queue_entries(&[])?;
+        assert!(!store.remove_queue_entries(&[])?);
         assert!(!store.deduplicate_queue()?);
         assert_eq!(store.queue_state()?, before);
 
         assert!(store.move_queue_entries(&[(ids[0] as i64, 0)], 2)?);
-        revision = assert_invalidated(&store, revision)?;
         assert_eq!(store.queue_ids()?, [ids[1], ids[2], ids[0]]);
-        store.reorder_queue(&ids)?;
-        revision = assert_invalidated(&store, revision)?;
+        assert!(store.reorder_queue(&ids)?);
         assert!(store.move_queue_entries(&[(ids[2] as i64, 2)], 1)?);
-        revision = assert_invalidated(&store, revision)?;
-        store.remove_queue_entries(&[ids[0]])?;
-        revision = assert_invalidated(&store, revision)?;
-        store.enqueue_sources(&[], &[1], None)?;
-        revision = assert_invalidated(&store, revision)?;
-        store.enqueue_tracks(&[2])?;
-        revision = assert_invalidated(&store, revision)?;
+        assert!(store.remove_queue_entries(&[ids[0]])?);
+        assert!(store.enqueue_sources(&[], &[1], None)?);
+        assert!(store.enqueue_tracks(&[2])?);
         assert!(store.deduplicate_queue()?);
-        revision = assert_invalidated(&store, revision)?;
+        assert_compact(&store)?;
         assert_eq!(store.queue_state()?.current_id, Some(ids[1]));
         let playlist = store.create_playlist("Replacement")?;
         store.add_playlist(playlist, &[1, 3])?;
         store.replace_queue_from_playlist(playlist)?;
-        revision = assert_invalidated(&store, revision)?;
+        assert_compact(&store)?;
         assert_eq!(store.queue_state()?.current_id, None);
-        store.clear_queue()?;
-        assert_invalidated(&store, revision)?;
-        let before = store.queue_state()?;
-        store.clear_queue()?;
-        assert_eq!(store.queue_state()?, before);
+        assert!(store.clear_queue()?);
+        assert!(!store.clear_queue()?);
         Ok(())
     }
 
     #[test]
-    fn queued_metadata_favorites_and_statistics_still_invalidate() -> Result<()> {
+    fn queued_metadata_favorites_and_statistics_return_precise_effects() -> Result<()> {
         let store = fixture()?;
         store.enqueue_tracks(&[1, 1, 2])?;
-        let mut revision = store.queue_state()?.revision;
-        assert!(
-            store
-                .edit_track(1, Some("Title"), None, None, None)?
-                .changed
-        );
-        revision = assert_invalidated(&store, revision)?;
-        assert!(store.set_favorite(&[1], true)?.changed);
-        revision = assert_invalidated(&store, revision)?;
-        store.increment_play_count(1)?;
-        revision = assert_invalidated(&store, revision)?;
+        assert!(store.edit_track(1, Some("Title"), None, None, None)?.queue);
+        assert!(store.set_favorite(&[1], true)?.queue);
+        assert!(store.increment_play_count(1)?.queue);
+        assert!(!store.mark_played(1, 123)?.queue);
+        assert!(!store.edit_track(1, Some("Title"), None, None, None)?.queue);
+        assert!(!store.set_favorite(&[1], true)?.queue);
         assert!(
             !store
-                .edit_track(1, Some("Title"), None, None, None)?
-                .changed
+                .edit_track(4, Some("Unqueued"), None, None, None)?
+                .queue
         );
-        assert!(!store.set_favorite(&[1], true)?.changed);
-        store.edit_track(4, Some("Unqueued"), None, None, None)?;
-        store.set_favorite(&[4], true)?;
-        store.increment_play_count(4)?;
-        assert_eq!(store.queue_state()?.revision, revision);
+        assert!(!store.set_favorite(&[4], true)?.queue);
+        assert!(!store.increment_play_count(4)?.queue);
         Ok(())
     }
 
     #[test]
-    fn track_cascades_invalidate_compact_and_preserve_surviving_current() -> Result<()> {
+    fn track_cascades_return_effects_compact_and_preserve_surviving_current() -> Result<()> {
         let store = fixture()?;
         store.enqueue_tracks(&[1, 2, 1, 3, 2])?;
         let ids = store.queue_ids()?;
         store.set_queue_current(Some(ids[3]))?;
         let before = store.queue_state()?;
-        store.remove_tracks(&[4])?;
-        store.remove_tracks(&[])?;
-        store.remove_missing_tracks()?;
+        let removal = store.prepare_track_removal(&[4])?;
+        assert!(!store.remove_prepared_tracks(removal)?.queue);
+        assert!(!store.remove_missing_tracks()?.queue);
         assert_eq!(store.queue_state()?, before);
-        store.remove_tracks(&[1])?;
-        let revision = assert_invalidated(&store, before.revision)?;
+        let removal = store.prepare_track_removal(&[1])?;
+        assert!(store.remove_prepared_tracks(removal)?.queue);
+        assert_compact(&store)?;
         assert_eq!(store.queue_ids()?, [ids[1], ids[3], ids[4]]);
         assert_eq!(store.queue_state()?.current_id, Some(ids[3]));
         assert_eq!(store.queue_state()?.current_position, Some(1));
         store
             .conn
             .execute("UPDATE tracks SET missing=1 WHERE id=3", [])?;
-        let metadata_revision = assert_invalidated(&store, revision)?;
-        store.remove_missing_tracks()?;
-        assert_invalidated(&store, metadata_revision)?;
+        assert!(store.remove_missing_tracks()?.queue);
+        assert_compact(&store)?;
         assert_eq!(store.queue_ids()?, [ids[1], ids[4]]);
         assert_eq!(store.queue_state()?.current_id, None);
         Ok(())
     }
 
     #[test]
-    fn structural_failures_roll_back_revision_order_and_current() -> Result<()> {
+    fn structural_failures_roll_back_order_and_current() -> Result<()> {
         let store = fixture()?;
         store.enqueue_tracks(&[1, 2, 1, 3])?;
         let ids = store.queue_ids()?;
@@ -713,11 +619,10 @@ mod tests {
         assert_eq!(store.queue_page(None, 0, 10)?, rows);
         let playlist = store.create_playlist("Replacement")?;
         store.add_playlist(playlist, &[2, 3])?;
-
-        // Fail after entries, FK actions and compaction, at revision invalidation.
         store.conn.execute_batch(
-            "CREATE TEMP TRIGGER reject_queue_revision AFTER UPDATE OF revision ON queue_meta
-             BEGIN SELECT RAISE(ABORT,'injected invalidation failure'); END;",
+            "CREATE TEMP TRIGGER reject_queue_insert AFTER INSERT ON queue_entries BEGIN SELECT RAISE(ABORT,'injected failure'); END;
+             CREATE TEMP TRIGGER reject_queue_update AFTER UPDATE ON queue_entries BEGIN SELECT RAISE(ABORT,'injected failure'); END;
+             CREATE TEMP TRIGGER reject_queue_delete AFTER DELETE ON queue_entries BEGIN SELECT RAISE(ABORT,'injected failure'); END;",
         )?;
         assert!(store.enqueue_tracks(&[1]).is_err());
         assert!(store.enqueue_sources(&[], &[1], None).is_err());
@@ -742,16 +647,8 @@ mod tests {
         assert!(store.track(1)?.is_some());
         store
             .conn
-            .execute_batch("DROP TRIGGER reject_queue_revision;")?;
-        store
-            .conn
             .execute("UPDATE tracks SET missing=1 WHERE id=1", [])?;
-        let before = store.queue_state()?;
         let rows = store.queue_page(None, 0, 10)?;
-        store.conn.execute_batch(
-            "CREATE TEMP TRIGGER reject_queue_revision AFTER UPDATE OF revision ON queue_meta
-             BEGIN SELECT RAISE(ABORT,'injected invalidation failure'); END;",
-        )?;
         assert!(store.remove_missing_tracks().is_err());
         assert_eq!(store.queue_state()?, before);
         assert_eq!(store.queue_page(None, 0, 10)?, rows);

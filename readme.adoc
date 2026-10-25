@@ -107,8 +107,9 @@ typical Linux installation: `~/.local/share/rivu`) and
 
 The data directory contains `library.db` (library and playback state),
 `layout.json` (desktop layouts), the `artwork/` cache, and optional `logs/`.
-Stop the core before operating on `library.db`. The application rejects incompatible
-formats rather than migrating or resetting them. The separate `rivu-migrate` tool,
+Stop the core before operating on `library.db`; external writes while Rivu runs
+are unsupported. The application rejects incompatible formats rather than migrating
+or resetting them. The separate `rivu-migrate` tool,
 installed alongside `rivu`, validates current configuration and database formats
 without starting the player; historical format conversion is not implemented.
 See link:doc/02_library.adoc#_sqlite_maintenance[SQLite maintenance] for commands,

@@ -14,13 +14,6 @@ pub(super) enum BusinessEvent {
     Shutdown(RuntimeControl),
 }
 
-/// Facts actually read in a query's SQLite snapshot. Failed/cancelled reads
-/// cannot manufacture an observation from the response's fallback revisions.
-struct QueryAuthority {
-    album_revision: Option<u64>,
-    playlist: Option<(i64, Option<u64>)>,
-}
-
 impl Core {
     /// Event waiting and state transitions stay on the same dedicated owner.
     /// The shared runtime only drives I/O, timers and independent long jobs.
@@ -126,20 +119,11 @@ impl Core {
         match event {
             BusinessEvent::Request(request) => self.dispatch_request(request),
             BusinessEvent::Audio(event) => {
-                let library_revision = self.state.library.revision;
                 let result = self.audio_event(event);
-                // Playback commits invalidate metadata before reading projections.
-                // Errors may follow a commit, so still refresh their durable token.
-                let refresh_album =
-                    result.is_err() || self.state.library.revision != library_revision;
                 if let Err(error) = result {
                     self.state.system.last_error = Some(format!("{error:#}"));
                 }
-                if refresh_album {
-                    self.publish();
-                } else {
-                    self.publish_snapshot();
-                }
+                self.publish();
             }
             BusinessEvent::AudioStopped => {
                 self.state.system.last_error = Some("Audio worker stopped unexpectedly".into());
@@ -265,19 +249,13 @@ impl Core {
                         | Command::ProcessingGraphExport { .. }
                         | Command::ProcessingGraphAudition { .. }
                 );
-                let maintenance = self.database_maintenance_active();
                 let result = self.command(command);
                 if let Err(error) = &result
                     && (!library_owned || request.reply.is_none())
                 {
                     self.state.system.last_error = Some(format!("{error:#}"));
                 }
-                if !maintenance {
-                    // command() attempted the token refresh without changing its result.
-                    self.publish_snapshot();
-                } else {
-                    self.publish();
-                }
+                self.publish();
                 let scan_id = if result.is_ok() {
                     if starts_external {
                         self.active_external_admission
@@ -400,24 +378,8 @@ impl Core {
         }
     }
 
-    pub(in crate::core) fn refresh_album_revision(&mut self) {
-        match self.store.album_revision() {
-            Ok(revision) => self.state.library.album_revision = revision,
-            Err(error) => {
-                self.state.system.last_error = Some(format!(
-                    "Refreshing album collection token failed: {error:#}"
-                ))
-            }
-        }
-    }
-
-    pub(in crate::core) fn publish(&mut self) {
-        self.refresh_album_revision();
-        self.publish_snapshot();
-    }
-
     /// Publish observations already captured by the serialized owner.
-    fn publish_snapshot(&mut self) {
+    pub(in crate::core) fn publish(&mut self) {
         self.state.system.revision = self.state.system.revision.wrapping_add(1);
         {
             let mut shared = self.shared.write();
@@ -488,125 +450,29 @@ impl Core {
                 result: Err(QueryError::Cancelled),
             };
         }
-        let (response, authority) = self.read_query(query);
-        if let Some(authority) = authority {
-            let mut changed = false;
-            if let Some(revision) = authority.album_revision {
-                changed = self.state.library.album_revision != revision;
-                self.state.library.album_revision = revision;
-            }
-            if let Some((playlist_id, revision)) = authority.playlist {
-                changed |= self.set_playlist_entry_revision(playlist_id, revision);
-            }
-            if changed {
-                // Core publishes before dispatch_request releases the response;
-                // GUI completion refreshes this snapshot before checking stamps.
-                self.publish_snapshot();
-            }
-        }
-        response
+        self.read_query(query)
     }
 
     #[cfg(test)]
     pub(in crate::core) fn query_response(&self, query: &Query) -> QueryResponse {
-        self.read_query(query).0
+        self.read_query(query)
     }
 
-    fn read_query(&self, query: &Query) -> (QueryResponse, Option<QueryAuthority>) {
+    fn read_query(&self, query: &Query) -> QueryResponse {
         let mut revisions = self.state.query_revisions_for(query);
-        if !matches!(
-            query,
-            Query::Albums { .. }
-                | Query::AlbumTracks { .. }
-                | Query::PlaylistEntries { .. }
-                | Query::PlaylistEntryBatch { .. }
-                | Query::PlaylistEntryLocations { .. }
-                | Query::PlaylistEntry { .. }
-                | Query::QueuePage { .. }
-                | Query::QueueBatch { .. }
-                | Query::QueueEntries { .. }
-                | Query::DuplicateMembers { .. }
-                | Query::DuplicateMemberSelection { .. }
-        ) {
-            return (
-                QueryResponse {
-                    revisions,
-                    result: self.view_in_snapshot(query, revisions),
-                },
-                None,
-            );
+        let result = self.view_in_snapshot(query, revisions);
+        if let Ok(ViewResponse::PlaylistEntry(Some(entry))) = &result {
+            revisions.playlist_entries = self
+                .state
+                .library
+                .playlist_entry_revisions
+                .get(&entry.playlist_id)
+                .map(|&revision| rivu_protocol::response::PlaylistEntryRevision {
+                    playlist_id: entry.playlist_id,
+                    revision,
+                });
         }
-        let mut authority = None;
-        let result = (|| {
-            let _snapshot = self.store.query_snapshot()?;
-            revisions = self.database_query_revisions(query)?;
-            let playlist_id = match query {
-                Query::PlaylistEntries { playlist_id, .. }
-                | Query::PlaylistEntryBatch { playlist_id, .. }
-                | Query::PlaylistEntryLocations { playlist_id, .. } => Some(*playlist_id),
-                _ => None,
-            };
-            authority = Some(QueryAuthority {
-                album_revision: matches!(query, Query::Albums { .. } | Query::AlbumTracks { .. })
-                    .then_some(revisions.album),
-                playlist: playlist_id
-                    .map(|id| (id, revisions.playlist_entries.map(|scope| scope.revision))),
-            });
-            let result = self.view_in_snapshot(query, revisions)?;
-            if let (Query::PlaylistEntry { .. }, ViewResponse::PlaylistEntry(Some(entry))) =
-                (query, &result)
-            {
-                revisions.playlist_entries = self
-                    .store
-                    .playlist_entry_revision(entry.playlist_id)?
-                    .map(|revision| rivu_protocol::response::PlaylistEntryRevision {
-                        playlist_id: entry.playlist_id,
-                        revision,
-                    });
-                authority.as_mut().unwrap().playlist = Some((
-                    entry.playlist_id,
-                    revisions.playlist_entries.map(|scope| scope.revision),
-                ));
-            }
-            Ok(result)
-        })();
-        (QueryResponse { revisions, result }, authority)
-    }
-
-    fn database_query_revisions(&self, query: &Query) -> Result<QueryRevisions, QueryError> {
-        let mut revisions = self.state.query_revisions_for(query);
-        match query {
-            Query::Albums { .. } | Query::AlbumTracks { .. } => {
-                revisions.album = self.store.album_revision()?;
-            }
-            Query::QueuePage { .. }
-            | Query::QueueBatch { .. }
-            | Query::QueueEntries { .. }
-            | Query::DuplicateMembers { .. }
-            | Query::DuplicateMemberSelection { .. } => {
-                revisions.queue = self.store.queue_revision()?;
-            }
-            _ => {}
-        }
-        let playlist_id = match query {
-            Query::PlaylistEntries { playlist_id, .. }
-            | Query::PlaylistEntryBatch { playlist_id, .. }
-            | Query::PlaylistEntryLocations { playlist_id, .. } => Some(*playlist_id),
-            _ => None,
-        };
-        if let Some(playlist_id) = playlist_id {
-            revisions.playlist_entries =
-                self.store
-                    .playlist_entry_revision(playlist_id)?
-                    .map(|revision| rivu_protocol::response::PlaylistEntryRevision {
-                        playlist_id,
-                        revision,
-                    });
-            if revisions.playlist_entries.is_none() {
-                revisions.playlist_metadata = None;
-            }
-        }
-        Ok(revisions)
+        QueryResponse { revisions, result }
     }
 
     #[cfg(test)]

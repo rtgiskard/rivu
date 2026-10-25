@@ -638,7 +638,7 @@ mod tests {
         model.sync(true, QueryRevisions::default(), 2);
         let request = model.prepare().unwrap();
         let old = model.revisions;
-        let current = QueryRevisions { library: 1, ..old };
+        let current = QueryRevisions { album: 1, ..old };
         let count = request.count_query.clone().unwrap();
         let completion = model.complete(
             &request.query,
@@ -694,7 +694,7 @@ mod tests {
         assert!(request.count_query.is_none());
         assert_eq!(finish(&mut model, request, 0).counts, Some((0, 10)));
         let current = QueryRevisions {
-            structure: 1,
+            album: 1,
             ..model.revisions
         };
         model.sync(true, current, 2);
@@ -906,7 +906,7 @@ mod tests {
             pages.demand(80..84, 2);
             let generation = projection.generation();
             let refreshed = QueryRevisions {
-                library: 1,
+                album: 1,
                 ..revisions
             };
             assert!(sync_pages(&mut projection, &mut pages, &query, refreshed));
@@ -935,44 +935,37 @@ mod tests {
     #[test]
     fn hidden_data_changes_discard_pages_and_bootstrap_previous_empty_results() {
         for query in queries() {
-            for revisions in [
-                QueryRevisions {
-                    library: 1,
-                    ..Default::default()
-                },
-                QueryRevisions {
-                    structure: 1,
-                    ..Default::default()
-                },
-            ] {
-                for total in [0, 2] {
-                    let mut projection = QueryProjection::default();
-                    let mut pages = paged::PagedRows::default();
-                    sync_pages(
-                        &mut projection,
-                        &mut pages,
-                        &query,
-                        QueryRevisions::default(),
-                    );
-                    pages.begin(0, 2);
-                    pages.accept(Page {
-                        total,
-                        rows: if total == 0 { vec![] } else { vec![1, 2] },
-                    });
-                    cancel_pages(&mut projection, &mut pages);
-                    assert!(sync_pages(&mut projection, &mut pages, &query, revisions));
-                    assert_eq!(pages.total(), None);
-                    assert!(!pages.is_empty());
-                    assert!(pages.get(0).is_none());
-                    assert_eq!(pages.demand(pages.visible(), 2), Some(0));
-                    pages.begin(0, 2);
-                    pages.accept(Page {
-                        total: 1,
-                        rows: vec![3],
-                    });
-                    assert_eq!(pages.total(), Some(1));
-                    assert_eq!(pages.get(0), Some(&3));
-                }
+            let revisions = QueryRevisions {
+                album: 1,
+                ..Default::default()
+            };
+            for total in [0, 2] {
+                let mut projection = QueryProjection::default();
+                let mut pages = paged::PagedRows::default();
+                sync_pages(
+                    &mut projection,
+                    &mut pages,
+                    &query,
+                    QueryRevisions::default(),
+                );
+                pages.begin(0, 2);
+                pages.accept(Page {
+                    total,
+                    rows: if total == 0 { vec![] } else { vec![1, 2] },
+                });
+                cancel_pages(&mut projection, &mut pages);
+                assert!(sync_pages(&mut projection, &mut pages, &query, revisions));
+                assert_eq!(pages.total(), None);
+                assert!(!pages.is_empty());
+                assert!(pages.get(0).is_none());
+                assert_eq!(pages.demand(pages.visible(), 2), Some(0));
+                pages.begin(0, 2);
+                pages.accept(Page {
+                    total: 1,
+                    rows: vec![3],
+                });
+                assert_eq!(pages.total(), Some(1));
+                assert_eq!(pages.get(0), Some(&3));
             }
         }
     }
@@ -1009,7 +1002,7 @@ mod tests {
             assert!(pages.demand(pages.visible(), 4).is_none());
 
             let refreshed = QueryRevisions {
-                library: 1,
+                album: 1,
                 ..revisions
             };
             assert!(sync_pages(&mut projection, &mut pages, &query, refreshed));

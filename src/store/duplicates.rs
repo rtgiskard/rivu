@@ -14,7 +14,6 @@ const DUPLICATE_MEMBER_COLUMNS: &str = "file_size,modified_ns,
 
 pub(super) struct DuplicateGroupCount {
     changes: u64,
-    data_version: i64,
     total: usize,
 }
 
@@ -120,18 +119,12 @@ fn validate_pair(source: &RelocationRow, target: &RelocationRow) -> Result<()> {
 
 impl Store {
     fn duplicate_group_count(&self) -> Result<usize> {
-        // Match the track-count cache: explicit snapshots never escape their
-        // transaction, and both local writes and external commits invalidate.
+        // Explicit snapshots never escape their transaction; local writes invalidate.
         let cacheable = self.conn.is_autocommit();
         let changes = self.conn.total_changes();
-        let data_version = self
-            .conn
-            .prepare_cached("PRAGMA data_version")?
-            .query_row([], |row| row.get::<_, i64>(0))?;
         if cacheable
             && let Some(cached) = self.duplicate_group_count_cache.borrow().as_ref()
             && cached.changes == changes
-            && cached.data_version == data_version
         {
             return Ok(cached.total);
         }
@@ -145,11 +138,8 @@ impl Store {
             |row| row.get::<_, i64>(0),
         )? as usize;
         if cacheable {
-            *self.duplicate_group_count_cache.borrow_mut() = Some(DuplicateGroupCount {
-                changes,
-                data_version,
-                total,
-            });
+            *self.duplicate_group_count_cache.borrow_mut() =
+                Some(DuplicateGroupCount { changes, total });
         }
         Ok(total)
     }
@@ -281,7 +271,10 @@ impl Store {
         })
     }
 
-    pub(crate) fn commit_relocation(&self, prepared: &PreparedRelocation) -> Result<()> {
+    pub(crate) fn commit_relocation(
+        &self,
+        prepared: &PreparedRelocation,
+    ) -> Result<super::ScanImpacts> {
         let tx = self.conn.unchecked_transaction()?;
         let source = relocation_row(&tx, prepared.source.id)?;
         let target = relocation_row(&tx, prepared.target.id)?;
@@ -298,6 +291,15 @@ impl Store {
                     track_number,disc_number,bits_per_sample,release_date
              FROM tracks WHERE id=?1",
             [target.identity.id],
+        )?;
+        let queue = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM queue_entries WHERE track_id=?1)",
+            [source.identity.id],
+            |row| row.get(0),
+        )?;
+        let albums = tx.query_row(
+            &format!("SELECT EXISTS(SELECT 1 FROM tracks AS t WHERE id IN (?1,?2) AND {}) OR EXISTS(SELECT 1 FROM tracks AS s CROSS JOIN temp.relocation_target AS t WHERE s.id=?1 AND {})", super::albums::eligible_member("t"), rivu_format::database::eligible_title("COALESCE(s.album_override,t.raw_album)")),
+            params![source.identity.id, target.identity.id], |row| row.get(0),
         )?;
         tx.execute("DELETE FROM tracks WHERE id=?1", [target.identity.id])?;
         let updated = tx.execute(
@@ -317,7 +319,15 @@ impl Store {
         let mut cache = self.track_cache.borrow_mut();
         cache.entries.remove(&source.identity.id);
         cache.entries.remove(&target.identity.id);
-        Ok(())
+        Ok(super::ScanImpacts {
+            changed: true,
+            library: true,
+            structure: true,
+            duplicate_groups: true,
+            queue,
+            albums,
+            ..Default::default()
+        })
     }
 }
 
@@ -344,10 +354,8 @@ mod tests {
     }
 
     #[test]
-    fn group_totals_follow_local_writes_external_commits_and_rollback() -> Result<()> {
-        let directory = tempfile::tempdir_in(concat!(env!("CARGO_MANIFEST_DIR"), "/.cache"))?;
-        let path = directory.path().join("duplicates.db");
-        let store = Store::open(&path)?;
+    fn group_totals_follow_local_writes_and_rollback() -> Result<()> {
+        let store = Store::open(std::path::Path::new(":memory:"))?;
         let first = blake3::hash(b"first");
         let second = blake3::hash(b"second");
         store.conn.execute(
@@ -362,8 +370,7 @@ mod tests {
             .conn
             .execute("UPDATE tracks SET fingerprint=NULL WHERE id=2", [])?;
         assert_eq!(total()?, 1);
-        let external = Connection::open(&path)?;
-        external.execute(
+        store.conn.execute(
             "UPDATE tracks SET fingerprint=?1 WHERE id=2",
             [first.as_bytes().as_slice()],
         )?;
@@ -372,8 +379,6 @@ mod tests {
         transaction.execute("UPDATE tracks SET fingerprint=NULL", [])?;
         assert_eq!(total()?, 0);
         transaction.rollback()?;
-        assert_eq!(total()?, 2);
-        external.execute_batch("BEGIN; UPDATE tracks SET fingerprint=NULL; ROLLBACK;")?;
         assert_eq!(total()?, 2);
         store.conn.execute("DELETE FROM tracks WHERE id=2", [])?;
         assert_eq!(total()?, 1);
@@ -512,7 +517,6 @@ mod tests {
         assert!(store.track(2)?.is_none());
         assert_eq!(store.queue_ids()?, ids);
         assert_eq!(store.queue_state()?.current_id, queue.current_id);
-        assert!(store.queue_state()?.revision > queue.revision);
         assert_eq!(
             store
                 .conn

@@ -761,10 +761,22 @@ impl Core {
         }) {
             return;
         }
-        // Retire maintenance ownership before any projection refresh may stop
-        // playback. The worker has released its writable connection already.
         let mut task = self.active_scan.take().unwrap();
-        let _ = futures::executor::block_on(task.worker);
+        let retired = futures::executor::block_on(task.worker);
+        if saved.outcome_uncertain || retired.is_err() {
+            self.database_outcome_uncertain();
+            task.status.progress = saved.progress;
+            task.status.progress.phase = ScanPhase::Failed;
+            task.status.library_committed = saved.library_committed;
+            task.status.playlist_id = saved.playlist_id;
+            task.status.message = "Database outcome is uncertain; restart Rivu".into();
+            task.status.error = Some(saved.error.map_or_else(
+                || task.status.message.clone(),
+                |error| format!("{error:#}; restart Rivu"),
+            ));
+            self.retain_scan_outcome(task.status, task.owner);
+            return;
+        }
         task.status.progress = saved.progress;
         task.status.library_committed = saved.library_committed;
         task.status.playlist_id = saved.playlist_id;
@@ -778,25 +790,11 @@ impl Core {
         if saved.library_committed || saved.outcome_uncertain {
             self.store.invalidate_caches();
         }
-        let impacts = if saved.outcome_uncertain {
-            // An unwind can happen after SQLite committed but before the next
-            // fact assignment. Invalidate possibly affected domains, without
-            // inventing a successful commit or doing unbounded recovery SQL.
-            if saved.playlist_id.is_none() {
-                self.state.library.playlist_revision =
-                    self.state.library.playlist_revision.wrapping_add(1);
-            }
-            Some(crate::store::ScanImpacts {
-                changed: true,
-                library: true,
-                structure: true,
-                duplicate_groups: true,
-                duplicate_members: true,
-                ..crate::store::ScanImpacts::default()
-            })
-        } else {
-            saved.impacts
-        };
+        if let Some(playlist_id) = saved.playlist_id {
+            self.advance_playlist_entry_revision(playlist_id);
+            self.invalidate_playlist_creation(true);
+        }
+        let impacts = saved.impacts;
         if let Some(impacts) = impacts {
             self.invalidate_scan_impacts(impacts);
             if let Some(total) = saved.library_total {
@@ -825,21 +823,14 @@ impl Core {
                 }));
             }
         }
-        if let Some(playlist_id) = saved.playlist_id {
-            if let Err(error) = self.refresh_playlist_entry_revision(playlist_id) {
-                errors
-                    .push(error.context("Playlist saved, but refreshing its content token failed"));
-            }
-            self.invalidate_playlist_creation(true);
-            if let Some(total) = saved.playlist_total {
-                match total {
-                    Ok(total) => self.state.library.playlist_total = total,
-                    Err(error) => {
-                        errors.push(error.context(
-                            "Scan saved and playlist created, but playlist refresh failed",
-                        ))
-                    }
-                }
+        if saved.playlist_id.is_some()
+            && let Some(total) = saved.playlist_total
+        {
+            match total {
+                Ok(total) => self.state.library.playlist_total = total,
+                Err(error) => errors.push(
+                    error.context("Scan saved and playlist created, but playlist refresh failed"),
+                ),
             }
         }
         if !errors.is_empty() {
@@ -937,7 +928,7 @@ mod tests {
             assert_eq!(saved.playlist_id.is_some(), committed);
             if let Some(id) = saved.playlist_id {
                 let store = Store::open(&directory.path().join("library.db")).unwrap();
-                assert!(store.playlist_entry_revision(id).unwrap().is_some());
+                assert!(store.playlist_ids().unwrap().contains(&id));
             }
             assert!(
                 saved

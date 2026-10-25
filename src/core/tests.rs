@@ -50,7 +50,10 @@ fn fixture_with_duration(duration: Option<f64>) -> (tempfile::TempDir, Core) {
     fixture_with_database(duration, false)
 }
 
-fn fixture_with_database(duration: Option<f64>, persistent: bool) -> (tempfile::TempDir, Core) {
+pub(super) fn fixture_with_database(
+    duration: Option<f64>,
+    persistent: bool,
+) -> (tempfile::TempDir, Core) {
     let directory = tempfile::tempdir().unwrap();
     let database_path = if persistent {
         directory.path().join("library.db")
@@ -96,7 +99,6 @@ fn fixture_with_database(duration: Option<f64>, persistent: bool) -> (tempfile::
         .unwrap();
     let mut state = CoreState::default();
     state.library.track_total = store.track_count().unwrap();
-    state.library.album_revision = store.album_revision().unwrap();
     state.system.config_path = directory.path().join("config.toml");
     Arc::make_mut(&mut state.system.config)
         .library_roots
@@ -117,6 +119,8 @@ fn fixture_with_database(duration: Option<f64>, persistent: bool) -> (tempfile::
         generation: 1,
         output_settings_request: 0,
         queue_ids: Vec::new(),
+        next_playlist_token: 0,
+        database_unavailable: false,
         playback: None,
         retired_playback: None,
         playback_write_deferred: false,
@@ -143,6 +147,9 @@ fn fixture_with_database(duration: Option<f64>, persistent: bool) -> (tempfile::
         config_save_error: None,
         _test_tasks: Some(tasks),
     };
+    for playlist_id in core.store.playlist_ids().unwrap() {
+        core.advance_playlist_entry_revision(playlist_id);
+    }
     core.enqueue(&[1, 2, 2, 3, 4]).unwrap();
     (directory, core)
 }
@@ -313,7 +320,8 @@ fn write_pcm_frames(path: &Path, frames: u32) {
 }
 
 fn pending(core: &mut Core, queue_id: u64) {
-    core.store.set_queue_current(Some(queue_id)).unwrap();
+    core.state.queue.current_id = Some(queue_id);
+    core.save_queue().unwrap();
 
     core.refresh_queue_tracks().unwrap();
     core.state.playback.status = PlaybackStatus::Playing;
@@ -399,5 +407,14 @@ fn queue_entries(core: &Core) -> Vec<(u64, i64)> {
 
 fn assert_queue_saved(core: &Core) {
     assert_eq!(core.store.queue_ids().unwrap(), core.queue_ids);
-    assert_eq!(core.store.queue_state().unwrap(), core.state.queue);
+    let projection = core
+        .store
+        .queue_projection(core.queue_ids.len(), core.state.queue.revision)
+        .unwrap();
+    assert_eq!(projection.current_id, core.state.queue.current_id);
+    assert_eq!(
+        projection.current_position,
+        core.state.queue.current_position
+    );
+    assert_eq!(projection.total, core.state.queue.total);
 }

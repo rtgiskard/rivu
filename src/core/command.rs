@@ -6,9 +6,7 @@ impl Core {
         if self.database_maintenance_active() && self.maintenance_control(&command)? {
             return Ok(());
         }
-        let result = self.apply_command(command);
-        self.refresh_album_revision();
-        result
+        self.apply_command(command)
     }
 
     fn apply_command(&mut self, command: Command) -> Result<()> {
@@ -18,7 +16,50 @@ impl Core {
                 destination,
             } => {
                 use rivu_protocol::model::CollectionDestination;
+                match &source {
+                    CollectionSource::Album { revision, .. } => {
+                        ensure!(
+                            self.state.library.album_revision == *revision,
+                            "Album collection changed"
+                        );
+                    }
+                    CollectionSource::Playlist {
+                        playlist_id,
+                        revision,
+                    } => {
+                        self.check_playlist_entry_revision(*playlist_id, *revision)?;
+                    }
+                }
+                match destination {
+                    CollectionDestination::Playlist {
+                        playlist_id,
+                        revision,
+                        ..
+                    } => {
+                        self.check_playlist_entry_revision(playlist_id, revision)?;
+                    }
+                    CollectionDestination::Queue {
+                        insertion: Some(insertion),
+                    } => {
+                        self.check_queue_insertion(
+                            usize::try_from(insertion.index)?,
+                            insertion.revision,
+                        )?;
+                    }
+                    _ => {}
+                }
                 let (count, inserted) = self.store.transfer_collection(&source, destination)?;
+                if count == 0 {
+                    return Ok(());
+                }
+                if count != 0
+                    && matches!(
+                        destination,
+                        CollectionDestination::Queue { insertion: None }
+                    )
+                {
+                    self.advance_queue_revision();
+                }
                 match destination {
                     CollectionDestination::Queue {
                         insertion: Some(insertion),
@@ -39,6 +80,7 @@ impl Core {
                 );
                 self.stop()?;
                 self.store.queue_album(&key, true)?;
+                self.advance_queue_revision();
                 self.state.current_track = None;
                 self.played.clear();
                 self.played_cursor = 0;
@@ -47,6 +89,7 @@ impl Core {
             }
             Command::EnqueueAlbum { key } => {
                 self.store.queue_album(&key, false)?;
+                self.advance_queue_revision();
                 self.append_queue_ids()?;
             }
             Command::Scan { paths, force } => return self.scan(paths, force),
@@ -117,6 +160,7 @@ impl Core {
                 ensure!(total > 0, "Playlist is empty");
                 self.stop()?;
                 self.store.replace_queue_from_playlist(playlist_id)?;
+                self.advance_queue_revision();
                 self.state.current_track = None;
                 self.played.clear();
                 self.played_cursor = 0;
@@ -195,9 +239,13 @@ impl Core {
             } => {
                 let roots =
                     other_tracks.then_some(self.state.system.config.library_roots.as_slice());
-                self.store
-                    .enqueue_sources(&directories, &track_ids, roots)?;
-                self.append_queue_ids()?;
+                if self
+                    .store
+                    .enqueue_sources(&directories, &track_ids, roots)?
+                {
+                    self.advance_queue_revision();
+                    self.append_queue_ids()?;
+                }
             }
             Command::InsertQueue {
                 track_ids,
@@ -205,9 +253,7 @@ impl Core {
                 expected_revision,
             } => {
                 self.check_queue_insertion(index, expected_revision)?;
-                let inserted =
-                    self.store
-                        .insert_queue_tracks(&track_ids, index, expected_revision)?;
+                let inserted = self.store.insert_queue_tracks(&track_ids, index)?;
                 self.insert_queue_ids(index, inserted)?;
             }
             Command::InsertQueueSources {
@@ -223,7 +269,6 @@ impl Core {
                     &track_ids,
                     other_tracks.then_some(self.state.system.config.library_roots.as_slice()),
                     index,
-                    expected_revision,
                 )?;
                 self.insert_queue_ids(index, inserted)?;
             }
@@ -241,7 +286,9 @@ impl Core {
             }
             Command::ClearQueue => {
                 self.stop()?;
-                self.store.clear_queue()?;
+                if self.store.clear_queue()? {
+                    self.advance_queue_revision();
+                }
                 self.reload_queue()?;
                 self.state.current_track = None;
                 self.played.clear();

@@ -777,7 +777,7 @@ mod deletion_tests {
                 (100,10,1,0),(101,10,2,1),(102,10,3,2),
                 (200,20,1,0),(201,20,2,1),(202,20,3,2);
              INSERT INTO queue_entries(id,track_id,position) VALUES (300,2,0);
-             UPDATE queue_meta SET current_id=300 WHERE singleton=1;",
+             UPDATE rivu_meta SET current_queue_entry_id=300 WHERE singleton=1;",
         )?;
         assert_eq!(store.remove_playlist_entry(101)?, 10);
         assert!(store.remove_playlist_entry(999).is_err());
@@ -797,7 +797,7 @@ mod deletion_tests {
             ]
         );
         let current: Option<i64> = store.conn.query_row(
-            "SELECT current_id FROM queue_meta WHERE singleton=1",
+            "SELECT current_queue_entry_id FROM rivu_meta WHERE singleton=1",
             [],
             |row| row.get(0),
         )?;

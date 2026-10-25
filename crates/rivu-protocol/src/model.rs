@@ -260,7 +260,7 @@ pub struct LibrarySnapshot {
     pub revision: u64,
     /// Changes only when the library tree or visible row ordering may change.
     pub structure_revision: u64,
-    /// Durable SQLite album membership/order/query token, shared with transfers.
+    /// Core-owned album membership/order/query token, shared with transfers.
     pub album_revision: u64,
     /// Playlist summaries: identity, name, or member count. Not a content epoch.
     pub playlist_revision: u64,

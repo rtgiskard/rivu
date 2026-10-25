@@ -80,7 +80,7 @@ pub struct TrackRevision {
 pub struct QueryRevisions {
     pub library: u64,
     pub structure: u64,
-    /// Durable album collection token, read in the result's database snapshot.
+    /// Core-owned album collection token captured with the serialized query.
     pub album: u64,
     pub playlist: u64,
     pub queue: u64,

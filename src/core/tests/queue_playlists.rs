@@ -270,8 +270,9 @@ fn indexed_playlist_commands_advance_only_changed_members_and_reject_stale_drops
 #[test]
 fn playlist_creation_count_failure_keeps_the_committed_lifetime_registered() {
     let (directory, mut core) = fixture_with_database(Some(10.0), true);
-    let before = core.state.query_revisions();
+    // Fixture a committed producer result before exercising Core's completion.
     let playlist_id = core.store.create_playlist("Committed playlist").unwrap();
+    let before = core.state.query_revisions();
     let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
     connection
         .execute_batch("PRAGMA foreign_keys=OFF; DROP TABLE playlists;")
@@ -1371,7 +1372,7 @@ fn failed_queue_moves_preserve_memory_order_current_history_and_revision() {
     let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
     connection
         .execute_batch(
-            "CREATE TRIGGER reject_queue_move AFTER UPDATE OF revision ON queue_meta
+            "CREATE TRIGGER reject_queue_move BEFORE UPDATE OF position ON queue_entries
              BEGIN SELECT RAISE(ABORT,'queue move rejected'); END;",
         )
         .unwrap();
@@ -1388,7 +1389,7 @@ fn failed_queue_moves_preserve_memory_order_current_history_and_revision() {
         assert!(core.command(command).is_err());
         assert_eq!(core.queue_ids, order);
         assert_eq!(core.state.queue, state);
-        assert_eq!(core.store.queue_state().unwrap(), state);
+        assert_queue_saved(&core);
         assert_eq!(core.generation, generation);
         assert_eq!(core.state.playback.status, PlaybackStatus::Playing);
         assert_eq!(core.played, [1, 3, 5]);
@@ -1703,17 +1704,9 @@ fn collection_transfers_keep_source_order_and_existing_occurrences() {
 }
 
 #[test]
-fn committed_playlist_creation_invalidates_and_refreshes_count_after_token_failure() {
+fn committed_playlist_creation_registers_tokens_and_refreshes_count() {
     for has_members in [false, true] {
-        let (directory, mut core) = fixture_with_database(Some(10.0), true);
-        let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
-        connection.execute_batch(
-            "CREATE TRIGGER fail_created_token AFTER INSERT ON playlist_versions
-             BEGIN UPDATE playlist_versions SET revision='unreadable' WHERE playlist_id=NEW.playlist_id; END;
-             CREATE TRIGGER fail_changed_token AFTER UPDATE OF revision ON playlist_versions
-             WHEN typeof(NEW.revision)='integer'
-             BEGIN UPDATE playlist_versions SET revision='unreadable' WHERE playlist_id=NEW.playlist_id; END;",
-        ).unwrap();
+        let (_directory, mut core) = fixture();
         let before = core.state.query_revisions();
         let command = if has_members {
             Command::CreatePlaylistWithTracks {
@@ -1725,8 +1718,10 @@ fn committed_playlist_creation_invalidates_and_refreshes_count_after_token_failu
                 name: "Committed".into(),
             }
         };
-        assert!(core.command(command).is_err());
+        core.command(command).unwrap();
         assert_eq!(core.state.library.playlist_total, 1);
+        assert!(core.state.library.playlist_entry_revisions.contains_key(&1));
+        assert_ne!(core.state.library.playlist_entry_revisions[&1], 0);
         assert_eq!(core.state.library.playlist_revision, before.playlist + 1);
         assert_eq!(
             core.state.library.duplicate_members_revision,

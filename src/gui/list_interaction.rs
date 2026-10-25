@@ -1299,7 +1299,7 @@ mod tests {
             structure: 4,
             ..Default::default()
         };
-        for failure in 0..4 {
+        for failure in 0..3 {
             let mut calls = 0;
             let mut epoch = QueryEpoch::default();
             let ticket = epoch.ticket();
@@ -1314,19 +1314,11 @@ mod tests {
                             &[8, 3],
                             4,
                             rivu_protocol::response::QueryRevisions {
-                                library: 9,
+                                album: 1,
                                 ..revisions
                             },
                         ),
-                        1 => album_page(
-                            &[8, 3],
-                            4,
-                            rivu_protocol::response::QueryRevisions {
-                                structure: 5,
-                                ..revisions
-                            },
-                        ),
-                        2 => album_page(&[], 4, revisions),
+                        1 => album_page(&[], 4, revisions),
                         _ => rivu_protocol::response::QueryResponse {
                             revisions,
                             result: Err(rivu_protocol::response::QueryError::Message(

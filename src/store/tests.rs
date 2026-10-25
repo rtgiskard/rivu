@@ -1461,11 +1461,17 @@ fn playback_precision_upgrade_is_source_conditional_and_idempotent() {
     let track = all_tracks(&store).remove(0);
     store.enqueue_tracks(&[track.id]).unwrap();
     let source = store.playback_source(&track).unwrap().unwrap();
-    assert!(!store.upgrade_bitrate(&source, 192_000, false).unwrap());
-    assert!(!store.upgrade_bitrate(&source, 0, true).unwrap());
+    assert!(
+        !store
+            .upgrade_bitrate(&source, 192_000, false)
+            .unwrap()
+            .changed
+    );
+    assert!(!store.upgrade_bitrate(&source, 0, true).unwrap().changed);
     let before = store.queue_state().unwrap();
     // Precision itself is content, even when the numerical value is unchanged.
-    assert!(store.upgrade_bitrate(&source, 128_000, true).unwrap());
+    let impact = store.upgrade_bitrate(&source, 128_000, true).unwrap();
+    assert!(impact.changed && impact.library && impact.queue && !impact.albums);
     let exact = store.track(track.id).unwrap().unwrap();
     assert!(exact.bitrate_exact);
     assert!(
@@ -1497,9 +1503,19 @@ fn playback_precision_upgrade_is_source_conditional_and_idempotent() {
             .bitrate_exact
     );
     let revision = store.queue_state().unwrap();
-    assert!(revision.revision > before.revision);
-    assert!(!store.upgrade_bitrate(&source, 256_000, true).unwrap());
-    assert!(!store.upgrade_bitrate(&source, 256_000, false).unwrap());
+    assert_eq!(revision, before);
+    assert!(
+        !store
+            .upgrade_bitrate(&source, 256_000, true)
+            .unwrap()
+            .changed
+    );
+    assert!(
+        !store
+            .upgrade_bitrate(&source, 256_000, false)
+            .unwrap()
+            .changed
+    );
     assert_eq!(store.queue_state().unwrap(), revision);
     assert!(store.playback_source(&exact).unwrap().is_none());
 
@@ -1530,7 +1546,12 @@ fn playback_precision_upgrade_is_source_conditional_and_idempotent() {
     let replacement = store.track(track.id).unwrap().unwrap();
     assert_eq!(replacement.bitrate_bps, Some(64_000));
     assert!(!replacement.bitrate_exact);
-    assert!(!store.upgrade_bitrate(&source, 128_000, true).unwrap());
+    assert!(
+        !store
+            .upgrade_bitrate(&source, 128_000, true)
+            .unwrap()
+            .changed
+    );
     record.media.bitrate_exact = true;
     assert!(store.apply_scan(&scan(vec![record])).unwrap().changed);
     assert!(store.track(track.id).unwrap().unwrap().bitrate_exact);
@@ -1544,9 +1565,24 @@ fn playback_precision_fill_and_cue_guard_preserve_source_identity() {
     store.apply_scan(&scan(vec![record.clone()])).unwrap();
     let track = all_tracks(&store).remove(0);
     let source = store.playback_source(&track).unwrap().unwrap();
-    assert!(store.upgrade_bitrate(&source, 128_000, false).unwrap());
-    assert!(!store.upgrade_bitrate(&source, 192_000, false).unwrap());
-    assert!(store.upgrade_bitrate(&source, 192_000, true).unwrap());
+    assert!(
+        store
+            .upgrade_bitrate(&source, 128_000, false)
+            .unwrap()
+            .changed
+    );
+    assert!(
+        !store
+            .upgrade_bitrate(&source, 192_000, false)
+            .unwrap()
+            .changed
+    );
+    assert!(
+        store
+            .upgrade_bitrate(&source, 192_000, true)
+            .unwrap()
+            .changed
+    );
     assert!(
         !store
             .apply_scan(&scan(vec![record.clone()]))
@@ -1556,7 +1592,12 @@ fn playback_precision_fill_and_cue_guard_preserve_source_identity() {
     record.modified_ns += 1;
     store.apply_scan(&scan(vec![record])).unwrap();
     assert_eq!(store.track(track.id).unwrap().unwrap().bitrate_bps, None);
-    assert!(!store.upgrade_bitrate(&source, 192_000, true).unwrap());
+    assert!(
+        !store
+            .upgrade_bitrate(&source, 192_000, true)
+            .unwrap()
+            .changed
+    );
 
     let mut cue = rec("/music/cue.flac", "cue", "Cue", 10.0);
     cue.cue = Some(CueSegment {
@@ -1574,11 +1615,21 @@ fn playback_precision_fill_and_cue_guard_preserve_source_identity() {
         .playback_source(&store.track(id).unwrap().unwrap())
         .unwrap()
         .unwrap();
-    assert!(store.upgrade_bitrate(&source, 128_000, true).unwrap());
+    assert!(
+        store
+            .upgrade_bitrate(&source, 128_000, true)
+            .unwrap()
+            .changed
+    );
     cue.cue.as_mut().unwrap().end_frame = Some(700);
     store.apply_scan(&scan(vec![cue])).unwrap();
     assert!(!store.track(id).unwrap().unwrap().bitrate_exact);
-    assert!(!store.upgrade_bitrate(&source, 192_000, true).unwrap());
+    assert!(
+        !store
+            .upgrade_bitrate(&source, 192_000, true)
+            .unwrap()
+            .changed
+    );
 }
 
 #[test]
@@ -3070,7 +3121,7 @@ fn bounded_view_queries_filter_order_and_count() {
 }
 
 #[test]
-fn paged_totals_follow_local_writes_external_commits_and_rollback() {
+fn paged_totals_follow_local_writes_and_rollback() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("counts.db");
     let store = Store::open(&path).unwrap();
@@ -3097,8 +3148,8 @@ fn paged_totals_follow_local_writes_external_commits_and_rollback() {
         .edit_track(first, Some("Other"), None, None, None)
         .unwrap();
     assert_eq!(count(), 1);
-    let external = Connection::open(&path).unwrap();
-    external
+    store
+        .conn
         .execute(
             "UPDATE tracks SET raw_title='Needle Three' WHERE path='/music/b/three.wav'",
             [],
@@ -4283,7 +4334,10 @@ fn persistent_queue_accepts_entire_large_library_pages_restarts_and_saves_playli
     assert_eq!(second.rows[0].position, 256);
     let current = last.rows[63].id;
     store.set_queue_current(Some(current)).unwrap();
-    assert_eq!(store.queue_state().unwrap().revision, state.revision);
+    assert_eq!(
+        store.queue_projection(state.total, 123).unwrap().revision,
+        123
+    );
     let (playlist, has_members) = store.create_playlist_from_queue("All").unwrap();
     assert!(has_members);
     assert_eq!(
@@ -4639,12 +4693,12 @@ fn collection_transfer_failures_preserve_queue_and_playlist_positions() {
             directory: "/album".into(),
             title: "Album".into(),
         },
-        revision: store.album_revision().unwrap(),
+        revision: 0,
     };
     let queue = store.queue_page(None, 0, 20).unwrap();
     let queue_state = store.queue_state().unwrap();
     let entries = store.playlist_entries_page(playlist, None, 0, 20).unwrap();
-    let playlist_revision = store.playlist_entry_revision(playlist).unwrap().unwrap();
+    let playlist_revision = 0;
     // Abort on a later row, after the destination gap has already been opened.
     store.conn.execute_batch("CREATE TEMP TRIGGER reject_collection_queue BEFORE INSERT ON queue_entries WHEN new.track_id=2 BEGIN SELECT RAISE(ABORT,'rejected member'); END; CREATE TEMP TRIGGER reject_collection_playlist BEFORE INSERT ON playlist_entries WHEN new.track_id=2 BEGIN SELECT RAISE(ABORT,'rejected member'); END;").unwrap();
     for destination in [
@@ -4666,10 +4720,6 @@ fn collection_transfer_failures_preserve_queue_and_playlist_positions() {
         assert_eq!(
             store.playlist_entries_page(playlist, None, 0, 20).unwrap(),
             entries
-        );
-        assert_eq!(
-            store.playlist_entry_revision(playlist).unwrap(),
-            Some(playlist_revision)
         );
     }
     store

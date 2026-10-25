@@ -74,6 +74,8 @@ pub(crate) struct PreparedTrackRemoval<'a> {
 /// Only committed deletion effects leave the transaction; no projection reads follow it.
 pub struct TrackRemovalImpact {
     pub removed: usize,
+    pub queue: bool,
+    pub albums: bool,
     pub playlists: Vec<i64>,
     pub duplicate_groups: bool,
 }
@@ -81,6 +83,8 @@ pub struct TrackRemovalImpact {
 pub struct TrackEditImpact {
     pub changed: bool,
     pub library: bool,
+    pub queue: bool,
+    pub albums: bool,
     pub member_facts: bool,
     /// None means the changed playlist scopes exceeded the publication bound.
     pub playlists: Option<Vec<i64>>,
@@ -89,6 +93,8 @@ pub struct TrackEditImpact {
 #[derive(Debug, Default)]
 pub struct FavoriteImpact {
     pub changed: bool,
+    pub queue: bool,
+    pub albums: bool,
     pub tracks: Option<Vec<i64>>,
     pub playlists: Option<Vec<i64>>,
 }
@@ -106,7 +112,6 @@ pub(crate) struct PlaybackSource {
 // Only the latest scope is retained; no row payloads or per-query map accumulate.
 pub(super) struct TrackCount {
     changes: u64,
-    data_version: i64,
     query: Option<String>,
     favorite: Option<bool>,
     missing: Option<bool>,
@@ -271,13 +276,14 @@ impl Store {
         source: &PlaybackSource,
         bitrate_bps: u64,
         bitrate_exact: bool,
-    ) -> Result<bool> {
+    ) -> Result<TrackEditImpact> {
         if bitrate_bps == 0 {
-            return Ok(false);
+            return Ok(TrackEditImpact::default());
         }
         let bitrate = i64::try_from(bitrate_bps).context("Audio bitrate exceeds database range")?;
         let cue = source.cue.as_ref();
-        let updated = self.conn.execute(
+        let tx = self.conn.unchecked_transaction()?;
+        let updated = tx.execute(
             "UPDATE tracks SET bitrate_bps=?1,bitrate_exact=?11 WHERE id=?2
              AND (bitrate_bps IS NULL OR (bitrate_exact=0 AND ?11=1))
              AND (bitrate_bps IS NOT ?1 OR bitrate_exact IS NOT ?11)
@@ -304,10 +310,23 @@ impl Store {
                 bitrate_exact,
             ],
         )?;
+        let (queue, albums) = if updated != 0 {
+            tx.query_row(&format!("SELECT EXISTS(SELECT 1 FROM queue_entries WHERE track_id=t.id),{} FROM tracks AS t WHERE id=?1", super::albums::eligible_member("t")), [source.id], |row| Ok((row.get(0)?, row.get(1)?)))?
+        } else {
+            (false, false)
+        };
+        tx.commit()?;
         if updated != 0 {
             self.track_cache.borrow_mut().entries.remove(&source.id);
         }
-        Ok(updated != 0)
+        Ok(TrackEditImpact {
+            changed: updated != 0,
+            library: updated != 0,
+            queue,
+            albums,
+            playlists: Some(Vec::new()),
+            ..Default::default()
+        })
     }
 
     pub fn set_favorite(&self, ids: &[i64], favorite: bool) -> Result<FavoriteImpact> {
@@ -600,19 +619,12 @@ impl Store {
         if query.is_none() && favorite.is_none() && missing.is_none() && prefix.is_none() {
             return self.track_count();
         }
-        // total_changes detects local writes, data_version other connections' commits.
-        // Never retain or reuse an explicit transaction's snapshot: a rollback does
-        // not advance either counter after that snapshot was read.
+        // Local writes invalidate; explicit transaction snapshots are never cached.
         let cacheable = self.conn.is_autocommit();
         let changes = self.conn.total_changes();
-        let data_version = self
-            .conn
-            .prepare_cached("PRAGMA data_version")?
-            .query_row([], |row| row.get::<_, i64>(0))?;
         if cacheable
             && let Some(cached) = self.count_cache.borrow().as_ref()
             && cached.changes == changes
-            && cached.data_version == data_version
             && cached.query.as_deref() == query
             && cached.favorite == favorite
             && cached.missing == missing
@@ -643,7 +655,6 @@ impl Store {
         if cacheable {
             *self.count_cache.borrow_mut() = Some(TrackCount {
                 changes,
-                data_version,
                 query: query.map(str::to_owned),
                 favorite,
                 missing,
@@ -949,6 +960,30 @@ impl Store {
                 Ok((TrackEditImpact { library: display || decoder, member_facts: row.get(2)?, ..Default::default() }, display))
             },
         ).optional()?.with_context(|| format!("track {id} does not exist"))?;
+        impact.queue = playlist_values_changed
+            && tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM queue_entries WHERE track_id=?1)",
+                [id],
+                |row| row.get::<_, bool>(0),
+            )?;
+        impact.albums = tx.query_row(
+            &format!(
+                "SELECT ((?1 AND ({} OR {})) OR (?2 AND {})) FROM tracks AS t WHERE id=?3",
+                super::albums::eligible_member("t"),
+                super::albums::eligible_member("t").replace(
+                    "COALESCE(t.album_override,t.raw_album)",
+                    "COALESCE(?4,t.album_override,t.raw_album)"
+                ),
+                super::albums::representative("t")
+            ),
+            params![
+                playlist_values_changed,
+                impact.library && !playlist_values_changed,
+                id,
+                album
+            ],
+            |row| row.get(0),
+        )?;
         if impact.library {
             impact.playlists = if playlist_values_changed {
                 bounded_metadata_ids(
@@ -997,10 +1032,13 @@ impl Store {
             "SELECT EXISTS(SELECT 1 FROM tracks WHERE id IN (SELECT value FROM json_each(?1)) AND cue_sheet IS NULL AND fingerprint IS NOT NULL)",
             [&removal.encoded], |row| row.get(0),
         )?;
-        let playlists = self.remove_track_rows(&tx, removal)?;
+        let albums = tx.query_row(&format!("SELECT EXISTS(SELECT 1 FROM tracks AS t WHERE id IN (SELECT value FROM json_each(?1)) AND {})", super::albums::eligible_member("t")), [&removal.encoded], |row| row.get(0))?;
+        let (playlists, queue) = self.remove_track_rows(&tx, removal)?;
         tx.commit()?;
         Ok(TrackRemovalImpact {
             removed,
+            queue,
+            albums,
             playlists,
             duplicate_groups,
         })
@@ -1010,7 +1048,7 @@ impl Store {
         &self,
         tx: &Transaction<'_>,
         removal: PreparedTrackRemoval<'_>,
-    ) -> Result<Vec<i64>> {
+    ) -> Result<(Vec<i64>, bool)> {
         for id in removal.ids {
             self.track_cache.borrow_mut().entries.remove(id);
         }
@@ -1038,8 +1076,7 @@ impl Store {
             close_gaps(tx, &positions, PositionScope::Playlist(playlist_id))?;
             playlists.push(playlist_id);
         }
-        super::queue::invalidate_structure(tx, !queue_positions.is_empty())?;
-        Ok(playlists)
+        Ok((playlists, !queue_positions.is_empty()))
     }
 
     pub fn remove_missing_tracks(&self) -> Result<TrackRemovalImpact> {
@@ -1058,6 +1095,14 @@ impl Store {
             "SELECT EXISTS(SELECT 1 FROM tracks WHERE missing=1 AND cue_sheet IS NULL AND fingerprint IS NOT NULL)",
             [], |row| row.get(0),
         )?;
+        let albums = tx.query_row(
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM tracks AS t WHERE missing=1 AND {})",
+                super::albums::eligible_member("t")
+            ),
+            [],
+            |row| row.get(0),
+        )?;
         tx.execute(
             "DELETE FROM playlist_entries WHERE track_id IN (SELECT id FROM tracks WHERE missing=1)",
             [],
@@ -1069,43 +1114,48 @@ impl Store {
             close_gaps(&tx, &positions, PositionScope::Playlist(playlist_id))?;
             playlists.push(playlist_id);
         }
-        super::queue::invalidate_structure(&tx, !queue_positions.is_empty())?;
         tx.commit()?;
         Ok(TrackRemovalImpact {
             removed,
+            queue: !queue_positions.is_empty(),
+            albums,
             playlists,
             duplicate_groups,
         })
     }
     pub fn mark_played(&self, track: i64, at: i64) -> Result<super::TrackStats> {
-        let stats = self
-            .conn
-            .query_row(
-                "UPDATE tracks SET last_played=?1 WHERE id=?2 AND last_played IS NOT ?1 RETURNING play_count,last_played",
-                params![at, track],
-                super::TrackStats::from_row,
-            )
-            .optional()?;
-        let stats = match stats {
-            Some(stats) => Some(stats),
-            None => self
-                .conn
-                .query_row(
-                    "SELECT play_count,last_played FROM tracks WHERE id=?1",
-                    [track],
-                    super::TrackStats::from_row,
-                )
-                .optional()?,
-        }
-        .with_context(|| format!("track {track} does not exist"))?;
+        let tx = self.conn.unchecked_transaction()?;
+        let (mut stats, changed) = match tx.query_row(
+            "UPDATE tracks SET last_played=?1 WHERE id=?2 AND last_played IS NOT ?1 RETURNING play_count,last_played",
+            params![at, track], super::TrackStats::from_row,
+        ).optional()? {
+            Some(stats) => (stats, true),
+            None => (tx.query_row("SELECT play_count,last_played FROM tracks WHERE id=?1", [track], super::TrackStats::from_row)
+                .optional()?.with_context(|| format!("track {track} does not exist"))?, false),
+        };
+        stats.changed = changed;
+        stats.albums = changed
+            && tx.query_row(
+                &format!(
+                    "SELECT {} FROM tracks AS t WHERE id=?1",
+                    super::albums::representative("t")
+                ),
+                [track],
+                |row| row.get::<_, bool>(0),
+            )?;
+        tx.commit()?;
         self.cache_track_stats(track, stats);
         Ok(stats)
     }
     pub fn increment_play_count(&self, track: i64) -> Result<super::TrackStats> {
-        let stats = self.conn.query_row(
+        let tx = self.conn.unchecked_transaction()?;
+        let mut stats = tx.query_row(
             "UPDATE tracks SET play_count=play_count+1 WHERE id=?1 RETURNING play_count,last_played",
             [track], super::TrackStats::from_row,
         ).optional()?.with_context(|| format!("track {track} does not exist"))?;
+        stats.changed = true;
+        (stats.queue, stats.albums) = tx.query_row(&format!("SELECT EXISTS(SELECT 1 FROM queue_entries WHERE track_id=t.id),{} FROM tracks AS t WHERE id=?1", super::albums::eligible_member("t")), [track], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        tx.commit()?;
         self.cache_track_stats(track, stats);
         Ok(stats)
     }
@@ -1150,7 +1200,13 @@ fn favorite_metadata(
         )?,
         None => None,
     };
+    let (queue, albums) = conn.query_row(
+        &format!("SELECT EXISTS(SELECT 1 FROM tracks AS t JOIN queue_entries AS q ON q.track_id=t.id WHERE t.id IN (SELECT value FROM json_each(?1)) AND (?2 IS NULL OR t.favorite<>?2)), EXISTS(SELECT 1 FROM tracks AS t WHERE t.id IN (SELECT value FROM json_each(?1)) AND (?2 IS NULL OR t.favorite<>?2) AND {})", super::albums::eligible_member("t")),
+        params![encoded_ids, favorite], |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
     Ok(FavoriteImpact {
+        queue,
+        albums,
         tracks,
         playlists,
         ..Default::default()
@@ -1207,7 +1263,7 @@ mod deletion_tests {
              INSERT INTO queue_entries(id,track_id,position) VALUES
                 (100,1,0),(101,2,1),(102,2,2),(103,3,3),
                 (104,4,4),(105,5,5),(106,6,6),(107,7,7);
-             UPDATE queue_meta SET current_id=106 WHERE singleton=1;
+             UPDATE rivu_meta SET current_queue_entry_id=106 WHERE singleton=1;
              INSERT INTO playlists(id,name) VALUES (10,'first'),(20,'second'),(30,'untouched');
              INSERT INTO playlist_entries(id,playlist_id,track_id,position) VALUES
                 (200,10,1,0),(201,10,2,1),(202,10,3,2),(203,10,4,3),
@@ -1235,7 +1291,7 @@ mod deletion_tests {
 
     fn current(store: &Store) -> Result<Option<i64>> {
         Ok(store.conn.query_row(
-            "SELECT current_id FROM queue_meta WHERE singleton=1",
+            "SELECT current_queue_entry_id FROM rivu_meta WHERE singleton=1",
             [],
             |row| row.get(0),
         )?)
@@ -1283,7 +1339,7 @@ mod deletion_tests {
         let store = fixture()?;
         store.conn.execute_batch(
             "UPDATE tracks SET missing=1 WHERE id IN (2,3,5);
-             UPDATE queue_meta SET current_id=102 WHERE singleton=1;",
+             UPDATE rivu_meta SET current_queue_entry_id=102 WHERE singleton=1;",
         )?;
         store.remove_missing_tracks()?;
         assert_compacted(&store)?;
@@ -1305,23 +1361,12 @@ mod deletion_tests {
         let store = fixture()?;
         let queue = queue_rows(&store)?;
         let playlists = playlist_rows(&store)?;
-        let revision: i64 = store.conn.query_row(
-            "SELECT revision FROM queue_meta WHERE singleton=1",
-            [],
-            |row| row.get(0),
-        )?;
         assert!(store.remove_tracks(&[2, 999, 2]).is_err());
         store.remove_tracks(&[])?;
         store.remove_tracks(&[8, 8])?;
         assert_eq!(queue_rows(&store)?, queue);
         assert_eq!(playlist_rows(&store)?, playlists);
         assert_eq!(current(&store)?, Some(106));
-        let after_revision: i64 = store.conn.query_row(
-            "SELECT revision FROM queue_meta WHERE singleton=1",
-            [],
-            |row| row.get(0),
-        )?;
-        assert_eq!(after_revision, revision);
         let track_count: i64 = store
             .conn
             .query_row("SELECT COUNT(*) FROM tracks", [], |row| row.get(0))?;
@@ -1376,6 +1421,73 @@ mod request_tests {
             (&*edited.title, &*edited.artist, &*edited.album),
             ("", "Override", "New album")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn metadata_effects_distinguish_album_members_representatives_and_unqueued_tracks() -> Result<()>
+    {
+        let store = Store::open(Path::new(":memory:"))?;
+        store.conn.execute_batch(
+            "INSERT INTO tracks(id,path,raw_title,raw_album,track_number) VALUES
+             (1,'/album/one.wav','One','Album',1),
+             (2,'/album/two.wav','Two','Album',2),
+             (3,'/other/three.wav','Three','',NULL);",
+        )?;
+        store.enqueue_tracks(&[3])?;
+        let playlist = store.create_playlist_with_tracks("Members", &[1, 2, 3])?;
+        let member = store.edit_track(2, None, None, None, Some(DecoderHint::Native))?;
+        assert!(member.changed && member.library && !member.queue && !member.albums);
+        assert_eq!(member.playlists, Some(Vec::new()));
+        let representative = store.edit_track(1, None, None, None, Some(DecoderHint::Native))?;
+        assert!(representative.library && representative.albums && !representative.queue);
+        let display = store.edit_track(2, Some("Retitled"), None, None, None)?;
+        assert!(display.library && display.albums && !display.queue);
+        assert_eq!(display.playlists, Some(vec![playlist]));
+        let plain = store.set_favorite(&[3], true)?;
+        assert!(plain.changed && plain.queue && !plain.albums);
+        let album = store.set_favorite(&[2], true)?;
+        assert!(album.changed && album.albums && !album.queue);
+        let noop = store.set_favorite(&[2], true)?;
+        assert!(!noop.changed && !noop.queue && !noop.albums);
+        let removal = store.prepare_track_removal(&[2])?;
+        let removed = store.remove_prepared_tracks(removal)?;
+        assert_eq!(removed.removed, 1);
+        assert!(removed.albums && !removed.queue);
+        assert_eq!(removed.playlists, [playlist]);
+        Ok(())
+    }
+
+    #[test]
+    fn statistics_return_committed_changes_and_representative_last_played_effects() -> Result<()> {
+        let store = Store::open(Path::new(":memory:"))?;
+        store.conn.execute_batch(
+            "INSERT INTO tracks(id,path,raw_album,track_number) VALUES
+             (1,'/album/one.wav','Album',1),(2,'/album/two.wav','Album',2),
+             (3,'/plain/three.wav','',NULL);",
+        )?;
+        store.enqueue_tracks(&[3])?;
+        let first = store.mark_played(1, 42)?;
+        assert!(first.changed && first.albums && !first.queue);
+        let noop = store.mark_played(1, 42)?;
+        assert!(!noop.changed && !noop.albums && !noop.queue);
+        let member = store.mark_played(2, 42)?;
+        assert!(member.changed && !member.albums && !member.queue);
+        let album_count = store.increment_play_count(2)?;
+        assert!(album_count.changed && album_count.albums && !album_count.queue);
+        let queue_count = store.increment_play_count(3)?;
+        assert!(queue_count.changed && queue_count.queue && !queue_count.albums);
+        let before = store.track(3)?.unwrap();
+        store.conn.execute_batch("CREATE TEMP TRIGGER reject_statistics AFTER UPDATE OF play_count,last_played ON tracks BEGIN SELECT RAISE(ABORT,'reject statistics'); END;")?;
+        assert!(store.increment_play_count(3).is_err());
+        assert!(store.mark_played(3, 99).is_err());
+        assert_eq!(store.track(3)?.unwrap(), before);
+        let stored: (i64, Option<i64>) = store.conn.query_row(
+            "SELECT play_count,last_played FROM tracks WHERE id=3",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(stored, (1, None));
         Ok(())
     }
 

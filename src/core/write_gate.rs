@@ -2,8 +2,17 @@ use super::*;
 use anyhow::bail;
 
 impl Core {
+    pub(in crate::core) fn database_outcome_uncertain(&mut self) {
+        self.database_unavailable = true;
+        self.pending_navigation = None;
+        self.store.invalidate_caches();
+        self.state.system.last_error = Some(
+            "Database commit outcome is uncertain; database operations are disabled until Rivu restarts".into(),
+        );
+    }
     pub(in crate::core) fn database_maintenance_active(&self) -> bool {
-        self.active_optimization.is_some()
+        self.database_unavailable
+            || self.active_optimization.is_some()
             || self
                 .active_scan
                 .as_ref()

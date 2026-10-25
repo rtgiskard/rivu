@@ -242,7 +242,10 @@ fn committed_deletions_isolate_history_and_queue_read_failures() {
             if fail_queue_ids {
                 assert!(core.state.library.history.is_empty());
                 assert_eq!(core.queue_ids, queue_ids);
-                assert_eq!(core.state.queue, queue);
+                assert_eq!(core.state.queue.total, queue.total);
+                assert_eq!(core.state.queue.current_id, queue.current_id);
+                assert_eq!(core.state.queue.current_position, queue.current_position);
+                assert_ne!(core.state.queue.revision, queue.revision);
                 assert!(Arc::ptr_eq(
                     core.state.current_track.as_ref().unwrap(),
                     &current
@@ -253,7 +256,7 @@ fn committed_deletions_isolate_history_and_queue_read_failures() {
                 assert!(format!("{error:#}").contains("Refreshing history failed"));
                 assert!(Arc::ptr_eq(&core.state.library.history, &history));
                 assert_eq!(core.queue_ids, [1, 4, 5]);
-                assert_eq!(core.state.queue, core.store.queue_state().unwrap());
+                assert_queue_saved(&core);
                 assert_eq!(core.state.current_track().unwrap().id, 1);
                 assert_eq!(core.played, [1, 4, 5]);
                 assert_eq!(core.played_cursor, 2);
@@ -1067,7 +1070,7 @@ fn committed_metadata_refresh_preserves_the_old_snapshot_until_audio_admission()
 }
 
 #[test]
-fn committed_deletion_recovers_other_playlists_catalog_and_queue_after_token_failure() {
+fn committed_deletion_invalidates_all_affected_playlists_before_projection_failure() {
     let (directory, mut core) = fixture_with_database(Some(10.0), true);
     for (name, track_ids) in [("First", vec![2, 3]), ("Second", vec![2, 4])] {
         core.command(Command::CreatePlaylistWithTracks {
@@ -1078,12 +1081,12 @@ fn committed_deletion_recovers_other_playlists_catalog_and_queue_after_token_fai
     }
     let before = core.state.query_revisions();
     let second = core.state.library.playlist_entry_revisions[&2];
+    let first = core.state.library.playlist_entry_revisions[&1];
     let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
     connection
         .execute_batch(
-            "CREATE TRIGGER fail_first_token AFTER UPDATE OF revision ON playlist_versions
-         WHEN NEW.playlist_id=1 AND typeof(NEW.revision)='integer'
-         BEGIN UPDATE playlist_versions SET revision='unreadable' WHERE playlist_id=1; END;",
+            "CREATE TRIGGER fail_delete_projection AFTER DELETE ON tracks WHEN OLD.id=2
+             BEGIN UPDATE tracks SET last_played='unreadable' WHERE id=3; END;",
         )
         .unwrap();
     let error = core
@@ -1097,12 +1100,55 @@ fn committed_deletion_recovers_other_playlists_catalog_and_queue_after_token_fai
         before.duplicate_members + 1
     );
     assert_ne!(core.state.library.playlist_entry_revisions[&2], second);
-    assert_eq!(
-        core.state.library.playlist_entry_revisions[&2],
-        core.store.playlist_entry_revision(2).unwrap().unwrap()
-    );
+    assert_ne!(core.state.library.playlist_entry_revisions[&1], first);
     assert_eq!(core.queue_ids, [1, 4, 5]);
     assert_eq!(core.state.queue.total, 3);
     assert_eq!(core.store.playlist_track_ids(1, 20).unwrap(), [3]);
     assert_eq!(core.store.playlist_track_ids(2, 20).unwrap(), [4]);
+}
+
+#[test]
+fn album_queries_keep_cached_members_for_unrelated_edits_and_invalidate_member_changes() {
+    let (_directory, mut core) = fixture();
+    core.command(Command::EditTrack {
+        track_id: 1,
+        title: None,
+        artist: None,
+        album: Some("Scoped album".into()),
+        decoder_hint: None,
+    })
+    .unwrap();
+    let query = Query::AlbumTracks {
+        key: AlbumKey {
+            directory: core.track(1).unwrap().path.parent().unwrap().into(),
+            title: "Scoped album".into(),
+        },
+        query: None,
+        offset: 0,
+        limit: 10,
+    };
+    let before = query.stamp(core.query_response(&query).revisions);
+    core.command(Command::EditTrack {
+        track_id: 2,
+        title: Some("Unrelated edit".into()),
+        artist: None,
+        album: None,
+        decoder_hint: None,
+    })
+    .unwrap();
+    assert_eq!(query.stamp(core.query_response(&query).revisions), before);
+    core.command(Command::EditTrack {
+        track_id: 1,
+        title: Some("Changed member".into()),
+        artist: None,
+        album: None,
+        decoder_hint: None,
+    })
+    .unwrap();
+    let response = core.query_response(&query);
+    assert_ne!(query.stamp(response.revisions), before);
+    let ViewResponse::AlbumTracks(page) = response.result.unwrap() else {
+        panic!("expected album members")
+    };
+    assert_eq!(page.rows[0].title, "Changed member");
 }

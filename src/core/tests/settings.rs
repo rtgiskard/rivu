@@ -326,7 +326,7 @@ fn queue_save_failure_does_not_prevent_final_config_save() {
     let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
     connection
         .execute_batch(
-            "CREATE TRIGGER fail_final_queue_save BEFORE UPDATE ON queue_meta
+            "CREATE TRIGGER fail_final_queue_save BEFORE UPDATE ON rivu_meta
          BEGIN SELECT RAISE(FAIL, 'queue save blocked'); END;",
         )
         .unwrap();

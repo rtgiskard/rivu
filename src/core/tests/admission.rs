@@ -138,6 +138,36 @@ fn external_admission_appends_valid_subset_without_roots_autoplay_or_playlist_ch
 }
 
 #[test]
+fn external_insertions_invalidate_queue_intents_even_for_unchanged_registered_sources() {
+    for index in [None, Some(0)] {
+        let (directory, mut core) = admission_fixture();
+        let path = directory.path().join("external.wav");
+        write_pcm_frames(&path, 1);
+        for _ in 0..2 {
+            let before = core.state.query_revisions();
+            core.start_external_admission(vec![path.clone()], index, index.map(|_| before.queue))
+                .unwrap();
+            finish_admission(&mut core);
+            assert_ne!(core.state.queue.revision, before.queue);
+            let stale = Query::QueueBatch {
+                query: None,
+                after: None,
+                limit: 2,
+                expected: Some(before),
+            };
+            assert!(matches!(
+                core.view(&stale),
+                Err(QueryError::RevisionChanged)
+            ));
+            assert!(
+                core.start_external_admission(vec![path.clone()], Some(0), Some(before.queue))
+                    .is_err()
+            );
+        }
+    }
+}
+
+#[test]
 fn revision_changed_during_probe_rejects_entire_batch_without_registration_or_append() {
     let (directory, mut core) = admission_fixture();
     let path = directory.path().join("external.wav");

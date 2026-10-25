@@ -1,6 +1,5 @@
 use super::Store;
 use super::positions::{PositionScope, insert_tracks};
-use super::queue::invalidate_structure;
 use super::scan::{PROBE_VERSION, ScanImpacts};
 use crate::library::ExternalAdmission;
 use anyhow::{Context, Result, ensure};
@@ -13,13 +12,8 @@ impl Store {
         &self,
         admission: &ExternalAdmission,
         index: Option<usize>,
-        expected_revision: Option<u64>,
         current_id: Option<u64>,
     ) -> Result<(Vec<u64>, ScanImpacts, usize)> {
-        ensure!(
-            index.is_none() || expected_revision.is_some(),
-            "Positional external admission requires a queue revision"
-        );
         ensure!(
             admission
                 .occurrences
@@ -28,18 +22,6 @@ impl Store {
             "Invalid external source occurrence"
         );
         let tx = self.conn.unchecked_transaction()?;
-        let revision = u64::try_from(tx.query_row(
-            "SELECT revision FROM queue_meta WHERE singleton=1",
-            [],
-            |row| row.get::<_, i64>(0),
-        )?)
-        .context("Invalid queue revision")?;
-        if let Some(expected) = expected_revision {
-            ensure!(
-                revision == expected,
-                "Queue revision changed; no external files were registered or queued"
-            );
-        }
         let total = usize::try_from(tx.query_row(
             "SELECT COALESCE(MAX(position)+1,0) FROM queue_entries",
             [],
@@ -118,7 +100,7 @@ impl Store {
             AND ((s.fingerprint IS NOT NULL AND t.fingerprint=s.fingerprint)
                 OR (t.path=s.path AND t.file_size=s.file_size AND t.modified_ns=s.modified_ns
                     AND s.modified_ns<>?1 AND t.fingerprint IS s.fingerprint))", [i64::MIN])?;
-        let mut impacts = tx.query_row("SELECT
+        let mut impacts = tx.query_row(&format!("SELECT
             COALESCE(MAX(t.id IS NULL OR t.fingerprint IS NOT s.fingerprint
                 OR COALESCE(t.title_override,t.raw_title) IS NOT COALESCE(t.title_override,s.raw_title)
                 OR COALESCE(t.artist_override,t.raw_artist) IS NOT COALESCE(t.artist_override,s.raw_artist)
@@ -132,9 +114,10 @@ impl Store {
             COALESCE(MAX((t.fingerprint IS NOT NULL OR s.fingerprint IS NOT NULL)
                 AND (t.id IS NULL OR t.fingerprint IS NOT s.fingerprint OR t.missing IS NOT 0)),0),
             COALESCE(MAX((t.fingerprint IS NOT NULL OR s.fingerprint IS NOT NULL)
-                AND (t.id IS NULL OR t.file_size IS NOT s.file_size OR t.modified_ns IS NOT s.modified_ns)),0)
-            FROM external_sources AS s LEFT JOIN tracks AS t ON t.id=s.resolved_id", [], |row| {
-            Ok(ScanImpacts { library: row.get(0)?, structure: row.get(1)?, duplicate_groups: row.get(2)?, duplicate_members: row.get(3)?, ..ScanImpacts::default() })
+                AND (t.id IS NULL OR t.file_size IS NOT s.file_size OR t.modified_ns IS NOT s.modified_ns)),0),
+            {}
+            FROM external_sources AS s LEFT JOIN tracks AS t ON t.id=s.resolved_id", super::scan::staged_projection_columns(false)), [], |row| {
+            Ok(ScanImpacts { library: row.get(0)?, structure: row.get(1)?, duplicate_groups: row.get(2)?, duplicate_members: row.get(3)?, queue: row.get(4)?, albums: row.get(5)?, ..ScanImpacts::default() })
         })?;
         let changed = tx.execute("UPDATE tracks SET
             fingerprint=s.fingerprint,file_size=s.file_size,modified_ns=s.modified_ns,
@@ -189,13 +172,13 @@ impl Store {
             .transpose()
             .context("Queue entry ID exceeds database range")?;
         tx.execute(
-            "UPDATE queue_meta SET current_id=?1 WHERE singleton=1 AND current_id IS NOT ?1",
+            "UPDATE rivu_meta SET current_queue_entry_id=?1 WHERE singleton=1 AND current_queue_entry_id IS NOT ?1",
             [current_id],
         )?;
-        invalidate_structure(&tx, count != 0)?;
         tx.execute_batch("DROP TABLE external_sources;")?;
         tx.commit()?;
         impacts.changed = changed != 0 || added != 0;
+        impacts.queue |= !inserted.is_empty();
         if impacts.changed {
             self.invalidate_caches();
         }
@@ -254,9 +237,7 @@ mod tests {
             &["/outside/second.wav", "/outside/first.wav"],
             vec![0, 1, 0],
         );
-        let (inserted, impacts, added) = store
-            .admit_external_queue(&prepared, None, None, None)
-            .unwrap();
+        let (inserted, impacts, added) = store.admit_external_queue(&prepared, None, None).unwrap();
         assert_eq!(inserted.len(), 3);
         assert_eq!(added, 2);
         assert!(impacts.structure);
@@ -290,19 +271,12 @@ mod tests {
     }
 
     #[test]
-    fn stale_position_and_failed_queue_write_leave_no_registered_residue() {
+    fn invalid_position_and_failed_queue_write_leave_no_registered_residue() {
         let store = Store::open(Path::new(":memory:")).unwrap();
         let prepared = admission(&["/outside/one.wav"], vec![0]);
-        let revision = store.queue_state().unwrap().revision;
-        store
-            .admit_external_queue(&prepared, None, None, None)
-            .unwrap();
+        store.admit_external_queue(&prepared, None, None).unwrap();
         let next = admission(&["/outside/two.wav"], vec![0]);
-        assert!(
-            store
-                .admit_external_queue(&next, Some(0), Some(revision), None)
-                .is_err()
-        );
+        assert!(store.admit_external_queue(&next, Some(2), None).is_err());
         assert!(
             store
                 .track_id_for_source(Path::new("/outside/two.wav"), None)
@@ -311,7 +285,7 @@ mod tests {
         );
         let before = store.queue_state().unwrap();
         store.conn.execute_batch("CREATE TEMP TRIGGER reject_admission BEFORE INSERT ON queue_entries BEGIN SELECT RAISE(ABORT,'rejected queue write'); END;").unwrap();
-        assert!(store.admit_external_queue(&next, None, None, None).is_err());
+        assert!(store.admit_external_queue(&next, None, None).is_err());
         assert!(
             store
                 .track_id_for_source(Path::new("/outside/two.wav"), None)
@@ -323,23 +297,16 @@ mod tests {
     }
 
     #[test]
-    fn positional_admission_preserves_current_occurrence_and_requires_revision() {
+    fn positional_admission_preserves_current_occurrence() {
         let store = Store::open(Path::new(":memory:")).unwrap();
         let existing = admission(&["/outside/old.wav"], vec![0, 0]);
-        store
-            .admit_external_queue(&existing, None, None, None)
-            .unwrap();
+        store.admit_external_queue(&existing, None, None).unwrap();
         let old = store.queue_ids().unwrap();
         store.set_queue_current(Some(old[1])).unwrap();
         let prepared = admission(&["/outside/new.wav"], vec![0, 0]);
-        assert!(
-            store
-                .admit_external_queue(&prepared, Some(1), None, Some(old[1]))
-                .is_err()
-        );
         let before = store.queue_state().unwrap();
         let (inserted, _, _) = store
-            .admit_external_queue(&prepared, Some(1), Some(before.revision), Some(old[1]))
+            .admit_external_queue(&prepared, Some(1), Some(old[1]))
             .unwrap();
         assert_eq!(
             store.queue_ids().unwrap(),
@@ -348,7 +315,6 @@ mod tests {
         let after = store.queue_state().unwrap();
         assert_eq!(after.current_id, before.current_id);
         assert_eq!(after.current_position, Some(3));
-        assert_eq!(after.revision, before.revision + 1);
     }
 
     #[test]
@@ -383,9 +349,7 @@ mod tests {
             vec![1, 0, 1, 2],
         );
         prepared.records[2].fingerprint = record("/outside/absent.wav").fingerprint;
-        let (_, _, added) = store
-            .admit_external_queue(&prepared, None, None, None)
-            .unwrap();
+        let (_, _, added) = store.admit_external_queue(&prepared, None, None).unwrap();
         assert_eq!(added, 2);
         let track = store.track(ordinary_id).unwrap().unwrap();
         assert_eq!(track.title, "Keep title");
@@ -426,9 +390,7 @@ mod tests {
     fn existing_raw_and_technical_facts_refresh_without_losing_user_state_or_references() {
         let store = Store::open(Path::new(":memory:")).unwrap();
         let mut prepared = admission(&["/outside/existing.wav"], vec![0]);
-        store
-            .admit_external_queue(&prepared, None, None, None)
-            .unwrap();
+        store.admit_external_queue(&prepared, None, None).unwrap();
         let old_queue = store.queue_ids().unwrap();
         let id = store.queue_track_id(old_queue[0]).unwrap();
         let playlist = store
@@ -452,7 +414,7 @@ mod tests {
         media.bitrate_exact = true;
         prepared.occurrences = vec![0, 0];
         let (inserted, impacts, added) = store
-            .admit_external_queue(&prepared, None, None, Some(old_queue[0]))
+            .admit_external_queue(&prepared, None, Some(old_queue[0]))
             .unwrap();
         assert_eq!(added, 0);
         assert!(

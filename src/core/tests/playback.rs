@@ -1,9 +1,21 @@
 use super::*;
 use crate::core::dispatch::BusinessEvent;
 
+fn add_test_album(core: &mut Core) {
+    core.command(Command::EditTrack {
+        track_id: 1,
+        title: None,
+        artist: None,
+        album: Some("Playback album".into()),
+        decoder_hint: None,
+    })
+    .unwrap();
+}
+
 #[test]
 fn audio_progress_publishes_album_token_only_when_statistics_change() {
     let (_directory, mut core) = fixture();
+    add_test_album(&mut core);
     playing(&mut core, 1);
     core.publish();
     let before = core.shared.read().clone();
@@ -21,10 +33,6 @@ fn audio_progress_publishes_album_token_only_when_statistics_change() {
         assert_eq!(state.playback.position, heard);
         assert_eq!(state.current_track().unwrap().play_count, count);
         assert_eq!(state.library.history[0].play_count, count);
-        assert_eq!(
-            state.library.album_revision,
-            core.store.album_revision().unwrap()
-        );
         assert_eq!(
             state.system.revision,
             previous.system.revision.wrapping_add(1)
@@ -50,19 +58,14 @@ fn audio_progress_publishes_album_token_only_when_statistics_change() {
 }
 
 #[test]
-fn audio_progress_projection_failure_publishes_committed_statistics_and_album_token() {
+fn audio_progress_publishes_committed_statistics_without_rereading_queue_projection() {
     let (directory, mut core) = fixture_with_database(Some(10.0), true);
+    add_test_album(&mut core);
     playing(&mut core, 1);
     core.publish();
     let before = core.shared.read().clone();
     let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
-    connection
-        .execute_batch(
-            "CREATE TRIGGER fail_stats_refresh AFTER UPDATE OF revision ON queue_meta
-             WHEN typeof(NEW.revision)='integer'
-             BEGIN UPDATE queue_meta SET revision='unreadable' WHERE singleton=1; END;",
-        )
-        .unwrap();
+    connection.execute_batch("DELETE FROM rivu_meta").unwrap();
     let generation = core.generation;
     for heard in [3.0, 4.0] {
         assert!(
@@ -81,89 +84,49 @@ fn audio_progress_projection_failure_publishes_committed_statistics_and_album_to
             before.library.revision.wrapping_add(1)
         );
         assert_ne!(state.library.album_revision, before.library.album_revision);
-        assert_eq!(
-            state.library.album_revision,
-            core.store.album_revision().unwrap()
-        );
-        assert_eq!(state.queue.revision, before.queue.revision);
-        assert!(
-            state
-                .system
-                .last_error
-                .as_ref()
-                .unwrap()
-                .contains("Playback statistics committed")
-        );
+        assert!(state.queue.revision > before.queue.revision);
+        assert!(state.system.last_error.is_none());
         assert_eq!(play_count(&core, 1), 1);
     }
 }
 
 #[test]
-fn audio_bitrate_projection_failure_still_publishes_committed_album_token() {
-    for eof in [false, true] {
-        let (directory, mut core) = fixture_with_database(Some(10.0), true);
-        precision_pending(&mut core);
-        if eof {
-            started(&mut core, Some(10.0)).unwrap();
-        }
-        core.publish();
-        let before = core.shared.read().library.album_revision;
-        let queue_before = core.shared.read().queue.revision;
-        let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
-        connection
-            .execute_batch(
-                "CREATE TRIGGER fail_bitrate_refresh AFTER UPDATE OF revision ON queue_meta
-                 WHEN typeof(NEW.revision)='integer'
-                 BEGIN UPDATE queue_meta SET revision='unreadable' WHERE singleton=1; END;",
-            )
-            .unwrap();
-        let generation = core.generation;
-        let event = if eof {
-            AudioEvent::Ended {
-                generation,
-                bitrate_bps: Some(192_000),
-            }
-        } else {
-            let mut event = started_event(&core, Some(10.0));
-            if let AudioEvent::Started { info, .. } = &mut event {
-                info.bitrate_bps = Some(192_000);
-                info.bitrate_exact = true;
-            }
-            event
-        };
-        assert!(core.business_event(BusinessEvent::Audio(event)));
-        let stored = core.store.track(1).unwrap().unwrap();
-        let state = core.shared.read();
-        assert_eq!(stored.bitrate_bps, Some(192_000));
-        assert!(stored.bitrate_exact);
-        assert_eq!(
-            state.current_track().unwrap().bitrate_bps,
-            stored.bitrate_bps
-        );
-        assert!(state.current_track().unwrap().bitrate_exact);
-        assert_ne!(state.library.album_revision, before);
-        assert_eq!(
-            state.library.album_revision,
-            core.store.album_revision().unwrap()
-        );
-        assert_eq!(state.queue.revision, queue_before);
-        let error = state.system.last_error.as_ref().unwrap();
-        assert!(error.contains(if eof {
-            "Bitrate update committed"
-        } else {
-            "Playback statistics committed"
-        }));
-        if !eof {
-            assert_ne!(core.generation, generation);
-            assert_eq!(state.playback.status, PlaybackStatus::Stopped);
-        }
+fn audio_bitrate_commit_publishes_tokens_without_rereading_queue_projection() {
+    let (directory, mut core) = fixture_with_database(Some(10.0), true);
+    add_test_album(&mut core);
+    precision_pending(&mut core);
+    core.publish();
+    let before = core.shared.read().library.album_revision;
+    let queue_before = core.shared.read().queue.revision;
+    let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+    // Removing an unrelated query target proves that publishing known metadata
+    // facts needs no structural queue read.
+    connection.execute_batch("DELETE FROM rivu_meta").unwrap();
+    let mut event = started_event(&core, Some(10.0));
+    if let AudioEvent::Started { info, .. } = &mut event {
+        info.bitrate_bps = Some(192_000);
+        info.bitrate_exact = true;
     }
+    assert!(core.business_event(BusinessEvent::Audio(event)));
+    let stored = core.store.track(1).unwrap().unwrap();
+    let state = core.shared.read();
+    assert_eq!(stored.bitrate_bps, Some(192_000));
+    assert!(stored.bitrate_exact);
+    assert_eq!(
+        state.current_track().unwrap().bitrate_bps,
+        stored.bitrate_bps
+    );
+    assert!(state.current_track().unwrap().bitrate_exact);
+    assert_ne!(state.library.album_revision, before);
+    assert!(state.queue.revision > queue_before);
+    assert!(state.system.last_error.is_none());
 }
 
 #[test]
 fn terminal_audio_events_publish_metadata_committed_by_retiring_started() {
     for failed in [false, true] {
         let (_directory, mut core) = fixture();
+        add_test_album(&mut core);
         precision_pending(&mut core);
         core.publish();
         let before = core.shared.read().library.album_revision;
@@ -190,10 +153,6 @@ fn terminal_audio_events_publish_metadata_committed_by_retiring_started() {
         assert_eq!(state.playback.status, PlaybackStatus::Stopped);
         assert!(state.current_track().unwrap().bitrate_exact);
         assert_ne!(state.library.album_revision, before);
-        assert_eq!(
-            state.library.album_revision,
-            core.store.album_revision().unwrap()
-        );
         if failed {
             assert_eq!(state.system.last_error.as_deref(), Some("Decoder failed"));
         }
@@ -203,6 +162,7 @@ fn terminal_audio_events_publish_metadata_committed_by_retiring_started() {
 #[test]
 fn deferred_bitrate_flush_after_audio_publication_refreshes_album_token() {
     let (_directory, mut core) = fixture();
+    add_test_album(&mut core);
     precision_pending(&mut core);
     started(&mut core, Some(10.0)).unwrap();
     core.publish();
@@ -219,16 +179,13 @@ fn deferred_bitrate_flush_after_audio_publication_refreshes_album_token() {
     assert!(state.current_track().unwrap().bitrate_exact);
     assert_eq!(state.current_track().unwrap().bitrate_bps, Some(192_000));
     assert_ne!(state.library.album_revision, before);
-    assert_eq!(
-        state.library.album_revision,
-        core.store.album_revision().unwrap()
-    );
     assert!(!core.playback_write_deferred);
 }
 
 #[test]
 fn audio_eof_resolved_duration_publishes_final_count_and_album_token() {
     let (_directory, mut core) = fixture_with_duration(None);
+    add_test_album(&mut core);
     pending(&mut core, 1);
     started(&mut core, None).unwrap();
     progress(&mut core, 3.0, 3.0);
@@ -246,10 +203,6 @@ fn audio_eof_resolved_duration_publishes_final_count_and_album_token() {
     assert_eq!(state.current_track().unwrap().play_count, 1);
     assert_eq!(play_count(&core, 1), 1);
     assert_ne!(state.library.album_revision, before);
-    assert_eq!(
-        state.library.album_revision,
-        core.store.album_revision().unwrap()
-    );
 }
 
 #[test]
@@ -279,10 +232,6 @@ fn rejected_audio_progress_count_preserves_statistics_and_album_token() {
     assert!(!core.playback.as_ref().unwrap().counted);
     assert_eq!(state.library.revision, before.library.revision);
     assert_eq!(state.library.album_revision, before.library.album_revision);
-    assert_eq!(
-        state.library.album_revision,
-        core.store.album_revision().unwrap()
-    );
     assert!(
         state
             .system
@@ -294,21 +243,14 @@ fn rejected_audio_progress_count_preserves_statistics_and_album_token() {
 }
 
 #[test]
-fn committed_play_count_invalidates_and_is_not_replayed_after_projection_failure() {
+fn committed_play_count_invalidates_once_without_queue_projection_reads() {
     let (directory, mut core) = fixture_with_database(Some(10.0), true);
     playing(&mut core, 1);
     let before_count = core.state.current_track().unwrap().play_count;
     let before = core.state.query_revisions();
     let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
-    connection
-        .execute_batch(
-            "CREATE TRIGGER fail_stats_refresh AFTER UPDATE OF revision ON queue_meta
-         WHEN typeof(NEW.revision)='integer'
-         BEGIN UPDATE queue_meta SET revision='unreadable' WHERE singleton=1; END;",
-        )
-        .unwrap();
-    let error = core.playback_progress(8.0, 8.0).unwrap_err();
-    assert!(error.to_string().contains("Playback statistics committed"));
+    connection.execute_batch("DELETE FROM rivu_meta").unwrap();
+    core.playback_progress(8.0, 8.0).unwrap();
     assert_eq!(core.state.library.revision, before.library + 1);
     assert_eq!(
         core.state.current_track().unwrap().play_count,
@@ -327,18 +269,7 @@ fn committed_play_count_invalidates_and_is_not_replayed_after_projection_failure
     core.playback_progress(9.0, 9.0).unwrap();
     assert_eq!(count(), before_count + 1);
     assert_eq!(core.state.library.revision, before.library + 1);
-    // Queue tokens are persisted authority, never synthesized from a failed read.
-    assert_eq!(core.state.queue.revision, before.queue);
-    connection
-        .execute_batch("DROP TRIGGER fail_stats_refresh;")
-        .unwrap();
-    connection
-        .execute(
-            "UPDATE queue_meta SET revision=?1 WHERE singleton=1",
-            [i64::try_from(before.queue + 1).unwrap()],
-        )
-        .unwrap();
-    core.refresh_queue_tracks().unwrap();
+    // Repeated progress cannot replay a known commit or generate another token.
     assert_eq!(core.state.queue.revision, before.queue + 1);
     assert_eq!(
         core.state.current_track().unwrap().play_count,
@@ -470,15 +401,12 @@ fn saturated_audio_admission_preserves_state_requests_events_and_command_order()
 #[test]
 fn activity_updates_playback_but_only_display_statistics_invalidate_queue_pages() {
     let (_directory, mut core) = fixture();
-    core.store.set_queue_current(Some(1)).unwrap();
-    core.refresh_queue_tracks().unwrap();
+    pending(&mut core, 1);
     let revision = core.state.queue.revision;
-    let stats = core.store.mark_played(1, 7).unwrap();
-    core.update_track_stats(1, stats).unwrap();
-    assert_eq!(core.state.current_track().unwrap().last_played, Some(7));
+    started(&mut core, Some(10.0)).unwrap();
+    assert!(core.state.current_track().unwrap().last_played.is_some());
     assert_eq!(core.state.queue.revision, revision);
-    let stats = core.store.increment_play_count(1).unwrap();
-    core.update_track_stats(1, stats).unwrap();
+    progress(&mut core, 3.0, 3.0);
     assert_ne!(core.state.queue.revision, revision);
     assert_eq!(
         core.store.queue_page(None, 0, 1).unwrap().rows[0]
@@ -553,8 +481,7 @@ fn precision_pending(core: &mut Core) {
         })
         .unwrap();
     core.apply_scan_impacts(impacts).unwrap();
-    core.store.clear_queue().unwrap();
-    core.reload_queue().unwrap();
+    core.command(Command::ClearQueue).unwrap();
     core.enqueue(&[1]).unwrap();
     let queue_id = core.queue_ids[0];
     pending(core, queue_id);
@@ -565,12 +492,25 @@ fn precision_pending(core: &mut Core) {
 fn playback_started_upgrades_estimate_and_duplicate_cannot_downgrade() {
     let (_directory, mut core) = fixture();
     precision_pending(&mut core);
+    let playlist_id = core.store.create_playlist("Bitrate scope").unwrap();
+    core.advance_playlist_entry_revision(playlist_id);
+    core.command(Command::AddPlaylist {
+        playlist_id,
+        track_ids: vec![1, 2],
+    })
+    .unwrap();
+    let query = Query::PlaylistEntries {
+        playlist_id,
+        query: None,
+        offset: 0,
+        limit: 2,
+    };
+    let playlist_stamp = query.stamp(core.query_response(&query).revisions);
     let mut event = started_event(&core, Some(10.0));
     if let AudioEvent::Started { info, .. } = &mut event {
         info.bitrate_bps = Some(128_000);
         info.bitrate_exact = true;
     }
-    let before = core.state.library.revision;
     core.audio_event(event).unwrap();
     assert!(core.store.track(1).unwrap().unwrap().bitrate_exact);
     assert!(core.state.current_track().unwrap().bitrate_exact);
@@ -579,8 +519,10 @@ fn playback_started_upgrades_estimate_and_duplicate_cannot_downgrade() {
             .track
             .bitrate_exact
     );
-    // The precision update shares Started's existing content revision.
-    assert_eq!(core.state.library.revision, before.wrapping_add(1));
+    assert_eq!(
+        query.stamp(core.query_response(&query).revisions),
+        playlist_stamp
+    );
     let revision = core.state.library.revision;
     let mut duplicate = started_event(&core, Some(10.0));
     if let AudioEvent::Started { info, .. } = &mut duplicate {
@@ -758,9 +700,10 @@ fn successful_start_records_recent_once_and_twenty_percent_is_strict() {
     assert_eq!(play_count(&core, 1), 0);
 
     // A duplicate Started must not refresh last-played a second time.
-    core.store.mark_played(1, 7).unwrap();
+    let played_at = core.store.history(200).unwrap()[0].played_at;
+    core.playback.as_mut().unwrap().paused_at = Some(7);
     started(&mut core, Some(10.0)).unwrap();
-    assert_eq!(core.store.history(200).unwrap()[0].played_at, 7);
+    assert_eq!(core.store.history(200).unwrap()[0].played_at, played_at);
     progress(&mut core, 9.0, 2.0);
     progress(&mut core, 9.0, f64::NAN);
     progress(&mut core, 9.0, f64::INFINITY);
@@ -803,7 +746,6 @@ fn configured_threshold_controls_counting_including_zero_percent() {
 fn repeated_progress_pause_seek_and_resume_count_only_once() {
     let (_directory, mut core) = fixture();
     playing(&mut core, 1);
-    core.store.mark_played(1, 7).unwrap();
     progress(&mut core, 1.0, 1.0);
     core.command(Command::Pause).unwrap();
     progress(&mut core, 1.0, 1.0);
@@ -1006,7 +948,7 @@ fn stop_ack_records_queued_start_and_snapshot_without_terminal_navigation() {
 
 #[test]
 fn queued_start_rejection_fences_once_without_recursive_stop_or_count() {
-    let (_directory, mut core) = fixture();
+    let (directory, mut core) = fixture_with_database(Some(10.0), true);
     pending(&mut core, 1);
     let generation = core.generation;
     let (sender, events) = mpsc::channel(4);
@@ -1025,7 +967,8 @@ fn queued_start_rejection_fences_once_without_recursive_stop_or_count() {
             bitrate_bps: None,
         })
         .unwrap();
-    core.store.remove_tracks(&[1]).unwrap();
+    let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+    connection.execute_batch("CREATE TRIGGER reject_start_activity BEFORE UPDATE OF last_played ON tracks BEGIN SELECT RAISE(ABORT,'activity rejected'); END;").unwrap();
     assert!(
         core.finish_playback(
             Ok(Some(rivu_audio::AudioSnapshot {
@@ -1104,10 +1047,11 @@ fn started_uses_valid_decoder_duration_or_keeps_known_metadata_duration() {
 
 #[test]
 fn rejected_recent_update_stops_without_counting_the_start() {
-    let (_directory, mut core) = fixture();
+    let (directory, mut core) = fixture_with_database(Some(10.0), true);
     pending(&mut core, 1);
     let generation = core.generation;
-    core.store.remove_tracks(&[1]).unwrap();
+    let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
+    connection.execute_batch("CREATE TRIGGER reject_start_activity BEFORE UPDATE OF last_played ON tracks BEGIN SELECT RAISE(ABORT,'activity rejected'); END;").unwrap();
     assert!(started(&mut core, Some(10.0)).is_err());
     assert_eq!(core.state.playback.status, PlaybackStatus::Stopped);
     assert_ne!(core.generation, generation);
@@ -1247,17 +1191,16 @@ fn crossing_play_threshold_refreshes_published_history_count_during_playback() {
 
 #[test]
 fn ordinary_stop_retains_failed_statistics_without_recounting_committed_plays() {
-    for failure in ["activity", "count", "queue"] {
+    for failure in ["activity", "count", "history"] {
         let (directory, mut core) = fixture_with_database(Some(10.0), true);
         playing(&mut core, 1);
         core.playback.as_mut().unwrap().paused_at = Some(17);
         core.playback.as_mut().unwrap().last_heard_at = Some(17);
         let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
-        let queue_revision = i64::try_from(core.state.queue.revision).unwrap();
         connection.execute_batch(match failure {
             "activity" => "CREATE TRIGGER reject_stop_activity BEFORE UPDATE OF last_played ON tracks BEGIN SELECT RAISE(FAIL,'activity unavailable'); END;",
             "count" => "CREATE TRIGGER reject_stop_count BEFORE UPDATE OF play_count ON tracks BEGIN SELECT RAISE(FAIL,'count unavailable'); END;",
-            "queue" => "CREATE TRIGGER reject_stop_projection AFTER UPDATE OF revision ON queue_meta WHEN typeof(NEW.revision)='integer' BEGIN UPDATE queue_meta SET revision='unreadable' WHERE singleton=1; END;",
+            "history" => "CREATE TRIGGER reject_stop_projection AFTER UPDATE OF last_played ON tracks WHEN NEW.id=1 BEGIN UPDATE tracks SET last_played='unreadable' WHERE id=4; END;",
             _ => unreachable!(),
         }).unwrap();
         let generation = core.generation;
@@ -1295,18 +1238,10 @@ fn ordinary_stop_retains_failed_statistics_without_recounting_committed_plays() 
             .execute_batch(match failure {
                 "activity" => "DROP TRIGGER reject_stop_activity;",
                 "count" => "DROP TRIGGER reject_stop_count;",
-                "queue" => "DROP TRIGGER reject_stop_projection;",
+                "history" => "DROP TRIGGER reject_stop_projection; UPDATE tracks SET last_played=NULL WHERE id=4;",
                 _ => unreachable!(),
             })
             .unwrap();
-        if failure == "queue" {
-            connection
-                .execute(
-                    "UPDATE queue_meta SET revision=?1 WHERE singleton=1",
-                    [queue_revision],
-                )
-                .unwrap();
-        }
         core.flush_deferred_playback().unwrap();
         assert!(core.retired_playback.is_none());
         assert!(core.playback.is_none());
@@ -1352,10 +1287,9 @@ fn stop_retains_later_progress_after_queued_start_projection_failure() {
     let (directory, mut core) = fixture_with_database(Some(10.0), true);
     pending(&mut core, 1);
     let generation = core.generation;
-    let revision = i64::try_from(core.state.queue.revision).unwrap();
     let connection = rusqlite::Connection::open(directory.path().join("library.db")).unwrap();
     connection
-        .execute_batch("CREATE TRIGGER reject_stop_projection AFTER UPDATE OF revision ON queue_meta WHEN typeof(NEW.revision)='integer' BEGIN UPDATE queue_meta SET revision='unreadable' WHERE singleton=1; END;")
+        .execute_batch("CREATE TRIGGER reject_stop_projection AFTER UPDATE OF last_played ON tracks WHEN NEW.id=1 BEGIN UPDATE tracks SET last_played='unreadable' WHERE id=4; END;")
         .unwrap();
     let (sender, events) = mpsc::channel(4);
     core.engine.events = Some(events);
@@ -1375,12 +1309,8 @@ fn stop_retains_later_progress_after_queued_start_projection_failure() {
     assert!(retired.stats.counted);
     assert_eq!(play_count(&core, 1), 1);
     connection
-        .execute_batch("DROP TRIGGER reject_stop_projection;")
-        .unwrap();
-    connection
-        .execute(
-            "UPDATE queue_meta SET revision=?1 WHERE singleton=1",
-            [revision],
+        .execute_batch(
+            "DROP TRIGGER reject_stop_projection; UPDATE tracks SET last_played=NULL WHERE id=4;",
         )
         .unwrap();
     core.flush_deferred_playback().unwrap();

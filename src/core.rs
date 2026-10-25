@@ -702,6 +702,8 @@ impl Runtime {
             subscribers,
             generation: 0,
             output_settings_request: 0,
+            next_playlist_token: 0,
+            database_unavailable: false,
             queue_ids: Vec::new(),
             playback: None,
             retired_playback: None,
@@ -858,6 +860,8 @@ struct Core {
     subscribers: Arc<RwLock<Vec<Sender<()>>>>,
     generation: u64,
     output_settings_request: u64,
+    next_playlist_token: u64,
+    database_unavailable: bool,
     // The only full queue projection: compact occurrence IDs, never shared with clients.
     queue_ids: Vec<u64>,
     playback: Option<PlaybackStats>,
@@ -917,9 +921,9 @@ impl Core {
     fn load_initial_state(&mut self) -> Result<()> {
         self.state.library.track_total = self.store.track_count()?;
         self.state.library.playlist_total = self.store.playlist_summary_page(None, 0, 0)?.total;
-        self.state.library.album_revision = self.store.album_revision()?;
-        self.state.library.playlist_entry_revisions =
-            Arc::new(self.store.playlist_entry_revisions()?);
+        for playlist_id in self.store.playlist_ids()? {
+            self.advance_playlist_entry_revision(playlist_id);
+        }
         self.state.library.history = Arc::new(self.store.history(MAX_QUERY_ROWS)?);
         self.state.system.devices = Arc::new(audio::devices().unwrap_or_default());
         self.state.system.ffmpeg_status = if self.state.system.config.ffmpeg_enabled {

@@ -5,8 +5,13 @@ use rand::RngExt;
 const MAX_NAVIGATION_HISTORY: usize = 4096;
 
 impl Core {
+    pub(in crate::core) fn advance_queue_revision(&mut self) {
+        self.state.queue.revision = self.state.queue.revision.wrapping_add(1);
+    }
     pub(in crate::core) fn refresh_queue_tracks(&mut self) -> Result<()> {
-        self.state.queue = self.store.queue_projection(self.queue_ids.len())?;
+        self.state.queue = self
+            .store
+            .queue_projection(self.queue_ids.len(), self.state.queue.revision)?;
         let track = self
             .state
             .queue
@@ -35,8 +40,14 @@ impl Core {
     // Queue mutations persist their own transaction. Playback selection uses
     // this boundary too; shutdown retries final persistence.
     pub(in crate::core) fn save_queue(&mut self) -> Result<()> {
+        ensure!(
+            !self.database_unavailable,
+            "Database outcome is uncertain; restart Rivu before saving"
+        );
         self.store.set_queue_current(self.state.queue.current_id)?;
-        self.state.queue = self.store.queue_projection(self.queue_ids.len())?;
+        self.state.queue = self
+            .store
+            .queue_projection(self.queue_ids.len(), self.state.queue.revision)?;
         Ok(())
     }
     pub(in crate::core) fn random_queue_id(&self, rng: &mut impl rand::Rng) -> Option<u64> {
@@ -58,14 +69,18 @@ impl Core {
 
     pub(in crate::core) fn reload_queue(&mut self) -> Result<()> {
         self.queue_ids = self.store.queue_ids()?;
-        self.state.queue = self.store.queue_projection(self.queue_ids.len())?;
+        self.state.queue = self
+            .store
+            .queue_projection(self.queue_ids.len(), self.state.queue.revision)?;
         self.prune_queue_history();
         Ok(())
     }
 
     pub(in crate::core) fn append_queue_ids(&mut self) -> Result<()> {
         self.store.extend_queue_ids(&mut self.queue_ids)?;
-        self.state.queue = self.store.queue_projection(self.queue_ids.len())?;
+        self.state.queue = self
+            .store
+            .queue_projection(self.queue_ids.len(), self.state.queue.revision)?;
         Ok(())
     }
 
@@ -90,8 +105,14 @@ impl Core {
         index: usize,
         inserted: Vec<u64>,
     ) -> Result<()> {
+        if inserted.is_empty() {
+            return Ok(());
+        }
+        self.advance_queue_revision();
         self.queue_ids.splice(index..index, inserted);
-        self.state.queue = self.store.queue_projection(self.queue_ids.len())?;
+        self.state.queue = self
+            .store
+            .queue_projection(self.queue_ids.len(), self.state.queue.revision)?;
         Ok(())
     }
 
@@ -109,9 +130,13 @@ impl Core {
         {
             self.stop()?;
         }
-        self.store.remove_queue_entries(queue_ids)?;
+        if self.store.remove_queue_entries(queue_ids)? {
+            self.advance_queue_revision();
+        }
         self.queue_ids.retain(|id| !ids.contains(id));
-        self.state.queue = self.store.queue_projection(self.queue_ids.len())?;
+        self.state.queue = self
+            .store
+            .queue_projection(self.queue_ids.len(), self.state.queue.revision)?;
         self.prune_queue_history();
         if self.state.queue.current_id.is_none() {
             self.state.current_track = None;
@@ -151,6 +176,7 @@ impl Core {
         if !self.store.move_queue_entries(&selected, insertion)? {
             return Ok(());
         }
+        self.advance_queue_revision();
 
         let first = selected[0].1 as usize;
         let last = selected[selected.len() - 1].1 as usize;
@@ -175,7 +201,9 @@ impl Core {
         {
             *slot = id as u64;
         }
-        self.state.queue = self.store.queue_projection(self.queue_ids.len())?;
+        self.state.queue = self
+            .store
+            .queue_projection(self.queue_ids.len(), self.state.queue.revision)?;
         Ok(())
     }
 
@@ -183,8 +211,11 @@ impl Core {
         if ids.is_empty() {
             return Ok(());
         }
-        self.store.enqueue_tracks(ids)?;
-        self.append_queue_ids()
+        if self.store.enqueue_tracks(ids)? {
+            self.advance_queue_revision();
+            self.append_queue_ids()?;
+        }
+        Ok(())
     }
 
     pub(in crate::core) fn randomize_queue(&mut self, rng: &mut impl rand::Rng) -> Result<()> {
@@ -196,14 +227,19 @@ impl Core {
         if order == self.queue_ids {
             return Ok(());
         }
-        self.store.reorder_queue(&order)?;
+        if self.store.reorder_queue(&order)? {
+            self.advance_queue_revision();
+        }
         self.queue_ids = order;
-        self.state.queue = self.store.queue_projection(self.queue_ids.len())?;
+        self.state.queue = self
+            .store
+            .queue_projection(self.queue_ids.len(), self.state.queue.revision)?;
         Ok(())
     }
 
     pub(in crate::core) fn deduplicate_queue(&mut self) -> Result<()> {
         if self.store.deduplicate_queue()? {
+            self.advance_queue_revision();
             self.reload_queue()?;
         }
         Ok(())

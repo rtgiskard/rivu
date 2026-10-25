@@ -499,6 +499,10 @@ impl Core {
         cancelled: bool,
     ) -> Result<()> {
         ensure!(!cancelled, "Processing cancelled");
+        ensure!(
+            !self.database_unavailable,
+            "Database outcome is uncertain; restart Rivu before publishing processing results"
+        );
         let track = self.track(result.track.id)?;
         ensure!(
             track.path == result.track.path

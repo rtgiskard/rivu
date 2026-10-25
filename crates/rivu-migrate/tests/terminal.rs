@@ -59,7 +59,7 @@ fn success_resources_are_escaped_without_rewriting_files_or_creating_backups() {
 }
 
 #[test]
-fn unsupported_revision_errors_escape_hostile_paths_without_changes() {
+fn unsupported_format_errors_escape_hostile_paths_without_changes() {
     let directory = tempfile::tempdir().unwrap();
     let data = directory.path().join(HOSTILE);
     fs::create_dir(&data).unwrap();
@@ -67,7 +67,7 @@ fn unsupported_revision_errors_escape_hostile_paths_without_changes() {
     let connection = Connection::open(data.join("library.db")).unwrap();
     database::create_current(&connection).unwrap();
     connection
-        .execute_batch("UPDATE schema_meta SET value=1 WHERE key='album_trigger_revision'")
+        .execute_batch("UPDATE rivu_meta SET format_version=99 WHERE singleton=1")
         .unwrap();
     drop(connection);
 
@@ -75,10 +75,7 @@ fn unsupported_revision_errors_escape_hostile_paths_without_changes() {
     assert_eq!(output.status.code(), Some(2));
     let stderr = assert_terminal_safe(&output.stderr);
     assert!(stderr.contains(ESCAPED), "{stderr}");
-    assert!(
-        stderr.contains("Unsupported album trigger revision"),
-        "{stderr}"
-    );
+    assert!(stderr.contains("Unsupported database version"), "{stderr}");
     assert!(output.stdout.is_empty());
     assert!(!config.exists());
 }

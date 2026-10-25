@@ -396,36 +396,26 @@ of the catalog. Creation registers a fresh token; deletion removes it. A missing
 key means the playlist is unavailable, never a fallback to the catalog token.
 Actual membership changes and reorders advance only the owning content token;
 membership also changes summary counts. Rename changes only the summary token.
-SQLite issues the content/lifetime tokens from a durable shared sequence. Data and
-versions advance atomically in the writer's transaction, including writes from
-other connections; rollback restores both. Deleting and recreating a playlist,
-even with the same ID, cannot revive an old token. Retention is bounded by extant
-playlists, with no per-track version table or mutation event log. Core publishes
-its own committed scoped changes through the Library state-section token. A query
-also reconciles the collection authority actually observed in its SQLite snapshot
-and publishes changed album or playlist scopes before delivering its response, so GUI
-completion checks the same authority. Unchanged and unrelated scopes retain their
-tokens; failed version reads and cancelled queries do not invent observations.
-Creation and deletion publish their lifetime/catalog validity before refreshing
-`playlist_total`. Renames and membership edits retain that total and perform no
-catalog count read; their summary/content invalidation does not depend on one.
-Committed creation and membership changes invalidate their summary and applicable
-duplicate-member domains before fallible version or count reads. Failure reading
-one affected playlist's token does not suppress reads for other affected playlists.
-After track deletion, independent catalog and queue refreshes still run; failed
-scopes retain their previous observations rather than inventing new versions.
+Core issues content/lifetime tokens from one in-memory sequence after confirmed
+commits. Deleting and recreating a playlist, even with the same ID, cannot revive
+an old token within that Core instance. Retention is bounded by extant playlists;
+no durable versions, additional per-track version table or mutation event log is
+needed. Restart reconstructs tokens; the existing instance identity isolates old
+results from the new process.
 
-Revision reads follow the query's dependency domains: album pages read the album
-token, queue and duplicate-member queries read the queue token, and playlist
-content queries read only the owning playlist token. These reads share the rows'
-SQLite snapshot; publishing their observations does not re-read unrelated tokens.
-Commands outside maintenance attempt the album token refresh once and reuse that
-observation when publishing, regardless of the business result. A failed refresh
-retains the previous token; it cannot replace the command's result or remove an
-accepted task ID. Event publication and maintenance branches retain the normal
-refresh path. Playlist version maps use copy-on-write only when an observed value
-or presence changes; multiple scope updates before the next publication share
-the first copy.
+Queries take their revision stamps from Core memory. Publishing state performs
+no database version reads and queries do not reconcile an independent SQLite
+version authority. Runtime writes must pass through Core; background connections
+are admitted under the existing save gate. Direct external database writes while
+Rivu runs are unsupported.
+
+Confirmed commits advance affected tokens before any fallible count or view
+refresh; rollback and no-op operations advance none. Creation and deletion publish
+their lifetime/catalog validity before refreshing `playlist_total`. Renames and
+membership edits retain that total without a catalog count read. Playlist maps
+use copy-on-write only when a token or presence changes. Unknown background commit
+outcomes retain the database operation gate until restart, including final saves;
+they never authorize replay or trust stale tokens.
 
 Playback-statistics writes return count and activity time directly to the Core.
 The bounded track cache and current/recent snapshots receive these scalar changes
@@ -439,15 +429,17 @@ next request; disconnect or server shutdown terminates the wait.
 === Query results and pagination
 
 Query responses contain the requested projection and its data revisions, not a
-full client state or queue snapshot. Collection rows and their durable versions
-are read in one SQLite snapshot. Publication sequence, four state-section tokens,
-query-data tokens, and consumer request generations have distinct responsibilities.
+full client state or queue snapshot. Core captures collection tokens with each
+serialized query; the save gate prevents reads before background commit facts
+have been applied. Publication sequence, four state-section tokens, query-data
+tokens, and consumer request generations have distinct responsibilities.
 
 `Query::stamp` is the sole query dependency contract for scheduling, projection
 identity, result acceptance, and batch validation. Library pages use library
-content; directory/album/location projections also use structure. Album projections
-add the durable `album` collection token. A single Track query uses
-`track = {track_id, revision}`. Root counts use structure only.
+content; directory/location projections also use structure. Album projections use
+only the Core-owned `album` collection token, so unrelated library changes do not
+invalidate them. A single Track query uses `track = {track_id, revision}`.
+Root counts use structure only.
 Playlist summaries use the summary catalog only; full entry rows use
 `playlist_metadata = {playlist_id, revision}` plus their scoped content/lifetime
 token. Unfiltered compact entry locations use only their content token; filtered
@@ -478,12 +470,12 @@ reusing an unrelated scoped revision.
 
 Whole-collection transfers carry an album key plus its `album` revision, or a
 playlist ID plus its content/lifetime revision. Destination playlists carry their
-own content/lifetime token; positional Queue insertion carries `queue_meta`'s
-persisted revision. The Store acquires the write lock before validating all these
-tokens against the same database transaction that resolves members and inserts
-them. A prior commit on another connection therefore rejects stale intent without
-changing either destination. Album lookup uses exact parent/title and album order;
-Queue preserves repeated occurrences and playlists keep first-occurrence uniqueness.
+own content/lifetime token; positional Queue insertion carries its in-memory
+queue revision. Core validates these tokens before Store starts the transaction
+that resolves members and inserts them. Serialized ownership and the save gate
+prevent another runtime writer from changing the validated state. Album lookup
+uses exact parent/title and album order; Queue preserves repeated occurrences and
+playlists keep first-occurrence uniqueness.
 
 Entry pages/batches and scoped `PlaylistEntryLocations` (including empty results)
 attach `revisions.playlist_entries = {playlist_id, revision}` when the collection
@@ -741,12 +733,12 @@ must not collect paged track IDs to perform album actions.
 
 `TransferCollection {source, destination}` copies a version-pinned whole Album
 or Playlist without collecting paged track payloads in the client. Album sources
-carry their key and durable `album` collection revision; Playlist sources carry
+carry their key and Core-owned `album` collection revision; Playlist sources carry
 their ID and entry-content revision. Queue insertion carries an index and queue
 revision; Playlist destinations carry their ID, entry revision and optional
-index. Omitted positions append. Core validates these versions after Store has
-acquired its write transaction, then source staging and insertion use that same
-transaction. A changed source or destination rejects the whole operation.
+index. Omitted positions append. Core validates versions before the Store write
+transaction; source staging and insertion use that transaction. A stale source
+or destination rejects the whole operation.
 Queue transfers preserve source occurrences and order; Playlist transfers keep
 the existing unique-track/first-occurrence policy. GUI collection drops, album
 menu copies and playlist-to-queue Append use this intent rather than bare IDs.
@@ -833,7 +825,8 @@ retains the active task and latest 32 terminal results. Unknown/evicted IDs fail
 for external admission); `playlist_id` confirms a subsequent playlist commit even
 if refresh failed. A failed task is not evidence of zero side effects; after an
 uncertain worker failure, absent confirmation is not proof that no commit happened.
-Retry only the missing step after inspection.
+An uncertain worker outcome disables database business operations until restart;
+after reopening, inspect committed data before submitting any missing operation.
 `CancelScan` requests cancellation before Saving and is rejected during Saving;
 its Ack never proves worker retirement. Only the task terminal result resolves it.
 A failed wait never automatically replays startup.

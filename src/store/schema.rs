@@ -19,13 +19,17 @@ impl Store {
         let c =
             Connection::open(path).with_context(|| format!("open database {}", path.display()))?;
         c.busy_timeout(std::time::Duration::from_secs(5))?;
-        if rivu_format::database::inspect(&c)? != rivu_format::database::DatabaseState::Empty {
+        let empty =
+            rivu_format::database::inspect(&c)? == rivu_format::database::DatabaseState::Empty;
+        if !empty {
             rivu_format::database::validate_current(&c)?;
         }
         c.pragma_update(None, "journal_mode", "WAL")?;
         c.pragma_update(None, "foreign_keys", "ON")?;
         c.execute_batch("PRAGMA synchronous=NORMAL;")?;
-        rivu_format::database::ensure_current(&c)?;
+        if empty {
+            rivu_format::database::create_current(&c)?;
+        }
         // SQLite's built-in lower() is ASCII-only; preserve frontend Unicode search.
         c.create_scalar_function(
             "lower",
@@ -97,7 +101,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bitrate_precision_updates_queue_metadata_and_survives_restart() -> Result<()> {
+    fn bitrate_precision_constraint_and_data_survive_restart() -> Result<()> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("library.db");
         let store = Store::open(&path)?;
@@ -113,11 +117,9 @@ mod tests {
                 .is_err()
         );
         store.enqueue_tracks(&[1])?;
-        let revision = store.queue_state()?.revision;
         store
             .conn
             .execute("UPDATE tracks SET bitrate_exact=1 WHERE id=1", [])?;
-        assert!(store.queue_state()?.revision > revision);
         drop(store);
         let store = Store::open(&path)?;
         let track = store.track(1)?.unwrap();
@@ -156,17 +158,7 @@ mod tests {
 
     #[test]
     fn incompatible_databases_are_rejected_without_changing_schema_or_data() -> Result<()> {
-        for (key, version) in [
-            ("version", None),
-            ("version", Some(0)),
-            ("version", Some(2)),
-            ("album_trigger_revision", None),
-            ("album_trigger_revision", Some(0)),
-            ("album_trigger_revision", Some(1)),
-            ("album_trigger_revision", Some(2)),
-            ("album_trigger_revision", Some(3)),
-            ("album_trigger_revision", Some(5)),
-        ] {
+        for version in [None, Some(0), Some(1), Some(3)] {
             let directory = tempfile::tempdir()?;
             let path = directory.path().join("library.db");
             let store = Store::open(&path)?;
@@ -182,7 +174,6 @@ mod tests {
             store.set_queue_current(Some(store.queue_ids()?[1]))?;
             let tracks = [store.track(1)?, store.track(2)?];
             let queue = store.queue_page(None, 0, 24)?;
-            let queue_state = store.queue_state()?;
             let entries = store.playlist_entries_page(playlist, None, 0, 24)?;
             let connection = &store.conn;
             connection.execute_batch(
@@ -191,11 +182,11 @@ mod tests {
             )?;
             if let Some(version) = version {
                 connection.execute(
-                    "UPDATE schema_meta SET value=?1 WHERE key=?2",
-                    rusqlite::params![version, key],
+                    "UPDATE rivu_meta SET format_version=?1 WHERE singleton=1",
+                    [version],
                 )?;
             } else {
-                connection.execute("DELETE FROM schema_meta WHERE key=?1", [key])?;
+                connection.execute("DELETE FROM rivu_meta WHERE singleton=1", [])?;
             }
             let schema_version: i64 =
                 connection.query_row("PRAGMA schema_version", [], |row| row.get(0))?;
@@ -209,7 +200,6 @@ mod tests {
             );
             assert_eq!([store.track(1)?, store.track(2)?], tracks);
             assert_eq!(store.queue_page(None, 0, 24)?, queue);
-            assert_eq!(store.queue_state()?, queue_state);
             assert_eq!(store.playlist_entries_page(playlist, None, 0, 24)?, entries);
 
             let connection = Connection::open(&path)?;
@@ -225,8 +215,8 @@ mod tests {
             );
             assert_eq!(
                 connection.query_row(
-                    "SELECT (SELECT value FROM schema_meta WHERE key=?1)",
-                    [key],
+                    "SELECT (SELECT format_version FROM rivu_meta WHERE singleton=1)",
+                    [],
                     |row| row.get::<_, Option<i64>>(0)
                 )?,
                 version

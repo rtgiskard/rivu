@@ -192,12 +192,12 @@ fn other_bulk_sources_union_with_directories_and_ids_without_duplicate_members()
     let before = store.queue_state().unwrap();
     assert!(
         store
-            .insert_queue_sources(&[], &[], Some(&[]), 0, before.revision.wrapping_add(1))
+            .insert_queue_sources(&[], &[], Some(&[]), before.total + 1)
             .is_err()
     );
     assert_eq!(store.queue_state().unwrap(), before);
     store
-        .insert_queue_sources(&[], &[], Some(&["/".into()]), before.total, before.revision)
+        .insert_queue_sources(&[], &[], Some(&["/".into()]), before.total)
         .unwrap();
     assert_eq!(store.queue_state().unwrap(), before);
     let other = store.create_playlist("Subset").unwrap();

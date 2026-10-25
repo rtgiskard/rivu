@@ -272,10 +272,10 @@ Right-click an album card for actions on the complete album, including adding it
 to a playlist and setting or clearing favorites. Drag a card to Queue or a named
 playlist catalog row to append the complete album in album order. Track rows
 offer the shared track menu and can be dragged individually to either destination.
-Album transfers submit the exact album identity and a durable collection token.
-SQLite resolves and copies members within the destination write transaction;
-concurrent collection changes, including commits from another connection, reject
-stale intent without inserting a partial album.
+Album transfers submit the exact album identity and a Core-owned collection token.
+Core rejects stale intent before SQLite resolves and copies all members within
+the destination transaction. Runtime writes are coordinated by Core; external
+database changes while Rivu is running are unsupported.
 
 Search matches effective album titles or any member artist across the library,
 not just the loaded rows. Matching an artist keeps the complete album visible,
@@ -746,12 +746,13 @@ rivu library keep-independent DESTINATION_ID
 
 == SQLite maintenance
 
-Rivu opens schema `1` databases with derived-trigger revision `4` only. Populated
-databases with missing or noncurrent markers are rejected without resetting or
-deleting user data. Empty databases are initialized directly with current tables
-and triggers; existing databases are not automatically upgraded or repaired.
-Version authorities and the current maintenance revision are defined in
-link:26_migration.adoc[Database and configuration migration].
+Rivu opens database format `2` only. The singleton `rivu_meta` row contains the
+format version and current queue occurrence; runtime revisions remain in Core
+memory. Populated databases with missing or noncurrent metadata are rejected
+without resetting or deleting user data. Empty databases are initialized directly
+with current tables and triggers; existing databases are not upgraded or repaired.
+Stop Rivu before editing the database externally. See
+link:26_migration.adoc[Database and configuration migration] for format and ownership.
 
 === Independent migration tool
 

@@ -55,17 +55,16 @@ impl Core {
         index: usize,
     ) -> Result<()> {
         if let Some(playlist_id) = self.store.move_playlist_entry(entry_id, index)? {
-            self.refresh_playlist_entry_revision(playlist_id)?;
+            self.advance_playlist_entry_revision(playlist_id);
         }
         Ok(())
     }
-    pub(in crate::core) fn refresh_playlist_entry_revision(
-        &mut self,
-        playlist_id: i64,
-    ) -> Result<()> {
-        let revision = self.store.playlist_entry_revision(playlist_id)?;
-        self.set_playlist_entry_revision(playlist_id, revision);
-        Ok(())
+    pub(in crate::core) fn advance_playlist_entry_revision(&mut self, playlist_id: i64) {
+        self.next_playlist_token = self
+            .next_playlist_token
+            .checked_add(1)
+            .expect("playlist token sequence exhausted");
+        self.set_playlist_entry_revision(playlist_id, Some(self.next_playlist_token));
     }
 
     pub(in crate::core) fn set_playlist_entry_revision(
@@ -98,9 +97,8 @@ impl Core {
         has_members: bool,
     ) -> Result<()> {
         self.invalidate_playlist_creation(has_members);
-        let revision = self.refresh_playlist_entry_revision(playlist_id);
-        let count = self.refresh_playlist_count();
-        revision.and(count).context(
+        self.advance_playlist_entry_revision(playlist_id);
+        self.refresh_playlist_count().context(
             "Playlist creation committed, but refreshing views failed; some projections may be stale",
         )
     }
@@ -143,13 +141,10 @@ impl Core {
             .library
             .duplicate_members_revision
             .wrapping_add(1);
-        let mut result = Ok(());
         for &playlist_id in ids {
-            result = result.and(self.refresh_playlist_entry_revision(playlist_id));
+            self.advance_playlist_entry_revision(playlist_id);
         }
-        result.context(
-            "Playlist changes committed, but refreshing entry tokens failed; previous tokens retained",
-        )
+        Ok(())
     }
 
     fn refresh_playlist_count(&mut self) -> Result<()> {
@@ -165,8 +160,16 @@ impl Core {
         playlist_id: i64,
         expected: u64,
     ) -> Result<()> {
-        self.store
-            .check_playlist_entry_revision(playlist_id, expected)
+        anyhow::ensure!(
+            self.state
+                .library
+                .playlist_entry_revisions
+                .get(&playlist_id)
+                .copied()
+                == Some(expected),
+            "Playlist entry revision changed"
+        );
+        Ok(())
     }
 
     pub(in crate::core) fn remove_playlist_entries(
@@ -195,7 +198,7 @@ impl Core {
             .store
             .move_playlist_entries(playlist_id, entry_ids, before_entry_id, after)?
         {
-            self.refresh_playlist_entry_revision(playlist_id)?;
+            self.advance_playlist_entry_revision(playlist_id);
         }
         Ok(())
     }

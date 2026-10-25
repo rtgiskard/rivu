@@ -1,6 +1,14 @@
 use super::*;
 
 impl Core {
+    pub(in crate::core) fn invalidate_collection_impacts(&mut self, queue: bool, albums: bool) {
+        if queue {
+            self.advance_queue_revision();
+        }
+        if albums {
+            self.state.library.album_revision = self.state.library.album_revision.wrapping_add(1);
+        }
+    }
     pub(in crate::core) fn track(&self, id: i64) -> Result<Track> {
         self.store.track(id)?.context("Track not found")
     }
@@ -9,7 +17,6 @@ impl Core {
         &mut self,
         track_ids: &[i64],
     ) -> Result<()> {
-        self.state.queue = self.store.queue_projection(self.queue_ids.len())?;
         if let Some(current) = self.state.current_track.as_ref()
             && track_ids.contains(&current.id)
         {
@@ -97,6 +104,7 @@ impl Core {
             album.as_deref(),
             decoder_hint,
         )?;
+        self.invalidate_collection_impacts(impact.queue, impact.albums);
         if impact.member_facts {
             self.state.library.duplicate_members_revision = self
                 .state
@@ -153,7 +161,12 @@ impl Core {
         }
         // Keep the selection on failure; only a committed cascade clears it.
         let impact = self.store.remove_prepared_tracks(removal)?;
-        self.finish_track_removal(&impact.playlists, impact.duplicate_groups)
+        self.finish_track_removal(
+            &impact.playlists,
+            impact.duplicate_groups,
+            impact.queue,
+            impact.albums,
+        )
     }
 
     pub(in crate::core) fn set_favorite(
@@ -162,6 +175,7 @@ impl Core {
         favorite: bool,
     ) -> Result<()> {
         let impact = self.store.set_favorite(track_ids, favorite)?;
+        self.invalidate_collection_impacts(impact.queue, impact.albums);
         if impact.changed {
             self.state
                 .library
@@ -179,6 +193,7 @@ impl Core {
 
     pub(in crate::core) fn toggle_favorite(&mut self, track_ids: &[i64]) -> Result<()> {
         let impact = self.store.toggle_favorite(track_ids)?;
+        self.invalidate_collection_impacts(impact.queue, impact.albums);
         if impact.changed {
             self.state
                 .library
@@ -208,7 +223,12 @@ impl Core {
         // A stopped decoder does not imply the database deletion succeeded.
         let impact = self.store.remove_missing_tracks()?;
         if impact.removed != 0 {
-            self.finish_track_removal(&impact.playlists, impact.duplicate_groups)?;
+            self.finish_track_removal(
+                &impact.playlists,
+                impact.duplicate_groups,
+                impact.queue,
+                impact.albums,
+            )?;
         }
         Ok(())
     }
@@ -217,12 +237,16 @@ impl Core {
         &mut self,
         affected_playlists: &[i64],
         duplicate_groups_changed: bool,
+        queue_changed: bool,
+        albums_changed: bool,
     ) -> Result<()> {
         let impacts = crate::store::ScanImpacts {
             changed: true,
             library: true,
             structure: true,
             duplicate_groups: duplicate_groups_changed,
+            queue: queue_changed,
+            albums: albums_changed,
             ..crate::store::ScanImpacts::default()
         };
         self.invalidate_scan_impacts(impacts);
@@ -230,11 +254,15 @@ impl Core {
         let catalog = self.refresh_scan_catalog(impacts);
         // Only a fresh ID set can supply the queue projection's total. Retain
         // the previous queue snapshot if reading the committed IDs fails.
-        let queue = self.store.queue_ids().and_then(|ids| {
-            self.queue_ids = ids;
-            self.prune_queue_history();
-            self.refresh_queue_tracks()
-        });
+        let queue = if queue_changed {
+            self.store.queue_ids().and_then(|ids| {
+                self.queue_ids = ids;
+                self.prune_queue_history();
+                self.refresh_queue_tracks()
+            })
+        } else {
+            Ok(())
+        };
         playlists.and(catalog).and(queue).context(
             "Track deletion committed, but refreshing views failed; some projections may be stale",
         )
@@ -245,9 +273,12 @@ impl Core {
         track_id: i64,
         stats: crate::store::TrackStats,
     ) -> Result<()> {
-        self.state
-            .library
-            .change_metadata(Some(&[track_id]), Some(&[]));
+        self.invalidate_collection_impacts(stats.queue, stats.albums);
+        if stats.changed {
+            self.state
+                .library
+                .change_metadata(Some(&[track_id]), Some(&[]));
+        }
         if let Some(index) =
             self.state.library.history.iter().position(|entry| {
                 entry.track_id == track_id && entry.play_count != stats.play_count
@@ -263,8 +294,6 @@ impl Core {
             current.play_count = stats.play_count;
             current.last_played = stats.last_played;
         }
-        self.state.queue = self.store.queue_projection(self.queue_ids.len())
-            .context("Playback statistics committed, but refreshing queue failed; previous queue projection retained")?;
         Ok(())
     }
 
@@ -289,6 +318,7 @@ impl Core {
 
     /// Publish committed facts without reading potentially large projections.
     pub(in crate::core) fn invalidate_scan_impacts(&mut self, impacts: crate::store::ScanImpacts) {
+        self.invalidate_collection_impacts(impacts.queue, impacts.albums);
         if impacts.library {
             self.state.library.revision = self.state.library.revision.wrapping_add(1);
         }
@@ -315,7 +345,6 @@ impl Core {
         impacts: crate::store::ScanImpacts,
     ) -> Result<()> {
         self.invalidate_scan_impacts(impacts);
-        self.state.library.album_revision = self.store.album_revision()?;
         let catalog = self.refresh_scan_catalog(impacts);
         // A failed projection read cannot hide another committed domain.
         let queue = if impacts.library {

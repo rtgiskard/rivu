@@ -23,10 +23,10 @@ fn execute(options: &Options, mode: Mode) -> Result<Report> {
     Ok(report)
 }
 
-fn revision(connection: &Connection) -> i64 {
+fn format_version(connection: &Connection) -> i64 {
     connection
         .query_row(
-            "SELECT value FROM schema_meta WHERE key='album_trigger_revision'",
+            "SELECT format_version FROM rivu_meta WHERE singleton=1",
             [],
             |row| row.get(0),
         )
@@ -223,14 +223,9 @@ fn unknown_future_and_invalid_configuration_fail_preflight() {
 #[test]
 fn unsupported_database_leaves_valid_unversioned_configuration_untouched() {
     for sql in [
-        "UPDATE schema_meta SET value=99 WHERE key='version'",
-        "UPDATE schema_meta SET value=99 WHERE key='album_trigger_revision'",
-        "DELETE FROM schema_meta WHERE key='album_trigger_revision'",
-        "UPDATE schema_meta SET value=0 WHERE key='album_trigger_revision'",
-        "UPDATE schema_meta SET value=1 WHERE key='album_trigger_revision'",
-        "UPDATE schema_meta SET value=2 WHERE key='album_trigger_revision'",
-        "UPDATE schema_meta SET value=3 WHERE key='album_trigger_revision'",
-        "DELETE FROM schema_meta WHERE key='version'",
+        "UPDATE rivu_meta SET format_version=99 WHERE singleton=1",
+        "UPDATE rivu_meta SET format_version=1 WHERE singleton=1",
+        "DELETE FROM rivu_meta",
         "DROP TABLE queue_entries",
     ] {
         let (_directory, options) = fixture();
@@ -302,9 +297,9 @@ fn sqlite_backup_includes_committed_wal_and_transaction_preserves_user_state() {
         .unwrap();
     connection.execute_batch("INSERT INTO playlists(name) VALUES('User playlist');
         INSERT INTO albums(directory,title,artist,track_count) VALUES('/retained','Retain','Artist',1);
-        INSERT INTO tracks(id,path) VALUES(1,'/music/original.flac');
+        INSERT INTO tracks(id,path,favorite,play_count,last_played) VALUES(1,'/music/original.flac',1,7,12345);
         INSERT INTO queue_entries(id,track_id,position) VALUES(41,1,0),(42,1,1);
-        UPDATE queue_meta SET current_id=42,revision=9;").unwrap();
+        UPDATE rivu_meta SET current_queue_entry_id=42;").unwrap();
     let checked = execute(&options, Mode::Check).unwrap();
     assert!(!checked.needs_changes);
     let mut report = Report::default();
@@ -316,7 +311,7 @@ fn sqlite_backup_includes_committed_wal_and_transaction_preserves_user_state() {
     assert_eq!(report.backups.len(), 1);
     assert_eq!(fs::read_to_string(&options.config).unwrap(), original);
     assert_eq!(fs::metadata(&options.config).unwrap().ino(), config_inode);
-    assert_eq!(revision(&connection), database::ALBUM_TRIGGER_REVISION);
+    assert_eq!(format_version(&connection), database::SCHEMA_VERSION);
     assert_eq!(report.backups[0].status, BackupStatus::Complete);
     assert_eq!(report.backups[0].path.extension().unwrap(), "bak");
     assert!(fs::read_dir(&options.data_dir).unwrap().all(|entry| {
@@ -329,7 +324,7 @@ fn sqlite_backup_includes_committed_wal_and_transaction_preserves_user_state() {
     let backup =
         Connection::open_with_flags(&report.backups[0].path, OpenFlags::SQLITE_OPEN_READ_ONLY)
             .unwrap();
-    assert_eq!(revision(&backup), database::ALBUM_TRIGGER_REVISION);
+    assert_eq!(format_version(&backup), database::SCHEMA_VERSION);
     for source in [&connection, &backup] {
         let name: String = source
             .query_row("SELECT name FROM playlists", [], |row| row.get(0))
@@ -346,7 +341,7 @@ fn sqlite_backup_includes_committed_wal_and_transaction_preserves_user_state() {
         assert_eq!(
             source
                 .query_row(
-                    "SELECT current_id,COUNT(*) FROM queue_entries CROSS JOIN queue_meta",
+                    "SELECT current_queue_entry_id,COUNT(*) FROM queue_entries CROSS JOIN rivu_meta",
                     [],
                     |row| { Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)) }
                 )
@@ -361,6 +356,30 @@ fn sqlite_backup_includes_committed_wal_and_transaction_preserves_user_state() {
             .collect::<rusqlite::Result<Vec<(i64, i64, i64)>>>()
             .unwrap();
         assert_eq!(entries, [(41, 1, 0), (42, 1, 1)]);
+        assert_eq!(
+            source
+                .query_row(
+                    "SELECT favorite,play_count,last_played FROM tracks WHERE id=1",
+                    [],
+                    |row| Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?
+                    )),
+                )
+                .unwrap(),
+            (1, 7, 12345)
+        );
+        assert_eq!(
+            source
+                .query_row(
+                    "SELECT seq FROM sqlite_sequence WHERE name='queue_entries'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            42
+        );
     }
     connection
         .execute(
@@ -368,10 +387,6 @@ fn sqlite_backup_includes_committed_wal_and_transaction_preserves_user_state() {
             [],
         )
         .unwrap();
-    let queue_revision: i64 = connection
-        .query_row("SELECT revision FROM queue_meta", [], |row| row.get(0))
-        .unwrap();
-    assert!(queue_revision > 9);
     assert_eq!(
         backup
             .query_row("SELECT path FROM tracks WHERE id=1", [], |row| row
@@ -396,7 +411,7 @@ fn transactional_change_failure_rolls_back_and_reentry_keeps_distinct_backups() 
     );
     assert_eq!(failed.backups.len(), 1);
     assert_eq!(failed.backups[0].status, BackupStatus::Complete);
-    assert_eq!(revision(&connection), database::ALBUM_TRIGGER_REVISION);
+    assert_eq!(format_version(&connection), database::SCHEMA_VERSION);
     assert_eq!(
         connection
             .query_row("SELECT count(*) FROM playlists", [], |row| row

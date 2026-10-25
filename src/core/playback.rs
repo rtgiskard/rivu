@@ -138,17 +138,23 @@ impl Core {
             self.playback_write_deferred = true;
             return false;
         }
-        if !std::fs::metadata(&source.path).is_ok_and(|after| same_source_file(before, &after))
-            || !self
-                .store
-                .upgrade_bitrate(source, bitrate, exact)
-                .unwrap_or_else(|error| {
-                    tracing::warn!(error = ?error, "playback_bitrate_not_saved");
-                    false
-                })
-        {
+        if !std::fs::metadata(&source.path).is_ok_and(|after| same_source_file(before, &after)) {
             return false;
         }
+        let impact = match self.store.upgrade_bitrate(source, bitrate, exact) {
+            Ok(impact) => impact,
+            Err(error) => {
+                tracing::warn!(error = ?error, "playback_bitrate_not_saved");
+                return false;
+            }
+        };
+        if !impact.changed {
+            return false;
+        }
+        self.invalidate_collection_impacts(impact.queue, impact.albums);
+        self.state
+            .library
+            .change_metadata(Some(&[track_id]), impact.playlists.as_deref());
         if let Some(current) = self.state.current_track.as_mut()
             && current.id == track_id
         {
@@ -171,19 +177,8 @@ impl Core {
                 .as_ref()
                 .is_some_and(|track| track.cue.is_none())
             && let Some(bitrate) = bitrate.filter(|bitrate| *bitrate > 0)
-            && self.persist_playback_bitrate(bitrate, true)
         {
-            let track_id = self
-                .state
-                .current_track
-                .as_ref()
-                .expect("playback bitrate has a current track")
-                .id;
-            self.state
-                .library
-                .change_metadata(Some(&[track_id]), Some(&[]));
-            self.state.queue = self.store.queue_projection(self.queue_ids.len())
-                .context("Bitrate update committed, but refreshing queue failed; previous queue projection retained")?;
+            self.persist_playback_bitrate(bitrate, true);
         }
         Ok(())
     }
@@ -622,17 +617,8 @@ impl Core {
             if !std::mem::take(&mut self.playback_write_deferred) && retired_duration.is_none() {
                 return Ok(());
             }
-            if let Some((bitrate, exact)) = self.pending_bitrate.take()
-                && self.persist_playback_bitrate(bitrate, exact)
-            {
-                let track_id = self
-                    .playback
-                    .as_ref()
-                    .expect("bitrate needs playback")
-                    .track_id;
-                self.state
-                    .library
-                    .change_metadata(Some(&[track_id]), Some(&[]));
+            if let Some((bitrate, exact)) = self.pending_bitrate.take() {
+                self.persist_playback_bitrate(bitrate, exact);
             }
             // The count's committed bit precedes projection reads. Attempt both
             // producer facts even if one projection fails; never count twice.

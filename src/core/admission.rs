@@ -75,7 +75,6 @@ fn save_external(
     path: PathBuf,
     mut prepared: library::ExternalAdmission,
     index: Option<usize>,
-    expected_revision: Option<u64>,
     queue_total: usize,
     current_id: Option<u64>,
     sender: oneshot::Sender<Saved>,
@@ -95,14 +94,13 @@ fn save_external(
             return;
         }
     };
-    let (inserted, impacts, _) =
-        match store.admit_external_queue(&prepared, index, expected_revision, current_id) {
-            Ok(committed) => committed,
-            Err(error) => {
-                saved.error = Some(error.context("External audio admission was not committed"));
-                return;
-            }
-        };
+    let (inserted, impacts, _) = match store.admit_external_queue(&prepared, index, current_id) {
+        Ok(committed) => committed,
+        Err(error) => {
+            saved.error = Some(error.context("External audio admission was not committed"));
+            return;
+        }
+    };
     saved.committed = true;
     saved.impacts = Some(impacts);
     let total = queue_total.checked_add(inserted.len());
@@ -110,7 +108,7 @@ fn save_external(
     saved.queue = Some(
         total
             .context("Queue count overflow after external admission")
-            .and_then(|total| store.queue_projection(total)),
+            .and_then(|total| store.queue_projection(total, 0)),
     );
     if impacts.structure {
         saved.track_total = Some(store.track_count());
@@ -372,8 +370,19 @@ impl Core {
             self.retain_external(task.status.clone());
             return;
         }
-        // This owner transition is the cancellation boundary. From this point
-        // shutdown waits for the atomic transaction and publishes its real facts.
+        let baseline = match task.expected_revision {
+            Some(expected) => {
+                self.check_queue_insertion(task.index.unwrap_or(self.queue_ids.len()), expected)
+            }
+            None => Ok(()),
+        };
+        if let Err(error) = baseline {
+            task.status.progress.phase = ScanPhase::Failed;
+            task.status.message = error.to_string();
+            task.status.error = Some(format!("{error:#}"));
+            self.retain_external(task.status.clone());
+            return;
+        }
         task.status.progress.phase = ScanPhase::Saving;
         task.status.message = "Saving external audio and queue…".into();
         task.status.progress.path = None;
@@ -381,12 +390,11 @@ impl Core {
         let (facts_tx, facts_rx) = oneshot::channel();
         let path = std::mem::take(&mut task.database_path);
         let index = task.index;
-        let expected_revision = task.expected_revision;
         let queue_total = self.queue_ids.len();
         let current_id = self.state.queue.current_id;
         task.worker = Some(self.executor.spawn(async move {
             let joined = tokio::task::spawn_blocking(move || {
-                save_external(path, prepared, index, expected_revision, queue_total, current_id, facts_tx);
+                save_external(path, prepared, index, queue_total, current_id, facts_tx);
             }).await;
             let mut saved = facts_rx.await.unwrap_or_else(|_| Saved::uncertain(anyhow::anyhow!("External audio saving worker produced no completion facts")));
             if let Err(error) = joined {
@@ -409,6 +417,18 @@ impl Core {
             saved.uncertain = true;
             saved.error = Some(error);
         }
+        if saved.uncertain {
+            self.database_outcome_uncertain();
+            task.status.library_committed = saved.committed;
+            task.status.progress.phase = ScanPhase::Failed;
+            task.status.message = "Database outcome is uncertain; restart Rivu".into();
+            task.status.error = Some(saved.error.map_or_else(
+                || task.status.message.clone(),
+                |error| format!("{error:#}; restart Rivu"),
+            ));
+            self.retain_external(task.status.clone());
+            return;
+        }
         task.status.library_committed = saved.committed;
         let invalid_diagnostics = saved.errors.len();
         let mut errors = saved.errors;
@@ -418,18 +438,7 @@ impl Core {
         if saved.committed || saved.uncertain {
             self.store.invalidate_caches();
         }
-        let impacts = if saved.uncertain {
-            Some(crate::store::ScanImpacts {
-                changed: true,
-                library: true,
-                structure: true,
-                duplicate_groups: true,
-                duplicate_members: true,
-                ..Default::default()
-            })
-        } else {
-            saved.impacts
-        };
+        let impacts = saved.impacts;
         if let Some(impacts) = impacts {
             self.invalidate_scan_impacts(impacts);
         }
@@ -440,7 +449,10 @@ impl Core {
         }
         if let Some(queue) = saved.queue {
             match queue {
-                Ok(queue) => self.state.queue = queue,
+                Ok(mut queue) => {
+                    queue.revision = self.state.queue.revision;
+                    self.state.queue = queue;
+                }
                 Err(error) => errors.push(format!(
                     "Queue committed but refreshing its projection failed: {error:#}"
                 )),
@@ -607,5 +619,63 @@ mod tests {
         assert!(!retired.load(Ordering::Acquire));
         drop(task);
         assert!(retired.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn lost_commit_facts_block_database_operations_without_replaying_the_save() {
+        let (directory, mut core) = super::super::tests::fixture_with_database(None, true);
+        let path = directory.path().join("uncertain.wav");
+        let mut writer = hound::WavWriter::create(
+            &path,
+            hound::WavSpec {
+                channels: 1,
+                sample_rate: 8_000,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            },
+        )
+        .unwrap();
+        for _ in 0..40_000 {
+            writer.write_sample(0_i16).unwrap();
+        }
+        writer.finalize().unwrap();
+        let before = core.queue_ids.clone();
+        core.command(Command::QueueExternalPaths {
+            paths: vec![path],
+            index: None,
+            expected_revision: None,
+        })
+        .unwrap();
+        loop {
+            let event = wait_on(&core.executor.clone(), async {
+                core.active_external_admission
+                    .as_mut()
+                    .unwrap()
+                    .next_event()
+                    .await
+            });
+            if let Event::Saved(saved) = event {
+                assert!(saved.committed);
+                core.external_admission_event(Event::Saved(Box::new(Saved::uncertain(
+                    anyhow::anyhow!("completion facts lost after commit"),
+                ))));
+                break;
+            }
+            core.external_admission_event(event);
+        }
+        assert!(core.database_maintenance_active());
+        assert_eq!(core.queue_ids, before);
+        assert!(
+            core.command(Command::Enqueue { track_ids: vec![1] })
+                .is_err()
+        );
+        assert!(core.save_queue().is_err());
+        core.command(Command::Volume { value: 0.37 }).unwrap();
+        assert_eq!(core.state.playback.volume, 0.37);
+        drop(core);
+        let reopened = Store::open(&directory.path().join("library.db")).unwrap();
+        let restored = reopened.queue_ids().unwrap();
+        assert_eq!(&restored[..before.len()], &before);
+        assert_eq!(restored.len(), before.len() + 1);
     }
 }

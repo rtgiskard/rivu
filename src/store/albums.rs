@@ -1,9 +1,6 @@
 use super::rows::{LIBRARY_ROW_COLUMNS, TRACK_COLUMNS, library_row_from_row, track_from_row};
 use super::tracks::{search_filter, search_query};
-use super::{
-    Store,
-    queue::{integer, invalidate_structure},
-};
+use super::{Store, queue::integer};
 use anyhow::{Context, Result, ensure};
 use rivu_format::database::{DIRECTORY, ORDER, TITLE, eligible_title};
 use rivu_protocol::model::{AlbumKey, AlbumSort, AlbumSummary, LibraryRow, MAX_QUERY_ROWS, Page};
@@ -18,9 +15,22 @@ fn album_filter() -> String {
     )
 }
 
+pub(super) fn eligible_member(alias: &str) -> String {
+    eligible_title(&format!(
+        "COALESCE({alias}.album_override,{alias}.raw_album)"
+    ))
+}
+
+pub(super) fn representative(alias: &str) -> String {
+    let directory = DIRECTORY.replace("path", &format!("{alias}.path"));
+    format!(
+        "({eligible} AND {alias}.id=(SELECT id FROM tracks INDEXED BY tracks_album_members WHERE {DIRECTORY}={directory} AND {TITLE}=COALESCE({alias}.album_override,{alias}.raw_album) ORDER BY {ORDER} LIMIT 1))",
+        eligible = eligible_member(alias)
+    )
+}
+
 impl Store {
-    /// Lock writers, validate durable tokens, and transfer in the same transaction.
-    /// No GUI-sized ID snapshot or process-local version check is used.
+    /// Transfer the collection atomically after Core validates its runtime tokens.
     pub(crate) fn transfer_collection(
         &self,
         source: &rivu_protocol::model::CollectionSource,
@@ -32,28 +42,6 @@ impl Store {
             &self.conn,
             rusqlite::TransactionBehavior::Immediate,
         )?;
-        match source {
-            CollectionSource::Album { revision, .. } => {
-                ensure!(
-                    self.album_revision()? == *revision,
-                    "Album collection changed"
-                );
-            }
-            CollectionSource::Playlist {
-                playlist_id,
-                revision,
-            } => {
-                self.check_playlist_entry_revision(*playlist_id, *revision)?;
-            }
-        }
-        if let CollectionDestination::Playlist {
-            playlist_id,
-            revision,
-            ..
-        } = destination
-        {
-            self.check_playlist_entry_revision(playlist_id, revision)?;
-        }
         tx.execute_batch("CREATE TEMP TABLE insertion_tracks(ordinal INTEGER PRIMARY KEY,track_id INTEGER NOT NULL);")?;
         match source {
             CollectionSource::Album { key, .. } => {
@@ -86,12 +74,6 @@ impl Store {
         let (scope, index) = match destination {
             CollectionDestination::Queue { insertion } => {
                 let index = if let Some(insertion) = insertion {
-                    let revision: u64 = tx.query_row(
-                        "SELECT revision FROM queue_meta WHERE singleton=1",
-                        [],
-                        |row| integer(row, 0),
-                    )?;
-                    ensure!(revision == insertion.revision, "Queue revision changed");
                     usize::try_from(insertion.index)?
                 } else {
                     tx.query_row(
@@ -115,9 +97,6 @@ impl Store {
             }
         };
         let count = insert_staged_tracks(&tx, scope, index)?;
-        if matches!(scope, PositionScope::Queue) {
-            invalidate_structure(&tx, count != 0)?;
-        }
         let ids = if matches!(
             destination,
             CollectionDestination::Queue { insertion: Some(_) }
@@ -235,13 +214,12 @@ impl Store {
         ensure!(count > 0, "Album is empty");
         if replace {
             tx.execute(
-                "UPDATE queue_meta SET current_id=NULL WHERE singleton=1",
+                "UPDATE rivu_meta SET current_queue_entry_id=NULL WHERE singleton=1",
                 [],
             )?;
             tx.execute("DELETE FROM queue_entries", [])?;
         }
         tx.execute(&format!("INSERT INTO queue_entries(track_id,position) SELECT id,(SELECT COALESCE(MAX(position)+1,0) FROM queue_entries)+row_number() OVER (ORDER BY {ORDER})-1 FROM tracks INDEXED BY tracks_album_members WHERE {filter} ORDER BY {ORDER}"), params![directory, key.title])?;
-        invalidate_structure(&tx, true)?;
         tx.commit()?;
         Ok(())
     }
