@@ -140,6 +140,24 @@ IPC access and upgrade constraints are described in link:doc/21_ipc.adoc[IPC].
 
 == Build and install
 
+=== Prebuilt Linux x86_64 binaries
+
+Download `rivu-linux-x86_64.tar.zst` and its SHA-256 checksum from
+https://github.com/rtgiskard/rivu/releases[GitHub Releases].
+Built on Arch Linux, these binaries require an *x86-64-v3-capable CPU*
+and compatible shared libraries; compatibility with older distributions is not guaranteed.
+
+Verify and extract with GNU tar and zstd:
+
+[source,sh]
+----
+sha256sum --check rivu-linux-x86_64.tar.zst.sha256
+tar --zstd -xf rivu-linux-x86_64.tar.zst
+----
+
+<<_ffmpeg_and_native_only_builds,FFmpeg support>> is included;
+install a Nerd Font as described under <<_font_embedding,Font embedding>>.
+
 === Arch Linux package
 
 Install the `rivu-git` AUR package with paru:
@@ -155,7 +173,7 @@ From the repository root, install the Arch Linux build and runtime prerequisites
 
 [source,sh]
 ----
-sudo pacman -S --needed rustup make gcc binutils clang pkgconf libpipewire opus fontconfig libxkbcommon ffmpeg ttf-nerd-fonts-symbols-mono
+sudo pacman -S --needed rustup make cmake gcc binutils clang pkgconf libpipewire opus fontconfig libxkbcommon ffmpeg ttf-nerd-fonts-symbols-mono
 rustup show
 make install PREFIX="$HOME/.local"
 ----
@@ -165,15 +183,21 @@ The recommended setup is rustup, which selects the stable release pinned in
 `clippy`. The Arch Linux `rustup` and `rust` packages are alternatives; distribution
 toolchains must match the pinned version and provide `rustfmt` and `clippy` for linting.
 
-Keep `Cargo.lock`; the Makefile uses `--locked` to prevent implicit dependency
-updates. Run `make lint` to check formatting and all workspace targets with all
-features, including font embedding.
+Keep `Cargo.lock` to retain the resolved dependency versions. Run `make lint`
+to check formatting and all workspace targets with all features, including
+font embedding.
 
 The install command builds the workspace and installs `rivu`, `rivu-migrate`,
 the desktop entry, and icons. Ensure `~/.local/bin` is on `PATH`.
 Use `make build` to build without installing, or `cargo build --locked --workspace --release`
 directly. Plain `cargo build --locked --release` builds only the application and its dependencies.
 Build outputs default to `.cache/target/`; `CARGO_TARGET_DIR` overrides that path.
+Local builds retain the compiler's default CPU target.
+
+With GNU tar and zstd installed, `make package` creates
+`.cache/dist/rivu-linux-<host-architecture>.tar.zst` and its SHA-256 checksum
+without installing into the system.
+
 
 Linux builds prefer `mold` when available and otherwise use the toolchain's
 default linker. Install it optionally with `sudo pacman -S --needed mold`.

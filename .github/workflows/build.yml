@@ -1,0 +1,76 @@
+name: Build and release Linux x86_64
+
+on:
+  push:
+    branches:
+      - '**'
+    tags:
+      - 'v*'
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    permissions:
+      contents: write
+    runs-on: ubuntu-24.04
+    container: archlinux:base
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash --noprofile --norc -euo pipefail {0}
+    env:
+      CARGO_HOME: ${{ github.workspace }}/.cache/cargo
+      RUSTUP_HOME: ${{ github.workspace }}/.cache/rustup
+      RUSTFLAGS: -C target-cpu=x86-64-v3
+    steps:
+      - name: Install build dependencies
+        run: |
+          pacman -Syu --noconfirm --needed \
+            rustup make cmake gcc binutils mold clang pkgconf libpipewire opus \
+            fontconfig libxkbcommon ffmpeg git tar zstd github-cli ttf-nerd-fonts-symbols-mono
+
+      - name: Check out source and tags
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Lint
+        run: |
+          rustup show
+          make lint
+
+      - name: Build release binaries
+        if: github.ref_type != 'tag'
+        run: |
+          make build
+
+      - name: Build and package release binaries
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+        run: |
+          make package
+
+      - name: Smoke test the archive
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+        run: |
+          (cd .cache/dist && sha256sum --check rivu-linux-x86_64.tar.zst.sha256)
+          mkdir -p .cache/smoke
+          tar -C .cache/smoke --zstd -xf .cache/dist/rivu-linux-x86_64.tar.zst
+          for binary in rivu rivu-migrate; do
+            executable=".cache/smoke/rivu-linux-x86_64/bin/$binary"
+            "$executable" --version
+            "$executable" --help
+          done
+
+      - name: Publish GitHub Release
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            .cache/dist/rivu-linux-x86_64.tar.zst \
+            .cache/dist/rivu-linux-x86_64.tar.zst.sha256 \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes
