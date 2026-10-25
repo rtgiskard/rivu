@@ -408,6 +408,20 @@ changes to its registered source or media invalidate publication. Switching the
 playback track is different: it suppresses a pending automatic graph-audition
 handoff through the playback generation, but does not discard a valid completed
 result. Use task IDs for completion and the selected-audio line for playback.
+
+Scratch directory creation, path preparation and neural-backend filesystem checks
+run on the processing worker. An accepted start can therefore fail asynchronously
+during preparation; no terminal result is published until Core rechecks source
+identity and cancellation. Queued can also mean waiting for retired cache files
+to be deleted before preparation or final publication proceeds.
+
+Processing and stem-mix workers are established before their retirement barrier
+enters the bounded reclamation mailbox. A thread-spawn failure returns to Core
+without leaving queued work, so repeated retries cannot consume retirement
+capacity. An admitted worker waits off Core for earlier deletions; Core never
+blocks on the reclamation mailbox. A deletion failure still rejects the waiting
+task and keeps the unreclaimed bytes charged until shutdown.
+
 Native source preparation checks cancellation between decoder calls; a backend
 call or filesystem operation has no hard cancellation-time guarantee. A retained
 audition or stem mix is rejected if the registered source's decoder hint changed,
@@ -422,7 +436,9 @@ protected, so a result too large to coexist with it fails. Old task status does
 not guarantee that its audio remains available. See
 link:22_cache.adoc#_processing_output_retention[Processing output retention]
 for eviction and status-history lifetimes. Export a graph output to keep a durable
-WAV; shutdown removes temporary results, never original media or exported files.
+WAV. Shutdown closes task admission and joins processing/reclamation workers while
+preserving retained outputs until playback has retired; final service destruction
+removes those temporary results, never original media or exported files.
 
 Input files are bounded to 8 GiB; source rendering has the float WAV RIFF limit
 (under 4 GiB). Offline/hybrid graph execution additionally limits its per-run PCM

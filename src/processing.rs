@@ -18,6 +18,9 @@ use std::{
 use tokio::sync::mpsc::{Receiver, Sender, channel};
 
 pub(crate) mod graph;
+mod reclaim;
+#[cfg(test)]
+mod tests;
 
 const MAX_SOURCE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 const MAX_OUTPUT_BYTES: u64 = 16 * 1024 * 1024 * 1024;
@@ -84,6 +87,10 @@ pub(crate) enum Event {
         id: u64,
         result: Result<Box<ProcessingResult>>,
     },
+    ReadyToPublish {
+        id: u64,
+        result: Box<ProcessingResult>,
+    },
     MixFinished {
         id: u64,
         generation: u64,
@@ -104,7 +111,7 @@ pub(crate) struct Service {
     pub audition: Option<u64>,
     pub audition_generation: Option<u64>,
     pub pending_audition: Option<(u64, u64)>,
-    root: Option<tempfile::TempDir>,
+    reclaimer: Option<reclaim::Reclaimer>,
     data_dir: PathBuf,
 }
 impl Service {
@@ -116,7 +123,7 @@ impl Service {
             active: None,
             results: Default::default(),
             next_id: 1,
-            root: None,
+            reclaimer: None,
             data_dir,
             audition: None,
             audition_generation: None,
@@ -173,6 +180,10 @@ impl Service {
             self.active.is_none(),
             "An audio processing task is already active"
         );
+        ensure!(
+            !self.sender.is_closed(),
+            "Processing service is shutting down"
+        );
         config.validate()?;
         if let Some(selection) = profile {
             ensure!(
@@ -184,39 +195,6 @@ impl Service {
             );
         }
         let stamp = SourceStamp::read(&track.path)?;
-        if matches!(
-            operation,
-            ProcessingOperation::Speech | ProcessingOperation::Separate
-        ) {
-            let manifest = if operation == ProcessingOperation::Speech {
-                &config.neural.speech_manifest
-            } else {
-                &config.neural.separation_manifest
-            };
-            ensure!(
-                manifest
-                    .as_ref()
-                    .is_some_and(|p| p.is_absolute() && p.is_file()),
-                "Select an absolute local prepared model manifest first"
-            );
-            ensure!(
-                config.neural.worker.is_file(),
-                "Neural worker does not exist: {}",
-                config.neural.worker.display()
-            );
-        }
-        if self.root.is_none() {
-            fs::create_dir_all(&self.data_dir)?;
-            let parent = fs::canonicalize(&self.data_dir)?;
-            self.root = Some(
-                tempfile::Builder::new()
-                    .prefix("processing-")
-                    .tempdir_in(parent)?,
-            );
-        }
-        let directory = tempfile::Builder::new()
-            .prefix("task-")
-            .tempdir_in(self.root.as_ref().unwrap().path())?;
         let id = self.next_id;
         self.next_id = self
             .next_id
@@ -274,14 +252,59 @@ impl Service {
         let cancelled = Arc::new(AtomicBool::new(false));
         let flag = cancelled.clone();
         let tx = self.sender.clone();
-        let worker = thread::Builder::new()
-            .name("rivu-processing".into())
-            .spawn(move || {
-                let result = if let Some(cached_output) = cached_output {
-                    run_cached_export(track, stamp, directory, initial, cached_output, &flag, &tx)
-                } else {
-                    run(track, stamp, config, directory, initial, &flag, &tx)
-                };
+        if self.reclaimer.is_none() {
+            self.reclaimer = Some(reclaim::Reclaimer::new(self.sender.clone())?);
+        }
+        let data_dir = self.data_dir.clone();
+        let worker = self
+            .reclaimer
+            .as_ref()
+            .unwrap()
+            .spawn("rivu-processing", move |retired| {
+                let result = (|| {
+                    retired?;
+                    check_cancel(&flag)?;
+                    if matches!(
+                        operation,
+                        ProcessingOperation::Speech | ProcessingOperation::Separate
+                    ) {
+                        let manifest = if operation == ProcessingOperation::Speech {
+                            &config.neural.speech_manifest
+                        } else {
+                            &config.neural.separation_manifest
+                        };
+                        ensure!(
+                            manifest
+                                .as_ref()
+                                .is_some_and(|p| p.is_absolute() && p.is_file()),
+                            "Select an absolute local prepared model manifest first"
+                        );
+                        ensure!(
+                            config.neural.worker.is_file(),
+                            "Neural worker does not exist: {}",
+                            config.neural.worker.display()
+                        );
+                    }
+                    fs::create_dir_all(&data_dir)?;
+                    let parent = fs::canonicalize(&data_dir)?;
+                    check_cancel(&flag)?;
+                    let directory = tempfile::Builder::new()
+                        .prefix("processing-")
+                        .tempdir_in(parent)?;
+                    if let Some(cached_output) = cached_output {
+                        run_cached_export(
+                            track,
+                            stamp,
+                            directory,
+                            initial,
+                            cached_output,
+                            &flag,
+                            &tx,
+                        )
+                    } else {
+                        run(track, stamp, config, directory, initial, &flag, &tx)
+                    }
+                })();
                 let _ = tx.blocking_send(Event::Finished {
                     id,
                     result: result.map(Box::new),
@@ -315,12 +338,55 @@ impl Service {
         if let Some(task) = task {
             let _ = task.worker.join();
         }
-        while self.receiver.try_recv().is_ok() {}
+        while let Ok(event) = self.receiver.try_recv() {
+            match event {
+                Event::Finished {
+                    result: Ok(result), ..
+                }
+                | Event::ReadyToPublish { result, .. } => self.retire(result),
+                _ => {}
+            }
+        }
+        if let Some(mut reclaimer) = self.reclaimer.take() {
+            reclaimer.shutdown();
+        }
+    }
+    pub fn retiring_bytes(&self) -> u64 {
+        self.reclaimer.as_ref().map_or(0, |worker| worker.bytes())
+    }
+    pub fn retire(&self, result: Box<ProcessingResult>) {
+        self.reclaimer
+            .as_ref()
+            .expect("result requires an admitted worker")
+            .retire(result);
+    }
+    pub fn publish_after_retirement(&self, id: u64, result: Box<ProcessingResult>) {
+        self.reclaimer
+            .as_ref()
+            .unwrap()
+            .publish_after_retirement(id, result);
     }
 }
 impl Drop for Service {
     fn drop(&mut self) {
         self.shutdown();
+        // shutdown intentionally preserves selected auditions until their player
+        // has retired. Final destruction owns no business round and joins its
+        // one cleanup thread before releasing Service.
+        let results = std::mem::take(&mut self.results);
+        if !results.is_empty() {
+            thread::scope(|scope| {
+                scope.spawn(move || {
+                    for result in results {
+                        if let Err(error) = fs::remove_dir_all(result.directory.path())
+                            && error.kind() != std::io::ErrorKind::NotFound
+                        {
+                            tracing::error!(error = %error, "processing_final_cache_reclamation_failed");
+                        }
+                    }
+                });
+            });
+        }
     }
 }
 fn check_cancel(cancel: &AtomicBool) -> Result<()> {
@@ -1032,6 +1098,10 @@ pub(crate) fn mix(
         "An audio processing task is already active"
     );
     ensure!(
+        !service.sender.is_closed(),
+        "Processing service is shutting down"
+    );
+    ensure!(
         vocal_gain_db.is_finite()
             && accompaniment_gain_db.is_finite()
             && (-96.0..=24.0).contains(&vocal_gain_db)
@@ -1053,55 +1123,58 @@ pub(crate) fn mix(
         .accompaniment
         .clone()
         .context("No accompaniment stem")?;
-    let file = tempfile::Builder::new()
-        .prefix("mix-")
-        .suffix(".wav")
-        .tempfile_in(result.directory.path())?;
-    let path = file.path().to_path_buf();
+    let directory = result.directory.path().to_path_buf();
+    let reclaimer = service.reclaimer.as_ref().unwrap();
     let cancelled = Arc::new(AtomicBool::new(false));
     let cancel = cancelled.clone();
     let tx = service.sender.clone();
-    let worker = thread::Builder::new()
-        .name("rivu-stem-mix".into())
-        .spawn(move || {
-            let outcome = (|| -> Result<PathBuf> {
-                let (file, _) = file.keep().map_err(|e| e.error)?;
-                let mut vocals = hound::WavReader::open(vocals)?;
-                let mut accompaniment = hound::WavReader::open(accompaniment)?;
-                ensure!(
-                    vocals.spec() == accompaniment.spec()
-                        && vocals.duration() == accompaniment.duration(),
-                    "Stem alignment mismatch"
-                );
-                let mut writer =
-                    hound::WavWriter::new(std::io::BufWriter::new(file), vocals.spec())?;
-                let vg = 10.0_f32.powf(vocal_gain_db / 20.0);
-                let ag = 10.0_f32.powf(accompaniment_gain_db / 20.0);
-                for (index, (v, a)) in vocals
-                    .samples::<f32>()
-                    .zip(accompaniment.samples::<f32>())
-                    .enumerate()
-                {
-                    if index % 8192 == 0 {
-                        check_cancel(&cancel)?;
-                    }
-                    let sample = v? * vg + a? * ag;
-                    ensure!(sample.is_finite(), "Nonfinite mixed sample");
-                    writer.write_sample(sample)?;
+    let worker = reclaimer.spawn("rivu-stem-mix", move |retired| {
+        let outcome = (|| -> Result<PathBuf> {
+            retired?;
+            check_cancel(&cancel)?;
+            let mut file = tempfile::Builder::new()
+                .prefix("mix-")
+                .suffix(".wav")
+                .tempfile_in(directory)?;
+            let mut vocals = hound::WavReader::open(vocals)?;
+            let mut accompaniment = hound::WavReader::open(accompaniment)?;
+            ensure!(
+                vocals.spec() == accompaniment.spec()
+                    && vocals.duration() == accompaniment.duration(),
+                "Stem alignment mismatch"
+            );
+            let mut writer =
+                hound::WavWriter::new(std::io::BufWriter::new(file.as_file_mut()), vocals.spec())?;
+            let vg = 10.0_f32.powf(vocal_gain_db / 20.0);
+            let ag = 10.0_f32.powf(accompaniment_gain_db / 20.0);
+            for (index, (v, a)) in vocals
+                .samples::<f32>()
+                .zip(accompaniment.samples::<f32>())
+                .enumerate()
+            {
+                if index % 8192 == 0 {
+                    check_cancel(&cancel)?;
                 }
-                writer.finalize()?;
-                check_cancel(&cancel)?;
-                Ok(path.clone())
-            })();
-            if outcome.is_err() {
-                let _ = fs::remove_file(&path);
+                let sample = v? * vg + a? * ag;
+                ensure!(sample.is_finite(), "Nonfinite mixed sample");
+                writer.write_sample(sample)?;
             }
-            let _ = tx.blocking_send(Event::MixFinished {
-                id,
-                generation,
-                result: outcome,
-            });
-        })?;
+            writer.finalize()?;
+            check_cancel(&cancel)?;
+            let (_, path) = file.keep().map_err(|error| error.error)?;
+            Ok(path)
+        })();
+        if let Err(error) = tx.blocking_send(Event::MixFinished {
+            id,
+            generation,
+            result: outcome,
+        }) && let Event::MixFinished {
+            result: Ok(path), ..
+        } = error.0
+        {
+            let _ = fs::remove_file(path);
+        }
+    })?;
     service.active = Some(Active {
         id,
         cancelled,

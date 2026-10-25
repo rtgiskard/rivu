@@ -493,8 +493,64 @@ impl Core {
                     .map(|r| r.status.clone())
             })
     }
+    fn admit_processing_result(
+        &self,
+        result: &crate::processing::ProcessingResult,
+        cancelled: bool,
+    ) -> Result<()> {
+        ensure!(!cancelled, "Processing cancelled");
+        let track = self.track(result.track.id)?;
+        ensure!(
+            track.path == result.track.path
+                && track.cue == result.track.cue
+                && track.decoder_hint == result.track.decoder_hint
+                && track.fingerprint == result.track.fingerprint,
+            "Source identity changed before publication"
+        );
+        ensure!(
+            crate::processing::SourceStamp::read(&track.path)? == result.stamp,
+            "Source file changed before publication"
+        );
+        let pinned_bytes = self
+            .processing
+            .results
+            .iter()
+            .filter(|r| Some(r.status.id) == self.processing.audition)
+            .map(|r| r.cache_bytes)
+            .sum::<u64>();
+        ensure!(
+            pinned_bytes
+                .checked_add(result.cache_bytes)
+                .is_some_and(|bytes| bytes <= crate::processing::graph::MAX_RETAINED_CACHE_BYTES),
+            "Processing cache plus selected audition exceeds the 4 GiB retention limit; stop that audition before running again"
+        );
+        Ok(())
+    }
+
+    fn retire_processing_result(&mut self, result: crate::processing::ProcessingResult) {
+        for status in self
+            .processing_results
+            .iter_mut()
+            .filter(|s| s.id == result.status.id)
+        {
+            status.outputs = None;
+            status.graph_outputs.clear();
+            status.error = Some("Output cache evicted; run processing again to audition".into());
+        }
+        self.processing.retire(Box::new(result));
+    }
     pub(in crate::core) fn processing_event(&mut self, event: crate::processing::Event) {
         use crate::processing::Event;
+        // ReadyToPublish is emitted only after the reclamation wave preceding
+        // this completion has physically retired. It receives the same current
+        // cancellation/source checks as the original worker completion.
+        let event = match event {
+            Event::ReadyToPublish { id, result } => Event::Finished {
+                id,
+                result: Ok(result),
+            },
+            event => event,
+        };
         match event {
             Event::GraphNode { id, status: node } => {
                 if self
@@ -542,81 +598,92 @@ impl Core {
                     .as_ref()
                     .is_some_and(|task| task.id == id)
                 {
+                    if let Ok(result) = result {
+                        self.processing.retire(result);
+                    }
                     return;
                 }
-                let task = self.processing.active.take().unwrap();
-                let cancelled = task.cancelled.load(Ordering::Acquire);
-                let _ = task.worker.join();
-                let result = result.map(|result| *result).and_then(|mut result| {
-                    ensure!(!cancelled, "Processing cancelled");
-                    let track = self.track(result.track.id)?;
-                    ensure!(
-                        track.path == result.track.path
-                            && track.cue == result.track.cue
-                            && track.decoder_hint == result.track.decoder_hint
-                            && track.fingerprint == result.track.fingerprint,
-                        "Source identity changed before publication"
-                    );
-                    ensure!(
-                        crate::processing::SourceStamp::read(&track.path)? == result.stamp,
-                        "Source file changed before publication"
-                    );
-                    let pinned_bytes = self.processing.results.iter()
-                        .filter(|r| Some(r.status.id) == self.processing.audition)
-                        .map(|r| r.cache_bytes).sum::<u64>();
-                    ensure!(pinned_bytes.checked_add(result.cache_bytes).is_some_and(|bytes|
-                        bytes <= crate::processing::graph::MAX_RETAINED_CACHE_BYTES),
-                        "Processing cache plus selected audition exceeds the 4 GiB retention limit; stop that audition before running again");
-                    if let Some((temporary, destination)) = result.pending_export.take() {
-                        temporary.persist_noclobber(&destination).map_err(|error| error.error)?;
-                        result.status.graph_exported_path = Some(destination);
+                let cancelled = self
+                    .processing
+                    .active
+                    .as_ref()
+                    .unwrap()
+                    .cancelled
+                    .load(Ordering::Acquire);
+                let result = result.and_then(|result| {
+                    if let Err(error) = self.admit_processing_result(&result, cancelled) {
+                        self.processing.retire(result);
+                        return Err(error);
+                    }
+                    while self.processing.results.len() >= 4
+                        || self
+                            .processing
+                            .results
+                            .iter()
+                            .map(|r| r.cache_bytes)
+                            .sum::<u64>()
+                            .saturating_add(result.cache_bytes)
+                            > crate::processing::graph::MAX_RETAINED_CACHE_BYTES
+                    {
+                        let index = self
+                            .processing
+                            .results
+                            .iter()
+                            .position(|r| Some(r.status.id) != self.processing.audition)
+                            .unwrap();
+                        let evicted = self.processing.results.remove(index).unwrap();
+                        self.retire_processing_result(evicted);
                     }
                     Ok(result)
                 });
+                if let Ok(completed) = &result
+                    && self
+                        .processing
+                        .results
+                        .iter()
+                        .map(|r| r.cache_bytes)
+                        .sum::<u64>()
+                        .saturating_add(self.processing.retiring_bytes())
+                        .saturating_add(completed.cache_bytes)
+                        > crate::processing::graph::MAX_RETAINED_CACHE_BYTES
+                {
+                    let result = result.unwrap();
+                    self.processing.publish_after_retirement(id, result);
+                    if let Some(status) =
+                        self.state.system.processing.as_mut().filter(|s| s.id == id)
+                    {
+                        status.phase = ProcessingPhase::Queued;
+                    }
+                    self.publish();
+                    // Still active: cancellation can revoke publication while
+                    // the reclaimer owns this completed but unadmitted result.
+                    return;
+                }
+                let task = self.processing.active.take().unwrap();
+                let _ = task.worker.join();
+                let result = result.and_then(|mut result| {
+                    if let Some((temporary, destination)) = result.pending_export.take() {
+                        if let Err(error) = temporary.persist_noclobber(&destination) {
+                            self.processing.retire(result);
+                            return Err(error.error.into());
+                        }
+                        result.status.graph_exported_path = Some(destination);
+                    }
+                    Ok(*result)
+                });
                 match result {
-                    Ok(mut result) => {
-                        let runner = result.runner.take();
+                    Ok(result) => {
                         self.state.system.processing = Some(result.status.clone());
                         self.processing.results.push_back(result);
-                        // A selected audition must remain seekable while other jobs complete.
-                        while self.processing.results.len() > 4
-                            || (self.processing.results.len() > 1
-                                && self
-                                    .processing
-                                    .results
-                                    .iter()
-                                    .map(|r| r.cache_bytes)
-                                    .sum::<u64>()
-                                    > crate::processing::graph::MAX_RETAINED_CACHE_BYTES)
-                        {
-                            let index = self
-                                .processing
-                                .results
-                                .iter()
-                                .position(|r| Some(r.status.id) != self.processing.audition)
-                                .unwrap();
-                            if let Some(evicted) = self.processing.results.remove(index) {
-                                for status in self
-                                    .processing_results
-                                    .iter_mut()
-                                    .filter(|s| s.id == evicted.status.id)
-                                {
-                                    status.outputs = None;
-                                    status.graph_outputs.clear();
-                                    status.error = Some(
-                                        "Output cache evicted; run processing again to audition"
-                                            .into(),
-                                    );
-                                }
-                            }
-                        }
                         if let Some((pending_id, generation)) = self.processing.pending_audition
                             && pending_id == id
                         {
                             self.processing.pending_audition = None;
                             let outcome = if generation != self.generation {
                                 Ok(())
-                            } else if let Some(runner) = runner {
+                            } else if let Some(runner) =
+                                self.processing.results.back_mut().unwrap().runner.take()
+                            {
                                 self.processing_graph_audition_prepared(id, runner)
                             } else {
                                 let target = self
@@ -705,25 +772,47 @@ impl Core {
                 }
                 let outcome = match result {
                     Ok(path) if !cancelled && (!requested || generation == self.generation) => {
-                        let outcome = if requested {
-                            self.audition_path(id, Some(path.clone()))
-                        } else {
-                            Ok(())
-                        };
-                        if outcome.is_ok() {
+                        let bytes = std::fs::metadata(&path).map(|metadata| metadata.len());
+                        let outcome = bytes.map_err(anyhow::Error::from).and_then(|bytes| {
+                            let retained = self
+                                .processing
+                                .results
+                                .iter()
+                                .map(|r| r.cache_bytes)
+                                .sum::<u64>();
+                            ensure!(
+                                retained
+                                    .saturating_add(self.processing.retiring_bytes())
+                                    .saturating_add(bytes)
+                                    <= crate::processing::graph::MAX_RETAINED_CACHE_BYTES,
+                                "Stem mix exceeds the 4 GiB processing retention limit"
+                            );
+                            if requested {
+                                self.audition_path(id, Some(path.clone()))?;
+                            }
+                            Ok(bytes)
+                        });
+                        if let Ok(bytes) = outcome.as_ref() {
                             if let Some(result) = self
                                 .processing
                                 .results
                                 .iter_mut()
                                 .find(|r| r.status.id == id)
-                                && let Some(old) = result.mix.replace(path)
                             {
-                                let _ = std::fs::remove_file(old);
+                                result.cache_bytes += *bytes;
+                                if let Some(old) = result.mix.replace(path.clone()) {
+                                    let old_bytes = std::fs::metadata(&old)
+                                        .map_or(0, |metadata| metadata.len());
+                                    if std::fs::remove_file(old).is_ok() {
+                                        result.cache_bytes =
+                                            result.cache_bytes.saturating_sub(old_bytes);
+                                    }
+                                }
                             }
                         } else {
                             let _ = std::fs::remove_file(path);
                         }
-                        outcome
+                        outcome.map(|_| ())
                     }
                     Ok(path) => {
                         let _ = std::fs::remove_file(path);
@@ -749,6 +838,7 @@ impl Core {
                     self.state.system.last_error = Some(format!("{error:#}"));
                 }
             }
+            Event::ReadyToPublish { .. } => unreachable!("normalized before dispatch"),
         }
         self.publish();
     }

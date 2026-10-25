@@ -41,8 +41,13 @@ fn completion(core: &mut Core) -> crate::processing::Event {
     }
 }
 fn complete(core: &mut Core) {
-    let event = completion(core);
-    core.processing_event(event);
+    loop {
+        let event = next_processing_event(core, Duration::from_secs(10)).unwrap();
+        core.processing_event(event);
+        if core.processing.active.is_none() {
+            break;
+        }
+    }
 }
 
 fn recording_final_snapshot(
@@ -96,6 +101,33 @@ fn offline_job_preserves_native_float_frames_and_does_not_add_library_entries() 
     assert_eq!(
         core.processing.results[0].status.settings.denoise,
         core.state.system.config.denoise
+    );
+}
+#[test]
+fn scratch_preparation_failure_is_terminal_and_can_be_retried() {
+    let (directory, mut core) = fixture();
+    source(directory.path());
+    let scratch = directory.path().join("processing-data");
+    std::fs::write(&scratch, b"not a directory").unwrap();
+    core.processing = crate::processing::Service::new(scratch.clone());
+    core.start_processing(1, ProcessingOperation::Denoise, None)
+        .unwrap();
+    assert_eq!(
+        core.processing_status(1).unwrap().phase,
+        ProcessingPhase::Queued
+    );
+    complete(&mut core);
+    let failed = core.processing_status(1).unwrap();
+    assert_eq!(failed.phase, ProcessingPhase::Failed);
+    assert!(failed.outputs.is_none());
+    assert!(failed.graph_outputs.is_empty());
+    std::fs::remove_file(&scratch).unwrap();
+    core.start_processing(1, ProcessingOperation::Denoise, None)
+        .unwrap();
+    complete(&mut core);
+    assert_eq!(
+        core.processing_status(2).unwrap().phase,
+        ProcessingPhase::Complete
     );
 }
 #[test]

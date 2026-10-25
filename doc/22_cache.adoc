@@ -194,6 +194,16 @@ a terminal status alone does not authorize audition. Cancellation/closed views d
 not prove worker retirement. Workflow and source/output validity are specified in
 link:27_audio_processing.adoc#_tasks_retention_and_audition[Audio processing].
 
+Retirement is nonblocking on Core: one bounded reclamation worker deletes rejected
+and evicted results. Retiring bytes remain charged until deletion succeeds, and
+stem mixes count toward the same output budget. A subsequent processing worker
+waits for prior reclamation before preparing more PCM. A completed result that
+must wait for reclamation remains cancellable and is revalidated before publication;
+export publication follows that final decision. A deletion failure retains its
+ownership and charge and fails later preparation rather than allowing more PCM
+to accumulate. Shutdown joins work and reclamation; retained audition files live
+until final service destruction after playback retirement.
+
 
 == Visualization caching
 
