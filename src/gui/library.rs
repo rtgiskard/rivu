@@ -11,7 +11,7 @@ use crate::{
     config::{LibraryColumn, LibraryColumns},
     model::{Command, DirectoryRow, LibraryRow},
 };
-use gpui::{AnyElement, Context, Render, SharedString, Window, div, prelude::*, px, rgb};
+use gpui::{AnyElement, Context, Div, Render, SharedString, Window, div, prelude::*, px, rgb};
 use rivu_ui::{
     IconButton, IconButtonDensity, IconButtonStyle, VirtualList, button, caption,
     list_panel_header, list_viewport, panel_surface, row,
@@ -559,6 +559,11 @@ impl Library {
         let demand_owner = cx.entity().downgrade();
         let view = list_viewport(
             VirtualList::new(("library-directory-tree", panel_id), row_count, scroll, cx.processor(move |this, range: std::ops::Range<usize>, window, cx| {
+                let row_height = rivu_ui::tree_row_height(window, cx);
+                let inline_action = |view: gpui::Stateful<Div>| {
+                    view.min_h_0().h(row_height - px(2.)).py_0()
+                        .min_w_0().w(row_height - px(2.)).px_0()
+                };
                 let playing_track = this.state.current_track()
                     .filter(|_| this.state.playback.status == crate::model::PlaybackStatus::Playing)
                     .map(|track| track.id);
@@ -583,7 +588,7 @@ impl Library {
                                     0,
                                     false,
                                 )
-                                .h(rivu_ui::tree_row_height(window, cx))
+                                .h(row_height)
                                 .gap_0()
                                 .overflow_hidden()
                                 .child(
@@ -606,10 +611,10 @@ impl Library {
                                                 )
                                                 .when(failed, |view| {
                                                     view.child(
-                                                        IconButton::new(gpui::ElementId::named_usize("library-retry", index), "󰑐", this.tr("gl-retry-folder")).build(IconButtonStyle::Quiet, IconButtonDensity::Regular, cx, move |this, _, cx| {
+                                                        IconButton::new(gpui::ElementId::named_usize("library-retry", index), "󰑐", this.tr("gl-retry-folder")).build_with(IconButtonStyle::Quiet, IconButtonDensity::Regular, cx, move |this, _, cx| {
                                                             this.library.retry_directory(&branch);
                                                             this.request_directory_page(branch.clone(), offset, cx);
-                                                        }),
+                                                        }, inline_action),
                                                     )
                                                 }),
                                         ),
@@ -674,7 +679,7 @@ impl Library {
                             } else {
                                 this.i18n.format("gl-rescan-path", &[("path", scan_path.display().to_string().into())])
                             };
-                            IconButton::new(gpui::ElementId::named_usize("library-scan", index), "󰑐", hint).build(IconButtonStyle::Quiet, IconButtonDensity::Regular, cx, move |this, _, cx| {
+                            IconButton::new(gpui::ElementId::named_usize("library-scan", index), "󰑐", hint).build_with(IconButtonStyle::Quiet, IconButtonDensity::Regular, cx, move |this, _, cx| {
                                 if this.library.root_count_failed(&scan_path) {
                                     this.library.retry_root_counts();
                                     this.request_root_counts(cx);
@@ -687,7 +692,7 @@ impl Library {
                                         cx,
                                     );
                                 }
-                            })
+                            }, inline_action)
                             .when(retry_counts, |view| view.text_color(gpui::rgb(theme.error)))
                         }).or_else(|| matches!(entry, DirectoryRow::OtherTracks).then(|| {
                             let hint = if retry_counts {
@@ -699,14 +704,14 @@ impl Library {
                             };
                             IconButton::new(gpui::ElementId::named_usize("library-check-other", index), "󰑐", this.tr(hint))
                                 .enabled(retry_counts || !this.state.system.scanning)
-                                .build(IconButtonStyle::Quiet, IconButtonDensity::Regular, cx, |this, _, cx| {
+                                .build_with(IconButtonStyle::Quiet, IconButtonDensity::Regular, cx, |this, _, cx| {
                                     if this.library.other_count_failed() {
                                         this.library.retry_root_counts();
                                         this.request_root_counts(cx);
                                     } else {
                                         this.send(Command::CheckOtherTracks { force: this.library.force_scan() }, cx);
                                     }
-                                })
+                                }, inline_action)
                                 .when(retry_counts, |view| view.text_color(gpui::rgb(theme.error)))
                         }));
                         let title = gpui::SharedString::from(title);
@@ -823,7 +828,7 @@ impl Library {
                                 0,
                                 selected,
                             )
-                            .h(rivu_ui::tree_row_height(window, cx))
+                            .h(row_height)
                             .gap_0()
                             .overflow_hidden()
                             .group("library-track-row")

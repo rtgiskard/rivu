@@ -623,8 +623,11 @@ content width at the callsite instead of forcing top alignment in centered rows.
 Text buttons remain bounded by the parent's available width; overlong labels
 truncate on one line and expose their full text in a tooltip.
 Within each icon-button density, Quiet and Bare retain the Surface hit area.
-Uniform tree rows reserve enough height for inline icon actions; two-line text
-gap and line height remain separate from outer row spacing.
+Uniform single-line tree rows use compact, typography-scaled height with a floor
+that contains the text line and row borders. Library Tree and List rows share this
+geometry. Their inline icon actions fit inside the row's borders without imposing
+the standalone button's vertical minimum; standalone controls keep their existing
+hit areas. Two-line text gap and line height remain separate from outer row spacing.
 
 `IconButtonGroup` constructs related actions with one visual style and density;
 it does not own their state or commands. Surface uses the control material,
