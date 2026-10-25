@@ -1,5 +1,5 @@
 use super::ScanCancellation;
-use crate::core::tasks::BlockingPool;
+use crate::execution::BlockingPool;
 use anyhow::{Context, Result, bail};
 use rivu_audio::{MediaInfo, SourceIdentity, probe_file};
 use rivu_format::input::open_regular_file;

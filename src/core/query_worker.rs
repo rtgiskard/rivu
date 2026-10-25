@@ -3,7 +3,6 @@ use super::*;
 struct ReadState {
     config: Arc<Config>,
     revisions: QueryRevisions,
-    library_revision: u64,
     playlist_entry_revisions: Arc<std::collections::BTreeMap<i64, u64>>,
 }
 
@@ -12,7 +11,6 @@ impl ReadState {
         Self {
             config: Arc::clone(&state.system.config),
             revisions: state.query_revisions_for(query),
-            library_revision: state.revisions.library,
             playlist_entry_revisions: Arc::clone(&state.library.playlist_entry_revisions),
         }
     }
@@ -428,9 +426,20 @@ struct ReadRequest {
     reply: oneshot::Sender<CoreResponse>,
 }
 
+impl ReadRequest {
+    fn is_cancelled(&self) -> bool {
+        self.reply.is_canceled()
+            || self
+                .ticket
+                .as_ref()
+                .is_some_and(|ticket| !ticket.is_current())
+    }
+}
+
 struct ReadConnection {
     store: Store,
     library_revision: u64,
+    duplicate_groups_revision: u64,
 }
 
 /// One independent SQLite owner, with bounded admission and one live snapshot.
@@ -480,17 +489,16 @@ impl ReadQueries {
             revisions,
             result: Err(error),
         };
-        if request
-            .ticket
-            .as_ref()
-            .is_some_and(|ticket| !ticket.is_current())
-        {
+        if request.is_cancelled() {
             return failed(QueryError::Cancelled);
         }
         {
             let mut gate = fence.state.lock();
             while gate.owner_busy {
                 fence.owner_ready.wait(&mut gate);
+            }
+            if request.is_cancelled() {
+                return failed(QueryError::Cancelled);
             }
             if gate.maintenance {
                 return failed(QueryError::Message(
@@ -507,7 +515,8 @@ impl ReadQueries {
                 Ok(store) => {
                     *reader = Some(ReadConnection {
                         store,
-                        library_revision: request.state.library_revision,
+                        library_revision: request.state.revisions.library,
+                        duplicate_groups_revision: request.state.revisions.duplicate_groups,
                     })
                 }
                 Err(error) => {
@@ -518,11 +527,7 @@ impl ReadQueries {
             }
         }
         let connection = reader.as_mut().expect("reader opened");
-        if connection.library_revision != request.state.library_revision {
-            connection.store.invalidate_caches();
-            connection.library_revision = request.state.library_revision;
-        }
-        let result = Self::read_pinned(&connection.store, shared, fence, request);
+        let result = Self::read_pinned(connection, shared, fence, request);
         match result {
             Ok(response) => response,
             Err(error) => {
@@ -535,12 +540,12 @@ impl ReadQueries {
     }
 
     fn read_pinned(
-        reader: &Store,
+        connection: &mut ReadConnection,
         shared: &RwLock<CoreState>,
         fence: &Arc<ReadFence>,
         request: &ReadRequest,
     ) -> Result<QueryResponse> {
-        let snapshot = reader.read_snapshot()?;
+        let snapshot = connection.store.read_snapshot()?;
         let revisions = request.state.revisions;
         let failed = |error| QueryResponse {
             revisions,
@@ -551,6 +556,9 @@ impl ReadQueries {
                 let mut gate = fence.state.lock();
                 while gate.owner_busy {
                     fence.owner_ready.wait(&mut gate);
+                }
+                if request.is_cancelled() {
+                    return failed(QueryError::Cancelled);
                 }
                 // SQL is pinned before this version check. No I/O holds the gate,
                 // and the owner cannot begin a commit/publication transition here.
@@ -572,12 +580,15 @@ impl ReadQueries {
                     return failed(QueryError::RevisionChanged);
                 }
             }
-            if request
-                .ticket
-                .as_ref()
-                .is_some_and(|ticket| !ticket.is_current())
-            {
-                return failed(QueryError::Cancelled);
+            // Only accepted snapshots can change cache ownership. A rejected
+            // version cannot tag old cached totals as belonging to a newer one.
+            if connection.library_revision != revisions.library {
+                snapshot.invalidate_filtered_track_count();
+                connection.library_revision = revisions.library;
+            }
+            if connection.duplicate_groups_revision != revisions.duplicate_groups {
+                snapshot.invalidate_duplicate_group_count();
+                connection.duplicate_groups_revision = revisions.duplicate_groups;
             }
             // Later writes cannot change this accepted WAL snapshot/version.
             request.state.read(&snapshot, &request.query, false)
@@ -636,6 +647,237 @@ mod tests {
             panic!("expected query response")
         };
         response
+    }
+
+    fn execute_read(
+        core: &Core,
+        path: &Path,
+        reader: &mut Option<ReadConnection>,
+        fence: &Arc<ReadFence>,
+        query: Query,
+    ) -> QueryResponse {
+        let (reply, _receiver) = oneshot::channel();
+        let request = ReadRequest {
+            state: ReadState::capture(&core.shared.read(), &query),
+            query,
+            ticket: None,
+            reply,
+        };
+        ReadQueries::execute(path, reader, &core.shared, fence, &request)
+    }
+
+    fn favorite_query() -> Query {
+        Query::LibraryPage {
+            query: None,
+            favorite: Some(true),
+            missing: None,
+            sort: Default::default(),
+            offset: 0,
+            limit: 0,
+        }
+    }
+
+    fn assert_counts(
+        core: &Core,
+        path: &Path,
+        reader: &mut Option<ReadConnection>,
+        fence: &Arc<ReadFence>,
+        favorites: usize,
+        duplicates: usize,
+    ) {
+        assert!(matches!(
+            execute_read(core, path, reader, fence, favorite_query()).result,
+            Ok(ViewResponse::LibraryPage(page)) if page.total == favorites
+        ));
+        assert!(matches!(
+            execute_read(core, path, reader, fence, Query::DuplicateGroups { offset: 0, limit: 0 }).result,
+            Ok(ViewResponse::DuplicateGroups(page)) if page.total == duplicates
+        ));
+    }
+
+    fn set_fingerprints(core: &mut Core, track_ids: &[i64], fingerprint: Option<&str>) {
+        let records = track_ids
+            .iter()
+            .map(|&id| {
+                let track = core.track(id).unwrap();
+                let known = core.store.known_source(&track.path).unwrap().unwrap();
+                library::ScanRecord {
+                    path: track.path,
+                    cue: known.cue,
+                    size: known.size,
+                    modified_ns: known.modified_ns,
+                    fingerprint: fingerprint.map(str::to_owned),
+                    media: known.media.unwrap(),
+                }
+            })
+            .collect();
+        let impacts = core
+            .store
+            .apply_scan(&ScanResult {
+                records,
+                ..Default::default()
+            })
+            .unwrap();
+        core.apply_scan_impacts(impacts).unwrap();
+        core.publish();
+    }
+
+    #[test]
+    fn abandoned_queued_read_is_cancelled_before_database_admission() {
+        let (directory, core) = super::super::tests::fixture_with_database(Some(10.0));
+        let query = Query::Track { track_id: 1 };
+        let (reply, receiver) = oneshot::channel();
+        let request = ReadRequest {
+            state: ReadState::capture(&core.shared.read(), &query),
+            query,
+            ticket: None,
+            reply,
+        };
+        drop(receiver);
+        let mut reader = None;
+        let fence = Arc::new(ReadFence::default());
+        // Opening this path would fail, so Cancelled proves the read was pruned
+        // before opening a connection, not merely before decoding the row.
+        let rejected = ReadQueries::execute(
+            &directory.path().join("does-not-exist.db"),
+            &mut reader,
+            &core.shared,
+            &fence,
+            &request,
+        );
+        assert!(matches!(rejected.result, Err(QueryError::Cancelled)));
+        let accepted = execute_read(
+            &core,
+            &directory.path().join("library.db"),
+            &mut reader,
+            &fence,
+            Query::Track { track_id: 2 },
+        );
+        assert!(matches!(accepted.result, Ok(ViewResponse::Track(Some(track))) if track.id == 2));
+    }
+
+    #[test]
+    fn queued_read_rechecks_receiver_and_ticket_after_owner_transition() {
+        for cancel_ticket in [false, true] {
+            let (directory, core) = super::super::tests::fixture_with_database(Some(10.0));
+            let fence = Arc::new(ReadFence::default());
+            let transition = fence.transition();
+            let mut epoch = QueryEpoch::default();
+            let (reply, receiver) = oneshot::channel();
+            let query = Query::Track { track_id: 1 };
+            let request = ReadRequest {
+                state: ReadState::capture(&core.shared.read(), &query),
+                query,
+                ticket: cancel_ticket.then(|| epoch.ticket()),
+                reply,
+            };
+            let shared = Arc::clone(&core.shared);
+            let worker_fence = Arc::clone(&fence);
+            let missing_path = directory.path().join("does-not-exist.db");
+            let worker = thread::spawn(move || {
+                let mut reader = None;
+                let rejected = ReadQueries::execute(
+                    &missing_path,
+                    &mut reader,
+                    &shared,
+                    &worker_fence,
+                    &request,
+                );
+                (rejected, reader)
+            });
+            // Observe the real condvar waiter while retaining the gate, so
+            // cancellation necessarily occurs after the first admission check.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let gate = loop {
+                let gate = fence.state.lock();
+                if fence.owner_ready.notify_one() {
+                    break gate;
+                }
+                drop(gate);
+                assert!(Instant::now() < deadline, "read did not wait for owner");
+                thread::yield_now();
+            };
+            if cancel_ticket {
+                epoch.cancel();
+            } else {
+                drop(receiver);
+            }
+            drop(gate);
+            transition.finish(false);
+            let (rejected, mut reader) = worker.join().unwrap();
+            assert!(matches!(rejected.result, Err(QueryError::Cancelled)));
+            let accepted = execute_read(
+                &core,
+                &directory.path().join("library.db"),
+                &mut reader,
+                &fence,
+                Query::Track { track_id: 2 },
+            );
+            assert!(
+                matches!(accepted.result, Ok(ViewResponse::Track(Some(track))) if track.id == 2)
+            );
+        }
+    }
+
+    #[test]
+    fn old_snapshot_counts_are_not_reused_after_domain_changes_or_rejected_reads() {
+        let (directory, mut core) = super::super::tests::fixture_with_database(Some(10.0));
+        let path = directory.path().join("library.db");
+        let before = core.shared.read().clone();
+        let connection = ReadConnection {
+            store: Store::open_reader(&path).unwrap(),
+            library_revision: before.library.revision,
+            duplicate_groups_revision: before.library.duplicate_groups_revision,
+        };
+        let snapshot = connection.store.read_snapshot().unwrap();
+        core.command(Command::SetFavorite {
+            track_ids: vec![1],
+            favorite: true,
+        })
+        .unwrap();
+        let fingerprint = blake3::hash(b"duplicate count domain").to_hex().to_string();
+        set_fingerprints(&mut core, &[1, 2], Some(&fingerprint));
+        // Fill both slots from the older SQL snapshot after the new revisions
+        // are already published. The next accepted read must replace them.
+        assert_eq!(
+            snapshot
+                .library_page(None, Some(true), None, 0, 0)
+                .unwrap()
+                .total,
+            0
+        );
+        assert_eq!(snapshot.duplicate_groups_page(0, 0).unwrap().total, 0);
+        snapshot.finish().unwrap();
+        let fence = Arc::new(ReadFence::default());
+        let mut reader = Some(connection);
+        let query = favorite_query();
+        let (reply, _receiver) = oneshot::channel();
+        let rejected = ReadRequest {
+            state: ReadState::capture(&before, &query),
+            query,
+            ticket: None,
+            reply,
+        };
+        assert!(matches!(
+            ReadQueries::execute(&path, &mut reader, &core.shared, &fence, &rejected).result,
+            Err(QueryError::RevisionChanged)
+        ));
+        assert_counts(&core, &path, &mut reader, &fence, 1, 1);
+        core.command(Command::CreatePlaylist {
+            name: "Unrelated count domain".into(),
+        })
+        .unwrap();
+        core.publish();
+        assert_counts(&core, &path, &mut reader, &fence, 1, 1);
+        core.command(Command::SetFavorite {
+            track_ids: vec![1],
+            favorite: false,
+        })
+        .unwrap();
+        core.publish();
+        assert_counts(&core, &path, &mut reader, &fence, 0, 1);
+        set_fingerprints(&mut core, &[2], None);
+        assert_counts(&core, &path, &mut reader, &fence, 0, 0);
     }
 
     #[test]
@@ -746,7 +988,8 @@ mod tests {
         };
         let mut reader = Some(ReadConnection {
             store: reader,
-            library_revision: core.state.revisions.library,
+            library_revision: core.state.library.revision,
+            duplicate_groups_revision: core.state.library.duplicate_groups_revision,
         });
         let rejected = ReadQueries::execute(&path, &mut reader, &core.shared, &fence, &request);
         assert!(

@@ -1,7 +1,7 @@
 use super::ScanCancellation;
 use super::input::{MAX_CUE_BYTES, read_input_async};
 use super::paths::{is_cue_path, logical_path};
-use crate::core::tasks::BlockingPool;
+use crate::execution::BlockingPool;
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use futures::{FutureExt, Stream, StreamExt};
 use rivu_protocol::model::PlaylistExportTrack;

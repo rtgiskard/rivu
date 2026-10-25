@@ -27,7 +27,7 @@ pub(crate) use tracks::PlaybackSource;
 
 pub(crate) struct Store {
     conn: Connection,
-    // Read-only owners invalidate these counts on published revision changes.
+    // Read-only owners invalidate each count on its published data-domain revision.
     revision_owned_counts: bool,
     track_cache: RefCell<cache::TrackCache>,
     count_cache: RefCell<Option<tracks::TrackCount>>,
@@ -115,7 +115,7 @@ impl Store {
     }
 
     /// Reuse the connection, but never carry a read transaction between requests.
-    /// The owner must invalidate counts when the published library revision changes.
+    /// The owner must invalidate each count when its published data domain changes.
     pub(crate) fn open_reader(path: &std::path::Path) -> Result<Self> {
         let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         Self::configure_connection(&conn)?;
@@ -167,11 +167,19 @@ impl Store {
             })
     }
 
+    pub(crate) fn invalidate_filtered_track_count(&self) {
+        *self.count_cache.borrow_mut() = None;
+    }
+
+    pub(crate) fn invalidate_duplicate_group_count(&self) {
+        *self.duplicate_group_count_cache.borrow_mut() = None;
+    }
+
     /// A background commit invalidates both cached tracks and cached counts.
     pub(crate) fn invalidate_caches(&self) {
         self.track_cache.borrow_mut().entries.clear();
-        *self.count_cache.borrow_mut() = None;
-        *self.duplicate_group_count_cache.borrow_mut() = None;
+        self.invalidate_filtered_track_count();
+        self.invalidate_duplicate_group_count();
     }
 }
 

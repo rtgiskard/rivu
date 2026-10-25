@@ -76,7 +76,7 @@ fn check_source_absent(metadata: std::io::Result<Metadata>) -> Result<()> {
 async fn verify_target(
     prepared: crate::store::PreparedRelocation,
     cancellation: library::ScanCancellation,
-    workers: Arc<tasks::BlockingPool>,
+    workers: Arc<BlockingPool>,
 ) -> Result<VerifiedTarget> {
     cancellation.check()?;
     let admitted = prepared.clone();
@@ -374,7 +374,7 @@ mod tests {
         let error = futures::executor::block_on(verify_target(
             prepared,
             library::ScanCancellation::default(),
-            tasks::BlockingPool::new(4),
+            BlockingPool::new(4),
         ))
         .err()
         .unwrap();
@@ -390,7 +390,7 @@ mod tests {
             futures::executor::block_on(verify_target(
                 prepared.clone(),
                 cancellation,
-                tasks::BlockingPool::new(4),
+                BlockingPool::new(4),
             ))
             .is_err()
         );
@@ -399,7 +399,7 @@ mod tests {
             futures::executor::block_on(verify_target(
                 prepared,
                 library::ScanCancellation::default(),
-                tasks::BlockingPool::new(4),
+                BlockingPool::new(4),
             ))
             .err()
             .unwrap()
@@ -414,7 +414,7 @@ mod tests {
         let verified = futures::executor::block_on(verify_target(
             prepared.clone(),
             library::ScanCancellation::default(),
-            tasks::BlockingPool::new(4),
+            BlockingPool::new(4),
         ))
         .unwrap();
         let replacement = prepared.target.path.with_extension("replacement");
@@ -429,7 +429,7 @@ mod tests {
         let verified = futures::executor::block_on(verify_target(
             prepared.clone(),
             library::ScanCancellation::default(),
-            tasks::BlockingPool::new(4),
+            BlockingPool::new(4),
         ))
         .unwrap();
         std::fs::write(&prepared.target.path, b"changed bytes").unwrap();
@@ -450,7 +450,7 @@ mod tests {
             let result = futures::executor::block_on(verify_target(
                 prepared,
                 library::ScanCancellation::default(),
-                tasks::BlockingPool::new(4),
+                BlockingPool::new(4),
             ));
             let _ = completed.send(result);
         });

@@ -1,6 +1,6 @@
 use super::paths::{is_audio_path, is_cue_path, logical_path};
 use super::source::{HASH_CHUNK_BYTES, KnownFile, SOURCE_BATCH_SIZE, ScanRecord, prepare_sources};
-use crate::core::tasks::BlockingPool;
+use crate::execution::BlockingPool;
 use anyhow::{Context, Result, anyhow, bail};
 use rivu_protocol::model::{CueSegment, ScanPhase};
 use std::collections::{HashMap, HashSet};

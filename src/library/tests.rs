@@ -396,7 +396,7 @@ fn async_source_lookup_releases_the_only_blocking_slot() -> Result<()> {
     let root = directory.path().to_path_buf();
     let audio = root.join("audio.wav");
     wav(&audio, 150)?;
-    let workers = &crate::core::tasks::BlockingPool::new(1);
+    let workers = &crate::execution::BlockingPool::new(1);
     futures::executor::block_on(async {
         let cancellation = ScanCancellation::default();
         let (lookup, requested) = futures::channel::oneshot::channel();
@@ -516,7 +516,7 @@ fn cancellation_during_a_hash_read_stops_at_the_chunk_boundary() {
 fn bounded_playlist_reads_enforce_capacity_and_cancellation_boundaries() -> Result<()> {
     futures::executor::block_on(async {
         use super::input::{MAX_CUE_BYTES, read_chunks_async, read_input_async};
-        let workers = &crate::core::tasks::BlockingPool::new(4);
+        let workers = &crate::execution::BlockingPool::new(4);
 
         let directory = tempfile::tempdir()?;
         let sheet = directory.path().join("album.cue");
@@ -2469,7 +2469,7 @@ fn export_m3u<I>(path: &Path, tracks: I, cancellation: &ScanCancellation) -> Res
 where
     I: IntoIterator<Item = Result<PlaylistExportTrack>>,
 {
-    let workers = &crate::core::tasks::BlockingPool::new(4);
+    let workers = &crate::execution::BlockingPool::new(4);
     futures::executor::block_on(super::export_m3u(
         workers,
         path,

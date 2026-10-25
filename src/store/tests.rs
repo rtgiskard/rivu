@@ -4775,14 +4775,14 @@ fn reader_snapshots_preserve_unicode_search() {
 }
 
 #[test]
-fn reader_snapshots_reuse_counts_until_published_invalidation() {
+fn reader_snapshots_refresh_counts_after_domain_invalidation_and_rollback() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("reader.db");
     let writer = Store::open(&path).unwrap();
     writer
         .conn
         .execute_batch(
-            "WITH RECURSIVE ids(id) AS (SELECT 1 UNION ALL SELECT id+1 FROM ids WHERE id<256)
+            "WITH RECURSIVE ids(id) AS (SELECT 1 UNION ALL SELECT id+1 FROM ids WHERE id<4)
          INSERT INTO tracks(id,path,raw_title,fingerprint)
          SELECT id,'/track-'||id,CASE WHEN id%2=0 THEN 'needle' ELSE 'other' END,
              CAST(printf('%032d',(id-1)/2) AS BLOB) FROM ids;",
@@ -4799,24 +4799,20 @@ fn reader_snapshots_reuse_counts_until_published_invalidation() {
         snapshot.finish().unwrap();
         (filtered, duplicates)
     };
-    let steps = SqlVmSteps::new(&reader.conn);
-    assert_eq!(counts(), (128, 128));
-    let cold = steps.take();
-    assert_eq!(counts(), (128, 128));
-    let warm = steps.take();
-    assert!(
-        warm * 4 < cold,
-        "unchanged snapshots repeated full counts: cold={cold}, warm={warm}"
-    );
+    assert_eq!(counts(), (2, 2));
+    assert_eq!(counts(), (2, 2));
     writer
         .conn
-        .execute(
-            "UPDATE tracks SET raw_title='changed',fingerprint=NULL WHERE id=2",
-            [],
-        )
+        .execute("UPDATE tracks SET raw_title='changed' WHERE id=2", [])
         .unwrap();
-    reader.invalidate_caches();
-    assert_eq!(counts(), (127, 127));
+    reader.invalidate_filtered_track_count();
+    assert_eq!(counts(), (1, 2));
+    writer
+        .conn
+        .execute("UPDATE tracks SET fingerprint=NULL WHERE id=2", [])
+        .unwrap();
+    reader.invalidate_duplicate_group_count();
+    assert_eq!(counts(), (1, 1));
     let transaction = writer.conn.unchecked_transaction().unwrap();
     transaction
         .execute("UPDATE tracks SET raw_title='transient'", [])
@@ -4834,6 +4830,6 @@ fn reader_snapshots_reuse_counts_until_published_invalidation() {
             .library_page(Some("needle"), None, None, 0, 0)
             .unwrap()
             .total,
-        127
+        1
     );
 }

@@ -94,13 +94,18 @@ Synchronous SQLite writes and their business transitions stay atomic on Core.
 A separate bounded query owner reuses one read connection and prepared statements,
 pins a SQLite snapshot for each request, and validates the captured query scope
 against published Core state. A transition fence prevents a committed database
-change from being read with the preceding publication. Reader caches follow the
-published library revision; maintenance waits for physical snapshot retirement.
-Requests capture only shared configuration, query and cache-invalidation revisions,
-and the shared playlist-entry revision map; playback and task-status payloads are
-not copied into the read queue.
+change from being read with the preceding publication. Reader count caches follow
+their respective data-domain revisions; maintenance waits for physical snapshot retirement.
+Requests capture shared configuration, query revisions (also used for count-cache
+invalidation), and the shared playlist-entry revision map; playback and task-status
+payloads are not copied into the read queue.
+Queued reads whose reply receiver has disappeared are skipped before database
+admission. Revoking a queued read does not interrupt SQL already executing or
+release its physical snapshot lease early; accepted commands retain their own
+completion semantics independently of the caller's reply receiver.
 
-App retains an explicitly owned async executor through Core and IPC retirement.
+App retains the application-level execution resources through Core and IPC retirement.
+Core and library jobs share these resources without library depending on Core internals.
 Independent jobs coordinate file I/O and bounded synchronous file, probe and
 background transaction stages. A shared blocking pool admits at most four such
 stages concurrently; waiting for Core, task admission, and command replies hold

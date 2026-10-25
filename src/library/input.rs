@@ -1,5 +1,5 @@
 use super::ScanCancellation;
-use crate::core::tasks::BlockingPool;
+use crate::execution::BlockingPool;
 use anyhow::{Context, Result, ensure};
 use std::io::Read;
 use std::path::Path;

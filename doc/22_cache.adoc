@@ -38,10 +38,12 @@ a whole-library snapshot nor a GUI page cache. Read-only export does not use it.
 Library track/display pages retain one latest exact filtered count, keyed by
 normalized filters and optional root. A separate scalar slot retains the
 duplicate-group total, so unchanged-data pagination does not repeat its full
-grouped count. The read-query owner reuses both across pinned read snapshots and
-clears them when the published library-section revision changes. Read-only mode
-alone is not an invalidation rule: the owner validates publication before using
-the snapshot and its counts. Writable Store connections use SQLite's local-change
+grouped count. The read-query owner reuses both across pinned read snapshots.
+It separately tracks the existing track-content and duplicate-group revisions,
+invalidating only the corresponding count slot when its domain changes. Playlist
+metadata changes alone do not invalidate either slot. Cache ownership advances
+only after the pinned snapshot passes publication validation. Read-only mode
+alone is not an invalidation rule. Writable Store connections use SQLite's local-change
 counter; their explicit transactions neither read nor populate counts, avoiding
 rollback leakage. Core explicitly clears caches after background commits.
 No external-commit polling, rows or multi-query map are retained. Root aggregation

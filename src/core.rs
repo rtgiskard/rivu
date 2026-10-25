@@ -5,6 +5,7 @@
 
 use crate::{
     config::{Config, ConfigPatch, ConfigPersistence, LibraryColumn},
+    execution::{BlockingPool, TaskRuntime},
     library::{self, M3uItem, ScanResult},
     logging,
     projection::{GuiSnapshot, MprisSnapshot, TraySnapshot},
@@ -36,8 +37,6 @@ use std::{
 };
 
 mod query_worker;
-pub(crate) mod tasks;
-use tasks::TaskRuntime;
 
 mod query_epoch;
 pub(crate) use query_epoch::{QueryEpoch, QueryTicket};
@@ -177,7 +176,7 @@ pub struct CoreHandle {
     pub(crate) waveform: Arc<RwLock<audio::WaveformFrame>>,
     sender: mpsc::Sender<Request>,
     executor: Arc<async_executor::Executor<'static>>,
-    workers: Arc<tasks::BlockingPool>,
+    workers: Arc<BlockingPool>,
     revision_updates: Arc<RwLock<Vec<mpsc::Sender<()>>>>,
     wakeup: Arc<RwLock<Option<Wakeup>>>,
     // Window-scoped: cloning a GUI handle must not change IPC/CLI query policy.
@@ -303,7 +302,7 @@ impl CoreHandle {
         &self.executor
     }
 
-    pub(crate) fn workers(&self) -> &Arc<tasks::BlockingPool> {
+    pub(crate) fn workers(&self) -> &Arc<BlockingPool> {
         &self.workers
     }
 
@@ -840,7 +839,7 @@ struct Core {
     engine: AudioEngine,
     logging: Option<logging::Control>,
     executor: Arc<async_executor::Executor<'static>>,
-    workers: Arc<tasks::BlockingPool>,
+    workers: Arc<BlockingPool>,
     read_queries: Option<query_worker::ReadQueries>,
     revision_updates: Arc<RwLock<Vec<mpsc::Sender<()>>>>,
     state: CoreState,

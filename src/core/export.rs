@@ -37,7 +37,7 @@ struct ExportSource {
     rows: std::vec::IntoIter<PlaylistExportTrack>,
     done: bool,
     cancellation: library::ScanCancellation,
-    workers: Arc<tasks::BlockingPool>,
+    workers: Arc<BlockingPool>,
 }
 
 impl ExportSource {
@@ -86,7 +86,7 @@ async fn export_snapshot(
     playlist_id: i64,
     path: &Path,
     cancellation: &library::ScanCancellation,
-    workers: Arc<tasks::BlockingPool>,
+    workers: Arc<BlockingPool>,
 ) -> Result<()> {
     cancellation.check()?;
     let database = database.to_path_buf();
@@ -216,7 +216,7 @@ mod tests {
             playlist_id,
             path,
             cancellation,
-            tasks::BlockingPool::new(4),
+            BlockingPool::new(4),
         ))
     }
 
@@ -309,7 +309,7 @@ mod tests {
             "INSERT INTO playlist_entries(playlist_id,track_id,position) SELECT ?1,id,id-1 FROM tracks",
             [playlist_id],
         )?;
-            let workers = tasks::BlockingPool::new(4);
+            let workers = BlockingPool::new(4);
             let snapshot = workers
                 .execute(move || Store::open_export(&database, playlist_id))
                 .await??;

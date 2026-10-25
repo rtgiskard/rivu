@@ -1,6 +1,10 @@
-use super::*;
+use anyhow::Result;
 use async_executor::Executor;
 use futures::channel::oneshot;
+use std::{
+    sync::Arc,
+    thread::{self, JoinHandle},
+};
 
 const BLOCKING_THREADS: usize = 4;
 
@@ -35,17 +39,17 @@ impl BlockingPool {
 }
 
 /// Application-owned executor, retained through Core and IPC retirement.
-pub(in crate::core) struct TaskRuntime {
-    pub(in crate::core) handle: Arc<Executor<'static>>,
-    pub(in crate::core) workers: Arc<BlockingPool>,
+pub(crate) struct TaskRuntime {
+    pub(crate) handle: Arc<Executor<'static>>,
+    pub(crate) workers: Arc<BlockingPool>,
     stop: Option<oneshot::Sender<()>>,
     worker: Option<JoinHandle<()>>,
 }
 impl TaskRuntime {
-    pub(in crate::core) fn start() -> Result<Self> {
+    pub(crate) fn start() -> Result<Self> {
         Self::with_blocking_threads(BLOCKING_THREADS)
     }
-    pub(in crate::core) fn with_blocking_threads(threads: usize) -> Result<Self> {
+    pub(crate) fn with_blocking_threads(threads: usize) -> Result<Self> {
         let workers = BlockingPool::new(threads);
         let handle = Arc::new(Executor::new());
         let executor = Arc::clone(&handle);

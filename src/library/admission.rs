@@ -2,7 +2,7 @@ use super::paths::{is_audio_path, logical_path};
 use super::scan::MAX_REPORTED_SCAN_ERRORS;
 use super::source::{HASH_CHUNK_BYTES, SOURCE_BATCH_SIZE, ScanRecord, prepare_sources};
 use super::{KnownFile, ScanCancellation};
-use crate::core::tasks::BlockingPool;
+use crate::execution::BlockingPool;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::PathBuf;

@@ -2,6 +2,7 @@ pub mod app;
 pub(crate) mod artwork;
 pub mod config;
 pub(crate) mod core;
+pub(crate) mod execution;
 pub(crate) mod gui;
 pub mod i18n;
 pub mod ipc;
