@@ -281,6 +281,12 @@ Both the title-to-tools separation and the space between controls use `gap_1`
 (0.25rem). A separate `panel_toolbar` remains available for wrapping toolbars;
 it is not the heading's overflow policy.
 
+List panels and Track details use `list_panel_header` for the same two-line title
+and secondary-text presentation. Track details supplies its editor/read status
+instead of a count, retaining the full status in a tooltip on the heading block.
+Status content and action availability remain owned by the metadata session;
+the shared layout does not change draft protection or save behavior.
+
 Header icon buttons use Surface/Regular styling. They derive their size from the
 symbol and 0.5rem padding on each side, with a 2rem minimum width and height.
 Symbols follow configured text size; padding and minimum hit areas follow UI

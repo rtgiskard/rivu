@@ -989,28 +989,9 @@ impl Metadata {
                     .flex_shrink_0()
                     .gap_3()
                     .child(rivu_ui::panel_heading_row(
-                        column()
-                            .gap_1()
-                            .child(
-                                caption(theme, heading)
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_lg()
-                                    .text_color(rgb(theme.text)),
-                            )
-                            .child(
-                                div()
-                                    .id(("metadata-status", panel_id))
-                                    .min_w_0()
-                                    .min_h_5()
-                                    .child(
-                                        caption(theme, status.clone())
-                                            .text_xs()
-                                            .text_color(rgb(theme.muted))
-                                            .truncate(),
-                                    )
-                                    .tooltip(rivu_ui::text_tooltip(status)),
-                            ),
+                        rivu_ui::list_panel_header(theme, heading, status.clone())
+                            .id(("metadata-status", panel_id))
+                            .tooltip(rivu_ui::text_tooltip(status)),
                         rivu_ui::panel_header_actions()
                             .child(
                                 favorite_button(("metadata-favorite", panel_id), favorite, |key| {
