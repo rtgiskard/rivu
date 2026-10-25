@@ -145,6 +145,9 @@ changing it only changes the displayed response, never the channels a band proce
 The overall toolbar groups the EQ power switch and monitor presets, band count
 and batch addition, and reset/A-B/help actions. Groups wrap together in narrow panels.
 The preset dropdown loads a preset; its management popover exposes naming, save,
+IME preedit remains a draft even when it parses as a valid gain. Unmarking or
+committing submits the completed value once; Escape cancels composition without
+applying the preedit.
 delete, copy and file actions without expanding the toolbar.
 
 Use the power icon switch to enable or bypass EQ. While EQ is off, its desktop

@@ -423,7 +423,10 @@ impl EqualizerEditor {
         cx: &mut Context<Self>,
     ) -> Subscription {
         cx.subscribe(input, move |this, _, event, cx| match event {
-            InputEvent::Changed { user: true } => {
+            InputEvent::Changed {
+                user: true,
+                composing,
+            } => {
                 if let Some(field) = this.fields.get_mut(&name) {
                     if !field.dirty {
                         field.draft_revision = Some(this.revision);
@@ -431,7 +434,8 @@ impl EqualizerEditor {
                     field.dirty = true;
                     field.generation = field.generation.wrapping_add(1);
                     if matches!(name.as_str(), "preamp_db" | "output_gain_db") {
-                        field.auto_pending = valid_gain_draft(field.input.read(cx).text());
+                        field.auto_pending =
+                            !composing && valid_gain_draft(field.input.read(cx).text());
                     }
                 }
                 this.schedule_gain_submission(cx);
@@ -469,7 +473,7 @@ impl EqualizerEditor {
                     let Some(field) = this.fields.get_mut(key) else {
                         continue;
                     };
-                    if !field.auto_pending {
+                    if !field.auto_pending || field.input.read(cx).is_composing() {
                         continue;
                     }
                     field.auto_pending = false;
@@ -2483,11 +2487,12 @@ mod tests {
         }
     }
 
-    fn fixture(
+    fn fixture_with_owner(
         cx: &mut TestAppContext,
     ) -> (
         tempfile::TempDir,
         Runtime,
+        Entity<AudioProcessing>,
         Entity<EqualizerEditor>,
         AnyWindowHandle,
     ) {
@@ -2547,9 +2552,6 @@ mod tests {
                 )
             })
         });
-        // Exercise the real controls and subscriptions, but do not start native
-        // command workers: committed snapshots below enter through reconcile.
-        drop(processing);
         let window = cx.open_window(size(px(1200.), px(900.)), {
             let editor = editor.clone();
             move |_, _| EditorWindow(editor)
@@ -2559,8 +2561,148 @@ mod tests {
             .unwrap();
         draw(cx, handle);
         assert!(editor.read_with(cx, |editor, _| editor.format.is_none()));
+        (directory, runtime, processing, editor, handle)
+    }
+
+    fn fixture(
+        cx: &mut TestAppContext,
+    ) -> (
+        tempfile::TempDir,
+        Runtime,
+        Entity<EqualizerEditor>,
+        AnyWindowHandle,
+    ) {
+        let (directory, runtime, processing, editor, handle) = fixture_with_owner(cx);
+        // Existing control tests reconcile snapshots explicitly instead of
+        // starting native command workers.
+        drop(processing);
         assert!(editor.read_with(cx, |editor, _| editor.owner.upgrade().is_none()));
         (directory, runtime, editor, handle)
+    }
+
+    #[gpui::test]
+    fn gain_preedit_submits_once_only_after_unchanged_unmark_or_commit(cx: &mut TestAppContext) {
+        let (_directory, _runtime, owner, editor, handle) = fixture_with_owner(cx);
+        // Hold the production queue at its dispatch boundary, retaining actual
+        // submissions without sending native commands or replacing the handler.
+        owner.update(cx, |owner, _| owner.command_active = true);
+        for (key, text, value, unmark) in [
+            ("preamp_db", "6", 6., true),
+            ("output_gain_db", "-3", -3., false),
+        ] {
+            let input = editor.read_with(cx, |editor, _| editor.fields[key].input.clone());
+            let before = owner.read_with(cx, |owner, _| owner.commands.len());
+            cx.update_window(handle, |_, window, cx| {
+                input.update(cx, |input, cx| {
+                    let end = input.text().encode_utf16().count();
+                    input.replace_and_mark_text_in_range(Some(0..end), text, None, window, cx);
+                });
+            })
+            .unwrap();
+            cx.run_until_parked();
+            assert_eq!(owner.read_with(cx, |owner, _| owner.commands.len()), before);
+            editor.read_with(cx, |editor, _| {
+                assert!(!editor.fields[key].auto_pending);
+                assert!(!editor.gain_submission_scheduled);
+            });
+            cx.update_window(handle, |_, window, cx| {
+                input.update(cx, |input, cx| {
+                    if unmark {
+                        input.unmark_text(window, cx);
+                    } else {
+                        input.replace_text_in_range(None, text, window, cx);
+                    }
+                    assert_eq!(input.text(), text);
+                });
+            })
+            .unwrap();
+            cx.run_until_parked();
+            owner.read_with(cx, |owner, _| {
+                assert_eq!(owner.commands.len(), before + 1);
+                let submission = owner.commands.back().unwrap();
+                match &submission.command {
+                    Command::EqualizerEdit {
+                        edit: EqualizerEdit::PreampDb(gain),
+                    } if unmark => {
+                        assert_eq!(*gain, value);
+                    }
+                    Command::EqualizerEdit {
+                        edit: EqualizerEdit::OutputGainDb(gain),
+                    } if !unmark => {
+                        assert_eq!(*gain, value);
+                    }
+                    _ => panic!("unexpected gain command"),
+                }
+                let field = submission.equalizer_field.as_ref().unwrap();
+                assert_eq!(field.key, key);
+                assert_eq!(field.text, text);
+            });
+            // Repeated unmark, redraw and scheduling do not duplicate the commit.
+            cx.update_window(handle, |_, window, cx| {
+                input.update(cx, |input, cx| input.unmark_text(window, cx));
+                editor.update(cx, |editor, cx| editor.schedule_gain_submission(cx));
+            })
+            .unwrap();
+            draw(cx, handle);
+            assert_eq!(
+                owner.read_with(cx, |owner, _| owner.commands.len()),
+                before + 1
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn preedit_interrupts_a_queued_gain_submission_until_unchanged_commit(cx: &mut TestAppContext) {
+        let (_directory, _runtime, owner, editor, handle) = fixture_with_owner(cx);
+        owner.update(cx, |owner, _| owner.command_active = true);
+        let input = editor.read_with(cx, |editor, _| editor.fields["preamp_db"].input.clone());
+        cx.update_window(handle, |_, window, cx| {
+            input.update(cx, |input, cx| {
+                let end = input.text().encode_utf16().count();
+                input.replace_text_in_range(Some(0..end), "4", window, cx);
+            });
+            let input = input.clone();
+            let editor = editor.clone();
+            // Changed queues the gain defer behind this interruption. The
+            // preedit notification itself has not run when that gain defer runs.
+            cx.defer(move |cx| {
+                assert!(editor.read(cx).gain_submission_scheduled);
+                assert!(editor.read(cx).fields["preamp_db"].auto_pending);
+                handle
+                    .update(cx, |_, window, cx| {
+                        input.update(cx, |input, cx| {
+                            input.replace_and_mark_text_in_range(
+                                Some(0..1),
+                                "-7",
+                                None,
+                                window,
+                                cx,
+                            );
+                        });
+                    })
+                    .unwrap();
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert!(owner.read_with(cx, |owner, _| owner.commands.is_empty()));
+        assert!(input.read_with(cx, |input, _| input.is_composing()));
+        cx.update_window(handle, |_, window, cx| {
+            input.update(cx, |input, cx| {
+                input.replace_text_in_range(None, "-7", window, cx);
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        owner.read_with(cx, |owner, _| {
+            assert_eq!(owner.commands.len(), 1);
+            let submission = owner.commands.front().unwrap();
+            assert!(matches!(
+                &submission.command,
+                Command::EqualizerEdit { edit: EqualizerEdit::PreampDb(gain) } if *gain == -7.
+            ));
+            assert_eq!(submission.equalizer_field.as_ref().unwrap().text, "-7");
+        });
     }
 
     fn draw(cx: &mut TestAppContext, handle: AnyWindowHandle) {

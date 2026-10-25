@@ -8,6 +8,7 @@ use crate::{
     theme::palette,
 };
 use gpui::{prelude::*, *};
+use std::cell::Cell;
 
 /// A candidate shown by a dropdown or autocomplete popup.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -95,6 +96,9 @@ pub struct ChoiceState<T> {
     open: bool,
     scroll: UniformListScrollHandle,
     revision: u64,
+    // The popup sets its explicit row height while rendering. It is independent
+    // of candidate count, unlike the scroll handle's measured total contents.
+    row_height: Cell<Option<Pixels>>,
 }
 
 impl<T> Default for ChoiceState<T> {
@@ -105,6 +109,7 @@ impl<T> Default for ChoiceState<T> {
             open: false,
             scroll: UniformListScrollHandle::new(),
             revision: 0,
+            row_height: Cell::new(None),
         }
     }
 }
@@ -185,15 +190,10 @@ impl<T> ChoiceState<T> {
                     "pageup" | "pagedown" => {
                         if let Some(index) = self.selected_index() {
                             let height = self.scroll.0.borrow().base_handle.bounds().size.height;
-                            let count = self.items.len().max(1);
-                            let row_height = self
-                                .scroll
-                                .0
-                                .borrow()
-                                .last_item_size
-                                .map(|size| f32::from(size.contents.height) / count as f32)
-                                .filter(|height| *height > 0.)
-                                .unwrap_or(DROPDOWN_ROW_REMS * f32::from(window.rem_size()));
+                            let row_height =
+                                self.row_height.get().map(f32::from).unwrap_or_else(|| {
+                                    DROPDOWN_ROW_REMS * f32::from(window.rem_size())
+                                });
                             let visible =
                                 ((f32::from(height) / row_height).floor() as usize).max(1);
                             self.selected = (if key == "pagedown" {
@@ -266,14 +266,16 @@ impl ChoicePopup {
         let count = choices.items.len();
         let selected = choices.selected_index();
         let revision = choices.revision;
-        let height = (count as f32 * f32::from(single_line_row_height(window, cx)))
+        let row_height = single_line_row_height(window, cx);
+        choices.row_height.set(Some(row_height));
+        let height = (count as f32 * f32::from(row_height))
             .min(f32::from(window.rem_size()) * POPOVER_MAX_REMS)
             .min(f32::from(window.viewport_size().height) * 0.45);
         let list = VirtualList::new(
             self.id.clone(),
             count,
             &choices.scroll,
-            cx.processor(move |owner, range: std::ops::Range<usize>, window, cx| {
+            cx.processor(move |owner, range: std::ops::Range<usize>, _window, cx| {
                 let choices = state(owner);
                 // The list calls this later for measurement and prepaint. Never combine
                 // a popup's captured revision/geometry with replacement candidates.
@@ -293,7 +295,7 @@ impl ChoicePopup {
                                 selected == Some(index),
                                 label,
                             )
-                            .h(single_line_row_height(window, cx))
+                            .h(row_height)
                             .role(Role::ListBoxOption)
                             .aria_label(hint.clone())
                             .aria_selected(selected == Some(index))
@@ -332,7 +334,7 @@ impl ChoicePopup {
                     .max_h(window.viewport_size().height)
                     .overflow_hidden()
                     .on_mouse_down_out(cx.listener(move |owner, event, window, cx| {
-                        if dismiss(owner, event, window, cx) {
+                        if state(owner).is_current(revision) && dismiss(owner, event, window, cx) {
                             cx.stop_propagation();
                             cx.notify();
                         }
@@ -540,7 +542,10 @@ mod tests {
                         self,
                         |this| &this.choices,
                         Self::choose,
-                        |_, _, _, _| false,
+                        |this, _, _, _| {
+                            this.choices.close();
+                            true
+                        },
                         window,
                         cx,
                     ),
@@ -606,6 +611,94 @@ mod tests {
                 this.callback(0)(this, window, cx);
                 assert_eq!(this.committed, [4, 6]);
             });
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn page_navigation_before_repaint_keeps_the_rendered_row_height() {
+        let mut cx = TestAppContext::single();
+        cx.update(crate::theme::init_test);
+        let window = cx.add_window(|_, _| PopupChoice {
+            choices: ChoiceState::default(),
+            committed: Vec::new(),
+        });
+        let choice = window.root(&mut cx).unwrap();
+        for font_size in [11, 18] {
+            cx.update(|cx| {
+                crate::theme::set_typography(font("sans-serif"), "sans-serif", font_size, cx)
+            });
+            cx.update_window(window.into(), |_, window, cx| {
+                choice.update(cx, |this, cx| {
+                    this.choices
+                        .open((0..100).map(|i| DropdownItem::new(i, "Old")), 0);
+                    cx.notify();
+                });
+                window.draw(cx).clear(cx);
+                let viewport = choice
+                    .read(cx)
+                    .choices
+                    .scroll
+                    .0
+                    .borrow()
+                    .base_handle
+                    .bounds()
+                    .size
+                    .height;
+                let page = (f32::from(viewport) / f32::from(single_line_row_height(window, cx)))
+                    .floor() as usize;
+                assert!(page > 1 && page < 50);
+                for count in [50, 200] {
+                    choice.update(cx, |this, _| {
+                        this.choices
+                            .open((0..count).map(|i| DropdownItem::new(i, "New")), 0);
+                        // No frame has measured the replacement count yet.
+                        navigate(&mut this.choices, "pagedown", window);
+                        assert_eq!(this.choices.selected_index(), Some(page));
+                        navigate(&mut this.choices, "pageup", window);
+                        assert_eq!(this.choices.selected_index(), Some(0));
+                    });
+                }
+            })
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn painted_outside_dismissal_cannot_close_a_replacement_popup() {
+        use gpui::InputEvent as _;
+        let mut cx = TestAppContext::single();
+        cx.update(crate::theme::init_test);
+        let window = cx.add_window(|_, _| PopupChoice {
+            choices: ChoiceState::default(),
+            committed: Vec::new(),
+        });
+        let choice = window.root(&mut cx).unwrap();
+        cx.update_window(window.into(), |_, window, cx| {
+            for close_first in [false, true] {
+                choice.update(cx, |this, cx| {
+                    this.choices.open([DropdownItem::new(1, "Old")], 0);
+                    cx.notify();
+                });
+                window.draw(cx).clear(cx);
+                choice.update(cx, |this, _| {
+                    if close_first {
+                        this.choices.close();
+                    }
+                    this.choices.open([DropdownItem::new(2, "New")], 0);
+                });
+                let outside = MouseDownEvent {
+                    position: point(px(400.), px(400.)),
+                    button: MouseButton::Left,
+                    ..Default::default()
+                };
+                window.dispatch_event(outside.clone().to_platform_input(), cx);
+                assert!(choice.read(cx).choices.is_open());
+                choice.update(cx, |_, cx| cx.notify());
+                window.draw(cx).clear(cx);
+                window.dispatch_event(outside.to_platform_input(), cx);
+                assert!(!choice.read(cx).choices.is_open());
+            }
         })
         .unwrap();
     }

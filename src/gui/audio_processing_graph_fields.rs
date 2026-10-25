@@ -40,6 +40,32 @@ fn field_identity(key: &str) -> Option<(u64, &str)> {
     Some((id.parse().ok()?, path))
 }
 
+fn stepped_field_text(key: &str, text: &str, step: f64) -> Option<String> {
+    let value = text.parse::<f64>().ok()?;
+    let stepped = value + step;
+    if !value.is_finite() || !stepped.is_finite() {
+        return None;
+    }
+    if step.fract() == 0. || key.ends_with("_seconds") {
+        return Some(stepped.to_string());
+    }
+    let decimal_places = |text: &str| {
+        let (mantissa, exponent) = text.split_once(['e', 'E']).unwrap_or((text, "0"));
+        let fraction = mantissa.split_once('.').map_or(0, |(_, part)| part.len());
+        let exponent = exponent.parse::<i32>().unwrap_or(0);
+        // f64 has no useful decimal precision beyond its smallest subnormal.
+        (fraction as i64 - i64::from(exponent)).clamp(0, 324) as usize
+    };
+    let precision = decimal_places(text).max(decimal_places(&step.to_string()));
+    // Round decimal addition noise without narrowing the finite f64 range or
+    // discarding fractional digits already present in the draft.
+    let mut text = format!("{stepped:.precision$}");
+    if precision > 0 {
+        text.truncate(text.trim_end_matches('0').trim_end_matches('.').len());
+    }
+    Some(text)
+}
+
 fn patch_value(value: &mut Value, path: &str, text: &str) -> Result<(), String> {
     let text = if is_path(path) { text } else { text.trim() };
     if let Some(base) = path.strip_suffix("/implementation/taps") {
@@ -411,17 +437,11 @@ impl AudioProcessing {
     }
 
     fn step_graph_field(&mut self, key: &str, step: f64, cx: &mut Context<Self>) {
-        match self.text(key, cx).parse::<f64>() {
-            Ok(value) if value.is_finite() && (value + step).is_finite() => {
-                let value = value + step;
-                let text = if step.fract() != 0. && !key.ends_with("_seconds") {
-                    (value as f32).to_string()
-                } else {
-                    value.to_string()
-                };
+        match stepped_field_text(key, &self.text(key, cx), step) {
+            Some(text) => {
                 self.stage_graph_text(key, text, cx);
             }
-            _ => {
+            None => {
                 self.graph_ui.field_errors.insert(
                     key.to_owned(),
                     self.tr("processing-fields-number").to_string(),
@@ -930,8 +950,35 @@ mod tests {
     use super::{
         DraftStamp, EqImplementation, GraphEdit, GraphNode, GraphNodeKind, PathBuf,
         ProcessingGraph, SubmittedField, draft_revision_current, node_replacement,
-        path_snapshot_current, submission_current,
+        path_snapshot_current, stepped_field_text, submission_current,
     };
+
+    #[test]
+    fn decimal_steps_preserve_finite_f64_range_and_draft_precision() {
+        for (text, step, expected) in [
+            ("0.2", 0.1, "0.3"),
+            ("0.123456789", 0.1, "0.223456789"),
+            ("2e-3", 0.001, "0.003"),
+            ("-0.2", -0.1, "-0.3"),
+        ] {
+            assert_eq!(
+                stepped_field_text("gain", text, step).as_deref(),
+                Some(expected)
+            );
+        }
+        for value in [1e100, -1e100, f64::MAX, -f64::MAX] {
+            let stepped = stepped_field_text("gain", &value.to_string(), 0.1).unwrap();
+            assert_eq!(stepped.parse::<f64>().unwrap(), value);
+        }
+        let small = stepped_field_text("gain", "1e-100", 1e-101)
+            .unwrap()
+            .parse::<f64>()
+            .unwrap();
+        assert!(((small - 1e-100) / 1e-101 - 1.).abs() < 1e-12);
+        assert!(stepped_field_text("gain", &f64::MAX.to_string(), f64::MAX).is_none());
+        assert!(stepped_field_text("gain", "inf", 0.1).is_none());
+        assert!(stepped_field_text("gain", "invalid", 0.1).is_none());
+    }
 
     fn speech_graph() -> ProcessingGraph {
         let mut graph = ProcessingGraph::default();

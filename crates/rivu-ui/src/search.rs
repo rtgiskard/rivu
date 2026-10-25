@@ -45,7 +45,7 @@ impl SearchField {
         });
         input.update(cx, |input, cx| input.set_trailing_text("—".into(), cx));
         let subscription = cx.subscribe(&input, |this, _, event, cx| {
-            if matches!(event, InputEvent::Changed { user: true }) {
+            if matches!(event, InputEvent::Changed { user: true, .. }) {
                 this.edited(cx);
             }
         });
@@ -505,5 +505,96 @@ mod tests {
         cx.executor().advance_clock(delay * 2);
         cx.run_until_parked();
         assert_eq!(*published.borrow(), vec![Some("current".into()), None]);
+    }
+
+    #[test]
+    fn search_keeps_live_preedit_and_escape_restores_the_replaced_query() {
+        let mut cx = TestAppContext::single();
+        cx.update(crate::theme::init_test);
+        let delay = Duration::from_millis(100);
+        let window = cx.add_window(move |_, cx| {
+            SearchField::new(
+                SearchLabels {
+                    name: "Search".into(),
+                    placeholder: "Search".into(),
+                    toggle: "Search".into(),
+                    clear: "Clear".into(),
+                },
+                delay,
+                cx,
+            )
+        });
+        let search = window.root(&mut cx).unwrap();
+        let published = Rc::new(RefCell::new(Vec::new()));
+        let _subscription = cx.update(|cx| {
+            let published = published.clone();
+            cx.subscribe(&search, move |_, event, _| {
+                let SearchEvent::Changed(query) = event;
+                published.borrow_mut().push(query.clone());
+            })
+        });
+        let handle = window.into();
+        cx.update_window(handle, |_, window, cx| {
+            search.update(cx, |search, cx| {
+                search.focus(window, cx);
+                search.input.update(cx, |input, cx| {
+                    input.replace_text_in_range(None, "中😀", window, cx);
+                });
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.executor().advance_clock(delay);
+        cx.run_until_parked();
+        let preedit = |cx: &mut TestAppContext| {
+            cx.update_window(handle, |_, window, cx| {
+                search.update(cx, |search, cx| {
+                    search.focus(window, cx);
+                    search.input.update(cx, |input, cx| {
+                        input.replace_and_mark_text_in_range(None, "候😀", Some(3..3), window, cx);
+                    });
+                });
+            })
+            .unwrap();
+            cx.run_until_parked();
+        };
+        let cancel = |cx: &mut TestAppContext| {
+            cx.update_window(handle, |_, window, cx| {
+                search.update(cx, |search, cx| {
+                    assert!(search.escape(window, cx));
+                    assert!(search.expanded);
+                    assert_eq!(search.input.read(cx).text(), "中😀");
+                    assert!(!search.input.read(cx).is_composing());
+                });
+            })
+            .unwrap();
+            cx.run_until_parked();
+        };
+        // Cancelling a pending candidate prevents it from becoming a query.
+        preedit(&mut cx);
+        cx.executor().advance_clock(delay / 2);
+        cancel(&mut cx);
+        cx.executor().advance_clock(delay * 2);
+        cx.run_until_parked();
+        assert_eq!(*published.borrow(), vec![Some("中😀".into())]);
+        // Search intentionally publishes preedit, unlike numeric auto-submit.
+        preedit(&mut cx);
+        cx.executor().advance_clock(delay);
+        cx.run_until_parked();
+        assert_eq!(
+            search.read_with(&cx, |search, _| search.query.clone()),
+            Some("候😀".into())
+        );
+        cancel(&mut cx);
+        cx.executor().advance_clock(delay);
+        cx.run_until_parked();
+        assert_eq!(
+            *published.borrow(),
+            vec![
+                Some("中😀".into()),
+                Some("候😀".into()),
+                Some("中😀".into()),
+            ]
+        );
     }
 }

@@ -8,7 +8,7 @@
 //! Mouse selection remains owned by its originating input outside the textbox
 //! until release, window exit, focus loss, or disabling the input.
 
-use std::{cell::RefCell, ops::Range, rc::Rc};
+use std::{borrow::Cow, cell::RefCell, ops::Range, rc::Rc};
 
 use gpui::AccessibleAction;
 use gpui::accesskit::{
@@ -69,7 +69,9 @@ actions!(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InputEvent {
     /// `user` distinguishes actual editing from [`Input::set_text`] updates.
-    Changed { user: bool },
+    /// `composing` marks tentative IME text; committing or cancelling emits
+    /// another change with `composing: false`, even when the value is unchanged.
+    Changed { user: bool, composing: bool },
     /// The user pressed Enter while this input was focused.
     Submit,
 }
@@ -83,7 +85,7 @@ pub enum InputEvent {
 /// the current value, and one synthetic text run. Its character positions use
 /// Unicode scalar indices (matching the smallest selectable IME text unit),
 /// converted to UTF-8 only at the action boundary. Selection preserves marked
-/// text; replacement follows normal user editing and emits `Changed { user: true }`.
+/// text; committed replacement emits `Changed { user: true, composing: false }`.
 /// Disabled inputs expose their state but reject editing and focus actions.
 pub struct Input {
     focus_handle: FocusHandle,
@@ -100,12 +102,19 @@ pub struct Input {
     selected_range: Range<usize>,
     selection_reversed: bool,
     marked_range: Option<Range<usize>>,
+    composition: Option<Composition>,
     last_layout: Option<ShapedLine>,
     last_bounds: Option<gpui::Bounds<Pixels>>,
     selection_subscriptions: Option<[Subscription; 2]>,
 }
 
 impl EventEmitter<InputEvent> for Input {}
+
+struct Composition {
+    content: SharedString,
+    selected_range: Range<usize>,
+    selection_reversed: bool,
+}
 
 impl Input {
     /// Creates an input with an explicit accessible name, initial value and placeholder.
@@ -115,7 +124,11 @@ impl Input {
         placeholder: impl Into<SharedString>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let content = value.into();
+        let value = value.into();
+        let content = match single_line_text(&value) {
+            Cow::Borrowed(_) => value,
+            Cow::Owned(text) => text.into(),
+        };
         let end = content.len();
         Self {
             focus_handle: cx.focus_handle().tab_stop(true),
@@ -132,6 +145,7 @@ impl Input {
             selected_range: end..end,
             selection_reversed: false,
             marked_range: None,
+            composition: None,
             last_layout: None,
             last_bounds: None,
             selection_subscriptions: None,
@@ -187,7 +201,7 @@ impl Input {
         ]);
     }
 
-    /// Disabled inputs retain their entity and value but reject user focus and editing.
+    /// Disabled inputs retain their committed value but reject user focus and editing.
     pub fn set_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
         if self.enabled == enabled {
             return;
@@ -195,7 +209,9 @@ impl Input {
         self.enabled = enabled;
         self.focus_handle = self.focus_handle.clone().tab_stop(enabled);
         self.selection_subscriptions = None;
-        self.marked_range = None;
+        if !enabled {
+            self.dismiss_composition(cx);
+        }
         cx.notify();
     }
 
@@ -209,27 +225,29 @@ impl Input {
     }
 
     pub fn focus_and_select_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.enabled {
+            return;
+        }
         self.focus_handle.focus(window, cx);
         self.move_to(0, cx);
         self.select_to(self.content.len(), cx);
     }
 
-    /// Cancel the current preedit without clearing committed input text.
+    /// Cancel preedit and restore the committed value and selection it replaced.
     pub fn dismiss_composition(&mut self, cx: &mut Context<Self>) -> bool {
-        let Some(marked) = self.marked_range.take() else {
+        let Some(composition) = self.composition.take() else {
             return false;
         };
-        self.content = format!(
-            "{}{}",
-            &self.content[..marked.start],
-            &self.content[marked.end..]
-        )
-        .into();
-        self.selected_range = marked.start..marked.start;
-        self.selection_reversed = false;
+        self.content = composition.content;
+        self.selected_range = composition.selected_range;
+        self.selection_reversed = composition.selection_reversed;
+        self.marked_range = None;
         self.last_layout = None;
         self.last_bounds = None;
-        cx.emit(InputEvent::Changed { user: true });
+        cx.emit(InputEvent::Changed {
+            user: true,
+            composing: false,
+        });
         cx.notify();
         true
     }
@@ -242,7 +260,11 @@ impl Input {
     /// Replaces the value and places the caret at its end.
     pub fn set_text(&mut self, value: impl Into<SharedString>, cx: &mut Context<Self>) {
         let value = value.into();
-        if self.content == value {
+        let value = match single_line_text(&value) {
+            Cow::Borrowed(_) => value,
+            Cow::Owned(text) => text.into(),
+        };
+        if self.content == value && !self.is_composing() {
             return;
         }
         let end = value.len();
@@ -250,10 +272,14 @@ impl Input {
         self.selected_range = end..end;
         self.selection_reversed = false;
         self.marked_range = None;
+        self.composition = None;
         self.scroll_offset = px(0.);
         self.last_layout = None;
         self.last_bounds = None;
-        cx.emit(InputEvent::Changed { user: false });
+        cx.emit(InputEvent::Changed {
+            user: false,
+            composing: false,
+        });
         cx.notify();
     }
 
@@ -333,7 +359,7 @@ impl Input {
     }
 
     fn submit(&mut self, _: &SubmitInput, _: &mut Window, cx: &mut Context<Self>) {
-        if self.enabled {
+        if self.enabled && !self.is_composing() {
             cx.emit(InputEvent::Submit);
         }
     }
@@ -399,7 +425,7 @@ impl Input {
             return;
         }
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-            self.replace_selection(None, &text.replace(['\r', '\n'], " "), window, cx);
+            self.replace_selection(None, &text, window, cx);
         }
     }
 
@@ -517,19 +543,26 @@ impl Input {
         if !self.enabled {
             return;
         }
+        let new_text = single_line_text(new_text);
         let range = range_utf16
             .as_ref()
             .map(|range| self.replace_range_from_utf16(range))
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
-        self.content =
-            (self.content[..range.start].to_owned() + new_text + &self.content[range.end..]).into();
+        self.content = (self.content[..range.start].to_owned()
+            + new_text.as_ref()
+            + &self.content[range.end..])
+            .into();
         self.selected_range = range.start + new_text.len()..range.start + new_text.len();
         self.selection_reversed = false;
         self.marked_range = None;
+        self.composition = None;
         self.last_layout = None;
         self.last_bounds = None;
-        cx.emit(InputEvent::Changed { user: true });
+        cx.emit(InputEvent::Changed {
+            user: true,
+            composing: false,
+        });
         cx.notify();
     }
 
@@ -548,11 +581,7 @@ impl Input {
         };
         let range = replace_all.then(|| 0..self.offset_to_utf16(self.content.len()));
         // Use the same user-edit path as typing/paste, including marked-text replacement.
-        if value.contains(['\r', '\n']) {
-            self.replace_selection(range, &value.replace(['\r', '\n'], " "), window, cx);
-        } else {
-            self.replace_selection(range, value, window, cx);
-        }
+        self.replace_selection(range, value, window, cx);
     }
 
     fn accessible_selection(&mut self, data: Option<&ActionData>, cx: &mut Context<Self>) {
@@ -579,6 +608,24 @@ impl Input {
         // Selection changes must not commit or cancel an in-progress IME composition.
         self.move_to(anchor, cx);
         self.select_to(focus, cx);
+    }
+}
+
+fn single_line_text(text: &str) -> Cow<'_, str> {
+    fn line_break(ch: char) -> bool {
+        matches!(
+            ch,
+            '\n' | '\r' | '\u{000b}' | '\u{000c}' | '\u{0085}' | '\u{2028}' | '\u{2029}'
+        )
+    }
+    if text.contains(line_break) {
+        Cow::Owned(
+            text.chars()
+                .map(|ch| if line_break(ch) { ' ' } else { ch })
+                .collect(),
+        )
+    } else {
+        Cow::Borrowed(text)
     }
 }
 
@@ -693,8 +740,15 @@ impl EntityInputHandler for Input {
             .map(|range| self.range_to_utf16(range))
     }
 
-    fn unmark_text(&mut self, _: &mut Window, _: &mut Context<Self>) {
-        self.marked_range = None;
+    fn unmark_text(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        if self.marked_range.take().is_some() {
+            self.composition = None;
+            cx.emit(InputEvent::Changed {
+                user: true,
+                composing: false,
+            });
+            cx.notify();
+        }
     }
 
     fn replace_text_in_range(
@@ -723,19 +777,31 @@ impl EntityInputHandler for Input {
             .map(|range| self.range_from_utf16(range))
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
-        self.content =
-            (self.content[..range.start].to_owned() + new_text + &self.content[range.end..]).into();
-        self.marked_range =
-            (!new_text.is_empty()).then_some(range.start..range.start + new_text.len());
+        if self.composition.is_none() {
+            self.composition = Some(Composition {
+                content: self.content.clone(),
+                selected_range: self.selected_range.clone(),
+                selection_reversed: self.selection_reversed,
+            });
+        }
+        let new_text = single_line_text(new_text);
+        self.content = (self.content[..range.start].to_owned()
+            + new_text.as_ref()
+            + &self.content[range.end..])
+            .into();
+        self.marked_range = Some(range.start..range.start + new_text.len());
         self.selected_range = selected_range_after_replacement(
-            new_text,
+            new_text.as_ref(),
             new_selected_range_utf16.as_ref(),
             range.start,
         );
         self.selection_reversed = false;
         self.last_layout = None;
         self.last_bounds = None;
-        cx.emit(InputEvent::Changed { user: true });
+        cx.emit(InputEvent::Changed {
+            user: true,
+            composing: true,
+        });
         cx.notify();
     }
 
@@ -1329,6 +1395,13 @@ mod tests {
             input.update(cx, |input, cx| input.set_enabled(false, cx));
             let focus = other.read(cx).focus_handle.clone();
             focus.focus(window, cx);
+            input.update(cx, |input, cx| {
+                let selected = input.selected_range.clone();
+                input.focus_and_select_all(window, cx);
+                assert_eq!(input.selected_range, selected);
+                assert!(!input.is_focused(window));
+            });
+            assert!(other.read(cx).is_focused(window));
             window.draw(cx).clear(cx);
         })
         .unwrap();
@@ -1399,6 +1472,214 @@ mod tests {
             }
         })
         .unwrap();
+    }
+
+    #[test]
+    fn every_value_entry_normalizes_line_breaks_and_keeps_utf16_selection() {
+        let mut cx = gpui::TestAppContext::single();
+        cx.update(crate::theme::init_test);
+        let value = "中\r\n😀\u{2028}e\u{301}";
+        let expected = "中  😀 e\u{301}";
+        let initialized = cx.update(|cx| cx.new(|cx| Input::new("Initial", value, "", cx)));
+        cx.read(|cx| {
+            assert_eq!(initialized.read(cx).text(), expected);
+            assert_eq!(
+                initialized.read(cx).selected_range,
+                expected.len()..expected.len()
+            );
+        });
+        let (input, _, handle) = selection_fixture(&mut cx);
+        cx.update_window(handle, |_, window, cx| {
+            input.update(cx, |input, cx| {
+                input.set_text(value, cx);
+                assert_eq!(input.text(), expected);
+                assert_eq!(input.selected_range, expected.len()..expected.len());
+                input.set_text("a中😀z", cx);
+                input.replace_text_in_range(Some(1..4), "Ω\n😀", window, cx);
+                assert_eq!(input.text(), "aΩ 😀z");
+                assert_eq!(
+                    input.selected_text_range(false, window, cx).unwrap().range,
+                    5..5
+                );
+                input.focus_and_select_all(window, cx);
+                EntityInputHandler::paste(
+                    input,
+                    ClipboardItem::new_string(
+                        "😀\r\n中\u{0085}Ω\u{000b}e\u{000c}f\u{2029}z".into(),
+                    ),
+                    window,
+                    cx,
+                );
+                assert_eq!(input.text(), "😀  中 Ω e f z");
+                input.set_text("a中😀z", cx);
+                input.replace_and_mark_text_in_range(
+                    Some(1..4),
+                    "😀\u{2028}中",
+                    Some(2..4),
+                    window,
+                    cx,
+                );
+                assert_eq!(input.text(), "a😀 中z");
+                assert_eq!(input.marked_text_range(window, cx), Some(1..5));
+                assert_eq!(input.selected_range, 5..9);
+                assert_eq!(
+                    input.selected_text_range(false, window, cx).unwrap().range,
+                    3..5
+                );
+            });
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn cancelling_repeated_and_empty_preedit_restores_replaced_text_and_selection() {
+        let mut cx = gpui::TestAppContext::single();
+        cx.update(crate::theme::init_test);
+        let (input, _, handle) = selection_fixture(&mut cx);
+        cx.update_window(handle, |_, window, cx| {
+            input.update(cx, |input, cx| {
+                input.move_to(8, cx);
+                input.select_to(1, cx);
+                assert!(input.selection_reversed);
+                input.replace_and_mark_text_in_range(Some(1..4), "候", Some(1..1), window, cx);
+                assert_eq!(input.text(), "a候z");
+                input.replace_and_mark_text_in_range(None, "😀e\u{301}", Some(2..4), window, cx);
+                assert_eq!(input.text(), "a😀e\u{301}z");
+                assert_eq!(input.selected_range, 5..8);
+                input.replace_and_mark_text_in_range(None, "", Some(0..0), window, cx);
+                assert_eq!(input.text(), "az");
+                assert!(input.is_composing());
+                assert!(input.dismiss_composition(cx));
+                assert_eq!(input.text(), "a中😀z");
+                assert_eq!(input.selected_range, 1..8);
+                assert!(input.selection_reversed);
+                assert!(!input.dismiss_composition(cx));
+            });
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn disabling_replacement_preedit_restores_committed_text_before_reenabling() {
+        let mut cx = gpui::TestAppContext::single();
+        cx.update(crate::theme::init_test);
+        let (input, _, handle) = selection_fixture(&mut cx);
+        input.update(&mut cx, |input, cx| input.set_text("4", cx));
+        let committed = Rc::new(RefCell::new(Vec::new()));
+        let _subscription = cx.update(|cx| {
+            let committed = committed.clone();
+            cx.subscribe(&input, move |input, event, cx| {
+                if matches!(
+                    event,
+                    super::InputEvent::Changed {
+                        user: true,
+                        composing: false
+                    }
+                ) {
+                    committed
+                        .borrow_mut()
+                        .push(input.read(cx).text().to_owned());
+                }
+            })
+        });
+        cx.update_window(handle, |_, window, cx| {
+            input.update(cx, |input, cx| {
+                input.move_to(1, cx);
+                input.select_to(0, cx);
+                input.replace_and_mark_text_in_range(None, "12", Some(2..2), window, cx);
+                assert_eq!(input.text(), "12");
+                assert!(input.is_composing());
+            });
+        })
+        .unwrap();
+        assert!(committed.borrow().is_empty());
+        cx.update_window(handle, |_, window, cx| {
+            input.update(cx, |input, cx| {
+                input.set_enabled(false, cx);
+                assert_eq!(input.text(), "4");
+                assert_eq!(input.selected_range, 0..1);
+                assert!(input.selection_reversed);
+                assert!(!input.is_composing());
+                input.replace_text_in_range(None, "12", window, cx);
+                input.unmark_text(window, cx);
+                assert_eq!(input.text(), "4");
+            });
+        })
+        .unwrap();
+        input.update(&mut cx, |input, cx| {
+            input.set_enabled(true, cx);
+            assert_eq!(input.text(), "4");
+            assert_eq!(input.selected_range, 0..1);
+            assert!(input.selection_reversed);
+            assert!(!input.is_composing());
+            assert!(!input.dismiss_composition(cx));
+            input.set_text("4", cx);
+        });
+        assert_eq!(*committed.borrow(), vec!["4".to_owned()]);
+    }
+
+    #[test]
+    fn unchanged_commits_notify_and_preedit_enter_never_submits() {
+        let mut cx = gpui::TestAppContext::single();
+        cx.update(crate::theme::init_test);
+        let (input, _, handle) = selection_fixture(&mut cx);
+        input.update(&mut cx, |input, cx| input.set_text("0", cx));
+        let edits = Rc::new(RefCell::new(Vec::new()));
+        let _subscription = cx.update(|cx| {
+            let edits = edits.clone();
+            cx.subscribe(&input, move |_, event, _| {
+                edits.borrow_mut().push(event.clone())
+            })
+        });
+        cx.update_window(handle, |_, window, cx| {
+            input.update(cx, |input, cx| {
+                input.replace_and_mark_text_in_range(Some(0..1), "0", Some(1..1), window, cx);
+                input.submit(&SubmitInput, window, cx);
+                input.replace_text_in_range(None, "0", window, cx);
+                assert!(!input.is_composing());
+                assert!(!input.dismiss_composition(cx));
+                input.submit(&SubmitInput, window, cx);
+                input.replace_and_mark_text_in_range(Some(0..1), "0", Some(1..1), window, cx);
+                input.unmark_text(window, cx);
+                input.unmark_text(window, cx);
+                assert!(!input.dismiss_composition(cx));
+                input.replace_and_mark_text_in_range(Some(0..1), "0", Some(1..1), window, cx);
+                input.set_text("0", cx);
+                assert!(!input.is_composing());
+                assert!(!input.dismiss_composition(cx));
+            });
+        })
+        .unwrap();
+        assert_eq!(
+            *edits.borrow(),
+            vec![
+                super::InputEvent::Changed {
+                    user: true,
+                    composing: true
+                },
+                super::InputEvent::Changed {
+                    user: true,
+                    composing: false
+                },
+                super::InputEvent::Submit,
+                super::InputEvent::Changed {
+                    user: true,
+                    composing: true
+                },
+                super::InputEvent::Changed {
+                    user: true,
+                    composing: false
+                },
+                super::InputEvent::Changed {
+                    user: true,
+                    composing: true
+                },
+                super::InputEvent::Changed {
+                    user: false,
+                    composing: false
+                },
+            ]
+        );
     }
 
     #[test]
@@ -1911,7 +2192,10 @@ mod tests {
         .unwrap();
         assert_eq!(
             *edits.borrow(),
-            vec![super::InputEvent::Changed { user: true }]
+            vec![super::InputEvent::Changed {
+                user: true,
+                composing: false
+            }]
         );
     }
 

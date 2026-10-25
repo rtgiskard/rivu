@@ -107,7 +107,7 @@ impl Metadata {
             let input =
                 cx.new(|cx| Input::new(context.tr(placeholder), "", context.tr(placeholder), cx));
             subscriptions.push(cx.subscribe(&input, |this, _, event, cx| {
-                if matches!(event, InputEvent::Changed { user: true }) {
+                if matches!(event, InputEvent::Changed { user: true, .. }) {
                     this.draft_changed(cx);
                 }
             }));

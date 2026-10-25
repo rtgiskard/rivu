@@ -674,6 +674,12 @@ Input owns text, selection, IME conversion, focus and pointer-selection capture.
 Text replacement, including IME preedit, invalidates its shaped-text hit-test
 cache. Pointer events arriving before the next paint cannot use offsets from
 the previous text; fresh geometry is published when the new text is painted.
+All editing paths keep single-line text by replacing line breaks with spaces.
+`InputEvent::Changed` reports both edit origin and whether IME composition is
+active. Preedit is visible but is not a committed
+configuration value; unmarking emits a committed change even when the text is
+unchanged. Enter does not submit active preedit. Escape restores the pre-composition
+text and selection before a later Escape can reach the enclosing editor.
 Editable combo inputs can use the select-trigger surface without changing input
 geometry or editing behavior; ordinary standalone inputs keep their input surface.
 Disabling an input keeps its draft while rejecting edits and removing its Tab
@@ -706,6 +712,9 @@ Choice callbacks and retained row presses are bound to the candidate generation
 that produced the popup. Closing, reopening or replacing candidates invalidates
 both callbacks and an in-progress press, including across a repaint; moving the
 keyboard highlight does not. A fresh press can select the replacement candidate.
+Paging uses the popup's rendered row height, including before replacement
+candidates have repainted. Outside-dismiss callbacks also belong to their candidate
+generation and cannot dismiss a replacement popup.
 Owners handle select-mode keys in capture, before GPUI arms native Enter/Space
 activation. `ChoiceDisposition::apply` prevents that activation from being armed;
 it cannot clear one already registered by an earlier listener.

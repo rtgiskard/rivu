@@ -359,7 +359,7 @@ impl AudioProcessing {
         cx: &mut Context<Self>,
     ) -> Subscription {
         cx.subscribe(input, move |this, _, event, cx| match event {
-            InputEvent::Changed { user: true } => {
+            InputEvent::Changed { user: true, .. } => {
                 if let Some(field) = this.fields.get_mut(&name) {
                     field.dirty = true;
                 }

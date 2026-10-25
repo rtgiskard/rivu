@@ -235,7 +235,10 @@ impl AudioProcessing {
         });
         let name = key.to_owned();
         let edited = cx.subscribe(&input, move |this, input, event, cx| match event {
-            InputEvent::Changed { user: true } => {
+            InputEvent::Changed {
+                user: true,
+                composing: false,
+            } => {
                 let text = input.read(cx).text().to_owned();
                 this.stage_graph_text(&name, text, cx);
                 cx.notify();

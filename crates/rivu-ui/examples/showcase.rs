@@ -121,7 +121,7 @@ impl Showcase {
             )
         });
         let input_subscription = cx.subscribe(&input, |this, _, event, cx| {
-            if matches!(event, InputEvent::Changed { user: true }) {
+            if matches!(event, InputEvent::Changed { user: true, .. }) {
                 this.edits += 1;
                 cx.notify();
             }
