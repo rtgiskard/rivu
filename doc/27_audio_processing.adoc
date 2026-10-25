@@ -362,6 +362,21 @@ Model assets are hard-linked on the same filesystem and copied otherwise: treat
 both bundles' assets as immutable, not independently editable copies. Use the
 emitted paths, and keep the separate environment installed. Absolute paths make
 inference independent of the application's working directory or repository.
+
+The worker accepts request version 1 and emits event version 2. Completion is a
+bounded summary: source format/length, model ID and manifest hash, and fixed WAV
+basenames relative to that request's `output_dir`. Full provenance, absolute
+output paths and per-block measurements remain in `output_dir/result.json`.
+The worker writes that report before emitting completion; callers still require
+a successful process exit and validate outputs before publication. Rust keeps
+the 64 KiB event-line limit and does not load the full report. Benchmark and corpus
+evaluation tools read the full report only after successful completion.
+
+For a version-1 runtime bundle, provision a new bundle from the verified manifest
+using the current provisioning tool and update the configured worker path.
+Do not replace sidecars inside an existing hashed bundle. Request and model
+manifest formats remain unchanged; old event streams fail the version check.
+
 For a shared worker, select the emitted runtime worker compatible with both
 prepared manifests; interpreters and manifests remain operation-specific:
 

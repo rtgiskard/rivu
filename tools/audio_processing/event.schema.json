@@ -1,11 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:rivu:audio-processing:event:1",
-  "title": "One UTF-8 JSON object per stdout line; stderr is diagnostic only",
+  "$id": "urn:rivu:audio-processing:event:2",
+  "title": "Version 2 bounded completion; full evidence remains in task-owned result.json",
   "type": "object",
   "required": ["version", "task_id", "type"],
+  "unevaluatedProperties": false,
   "properties": {
-    "version": {"const": 1},
+    "version": {"const": 2},
     "task_id": {"type": "string", "maxLength": 128},
     "type": {"enum": ["progress", "complete", "error"]}
   },
@@ -20,36 +21,30 @@
       }
     },
     {
-      "required": ["outputs", "sample_rate", "channels", "frames", "model", "source_sha256", "request_sha256", "processing", "metrics"],
+      "required": ["outputs", "sample_rate", "channels", "frames", "model"],
       "properties": {
         "type": {"const": "complete"},
         "outputs": {
           "type": "object",
-          "description": "Absolute task-owned float32 WAV paths, visible only after successful complete. Source frame count, channel count and sample rate exactly preserved. Samples may exceed full scale; no hidden clipping or normalization.",
+          "description": "Fixed WAV basenames relative to the request's output_dir, published only after successful complete and result.json write. Source format and unclipped float samples are preserved.",
           "additionalProperties": false,
           "properties": {
-            "speech": {"type": "string", "pattern": "^/"},
-            "vocals": {"type": "string", "pattern": "^/"},
-            "accompaniment": {"type": "string", "pattern": "^/"}
+            "speech": {"const": "speech.wav"},
+            "vocals": {"const": "vocals.wav"},
+            "accompaniment": {"const": "accompaniment.wav"}
           },
           "oneOf": [{"required": ["speech"], "maxProperties": 1}, {"required": ["vocals", "accompaniment"], "maxProperties": 2}]
         },
         "sample_rate": {"type": "integer", "minimum": 8000, "maximum": 192000},
         "channels": {"enum": [1, 2]},
-        "frames": {"type": "integer", "minimum": 1},
+        "frames": {"type": "integer", "minimum": 1, "maximum": 2764800000},
         "model": {
-          "type": "object", "required": ["id", "sha256", "files"],
+          "type": "object", "required": ["id", "sha256"], "additionalProperties": false,
           "properties": {
-            "id": {"type": "string"},
-            "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$", "description": "SHA256 of canonical manifest JSON, including model/dependency/license identities. Individual artifact hashes are in files."},
-            "files": {"type": "object", "additionalProperties": {"type": "string", "pattern": "^[a-f0-9]{64}$"}},
-            "provenance": {"type": "object", "description": "Factual model/engine revision, source, known license or unresolved status; never an inferred permission grant."}
+            "id": {"enum": ["MossFormer2_SE_48K", "nsnet2", "DeepFilterNet3", "melband_roformer_kim", "htdemucs"]},
+            "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$", "description": "Canonical manifest SHA256; full artifact/provenance evidence is in result.json."}
           }
-        },
-        "source_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
-        "request_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
-        "processing": {"type": "object"},
-        "metrics": {"type": "object"}
+        }
       }
     },
     {

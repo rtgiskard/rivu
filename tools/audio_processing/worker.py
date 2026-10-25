@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Local offline inference worker; stdout is the version1 JSONL event protocol.
+"""Local offline inference worker; stdout is the version2 JSONL event protocol.
 
 Launch with the explicitly prepared interpreter and local request file:
   .cache/neural/moss-venv/bin/python tools/audio_processing/worker.py --request /abs/request.json
@@ -35,6 +35,7 @@ import sys
 import time
 
 VERSION = 1
+EVENT_VERSION = 2
 CORE_SECONDS = 24
 CONTEXT_SECONDS = 8
 MAX_SECONDS = 4 * 60 * 60
@@ -309,7 +310,9 @@ def process(request, emit):
                     "output_peaks":peaks,"input_rms":math.sqrt(input_energy/(info.frames*info.channels)),
                     "target_rms":math.sqrt(output_energy/(info.frames*info.channels))}}
         (destination / "result.json").write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
-        emit("complete", **report)
+        emit("complete", outputs={stem: stem + ".wav" for stem in stems},
+             sample_rate=info.samplerate, channels=info.channels, frames=info.frames,
+             model={"id":manifest["id"], "sha256":report["model"]["sha256"]})
     except BaseException:
         # Only this newly created task directory is ours; never remove preexisting data.
         shutil.rmtree(destination)
@@ -321,7 +324,7 @@ def main():
     args = parser.parse_args()
     task_id = ""
     def emit(event_type, **fields):
-        print(json.dumps({"version":VERSION,"task_id":task_id,"type":event_type,**fields}, allow_nan=False), flush=True)
+        print(json.dumps({"version":EVENT_VERSION,"task_id":task_id,"type":event_type,**fields}, allow_nan=False), flush=True)
     try:
         request = read_json(args.request)
         candidate_id = request.get("task_id") if isinstance(request, dict) else None

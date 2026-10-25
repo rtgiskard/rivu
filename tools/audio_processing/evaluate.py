@@ -93,9 +93,10 @@ def main():
         events=[json.loads(line) for line in completed.stdout.splitlines()]
         (output/(name+"-events.jsonl")).write_text(completed.stdout)
         (output/(name+"-stderr.txt")).write_text(completed.stderr)
-        if completed.returncode or not events or events[-1]["type"]!="complete":
+        if completed.returncode or not events or events[-1]["type"]!="complete" or events[-1].get("version")!=2 or events[-1].get("task_id")!=request["task_id"]:
             raise RuntimeError(json.dumps({"case":name,"exit":completed.returncode,"events":events,"stderr":completed.stderr}))
-        result=events[-1]
+        with (Path(request["output_dir"])/"result.json").open() as stream:
+            result=json.load(stream)
         estimate,output_rate=sf.read(result["outputs"]["vocals" if operation=="separate" else "speech"],dtype="float32",always_2d=True)
         if output_rate!=rate:
             raise ValueError("output rate changed: "+name)

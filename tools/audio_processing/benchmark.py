@@ -103,9 +103,10 @@ def main():
         completed = subprocess.run([sys.executable, str(Path(__file__).with_name("worker.py")), "--request", str(request_path)],
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         events = [json.loads(line) for line in completed.stdout.splitlines()]
-        if completed.returncode or not events or events[-1]["type"] != "complete":
+        if completed.returncode or not events or events[-1]["type"] != "complete" or events[-1].get("version") != 2 or events[-1].get("task_id") != request["task_id"]:
             raise RuntimeError(json.dumps({"exit":completed.returncode,"events":events,"stderr":completed.stderr}))
-        result = events[-1]
+        with (Path(run_request["output_dir"]) / "result.json").open() as stream:
+            result = json.load(stream)
         stem = "speech" if request["operation"] == "speech" else "vocals"
         output, output_rate = sf.read(result["outputs"][stem], dtype="float32", always_2d=True)
         if output_rate != rate:

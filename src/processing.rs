@@ -940,7 +940,7 @@ fn neural(
         let mut consume_event = |line: &[u8]| -> Result<()> {
             let event: serde_json::Value = serde_json::from_slice(line)?;
             ensure!(
-                event["version"] == 1 && event["task_id"] == task_id,
+                event["version"] == 2 && event["task_id"] == task_id,
                 "Neural event identity/version mismatch"
             );
             match event["type"].as_str() {
@@ -1040,11 +1040,14 @@ fn neural(
                 .to_owned(),
         );
         let output = |key: &str| -> Result<PathBuf> {
-            let path = PathBuf::from(
-                event["outputs"][key]
-                    .as_str()
-                    .context("Missing neural output")?,
+            let name = event["outputs"][key]
+                .as_str()
+                .context("Missing neural output")?;
+            ensure!(
+                name.strip_suffix(".wav") == Some(key),
+                "Invalid neural output name"
             );
+            let path = output_dir.join(name);
             let path = fs::canonicalize(path)?;
             ensure!(
                 path.starts_with(fs::canonicalize(&output_dir)?),

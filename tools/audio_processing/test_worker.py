@@ -147,6 +147,57 @@ class OutputContainerTests(unittest.TestCase):
                     process(request, lambda *args, **kwargs: None)
             self.assertFalse(destination.exists())
 
+    def test_large_report_does_not_expand_completion_and_preserves_audio(self):
+        import io
+        import sys
+        import numpy as np
+        import soundfile as sf
+        import worker
+        from contextlib import redirect_stdout
+        from unittest.mock import patch
+
+        scratch = ROOT / ".cache/neural/tests"
+        scratch.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=scratch) as directory:
+            base = Path(directory).resolve()
+            source = base / "input.wav"
+            audio = np.full((8001, 1), 0.25, dtype="float32")
+            sf.write(source, audio, 8000, subtype="FLOAT")
+            evidence = base / "evidence.txt"
+            evidence.write_text("Synthetic inference fixture, not a prepared model")
+            manifest = base / "manifest.json"
+            manifest.write_text(json.dumps({"version":1, "operation":"speech", "id":"nsnet2",
+                "files":{"evidence.txt":digest(evidence)}, "license_evidence":"evidence.txt",
+                "packages":{}, "provenance":{"record":"x" * 70000}}))
+            destination = base / "result"
+            request = {**ProtocolTests().request(), "input_path":str(source),
+                       "output_dir":str(destination), "model_manifest":str(manifest)}
+            request_path = base / "request.json"
+            request_path.write_text(json.dumps(request))
+            stdout = io.StringIO()
+            # Only inference is synthetic: admission, WAV I/O, reporting and
+            # the actual main() JSONL serializer execute unchanged.
+            with patch.object(worker, "build_engine", return_value=(8000, lambda samples: samples * 0.5)), \
+                 patch.object(worker, "deny_network"), patch.object(worker, "CORE_SECONDS", 1), \
+                 patch.dict(os.environ), patch.object(sys, "argv", ["worker.py", "--request", str(request_path)]), \
+                 redirect_stdout(stdout):
+                self.assertEqual(worker.main(), 0)
+            lines = stdout.getvalue().splitlines()
+            event = json.loads(lines[-1])
+            self.assertEqual(event["type"], "complete")
+            self.assertEqual(event["version"], 2)
+            self.assertLess(len(lines[-1].encode("utf-8")) + 1, 65536)
+            report_path = destination / "result.json"
+            self.assertGreater(report_path.stat().st_size, 65536)
+            report = json.loads(report_path.read_text())
+            self.assertEqual(report["model"]["provenance"]["record"], "x" * 70000)
+            self.assertEqual(len(report["metrics"]["block_seconds"]), 2)
+            self.assertEqual(report["source_sha256"], digest(source))
+            output, rate = sf.read(destination / event["outputs"]["speech"], dtype="float32", always_2d=True)
+            self.assertEqual(rate, 8000)
+            np.testing.assert_array_equal(output, audio * 0.5)
+
+
 @unittest.skipUnless(os.environ.get("RIVU_SPEECH_MANIFEST"),"explicit prepared real speech model required")
 class RealSpeechTests(unittest.TestCase):
     def test_real_model_alignment_wet_bypass_and_no_independent_scaling(self):
@@ -168,7 +219,7 @@ class RealSpeechTests(unittest.TestCase):
             events = []
             process(request,lambda kind,**fields:events.append((kind,fields)))
             self.assertEqual(events[-1][0],"complete")
-            output, output_rate = sf.read(events[-1][1]["outputs"]["speech"],dtype="float32",always_2d=True)
+            output, output_rate = sf.read(base / "result" / events[-1][1]["outputs"]["speech"],dtype="float32",always_2d=True)
             self.assertEqual(output_rate,rate)
             np.testing.assert_array_equal(output.view("uint32"),audio.view("uint32"))
             self.assertGreater(float(output.max()),1)
@@ -212,7 +263,7 @@ class RealSpeechTests(unittest.TestCase):
                                        capture_output=True,text=True,check=True)
             event = json.loads(completed.stdout.splitlines()[-1])
             self.assertEqual(event["type"],"complete")
-            output,rate = sf.read(event["outputs"]["speech"],dtype="float32",always_2d=True)
+            output,rate = sf.read(base / "result" / event["outputs"]["speech"],dtype="float32",always_2d=True)
             self.assertEqual(rate,44100)
             np.testing.assert_array_equal(output,audio)
             self.assertEqual(digest(source),original_hash)
@@ -256,17 +307,18 @@ class RealSeparationTests(unittest.TestCase):
                              (rate, 2, len(audio)))
             stems = {}
             for name in ("vocals", "accompaniment"):
-                stems[name], output_rate = sf.read(event["outputs"][name], dtype="float32", always_2d=True)
+                stems[name], output_rate = sf.read(base / "result" / event["outputs"][name], dtype="float32", always_2d=True)
                 self.assertEqual(output_rate, rate)
                 self.assertEqual(stems[name].shape, audio.shape)
                 self.assertTrue(np.isfinite(stems[name]).all())
             np.testing.assert_array_equal(stems["accompaniment"].view("uint32"),
                                           (audio-stems["vocals"]).view("uint32"))
             self.assertEqual(digest(source), source_hash)
-            self.assertEqual(len(event["metrics"]["block_seconds"]), 2)
+            report = json.loads((base / "result/result.json").read_text())
+            self.assertEqual(len(report["metrics"]["block_seconds"]), 2)
             for metric, samples in (("input_rms", audio), ("target_rms", stems["vocals"])):
                 expected_rms = float(np.sqrt(np.mean(np.square(samples.astype("float64")))))
-                self.assertAlmostEqual(event["metrics"][metric], expected_rms, places=12)
+                self.assertAlmostEqual(report["metrics"][metric], expected_rms, places=12)
 
     def test_kim_source_rate_stereo_boundary_and_exact_complement(self):
         self.check_model("RIVU_KIM_MANIFEST", "melband_roformer_kim")
