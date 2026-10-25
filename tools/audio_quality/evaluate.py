@@ -14,6 +14,11 @@ import sys
 import numpy as np
 import soundfile as sf
 
+if __package__:
+    from .metric_core import db_ratio, projection_metrics
+else:
+    from metric_core import db_ratio, projection_metrics
+
 MAX_FRAMES = 12_000_000
 MAX_CHANNELS = 8
 
@@ -37,20 +42,10 @@ def load(path):
     return data, rate
 
 
-def db_ratio(numerator, denominator):
-    if numerator == 0:
-        return None
-    if denominator == 0:
-        return "infinity"
-    return float(10 * np.log10(numerator / denominator))
 
 
 def channel_metrics(reference, estimate):
-    ref = reference - reference.mean()
-    est = estimate - estimate.mean()
-    energy = float(np.dot(ref, ref))
-    alpha = float(np.dot(ref, est) / energy) if energy else None
-    target = alpha * ref if alpha is not None else np.zeros_like(ref)
+    si_sdr, alpha = projection_metrics(reference, estimate)
     error = estimate - reference
     return {
         "reference_rms": float(np.sqrt(np.mean(reference ** 2))),
@@ -60,7 +55,7 @@ def channel_metrics(reference, estimate):
         "peak_abs": float(np.max(np.abs(estimate))),
         "peak_error_abs": float(np.max(np.abs(error))),
         "snr_db": db_ratio(float(np.dot(reference, reference)), float(np.dot(error, error))),
-        "si_sdr_db": db_ratio(float(np.dot(target, target)), float(np.dot(est - target, est - target))),
+        "si_sdr_db": si_sdr,
         "least_squares_reference_gain": alpha,
         "overs_count": int(np.count_nonzero(np.abs(estimate) > 1)),
     }

@@ -9,12 +9,34 @@ import argparse
 import json
 import math
 from pathlib import Path
-import statistics
 import subprocess
 from types import SimpleNamespace
 
 import soundfile as sf
-from evaluate import evaluate
+if __package__:
+    from .evaluate import evaluate
+    from .metric_core import score_difference, score_summary
+else:
+    from evaluate import evaluate
+    from metric_core import score_difference, score_summary
+
+
+def summarize_reports(reports):
+    groups = {}
+    for mode in ("stationary", "profile", "adaptive"):
+        rows = [r for r in reports if r["mode"] == mode and r["noise_kind"] != "clean"]
+        gains = [score_difference(r["metrics_by_channel"][0]["si_sdr_db"],
+                                  r["baseline_metrics_by_channel"][0]["si_sdr_db"]) for r in rows]
+        summary = score_summary(gains)
+        groups[mode] = {
+            "cases": len(rows),
+            "median_si_sdr_improvement_db": summary["median"],
+            "min_si_sdr_improvement_db": summary["min"],
+            "max_si_sdr_improvement_db": summary["max"],
+            "si_sdr_improvement_counts": {key:value for key,value in summary.items() if key.endswith("_count")},
+            "degraded_cases": sum(float(gain) < 0 for gain in gains if gain is not None),
+        }
+    return groups
 
 
 def main():
@@ -64,14 +86,10 @@ def main():
                 metrics = evaluate(SimpleNamespace(reference=str(reference), estimate=str(estimate), noisy=str(source), complement=None, mixture=None, provenance=manifest["provenance"], implementation=f"rivu-dsp classical {mode}; config={config}; synthetic calibrated controls disclosed"))
                 metrics.update({"speaker": corpus.name, "noise_kind": case["name"], "input_snr_db": snr, "mode": mode, "timings": timings})
                 reports.append(metrics)
-    groups = {}
-    for mode in ("stationary", "profile", "adaptive"):
-        rows = [r for r in reports if r["mode"] == mode and r["noise_kind"] != "clean"]
-        gains = [r["metrics_by_channel"][0]["si_sdr_db"] - r["baseline_metrics_by_channel"][0]["si_sdr_db"] for r in rows]
-        groups[mode] = {"cases": len(rows), "median_si_sdr_improvement_db": statistics.median(gains), "min_si_sdr_improvement_db": min(gains), "max_si_sdr_improvement_db": max(gains), "degraded_cases": sum(g < 0 for g in gains)}
+    groups = summarize_reports(reports)
     report = {"schema": 1, "summary": groups, "reports": reports, "limits": "Synthetic noise, four short source utterances; no perceptual or listening claim. Profile uses oracle synthetic noise. Timings exclude WAV I/O and profile capture; no cross-mode timing comparison made."}
     (output / "report.json").write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
-    print(json.dumps({"report": str(output / "report.json"), "summary": groups}, indent=2))
+    print(json.dumps({"report": str(output / "report.json"), "summary": groups}, indent=2, allow_nan=False))
 
 
 if __name__ == "__main__":

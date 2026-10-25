@@ -16,7 +16,10 @@ import json
 from pathlib import Path
 
 import numpy as np
-from evaluate import channel_metrics, identity, load, stereo_metrics
+if __package__:
+    from .evaluate import channel_metrics, identity, load, stereo_metrics
+else:
+    from evaluate import channel_metrics, identity, load, stereo_metrics
 
 
 def compare(args):

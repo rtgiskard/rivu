@@ -746,6 +746,43 @@ wall/CPU time, real-time factor, block latency percentiles, peak resident memory
 allocations/capacity and underruns. End-to-end seek/cancel/shutdown behavior and
 GUI controls require actual application smoke proof.
 
+The Python benchmark and corpus evaluator report two distinct wall times.
+`worker_subprocess_wall_seconds` covers only the worker subprocess call, including
+startup and captured pipes. `evaluation_wall_seconds` starts before per-sample
+reference/input reads and request creation and ends after output reads, artifact
+writes, hashes, scoring and sample-record construction. It excludes record append,
+progress printing, cross-sample summaries and final aggregate report serialization
+or writing. `timing_summary` summarizes each field separately. Historical mixed
+wall-time fields cannot be relabeled as either measurement without rerunning.
+
+Paired SNR and SI-SDR use the same boundary semantics in both tool families:
+undefined scores and gains are JSON `null`, while exact positive-energy
+reconstruction is `"infinity"`. Improvement against an infinite baseline can be
+`"-infinity"`; infinity minus itself is undefined. Summaries exclude undefined
+values rather than treating them as zero, report defined/undefined and signed
+infinity counts, and preserve infinity in ordering. A median centered between
+opposite infinities is undefined. These numerical cases do not establish quality.
+
+Music corpus manifest schema 2 records each prepared directory relative to the
+corpus root and explicitly binds `diagnostic_only` to source identity and SHA256.
+Directory numbering is not a diagnostic rule. During preparation, mark any known
+reference erratum with repeatable `--diagnostic-source` paths; the marker follows
+identical source bytes even when renamed or reordered. For example, bind these
+variables to the actual local source files before running:
+
+[source,shell]
+----
+python tools/audio_quality/prepare_music.py "$al_james_source" "$other_source" \
+  --diagnostic-source "$al_james_source" \
+  --output /absolute/new-music-float --provenance 'actual source and license'
+----
+
+Schema-1 music corpora must be prepared again, or explicitly migrated by verifying
+every source/hash, recording its diagnostic boolean and relative track directory,
+and upgrading the schema. Changing only the schema number or assigning flags by
+old directory order is not a migration. Historical evidence retains its original
+measurement and corpus identity; this contract does not revalidate those results.
+
 Automatic metrics and actual listening are distinct evidence. No automated
 analysis is reported as human listening. Missing listening approval remains an
 explicit acceptance gap, even when objective and integration checks pass.
@@ -822,7 +859,9 @@ evidence and its narrower numerical scope.
   better and does not justify an unmeasured default change.
 * Separation quality: the existing Kim evaluation's valid track-01/02 stem
   comparisons reported median SI-SDR improvement 17.640 dB (16.145–19.392).
-  Track-00's diagnostic/reference erratum is excluded, not counted as a pass.
+  The Al James source reference erratum, stored as track-00 in that historical
+  preparation, is excluded rather than counted as a pass; new evaluations use
+  manifest source/hash identity, not that directory number.
   Mixture-minus-vocals reconstruction remains only an invariant. The MUSDB
   compressed reference subset is not fullband lossless music acceptance.
   The additional `neural/acceptance-evidence/summary.json` contains eight stem

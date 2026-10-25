@@ -13,9 +13,10 @@ model job at a time. Use the corresponding prepared interpreter, for example:
 
 Omit --case to evaluate every canonical synthetic case. Paired corpora require
 clean/ and noisy/ matching FLOAT WAV files plus manifest.json. Music requires
-track-*/{mixture,vocals,accompaniment}.wav plus manifest.json. Al James track00 is
-diagnostic only (published ground-truth vocal leakage erratum); all AAC MUSDB
-excerpts are bandlimited and do not establish fullband music quality.
+track-*/{mixture,vocals,accompaniment}.wav plus schema-2 manifest.json with explicit
+source/SHA256/diagnostic_only records. Mark the documented Al James reference
+erratum via prepare_music.py --diagnostic-source; no track ordinal implies an
+erratum. All AAC MUSDB excerpts are bandlimited, not fullband quality evidence.
 """
 import argparse
 import json
@@ -25,8 +26,16 @@ import statistics
 import subprocess
 import sys
 import time
-from benchmark import metrics
-from worker import digest, read_json
+if __package__:
+    from .benchmark import metrics, TIMING_BOUNDARIES, timing_summary
+    from .worker import digest, read_json
+    from ..audio_quality.metric_core import score_difference, score_summary
+    from ..audio_quality.music_manifest import music_records
+else:
+    from benchmark import metrics, TIMING_BOUNDARIES, timing_summary
+    from worker import digest, read_json
+    from audio_quality.metric_core import score_difference, score_summary
+    from audio_quality.music_manifest import music_records
 
 
 def cases(kind, root, selected):
@@ -39,13 +48,14 @@ def cases(kind, root, selected):
                     continue
                 if selected and source.stem not in selected:
                     continue
-                yield folder.name+"-"+source.stem,source,folder/"clean.wav",folder/"manifest.json",None,False
+                yield folder.name+"-"+source.stem,source,folder/"clean.wav",folder/"manifest.json",None,False,None
     elif kind == "paired":
         for source in sorted((root/"noisy").glob("*.wav")):
-            yield source.stem,source,root/"clean"/source.name,root/"manifest.json",None,False
+            yield source.stem,source,root/"clean"/source.name,root/"manifest.json",None,False,None
     else:
-        for folder in sorted(root.glob("track-*")):
-            yield folder.name,folder/"mixture.wav",folder/"vocals.wav",root/"manifest.json",folder/"accompaniment.wav",folder.name=="track-00"
+        for folder, record in music_records(read_json(root/"manifest.json"), root):
+            identity = {key:record[key] for key in ("source", "sha256")}
+            yield folder.name,folder/"mixture.wav",folder/"vocals.wav",root/"manifest.json",folder/"accompaniment.wav",record["diagnostic_only"],identity
 
 
 def main():
@@ -72,12 +82,14 @@ def main():
     args.output_dir.mkdir(mode=0o700)
     output=args.output_dir.resolve()
     report={"command":sys.argv,"model_manifest_sha256":digest(model),"runs":[],
+            "timing_boundaries":TIMING_BOUNDARIES,
             "human_listening":"not performed; objective results do not establish listening approval"}
     if operation=="speech":
         import importlib.metadata
         from pystoi import stoi
         report["metric_packages"]={"pystoi":importlib.metadata.version("pystoi")}
-    for index,(name,source,reference,provenance,backing,diagnostic) in enumerate(records):
+    for index,(name,source,reference,provenance,backing,diagnostic,source_identity) in enumerate(records):
+        evaluation_start=time.perf_counter()
         reference_audio,rate=sf.read(reference,dtype="float32",always_2d=True)
         input_audio,input_rate=sf.read(source,dtype="float32",always_2d=True)
         if rate!=input_rate:
@@ -87,9 +99,10 @@ def main():
                  "parameters":{"overlap":0.75} if operation=="separate" else {"wet_mix":1.0,"attenuation_limit_db":80}}
         request_path=output/(name+"-request.json")
         request_path.write_text(json.dumps(request))
-        start=time.perf_counter()
+        worker_start=time.perf_counter()
         completed=subprocess.run([sys.executable,str(Path(__file__).with_name("worker.py")),"--request",str(request_path)],
                                  stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+        worker_seconds=time.perf_counter()-worker_start
         events=[json.loads(line) for line in completed.stdout.splitlines()]
         (output/(name+"-events.jsonl")).write_text(completed.stdout)
         (output/(name+"-stderr.txt")).write_text(completed.stderr)
@@ -103,9 +116,11 @@ def main():
         core=result["processing"]["core_seconds"]
         record={"name":name,"diagnostic_only":diagnostic,"input_path":str(source),"reference_path":str(reference),
                 "reference_sha256":digest(reference),"corpus_manifest_sha256":digest(provenance),"worker":result,
-                "end_to_end_wall_seconds":time.perf_counter()-start,"input_quality":metrics(reference_audio,input_audio,rate,core),
+                "worker_subprocess_wall_seconds":worker_seconds,"input_quality":metrics(reference_audio,input_audio,rate,core),
                 "output_quality":metrics(reference_audio,estimate,rate,core)}
-        record["si_sdr_gain_db"]=[a-b for a,b in zip(record["output_quality"]["si_sdr_db"],record["input_quality"]["si_sdr_db"])]
+        if source_identity is not None:
+            record["corpus_source"]=source_identity
+        record["si_sdr_gain_db"]=[score_difference(a,b) for a,b in zip(record["output_quality"]["si_sdr_db"],record["input_quality"]["si_sdr_db"])]
         if backing:
             accompaniment,accompaniment_rate=sf.read(backing,dtype="float32",always_2d=True)
             estimated_accompaniment,estimated_rate=sf.read(result["outputs"]["accompaniment"],dtype="float32",always_2d=True)
@@ -121,16 +136,20 @@ def main():
                 record["intelligibility"][metric_name]={
                     "input":[float(stoi(reference_audio[:,channel],input_audio[:,channel],rate,extended=extended)) for channel in range(reference_audio.shape[1])],
                     "output":[float(stoi(reference_audio[:,channel],estimate[:,channel],rate,extended=extended)) for channel in range(reference_audio.shape[1])]}
+        record["evaluation_wall_seconds"]=time.perf_counter()-evaluation_start
         report["runs"].append(record)
-        print(json.dumps({"case":name,"completed":index+1,"total":len(records),"si_sdr_gain_db":record["si_sdr_gain_db"]}),flush=True)
+        print(json.dumps({"case":name,"completed":index+1,"total":len(records),"si_sdr_gain_db":record["si_sdr_gain_db"]},allow_nan=False),flush=True)
     primary=[run for run in report["runs"] if not run["diagnostic_only"] and not run["name"].endswith("-clean")]
     gains=[gain for run in primary for gain in run["si_sdr_gain_db"]]
-    report["summary"]={"cases":len(records),"primary_cases":len(primary),"median_si_sdr_gain_db":statistics.median(gains) if gains else None,
-                       "min_si_sdr_gain_db":min(gains) if gains else None,"max_si_sdr_gain_db":max(gains) if gains else None,
+    gain_summary=score_summary(gains)
+    report["summary"]={"cases":len(records),"primary_cases":len(primary),"median_si_sdr_gain_db":gain_summary["median"],
+                       "min_si_sdr_gain_db":gain_summary["min"],"max_si_sdr_gain_db":gain_summary["max"],
+                       "si_sdr_gain_counts":{key:value for key,value in gain_summary.items() if key.endswith("_count")},
                        "median_warm_rtf":statistics.median(run["worker"]["metrics"]["real_time_factor"] for run in report["runs"])}
+    report["timing_summary"]=timing_summary(report["runs"])
     with (output/"report.json").open("x") as stream:
         json.dump(report,stream,indent=2,allow_nan=False)
-    print(json.dumps({"report":str(output/"report.json"),"summary":report["summary"]}),flush=True)
+    print(json.dumps({"report":str(output/"report.json"),"summary":report["summary"],"timing_summary":report["timing_summary"]},allow_nan=False),flush=True)
 
 if __name__=="__main__":
     main()

@@ -6,14 +6,33 @@ level-normalized for scoring). SI-SDR is reported separately from absolute error
 """
 import argparse
 import json
-import math
 from pathlib import Path
-import resource
 import statistics
 import subprocess
 import sys
 import time
-from worker import digest, read_json
+if __package__:
+    from .worker import digest, read_json
+    from ..audio_quality.metric_core import db_ratio, projection_metrics, score_difference
+else:
+    from worker import digest, read_json
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from audio_quality.metric_core import db_ratio, projection_metrics, score_difference
+
+
+TIMING_BOUNDARIES = {
+    "worker_subprocess_wall_seconds": "Immediately before subprocess.run through its return; includes process startup, worker work and captured pipe collection only.",
+    "evaluation_wall_seconds": "Before per-sample reference/input reads and request creation through completed sample record construction, after all worker output/event reads, artifact writes, hashes and quality/intelligibility scoring. Excludes appending the completed record, progress printing, corpus summaries and final aggregate report serialization/write; excludes one-time CLI/model/corpus setup.",
+}
+
+
+def timing_summary(runs):
+    summary = {}
+    for field in TIMING_BOUNDARIES:
+        times = [run[field] for run in runs]
+        summary[field] = {"median":statistics.median(times), "min":min(times), "max":max(times),
+                          "stdev":statistics.stdev(times) if len(times)>1 else 0.0}
+    return summary
 
 
 def metrics(reference, estimate, rate, core_seconds=24):
@@ -23,19 +42,16 @@ def metrics(reference, estimate, rate, core_seconds=24):
     ref = reference.astype("float64")
     est = estimate.astype("float64")
     error = est-ref
-    def db(value):
-        return 10*math.log10(max(float(value), 1e-30))
-    results = {"absolute_snr_db":db(np.sum(ref**2))-db(np.sum(error**2)),
+    results = {"absolute_snr_db":db_ratio(float(np.sum(ref**2)), float(np.sum(error**2))),
                "rms_error":float(np.sqrt(np.mean(error**2))),
                "peak_error":float(np.max(np.abs(error))),
                "reference_rms":float(np.sqrt(np.mean(ref**2))),
                "output_rms":float(np.sqrt(np.mean(est**2))),
                "output_peak":float(np.max(np.abs(est))), "si_sdr_db":[], "reference_gain":[]}
     for channel in range(ref.shape[1]):
-        target, output = ref[:,channel]-ref[:,channel].mean(), est[:,channel]-est[:,channel].mean()
-        projection = target * (np.dot(output,target)/max(np.dot(target,target),1e-30))
-        results["reference_gain"].append(float(np.dot(output,target)/max(np.dot(target,target),1e-30)))
-        results["si_sdr_db"].append(db(np.sum(projection**2))-db(np.sum((output-projection)**2)))
+        score, gain = projection_metrics(ref[:,channel], est[:,channel])
+        results["reference_gain"].append(gain)
+        results["si_sdr_db"].append(score)
     if ref.shape[1] == 2:
         def coherence(audio):
             left, right = audio[:,0], audio[:,1]
@@ -59,8 +75,8 @@ def metrics(reference, estimate, rate, core_seconds=24):
         if active.any():
             weak = active & (energies <= np.quantile(energies[active],0.2))
             target, residual = ref_blocks[weak],err_blocks[weak]
-            results["weak_active_frame_snr_db"] = db(np.sum(target**2))-db(np.sum(residual**2))
-            results["weak_active_frame_reference_gain"] = float(np.sum((target+residual)*target)/max(np.sum(target**2),1e-30))
+            results["weak_active_frame_snr_db"] = db_ratio(float(np.sum(target**2)), float(np.sum(residual**2)))
+            results["weak_active_frame_reference_gain"] = float(np.sum((target+residual)*target)/np.sum(target**2))
     # Absolute alignment check on error cross-correlation, bounded to +/- 50 ms.
     from scipy.signal import correlate, correlation_lags
     count = min(len(ref), rate*60)
@@ -88,20 +104,23 @@ def main():
     request = read_json(args.request)
     base = Path(request["output_dir"])
     report = {"command":sys.argv,"request":request,"corpus_manifest_sha256":digest(args.corpus_manifest),
-              "corpus_provenance":read_json(args.corpus_manifest),"reference_sha256":digest(args.reference),"runs":[]}
-    reference, rate = sf.read(args.reference, dtype="float32", always_2d=True)
-    noisy, source_rate = sf.read(request["input_path"], dtype="float32", always_2d=True)
-    if rate != source_rate:
-        raise ValueError("reference must be at source rate")
-    report["input_quality"] = metrics(reference, noisy, rate)
+              "corpus_provenance":read_json(args.corpus_manifest),"runs":[],"timing_boundaries":TIMING_BOUNDARIES}
     for index in range(args.repeats):
+        evaluation_start = time.perf_counter()
+        reference, rate = sf.read(args.reference, dtype="float32", always_2d=True)
+        noisy, source_rate = sf.read(request["input_path"], dtype="float32", always_2d=True)
+        if rate != source_rate:
+            raise ValueError("reference must be at source rate")
+        report["reference_sha256"] = digest(args.reference)
+        report["input_quality"] = metrics(reference, noisy, rate)
         run_request = {**request,"output_dir":str(base.with_name(base.name+"-run-"+str(index)))}
         request_path = base.parent / (base.name+"-request-"+str(index)+".json")
         with request_path.open("x") as stream:
             json.dump(run_request, stream)
-        start = time.perf_counter()
+        worker_start = time.perf_counter()
         completed = subprocess.run([sys.executable, str(Path(__file__).with_name("worker.py")), "--request", str(request_path)],
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        worker_seconds = time.perf_counter()-worker_start
         events = [json.loads(line) for line in completed.stdout.splitlines()]
         if completed.returncode or not events or events[-1]["type"] != "complete" or events[-1].get("version") != 2 or events[-1].get("task_id") != request["task_id"]:
             raise RuntimeError(json.dumps({"exit":completed.returncode,"events":events,"stderr":completed.stderr}))
@@ -111,9 +130,9 @@ def main():
         output, output_rate = sf.read(result["outputs"][stem], dtype="float32", always_2d=True)
         if output_rate != rate:
             raise ValueError("output rate changed")
-        result["end_to_end_wall_seconds"] = time.perf_counter()-start
+        result["worker_subprocess_wall_seconds"] = worker_seconds
         result["reference_quality"] = metrics(reference, output, rate, result["processing"]["core_seconds"])
-        result["si_sdr_gain_db"] = [a-b for a,b in zip(result["reference_quality"]["si_sdr_db"],report["input_quality"]["si_sdr_db"])]
+        result["si_sdr_gain_db"] = [score_difference(a,b) for a,b in zip(result["reference_quality"]["si_sdr_db"],report["input_quality"]["si_sdr_db"])]
         if args.upstream_reference:
             upstream, upstream_rate = sf.read(args.upstream_reference, dtype="float32", always_2d=True)
             if upstream_rate != rate:
@@ -128,15 +147,14 @@ def main():
                 if backing_rate != rate:
                     raise ValueError("accompaniment reference rate changed")
                 result["accompaniment_quality"] = metrics(backing, accompaniment, rate, result["processing"]["core_seconds"])
+        result["evaluation_wall_seconds"] = time.perf_counter()-evaluation_start
         report["runs"].append(result)
-    times = [run["end_to_end_wall_seconds"] for run in report["runs"]]
-    report["wall_seconds_summary"] = {"median":statistics.median(times),"min":min(times),"max":max(times),
-                                      "stdev":statistics.stdev(times) if len(times)>1 else 0.0}
+    report["timing_summary"] = timing_summary(report["runs"])
     report["human_listening"] = "not performed; objective scores do not establish listening approval"
     with args.report.open("x") as stream:
         json.dump(report, stream, indent=2, allow_nan=False)
-    print(json.dumps({"report":str(args.report),"summary":report["wall_seconds_summary"],
-                      "si_sdr_gain_db":report["runs"][0]["si_sdr_gain_db"]}))
+    print(json.dumps({"report":str(args.report),"summary":report["timing_summary"],
+                      "si_sdr_gain_db":report["runs"][0]["si_sdr_gain_db"]}, allow_nan=False))
 
 if __name__ == "__main__":
     main()
