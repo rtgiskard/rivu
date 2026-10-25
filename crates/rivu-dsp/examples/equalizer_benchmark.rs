@@ -75,6 +75,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut results = Vec::new();
     for (rate, channels, bands, stages, enabled, taps) in [
         (48_000, 2, 0, 1, false, 0),
+        (48_000, 2, 0, 1, false, 513),
         (48_000, 2, 1, 1, true, 0),
         (48_000, 2, 10, 1, true, 0),
         (48_000, 2, 32, 1, true, 0),
@@ -111,11 +112,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .collect(),
         };
         let prepared = Instant::now();
+        ALLOCATIONS.store(0, Ordering::Relaxed);
+        BYTES.store(0, Ordering::Relaxed);
+        COUNTING.store(true, Ordering::Relaxed);
         let mut eq = if taps == 0 {
             Processor::Iir(Equalizer::new(&config, rate, channels)?)
         } else {
             Processor::Fir(FirEqualizer::new(&config, rate, channels, taps)?)
         };
+        COUNTING.store(false, Ordering::Relaxed);
+        let preparation_allocations = ALLOCATIONS.load(Ordering::Relaxed);
+        let preparation_allocated_bytes = BYTES.load(Ordering::Relaxed);
         let preparation_ns = prepared.elapsed().as_nanos();
         let seed: Vec<f32> = (0..block_frames as usize * channels)
             .map(|index| {
@@ -171,6 +178,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "observed_blocks_over_deadline":block_times.iter().filter(|&&ns| ns as f64 > f64::from(block_frames) / f64::from(rate) * 1e9).count(),
             "repetitions":repetitions,"audio_seconds_per_repeat":audio_seconds,
             "preparation_ns_single_sample":preparation_ns,
+            "preparation_allocations":preparation_allocations,
+            "preparation_allocated_bytes":preparation_allocated_bytes,
             "process_ns_min":elapsed[0],"process_ns_median":median_ns,
             "process_ns_p95":percentile(&elapsed,0.95),"process_ns_max":elapsed[elapsed.len()-1],
             "worst_observed_block_ns":worst_block_ns,

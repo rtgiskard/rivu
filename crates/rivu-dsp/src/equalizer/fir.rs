@@ -22,6 +22,7 @@ pub struct FirEqualizer {
     channels: usize,
     taps: usize,
     bypass: bool,
+    poisoned: bool,
     partitions: usize,
     position: usize,
     history_position: usize,
@@ -33,8 +34,8 @@ pub struct FirEqualizer {
     work: Vec<Complex<f32>>,
     sum: Vec<Complex<f32>>,
     scratch: Vec<Complex<f32>>,
-    forward: Arc<dyn Fft<f32>>,
-    inverse: Arc<dyn Fft<f32>>,
+    forward: Option<Arc<dyn Fft<f32>>>,
+    inverse: Option<Arc<dyn Fft<f32>>>,
 }
 
 impl FirEqualizer {
@@ -50,19 +51,25 @@ impl FirEqualizer {
             channels <= MAX_CHANNELS,
             "FIR supports at most {MAX_CHANNELS} channels"
         );
-        let mut planner = FftPlanner::new();
-        let forward = planner.plan_fft_forward(FFT_SIZE);
-        let inverse = planner.plan_fft_inverse(FFT_SIZE);
-        let scratch_len = forward
-            .get_inplace_scratch_len()
-            .max(inverse.get_inplace_scratch_len());
         let bypass = !config.enabled;
+        let (forward, inverse, scratch_len) = if bypass {
+            (None, None, 0)
+        } else {
+            let mut planner = FftPlanner::new();
+            let forward = planner.plan_fft_forward(FFT_SIZE);
+            let inverse = planner.plan_fft_inverse(FFT_SIZE);
+            let scratch_len = forward
+                .get_inplace_scratch_len()
+                .max(inverse.get_inplace_scratch_len());
+            (Some(forward), Some(inverse), scratch_len)
+        };
         let partitions = if bypass { 0 } else { taps.div_ceil(PARTITION) };
         let spectra_len = channels * partitions * FFT_SIZE;
         let mut equalizer = Self {
             channels,
             taps,
             bypass,
+            poisoned: false,
             partitions,
             position: 0,
             history_position: 0,
@@ -71,8 +78,8 @@ impl FirEqualizer {
             input: vec![0.0; if bypass { 0 } else { channels * PARTITION }],
             output: vec![0.0; if bypass { 0 } else { channels * PARTITION }],
             overlap: vec![0.0; if bypass { 0 } else { channels * PARTITION }],
-            work: vec![Complex::default(); FFT_SIZE],
-            sum: vec![Complex::default(); FFT_SIZE],
+            work: vec![Complex::default(); if bypass { 0 } else { FFT_SIZE }],
+            sum: vec![Complex::default(); if bypass { 0 } else { FFT_SIZE }],
             scratch: vec![Complex::default(); scratch_len],
             forward,
             inverse,
@@ -91,7 +98,10 @@ impl FirEqualizer {
                     }
                     equalizer
                         .forward
+                        .as_ref()
+                        .expect("active FIR has FFT plans")
                         .process_with_scratch(&mut equalizer.work, &mut equalizer.scratch);
+                    ensure!(finite_complex(&equalizer.work), "FIR kernel FFT overflow");
                     let start = (channel * partitions + partition) * FFT_SIZE;
                     equalizer.kernels[start..start + FFT_SIZE].copy_from_slice(&equalizer.work);
                 }
@@ -118,6 +128,7 @@ impl FirEqualizer {
     }
 
     pub fn reset(&mut self) {
+        self.poisoned = false;
         self.position = 0;
         self.history_position = 0;
         self.histories.fill(Complex::default());
@@ -128,11 +139,14 @@ impl FirEqualizer {
 
     /// Whole frames only. Invalid active input is rejected before mutation.
     /// Disabled EQ preserves every input bit, including non-finite payloads.
+    /// Numerical failure may advance a finite prefix and requires reset; no
+    /// invalid FFT, convolution, or overlap-add sample is published.
     pub fn process_interleaved(&mut self, samples: &mut [f32]) -> Result<()> {
         ensure!(
             samples.len().is_multiple_of(self.channels),
             "incomplete FIR frame"
         );
+        ensure!(!self.poisoned, "FIR numerical failure requires reset");
         if self.bypass {
             return Ok(());
         }
@@ -148,14 +162,17 @@ impl FirEqualizer {
             }
             self.position += 1;
             if self.position == PARTITION {
-                self.convolve_partition();
+                if let Err(error) = self.convolve_partition() {
+                    self.poisoned = true;
+                    return Err(error);
+                }
                 self.position = 0;
             }
         }
         Ok(())
     }
 
-    fn convolve_partition(&mut self) {
+    fn convolve_partition(&mut self) -> Result<()> {
         for channel in 0..self.channels {
             self.work.fill(Complex::default());
             for (bin, &sample) in self
@@ -166,7 +183,10 @@ impl FirEqualizer {
                 bin.re = sample;
             }
             self.forward
+                .as_ref()
+                .expect("active FIR has FFT plans")
                 .process_with_scratch(&mut self.work, &mut self.scratch);
+            ensure!(finite_complex(&self.work), "FIR input FFT overflow");
             let start = (channel * self.partitions + self.history_position) * FFT_SIZE;
             self.histories[start..start + FFT_SIZE].copy_from_slice(&self.work);
             self.sum.fill(Complex::default());
@@ -182,18 +202,36 @@ impl FirEqualizer {
                     .zip(&self.kernels[kernel..kernel + FFT_SIZE])
                 {
                     *sum += *signal * *filter;
+                    ensure!(
+                        sum.re.is_finite() && sum.im.is_finite(),
+                        "FIR convolution overflow"
+                    );
                 }
             }
             self.inverse
+                .as_ref()
+                .expect("active FIR has FFT plans")
                 .process_with_scratch(&mut self.sum, &mut self.scratch);
+            ensure!(finite_complex(&self.sum), "FIR inverse FFT overflow");
             for index in 0..PARTITION {
                 let output = channel * PARTITION + index;
                 self.output[output] = self.sum[index].re / FFT_SIZE as f32 + self.overlap[output];
                 self.overlap[output] = self.sum[index + PARTITION].re / FFT_SIZE as f32;
+                ensure!(
+                    self.output[output].is_finite() && self.overlap[output].is_finite(),
+                    "FIR overlap-add overflow"
+                );
             }
         }
         self.history_position = (self.history_position + 1) % self.partitions;
+        Ok(())
     }
+}
+
+fn finite_complex(values: &[Complex<f32>]) -> bool {
+    values
+        .iter()
+        .all(|value| value.re.is_finite() && value.im.is_finite())
 }
 
 fn design_kernel(
@@ -324,5 +362,64 @@ mod tests {
         assert!(many.process_interleaved(&mut invalid).is_err());
         assert_eq!(invalid[0], 1.0);
         assert!(FirEqualizer::new(&config, 48_000, 1, 1024).is_err());
+    }
+
+    #[test]
+    fn disabled_fir_prepares_no_plans_or_convolution_storage_and_preserves_bits() {
+        let mut fir = FirEqualizer::new(&EqualizerConfig::default(), 48_000, 2, 513).unwrap();
+        assert!(fir.forward.is_none() && fir.inverse.is_none());
+        let capacity = fir.kernels.capacity()
+            + fir.histories.capacity()
+            + fir.input.capacity()
+            + fir.output.capacity()
+            + fir.overlap.capacity()
+            + fir.work.capacity()
+            + fir.sum.capacity()
+            + fir.scratch.capacity();
+        assert_eq!(capacity, 0);
+        assert_eq!((fir.latency_frames(), fir.tail_frames()), (0, 0));
+        let mut samples = [
+            f32::from_bits(0x7fc0_1234),
+            f32::NEG_INFINITY,
+            -0.0,
+            f32::MAX,
+        ];
+        let bits = samples.map(f32::to_bits);
+        fir.process_interleaved(&mut samples).unwrap();
+        assert_eq!(samples.map(f32::to_bits), bits);
+    }
+
+    #[test]
+    fn finite_fft_and_convolution_overflows_require_reset_without_invalid_publication() {
+        for (gain, constant) in [(0.0, true), (48.0, false)] {
+            let config = EqualizerConfig {
+                enabled: true,
+                preamp_db: gain / 2.0,
+                output_gain_db: gain / 2.0,
+                ..Default::default()
+            };
+            let mut fir = FirEqualizer::new(&config, 48_000, 1, 513).unwrap();
+            let mut input = vec![0.0; PARTITION * 2];
+            if constant {
+                input.fill(f32::MAX);
+            } else {
+                input[0] = f32::MAX / 4.0;
+            }
+            assert!(fir.process_interleaved(&mut input).is_err());
+            assert!(input.iter().all(|sample| sample.is_finite()));
+            let mut next = [0.25; PARTITION];
+            assert!(fir.process_interleaved(&mut next).is_err());
+            assert_eq!(next, [0.25; PARTITION]);
+            fir.reset();
+            let mut fresh = FirEqualizer::new(&config, 48_000, 1, 513).unwrap();
+            let mut expected = vec![0.125; 2048];
+            let mut actual = expected.clone();
+            fir.process_interleaved(&mut actual).unwrap();
+            fresh.process_interleaved(&mut expected).unwrap();
+            assert_eq!(actual, expected);
+            if gain > 0.0 {
+                assert!(actual.iter().any(|sample| *sample > 1.0));
+            }
+        }
     }
 }

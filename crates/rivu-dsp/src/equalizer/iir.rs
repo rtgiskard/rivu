@@ -349,6 +349,7 @@ pub struct Equalizer {
     pending: Option<usize>,
     fade_position: usize,
     fade_frames: usize,
+    failed_sample: Option<usize>,
 }
 
 impl Equalizer {
@@ -368,6 +369,7 @@ impl Equalizer {
             pending: None,
             fade_position: 0,
             fade_frames: (sample_rate as usize * TRANSITION_MS as usize / 1_000).max(2),
+            failed_sample: None,
         })
     }
 
@@ -415,6 +417,7 @@ impl Equalizer {
     /// recently requested config. Use at seek/discontinuity before feeding new
     /// audio; audio from before reset can never leak into the new timeline.
     pub fn reset(&mut self) {
+        self.failed_sample = None;
         if let Some(pending) = self.pending.take() {
             self.active = pending;
         }
@@ -440,13 +443,16 @@ impl Equalizer {
     /// every sample bit (including signed zero and non-finite payloads).
     /// Invalid lengths and non-finite active inputs fail before mutation.
     /// Output overflow is reported, never limited or replaced with silence;
-    /// the already processed prefix/state may have advanced on that error.
+    /// the processed prefix may have advanced. Reset is required after overflow.
     pub fn process(&mut self, samples: &mut [f32]) -> Result<(), EqualizerError> {
         if !samples.len().is_multiple_of(self.channels) {
             return Err(EqualizerError::IncompleteFrame {
                 samples: samples.len(),
                 channels: self.channels,
             });
+        }
+        if let Some(sample) = self.failed_sample {
+            return Err(EqualizerError::NonFiniteOutput { sample });
         }
         if self.retiring.is_none() && !self.banks[self.active].enabled {
             return Ok(());
@@ -492,6 +498,7 @@ impl Equalizer {
                 };
                 let output = output as f32;
                 if !output.is_finite() {
+                    self.failed_sample = Some(frame_index * self.channels + channel);
                     return Err(EqualizerError::NonFiniteOutput {
                         sample: frame_index * self.channels + channel,
                     });
@@ -525,6 +532,7 @@ impl Equalizer {
                 };
                 let output = output as f32;
                 if !output.is_finite() {
+                    self.failed_sample = Some(frame_index * self.channels + channel);
                     return Err(EqualizerError::NonFiniteOutput {
                         sample: frame_index * self.channels + channel,
                     });
@@ -1262,6 +1270,35 @@ mod tests {
                 actual, expected,
                 "scalar equivalence for {channels} channels"
             );
+        }
+    }
+
+    #[test]
+    fn overflow_stops_publication_and_requires_reset_in_every_kernel() {
+        let settings = EqualizerConfig {
+            enabled: true,
+            preamp_db: 24.0,
+            output_gain_db: 24.0,
+            ..Default::default()
+        };
+        for channels in [1, 2, 6] {
+            let mut eq = Equalizer::new(&settings, 48_000, channels).unwrap();
+            let mut audio = vec![0.0; channels * 3];
+            audio[channels] = f32::MAX;
+            assert!(
+                matches!(eq.process(&mut audio), Err(EqualizerError::NonFiniteOutput { sample }) if sample == channels)
+            );
+            assert!(audio.iter().all(|sample| sample.is_finite()));
+            let mut next = vec![0.25; channels];
+            let original = next.clone();
+            assert!(eq.process(&mut next).is_err());
+            assert_eq!(next, original);
+            eq.reset();
+            eq.process(&mut next).unwrap();
+            let mut fresh = Equalizer::new(&settings, 48_000, channels).unwrap();
+            let mut expected = original;
+            fresh.process(&mut expected).unwrap();
+            assert_eq!(next, expected);
         }
     }
 }

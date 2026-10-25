@@ -198,7 +198,7 @@ impl fmt::Display for EqualizerError {
             Self::NonFiniteInput { sample } => write!(f, "EQ input sample {sample} is not finite"),
             Self::NonFiniteOutput { sample } => write!(
                 f,
-                "EQ output sample {sample} is not representable as finite f32; reduce gain"
+                "EQ output sample {sample} is not representable as finite f32; reduce gain and reset EQ before reuse"
             ),
         }
     }

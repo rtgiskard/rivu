@@ -550,6 +550,9 @@ result. Source files are not modified.
 * Allocation, channel count, block work, retained results and scratch storage have
   explicit finite bounds. Long processing stays outside the device callback.
 
+  Numerical failure can advance a finite prefix of DSP history; reset the processor
+  before reuse and discard the failed job's partial output. Failed noise-profile
+  capture cannot publish a profile and also requires reset before reuse.
 === Timeline and source identity
 
 Graph execution retains full causal intermediate context: FIR ringing, denoiser
@@ -593,6 +596,13 @@ input/output gain, presets and response inspection. Graphical and numerical
 editing operate on one authoritative filter configuration.
 
 Numerical acceptance is based on independent transfer-function evaluation and
+Disabled FIR constructs no FFT plans or convolution storage. Classical restoration
+prepares only the required path: exact bypass for zero Wet or an entirely disabled
+chain, time-domain state for hum/repair without spectral denoising, and FFT/STFT
+storage only for spectral modes. Configuration and required noise profiles are
+still validated on bypass. Hum-only processing has no lookahead or dry-alignment
+queue; partial-wet delayed processing retains only the alignment it needs.
+
 processed signals, not source-text or copied-value tests:
 
 * Disabled processing is sample-exact and does not allocate in processing.

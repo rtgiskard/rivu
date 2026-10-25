@@ -3,11 +3,40 @@ use anyhow::{Context, Result, ensure};
 use rivu_dsp::denoise::{DenoiseConfig, DenoiseMode, Denoiser, ProfileCollector};
 use serde_json::json;
 use std::{
+    alloc::{GlobalAlloc, Layout, System},
     fs::{self, OpenOptions},
     io::BufWriter,
     path::Path,
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
     time::Instant,
 };
+
+// Same opt-in allocator accounting as equalizer_benchmark; WAV I/O is excluded.
+struct Counted;
+static COUNTING: AtomicBool = AtomicBool::new(false);
+static ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
+static BYTES: AtomicU64 = AtomicU64::new(0);
+unsafe impl GlobalAlloc for Counted {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        if COUNTING.load(Ordering::Relaxed) {
+            ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+            BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
+        }
+        unsafe { System.alloc(layout) }
+    }
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        unsafe { System.dealloc(ptr, layout) }
+    }
+    unsafe fn realloc(&self, ptr: *mut u8, old: Layout, size: usize) -> *mut u8 {
+        if COUNTING.load(Ordering::Relaxed) {
+            ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+            BYTES.fetch_add(size as u64, Ordering::Relaxed);
+        }
+        unsafe { System.realloc(ptr, old, size) }
+    }
+}
+#[global_allocator]
+static ALLOCATOR: Counted = Counted;
 
 fn main() -> Result<()> {
     let args: Vec<_> = std::env::args_os().collect();
@@ -59,7 +88,11 @@ fn main() -> Result<()> {
         None
     };
     let preparation = Instant::now();
+    COUNTING.store(true, Ordering::Relaxed);
     let mut denoiser = Denoiser::new(spec.sample_rate, channels, config.clone(), profile)?;
+    COUNTING.store(false, Ordering::Relaxed);
+    let preparation_allocations = ALLOCATIONS.swap(0, Ordering::Relaxed);
+    let preparation_allocated_bytes = BYTES.swap(0, Ordering::Relaxed);
     let preparation_ns = preparation.elapsed().as_nanos();
     let destination = Path::new(&args[2]);
     let file = OpenOptions::new()
@@ -78,7 +111,9 @@ fn main() -> Result<()> {
             input.push(sample?);
             if input.len() == 4096 * channels {
                 let start = Instant::now();
+                COUNTING.store(true, Ordering::Relaxed);
                 denoiser.process_block(&input, &mut output, &mut never_cancel)?;
+                COUNTING.store(false, Ordering::Relaxed);
                 process_ns += start.elapsed().as_nanos();
                 for &sample in &output {
                     writer.write_sample(sample)?;
@@ -90,7 +125,9 @@ fn main() -> Result<()> {
         }
         if !input.is_empty() {
             let start = Instant::now();
+            COUNTING.store(true, Ordering::Relaxed);
             denoiser.process_block(&input, &mut output, &mut never_cancel)?;
+            COUNTING.store(false, Ordering::Relaxed);
             process_ns += start.elapsed().as_nanos();
             for &sample in &output {
                 writer.write_sample(sample)?;
@@ -99,7 +136,9 @@ fn main() -> Result<()> {
             output.clear();
         }
         let start = Instant::now();
+        COUNTING.store(true, Ordering::Relaxed);
         denoiser.finish(&mut output, &mut never_cancel)?;
+        COUNTING.store(false, Ordering::Relaxed);
         process_ns += start.elapsed().as_nanos();
         for &sample in &output {
             writer.write_sample(sample)?;
@@ -114,6 +153,10 @@ fn main() -> Result<()> {
             json!({"schema":1,"input":args[1].to_string_lossy(),"output":args[2].to_string_lossy(),
             "sample_rate":spec.sample_rate,"channels":channels,"frames":output_samples / channels as u64,
             "config":config,"preparation_ns":preparation_ns,"process_ns":process_ns,
+            "preparation_allocations":preparation_allocations,
+            "preparation_allocated_bytes":preparation_allocated_bytes,
+            "process_allocations":ALLOCATIONS.load(Ordering::Relaxed),
+            "process_allocated_bytes":BYTES.load(Ordering::Relaxed),
             "render_wall_ns":wall.elapsed().as_nanos(),
             "measurement":"single run; process excludes WAV I/O; profile capture excluded; repeat externally for timing comparisons"}),
         )

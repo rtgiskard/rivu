@@ -84,7 +84,7 @@ impl ProfileCollector {
     }
 
     pub fn push_block(&mut self, input: &[f32], cancel: &mut impl FnMut() -> bool) -> Result<()> {
-        ensure!(!self.poisoned, "cancelled noise profile must be reset");
+        ensure!(!self.poisoned, "noise profile failure requires reset");
         let frames = validate_block(input, self.channels)?;
         ensure!(
             frames as u64 <= self.max_frames - self.captured_frames,
@@ -104,7 +104,7 @@ impl ProfileCollector {
                     self.poisoned = true;
                     bail!("noise profile capture cancelled");
                 }
-                self.observe(self.size);
+                self.observe(self.size)?;
                 let hop = self.size / 2;
                 self.input.copy_within(hop * self.channels.., 0);
                 self.filled -= hop;
@@ -113,7 +113,7 @@ impl ProfileCollector {
         Ok(())
     }
 
-    fn observe(&mut self, valid: usize) {
+    fn observe(&mut self, valid: usize) -> Result<()> {
         // Center partial selections in the window; normalize using only actual
         // selected samples, never the zero-padding support.
         let offset = (self.size - valid) / 2;
@@ -122,8 +122,9 @@ impl ProfileCollector {
             .map(|x| x * x)
             .sum();
         if energy <= MIN_POWER {
-            return;
+            return Ok(());
         }
+        self.poisoned = true;
         let scale = (self.size as f32 / 2.0) / energy / self.channels as f32;
         for ch in 0..self.channels {
             for i in 0..self.size {
@@ -138,30 +139,38 @@ impl ProfileCollector {
             }
             self.fft
                 .process_with_scratch(&mut self.spectrum, &mut self.scratch);
+            ensure!(
+                self.spectrum
+                    .iter()
+                    .all(|bin| bin.re.is_finite() && bin.im.is_finite()),
+                "noise profile FFT overflow"
+            );
             for (sum, bin) in self.power.iter_mut().zip(&self.spectrum) {
-                *sum += f64::from(bin.norm_sqr() * scale);
+                let power = bin.norm_sqr() * scale;
+                ensure!(power.is_finite(), "noise profile power overflow");
+                *sum += f64::from(power);
+                ensure!(sum.is_finite(), "noise profile accumulation overflow");
             }
         }
         self.observations += 1;
+        self.poisoned = false;
+        Ok(())
     }
 
     pub fn finish(mut self) -> Result<NoiseProfile> {
-        ensure!(
-            !self.poisoned,
-            "cancelled noise profile cannot be published"
-        );
+        ensure!(!self.poisoned, "failed noise profile cannot be published");
         ensure!(
             self.captured_frames > 0,
             "select a nonempty noise-only segment first"
         );
         if self.observations == 0 || self.filled > self.size / 2 {
-            self.observe(self.filled);
+            self.observe(self.filled)?;
         }
         ensure!(
             self.observations > 0,
             "noise segment has no measurable window support"
         );
-        Ok(NoiseProfile {
+        let profile = NoiseProfile {
             sample_rate: self.sample_rate,
             channels: self.channels,
             fft_size: self.size,
@@ -171,7 +180,9 @@ impl ProfileCollector {
                 .iter()
                 .map(|x| (*x / self.observations as f64) as f32)
                 .collect(),
-        })
+        };
+        profile.validate(self.sample_rate, self.channels, self.size)?;
+        Ok(profile)
     }
 
     pub fn reset(&mut self) {
@@ -247,27 +258,27 @@ impl ImpulseRepair {
         }
     }
 
-    fn push(&mut self, frame: &[f32], final_frames: Option<u64>) -> bool {
+    fn push(&mut self, frame: &[f32], final_frames: Option<u64>) -> Result<bool> {
         let c = self.channels;
         self.data[self.filled * c..(self.filled + 1) * c].copy_from_slice(frame);
         self.filled += 1;
         if self.filled < 2 * self.radius + 1 {
-            return false;
+            return Ok(false);
         }
         let interior = self.processed >= self.radius as u64
             && final_frames.is_none_or(|total| self.processed + (self.radius as u64) < total);
         if interior {
-            self.repair();
+            self.repair()?;
         }
         self.frame
             .copy_from_slice(&self.data[self.radius * c..(self.radius + 1) * c]);
         self.data.copy_within(c.., 0);
         self.filled -= 1;
         self.processed += 1;
-        true
+        Ok(true)
     }
 
-    fn repair(&mut self) {
+    fn repair(&mut self) -> Result<()> {
         let r = self.radius;
         let c = self.channels;
         let floor = self.floor;
@@ -284,9 +295,17 @@ impl ImpulseRepair {
                 differences[count] = (self.data[i * c + ch] - self.data[(i - 1) * c + ch]).abs();
                 count += 1;
             }
+            ensure!(
+                differences[..count].iter().all(|value| value.is_finite()),
+                "denoise repair difference overflow"
+            );
             differences[..count].sort_unstable_by(f32::total_cmp);
             let scale = differences[count / 2].max(floor);
             let jump = (center - left).abs();
+            ensure!(
+                jump.is_finite() && (self.config.threshold * scale).is_finite(),
+                "denoise repair threshold overflow"
+            );
             if jump <= self.config.threshold * scale {
                 continue;
             }
@@ -294,22 +313,35 @@ impl ImpulseRepair {
                 let right = self.data[(r + width) * c + ch];
                 let allowed_drift =
                     self.config.threshold * scale + (1.0 - self.config.transient_protection) * jump;
+                ensure!(
+                    allowed_drift.is_finite() && (right - left).is_finite(),
+                    "denoise repair drift overflow"
+                );
                 if (right - left).abs() > allowed_drift {
                     continue;
                 }
                 // A sustained step or broad onset does not return to its local
                 // baseline within max_width and therefore cannot enter here.
                 let following = self.data[(r + width + 1) * c + ch];
+                ensure!(
+                    (following - right).is_finite(),
+                    "denoise repair context overflow"
+                );
                 if (following - right).abs() > self.config.threshold * scale {
                     continue;
                 }
                 for i in 0..width {
                     let t = (i + 1) as f32 / (width + 1) as f32;
                     self.data[(r + i) * c + ch] = left + t * (right - left);
+                    ensure!(
+                        self.data[(r + i) * c + ch].is_finite(),
+                        "denoise repair interpolation overflow"
+                    );
                 }
                 break;
             }
         }
+        Ok(())
     }
 
     fn reset(&mut self) {
@@ -342,8 +374,8 @@ pub struct Denoiser {
     filled: usize,
     frame_start: i64,
     window: Vec<f32>,
-    forward: Arc<dyn Fft<f32>>,
-    inverse: Arc<dyn Fft<f32>>,
+    forward: Option<Arc<dyn Fft<f32>>>,
+    inverse: Option<Arc<dyn Fft<f32>>>,
     spectra: Vec<Complex32>,
     scratch: Vec<Complex32>,
     overlap: Vec<f32>,
@@ -385,22 +417,37 @@ impl Denoiser {
         }
         let size = config.fft_size;
         let hop = size / 4;
-        let bins = size / 2 + 1;
-        let mut planner = FftPlanner::new();
-        let forward = planner.plan_fft_forward(size);
-        let inverse = planner.plan_fft_inverse(size);
-        let scratch_len = forward
-            .get_inplace_scratch_len()
-            .max(inverse.get_inplace_scratch_len());
-        let stationary_power =
-            10.0_f32.powf(config.stationary_noise_dbfs / 10.0) * size as f32 / 2.0;
-        let initial_noise = if config.mode == DenoiseMode::Profile {
+        let bypass = config.wet == 0.0
+            || (config.mode == DenoiseMode::Off && !config.hum.enabled && !config.impulse.enabled);
+        let spectral = !bypass && config.mode != DenoiseMode::Off;
+        let spectral_size = if spectral { size } else { 0 };
+        let bins = if spectral { size / 2 + 1 } else { 0 };
+        let (forward, inverse, scratch_len) = if spectral {
+            let mut planner = FftPlanner::new();
+            let forward = planner.plan_fft_forward(size);
+            let inverse = planner.plan_fft_inverse(size);
+            let scratch_len = forward
+                .get_inplace_scratch_len()
+                .max(inverse.get_inplace_scratch_len());
+            (Some(forward), Some(inverse), scratch_len)
+        } else {
+            (None, None, 0)
+        };
+        let initial_noise = if !spectral {
+            Vec::new()
+        } else if config.mode == DenoiseMode::Profile {
             profile.expect("profile validated above").power
         } else {
+            let stationary_power =
+                10.0_f32.powf(config.stationary_noise_dbfs / 10.0) * size as f32 / 2.0;
             vec![stationary_power; bins]
         };
-        let mut hum = Vec::new();
-        if config.hum.enabled {
+        let mut hum = Vec::with_capacity(if !bypass && config.hum.enabled {
+            config.hum.harmonics
+        } else {
+            0
+        });
+        if !bypass && config.hum.enabled {
             for harmonic in 1..=config.hum.harmonics {
                 hum.push(HumNotch::new(
                     sample_rate,
@@ -410,14 +457,10 @@ impl Denoiser {
                 ));
             }
         }
-        let impulse = config
-            .impulse
-            .enabled
+        let impulse = (!bypass && config.impulse.enabled)
             .then(|| ImpulseRepair::new(config.impulse.clone(), channels));
-        let bypass = config.wet == 0.0
-            || (config.mode == DenoiseMode::Off && !config.hum.enabled && !config.impulse.enabled);
         let coefficient = |ms: f32| {
-            if ms == 0.0 {
+            if !spectral || ms == 0.0 {
                 0.0
             } else {
                 (-(hop as f32) / (sample_rate as f32 * ms * 0.001)).exp()
@@ -425,12 +468,19 @@ impl Denoiser {
         };
         let attack = coefficient(config.attack_ms);
         let release = coefficient(config.release_ms);
-        let floor = 10.0_f32.powf(config.noise_floor_db / 20.0);
-        let adaptive_smoothing = (-(hop as f32) / (0.08 * sample_rate as f32)).exp();
-        let adaptive_base = (-(hop as f32) / (0.25 * sample_rate as f32)).exp();
-        // Only a partial wet blend needs an aligned copy of the original.
-        let dry_capacity = if !bypass && config.wet < 1.0 {
-            (size + 32) * channels
+        let (floor, adaptive_smoothing, adaptive_base) = if spectral {
+            (
+                10.0_f32.powf(config.noise_floor_db / 20.0),
+                (-(hop as f32) / (0.08 * sample_rate as f32)).exp(),
+                (-(hop as f32) / (0.25 * sample_rate as f32)).exp(),
+            )
+        } else {
+            (0.0, 0.0, 0.0)
+        };
+        // Retain dry samples only when a partial blend actually has lookahead.
+        let delay = spectral_size + impulse.as_ref().map_or(0, |repair| repair.radius);
+        let dry_capacity = if !bypass && config.wet < 1.0 && delay > 0 {
+            (delay + 1) * channels
         } else {
             0
         };
@@ -448,17 +498,17 @@ impl Denoiser {
             dry: VecDeque::with_capacity(dry_capacity),
             hum,
             impulse,
-            frame: vec![0.0; channels],
-            input: vec![0.0; size * channels],
-            filled: size / 2,
+            frame: vec![0.0; if bypass { 0 } else { channels }],
+            input: vec![0.0; spectral_size * channels],
+            filled: spectral_size / 2,
             frame_start: -(size as i64 / 2),
-            window: window(size),
+            window: if spectral { window(size) } else { Vec::new() },
             forward,
             inverse,
-            spectra: vec![Complex32::default(); size * channels],
+            spectra: vec![Complex32::default(); spectral_size * channels],
             scratch: vec![Complex32::default(); scratch_len],
-            overlap: vec![0.0; size * channels],
-            weights: vec![0.0; size],
+            overlap: vec![0.0; spectral_size * channels],
+            weights: vec![0.0; spectral_size],
             power: vec![0.0; bins],
             smoothed_power: vec![0.0; bins],
             noise: initial_noise.clone(),
@@ -539,60 +589,85 @@ impl Denoiser {
             self.emitted += frames as u64;
             return Ok(());
         }
+        // Any failure after consuming source invalidates the timeline until reset.
+        self.poisoned = true;
         for (index, frame) in input.chunks_exact(self.channels).enumerate() {
             if index % self.hop == 0 {
                 self.check_cancel(cancel)?;
             }
-            if self.config.wet < 1.0 {
+            if self.dry.capacity() > 0 {
                 self.dry.extend(frame.iter().copied());
             }
             self.received += 1;
             if let Some(repair) = &mut self.impulse {
-                if !repair.push(frame, None) {
+                if !repair.push(frame, None)? {
                     continue;
                 }
                 self.frame.copy_from_slice(&repair.frame);
             } else {
                 self.frame.copy_from_slice(frame);
             }
-            self.push_prepared(output, cancel)?;
+            self.push_prepared(output, cancel, self.impulse.is_none().then_some(frame))?;
         }
+        self.poisoned = false;
         Ok(())
     }
 
-    fn emit(&mut self, wet_frame: usize, output: &mut Vec<f32>) {
+    fn emit(
+        &mut self,
+        wet_frame: usize,
+        output: &mut Vec<f32>,
+        immediate_dry: Option<&[f32]>,
+    ) -> Result<()> {
         let wet = self.config.wet;
-        for ch in 0..self.channels {
+        let mut frame = [0.0; MAX_CHANNELS];
+        for (ch, sample) in frame[..self.channels].iter_mut().enumerate() {
             let processed = if self.config.mode == DenoiseMode::Off {
                 self.frame[ch]
             } else {
                 self.overlap[wet_frame * self.channels + ch] / self.weights[wet_frame]
             };
-            output.push(if wet == 1.0 {
+            ensure!(processed.is_finite(), "denoise output overflow");
+            *sample = if wet == 1.0 {
                 processed
             } else {
-                let dry = self
-                    .dry
-                    .pop_front()
-                    .expect("source frame precedes aligned output");
-                dry + wet * (processed - dry)
-            });
+                let dry = if let Some(dry) = immediate_dry {
+                    dry[ch]
+                } else {
+                    self.dry
+                        .pop_front()
+                        .expect("source precedes aligned output")
+                };
+                // A convex blend must not overflow merely because its f32
+                // difference would. This does not limit either signal.
+                (f64::from(dry) * (1.0 - f64::from(wet)) + f64::from(processed) * f64::from(wet))
+                    as f32
+            };
+            ensure!(sample.is_finite(), "denoise wet blend overflow");
         }
+        output.extend_from_slice(&frame[..self.channels]);
         self.emitted += 1;
+        Ok(())
     }
 
     fn push_prepared(
         &mut self,
         output: &mut Vec<f32>,
         cancel: &mut impl FnMut() -> bool,
+        immediate_dry: Option<&[f32]>,
     ) -> Result<()> {
         for ch in 0..self.channels {
             for notch in &mut self.hum {
                 self.frame[ch] = notch.process(ch, self.frame[ch]);
+                ensure!(self.frame[ch].is_finite(), "denoise hum filter overflow");
             }
         }
+        ensure!(
+            self.frame.iter().all(|sample| sample.is_finite()),
+            "denoise repair overflow"
+        );
         if self.config.mode == DenoiseMode::Off {
-            self.emit(0, output);
+            self.emit(0, output, immediate_dry)?;
             return Ok(());
         }
         self.input[self.filled * self.channels..(self.filled + 1) * self.channels]
@@ -613,21 +688,46 @@ impl Denoiser {
                 *bin = Complex32::new(self.input[i * self.channels + ch] * self.window[i], 0.0);
             }
             self.forward
+                .as_ref()
+                .expect("spectral denoise has FFT plans")
                 .process_with_scratch(spectrum, &mut self.scratch);
+            ensure!(
+                spectrum
+                    .iter()
+                    .all(|bin| bin.re.is_finite() && bin.im.is_finite()),
+                "denoise FFT overflow"
+            );
             for (power, bin) in self.power.iter_mut().zip(spectrum.iter()) {
                 *power += bin.norm_sqr() / self.channels as f32;
+                ensure!(power.is_finite(), "denoise spectral power overflow");
             }
         }
-        self.estimate_gains();
+        self.estimate_gains()?;
         for ch in 0..self.channels {
             let spectrum = &mut self.spectra[ch * self.size..(ch + 1) * self.size];
             for (bin, value) in spectrum.iter_mut().enumerate() {
                 *value *= self.gain[bin.min(self.size - bin)];
+                ensure!(
+                    value.re.is_finite() && value.im.is_finite(),
+                    "denoise spectral gain overflow"
+                );
             }
             self.inverse
+                .as_ref()
+                .expect("spectral denoise has FFT plans")
                 .process_with_scratch(spectrum, &mut self.scratch);
+            ensure!(
+                spectrum
+                    .iter()
+                    .all(|bin| bin.re.is_finite() && bin.im.is_finite()),
+                "denoise inverse FFT overflow"
+            );
             for (i, bin) in spectrum.iter().enumerate() {
                 self.overlap[i * self.channels + ch] += bin.re * self.window[i] / self.size as f32;
+                ensure!(
+                    self.overlap[i * self.channels + ch].is_finite(),
+                    "denoise overlap-add overflow"
+                );
             }
         }
         for (weight, window) in self.weights.iter_mut().zip(&self.window) {
@@ -636,7 +736,7 @@ impl Denoiser {
         for i in 0..self.hop {
             let position = self.frame_start + i as i64;
             if position >= 0 && (position as u64) < self.received && self.emitted < self.received {
-                self.emit(i, output);
+                self.emit(i, output, None)?;
             }
         }
         let samples = self.hop * self.channels;
@@ -651,7 +751,7 @@ impl Denoiser {
         Ok(())
     }
 
-    fn estimate_gains(&mut self) {
+    fn estimate_gains(&mut self) -> Result<()> {
         let bins = self.power.len();
         // Frequency-smoothed power is used for adaptation and flux only. Gain
         // estimation keeps narrow strong harmonics from being diluted first.
@@ -659,6 +759,10 @@ impl Denoiser {
             let lo = k.saturating_sub(1);
             let hi = (k + 1).min(bins - 1);
             self.smoothed_power[k] = self.power[lo..=hi].iter().sum::<f32>() / (hi - lo + 1) as f32;
+            ensure!(
+                self.smoothed_power[k].is_finite(),
+                "denoise power smoothing overflow"
+            );
         }
         let first = self.analyzed == 0;
         if self.config.mode == DenoiseMode::Adaptive {
@@ -676,6 +780,7 @@ impl Denoiser {
                     }
                 }
                 let background = background / neighbors.max(1) as f32;
+                ensure!(background.is_finite(), "denoise background power overflow");
                 if first {
                     self.local_energy[k] = p;
                     self.minimum[k] = p;
@@ -686,6 +791,10 @@ impl Denoiser {
                     self.noise[k] = self.power[k].min(background).max(MIN_POWER);
                 } else {
                     self.local_energy[k] = smoothing * self.local_energy[k] + (1.0 - smoothing) * p;
+                    ensure!(
+                        self.local_energy[k].is_finite(),
+                        "denoise local energy overflow"
+                    );
                     self.minimum[k] = self.minimum[k].min(self.local_energy[k]);
                     self.temporary_minimum[k] = self.temporary_minimum[k].min(self.local_energy[k]);
                     if rotate_minimum {
@@ -696,11 +805,12 @@ impl Denoiser {
                     // held musical note "noise". Distinguish a spectral ridge
                     // from a broadband noise-level change using flanking bins,
                     // excluding the main lobe and its immediate neighbors.
-                    let tonal_signal = p > 6.0 * background.max(MIN_POWER)
-                        && p > 4.0 * self.noise[k].max(MIN_POWER);
+                    let tonal_signal = f64::from(p) > 6.0 * f64::from(background.max(MIN_POWER))
+                        && f64::from(p) > 4.0 * f64::from(self.noise[k].max(MIN_POWER));
                     let signal_present = tonal_signal
-                        || p > 2.5 * self.minimum[k].max(MIN_POWER)
-                        || self.local_energy[k] > 2.5 * self.minimum[k].max(MIN_POWER);
+                        || f64::from(p) > 2.5 * f64::from(self.minimum[k].max(MIN_POWER))
+                        || f64::from(self.local_energy[k])
+                            > 2.5 * f64::from(self.minimum[k].max(MIN_POWER));
                     let present = if signal_present { 1.0 } else { 0.0 };
                     self.presence[k] = 0.8 * self.presence[k] + 0.2 * present;
                     // A probabilistic ramp would absorb a fraction of a strong
@@ -711,6 +821,7 @@ impl Denoiser {
                     if !signal_present {
                         let alpha = base + (1.0 - base) * self.presence[k];
                         self.noise[k] = alpha * self.noise[k] + (1.0 - alpha) * self.power[k];
+                        ensure!(self.noise[k].is_finite(), "denoise noise estimate overflow");
                     }
                     // Presence estimation is uncertain around quiet phonemes.
                     // Do not let accumulated speech energy push the estimate
@@ -724,14 +835,21 @@ impl Denoiser {
         for k in 0..bins {
             let power = self.power[k].max(MIN_POWER);
             let noise = (self.noise[k] * self.config.strength).max(MIN_POWER);
+            ensure!(noise.is_finite(), "denoise noise strength overflow");
+            ensure!((noise / power).is_finite(), "denoise noise ratio overflow");
             let mut target = match self.config.mode {
                 DenoiseMode::Off => 1.0,
                 DenoiseMode::Stationary => (1.0 - noise / power).max(0.0).sqrt(),
                 DenoiseMode::Profile => (1.0 - noise / power).max(0.0),
                 DenoiseMode::Adaptive => {
                     let posterior_signal = (power / noise - 1.0).max(0.0);
+                    ensure!(
+                        posterior_signal.is_finite(),
+                        "denoise posterior SNR overflow"
+                    );
                     let decision_directed =
                         0.96 * self.previous_clean[k] / noise + 0.04 * posterior_signal;
+                    ensure!(decision_directed.is_finite(), "denoise prior SNR overflow");
                     // Decision-directed SNR alone lags moving formants and
                     // pitch changes: the previous bin may contain no signal.
                     // Strong current evidence gets an instantaneous estimate;
@@ -741,17 +859,21 @@ impl Denoiser {
                     prior / (1.0 + prior)
                 }
             };
+            ensure!(target.is_finite(), "denoise target gain overflow");
             if self.config.strength == 0.0 {
                 target = 1.0;
             }
             let prior_power = self.previous_power[k];
             let flux = if prior_power > MIN_POWER {
-                ((self.smoothed_power[k] - prior_power) / self.smoothed_power[k].max(MIN_POWER))
-                    .max(0.0)
+                let flux =
+                    (self.smoothed_power[k] - prior_power) / self.smoothed_power[k].max(MIN_POWER);
+                ensure!(flux.is_finite(), "denoise spectral flux overflow");
+                flux.max(0.0)
             } else {
                 0.0
             };
             target += (1.0 - target) * self.config.transient_protection * flux;
+            ensure!(target.is_finite(), "denoise transient gain overflow");
             self.target_gain[k] = target.max(floor);
             self.previous_power[k] = self.smoothed_power[k];
         }
@@ -779,16 +901,22 @@ impl Denoiser {
                 // even after the estimator identifies it as signal. The
                 // transient control accelerates recovery in proportion to
                 // new power absent from the preceding clean estimate.
-                let new_signal = ((self.power[k] - self.previous_clean[k])
-                    / self.power[k].max(MIN_POWER))
-                .max(0.0);
+                let new_signal =
+                    (self.power[k] - self.previous_clean[k]) / self.power[k].max(MIN_POWER);
+                ensure!(new_signal.is_finite(), "denoise recovery ratio overflow");
+                let new_signal = new_signal.max(0.0);
                 self.release * (1.0 - self.config.transient_protection * new_signal)
             } else {
                 self.release
             };
             self.gain[k] = alpha * self.gain[k] + (1.0 - alpha) * target;
             self.previous_clean[k] = self.gain[k] * self.gain[k] * self.power[k];
+            ensure!(
+                self.gain[k].is_finite() && self.previous_clean[k].is_finite(),
+                "denoise gain history overflow"
+            );
         }
+        Ok(())
     }
 
     /// Flush delayed repair and overlap-add output. Emits exactly the source
@@ -804,6 +932,7 @@ impl Denoiser {
             "denoise job must be reset before reuse"
         );
         self.check_cancel(cancel)?;
+        self.poisoned = true;
         if !self.bypass {
             // Flush only real delayed repair frames; zero lookahead is context,
             // not source and is never included in the dry queue or counters.
@@ -818,9 +947,9 @@ impl Denoiser {
                     .impulse
                     .as_mut()
                     .expect("repair exists in loop condition");
-                if repair.push(&self.frame, Some(self.received)) {
+                if repair.push(&self.frame, Some(self.received))? {
                     self.frame.copy_from_slice(&repair.frame);
-                    self.push_prepared(output, cancel)?;
+                    self.push_prepared(output, cancel, None)?;
                 }
             }
             while self.emitted < self.received {
@@ -835,6 +964,7 @@ impl Denoiser {
             }
         }
         self.finished = true;
+        self.poisoned = false;
         Ok(())
     }
 
@@ -854,7 +984,7 @@ impl Denoiser {
         }
         self.frame.fill(0.0);
         self.input.fill(0.0);
-        self.filled = self.size / 2;
+        self.filled = self.input.len() / self.channels / 2;
         self.frame_start = -(self.size as i64 / 2);
         self.overlap.fill(0.0);
         self.weights.fill(0.0);
@@ -876,6 +1006,369 @@ impl Denoiser {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn spectral_capacity(processor: &Denoiser) -> usize {
+        processor.input.capacity()
+            + processor.window.capacity()
+            + processor.spectra.capacity()
+            + processor.scratch.capacity()
+            + processor.overlap.capacity()
+            + processor.weights.capacity()
+            + processor.power.capacity()
+            + processor.smoothed_power.capacity()
+            + processor.noise.capacity()
+            + processor.initial_noise.capacity()
+            + processor.local_energy.capacity()
+            + processor.minimum.capacity()
+            + processor.temporary_minimum.capacity()
+            + processor.presence.capacity()
+            + processor.previous_power.capacity()
+            + processor.previous_clean.capacity()
+            + processor.gain.capacity()
+            + processor.target_gain.capacity()
+    }
+
+    #[test]
+    fn bypass_and_time_domain_paths_prepare_only_their_required_state() {
+        let mut bypass_config = DenoiseConfig {
+            mode: DenoiseMode::Adaptive,
+            wet: 0.0,
+            ..Default::default()
+        };
+        bypass_config.hum.enabled = true;
+        bypass_config.impulse.enabled = true;
+        for config in [DenoiseConfig::default(), bypass_config] {
+            let mut processor = Denoiser::new(48_000, 2, config, None).unwrap();
+            assert_eq!(spectral_capacity(&processor), 0);
+            assert!(processor.forward.is_none() && processor.inverse.is_none());
+            assert_eq!(processor.frame.capacity(), 0);
+            assert_eq!(processor.hum.capacity(), 0);
+            assert!(processor.impulse.is_none());
+            assert_eq!(processor.dry.capacity(), 0);
+            assert_eq!(processor.lookahead_frames(), 0);
+            let input = [-0.0, 0.0, f32::MAX, -f32::MAX];
+            let mut output = Vec::new();
+            processor
+                .process_block(&input, &mut output, &mut || false)
+                .unwrap();
+            processor.finish(&mut output, &mut || false).unwrap();
+            assert_eq!(
+                input.map(f32::to_bits).as_slice(),
+                output.iter().map(|x| x.to_bits()).collect::<Vec<_>>()
+            );
+            assert_eq!(
+                (processor.input_frames(), processor.output_frames()),
+                (2, 2)
+            );
+            processor.reset();
+            assert_eq!(
+                (processor.input_frames(), processor.output_frames()),
+                (0, 0)
+            );
+        }
+        let config = DenoiseConfig {
+            wet: 0.5,
+            hum: HumConfig {
+                enabled: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let processor = Denoiser::new(48_000, 2, config.clone(), None).unwrap();
+        assert_eq!(spectral_capacity(&processor), 0);
+        assert!(processor.forward.is_none() && processor.inverse.is_none());
+        assert_eq!(processor.frame.len(), 2);
+        assert_eq!(
+            processor
+                .hum
+                .iter()
+                .map(|notch| notch.state.len())
+                .sum::<usize>(),
+            2 * config.hum.harmonics
+        );
+        assert_eq!(processor.dry.capacity(), 0);
+        assert_eq!(processor.lookahead_frames(), 0);
+        let repair_config = DenoiseConfig {
+            impulse: ImpulseConfig {
+                enabled: true,
+                ..Default::default()
+            },
+            ..config
+        };
+        let mut processor = Denoiser::new(48_000, 2, repair_config, None).unwrap();
+        assert_eq!(spectral_capacity(&processor), 0);
+        let radius = processor.impulse.as_ref().unwrap().radius;
+        assert_eq!(processor.lookahead_frames(), radius);
+        assert_eq!(processor.dry.capacity(), (radius + 1) * 2);
+        let capacity = processor.dry.capacity();
+        let mut output = Vec::new();
+        processor
+            .process_block(&[0.125; 2000], &mut output, &mut || false)
+            .unwrap();
+        processor.finish(&mut output, &mut || false).unwrap();
+        assert_eq!(output.len(), 2000);
+        assert!(processor.dry.is_empty());
+        assert_eq!(processor.dry.capacity(), capacity);
+        assert_eq!(processor.analyzed, 0);
+    }
+
+    #[test]
+    fn hum_only_is_immediate_and_matches_the_time_domain_reference() {
+        let config = DenoiseConfig {
+            wet: 0.25,
+            hum: HumConfig {
+                enabled: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut processor = Denoiser::new(48_000, 2, config.clone(), None).unwrap();
+        let mut reference: Vec<_> = (1..=config.hum.harmonics)
+            .map(|harmonic| {
+                HumNotch::new(
+                    48_000,
+                    2,
+                    config.hum.fundamental_hz * harmonic as f32,
+                    config.hum.q,
+                )
+            })
+            .collect();
+        let input = noise(2000, 135, 4.0);
+        let expected: Vec<_> = input
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .flat_map(|frame| {
+                frame
+                    .iter()
+                    .enumerate()
+                    .map(|(ch, &dry)| {
+                        let mut wet = dry;
+                        for notch in &mut reference {
+                            wet = notch.process(ch, wet);
+                        }
+                        (f64::from(dry) * 0.75 + f64::from(wet) * 0.25) as f32
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        let mut output = Vec::new();
+        for block in input.chunks(74) {
+            let before = output.len();
+            processor
+                .process_block(block, &mut output, &mut || false)
+                .unwrap();
+            assert_eq!(output.len() - before, block.len());
+        }
+        assert_eq!(output, expected);
+        processor.finish(&mut output, &mut || false).unwrap();
+        assert_eq!(output, expected);
+        assert_eq!(processor.analyzed, 0);
+        processor.reset();
+        output.clear();
+        processor
+            .process_block(&[0.0; 4], &mut output, &mut || false)
+            .unwrap();
+        assert_eq!(output, [0.0; 4]);
+    }
+
+    #[test]
+    fn hum_overflow_stops_at_the_last_finite_frame_and_reset_recovers() {
+        let config = DenoiseConfig {
+            hum: HumConfig {
+                enabled: true,
+                harmonics: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut processor = Denoiser::new(48_000, 1, config, None).unwrap();
+        let mut output = Vec::new();
+        assert!(
+            processor
+                .process_block(&[f32::MAX, -f32::MAX], &mut output, &mut || false)
+                .is_err()
+        );
+        assert_eq!(output.len(), 1);
+        assert!(output[0].is_finite());
+        assert!(processor.finish(&mut output, &mut || false).is_err());
+        assert_eq!(output.len(), 1);
+        processor.reset();
+        output.clear();
+        processor
+            .process_block(&[0.0; 2], &mut output, &mut || false)
+            .unwrap();
+        processor.finish(&mut output, &mut || false).unwrap();
+        assert_eq!(output, [0.0; 2]);
+    }
+
+    #[test]
+    fn partial_wet_convex_blend_does_not_overflow_its_difference() {
+        let config = DenoiseConfig {
+            wet: 0.5,
+            hum: HumConfig {
+                enabled: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut processor = Denoiser::new(48_000, 2, config, None).unwrap();
+        processor.frame.copy_from_slice(&[f32::MAX, -f32::MAX]);
+        let mut output = Vec::new();
+        processor
+            .emit(0, &mut output, Some(&[-f32::MAX, f32::MAX]))
+            .unwrap();
+        assert_eq!(output, [0.0; 2]);
+        assert_eq!(processor.dry.capacity(), 0);
+    }
+
+    #[test]
+    fn zero_wet_still_requires_a_valid_explicit_profile() {
+        let config = DenoiseConfig {
+            mode: DenoiseMode::Profile,
+            wet: 0.0,
+            fft_size: 256,
+            ..Default::default()
+        };
+        assert!(Denoiser::new(48_000, 1, config.clone(), None).is_err());
+        let mut captured = NoiseProfile {
+            sample_rate: 48_000,
+            channels: 1,
+            fft_size: 256,
+            captured_frames: 1,
+            power: vec![0.0; 129],
+        };
+        captured.power[0] = f32::INFINITY;
+        assert!(Denoiser::new(48_000, 1, config.clone(), Some(captured.clone())).is_err());
+        captured.power[0] = 0.0;
+        let processor = Denoiser::new(48_000, 1, config, Some(captured)).unwrap();
+        assert_eq!(spectral_capacity(&processor), 0);
+        assert!(processor.forward.is_none() && processor.inverse.is_none());
+    }
+
+    #[test]
+    fn numerical_errors_never_publish_invalid_audio_and_require_reset() {
+        for mode in [DenoiseMode::Stationary, DenoiseMode::Adaptive] {
+            for amplitude in [1.0e20, f32::MAX] {
+                let config = DenoiseConfig {
+                    mode,
+                    fft_size: 256,
+                    ..Default::default()
+                };
+                let mut processor = Denoiser::new(48_000, 2, config, None).unwrap();
+                let mut output = vec![0.125];
+                assert!(
+                    processor
+                        .process_block(&vec![amplitude; 512], &mut output, &mut || false)
+                        .is_err()
+                );
+                assert_eq!(output, [0.125]);
+                assert!(
+                    processor
+                        .process_block(&[0.0; 2], &mut output, &mut || false)
+                        .is_err()
+                );
+                assert!(processor.finish(&mut output, &mut || false).is_err());
+                processor.reset();
+                output.clear();
+                processor
+                    .process_block(&[0.0; 14], &mut output, &mut || false)
+                    .unwrap();
+                processor.finish(&mut output, &mut || false).unwrap();
+                assert_eq!(output, [0.0; 14]);
+                assert_eq!(
+                    (processor.input_frames(), processor.output_frames()),
+                    (7, 7)
+                );
+            }
+        }
+        let config = DenoiseConfig {
+            impulse: ImpulseConfig {
+                enabled: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut processor = Denoiser::new(48_000, 1, config, None).unwrap();
+        let input: Vec<_> = (0..64)
+            .map(|i| if i % 2 == 0 { f32::MAX } else { -f32::MAX })
+            .collect();
+        let mut output = Vec::new();
+        assert!(
+            processor
+                .process_block(&input, &mut output, &mut || false)
+                .is_err()
+        );
+        assert!(output.iter().all(|sample| sample.is_finite()));
+        let published = output.clone();
+        assert!(processor.finish(&mut output, &mut || false).is_err());
+        assert_eq!(output, published);
+        processor.reset();
+        output.clear();
+        processor
+            .process_block(&[0.0; 3], &mut output, &mut || false)
+            .unwrap();
+        processor.finish(&mut output, &mut || false).unwrap();
+        assert_eq!(output, [0.0; 3]);
+    }
+
+    #[test]
+    fn invalid_input_is_atomic_and_short_tail_overflow_is_reported_at_finish() {
+        let config = DenoiseConfig {
+            mode: DenoiseMode::Stationary,
+            fft_size: 256,
+            ..Default::default()
+        };
+        let mut processor = Denoiser::new(48_000, 2, config, None).unwrap();
+        let mut output = vec![0.25];
+        assert!(
+            processor
+                .process_block(&[1.0, 0.0, f32::NAN, 0.0], &mut output, &mut || false)
+                .is_err()
+        );
+        assert_eq!(
+            (processor.received, processor.emitted, processor.filled),
+            (0, 0, 128)
+        );
+        assert!(!processor.poisoned);
+        assert_eq!(output, [0.25]);
+        processor
+            .process_block(&[1.0e20; 2], &mut output, &mut || false)
+            .unwrap();
+        assert!(processor.finish(&mut output, &mut || false).is_err());
+        assert_eq!(output, [0.25]);
+        assert!(processor.poisoned);
+    }
+
+    #[test]
+    fn profile_fft_power_and_finish_overflow_cannot_publish_and_reset_recovers() {
+        for amplitude in [1.0e20, f32::MAX] {
+            let mut capture = ProfileCollector::new(48_000, 1, 256, 512).unwrap();
+            assert!(
+                capture
+                    .push_block(&[amplitude; 256], &mut || false)
+                    .is_err()
+            );
+            assert!(capture.push_block(&[0.0], &mut || false).is_err());
+            capture.reset();
+            capture.push_block(&[0.125; 256], &mut || false).unwrap();
+            capture.finish().unwrap().validate(48_000, 1, 256).unwrap();
+            let mut capture = ProfileCollector::new(48_000, 1, 256, 512).unwrap();
+            assert!(
+                capture
+                    .push_block(&[amplitude; 256], &mut || false)
+                    .is_err()
+            );
+            assert!(capture.finish().is_err());
+        }
+        let mut capture = ProfileCollector::new(48_000, 1, 256, 512).unwrap();
+        capture.push_block(&[1.0e20], &mut || false).unwrap();
+        assert!(capture.finish().is_err());
+        let mut capture = ProfileCollector::new(48_000, 1, 256, 512).unwrap();
+        assert!(capture.push_block(&[0.0, f32::NAN], &mut || false).is_err());
+        assert_eq!((capture.captured_frames, capture.filled), (0, 0));
+        assert!(!capture.poisoned);
+    }
 
     fn noise(frames: usize, seed: u32, amplitude: f32) -> Vec<f32> {
         let mut state = seed;
@@ -1225,7 +1718,12 @@ mod tests {
                         113,
                     );
                     for ((dry, processed), mixed) in input.iter().zip(&full).zip(&blended) {
-                        assert_eq!(*mixed, *dry + wet * (*processed - *dry));
+                        assert_eq!(
+                            *mixed,
+                            (f64::from(*dry) * (1.0 - f64::from(wet))
+                                + f64::from(*processed) * f64::from(wet))
+                                as f32
+                        );
                     }
                 }
             }
