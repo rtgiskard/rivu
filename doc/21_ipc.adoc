@@ -820,6 +820,12 @@ Retry only the missing step after inspection.
 its Ack never proves worker retirement. Only the task terminal result resolves it.
 A failed wait never automatically replays startup.
 
+For scan preparation, shutdown and Core destruction close the scan event receiver
+before signalling cancellation, then join the worker. This prevents
+cancellation-triggered final delivery from overtaking receiver closure. Normal
+shutdown during Saving instead drains the accepted completion before joining,
+preserving committed facts.
+
 === Transactional inputs and bounded storage queries
 
 Track-ID mutations serialize each input list once. Library deletion validates

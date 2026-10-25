@@ -897,10 +897,10 @@ impl Drop for Core {
         drop(self.active_export.take());
         drop(self.active_external_admission.take());
         if let Some(task) = self.active_scan.take() {
+            self.scan_rx.close();
             if task.status.progress.phase != ScanPhase::Saving {
                 task.cancellation.cancel();
             }
-            self.scan_rx.close();
             while self.scan_rx.try_recv().is_ok() {}
             let _ = futures::executor::block_on(task.worker);
             while self.scan_rx.try_recv().is_ok() {}

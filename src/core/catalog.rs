@@ -623,11 +623,11 @@ impl Core {
                 }
             }
         } else {
+            // Close before cancellation can wake a worker's final delivery.
+            self.scan_rx.close();
             if let Some(task) = &self.active_scan {
                 task.cancellation.cancel();
             }
-            // Disconnect before joining: final traversal delivery may be full.
-            self.scan_rx.close();
             if let Some(task) = self.active_scan.take() {
                 self.complete_unsaved_scan(task, Ok(()), true);
             }

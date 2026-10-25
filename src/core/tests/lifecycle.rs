@@ -39,60 +39,102 @@ fn lifecycle_shutdown_coalesces_without_business_queue_capacity() {
 
 #[test]
 fn shutdown_cancels_and_closes_an_async_scan_worker_before_retirement() {
-    let (_directory, mut core) = fixture_with_database(Some(10.0), true);
-    let cancellation = library::ScanCancellation::default();
-    let observed = cancellation.clone();
-    let sender = core.scan_tx.clone();
-    let progress = ScanProgress {
-        phase: ScanPhase::Discovering,
-        processed: 0,
-        total: None,
-        errors: 0,
-        path: None,
-    };
-    sender
-        .try_send(ScanEvent::Progress {
-            id: 1,
-            progress: progress.clone(),
-        })
-        .unwrap();
-    let (result_tx, result_rx) = bounded(1);
-    core.active_scan = Some(ScanTask {
-        status: ScanTaskStatus {
-            id: 1,
-            progress: progress.clone(),
-            message: String::new(),
-            library_committed: false,
-            playlist_id: None,
-            error: None,
-        },
-        owner: crate::projection::MediaTaskOwner::Library,
-        cancellation,
-        worker: core.executor.spawn(async move {
-            observed.cancelled().await;
-            let disconnected = sender
-                .send(ScanEvent::Finished(ScanFinished {
-                    other_tracks_check: false,
+    struct OnCancel(Box<dyn Fn() + Send + Sync>);
+
+    impl std::task::Wake for OnCancel {
+        fn wake(self: Arc<Self>) {
+            (self.0)();
+        }
+    }
+
+    for drop_owner in [false, true] {
+        let (_directory, mut core) = fixture_with_database(Some(10.0), true);
+        // Keep Tokio alive until Drop has joined the scan worker.
+        let _tasks = core._test_tasks.take().unwrap();
+        let cancellation = library::ScanCancellation::default();
+        let observed = cancellation.clone();
+        let sender = core.scan_tx.clone();
+        let progress = ScanProgress {
+            phase: ScanPhase::Discovering,
+            processed: 0,
+            total: None,
+            errors: 0,
+            path: None,
+        };
+        sender
+            .try_send(ScanEvent::Progress {
+                id: 1,
+                progress: progress.clone(),
+            })
+            .unwrap();
+
+        // Attempt delivery synchronously at cancellation notification, before
+        // the owner can advance to its next statement. No scheduling race.
+        let (wake_tx, wake_rx) = bounded(1);
+        let notify_sender = sender.clone();
+        let notify_progress = progress.clone();
+        let waker = std::task::Waker::from(Arc::new(OnCancel(Box::new(move || {
+            let disconnected = matches!(
+                notify_sender.try_send(ScanEvent::Progress {
                     id: 1,
-                    result: Ok(ScanResult::default()),
-                    import: None,
-                    progress,
-                }))
-                .await
-                .is_err();
-            result_tx
-                .try_send((disconnected, observed.is_cancelled()))
-                .unwrap();
-        }),
-        pending_save: None,
-    });
-    core.shutdown_scan();
-    assert_eq!(result_rx.recv().unwrap(), (true, true));
-    assert!(core.active_scan.is_none());
-    assert_eq!(
-        core.scan_results.back().unwrap().progress.phase,
-        ScanPhase::Cancelled
-    );
+                    progress: notify_progress.clone(),
+                }),
+                Err(mpsc::error::TrySendError::Closed(_))
+            );
+            wake_tx.try_send(disconnected).unwrap();
+        }))));
+        let notification = cancellation.clone();
+        let mut cancelled = std::pin::pin!(notification.cancelled());
+        assert!(
+            cancelled
+                .as_mut()
+                .poll(&mut std::task::Context::from_waker(&waker))
+                .is_pending()
+        );
+
+        let (result_tx, result_rx) = bounded(1);
+        core.active_scan = Some(ScanTask {
+            status: ScanTaskStatus {
+                id: 1,
+                progress: progress.clone(),
+                message: String::new(),
+                library_committed: false,
+                playlist_id: None,
+                error: None,
+            },
+            owner: crate::projection::MediaTaskOwner::Library,
+            cancellation,
+            worker: core.executor.spawn(async move {
+                observed.cancelled().await;
+                let disconnected = sender
+                    .send(ScanEvent::Finished(ScanFinished {
+                        other_tracks_check: false,
+                        id: 1,
+                        result: Ok(ScanResult::default()),
+                        import: None,
+                        progress,
+                    }))
+                    .await
+                    .is_err();
+                result_tx
+                    .try_send((disconnected, observed.is_cancelled()))
+                    .unwrap();
+            }),
+            pending_save: None,
+        });
+        if drop_owner {
+            drop(core);
+        } else {
+            core.shutdown_scan();
+            assert!(core.active_scan.is_none());
+            assert_eq!(
+                core.scan_results.back().unwrap().progress.phase,
+                ScanPhase::Cancelled
+            );
+        }
+        assert!(wake_rx.try_recv().unwrap());
+        assert_eq!(result_rx.try_recv().unwrap(), (true, true));
+    }
 }
 
 #[test]
